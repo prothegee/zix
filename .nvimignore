@@ -1,56 +1,8 @@
-##
-## directory
-##
-.bin
-.out
-.log
-.logs
-.build
-.cache
-.target
-.zig-out
-.zig-cache
-.svelte-kit
-.node_modules
-
+.git
+.tmp
 bin
-out
-log
-logs
 build
-cache
-target
+out
 zig-out
-svelte-kit
-node_modules
-
-##
-## extension
-##
-*.bak*
-*Zone.Identifier
-
-##
-## file: include
-##
-/.config/*.json.template
-/.nvim/*.json.template
-/.vscode/*.json.template
-/.zed/*.json.template
-
-compile_commands.json
-
-test_common*
-
-*.o
-*.exe
-*.exec
-
-##
-## file: exclude
-##
-!/.config/*.json.template
-!/.nvim/*.json.template
-!/.vscode/*.json.template
-!/.zed/*.json.template
+zig-pkg
 
