@@ -118,17 +118,17 @@ test "zix test: http method fn/s" {
     };
 
     for (es) |e| {
-        const e_str = codeStringFromEnum(e);
+        const e_str = stringFromEnum(e);
 
         try std.testing.expect(
             std.mem.eql(
                 u8, e_str, e.asString()));
 
-        const expected1 = codeFromString(e_str);
+        const expected1 = enumFromString(e_str);
         try std.testing.expect(
             expected1 == e);
 
-        const expected2 = codeStringFromEnum(e);
+        const expected2 = stringFromEnum(e);
         try std.testing.expect(
             std.mem.eql(
                 u8, e_str, expected2));
