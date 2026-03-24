@@ -2,6 +2,7 @@
 ## directory
 ##
 .tmp
+.zig-cache
 bin
 build
 out
