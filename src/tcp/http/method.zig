@@ -1,5 +1,4 @@
 const std = @import("std");
-const this = @This();
 
 /// zix http method code
 pub const Code = enum(u8) {
@@ -20,7 +19,7 @@ pub const Code = enum(u8) {
     // --------------------------------------------------------- //
 
     pub fn asString(self: Self) []const u8 {
-        return this.Code.toString(self);
+        return Self.toString(self);
     }
 
     /// brief:
