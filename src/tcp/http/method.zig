@@ -62,7 +62,7 @@ pub const Code = enum(u8) {
 ///
 /// Return:
 /// zix.Http.Method.Code
-pub fn codeFromString(method_string: []const u8) Code {
+pub fn enumFromString(method_string: []const u8) Code {
     if (std.mem.eql(u8, method_string, "GET")) { return Code.GET; }
     if (std.mem.eql(u8, method_string, "HEAD")) { return Code.HEAD; }
     if (std.mem.eql(u8, method_string, "POST")) { return Code.POST; }
@@ -87,7 +87,7 @@ pub fn codeFromString(method_string: []const u8) Code {
 ///
 /// return:
 /// []const u8
-fn codeStringFromEnum(method_enum: Code) []const u8 {
+fn stringFromEnum(method_enum: Code) []const u8 {
     return switch (method_enum) {
         .GET => "GET",
         .HEAD => "HEAD",
