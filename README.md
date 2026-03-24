@@ -1,6 +1,6 @@
-# six
+# 06; zix; Zero sIX
 
-TBA
+[![zix-logo](zix-logo.svg)]
 
 <br>
 
