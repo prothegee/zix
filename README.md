@@ -1,6 +1,6 @@
 # 06; zix; Zero sIX
 
-[![zix-logo](zix-logo.svg)]
+![zix-logo](zix-logo.svg)
 
 <br>
 
