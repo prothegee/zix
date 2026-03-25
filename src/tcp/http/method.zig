@@ -18,16 +18,16 @@ pub const Code = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// brief:
-    /// get string from method code enum
+    /// Brief:
+    /// Get self object string from enum
     ///
-    /// note:
+    /// Note:
     /// - exhaustive
     ///
-    /// param:
+    /// Param:
     /// self - zix.Tcp.Method.Code
     ///
-    /// return:
+    /// Return:
     /// []const u8
     fn toString(self: Code) []const u8 {
         return switch (self) {
@@ -42,10 +42,10 @@ pub const Code = enum(u8) {
             .CONNECT => "CONNECT",
         };
     }
-    /// brief:
-    /// get self object as string
+    /// Brief:
+    /// Get self object as a string
     ///
-    /// return:
+    /// Return:
     /// []const u8
     pub fn asString(self: Self) []const u8 {
         return Self.toString(self);
@@ -55,39 +55,46 @@ pub const Code = enum(u8) {
 // --------------------------------------------------------- //
 
 /// Brief:
-/// Get enum method code from string
+/// Get enum from string
 ///
 /// Note:
-/// By default it will return "GET"
+/// - If not match, it will return GET
+///
+/// Params:
+/// method_string - []const u8 (insensitive; forced to lowercase)
 ///
 /// Return:
-/// zix.Http.Method.Code
+/// zix.Tcp.Http.Method.Code
 pub fn enumFromString(method_string: []const u8) Code {
-    if (std.mem.eql(u8, method_string, "GET")) { return Code.GET; }
-    if (std.mem.eql(u8, method_string, "HEAD")) { return Code.HEAD; }
-    if (std.mem.eql(u8, method_string, "POST")) { return Code.POST; }
-    if (std.mem.eql(u8, method_string, "PUT")) { return Code.PUT; }
-    if (std.mem.eql(u8, method_string, "DELETE")) { return Code.DELETE; }
-    if (std.mem.eql(u8, method_string, "PATCH")) { return Code.PATCH; }
-    if (std.mem.eql(u8, method_string, "OPTIONS")) { return Code.OPTIONS; }
-    if (std.mem.eql(u8, method_string, "TRACE")) { return Code.TRACE; }
-    if (std.mem.eql(u8, method_string, "CONNECT")) { return Code.CONNECT; }
+    var data: [8]u8 = undefined;
+    const mod = std.ascii.lowerString(&data, method_string);
+
+    if (std.mem.eql(u8, mod, "get")) { return Code.GET; }
+    if (std.mem.eql(u8, mod, "head")) { return Code.HEAD; }
+    if (std.mem.eql(u8, mod, "post")) { return Code.POST; }
+    if (std.mem.eql(u8, mod, "put")) { return Code.PUT; }
+    if (std.mem.eql(u8, mod, "delete")) { return Code.DELETE; }
+    if (std.mem.eql(u8, mod, "patch")) { return Code.PATCH; }
+    if (std.mem.eql(u8, mod, "options")) { return Code.OPTIONS; }
+    if (std.mem.eql(u8, mod, "trace")) { return Code.TRACE; }
+    if (std.mem.eql(u8, mod, "connect")) { return Code.CONNECT; }
+
     return Code.GET;
 }
 
-/// brief:
-/// get string from method code enum
+/// Brief:
+/// Get string from enum
 ///
-/// note:
-/// - exhaustive
-/// - seperated by it's enum
+/// Note:
+/// - Exhaustive
+/// - Seperated by it's enum
 ///
-/// param:
-/// self - zix.Tcp.Method.Code
+/// Param:
+/// method_enum - zix.Tcp.Http.Method.Code
 ///
-/// return:
+/// Return:
 /// []const u8
-fn stringFromEnum(method_enum: Code) []const u8 {
+pub fn stringFromEnum(method_enum: Code) []const u8 {
     return switch (method_enum) {
         .GET => "GET",
         .HEAD => "HEAD",
@@ -104,7 +111,7 @@ fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http method fn/s" {
+test "zix test: tcp http method fn/s" {
     const es = [_]Code {
         Code.GET,
         Code.HEAD,
