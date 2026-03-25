@@ -62,7 +62,7 @@ pub const Code = enum(u8) {
 ///
 /// Return:
 /// zix.Http.Method.Code
-pub fn codeFromString(method_string: []const u8) Code {
+pub fn enumFromString(method_string: []const u8) Code {
     if (std.mem.eql(u8, method_string, "GET")) { return Code.GET; }
     if (std.mem.eql(u8, method_string, "HEAD")) { return Code.HEAD; }
     if (std.mem.eql(u8, method_string, "POST")) { return Code.POST; }
@@ -87,7 +87,7 @@ pub fn codeFromString(method_string: []const u8) Code {
 ///
 /// return:
 /// []const u8
-fn codeStringFromEnum(method_enum: Code) []const u8 {
+fn stringFromEnum(method_enum: Code) []const u8 {
     return switch (method_enum) {
         .GET => "GET",
         .HEAD => "HEAD",
@@ -118,17 +118,17 @@ test "zix test: http method fn/s" {
     };
 
     for (es) |e| {
-        const e_str = codeStringFromEnum(e);
+        const e_str = stringFromEnum(e);
 
         try std.testing.expect(
             std.mem.eql(
                 u8, e_str, e.asString()));
 
-        const expected1 = codeFromString(e_str);
+        const expected1 = enumFromString(e_str);
         try std.testing.expect(
             expected1 == e);
 
-        const expected2 = codeStringFromEnum(e);
+        const expected2 = stringFromEnum(e);
         try std.testing.expect(
             std.mem.eql(
                 u8, e_str, expected2));

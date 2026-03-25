@@ -12,6 +12,8 @@ zig-pkg
 ##
 ## extension
 ##
+*.bak
+*.bak.*
 
 ##
 ## file: include
