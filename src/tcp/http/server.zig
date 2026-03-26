@@ -5,9 +5,10 @@ const std = @import("std");
 // - The new IO since zig 0.16 Threaded is use limited and unlimited request
 //   assume the number from 1-8192 for each thread,
 //   then the overhead is depend on the each handler.
-//   So create two engine instead rather than one,
-//   one using minimal approach so full controll on the handler implementation
-//   two using default approach which has some overhead specially on middlewares usage.
+//   So create two/three engine mode instead rather than one engine mode,
+//   one using manual to fully control of what handled from I/O,
+//   two using minimal approach so full controll on the handler implementation,
+//   and three using default approach which has some overhead specially on middlewares usage.
 //
 
 // /// zix tcp http server config structure
