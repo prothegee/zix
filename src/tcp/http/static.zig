@@ -90,17 +90,13 @@ pub fn serve(
         const length = end - start + 1;
 
         if (start >= stat.size) {
-            const s = std.fmt.bufPrint(&header_buf,
-                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{d}\r\nConnection: keep-alive\r\n\r\n",
-                .{stat.size}) catch return false;
+            const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{d}\r\nConnection: keep-alive\r\n\r\n", .{stat.size}) catch return false;
             req.server.out.writeAll(s) catch return false;
             req.server.out.flush() catch return false;
             return true;
         }
 
-        const s = std.fmt.bufPrint(&header_buf,
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n",
-            .{ content_type, length, start, end, stat.size }) catch return false;
+        const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, length, start, end, stat.size }) catch return false;
         req.server.out.writeAll(s) catch return false;
 
         var file_buf: [8192]u8 = undefined;
@@ -122,9 +118,7 @@ pub fn serve(
             remaining -= n;
         }
     } else {
-        const s = std.fmt.bufPrint(&header_buf,
-            "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n",
-            .{ content_type, stat.size }) catch return false;
+        const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, stat.size }) catch return false;
         req.server.out.writeAll(s) catch return false;
 
         var file_buf: [8192]u8 = undefined;
