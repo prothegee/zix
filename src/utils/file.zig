@@ -12,7 +12,7 @@ const std = @import("std");
 ///
 /// Return:
 /// []const u8
-pub fn getFileExt(fp: []const u8) []const u8 {
+pub fn extension(fp: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, fp, '.')) |dot_pos| {
         if (dot_pos + 1 < fp.len) {
             return fp[dot_pos + 1 ..];

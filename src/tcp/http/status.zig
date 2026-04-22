@@ -194,76 +194,200 @@ pub fn enumFromString(status_string: []const u8) Code {
     const mod = std.ascii.lowerString(&data, status_string);
 
     // 1xx : informational
-    if (std.mem.eql(u8, mod, "continue")) { return Code.CONTINUE; }
-    if (std.mem.eql(u8, mod, "switching protocols")) { return Code.SWITCHING_PROTOCOL; }
-    if (std.mem.eql(u8, mod, "processing")) { return Code.PROCESSING; }
-    if (std.mem.eql(u8, mod, "early hints")) { return Code.EARLY_HINTS; }
+    if (std.mem.eql(u8, mod, "continue")) {
+        return Code.CONTINUE;
+    }
+    if (std.mem.eql(u8, mod, "switching protocols")) {
+        return Code.SWITCHING_PROTOCOL;
+    }
+    if (std.mem.eql(u8, mod, "processing")) {
+        return Code.PROCESSING;
+    }
+    if (std.mem.eql(u8, mod, "early hints")) {
+        return Code.EARLY_HINTS;
+    }
 
     // 2xx : success
-    if (std.mem.eql(u8, mod, "ok")) { return Code.OK; }
-    if (std.mem.eql(u8, mod, "created")) { return Code.CREATED; }
-    if (std.mem.eql(u8, mod, "accepted")) { return Code.ACCEPTED; }
-    if (std.mem.eql(u8, mod, "non-authoritative information")) { return Code.NON_AUTHORITATIVE_INFORMATION; }
-    if (std.mem.eql(u8, mod, "no content")) { return Code.NO_CONTENT; }
-    if (std.mem.eql(u8, mod, "reset content")) { return Code.RESET_CONTENT; }
-    if (std.mem.eql(u8, mod, "partial content")) { return Code.PARTIAL_CONTENT; }
-    if (std.mem.eql(u8, mod, "multi-status")) { return Code.MULTI_STATUS; }
-    if (std.mem.eql(u8, mod, "already reported")) { return Code.ALREADY_REPORTED; }
-    if (std.mem.eql(u8, mod, "im used")) { return Code.IM_USED; }
+    if (std.mem.eql(u8, mod, "ok")) {
+        return Code.OK;
+    }
+    if (std.mem.eql(u8, mod, "created")) {
+        return Code.CREATED;
+    }
+    if (std.mem.eql(u8, mod, "accepted")) {
+        return Code.ACCEPTED;
+    }
+    if (std.mem.eql(u8, mod, "non-authoritative information")) {
+        return Code.NON_AUTHORITATIVE_INFORMATION;
+    }
+    if (std.mem.eql(u8, mod, "no content")) {
+        return Code.NO_CONTENT;
+    }
+    if (std.mem.eql(u8, mod, "reset content")) {
+        return Code.RESET_CONTENT;
+    }
+    if (std.mem.eql(u8, mod, "partial content")) {
+        return Code.PARTIAL_CONTENT;
+    }
+    if (std.mem.eql(u8, mod, "multi-status")) {
+        return Code.MULTI_STATUS;
+    }
+    if (std.mem.eql(u8, mod, "already reported")) {
+        return Code.ALREADY_REPORTED;
+    }
+    if (std.mem.eql(u8, mod, "im used")) {
+        return Code.IM_USED;
+    }
 
     // 3xx : redirect
-    if (std.mem.eql(u8, mod, "multiple choices")) { return Code.MULTIPLE_CHOICES; }
-    if (std.mem.eql(u8, mod, "moved permanently")) { return Code.MOVED_PERMANENTLY; }
-    if (std.mem.eql(u8, mod, "found")) { return Code.FOUND; }
-    if (std.mem.eql(u8, mod, "see other")) { return Code.SEE_OTHER; }
-    if (std.mem.eql(u8, mod, "not modified")) { return Code.NOT_MODIFIED; }
-    if (std.mem.eql(u8, mod, "use proxy")) { return Code.USE_PROXY; }
-    if (std.mem.eql(u8, mod, "temporary redirect")) { return Code.TEMPORARY_REDIRECT; }
-    if (std.mem.eql(u8, mod, "permanent redirect")) { return Code.PERMANENT_REDIRECT; }
+    if (std.mem.eql(u8, mod, "multiple choices")) {
+        return Code.MULTIPLE_CHOICES;
+    }
+    if (std.mem.eql(u8, mod, "moved permanently")) {
+        return Code.MOVED_PERMANENTLY;
+    }
+    if (std.mem.eql(u8, mod, "found")) {
+        return Code.FOUND;
+    }
+    if (std.mem.eql(u8, mod, "see other")) {
+        return Code.SEE_OTHER;
+    }
+    if (std.mem.eql(u8, mod, "not modified")) {
+        return Code.NOT_MODIFIED;
+    }
+    if (std.mem.eql(u8, mod, "use proxy")) {
+        return Code.USE_PROXY;
+    }
+    if (std.mem.eql(u8, mod, "temporary redirect")) {
+        return Code.TEMPORARY_REDIRECT;
+    }
+    if (std.mem.eql(u8, mod, "permanent redirect")) {
+        return Code.PERMANENT_REDIRECT;
+    }
 
     // 4xx : client error
-    if (std.mem.eql(u8, mod, "bad request")) { return Code.BAD_REQUEST; }
-    if (std.mem.eql(u8, mod, "unauthorized")) { return Code.UNAUTHORIZED; }
-    if (std.mem.eql(u8, mod, "payment required")) { return Code.PAYMENT_REQUIRED; }
-    if (std.mem.eql(u8, mod, "forbidden")) { return Code.FORBIDDEN; }
-    if (std.mem.eql(u8, mod, "not found")) { return Code.NOT_FOUND; }
-    if (std.mem.eql(u8, mod, "method not allowed")) { return Code.METHOD_NOT_ALLOWED; }
-    if (std.mem.eql(u8, mod, "not acceptable")) { return Code.NOT_ACCEPTABLE; }
-    if (std.mem.eql(u8, mod, "proxy authentication required")) { return Code.PROXY_AUTHENTICATION_REQUIRED; }
-    if (std.mem.eql(u8, mod, "request timeout")) { return Code.REQUEST_TIMEOUT; }
-    if (std.mem.eql(u8, mod, "conflict")) { return Code.CONFLICT; }
-    if (std.mem.eql(u8, mod, "gone")) { return Code.GONE; }
-    if (std.mem.eql(u8, mod, "length required")) { return Code.LENGTH_REQUIRED; }
-    if (std.mem.eql(u8, mod, "precondition failed")) { return Code.PRECONDITION_FAILED; }
-    if (std.mem.eql(u8, mod, "payload too large")) { return Code.PAYLOAD_TOO_LARGE; }
-    if (std.mem.eql(u8, mod, "uri too long")) { return Code.URI_TOO_LONG; }
-    if (std.mem.eql(u8, mod, "unsupported media type")) { return Code.UNSUPPORTED_MEDIA_TYPE; }
-    if (std.mem.eql(u8, mod, "range not satisfiable")) { return Code.RANGE_NOT_SATISFIABLE; }
-    if (std.mem.eql(u8, mod, "expectation failed")) { return Code.EXPECTATION_FAILED; }
-    if (std.mem.eql(u8, mod, "i'm a teapot")) { return Code.IM_A_TEAPOT; }
-    if (std.mem.eql(u8, mod, "misdirected request")) { return Code.MISDIRECTED_REQUEST; }
-    if (std.mem.eql(u8, mod, "unprocessable entity")) { return Code.UNPROCESSABLE_ENTITY; }
-    if (std.mem.eql(u8, mod, "locked")) { return Code.LOCKED; }
-    if (std.mem.eql(u8, mod, "failed dependency")) { return Code.FAILED_DEPENDENCY; }
-    if (std.mem.eql(u8, mod, "too early")) { return Code.TOO_EARLY; }
-    if (std.mem.eql(u8, mod, "upgrade required")) { return Code.UPGRADE_REQUIRED; }
-    if (std.mem.eql(u8, mod, "precondition required")) { return Code.PRECONDITION_REQUIRED; }
-    if (std.mem.eql(u8, mod, "too many requests")) { return Code.TOO_MANY_REQUESTS; }
-    if (std.mem.eql(u8, mod, "request header fields too large")) { return Code.REQUEST_HEADER_FIELDS_TOO_LARGE; }
-    if (std.mem.eql(u8, mod, "unavailable for legal reasons")) { return Code.UNAVAILABLE_FOR_LEGAL_REASONS; }
+    if (std.mem.eql(u8, mod, "bad request")) {
+        return Code.BAD_REQUEST;
+    }
+    if (std.mem.eql(u8, mod, "unauthorized")) {
+        return Code.UNAUTHORIZED;
+    }
+    if (std.mem.eql(u8, mod, "payment required")) {
+        return Code.PAYMENT_REQUIRED;
+    }
+    if (std.mem.eql(u8, mod, "forbidden")) {
+        return Code.FORBIDDEN;
+    }
+    if (std.mem.eql(u8, mod, "not found")) {
+        return Code.NOT_FOUND;
+    }
+    if (std.mem.eql(u8, mod, "method not allowed")) {
+        return Code.METHOD_NOT_ALLOWED;
+    }
+    if (std.mem.eql(u8, mod, "not acceptable")) {
+        return Code.NOT_ACCEPTABLE;
+    }
+    if (std.mem.eql(u8, mod, "proxy authentication required")) {
+        return Code.PROXY_AUTHENTICATION_REQUIRED;
+    }
+    if (std.mem.eql(u8, mod, "request timeout")) {
+        return Code.REQUEST_TIMEOUT;
+    }
+    if (std.mem.eql(u8, mod, "conflict")) {
+        return Code.CONFLICT;
+    }
+    if (std.mem.eql(u8, mod, "gone")) {
+        return Code.GONE;
+    }
+    if (std.mem.eql(u8, mod, "length required")) {
+        return Code.LENGTH_REQUIRED;
+    }
+    if (std.mem.eql(u8, mod, "precondition failed")) {
+        return Code.PRECONDITION_FAILED;
+    }
+    if (std.mem.eql(u8, mod, "payload too large")) {
+        return Code.PAYLOAD_TOO_LARGE;
+    }
+    if (std.mem.eql(u8, mod, "uri too long")) {
+        return Code.URI_TOO_LONG;
+    }
+    if (std.mem.eql(u8, mod, "unsupported media type")) {
+        return Code.UNSUPPORTED_MEDIA_TYPE;
+    }
+    if (std.mem.eql(u8, mod, "range not satisfiable")) {
+        return Code.RANGE_NOT_SATISFIABLE;
+    }
+    if (std.mem.eql(u8, mod, "expectation failed")) {
+        return Code.EXPECTATION_FAILED;
+    }
+    if (std.mem.eql(u8, mod, "i'm a teapot")) {
+        return Code.IM_A_TEAPOT;
+    }
+    if (std.mem.eql(u8, mod, "misdirected request")) {
+        return Code.MISDIRECTED_REQUEST;
+    }
+    if (std.mem.eql(u8, mod, "unprocessable entity")) {
+        return Code.UNPROCESSABLE_ENTITY;
+    }
+    if (std.mem.eql(u8, mod, "locked")) {
+        return Code.LOCKED;
+    }
+    if (std.mem.eql(u8, mod, "failed dependency")) {
+        return Code.FAILED_DEPENDENCY;
+    }
+    if (std.mem.eql(u8, mod, "too early")) {
+        return Code.TOO_EARLY;
+    }
+    if (std.mem.eql(u8, mod, "upgrade required")) {
+        return Code.UPGRADE_REQUIRED;
+    }
+    if (std.mem.eql(u8, mod, "precondition required")) {
+        return Code.PRECONDITION_REQUIRED;
+    }
+    if (std.mem.eql(u8, mod, "too many requests")) {
+        return Code.TOO_MANY_REQUESTS;
+    }
+    if (std.mem.eql(u8, mod, "request header fields too large")) {
+        return Code.REQUEST_HEADER_FIELDS_TOO_LARGE;
+    }
+    if (std.mem.eql(u8, mod, "unavailable for legal reasons")) {
+        return Code.UNAVAILABLE_FOR_LEGAL_REASONS;
+    }
 
     // 5xx : server error
-    if (std.mem.eql(u8, mod, "internal server error")) { return Code.INTERNAL_SERVER_ERROR; }
-    if (std.mem.eql(u8, mod, "not implemented")) { return Code.NOT_IMPLEMENTED; }
-    if (std.mem.eql(u8, mod, "bad gateway")) { return Code.BAD_GATEWAY; }
-    if (std.mem.eql(u8, mod, "service unavailable")) { return Code.SERVICE_UNAVAILABLE; }
-    if (std.mem.eql(u8, mod, "gateway timeout")) { return Code.GATEWAY_TIMEOUT; }
-    if (std.mem.eql(u8, mod, "http version not supported")) { return Code.HTTP_VERSION_NOT_SUPPORTED; }
-    if (std.mem.eql(u8, mod, "variant also negotiates")) { return Code.VARIANT_ALSO_NEGOTIATES; }
-    if (std.mem.eql(u8, mod, "insufficient storage")) { return Code.INSUFFICIENT_STORAGE; }
-    if (std.mem.eql(u8, mod, "loop detected")) { return Code.LOOP_DETECTED; }
-    if (std.mem.eql(u8, mod, "not extended")) { return Code.NOT_EXTENDED; }
-    if (std.mem.eql(u8, mod, "network authentication required")) { return Code.NETWORK_AUTHENTICATION_REQUIRED; }
+    if (std.mem.eql(u8, mod, "internal server error")) {
+        return Code.INTERNAL_SERVER_ERROR;
+    }
+    if (std.mem.eql(u8, mod, "not implemented")) {
+        return Code.NOT_IMPLEMENTED;
+    }
+    if (std.mem.eql(u8, mod, "bad gateway")) {
+        return Code.BAD_GATEWAY;
+    }
+    if (std.mem.eql(u8, mod, "service unavailable")) {
+        return Code.SERVICE_UNAVAILABLE;
+    }
+    if (std.mem.eql(u8, mod, "gateway timeout")) {
+        return Code.GATEWAY_TIMEOUT;
+    }
+    if (std.mem.eql(u8, mod, "http version not supported")) {
+        return Code.HTTP_VERSION_NOT_SUPPORTED;
+    }
+    if (std.mem.eql(u8, mod, "variant also negotiates")) {
+        return Code.VARIANT_ALSO_NEGOTIATES;
+    }
+    if (std.mem.eql(u8, mod, "insufficient storage")) {
+        return Code.INSUFFICIENT_STORAGE;
+    }
+    if (std.mem.eql(u8, mod, "loop detected")) {
+        return Code.LOOP_DETECTED;
+    }
+    if (std.mem.eql(u8, mod, "not extended")) {
+        return Code.NOT_EXTENDED;
+    }
+    if (std.mem.eql(u8, mod, "network authentication required")) {
+        return Code.NETWORK_AUTHENTICATION_REQUIRED;
+    }
 
     return Code.IM_A_TEAPOT;
 }
@@ -360,7 +484,7 @@ pub fn stringFromEnum(status_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 
 test "zix test: tcp http status fn/s" {
-    const es = [_]Code {
+    const es = [_]Code{
         // 1xx : informational
         Code.CONTINUE,
         Code.SWITCHING_PROTOCOL,
@@ -437,18 +561,12 @@ test "zix test: tcp http status fn/s" {
     for (es) |e| {
         const e_str = stringFromEnum(e);
 
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, e.asString()));
+        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
 
         const expected1 = enumFromString(e_str);
-        try std.testing.expect(
-            expected1 == e);
+        try std.testing.expect(expected1 == e);
 
         const expected2 = stringFromEnum(e);
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, expected2));
+        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
     }
 }
-
