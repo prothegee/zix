@@ -7,6 +7,7 @@ pub const Type = enum(u8) {
 
     NA,
 
+    TEXT_PLAIN,
     TEXT_HTML,
     TEXT_CSS, // css, min.css
     TEXT_CSV,
@@ -74,6 +75,7 @@ pub const Type = enum(u8) {
         return switch (self) {
             .NA => "n/a",
 
+            .TEXT_PLAIN => "text/plain",
             .TEXT_HTML => "text/html",
             .TEXT_CSS => "text/css",
             .TEXT_CSV => "text/csv",
@@ -152,6 +154,7 @@ pub fn enumFromString(type_string: []const u8) Type {
 
     if (std.mem.eql(u8, mod, "n/a")) { return Type.NA; }
 
+    if (std.mem.eql(u8, mod, "text/plain")) { return Type.TEXT_PLAIN; }
     if (std.mem.eql(u8, mod, "text/html")) { return Type.TEXT_HTML; }
     if (std.mem.eql(u8, mod, "text/css")) { return Type.TEXT_CSS; }
     if (std.mem.eql(u8, mod, "text/csv")) { return Type.TEXT_CSV; }
@@ -221,6 +224,7 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
     return switch (content_enum) {
         .NA => "n/a",
 
+        .TEXT_PLAIN => "text/plain",
         .TEXT_HTML => "text/html",
         .TEXT_CSS => "text/css",
         .TEXT_CSV => "text/csv",
