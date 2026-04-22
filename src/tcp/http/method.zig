@@ -69,15 +69,33 @@ pub fn enumFromString(method_string: []const u8) Code {
     var data: [8]u8 = undefined;
     const mod = std.ascii.lowerString(&data, method_string);
 
-    if (std.mem.eql(u8, mod, "get")) { return Code.GET; }
-    if (std.mem.eql(u8, mod, "head")) { return Code.HEAD; }
-    if (std.mem.eql(u8, mod, "post")) { return Code.POST; }
-    if (std.mem.eql(u8, mod, "put")) { return Code.PUT; }
-    if (std.mem.eql(u8, mod, "delete")) { return Code.DELETE; }
-    if (std.mem.eql(u8, mod, "patch")) { return Code.PATCH; }
-    if (std.mem.eql(u8, mod, "options")) { return Code.OPTIONS; }
-    if (std.mem.eql(u8, mod, "trace")) { return Code.TRACE; }
-    if (std.mem.eql(u8, mod, "connect")) { return Code.CONNECT; }
+    if (std.mem.eql(u8, mod, "get")) {
+        return Code.GET;
+    }
+    if (std.mem.eql(u8, mod, "head")) {
+        return Code.HEAD;
+    }
+    if (std.mem.eql(u8, mod, "post")) {
+        return Code.POST;
+    }
+    if (std.mem.eql(u8, mod, "put")) {
+        return Code.PUT;
+    }
+    if (std.mem.eql(u8, mod, "delete")) {
+        return Code.DELETE;
+    }
+    if (std.mem.eql(u8, mod, "patch")) {
+        return Code.PATCH;
+    }
+    if (std.mem.eql(u8, mod, "options")) {
+        return Code.OPTIONS;
+    }
+    if (std.mem.eql(u8, mod, "trace")) {
+        return Code.TRACE;
+    }
+    if (std.mem.eql(u8, mod, "connect")) {
+        return Code.CONNECT;
+    }
 
     return Code.GET;
 }
@@ -112,7 +130,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 
 test "zix test: tcp http method fn/s" {
-    const es = [_]Code {
+    const es = [_]Code{
         Code.GET,
         Code.HEAD,
         Code.POST,
@@ -127,18 +145,12 @@ test "zix test: tcp http method fn/s" {
     for (es) |e| {
         const e_str = stringFromEnum(e);
 
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, e.asString()));
+        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
 
         const expected1 = enumFromString(e_str);
-        try std.testing.expect(
-            expected1 == e);
+        try std.testing.expect(expected1 == e);
 
         const expected2 = stringFromEnum(e);
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, expected2));
+        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
     }
 }
-

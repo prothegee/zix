@@ -7,6 +7,7 @@ pub const Type = enum(u8) {
 
     NA,
 
+    TEXT_PLAIN,
     TEXT_HTML,
     TEXT_CSS, // css, min.css
     TEXT_CSV,
@@ -74,6 +75,7 @@ pub const Type = enum(u8) {
         return switch (self) {
             .NA => "n/a",
 
+            .TEXT_PLAIN => "text/plain",
             .TEXT_HTML => "text/html",
             .TEXT_CSS => "text/css",
             .TEXT_CSV => "text/csv",
@@ -150,57 +152,150 @@ pub fn enumFromString(type_string: []const u8) Type {
     var data: [32]u8 = undefined;
     const mod = std.ascii.lowerString(&data, type_string);
 
-    if (std.mem.eql(u8, mod, "n/a")) { return Type.NA; }
+    if (std.mem.eql(u8, mod, "n/a")) {
+        return Type.NA;
+    }
 
-    if (std.mem.eql(u8, mod, "text/html")) { return Type.TEXT_HTML; }
-    if (std.mem.eql(u8, mod, "text/css")) { return Type.TEXT_CSS; }
-    if (std.mem.eql(u8, mod, "text/csv")) { return Type.TEXT_CSV; }
+    if (std.mem.eql(u8, mod, "text/plain")) {
+        return Type.TEXT_PLAIN;
+    }
+    if (std.mem.eql(u8, mod, "text/html")) {
+        return Type.TEXT_HTML;
+    }
+    if (std.mem.eql(u8, mod, "text/css")) {
+        return Type.TEXT_CSS;
+    }
+    if (std.mem.eql(u8, mod, "text/csv")) {
+        return Type.TEXT_CSV;
+    }
 
-    if (std.mem.eql(u8, mod, "audio/mpeg")) { return Type.AUDIO_MPEG; }
-    if (std.mem.eql(u8, mod, "audio/wav")) { return Type.AUDIO_WAV; }
-    if (std.mem.eql(u8, mod, "audio/flac")) { return Type.AUDIO_FLAC; }
-    if (std.mem.eql(u8, mod, "audio/midi")) { return Type.AUDIO_MIDI; }
+    if (std.mem.eql(u8, mod, "audio/mpeg")) {
+        return Type.AUDIO_MPEG;
+    }
+    if (std.mem.eql(u8, mod, "audio/wav")) {
+        return Type.AUDIO_WAV;
+    }
+    if (std.mem.eql(u8, mod, "audio/flac")) {
+        return Type.AUDIO_FLAC;
+    }
+    if (std.mem.eql(u8, mod, "audio/midi")) {
+        return Type.AUDIO_MIDI;
+    }
 
-    if (std.mem.eql(u8, mod, "application/javascript")) { return Type.APPLICATION_JAVASCRIPT; }
-    if (std.mem.eql(u8, mod, "application/json")) { return Type.APPLICATION_JSON; }
-    if (std.mem.eql(u8, mod, "application/pdf")) { return Type.APPLICATION_PDF; }
-    if (std.mem.eql(u8, mod, "application/xml")) { return Type.APPLICATION_XML; }
-    if (std.mem.eql(u8, mod, "application/rtf")) { return Type.APPLICATION_RTF; }
-    if (std.mem.eql(u8, mod, "application/zip")) { return Type.APPLICATION_ZIP; }
-    if (std.mem.eql(u8, mod, "application/gzip")) { return Type.APPLICATION_GZIP; }
-    if (std.mem.eql(u8, mod, "application/x-tar")) { return Type.APPLICATION_TAR; }
-    if (std.mem.eql(u8, mod, "application/x-7z-compressed")) { return Type.APPLICATION_7Z_COMPRESSED; }
-    if (std.mem.eql(u8, mod, "application/vnd.rar")) { return Type.APPLICATION_VND_RAR; }
-    if (std.mem.eql(u8, mod, "application/jsonld")) { return Type.APPLICATION_LD_JSON; }
-    if (std.mem.eql(u8, mod, "application/rdf+xml")) { return Type.APPLICATION_RDF_XML; }
-    if (std.mem.eql(u8, mod, "application/rss+xml")) { return Type.APPLICATION_RSS_XML; }
-    if (std.mem.eql(u8, mod, "application/atom+xml")) { return Type.APPLICATION_ATOM_XML; }
-    if (std.mem.eql(u8, mod, "application/graphql")) { return Type.APPLICATION_GRAPHQL; }
-    if (std.mem.eql(u8, mod, "application/wasm")) { return Type.APPLICATION_WASM; }
-    if (std.mem.eql(u8, mod, "application/manifest+json")) { return Type.APPLICATION_MANIFEST_JSON; }
-    if (std.mem.eql(u8, mod, "application/octet-stream")) { return Type.APPLICATION_OCTET_STREAM; }
+    if (std.mem.eql(u8, mod, "application/javascript")) {
+        return Type.APPLICATION_JAVASCRIPT;
+    }
+    if (std.mem.eql(u8, mod, "application/json")) {
+        return Type.APPLICATION_JSON;
+    }
+    if (std.mem.eql(u8, mod, "application/pdf")) {
+        return Type.APPLICATION_PDF;
+    }
+    if (std.mem.eql(u8, mod, "application/xml")) {
+        return Type.APPLICATION_XML;
+    }
+    if (std.mem.eql(u8, mod, "application/rtf")) {
+        return Type.APPLICATION_RTF;
+    }
+    if (std.mem.eql(u8, mod, "application/zip")) {
+        return Type.APPLICATION_ZIP;
+    }
+    if (std.mem.eql(u8, mod, "application/gzip")) {
+        return Type.APPLICATION_GZIP;
+    }
+    if (std.mem.eql(u8, mod, "application/x-tar")) {
+        return Type.APPLICATION_TAR;
+    }
+    if (std.mem.eql(u8, mod, "application/x-7z-compressed")) {
+        return Type.APPLICATION_7Z_COMPRESSED;
+    }
+    if (std.mem.eql(u8, mod, "application/vnd.rar")) {
+        return Type.APPLICATION_VND_RAR;
+    }
+    if (std.mem.eql(u8, mod, "application/jsonld")) {
+        return Type.APPLICATION_LD_JSON;
+    }
+    if (std.mem.eql(u8, mod, "application/rdf+xml")) {
+        return Type.APPLICATION_RDF_XML;
+    }
+    if (std.mem.eql(u8, mod, "application/rss+xml")) {
+        return Type.APPLICATION_RSS_XML;
+    }
+    if (std.mem.eql(u8, mod, "application/atom+xml")) {
+        return Type.APPLICATION_ATOM_XML;
+    }
+    if (std.mem.eql(u8, mod, "application/graphql")) {
+        return Type.APPLICATION_GRAPHQL;
+    }
+    if (std.mem.eql(u8, mod, "application/wasm")) {
+        return Type.APPLICATION_WASM;
+    }
+    if (std.mem.eql(u8, mod, "application/manifest+json")) {
+        return Type.APPLICATION_MANIFEST_JSON;
+    }
+    if (std.mem.eql(u8, mod, "application/octet-stream")) {
+        return Type.APPLICATION_OCTET_STREAM;
+    }
 
-    if (std.mem.eql(u8, mod, "image/png")) { return Type.IMAGE_PNG; }
-    if (std.mem.eql(u8, mod, "image/jpeg")) { return Type.IMAGE_JPEG; }
-    if (std.mem.eql(u8, mod, "image/gif")) { return Type.IMAGE_GIF; }
-    if (std.mem.eql(u8, mod, "image/svg+xml")) { return Type.IMAGE_SVG_XML; }
-    if (std.mem.eql(u8, mod, "image/webp")) { return Type.IMAGE_WEBP; }
-    if (std.mem.eql(u8, mod, "image/x-icon")) { return Type.IMAGE_X_ICON; }
+    if (std.mem.eql(u8, mod, "image/png")) {
+        return Type.IMAGE_PNG;
+    }
+    if (std.mem.eql(u8, mod, "image/jpeg")) {
+        return Type.IMAGE_JPEG;
+    }
+    if (std.mem.eql(u8, mod, "image/gif")) {
+        return Type.IMAGE_GIF;
+    }
+    if (std.mem.eql(u8, mod, "image/svg+xml")) {
+        return Type.IMAGE_SVG_XML;
+    }
+    if (std.mem.eql(u8, mod, "image/webp")) {
+        return Type.IMAGE_WEBP;
+    }
+    if (std.mem.eql(u8, mod, "image/x-icon")) {
+        return Type.IMAGE_X_ICON;
+    }
 
-    if (std.mem.eql(u8, mod, "video/mp4")) { return Type.VIDEO_MP4; }
-    if (std.mem.eql(u8, mod, "video/webm")) { return Type.VIDEO_WEBM; }
-    if (std.mem.eql(u8, mod, "video/ogg")) { return Type.VIDEO_OGG; }
-    if (std.mem.eql(u8, mod, "video/mpeg")) { return Type.VIDEO_MPEG; }
-    if (std.mem.eql(u8, mod, "video/x-msvideo")) { return Type.VIDEO_AVI; }
-    if (std.mem.eql(u8, mod, "video/quicktime")) { return Type.VIDEO_MOV; }
-    if (std.mem.eql(u8, mod, "video/x-ms-wmv")) { return Type.VIDEO_WMV; }
-    if (std.mem.eql(u8, mod, "video/x-flv")) { return Type.VIDEO_FLV; }
-    if (std.mem.eql(u8, mod, "video/x-matroska")) { return Type.VIDEO_MKV; }
+    if (std.mem.eql(u8, mod, "video/mp4")) {
+        return Type.VIDEO_MP4;
+    }
+    if (std.mem.eql(u8, mod, "video/webm")) {
+        return Type.VIDEO_WEBM;
+    }
+    if (std.mem.eql(u8, mod, "video/ogg")) {
+        return Type.VIDEO_OGG;
+    }
+    if (std.mem.eql(u8, mod, "video/mpeg")) {
+        return Type.VIDEO_MPEG;
+    }
+    if (std.mem.eql(u8, mod, "video/x-msvideo")) {
+        return Type.VIDEO_AVI;
+    }
+    if (std.mem.eql(u8, mod, "video/quicktime")) {
+        return Type.VIDEO_MOV;
+    }
+    if (std.mem.eql(u8, mod, "video/x-ms-wmv")) {
+        return Type.VIDEO_WMV;
+    }
+    if (std.mem.eql(u8, mod, "video/x-flv")) {
+        return Type.VIDEO_FLV;
+    }
+    if (std.mem.eql(u8, mod, "video/x-matroska")) {
+        return Type.VIDEO_MKV;
+    }
 
-    if (std.mem.eql(u8, mod, "font/ttf")) { return Type.FONT_TTF; }
-    if (std.mem.eql(u8, mod, "font/otf")) { return Type.FONT_OTF; }
-    if (std.mem.eql(u8, mod, "font/woff")) { return Type.FONT_WOFF; }
-    if (std.mem.eql(u8, mod, "font/woff2")) { return Type.FONT_WOFF2; }
+    if (std.mem.eql(u8, mod, "font/ttf")) {
+        return Type.FONT_TTF;
+    }
+    if (std.mem.eql(u8, mod, "font/otf")) {
+        return Type.FONT_OTF;
+    }
+    if (std.mem.eql(u8, mod, "font/woff")) {
+        return Type.FONT_WOFF;
+    }
+    if (std.mem.eql(u8, mod, "font/woff2")) {
+        return Type.FONT_WOFF2;
+    }
 
     return Type.NA;
 }
@@ -221,6 +316,7 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
     return switch (content_enum) {
         .NA => "n/a",
 
+        .TEXT_PLAIN => "text/plain",
         .TEXT_HTML => "text/html",
         .TEXT_CSS => "text/css",
         .TEXT_CSV => "text/csv",
@@ -280,7 +376,7 @@ test "zix test: tcp http content fn/s" {
     // tbd
     try std.testing.expect(true);
 
-    const es = [_]Type {
+    const es = [_]Type{
         Type.NA,
 
         Type.TEXT_HTML,
@@ -337,18 +433,12 @@ test "zix test: tcp http content fn/s" {
     for (es) |e| {
         const e_str = stringFromEnum(e);
 
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, e.asString()));
+        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
 
         const expected1 = enumFromString(e_str);
-        try std.testing.expect(
-            expected1 == e);
+        try std.testing.expect(expected1 == e);
 
         const expected2 = stringFromEnum(e);
-        try std.testing.expect(
-            std.mem.eql(
-                u8, e_str, expected2));
+        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
     }
 }
-
