@@ -19,6 +19,36 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
+    // Unit test
     test_step.dependOn(&zix_tests_run.step);
-}
 
+    // Integration test: postpone tbd
+
+    // --------------------------------------------------------- //
+
+    // Examples
+    const examples = .{
+        .{ "server_basic", "examples/server_basic.zig" },
+        .{ "server_json", "examples/server_json.zig" },
+        .{ "server_timeout_resp", "examples/server_timeout_resp.zig" },
+    };
+
+    inline for (examples) |pair| {
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path(pair[1]),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe_mod.addImport("zix", zix);
+
+        const exe = b.addExecutable(.{
+            .name = pair[0],
+            .root_module = exe_mod,
+        });
+        b.installArtifact(exe);
+
+        const run = b.addRunArtifact(exe);
+        const run_step = b.step("example-" ++ pair[0], "Run " ++ pair[0]);
+        run_step.dependOn(&run.step);
+    }
+}
