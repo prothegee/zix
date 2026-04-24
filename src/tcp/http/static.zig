@@ -1,6 +1,19 @@
+//! zix http static
+
 const std = @import("std");
 const file_utils = @import("../../utils/file.zig");
 
+/// Brief:
+/// Map a file extension to its MIME type string
+///
+/// Note:
+/// - Returns "application/octet-stream" for unknown extensions
+///
+/// Param:
+/// ext - []const u8 (file extension without leading dot)
+///
+/// Return:
+/// []const u8
 fn mimeType(ext: []const u8) []const u8 {
     if (std.mem.eql(u8, ext, "html")) return "text/html";
     if (std.mem.eql(u8, ext, "css")) return "text/css";
@@ -41,6 +54,18 @@ const RangeRequest = struct {
     end: ?u64,
 };
 
+/// Brief:
+/// Parse a Range request header value into a RangeRequest
+///
+/// Note:
+/// - Only supports "bytes=" unit prefix (RFC 7233)
+/// - Returns null if the header is malformed or missing the bytes= prefix
+///
+/// Param:
+/// value - []const u8 (raw Range header value)
+///
+/// Return:
+/// ?RangeRequest
 fn parseRangeHeader(value: []const u8) ?RangeRequest {
     if (!std.mem.startsWith(u8, value, "bytes=")) return null;
     const spec = value[6..];
@@ -50,6 +75,22 @@ fn parseRangeHeader(value: []const u8) ?RangeRequest {
     return .{ .start = start, .end = end };
 }
 
+/// Brief:
+/// Serve a static file from the public directory
+///
+/// Note:
+/// - Rejects paths containing ".." to prevent directory traversal
+/// - Supports Range requests (RFC 7233) for partial content (206)
+/// - Returns false if the file is not found or path is invalid; caller sends 404
+///
+/// Param:
+/// req        - *std.http.Server.Request
+/// req_path   - []const u8 (path relative to public_dir, no leading slash)
+/// public_dir - []const u8 (directory to serve files from)
+/// io         - std.Io
+///
+/// Return:
+/// !bool
 pub fn serve(
     req: *std.http.Server.Request,
     req_path: []const u8,
