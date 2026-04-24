@@ -1,6 +1,6 @@
 # HLD — zix
 
-A micro net-framework to complement network library, built on Zig 0.16.x.
+A micro net-frame-work to complement network library, built on Zig 0.16.x.
 
 ---
 
@@ -18,8 +18,11 @@ A micro net-framework to complement network library, built on Zig 0.16.x.
 
 ```mermaid
 flowchart TD
-    A["main()"] --> B["std.Io.Threaded.init()\nM:N async I/O backend"]
+    A1["main(process)"] -->|auto| B["io = process.io\n(runtime-managed thread pool)"]
+    A2["main()"] -->|manual| B2["std.Io.Threaded.init()\nwith .concurrent_limit"]
+    B2 --> B3["io = threaded.io()"]
     B --> C["HttpServer.run()"]
+    B3 --> C
     C --> D["net_server.accept(io)\nsuspends until TCP connection"]
     D --> E["io.concurrent(handleConnection)"]
     E --> D
@@ -42,7 +45,11 @@ flowchart TD
     Q --> J
 ```
 
-Concurrency is provided by `std.Io.Threaded` (hybrid async I/O using a kernel-backed thread pool). Each accepted connection is a concurrent task — non-blocking for the accept loop. Tasks suspend on I/O without busy-waiting.
+Two I/O modes are supported:
+- **Auto** (`main(process: std.process.Init)` — use `process.io`): the runtime manages the thread pool; concurrency defaults to CPU count − 1.
+- **Manual** (`main() !void` — create `std.Io.Threaded` explicitly): caller controls `.concurrent_limit` (`.unlimited` or `std.Io.Limit.limited(n)`).
+
+Either way, `HttpServer` receives an opaque `std.Io` value — it does not own or deinit the backend. Each accepted connection is dispatched as a concurrent task via `io.concurrent(handleConnection)`, suspending on I/O without busy-waiting.
 
 ---
 
@@ -104,9 +111,9 @@ graph LR
 ## Public API  (`import("zix")`)
 
 | Symbol | Type | Description |
-|--------|------|-------------|
+| :-     | :-   | :-          |
 | `HttpServerConfig` | `struct` | Server configuration (see below) |
-| `HttpServer` | `struct` | Server lifecycle: init / registerHandler / run |
+| `HttpServer` | `struct` | Server lifecycle: init / registerHandler / registerPrefixHandler / registerParamHandler / run |
 | `Request` | `struct` | Per-request reader: method, path, query, header, body |
 | `Response` | `struct` | Per-request writer: send, sendJson, noContent, addHeader |
 | `Context` | `struct` | Per-request context: io, allocator, response_sent |
@@ -190,11 +197,14 @@ sequenceDiagram
 Wraps `*std.http.Server.Request` + a `*std.Io.Reader` for body reading.
 
 | Method | Returns | Notes |
-|--------|---------|-------|
+| :-     | :-      | :-    |
 | `method()` | `Method.Code` | Mapped from `std.http.Method` |
 | `path()` | `[]const u8` | Target stripped of query string |
 | `query()` | `[]const u8` | Raw query string after `?` |
 | `queryParam(key)` | `?[]const u8` | Single key from query string |
+| `queryParams(allocator)` | `![]QueryParam` | All query params as a slice; bare keys have `value = null` |
+| `pathSegments(allocator)` | `![][]const u8` | Non-empty path segments split by `/`; `"/a/b"` → `["a","b"]` |
+| `pathParam(name)` | `?[]const u8` | Named capture from a param route; `null` if name not captured |
 | `header(name)` | `?[]const u8` | Case-insensitive header lookup |
 | `body()` | `![]const u8` | Reads `Content-Length` bytes; cached after first call |
 
@@ -205,7 +215,7 @@ Wraps `*std.http.Server.Request` + a `*std.Io.Reader` for body reading.
 Buffers response state; writes on `send()` or equivalent.
 
 | Method | Notes |
-|--------|-------|
+| :-     | :-    |
 | `setStatus(Status.Code)` | Default: `.OK` |
 | `setContentType([]const u8)` | Default: `"text/plain"` |
 | `setKeepAlive(bool)` | Default: `true` |
@@ -218,21 +228,80 @@ Response is written to `req.server.out` (the underlying `std.Io.Writer`). The 4 
 
 ---
 
-## Router Dispatch
+## Router
+
+### Registration — three explicit functions
+
+Each function communicates intent at the call site:
+
+| Function | Pattern example | Behaviour |
+| :-       | :-              | :-        |
+| `registerHandler(path, h)` | `"/about"` | Exact — matches only when the full path equals `path` |
+| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix — matches `prefix` and any sub-path; NOT partial segments |
+| `registerParamHandler(pattern, h)` | `"/users/:id"` | Parameterized — `:name` segments are captured; literals must match exactly |
+
+```zig
+server.registerHandler("/about", aboutHandler);
+server.registerPrefixHandler("/api", apiHandler);        // /api, /api/foo, /api/foo/bar — NOT /apiv2
+server.registerParamHandler("/users/:id", userHandler);  // req.pathParam("id") → "alice"
+server.registerParamHandler("/:tenant/:branch", branchHandler);
+```
+
+### Dispatch — priority rules
+
+```
+Pass 1 — exact routes       first exact match wins           (registration order irrelevant)
+Pass 2 — param routes       first matching pattern wins      (registration order matters here)
+Pass 3 — prefix routes      longest matching prefix wins     (registration order irrelevant)
+
+exact  >  param  >  prefix (longer prefix beats shorter prefix)
+```
+
+Passes 1 and 3 are fully deterministic regardless of registration order. **Pass 2 is the exception**: when two param patterns have the same segment count and both could match the same request, the one registered first wins. Register more-literal patterns (more fixed segments) before all-param patterns of equal depth.
 
 ```mermaid
 flowchart TD
-    A["Router.dispatch(req, res, ctx)"] --> B["i = 0"]
-    B --> C{"i < routes.len?"}
-    C -->|no| D["return false\n(no match)"]
-    C -->|yes| E{"routes[i].path\n== req.path()?"}
-    E -->|no| F["i += 1"]
-    F --> C
-    E -->|yes| G["handler(req, res, ctx)"]
-    G --> H["return true"]
+    A["dispatch(req, res, ctx)"] --> B["Pass 1: scan exact routes"]
+    B --> C{"exact match?"}
+    C -->|yes| DONE["call handler → return true"]
+    C -->|no| D["Pass 2: scan param routes\nin registration order"]
+    D --> E{"pattern\nmatches?"}
+    E -->|yes| F["write path_params to req"]
+    F --> DONE
+    E -->|no| G["Pass 3: scan prefix routes\ncollect all that match"]
+    G --> H{"any prefix\nmatched?"}
+    H -->|no| Z["return false"]
+    H -->|yes| I["pick longest prefix"]
+    I --> DONE
 ```
 
-Registration order is preserved; first match wins. Routes are added via `registerHandler()` before `run()`.
+### Priority table
+
+| Registered routes | Request | Winner | Reason |
+|---|---|---|---|
+| `/path/info` (exact) + `/path/:id` (param) + `/path` (prefix) | `/path/info` | `/path/info` | exact beats all |
+| `/path/:id` (param) + `/path` (prefix) | `/path/alice` | `/path/:id` | param beats prefix |
+| `/api/v2` (prefix) + `/api` (prefix) | `/api/v2/foo` | `/api/v2` | longer prefix wins |
+| `/path` (prefix) | `/pathfoo` | — no match | boundary check: next char must be `/` or end |
+| `/path/user/:id` (param, reg. 1st) + `/path/:a/:b` (param, reg. 2nd) | `/path/user/alice` | `/path/user/:id` | more literals registered first |
+| `/path/:a/:b` (param, reg. 1st) + `/path/user/:id` (param, reg. 2nd) | `/path/user/alice` | `/path/:a/:b` | ⚠ wrong order — all-param wins unexpectedly |
+
+### Path parameters
+
+In a handler registered with `registerParamHandler`, read captures via `req.pathParam(name)`:
+
+```zig
+pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+    const id = req.pathParam("id") orelse {
+        res.setStatus(.BAD_REQUEST);
+        try res.sendJson("{\"error\":\"missing id\"}");
+        return;
+    };
+    // use id ...
+}
+```
+
+`req.pathParam` returns `null` if the name was not captured (e.g., the handler was reached via an exact or prefix route).
 
 ---
 
@@ -316,12 +385,9 @@ graph TD
 
 ## Performance Reference  (from `rnd/`)
 
-| Mode | Benchmark | req/s |
-|------|-----------|-------|
-| `io.concurrent` async (server_implementation.zig) | wrk -c100 -t6 -d10s | ~349 k |
-| `std.Thread.spawn` detached (server_configuration.zig) | wrk -c100 -t2 -d10s | ~254 k |
-
 Current `HttpServer` uses the `io.concurrent` pattern.
+
+<br>
 
 ---
 
