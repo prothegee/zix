@@ -1,3 +1,5 @@
+//! zix http server config
+
 const std = @import("std");
 
 pub const HttpServerConfig = struct {
