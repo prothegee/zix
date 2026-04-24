@@ -1,14 +1,15 @@
+//! File utils
+
 const std = @import("std");
 
 /// Brief:
-/// Get file extension from `fp` param
+/// Get file extension from file path
 ///
 /// Note:
-/// - Default return "" or empty
-/// - If `.` is not found, it return "" or empty
+/// - Returns "" if '.' is not found or if '.' is the last character
 ///
 /// Param:
-/// fp - file path
+/// fp - []const u8 (file path)
 ///
 /// Return:
 /// []const u8
