@@ -1,3 +1,5 @@
+//! zix http middleware
+
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;

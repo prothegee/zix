@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
         .{ "server_basic", "examples/server_basic.zig" },
         .{ "server_json", "examples/server_json.zig" },
         .{ "server_timeout_resp", "examples/server_timeout_resp.zig" },
+        .{ "server_params", "examples/server_params.zig" },
+        .{ "server_manual_concurrent", "examples/server_manual_concurrent.zig" },
+        .{ "server_paths", "examples/server_paths.zig" },
     };
 
     inline for (examples) |pair| {

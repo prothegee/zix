@@ -1,3 +1,5 @@
+//! zix http upload
+
 const std = @import("std");
 
 pub const MultipartField = struct {
@@ -13,6 +15,15 @@ pub const MultipartParser = struct {
     fields: std.ArrayList(MultipartField),
     allocator: std.mem.Allocator,
 
+    /// Brief:
+    /// Initialize the multipart parser with the given boundary
+    ///
+    /// Param:
+    /// allocator - std.mem.Allocator
+    /// boundary  - []const u8 (boundary string from the Content-Type header)
+    ///
+    /// Return:
+    /// MultipartParser
     pub fn init(allocator: std.mem.Allocator, boundary: []const u8) MultipartParser {
         return .{
             .boundary = boundary,
@@ -21,6 +32,11 @@ pub const MultipartParser = struct {
         };
     }
 
+    /// Brief:
+    /// Free all parsed field data and the fields list
+    ///
+    /// Note:
+    /// - Only file fields have heap-allocated data; form fields borrow from the body slice
     pub fn deinit(self: *MultipartParser) void {
         for (self.fields.items) |field| {
             if (field.is_file) self.allocator.free(field.data);
@@ -28,6 +44,17 @@ pub const MultipartParser = struct {
         self.fields.deinit(self.allocator);
     }
 
+    /// Brief:
+    /// Parse the multipart body into individual fields
+    ///
+    /// Note:
+    /// - File field data is heap-duplicated; form field data slices into the body
+    ///
+    /// Param:
+    /// body - []const u8 (full request body)
+    ///
+    /// Return:
+    /// !void
     pub fn parse(self: *MultipartParser, body: []const u8) !void {
         const boundary_start = try self.allocator.alloc(u8, self.boundary.len + 4);
         defer self.allocator.free(boundary_start);
@@ -106,6 +133,17 @@ pub const MultipartParser = struct {
         }
     }
 
+    /// Brief:
+    /// Look up a parsed field by name
+    ///
+    /// Note:
+    /// - Returns null if no field with that name was parsed
+    ///
+    /// Param:
+    /// name - []const u8
+    ///
+    /// Return:
+    /// ?*MultipartField
     pub fn getField(self: *MultipartParser, name: []const u8) ?*MultipartField {
         for (self.fields.items) |*f| {
             if (std.mem.eql(u8, f.name, name)) return f;
@@ -114,6 +152,17 @@ pub const MultipartParser = struct {
     }
 };
 
+/// Brief:
+/// Save file data to a directory, creating it if it does not exist
+///
+/// Param:
+/// io       - std.Io
+/// dir      - []const u8 (destination directory path)
+/// filename - []const u8
+/// data     - []const u8 (file content)
+///
+/// Return:
+/// ![]const u8 (full path of the saved file)
 pub fn saveFile(io: std.Io, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 

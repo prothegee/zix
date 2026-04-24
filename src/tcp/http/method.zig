@@ -1,3 +1,5 @@
+//! zix http method
+
 const std = @import("std");
 
 /// zix http method code

@@ -1,3 +1,5 @@
+//! zix http server
+
 const std = @import("std");
 const Config = @import("config.zig").HttpServerConfig;
 const Router = @import("router.zig").Router;
@@ -9,6 +11,18 @@ const static = @import("static.zig");
 
 // --------------------------------------------------------- //
 
+/// Brief:
+/// Handle a single TCP connection with a keep-alive request loop
+///
+/// Note:
+/// - Heap-allocates I/O buffers from smp_allocator sized by config (max_client_request / max_client_response)
+/// - Per-connection arena is reset each request; deinit on connection close
+/// - Falls back to static file serving if no route matches; sends 404 if neither matches
+///
+/// Param:
+/// stream - std.Io.net.Stream
+/// io     - std.Io
+/// server - *HttpServer
 fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *HttpServer) void {
     defer stream.close(io);
 
@@ -70,6 +84,14 @@ pub const HttpServer = struct {
     config: Config,
     router: Router,
 
+    /// Brief:
+    /// Initialize the HTTP server with the given config
+    ///
+    /// Param:
+    /// config - HttpServerConfig
+    ///
+    /// Return:
+    /// !HttpServer
     pub fn init(config: Config) !HttpServer {
         return .{
             .config = config,
@@ -77,16 +99,71 @@ pub const HttpServer = struct {
         };
     }
 
+    /// Brief:
+    /// Free all router storage
     pub fn deinit(self: *HttpServer) void {
         self.router.deinit();
     }
 
+    /// Brief:
+    /// Register a handler for an exact URL path
+    ///
+    /// Note:
+    /// - Matches only when the request path equals path character-for-character
+    /// - Logs and swallows allocation errors at runtime
+    ///
+    /// Param:
+    /// path    - []const u8
+    /// handler - HandlerFn
     pub fn registerHandler(self: *HttpServer, path: []const u8, handler: HandlerFn) void {
         self.router.register(path, handler) catch |err| {
             std.debug.print("zix: registerHandler failed for '{s}': {}\n", .{ path, err });
         };
     }
 
+    /// Brief:
+    /// Register a handler for a URL prefix and all sub-paths below it
+    ///
+    /// Note:
+    /// - "/api" matches "/api", "/api/foo", "/api/foo/bar" but NOT "/apiv2"
+    /// - Among multiple prefix routes, the longest matching prefix wins
+    /// - Logs and swallows allocation errors at runtime
+    ///
+    /// Param:
+    /// prefix  - []const u8 (no trailing slash)
+    /// handler - HandlerFn
+    pub fn registerPrefixHandler(self: *HttpServer, prefix: []const u8, handler: HandlerFn) void {
+        self.router.registerPrefix(prefix, handler) catch |err| {
+            std.debug.print("zix: registerPrefixHandler failed for '{s}': {}\n", .{ prefix, err });
+        };
+    }
+
+    /// Brief:
+    /// Register a handler for a parameterized URL pattern
+    ///
+    /// Note:
+    /// - Segments prefixed with ':' are named captures; others must match literally
+    /// - "/users/:id" matches "/users/alice" and captures id="alice"
+    /// - Access captured values inside the handler via req.pathParam("id")
+    /// - Logs and swallows allocation errors at runtime
+    ///
+    /// Param:
+    /// pattern - []const u8 (e.g. "/users/:id" or "/:tenant/:branch")
+    /// handler - HandlerFn
+    pub fn registerParamHandler(self: *HttpServer, pattern: []const u8, handler: HandlerFn) void {
+        self.router.registerParam(pattern, handler) catch |err| {
+            std.debug.print("zix: registerParamHandler failed for '{s}': {}\n", .{ pattern, err });
+        };
+    }
+
+    /// Brief:
+    /// Start listening and accepting connections
+    ///
+    /// Note:
+    /// - Blocks indefinitely; each accepted connection is spawned via io.concurrent()
+    ///
+    /// Return:
+    /// !void
     pub fn run(self: *HttpServer) !void {
         const cfg = self.config;
         const io = cfg.io;
