@@ -1,7 +1,10 @@
+//! zix
 //! A micro net-frame-work
-//! to be compliment network library.
+//! to compliment your system in network implementation.
 
 pub const Tcp = @import("tcp/Tcp.zig");
+
+// --------------------------------------------------------- //
 
 pub const HttpServerConfig = @import("tcp/http/config.zig").HttpServerConfig;
 pub const HttpServer = @import("tcp/http/server.zig").HttpServer;

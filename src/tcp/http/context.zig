@@ -1,3 +1,5 @@
+//! zix http context
+
 const std = @import("std");
 
 pub const Context = struct {

@@ -1,3 +1,5 @@
+//! zix http status
+
 const std = @import("std");
 
 /// zix tcp http status code

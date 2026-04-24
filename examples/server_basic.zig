@@ -10,12 +10,14 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 
 // --------------------------------------------------------- //
 
+// curl usage: curl -X GET "http://localhost:9000/"
 pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("hello from zix");
 }
 
+// curl usage: curl -X GET "http://localhost:9000/about"
 pub fn aboutHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     _ = req;
     _ = ctx;

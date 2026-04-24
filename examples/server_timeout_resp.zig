@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9002;
+const PORT: u16 = 9005;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
@@ -14,8 +14,9 @@ const DELAY_MAX_MS: u64 = 6_000;
 
 // --------------------------------------------------------- //
 
-// Simulates a handler that takes a random amount of time (3-9 seconds),
+// Simulates a handler that takes a random amount of time (3-6 seconds),
 // if the simulated duration exceeds HANDLER_TIMEOUT_MS, responds with 408.
+// curl usage: curl -X GET "http://localhost:9005/slow"
 pub fn slowHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     _ = req;
 

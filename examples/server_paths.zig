@@ -1,0 +1,159 @@
+const std = @import("std");
+const zix = @import("zix");
+
+const IP: []const u8 = "0.0.0.0";
+const PORT: u16 = 9004;
+const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
+const MAX_CLIENT_REQUEST: usize = 1024 * 4;
+const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
+const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
+
+const MAX_PATH_SEGMENTS: usize = 9;
+
+// --------------------------------------------------------- //
+
+// GET /path
+// GET /path/<seg1>
+// GET /path/<seg1>/<seg2>
+// ... up to MAX_PATH_SEGMENTS segments after /path
+// More than MAX_PATH_SEGMENTS → 404
+// Note: /path/user/:id is handled by userHandler below (param beats prefix)
+//
+// curl usage: curl -X GET "http://localhost:9004/path"
+// curl usage: curl -X GET "http://localhost:9004/path/hello"
+// curl usage: curl -X GET "http://localhost:9004/path/hello/world"
+// curl usage: curl -X GET "http://localhost:9004/path/a/b/c/d/e/f/g/h/i"
+// curl usage: curl -X GET "http://localhost:9004/path/a/b/c/d/e/f/g/h/i/j"  (→ 404)
+pub fn pathsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+        try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const all_segments = try req.pathSegments(ctx.allocator);
+
+    // Skip the leading "path" segment — it is always present because we are
+    // registered under the /path prefix.
+    const sub = if (all_segments.len > 0) all_segments[1..] else all_segments;
+
+    if (sub.len > MAX_PATH_SEGMENTS) {
+        res.setStatus(.NOT_FOUND);
+        try res.sendJson("{\"message\":\"Error: too many path segments\",\"max\":9}");
+        return;
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(ctx.allocator, "{\"path\":\"");
+    try buf.appendSlice(ctx.allocator, req.path());
+    try buf.appendSlice(ctx.allocator, "\",\"segments\":[");
+    for (sub, 0..) |seg, i| {
+        if (i > 0) try buf.appendSlice(ctx.allocator, ",");
+        try buf.append(ctx.allocator, '"');
+        try buf.appendSlice(ctx.allocator, seg);
+        try buf.append(ctx.allocator, '"');
+    }
+    try buf.appendSlice(ctx.allocator, "],\"count\":");
+    var count_buf: [4]u8 = undefined;
+    const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{sub.len});
+    try buf.appendSlice(ctx.allocator, count_str);
+    try buf.append(ctx.allocator, '}');
+
+    try res.sendJson(buf.items);
+}
+
+// GET /path/user/:id
+// Demonstrates registerParamHandler — :id is captured and returned in the response.
+// Priority: param beats prefix, so this wins over pathsHandler for /path/user/<anything>.
+//
+// curl usage: curl -X GET "http://localhost:9004/path/user/alice"
+// curl usage: curl -X GET "http://localhost:9004/path/user/123"
+pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+    _ = ctx;
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+        try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const id = req.pathParam("id") orelse {
+        res.setStatus(.BAD_REQUEST);
+        try res.sendJson("{\"error\":\"missing path param: id\"}");
+        return;
+    };
+
+    var buf: [256]u8 = undefined;
+    const msg = try std.fmt.bufPrint(
+        &buf,
+        "{{\"path\":\"{s}\",\"id\":\"{s}\"}}",
+        .{ req.path(), id },
+    );
+    try res.sendJson(msg);
+}
+
+// GET /path/:tenant-id/:tenant-branch
+// Demonstrates hyphenated param names.
+// Hyphens are valid in param names — the name is everything after ':' until the next '/'.
+//
+// IMPORTANT registration order: within param routes, first-registered wins when two
+// patterns have the same segment count. Register more-literal patterns first so they
+// take priority over all-param patterns of the same depth.
+//   /path/user/:id         registered 1st → wins for /path/user/<anything>
+//   /path/:tenant-id/:tenant-branch  registered 2nd → wins for /path/<non-user>/<anything>
+//
+// curl usage: curl -X GET "http://localhost:9004/path/acme/main"
+// curl usage: curl -X GET "http://localhost:9004/path/acme/dev"
+// curl usage: curl -X GET "http://localhost:9004/path/user/alice"   (→ userHandler, not here)
+pub fn tenantHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+    _ = ctx;
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+        try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const tenant_id = req.pathParam("tenant-id") orelse {
+        res.setStatus(.BAD_REQUEST);
+        try res.sendJson("{\"error\":\"missing path param: tenant-id\"}");
+        return;
+    };
+    const tenant_branch = req.pathParam("tenant-branch") orelse {
+        res.setStatus(.BAD_REQUEST);
+        try res.sendJson("{\"error\":\"missing path param: tenant-branch\"}");
+        return;
+    };
+
+    var buf: [512]u8 = undefined;
+    const msg = try std.fmt.bufPrint(
+        &buf,
+        "{{\"path\":\"{s}\",\"tenant-id\":\"{s}\",\"tenant-branch\":\"{s}\"}}",
+        .{ req.path(), tenant_id, tenant_branch },
+    );
+    try res.sendJson(msg);
+}
+
+// --------------------------------------------------------- //
+
+pub fn main(process: std.process.Init) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    var server = try zix.HttpServer.init(.{
+        .io = process.io,
+        .allocator = arena.allocator(),
+        .ip = IP,
+        .port = PORT,
+        .max_kernel_backlog = MAX_KERNEL_BACKLOG,
+        .max_client_request = MAX_CLIENT_REQUEST,
+        .max_allocator_size = MAX_ALLOCATOR_SIZE,
+        .max_client_response = MAX_CLIENT_RESPONSE,
+    });
+    defer server.deinit();
+
+    // Param routes: more-literal patterns first, all-param patterns after.
+    server.registerParamHandler("/path/user/:id", userHandler);
+    server.registerParamHandler("/path/:tenant-id/:tenant-branch", tenantHandler);
+    server.registerPrefixHandler("/path", pathsHandler);
+
+    try server.run();
+}

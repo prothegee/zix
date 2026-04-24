@@ -1,3 +1,5 @@
+// zix http content
+
 const std = @import("std");
 
 pub const Type = enum(u8) {
@@ -373,7 +375,6 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
 // --------------------------------------------------------- //
 
 test "zix test: tcp http content fn/s" {
-    // tbd
     try std.testing.expect(true);
 
     const es = [_]Type{
