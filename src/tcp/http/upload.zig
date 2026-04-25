@@ -36,7 +36,7 @@ pub const MultipartParser = struct {
     /// Free all parsed field data and the fields list
     ///
     /// Note:
-    /// - Only file fields have heap-allocated data; form fields borrow from the body slice
+    /// - Only file fields have heap-allocated data, form fields borrow from the body slice
     pub fn deinit(self: *MultipartParser) void {
         for (self.fields.items) |field| {
             if (field.is_file) self.allocator.free(field.data);
@@ -48,7 +48,7 @@ pub const MultipartParser = struct {
     /// Parse the multipart body into individual fields
     ///
     /// Note:
-    /// - File field data is heap-duplicated; form field data slices into the body
+    /// - File field data is heap-duplicated, form field data slices into the body
     ///
     /// Param:
     /// body - []const u8 (full request body)
@@ -152,34 +152,39 @@ pub const MultipartParser = struct {
     }
 };
 
-/// Brief:
-/// Save file data to a directory, creating it if it does not exist
-///
-/// Param:
-/// io       - std.Io
-/// dir      - []const u8 (destination directory path)
-/// filename - []const u8
-/// data     - []const u8 (file content)
-///
-/// Return:
-/// ![]const u8 (full path of the saved file)
-pub fn saveFile(io: std.Io, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
-    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
-    var path_buf: [512]u8 = undefined;
-    if (dir.len + 1 + filename.len > path_buf.len) return error.PathTooLong;
-    @memcpy(path_buf[0..dir.len], dir);
-    path_buf[dir.len] = '/';
-    @memcpy(path_buf[dir.len + 1 ..][0..filename.len], filename);
-    const full_path = path_buf[0 .. dir.len + 1 + filename.len];
+test "zix test: http upload MultipartParser" {
+    const boundary = "boundary123";
+    const body =
+        "--boundary123\r\n" ++
+        "Content-Disposition: form-data; name=\"field1\"\r\n" ++
+        "\r\n" ++
+        "value1\r\n" ++
+        "--boundary123\r\n" ++
+        "Content-Disposition: form-data; name=\"file1\"; filename=\"test.txt\"\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "\r\n" ++
+        "hello world\r\n" ++
+        "--boundary123--\r\n";
 
-    const f = try std.Io.Dir.cwd().createFile(io, full_path, .{});
-    defer f.close(io);
+    var parser = MultipartParser.init(std.testing.allocator, boundary);
+    defer parser.deinit();
 
-    var write_buf: [8192]u8 = undefined;
-    var writer = f.writer(io, &write_buf);
-    try writer.interface.writeAll(data);
-    try writer.interface.flush();
+    try parser.parse(body);
 
-    return full_path;
+    try std.testing.expectEqual(@as(usize, 2), parser.fields.items.len);
+
+    const f1 = parser.getField("field1").?;
+    try std.testing.expectEqualStrings("field1", f1.name);
+    try std.testing.expectEqualStrings("value1", f1.data);
+    try std.testing.expect(!f1.is_file);
+
+    const f2 = parser.getField("file1").?;
+    try std.testing.expectEqualStrings("file1", f2.name);
+    try std.testing.expectEqualStrings("test.txt", f2.filename.?);
+    try std.testing.expectEqualStrings("text/plain", f2.content_type.?);
+    try std.testing.expectEqualStrings("hello world", f2.data);
+    try std.testing.expect(f2.is_file);
 }

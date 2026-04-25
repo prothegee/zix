@@ -28,12 +28,16 @@ pub fn build(b: *std.Build) void {
 
     // Examples
     const examples = .{
-        .{ "server_basic", "examples/server_basic.zig" },
-        .{ "server_json", "examples/server_json.zig" },
-        .{ "server_timeout_resp", "examples/server_timeout_resp.zig" },
-        .{ "server_params", "examples/server_params.zig" },
-        .{ "server_manual_concurrent", "examples/server_manual_concurrent.zig" },
-        .{ "server_paths", "examples/server_paths.zig" },
+        .{ "example-server_basic",              "examples/server_basic.zig" },
+        .{ "example-server_json",               "examples/server_json.zig" },
+        .{ "example-server_manual_concurrent",  "examples/server_manual_concurrent.zig" },
+        .{ "example-server_middleware",         "examples/server_middleware.zig" },
+        .{ "example-server_params",             "examples/server_params.zig" },
+        .{ "example-server_paths",              "examples/server_paths.zig" },
+        .{ "example-server_static",             "examples/server_static.zig" },
+        .{ "example-server_timeout_resp",       "examples/server_timeout_resp.zig" },
+        .{ "example-server_websocket",          "examples/server_websocket.zig" },
+        .{ "example-server_xtra_headers",       "examples/server_xtra_headers.zig" },
     };
 
     inline for (examples) |pair| {

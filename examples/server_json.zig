@@ -41,7 +41,7 @@ pub fn statusHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X GET "http://localhost:9001/echo?name=alice"
+// curl usage: curl -X GET "http://localhost:9001/echo?name=Alice"
 pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     const name = req.queryParam("name") orelse "world";
 
@@ -65,7 +65,7 @@ pub fn postHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X POST "http://localhost:9001/user" -H "Content-Type: application/json" -d '{"name":"alice","age":30}'
+// curl usage: curl -X POST "http://localhost:9001/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
 pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -106,9 +106,9 @@ pub fn usersHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !v
     }
 
     const static_users = [_]User{
-        .{ .name = "alice", .age = 30 },
-        .{ .name = "bob", .age = 25 },
-        .{ .name = "carol", .age = 28 },
+        .{ .name = "Alice", .age = 30 },
+        .{ .name = "Bob", .age = 25 },
+        .{ .name = "Carol", .age = 28 },
     };
 
     var arr = std.json.Array.init(ctx.allocator);

@@ -146,7 +146,7 @@ pub const Type = enum(u8) {
 /// - If not match, it will return NA
 ///
 /// Params:
-/// type_string - []const u8 (insensitive; forced to lowercase)
+/// type_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
 /// zix.Tcp.Http.Content.Type
@@ -369,6 +369,77 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
         .FONT_WOFF => "font/woff",
         .FONT_WOFF2 => "font/woff2",
     };
+}
+
+/// Brief:
+/// Get Content.Type enum from a file extension
+///
+/// Note:
+/// - Case-insensitive
+/// - Returns .APPLICATION_OCTET_STREAM for unknown extensions
+///
+/// Param:
+/// ext - []const u8 (without leading dot, e.g. "html", "png")
+///
+/// Return:
+/// Type
+pub fn typeFromExtension(ext: []const u8) Type {
+    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return .TEXT_HTML;
+    if (std.ascii.eqlIgnoreCase(ext, "css")) return .TEXT_CSS;
+    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "min.js")) return .APPLICATION_JAVASCRIPT;
+    if (std.ascii.eqlIgnoreCase(ext, "json") or std.ascii.eqlIgnoreCase(ext, "map")) return .APPLICATION_JSON;
+    if (std.ascii.eqlIgnoreCase(ext, "txt")) return .TEXT_PLAIN;
+    if (std.ascii.eqlIgnoreCase(ext, "csv")) return .TEXT_CSV;
+    if (std.ascii.eqlIgnoreCase(ext, "xml")) return .APPLICATION_XML;
+    if (std.ascii.eqlIgnoreCase(ext, "rtf")) return .APPLICATION_RTF;
+    if (std.ascii.eqlIgnoreCase(ext, "pdf")) return .APPLICATION_PDF;
+    if (std.ascii.eqlIgnoreCase(ext, "wasm")) return .APPLICATION_WASM;
+    if (std.ascii.eqlIgnoreCase(ext, "zip")) return .APPLICATION_ZIP;
+    if (std.ascii.eqlIgnoreCase(ext, "gz")) return .APPLICATION_GZIP;
+    if (std.ascii.eqlIgnoreCase(ext, "tar")) return .APPLICATION_TAR;
+    if (std.ascii.eqlIgnoreCase(ext, "7z")) return .APPLICATION_7Z_COMPRESSED;
+    if (std.ascii.eqlIgnoreCase(ext, "rar")) return .APPLICATION_VND_RAR;
+    if (std.ascii.eqlIgnoreCase(ext, "png")) return .IMAGE_PNG;
+    if (std.ascii.eqlIgnoreCase(ext, "jpg") or std.ascii.eqlIgnoreCase(ext, "jpeg")) return .IMAGE_JPEG;
+    if (std.ascii.eqlIgnoreCase(ext, "gif")) return .IMAGE_GIF;
+    if (std.ascii.eqlIgnoreCase(ext, "svg")) return .IMAGE_SVG_XML;
+    if (std.ascii.eqlIgnoreCase(ext, "webp")) return .IMAGE_WEBP;
+    if (std.ascii.eqlIgnoreCase(ext, "ico")) return .IMAGE_X_ICON;
+    if (std.ascii.eqlIgnoreCase(ext, "mp4")) return .VIDEO_MP4;
+    if (std.ascii.eqlIgnoreCase(ext, "webm")) return .VIDEO_WEBM;
+    if (std.ascii.eqlIgnoreCase(ext, "ogg")) return .VIDEO_OGG;
+    if (std.ascii.eqlIgnoreCase(ext, "mpeg")) return .VIDEO_MPEG;
+    if (std.ascii.eqlIgnoreCase(ext, "avi")) return .VIDEO_AVI;
+    if (std.ascii.eqlIgnoreCase(ext, "mov")) return .VIDEO_MOV;
+    if (std.ascii.eqlIgnoreCase(ext, "wmv")) return .VIDEO_WMV;
+    if (std.ascii.eqlIgnoreCase(ext, "flv")) return .VIDEO_FLV;
+    if (std.ascii.eqlIgnoreCase(ext, "mkv")) return .VIDEO_MKV;
+    if (std.ascii.eqlIgnoreCase(ext, "mp3")) return .AUDIO_MPEG;
+    if (std.ascii.eqlIgnoreCase(ext, "wav")) return .AUDIO_WAV;
+    if (std.ascii.eqlIgnoreCase(ext, "flac")) return .AUDIO_FLAC;
+    if (std.ascii.eqlIgnoreCase(ext, "mid") or std.ascii.eqlIgnoreCase(ext, "midi")) return .AUDIO_MIDI;
+    if (std.ascii.eqlIgnoreCase(ext, "woff")) return .FONT_WOFF;
+    if (std.ascii.eqlIgnoreCase(ext, "woff2")) return .FONT_WOFF2;
+    if (std.ascii.eqlIgnoreCase(ext, "ttf")) return .FONT_TTF;
+    if (std.ascii.eqlIgnoreCase(ext, "otf")) return .FONT_OTF;
+    return .APPLICATION_OCTET_STREAM;
+}
+
+/// Brief:
+/// Get MIME type string from a file extension
+///
+/// Note:
+/// - Case-insensitive
+/// - Returns "application/octet-stream" for unknown extensions
+/// - Convenience wrapper around typeFromExtension().asString()
+///
+/// Param:
+/// ext - []const u8 (without leading dot, e.g. "html", "png")
+///
+/// Return:
+/// []const u8
+pub fn fromExtension(ext: []const u8) []const u8 {
+    return typeFromExtension(ext).asString();
 }
 
 // --------------------------------------------------------- //

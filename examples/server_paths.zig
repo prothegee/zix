@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9004;
+const PORT: u16 = 9005;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
@@ -19,11 +19,11 @@ const MAX_PATH_SEGMENTS: usize = 9;
 // More than MAX_PATH_SEGMENTS → 404
 // Note: /path/user/:id is handled by userHandler below (param beats prefix)
 //
-// curl usage: curl -X GET "http://localhost:9004/path"
-// curl usage: curl -X GET "http://localhost:9004/path/hello"
-// curl usage: curl -X GET "http://localhost:9004/path/hello/world"
-// curl usage: curl -X GET "http://localhost:9004/path/a/b/c/d/e/f/g/h/i"
-// curl usage: curl -X GET "http://localhost:9004/path/a/b/c/d/e/f/g/h/i/j"  (→ 404)
+// curl usage: curl -X GET "http://localhost:9005/path"
+// curl usage: curl -X GET "http://localhost:9005/path/hello"
+// curl usage: curl -X GET "http://localhost:9005/path/hello/world"
+// curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i"
+// curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i/j"  (→ 404)
 pub fn pathsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -66,8 +66,8 @@ pub fn pathsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !v
 // Demonstrates registerParamHandler — :id is captured and returned in the response.
 // Priority: param beats prefix, so this wins over pathsHandler for /path/user/<anything>.
 //
-// curl usage: curl -X GET "http://localhost:9004/path/user/alice"
-// curl usage: curl -X GET "http://localhost:9004/path/user/123"
+// curl usage: curl -X GET "http://localhost:9005/path/user/alice"
+// curl usage: curl -X GET "http://localhost:9005/path/user/123"
 pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {
@@ -101,9 +101,9 @@ pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 //   /path/user/:id         registered 1st → wins for /path/user/<anything>
 //   /path/:tenant-id/:tenant-branch  registered 2nd → wins for /path/<non-user>/<anything>
 //
-// curl usage: curl -X GET "http://localhost:9004/path/acme/main"
-// curl usage: curl -X GET "http://localhost:9004/path/acme/dev"
-// curl usage: curl -X GET "http://localhost:9004/path/user/alice"   (→ userHandler, not here)
+// curl usage: curl -X GET "http://localhost:9005/path/acme/main"
+// curl usage: curl -X GET "http://localhost:9005/path/acme/dev"
+// curl usage: curl -X GET "http://localhost:9005/path/user/alice"   (→ userHandler, not here)
 pub fn tenantHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {
