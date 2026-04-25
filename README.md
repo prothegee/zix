@@ -20,7 +20,7 @@
 </p>
 
 <p align="center" style="color: #333333;font-color: #333333;">
-    <i>Every byte owned, every thread deloberate, every route explicit.</i>
+    <i>Every byte owned, every thread deliberate, every route explicit.</i>
 </p>
 
 <p align="center" style="color: #333333;font-color: #333333;">
