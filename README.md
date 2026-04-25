@@ -15,9 +15,21 @@
     <i>A micro net-frame-work.</i>
 </p>
 
+<p align="center" style="color: #333333;font-color: #333333;">
+    <i>Where the wire meets the will.</i>
+</p>
+
+<p align="center" style="color: #333333;font-color: #333333;">
+    <i>Every byte owned, every thread deloberate, every route explicit.</i>
+</p>
+
+<p align="center" style="color: #333333;font-color: #333333;">
+    <i>No hidden cost. Just clean metal and honest code - predictable by principle</i>
+</p>
+
 <br>
 
-## Motivation, Idea, Principal
+## A Reason.. A Motivation...
 
 __*1. Explicit Over Implicit.*__
 
