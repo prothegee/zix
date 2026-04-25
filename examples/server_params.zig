@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9003;
+const PORT: u16 = 9004;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
@@ -27,7 +27,7 @@ fn sendResponse(res: *zix.Response, allocator: std.mem.Allocator, response: Simp
 // /echo?foo=bar&baz=qux  →  {"foo":"bar","baz":"qux"}
 // /echo                  →  null
 // /echo?flag             →  {"flag":null}
-// curl usage: curl -X GET "http://localhost:9002/echo?foo=bar&baz=qux"
+// curl usage: curl -X GET "http://localhost:9004/echo?foo=bar&baz=qux"
 pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -63,7 +63,7 @@ pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 // GET /greet?name=<value>
 // /greet?name=alice  →  {"ok":true,"message":"hello, alice"}
 // /greet             →  {"ok":false,"message":"Error: missing required param: name"}
-// curl usage: curl -X GET "http://localhost:9002/greet?name=alice"
+// curl usage: curl -X GET "http://localhost:9004/greet?name=alice"
 pub fn greetHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -86,7 +86,7 @@ pub fn greetHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !v
 // /calc?a=3&b=4   →  {"ok":true,"message":"3 + 4 = 7"}
 // /calc?b=4       →  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 →  {"ok":false,"message":"Error: a must be a number"}
-// curl usage: curl -X GET "http://localhost:9002/calc?a=3&b=4"
+// curl usage: curl -X GET "http://localhost:9004/calc?a=3&b=4"
 pub fn calcHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
