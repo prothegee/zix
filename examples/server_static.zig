@@ -207,7 +207,7 @@ pub fn secretHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
     }
 
     // Resolve MIME from extension via Content.fromExtension — displayable types render
-    // inline in the browser; unknown/binary types fall back to octet-stream and prompt
+    // inline in the browser, unknown/binary types fall back to octet-stream and prompt
     // a download.
     const ext = if (std.mem.lastIndexOfScalar(u8, sub, '.')) |dot| sub[dot + 1 ..] else "";
     res.setContentType(zix.Tcp.Http.Content.typeFromExtension(ext));

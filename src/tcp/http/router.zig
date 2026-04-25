@@ -75,7 +75,7 @@ pub const Router = struct {
     /// Register a handler for a parameterized URL pattern
     ///
     /// Note:
-    /// - Segments prefixed with ':' are named captures; others must match literally
+    /// - Segments prefixed with ':' are named captures others must match literally
     /// - "/users/:id" matches "/users/alice" and captures id="alice"
     /// - Captured values are read via req.pathParam("id") inside the handler
     ///
@@ -94,7 +94,7 @@ pub const Router = struct {
     ///
     /// Note:
     /// - Pass 1 exact:  first exact match wins
-    /// - Pass 2 param:  first parameterized pattern that matches wins; params written to req.path_params
+    /// - Pass 2 param:  first parameterized pattern that matches wins params written to req.path_params
     /// - Pass 3 prefix: longest matching prefix wins
     /// - Priority is independent of registration order
     ///
@@ -171,4 +171,55 @@ fn matchParam(pattern: []const u8, path: []const u8, req: *Request) !bool {
 
     req.path_params = params.items;
     return true;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix test: http router matchParam" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var req = Request{
+        .inner = undefined,
+        .reader = undefined,
+        .allocator = allocator,
+    };
+
+    try std.testing.expect(try matchParam("/users/:id", "/users/alice", &req));
+    try std.testing.expectEqualStrings("id", req.path_params[0].name);
+    try std.testing.expectEqualStrings("alice", req.path_params[0].value);
+
+    try std.testing.expect(try matchParam("/:tenant/:branch", "/acme/main", &req));
+    try std.testing.expectEqualStrings("tenant", req.path_params[0].name);
+    try std.testing.expectEqualStrings("acme", req.path_params[0].value);
+    try std.testing.expectEqualStrings("branch", req.path_params[1].name);
+    try std.testing.expectEqualStrings("main", req.path_params[1].value);
+
+    try std.testing.expect(!try matchParam("/users/:id", "/users", &req));
+    try std.testing.expect(!try matchParam("/users/:id", "/users/alice/posts", &req));
+}
+
+fn mockHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = res;
+    _ = ctx;
+}
+
+test "zix test: http router registration" {
+    var router = Router.init(std.testing.allocator);
+    defer router.deinit();
+
+    try router.register("/about", mockHandler);
+    try router.registerPrefix("/api", mockHandler);
+    try router.registerParam("/users/:id", mockHandler);
+
+    try std.testing.expectEqual(@as(usize, 3), router.routes.items.len);
+    try std.testing.expectEqual(RouteKind.exact, router.routes.items[0].kind);
+    try std.testing.expectEqualStrings("/about", router.routes.items[0].path);
+    try std.testing.expectEqual(RouteKind.prefix, router.routes.items[1].kind);
+    try std.testing.expectEqualStrings("/api", router.routes.items[1].path);
+    try std.testing.expectEqual(RouteKind.param, router.routes.items[2].kind);
+    try std.testing.expectEqualStrings("/users/:id", router.routes.items[2].path);
 }

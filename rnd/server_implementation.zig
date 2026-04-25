@@ -18,7 +18,7 @@ const CLIENT_REQUEST_BUFFER_SIZE: usize = 1024 * 8;
 //
 // STATUS:
 // The current server uses threaded async I/O via Zig’s new std.Io.Threaded
-// it’s not purely blocking I/O nor pure epoll/kqueue/io_uring; it’s a hybrid,
+// it’s not purely blocking I/O nor pure epoll/kqueue/io_uring it’s a hybrid,
 // so i'ts asynchronous I/O but using a higher-level abstraction
 // than directly using epoll/kqueue/io_uring.
 //
@@ -1529,7 +1529,7 @@ fn handleZigRoutes(ctx: *Context) anyerror!void {
         try sendHttpResponse(request, .ok, response_body.items, "text/plain", true, cors_config, cache_config, null);
         return;
     } else {
-        // No dynamic route matched; try static file (from ./public)
+        // No dynamic route matched, try static file (from ./public)
         if (std.mem.startsWith(u8, path, "/")) {
             const sub_path = path[1..];
             const file_served = serveStaticFile(request, sub_path, io) catch false;
@@ -1760,7 +1760,7 @@ fn handleClient(stream: std.Io.net.Stream, io: std.Io) void {
         }
 
         // Continue to next request on keep-alive
-        // discardBody() is private - respond(); does it handles internally?
+        // discardBody() is private - respond() does it handles internally?
     }
 }
 

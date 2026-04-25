@@ -12,9 +12,9 @@ The backing buffer is arena-allocated per request to exactly the configured cap 
 
 | Variant | Cap | When to use |
 | :- | :- | :- |
-| `.MINIMAL` | 16 | Simple APIs in a controlled or constrained environment; internal services with no proxy |
+| `.MINIMAL` | 16 | Simple APIs in a controlled or constrained environment, internal services with no proxy |
 | `.COMMON` | 32 | **Default.** Most web applications behind a single proxy or load balancer |
-| `.LARGE` | 64 | CDN + proxy stacks; services that emit many CORS, cache, or forwarding headers |
+| `.LARGE` | 64 | CDN + proxy stacks, services that emit many CORS, cache, or forwarding headers |
 | `.EXTRA_LARGE` | 128 | k8s deployments, service mesh (Envoy/Linkerd), heavy header chains |
 | `.{ .CUSTOM = N }` | N | Explicit non-standard cap |
 
@@ -32,7 +32,7 @@ var server = try zix.HttpServer.init(.{
 
 ## Choosing a Tier
 
-**Start with `.COMMON` (32).** Count the headers your heaviest handler actually adds in production, then round up to the next tier. Do not over-provision — a larger cap means a larger per-response stack footprint and a harder limit to reason about under attack.
+**Start with `.COMMON` (32).** Count the headers your heaviest handler actually adds in production, then round up to the next tier. Do not over-provision — a larger cap means a larger per-response arena footprint and a harder limit to reason about under attack.
 
 Typical header counts by deployment:
 
@@ -60,13 +60,13 @@ error.InvalidHeaderValue  — CR or LF found in header value
 
 ### Header flooding (cap as a DoS limit)
 
-The cap is not just a usability limit — it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.common` (32), the worst-case per-response overhead is:
+The cap is not just a usability limit — it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.COMMON` (32), the worst-case per-response overhead is:
 
 ```
-32 headers × (name_ptr + value_ptr) = 32 × 32 bytes = 1 KB (stack)
+32 headers × (name_ptr + value_ptr) = 32 × 32 bytes = 1 KB (arena)
 ```
 
-With `.extra_large` (128), that rises to ~4 KB. Both are bounded and stack-allocated. Do not set `.custom(N)` to a large number speculatively — it widens the footprint without a corresponding benefit.
+With `.EXTRA_LARGE` (128), that rises to ~4 KB. Both are bounded and arena-allocated. Do not set `.{ .CUSTOM = N }` to a large number speculatively — it widens the footprint without a corresponding benefit.
 
 ### Headers visible to clients
 
@@ -112,7 +112,7 @@ See `examples/server_xtra_headers.zig` for a working demonstration of the cap, t
 
 ## Custom Values > 128
 
-`.{ .CUSTOM = N }` where N > 128 is fully supported — the backing buffer is arena-allocated to exactly N slots per request. That said, if you genuinely need more than 128 custom headers per response, reconsider the design — typical HTTP responses carry 5–20 headers; 128 is already an extreme upper bound.
+`.{ .CUSTOM = N }` where N > 128 is fully supported — the backing buffer is arena-allocated to exactly N slots per request. That said, if you genuinely need more than 128 custom headers per response, reconsider the design — typical HTTP responses carry 5–20 headers, 128 is already an extreme upper bound.
 
 ---
 

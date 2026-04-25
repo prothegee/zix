@@ -33,7 +33,7 @@ pub const ParseResult = struct {
 /// Parse one WebSocket frame from buf.
 ///
 /// Note:
-/// - Client→server frames are masked; the unmasked payload is written into payload_buf.
+/// - Client→server frames are masked, the unmasked payload is written into payload_buf.
 ///   payload_buf must be at least as large as the expected payload (max 4 KB recommended).
 /// - Returns null if buf does not yet contain a complete frame.
 ///
@@ -91,7 +91,7 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
 ///
 /// Note:
 /// - buf must be large enough: payload.len + 10 bytes for the header.
-/// - Payload is capped at payload.len; caller is responsible for sizing buf.
+/// - Payload is capped at payload.len, caller is responsible for sizing buf.
 ///
 /// Param:
 /// buf     - []u8        (destination, must be at least payload.len + 10)
@@ -130,7 +130,7 @@ pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
 ///
 /// Param:
 /// key - []const u8 (value of the Sec-WebSocket-Key request header)
-/// out - *[64]u8    (caller-provided output buffer; result is a sub-slice of it)
+/// out - *[64]u8    (caller-provided output buffer, result is a sub-slice of it)
 ///
 /// Return:
 /// ![]const u8
@@ -177,7 +177,7 @@ pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void 
 // --------------------------------------------------------- //
 
 /// Heap-allocated per-connection handle.
-/// Created by the handler with smp_allocator; destroyed when the WS session ends.
+/// Created by the handler with smp_allocator, destroyed when the WS session ends.
 pub const Conn = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
@@ -256,10 +256,10 @@ pub const RoomMap = struct {
     }
 
     /// Brief:
-    /// Remove a connection from its room; removes the room if it becomes empty
+    /// Remove a connection from its room, removes the room if it becomes empty
     ///
     /// Note:
-    /// - Safe to call from defer; no-op if the conn is not found.
+    /// - Safe to call from defer, no-op if the conn is not found.
     /// - When the last connection leaves, the owned-copy room key is freed.
     ///
     /// Param:
@@ -298,8 +298,8 @@ pub const RoomMap = struct {
     ///
     /// Note:
     /// - Frames are serialized once and sent to every connection.
-    /// - Payload is capped at 4 KB; larger messages are silently truncated.
-    /// - Failed writes are skipped; dead connections are cleaned up by their own handler's leave().
+    /// - Payload is capped at 4 KB, larger messages are silently truncated.
+    /// - Failed writes are skipped, dead connections are cleaned up by their own handler's leave().
     ///
     /// Param:
     /// room    - []const u8

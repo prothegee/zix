@@ -48,13 +48,13 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const Template = struct {
     pub const page_ok =
         \\OK
-        ;
+    ;
     pub const page_not_found =
         \\Not Found
-        ;
+    ;
     pub const page_method_not_allowed =
         \\Method Not Allowed
-        ;
+    ;
 };
 
 // --------------------------------------------------------- //
@@ -87,8 +87,9 @@ fn handlers(io: std.Io, stream: std.Io.net.Stream, keep_alive: bool) void {
             break;
         };
         var path = if (std.mem.indexOfScalar(u8, req.head.target, '?')) |pos|
-                        req.head.target[0..pos]
-                   else req.head.target;
+            req.head.target[0..pos]
+        else
+            req.head.target;
         if (path.len == 0) path = "/";
 
         resp.clearRetainingCapacity();
@@ -178,7 +179,7 @@ const HttpServer = struct {
         if (@import("builtin").mode == .Debug) {
             std.debug.print("DEBUG MODE\n", .{});
         }
-        std.debug.print("HttpServer running: {s}:{d}\n", .{self.ip,  self.port});
+        std.debug.print("HttpServer running: {s}:{d}\n", .{ self.ip, self.port });
         defer self.net_server.deinit(self.io);
 
         self.is_running = true;
@@ -190,7 +191,7 @@ const HttpServer = struct {
                 continue;
             };
 
-            const thread = std.Thread.spawn(.{}, handlers, .{self.io, stream, self.keep_alive}) catch |err| {
+            const thread = std.Thread.spawn(.{}, handlers, .{ self.io, stream, self.keep_alive }) catch |err| {
                 std.debug.print("Error: fail spawn a thread: {}\n", .{err});
                 stream.close(self.io);
                 continue;

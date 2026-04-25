@@ -69,13 +69,13 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const Template = struct {
     pub const page_ok =
         \\OK
-        ;
+    ;
     pub const page_not_found =
         \\Not Found
-        ;
+    ;
     pub const page_method_not_allowed =
         \\Method Not Allowed
-        ;
+    ;
 };
 
 // --------------------------------------------------------- //
@@ -108,8 +108,9 @@ fn handlers(io: std.Io, stream: std.Io.net.Stream, keep_alive: bool) void {
             break;
         };
         var path = if (std.mem.indexOfScalar(u8, req.head.target, '?')) |pos|
-                        req.head.target[0..pos]
-                   else req.head.target;
+            req.head.target[0..pos]
+        else
+            req.head.target;
         if (path.len == 0) path = "/";
 
         resp.clearRetainingCapacity();
@@ -177,13 +178,7 @@ const HttpServer = struct {
             else
                 workers;
 
-        return .{
-            .ip = ip,
-            .port = port,
-            .is_running = false,
-            .keep_alive = false,
-            .workers = actual_workers
-        };
+        return .{ .ip = ip, .port = port, .is_running = false, .keep_alive = false, .workers = actual_workers };
     }
     pub fn deinit(self: This) void {
         self.is_running = false;
@@ -202,7 +197,7 @@ const HttpServer = struct {
         if (@import("builtin").mode == .Debug) {
             std.debug.print("DEBUG MODE\n", .{});
         }
-        std.debug.print("HttpServer running: {s}:{d} ({d} {s})\n", .{self.ip,  self.port, self.workers, workers_msg});
+        std.debug.print("HttpServer running: {s}:{d} ({d} {s})\n", .{ self.ip, self.port, self.workers, workers_msg });
 
         self.is_running = true;
         self.keep_alive = true;
@@ -213,7 +208,9 @@ const HttpServer = struct {
         for (threads) |*t| {
             t.* = try std.Thread.spawn(.{}, startProcess, .{self});
         }
-        for (threads) |t| { t.join(); }
+        for (threads) |t| {
+            t.join();
+        }
     }
 
     fn startProcess(self: *This) !void {
@@ -238,14 +235,7 @@ const HttpServer = struct {
                 continue;
             };
 
-            _ = This.threaded.io().concurrent(
-                    handlers,
-                    .{
-                        This.io,
-                        This.net_stream,
-                        self.keep_alive
-                    }
-                ) catch |err| {
+            _ = This.threaded.io().concurrent(handlers, .{ This.io, This.net_stream, self.keep_alive }) catch |err| {
                 std.debug.print("Error: fail io concurrent: {}\n", .{err});
                 This.net_stream.close(This.io);
             };

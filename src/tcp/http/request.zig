@@ -79,7 +79,7 @@ pub const Request = struct {
     /// Read and return the request body
     ///
     /// Note:
-    /// - Cached after first read; subsequent calls return the same slice
+    /// - Cached after first read subsequent calls return the same slice
     /// - Returns empty string if Content-Length is missing or zero
     ///
     /// Return:
@@ -219,3 +219,56 @@ pub const Request = struct {
         return list.items;
     }
 };
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix test: http request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const head = std.http.Server.Request.Head{
+        .method = .GET,
+        .target = "/api/users/123?name=alice&flag",
+        .version = .@"HTTP/1.1",
+        .expect = null,
+        .content_type = null,
+        .content_length = null,
+        .transfer_encoding = .none,
+        .transfer_compression = .identity,
+        .keep_alive = true,
+    };
+    var inner = std.http.Server.Request{
+        .server = undefined,
+        .head = head,
+        .head_buffer = undefined,
+        .respond_err = null,
+    };
+    var req = Request{
+        .inner = &inner,
+        .reader = undefined,
+        .allocator = allocator,
+    };
+
+    try std.testing.expectEqual(Method.Code.GET, req.method());
+    try std.testing.expectEqualStrings("/api/users/123", req.path());
+    try std.testing.expectEqualStrings("name=alice&flag", req.query());
+
+    try std.testing.expectEqualStrings("alice", req.queryParam("name").?);
+    try std.testing.expect(req.queryParam("flag") == null);
+    try std.testing.expect(req.queryParam("missing") == null);
+
+    const segments = try req.pathSegments(allocator);
+    try std.testing.expectEqual(@as(usize, 3), segments.len);
+    try std.testing.expectEqualStrings("api", segments[0]);
+    try std.testing.expectEqualStrings("users", segments[1]);
+    try std.testing.expectEqualStrings("123", segments[2]);
+
+    const params = try req.queryParams(allocator);
+    try std.testing.expectEqual(@as(usize, 2), params.len);
+    try std.testing.expectEqualStrings("name", params[0].key);
+    try std.testing.expectEqualStrings("alice", params[0].value.?);
+    try std.testing.expectEqualStrings("flag", params[1].key);
+    try std.testing.expect(params[1].value == null);
+}
