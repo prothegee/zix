@@ -63,7 +63,7 @@ pub const Code = enum(u8) {
 /// - If not match, it will return GET
 ///
 /// Params:
-/// method_string - []const u8 (insensitive; forced to lowercase)
+/// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
 /// zix.Tcp.Http.Method.Code

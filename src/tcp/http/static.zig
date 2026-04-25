@@ -1,53 +1,8 @@
 //! zix http static
 
 const std = @import("std");
+const content = @import("content.zig");
 const file_utils = @import("../../utils/file.zig");
-
-/// Brief:
-/// Map a file extension to its MIME type string
-///
-/// Note:
-/// - Returns "application/octet-stream" for unknown extensions
-///
-/// Param:
-/// ext - []const u8 (file extension without leading dot)
-///
-/// Return:
-/// []const u8
-fn mimeType(ext: []const u8) []const u8 {
-    if (std.mem.eql(u8, ext, "html")) return "text/html";
-    if (std.mem.eql(u8, ext, "css")) return "text/css";
-    if (std.mem.eql(u8, ext, "js") or std.mem.eql(u8, ext, "min.js")) return "application/javascript";
-    if (std.mem.eql(u8, ext, "json") or std.mem.eql(u8, ext, "map")) return "application/json";
-    if (std.mem.eql(u8, ext, "png")) return "image/png";
-    if (std.mem.eql(u8, ext, "jpg") or std.mem.eql(u8, ext, "jpeg")) return "image/jpeg";
-    if (std.mem.eql(u8, ext, "gif")) return "image/gif";
-    if (std.mem.eql(u8, ext, "svg")) return "image/svg+xml";
-    if (std.mem.eql(u8, ext, "webp")) return "image/webp";
-    if (std.mem.eql(u8, ext, "mp4")) return "video/mp4";
-    if (std.mem.eql(u8, ext, "webm")) return "video/webm";
-    if (std.mem.eql(u8, ext, "ogg")) return "video/ogg";
-    if (std.mem.eql(u8, ext, "txt")) return "text/plain";
-    if (std.mem.eql(u8, ext, "pdf")) return "application/pdf";
-    if (std.mem.eql(u8, ext, "xml")) return "application/xml";
-    if (std.mem.eql(u8, ext, "ico")) return "image/x-icon";
-    if (std.mem.eql(u8, ext, "woff")) return "font/woff";
-    if (std.mem.eql(u8, ext, "woff2")) return "font/woff2";
-    if (std.mem.eql(u8, ext, "ttf")) return "font/ttf";
-    if (std.mem.eql(u8, ext, "otf")) return "font/otf";
-    if (std.mem.eql(u8, ext, "csv")) return "text/csv";
-    if (std.mem.eql(u8, ext, "rtf")) return "application/rtf";
-    if (std.mem.eql(u8, ext, "zip")) return "application/zip";
-    if (std.mem.eql(u8, ext, "gz")) return "application/gzip";
-    if (std.mem.eql(u8, ext, "tar")) return "application/x-tar";
-    if (std.mem.eql(u8, ext, "7z")) return "application/x-7z-compressed";
-    if (std.mem.eql(u8, ext, "rar")) return "application/vnd.rar";
-    if (std.mem.eql(u8, ext, "mp3")) return "audio/mpeg";
-    if (std.mem.eql(u8, ext, "wav")) return "audio/wav";
-    if (std.mem.eql(u8, ext, "flac")) return "audio/flac";
-    if (std.mem.eql(u8, ext, "wasm")) return "application/wasm";
-    return "application/octet-stream";
-}
 
 const RangeRequest = struct {
     start: u64,
@@ -81,7 +36,7 @@ fn parseRangeHeader(value: []const u8) ?RangeRequest {
 /// Note:
 /// - Rejects paths containing ".." to prevent directory traversal
 /// - Supports Range requests (RFC 7233) for partial content (206)
-/// - Returns false if the file is not found or path is invalid; caller sends 404
+/// - Returns false if the file is not found or path is invalid, caller sends 404
 ///
 /// Param:
 /// req        - *std.http.Server.Request
@@ -112,7 +67,7 @@ pub fn serve(
     const stat = f.stat(io) catch return false;
     if (stat.kind != .file) return false;
 
-    const content_type = mimeType(file_utils.extension(req_path));
+    const content_type = content.fromExtension(file_utils.extension(req_path));
 
     var range_req: ?RangeRequest = null;
     var it = req.iterateHeaders();
@@ -177,4 +132,28 @@ pub fn serve(
 
     req.server.out.flush() catch return false;
     return true;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix test: http static mimeType" {
+    try std.testing.expectEqualStrings("text/html", content.fromExtension("html"));
+    try std.testing.expectEqualStrings("text/css", content.fromExtension("css"));
+    try std.testing.expectEqualStrings("application/json", content.fromExtension("json"));
+    try std.testing.expectEqualStrings("image/png", content.fromExtension("png"));
+    try std.testing.expectEqualStrings("application/octet-stream", content.fromExtension("unknown"));
+}
+
+test "zix test: http static parseRangeHeader" {
+    const r1 = parseRangeHeader("bytes=0-499").?;
+    try std.testing.expectEqual(@as(u64, 0), r1.start);
+    try std.testing.expectEqual(@as(u64, 499), r1.end.?);
+
+    const r2 = parseRangeHeader("bytes=500-").?;
+    try std.testing.expectEqual(@as(u64, 500), r2.start);
+    try std.testing.expect(r2.end == null);
+
+    try std.testing.expect(parseRangeHeader("none") == null);
+    try std.testing.expect(parseRangeHeader("bytes=abc") == null);
 }

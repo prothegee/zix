@@ -187,7 +187,7 @@ pub const Code = enum(u16) {
 /// - If not match, it will return Code.IM_A_TEAPOT
 ///
 /// Params:
-/// method_string - []const u8 (insensitive; forced to lowercase)
+/// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
 /// zix.Tcp.Http.Status.Code

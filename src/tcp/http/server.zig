@@ -16,8 +16,8 @@ const static = @import("static.zig");
 ///
 /// Note:
 /// - Heap-allocates I/O buffers from smp_allocator sized by config (max_client_request / max_client_response)
-/// - Per-connection arena is reset each request; deinit on connection close
-/// - Falls back to static file serving if no route matches; sends 404 if neither matches
+/// - Per-connection arena is reset each request, deinit on connection close
+/// - Falls back to static file serving if no route matches, sends 404 if neither matches
 ///
 /// Param:
 /// stream - std.Io.net.Stream
@@ -38,7 +38,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *HttpServer) 
     var conn_writer = stream.writer(io, buf_write);
     var http_server = std.http.Server.init(&conn_reader.interface, &conn_writer.interface);
 
-    // Per-connection arena; max_allocator_size is the initial backing allocation.
+    // Per-connection arena, max_allocator_size is the initial backing allocation.
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
@@ -57,7 +57,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *HttpServer) 
             .reader = &conn_reader.interface,
             .allocator = allocator,
         };
-        var res = Response.init(&inner_req, allocator);
+        var res = Response.init(&inner_req, allocator, cfg.max_response_headers.value()) catch return;
         var ctx = Context{ .io = io, .allocator = allocator };
 
         const matched = server.router.dispatch(&req, &res, &ctx) catch false;
@@ -142,7 +142,7 @@ pub const HttpServer = struct {
     /// Register a handler for a parameterized URL pattern
     ///
     /// Note:
-    /// - Segments prefixed with ':' are named captures; others must match literally
+    /// - Segments prefixed with ':' are named captures, others must match literally
     /// - "/users/:id" matches "/users/alice" and captures id="alice"
     /// - Access captured values inside the handler via req.pathParam("id")
     /// - Logs and swallows allocation errors at runtime
@@ -160,13 +160,20 @@ pub const HttpServer = struct {
     /// Start listening and accepting connections
     ///
     /// Note:
-    /// - Blocks indefinitely; each accepted connection is spawned via io.concurrent()
+    /// - If config.public_dir is non-empty, validates the directory exists before binding;
+    ///   returns error.PublicDirNotFound if not
+    /// - Blocks indefinitely, each accepted connection is spawned via io.concurrent()
     ///
     /// Return:
     /// !void
     pub fn run(self: *HttpServer) !void {
         const cfg = self.config;
         const io = cfg.io;
+
+        if (cfg.public_dir.len > 0) {
+            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+            dir.close(io);
+        }
 
         const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
         var net_server = try addr.listen(io, .{

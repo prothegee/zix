@@ -11,4 +11,5 @@ pub const Router = @import("./router.zig");
 pub const Middleware = @import("./middleware.zig");
 pub const Static = @import("./static.zig");
 pub const Upload = @import("./upload.zig");
+pub const WebSocket = @import("./websocket.zig");
 pub const Server = @import("./server.zig");
