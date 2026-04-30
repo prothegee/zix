@@ -28,16 +28,16 @@ pub fn build(b: *std.Build) void {
 
     // Examples
     const examples = .{
-        .{ "example-server_basic",              "examples/server_basic.zig" },
-        .{ "example-server_json",               "examples/server_json.zig" },
-        .{ "example-server_manual_concurrent",  "examples/server_manual_concurrent.zig" },
-        .{ "example-server_middleware",         "examples/server_middleware.zig" },
-        .{ "example-server_params",             "examples/server_params.zig" },
-        .{ "example-server_paths",              "examples/server_paths.zig" },
-        .{ "example-server_static",             "examples/server_static.zig" },
-        .{ "example-server_timeout_resp",       "examples/server_timeout_resp.zig" },
-        .{ "example-server_websocket",          "examples/server_websocket.zig" },
-        .{ "example-server_xtra_headers",       "examples/server_xtra_headers.zig" },
+        .{ "example-http_basic",              "examples/http_basic.zig" },
+        .{ "example-http_json",               "examples/http_json.zig" },
+        .{ "example-http_manual_concurrent",  "examples/http_manual_concurrent.zig" },
+        .{ "example-http_middleware",         "examples/http_middleware.zig" },
+        .{ "example-http_params",             "examples/http_params.zig" },
+        .{ "example-http_paths",              "examples/http_paths.zig" },
+        .{ "example-http_static",             "examples/http_static.zig" },
+        .{ "example-http_timeout_resp",       "examples/http_timeout_resp.zig" },
+        .{ "example-http_websocket",          "examples/http_websocket.zig" },
+        .{ "example-http_xtra_headers",       "examples/http_xtra_headers.zig" },
     };
 
     inline for (examples) |pair| {
