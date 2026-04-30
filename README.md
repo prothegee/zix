@@ -3,7 +3,7 @@
 <h1 align="center">
     <b><i>ZIX</i></b>
 </h1>
-<p align="center" style="color: #333333;font-color: #333333;">
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <b><i>Zero sIX; 06;</i></b>
 </p>
 
@@ -11,19 +11,19 @@
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
 </div>
 
-<p align="center" style="color: #333333;font-color: #333333;">
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>A micro net-frame-work.</i>
 </p>
 
-<p align="center" style="color: #333333;font-color: #333333;">
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Where the wire meets the will.</i>
 </p>
 
-<p align="center" style="color: #333333;font-color: #333333;">
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Every byte owned, every thread deliberate, every route explicit.</i>
 </p>
 
-<p align="center" style="color: #333333;font-color: #333333;">
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>No hidden cost. Just clean metal and honest code - predictable by principle</i>
 </p>
 
