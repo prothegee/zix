@@ -1,9 +1,9 @@
 //! UDP PoC Client — rnd only, not part of src/
 //! Zig 0.16.x
 //!
-//! Usage: zig run rnd/udp_client.zig -- <bind_port> [server_port]
-//!        bind_port   defaults to 9101
-//!        server_port defaults to 9100
+//! Usage: zig run rnd/udp_client.zig -- [--bind-port <port>] [--server-port <port>]
+//!        --bind-port    local bind port (default: 9101)
+//!        --server-port  server port to connect to (default: 9100)
 //!
 //! NOTE: concurrency model uses process.Init / io.concurrent()
 //!       should be configurable later (e.g. std.Thread.spawn for constrained envs)
@@ -116,14 +116,18 @@ pub fn main(process: std.process.Init) !void {
     const io = process.io;
     var config: ClientConfig = .{};
 
-    // argv[1]: bind port (e.g. zig run rnd/udp_client.zig -- 9102)
     var args_it = std.process.Args.Iterator.init(process.minimal.args);
     _ = args_it.skip(); // skip argv[0]
-    if (args_it.next()) |port_str| {
-        config.bind_port = std.fmt.parseInt(u16, port_str, 10) catch config.bind_port;
-    }
-    if (args_it.next()) |port_str| {
-        config.server_port = std.fmt.parseInt(u16, port_str, 10) catch config.server_port;
+    while (args_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--bind-port")) {
+            if (args_it.next()) |val| {
+                config.bind_port = std.fmt.parseInt(u16, val, 10) catch config.bind_port;
+            }
+        } else if (std.mem.eql(u8, arg, "--server-port")) {
+            if (args_it.next()) |val| {
+                config.server_port = std.fmt.parseInt(u16, val, 10) catch config.server_port;
+            }
+        }
     }
 
     const bind_addr = try std.Io.net.IpAddress.parse("0.0.0.0", config.bind_port);
@@ -132,7 +136,7 @@ pub fn main(process: std.process.Init) !void {
 
     const dest = try std.Io.net.IpAddress.parse(config.server_ip, config.server_port);
 
-    std.debug.print("zix udp client: -> {s}:{d}\n", .{ config.server_ip, config.server_port });
+    std.debug.print("zix udp client: bound 0.0.0.0:{d} -> {s}:{d}\n", .{ config.bind_port, config.server_ip, config.server_port });
 
     // persistent receive task — reads server feedback for client lifetime
     _ = io.concurrent(receiveFeedback, .{ReceiveTask{ .socket = socket, .io = io }}) catch |err| {
