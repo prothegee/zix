@@ -1,8 +1,8 @@
 //! UDP PoC Server — rnd only, not part of src/
 //! Zig 0.16.x
 //!
-//! Usage: zig run rnd/udp_server.zig -- [port]
-//!        port defaults to 9100
+//! Usage: zig run rnd/udp_server.zig -- [--port <port>]
+//!        --port  bind port (default: 9100)
 //!
 //! NOTE: concurrency model uses process.Init / io.concurrent()
 //!       should be configurable later (e.g. std.Thread.spawn for constrained envs)
@@ -160,18 +160,21 @@ pub fn main(process: std.process.Init) !void {
     const io = process.io;
     var config: ServerConfig = .{};
 
-    // argv[1]: bind port (e.g. zig run rnd/udp_server.zig -- 9200)
     var args_it = std.process.Args.Iterator.init(process.minimal.args);
     _ = args_it.skip();
-    if (args_it.next()) |port_str| {
-        config.port = std.fmt.parseInt(u16, port_str, 10) catch config.port;
+    while (args_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--port")) {
+            if (args_it.next()) |val| {
+                config.port = std.fmt.parseInt(u16, val, 10) catch config.port;
+            }
+        }
     }
 
     const addr = try std.Io.net.IpAddress.parse(config.ip, config.port);
     const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
 
-    std.debug.print("zix udp server: {s}:{d}\n", .{ config.ip, config.port });
+    std.debug.print("zix udp server: listening on {s}:{d}\n", .{ config.ip, config.port });
 
     var clients = std.array_list.Managed(ClientRecord).init(std.heap.smp_allocator);
     defer clients.deinit();
