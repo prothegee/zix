@@ -38,6 +38,8 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_timeout_resp",       "examples/http_timeout_resp.zig" },
         .{ "example-http_websocket",          "examples/http_websocket.zig" },
         .{ "example-http_xtra_headers",       "examples/http_xtra_headers.zig" },
+        .{ "example-udp_server",              "examples/udp_server.zig" },
+        .{ "example-udp_client",              "examples/udp_client.zig" },
     };
 
     inline for (examples) |pair| {
