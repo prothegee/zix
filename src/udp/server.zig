@@ -1,0 +1,277 @@
+//! zix udp server
+
+const std = @import("std");
+const Config = @import("config.zig");
+const UdpServerConfig = Config.UdpServerConfig;
+const PortMode = Config.PortMode;
+
+// --------------------------------------------------------- //
+
+/// UDP server typed to a user-defined extern struct packet.
+///
+/// Usage:
+///   const MyServer = zix.Udp.Server(MyPacket);
+///   var server = try MyServer.init(config);           // REQUIRED mode
+///   var server = try MyServer.initArgs(config, args); // CONFIGURABLE mode
+///   defer server.deinit();
+///   try server.run(io);
+pub fn UdpServer(comptime Packet: type) type {
+    // RFC 768: max UDP payload = 65,535 - 8 (UDP header) - 20 (min IPv4 header) = 65,507 bytes.
+    // Packets larger than this cannot be sent in a single datagram.
+    if (@sizeOf(Packet) > 65_507) @compileError("Packet size exceeds maximum UDP payload of 65,507 bytes (RFC 768)");
+    return struct {
+        const Self = @This();
+
+        // NOTE: index is a monotonic connection counter — transient identity, not stable across reconnects.
+        // NOTE: client identity structure and validation are the application's responsibility;
+        //       the server only assigns an index for internal tracking and log output.
+        const ClientRecord = struct {
+            from: std.Io.net.IpAddress,
+            last_seen: std.Io.Clock.Timestamp,
+            index: usize,
+        };
+
+        // PERF: peers is heap-allocated per packet — no fixed cap.
+        //       Allocated before io.concurrent() dispatch; freed inside processPacket after broadcast.
+        // NOTE: socket is shared across concurrent tasks; UDP send is kernel-atomic per datagram.
+        const Task = struct {
+            buf: [@sizeOf(Packet)]u8,
+            from: std.Io.net.IpAddress,
+            socket: std.Io.net.Socket,
+            io: std.Io,
+            config: UdpServerConfig,
+            peers: []std.Io.net.IpAddress,
+            sender_index: usize,
+        };
+
+        config: UdpServerConfig,
+
+        // --------------------------------------------------------- //
+
+        /// Initialize in REQUIRED mode — port must be set non-zero in config.
+        /// Returns error.PortNotConfigured if config.port is zero.
+        pub fn init(config: UdpServerConfig) !Self {
+            if (config.port == 0) return error.PortNotConfigured;
+            return .{ .config = config };
+        }
+
+        /// Initialize in CONFIGURABLE mode — reads --port from CLI args, falls back to config.port.
+        /// Never fails for a missing arg; config.port is the default.
+        pub fn initArgs(config: UdpServerConfig, args: anytype) !Self {
+            var cfg = config;
+            var it = std.process.Args.Iterator.init(args);
+            _ = it.skip(); // skip argv[0]
+            while (it.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--port")) {
+                    if (it.next()) |val| {
+                        cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
+                    }
+                }
+            }
+            if (cfg.port == 0) return error.PortNotConfigured;
+            return .{ .config = cfg };
+        }
+
+        /// Release resources. Call after run() returns or errors.
+        pub fn deinit(self: *Self) void {
+            _ = self;
+        }
+
+        /// Bind the socket and start the receive loop. Blocks until an error occurs.
+        /// Prints "listening on ip:port" after a successful bind.
+        pub fn run(self: *Self, io: std.Io) !void {
+            const addr = try std.Io.net.IpAddress.parse(self.config.ip, self.config.port);
+            const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+            defer socket.close(io);
+
+            std.debug.print("zix udp server: listening on {s}:{d}\n", .{ self.config.ip, self.config.port });
+
+            // NOTE: config.allocator must be a general-purpose allocator — not an ArenaAllocator.
+            //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
+            //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
+            //       so snapshots would accumulate unboundedly until the server stops.
+            var clients = std.array_list.Managed(ClientRecord).init(self.config.allocator);
+            defer clients.deinit();
+
+            const poll_timeout: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromMilliseconds(self.config.poll_timeout_ms),
+                .clock = .awake,
+            } };
+
+            var last_check = std.Io.Clock.Timestamp.now(io, .awake);
+            var next_index: usize = 1; // 1-based for readable log output
+
+            while (true) {
+                var buf: [@sizeOf(Packet)]u8 = undefined;
+
+                const msg = socket.receiveTimeout(io, &buf, poll_timeout) catch |err| {
+                    if (err == error.Timeout) {
+                        const now = std.Io.Clock.Timestamp.now(io, .awake);
+                        checkDisconnections(&clients, now, self.config.disconnect_timeout_ms);
+                        last_check = now;
+                        continue;
+                    }
+                    std.debug.print("receive error: {}\n", .{err});
+                    continue;
+                };
+
+                // overflow / size guard — drop datagrams that are not exactly Packet size
+                if (msg.flags.trunc or msg.data.len != @sizeOf(Packet)) {
+                    if (self.config.error_report) socket.send(io, &msg.from, &[_]u8{0x15}) catch {};
+                    std.debug.print("drop: expected {d} bytes, got {d} trunc={}\n", .{ @sizeOf(Packet), msg.data.len, msg.flags.trunc });
+                    continue;
+                }
+
+                const now = std.Io.Clock.Timestamp.now(io, .awake);
+
+                // track connected clients; capture sender_index for the task
+                var sender_index: usize = 0;
+                var known = false;
+                for (clients.items) |*r| {
+                    if (r.from.eql(&msg.from)) {
+                        r.last_seen = now;
+                        sender_index = r.index;
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    sender_index = next_index;
+                    next_index += 1;
+                    clients.append(.{ .from = msg.from, .last_seen = now, .index = sender_index }) catch {};
+                    var addr_buf: [64]u8 = undefined;
+                    std.debug.print("client connected: {s} [index: {d}, connected: {d}]\n", .{ fmtAddr(msg.from, &addr_buf), sender_index, clients.items.len });
+                }
+
+                // rate-limited disconnect check even when packets arrive rapidly
+                if (std.Io.Clock.Timestamp.durationTo(last_check, now).raw.toMilliseconds() >= self.config.poll_timeout_ms) {
+                    checkDisconnections(&clients, now, self.config.disconnect_timeout_ms);
+                    last_check = now;
+                }
+
+                // Heap-allocate peer snapshot for broadcast; freed inside processPacket after all sends.
+                // PERF: allocation only occurs when broadcast is enabled and clients list is non-empty.
+                // NOTE: must use a general-purpose allocator — the free() below is real, not a no-op.
+                var peers: []std.Io.net.IpAddress = &.{};
+                if (self.config.broadcast and clients.items.len > 0) {
+                    if (self.config.allocator.alloc(std.Io.net.IpAddress, clients.items.len)) |p| {
+                        for (clients.items, 0..) |r, i| p[i] = r.from;
+                        peers = p;
+                    } else |_| {}
+                }
+
+                const task = Task{
+                    .buf = buf,
+                    .from = msg.from,
+                    .socket = socket,
+                    .io = io,
+                    .config = self.config,
+                    .peers = peers,
+                    .sender_index = sender_index,
+                };
+
+                _ = io.concurrent(processPacket, .{task}) catch |err| {
+                    std.debug.print("concurrent error: {}\n", .{err});
+                    processPacket(task); // fallback: inline — blocks receive loop
+                };
+            }
+        }
+
+        // --------------------------------------------------------- //
+
+        fn processPacket(task: Task) void {
+            // Free peer snapshot allocated in run() before io.concurrent() dispatch.
+            // NOTE: this free() is real — config.allocator must not be an ArenaAllocator.
+            defer if (task.peers.len > 0) task.config.allocator.free(task.peers);
+
+            var addr_buf: [64]u8 = undefined;
+            std.debug.print("recv from={s} [index: {d}]\n", .{ fmtAddr(task.from, &addr_buf), task.sender_index });
+
+            if (task.config.auto_ack) {
+                task.socket.send(task.io, &task.from, &[_]u8{0x06}) catch |err| {
+                    std.debug.print("ack error: {}\n", .{err});
+                };
+            }
+
+            if (task.config.auto_echo) {
+                task.socket.send(task.io, &task.from, &task.buf) catch |err| {
+                    std.debug.print("echo error: {}\n", .{err});
+                };
+            }
+
+            if (task.config.broadcast) {
+                // SECURITY: no sender validation — spoofed IPs can trigger broadcast to all peers
+                // PERF: N sequential send() syscalls per packet; consider sendmmsg batching for large client counts
+                for (task.peers) |*peer| {
+                    task.socket.send(task.io, peer, &task.buf) catch |err| {
+                        std.debug.print("broadcast error: {}\n", .{err});
+                    };
+                }
+            }
+        }
+
+        fn checkDisconnections(
+            clients: *std.array_list.Managed(ClientRecord),
+            now: std.Io.Clock.Timestamp,
+            timeout_ms: i64,
+        ) void {
+            var i: usize = 0;
+            while (i < clients.items.len) {
+                const elapsed = std.Io.Clock.Timestamp.durationTo(clients.items[i].last_seen, now).raw.toMilliseconds();
+                if (elapsed >= timeout_ms) {
+                    var buf: [64]u8 = undefined;
+                    const addr_str = fmtAddr(clients.items[i].from, &buf);
+                    const idx = clients.items[i].index;
+                    _ = clients.swapRemove(i);
+                    std.debug.print("client disconnected: {s} [index: {d}, connected: {d}]\n", .{ addr_str, idx, clients.items.len });
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        fn fmtAddr(from: std.Io.net.IpAddress, buf: []u8) []const u8 {
+            return switch (from) {
+                .ip4 => |a| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
+                    a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
+                }) catch "?",
+                .ip6 => "ipv6",
+            };
+        }
+    };
+}
+
+// --------------------------------------------------------- //
+
+// RFC 768: port 0 is reserved; binding to it is undefined behavior.
+// init() rejects port 0 with error.PortNotConfigured before any socket is opened.
+// run() and socket I/O are excluded from unit tests — those require live I/O.
+
+const TestPkt = extern struct { value: u32 };
+
+test "zix test: UdpServer init, port zero returns PortNotConfigured" {
+    const S = UdpServer(TestPkt);
+    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0 }));
+}
+
+test "zix test: UdpServer init, nonzero port succeeds" {
+    const S = UdpServer(TestPkt);
+    var server = try S.init(.{ .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100 });
+    server.deinit();
+}
+
+test "zix test: UdpServer init, config fields are preserved" {
+    const S = UdpServer(TestPkt);
+    var server = try S.init(.{
+        .allocator = std.testing.allocator,
+        .ip = "127.0.0.1",
+        .port = 9200,
+        .broadcast = true,
+        .auto_ack = true,
+    });
+    defer server.deinit();
+    try std.testing.expectEqual(std.testing.allocator.ptr, server.config.allocator.ptr);
+    try std.testing.expectEqual(@as(u16, 9200), server.config.port);
+    try std.testing.expect(server.config.broadcast);
+    try std.testing.expect(server.config.auto_ack);
+}

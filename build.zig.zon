@@ -1,7 +1,7 @@
 .{
     .name = .zix,
     .version = "0.1.0",
-    .date_release = "20260425",
+    .date_release = "20260504",
     .fingerprint = 0x4cc61d74dc93a20b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.2974+83c7aba12",
     .paths = .{

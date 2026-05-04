@@ -9,7 +9,7 @@ const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 
 // --------------------------------------------------------- //
-// This example demonstrates zix.HeaderSize — the configurable
+// This example demonstrates zix.Http.HeaderSize -- the configurable
 // cap on how many custom response headers addHeader() will accept.
 //
 // The cap is set once at HttpServer.init() via max_response_headers.
@@ -29,7 +29,7 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 // GET /info
 // Returns a JSON body with several custom headers attached:
 // X-Server, X-Version, Cache-Control, Vary, X-Frame-Options, X-Content-Type-Options
-pub fn infoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
 
@@ -45,7 +45,7 @@ pub fn infoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 
 // GET /cors
 // Demonstrates a CORS preflight-style response with multiple headers.
-pub fn corsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn corsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
 
@@ -66,7 +66,7 @@ pub fn corsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 // In practice, addHeader() returns error.TooManyHeaders when the cap is
 // reached. Handlers should propagate or handle it — returning the error
 // here surfaces it as a 500 to the client.
-pub fn overflowHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     // _ = ctx;
 
@@ -97,7 +97,7 @@ pub fn overflowHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context)
 // GET /inject-guard
 // Demonstrates the header injection guard — CR or LF in name or value
 // is rejected by addHeader() before writing to the wire.
-pub fn injectGuardHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn injectGuardHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     // _ = ctx;
 
@@ -121,7 +121,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,
