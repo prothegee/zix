@@ -73,7 +73,7 @@ __*6. Predictable, Transparent Memory Management.*__
 - Always push Zig and their std.
 - Single file, single responsibility.
 - Use Data-Oriented Design approach first.
-- A "nice to have" and "maybe we need this" is teriary.
+- A "nice to have" and "maybe we need this" is tertiary.
 - Narrowing down the system thinking first then be explicit.
 - Always fix from our side first rather than Zig feature/s side.
 
