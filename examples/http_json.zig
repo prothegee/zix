@@ -21,7 +21,7 @@ const ResponseData = struct {
     data: ?std.json.Value,
 };
 
-fn sendResponse(res: *zix.Response, allocator: std.mem.Allocator, response: ResponseData) !void {
+fn sendResponse(res: *zix.Http.Response, allocator: std.mem.Allocator, response: ResponseData) !void {
     const json_bytes = try std.json.Stringify.valueAlloc(allocator, response, .{});
     try res.sendJson(json_bytes);
 }
@@ -29,7 +29,7 @@ fn sendResponse(res: *zix.Response, allocator: std.mem.Allocator, response: Resp
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9001/status"
-pub fn statusHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn statusHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "method not allowed", .data = null });
@@ -42,7 +42,7 @@ pub fn statusHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
 }
 
 // curl usage: curl -X GET "http://localhost:9001/echo?name=Alice"
-pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const name = req.queryParam("name") orelse "world";
 
     var obj = std.json.ObjectMap{};
@@ -51,7 +51,7 @@ pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 }
 
 // curl usage: curl -X POST "http://localhost:9001/post" -d "hello"
-pub fn postHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn postHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "method not allowed", .data = null });
@@ -66,7 +66,7 @@ pub fn postHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 }
 
 // curl usage: curl -X POST "http://localhost:9001/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
-pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "method not allowed", .data = null });
@@ -98,7 +98,7 @@ pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 }
 
 // curl usage: curl -X GET "http://localhost:9001/users"
-pub fn usersHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn usersHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "method not allowed", .data = null });
@@ -127,7 +127,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

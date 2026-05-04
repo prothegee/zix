@@ -10,14 +10,14 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 
 // Global room registry — lives for the process lifetime.
 // join() and leave() are called by each WebSocket handler task.
-var ws_rooms: zix.WebSocket.RoomMap = undefined;
+var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 
 // --------------------------------------------------------- //
 
 // GET /ws/:room-id?name=alice
 // WebSocket upgrade handler.
 //
-// Query params MUST be read before zix.WebSocket.upgrade() is called.
+// Query params MUST be read before zix.Http.WebSocket.upgrade() is called.
 // After the 101 handshake the HTTP request context is gone — the connection
 // becomes a raw WebSocket stream. Capture anything you need from the request
 // (path params, query params, headers) before calling upgrade().
@@ -36,7 +36,7 @@ var ws_rooms: zix.WebSocket.RoomMap = undefined;
 //
 // After connecting, any message you type is broadcast to every other client
 // in the same room, prefixed with the sender's display name.
-pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try res.sendJson("{\"error\":\"method not allowed\"}");
@@ -72,16 +72,16 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
 
     // Compute and send 101 handshake
     var accept_buf: [64]u8 = undefined;
-    const accept = zix.WebSocket.acceptKey(ws_key.?, &accept_buf) catch {
+    const accept = zix.Http.WebSocket.acceptKey(ws_key.?, &accept_buf) catch {
         res.setStatus(.INTERNAL_SERVER_ERROR);
         try res.sendJson("{\"error\":\"handshake failed\"}");
         return;
     };
 
-    zix.WebSocket.upgrade(ctx.stream, ctx.io, accept) catch return;
+    zix.Http.WebSocket.upgrade(ctx.stream, ctx.io, accept) catch return;
 
     // Register this connection in the room
-    const conn = try std.heap.smp_allocator.create(zix.WebSocket.Conn);
+    const conn = try std.heap.smp_allocator.create(zix.Http.WebSocket.Conn);
     conn.* = .{ .stream = ctx.stream, .io = ctx.io };
     defer std.heap.smp_allocator.destroy(conn);
 
@@ -107,7 +107,7 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
         var offset: usize = 0;
         while (offset < buf_used) {
             var payload_buf: [4096]u8 = undefined;
-            const result = zix.WebSocket.parseFrame(frame_buf[offset..buf_used], &payload_buf) orelse break;
+            const result = zix.Http.WebSocket.parseFrame(frame_buf[offset..buf_used], &payload_buf) orelse break;
 
             switch (result.frame.opcode) {
                 .text, .binary => {
@@ -122,7 +122,7 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
                 },
                 .ping => {
                     var pong_frame: [128]u8 = undefined;
-                    const plen = zix.WebSocket.buildFrame(&pong_frame, .pong, result.frame.payload);
+                    const plen = zix.Http.WebSocket.buildFrame(&pong_frame, .pong, result.frame.payload);
                     var wb: [128]u8 = undefined;
                     var w = ctx.stream.writer(ctx.io, &wb);
                     w.interface.writeAll(pong_frame[0..plen]) catch break :outer;
@@ -131,7 +131,7 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
                 .close => {
                     // Echo close frame back then exit — RFC 6455 5.5.1
                     var close_frame: [16]u8 = undefined;
-                    const clen = zix.WebSocket.buildFrame(&close_frame, .close, &.{});
+                    const clen = zix.Http.WebSocket.buildFrame(&close_frame, .close, &.{});
                     var wb: [16]u8 = undefined;
                     var w = ctx.stream.writer(ctx.io, &wb);
                     w.interface.writeAll(close_frame[0..clen]) catch {};
@@ -158,7 +158,7 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
     // to defers.  Best-effort: ignore write failures on a dying connection.
     if (!clean_close) {
         var close_frame: [16]u8 = undefined;
-        const clen = zix.WebSocket.buildFrame(&close_frame, .close, &.{});
+        const clen = zix.Http.WebSocket.buildFrame(&close_frame, .close, &.{});
         var wb: [16]u8 = undefined;
         var w = ctx.stream.writer(ctx.io, &wb);
         w.interface.writeAll(close_frame[0..clen]) catch {};
@@ -170,13 +170,13 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    ws_rooms = zix.WebSocket.RoomMap.init(std.heap.smp_allocator);
+    ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

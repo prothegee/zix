@@ -31,7 +31,7 @@ fn createInitDirs(io: std.Io) void {
 
 // GET /
 // curl usage: curl -X GET "http://localhost:9006/"
-pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     res.setContentType(.TEXT_PLAIN);
@@ -49,7 +49,7 @@ pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 //     -F 'data={"userid":0,"sessionid":"01944f5a-0000-7000-8000-000000000000"}'
 //
 // Response: {"file":{"name":"file.txt","size":42,"path":"./public/u/file.txt"},"data":{"userid":0,"sessionid":"..."}}
-pub fn uploadHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try res.sendJson("{\"error\":\"method not allowed\"}");
@@ -74,7 +74,7 @@ pub fn uploadHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
 
     const body = try req.body();
 
-    var parser = zix.MultipartParser.init(ctx.allocator, boundary);
+    var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
     defer parser.deinit();
     try parser.parse(body);
 
@@ -133,7 +133,7 @@ pub fn uploadHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
 //   curl -X GET "http://localhost:9006/secret/file.txt?sec=abc123"
 //   curl -X GET "http://localhost:9006/secret/file.txt"               (→ 403 if file exists)
 //   curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (→ 404)
-pub fn secretHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try res.sendJson("{\"error\":\"method not allowed\"}");
@@ -210,7 +210,7 @@ pub fn secretHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
     // inline in the browser, unknown/binary types fall back to octet-stream and prompt
     // a download.
     const ext = if (std.mem.lastIndexOfScalar(u8, sub, '.')) |dot| sub[dot + 1 ..] else "";
-    res.setContentType(zix.Tcp.Http.Content.typeFromExtension(ext));
+    res.setContentType(zix.Http.Content.typeFromExtension(ext));
     try res.send(data[0..total]);
 
     // If you want to force download for all files regardless of type, use:
@@ -226,7 +226,7 @@ pub fn main(process: std.process.Init) !void {
 
     createInitDirs(process.io);
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

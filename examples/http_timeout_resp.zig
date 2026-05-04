@@ -17,7 +17,7 @@ const DELAY_MAX_MS: u64 = 6_000;
 // Simulates a handler that takes a random amount of time (3-6 seconds),
 // if the simulated duration exceeds HANDLER_TIMEOUT_MS, responds with 408.
 // curl usage: curl -X GET "http://localhost:9007/slow"
-pub fn slowHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
     // Seed PRNG from the current wall-clock second (std.Io.Timestamp, like rnd examples).
@@ -56,7 +56,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

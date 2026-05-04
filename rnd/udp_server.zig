@@ -17,10 +17,10 @@ const std = @import("std");
 // NOTE: native-endian layout; must match client and any foreign client (Go, C++, Rust, etc.)
 // NOTE: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
 const TestPacket = extern struct {
-    id:          [16]u8,
+    id: [16]u8,
     packet_type: i32,
-    register:    u32,
-    position:    [3]f64,
+    register: u32,
+    position: [3]f64,
 };
 
 // --------------------------------------------------------- //
@@ -31,17 +31,17 @@ const TestPacket = extern struct {
 //   Both modes fail if the port is not provided — the distinction is the source, not the behavior.
 //   No silent defaults in either mode. Enforces "explicit over implicit."
 const ServerConfig = struct {
-    ip:           []const u8 = "0.0.0.0",
-    port:         u16        = 9100,
-    auto_ack:     bool       = false, // send 0x06 ACK byte back to sender on success
-    error_report: bool       = false, // send 0x15 NACK byte back to sender on bad packet
+    ip: []const u8 = "0.0.0.0",
+    port: u16 = 9100,
+    auto_ack: bool = false, // send 0x06 ACK byte back to sender on success
+    error_report: bool = false, // send 0x15 NACK byte back to sender on bad packet
     // NOTE: if auto_echo is true, echoes the received packet as-is back to sender only
     //       feedback shape (e.g. result struct) should be configurable later
-    auto_echo:    bool       = false,
+    auto_echo: bool = false,
     // NOTE: if broadcast is true, relays the received packet to ALL connected clients
     //       server stamps the sender's connection index into the id field before relaying —
     //       receivers use the id to distinguish which peer sent the data
-    broadcast:    bool       = true,
+    broadcast: bool = true,
 };
 
 // --------------------------------------------------------- //
@@ -67,13 +67,13 @@ const MAX_BROADCAST_CLIENTS: usize = 64;
 // PERF: peers[MAX_BROADCAST_CLIENTS] is copied by value into every PacketTask — grows with
 //       IpAddress size * MAX_BROADCAST_CLIENTS; reduce cap or switch to heap slice in src/
 const PacketTask = struct {
-    buf:          [@sizeOf(TestPacket)]u8,
-    from:         std.Io.net.IpAddress,
-    socket:       std.Io.net.Socket,
-    io:           std.Io,
-    config:       ServerConfig,
-    peers:        [MAX_BROADCAST_CLIENTS]std.Io.net.IpAddress,
-    n_peers:      usize,
+    buf: [@sizeOf(TestPacket)]u8,
+    from: std.Io.net.IpAddress,
+    socket: std.Io.net.Socket,
+    io: std.Io,
+    config: ServerConfig,
+    peers: [MAX_BROADCAST_CLIENTS]std.Io.net.IpAddress,
+    n_peers: usize,
     sender_index: usize,
 };
 
@@ -82,9 +82,9 @@ const PacketTask = struct {
 // NOTE: when identifying clients, how the id is structured, validated, and scoped is the
 //       application's responsibility; the transport layer only assigns a transient index.
 const ClientRecord = struct {
-    from:      std.Io.net.IpAddress,
+    from: std.Io.net.IpAddress,
     last_seen: std.Io.Clock.Timestamp,
-    index:     usize,
+    index: usize,
 };
 
 // --------------------------------------------------------- //
@@ -120,8 +120,7 @@ fn processPacket(task: PacketTask) void {
     var addr_buf: [64]u8 = undefined;
     std.debug.print(
         "recv from={s} [index: {d}] | packet_type={d} register={d} x={d:.4} y={d:.4} z={d:.4}\n",
-        .{ fmtAddr(task.from, &addr_buf), task.sender_index, pkt.packet_type, pkt.register,
-           pkt.position[0], pkt.position[1], pkt.position[2] },
+        .{ fmtAddr(task.from, &addr_buf), task.sender_index, pkt.packet_type, pkt.register, pkt.position[0], pkt.position[1], pkt.position[2] },
     );
 
     if (task.config.auto_ack) {
@@ -182,7 +181,7 @@ pub fn main(process: std.process.Init) !void {
     const poll_timeout: std.Io.Timeout = .{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(POLL_TIMEOUT_MS),
         .clock = .awake,
-    }};
+    } };
 
     var last_check = std.Io.Clock.Timestamp.now(io, .awake);
     var next_index: usize = 1; // monotonic counter; 1-based for readable log output
@@ -204,8 +203,7 @@ pub fn main(process: std.process.Init) !void {
         // overflow / size guard — drop any datagram that isn't exactly TestPacket
         if (msg.flags.trunc or msg.data.len != @sizeOf(TestPacket)) {
             if (config.error_report) socket.send(io, &msg.from, &[_]u8{0x15}) catch {};
-            std.debug.print("drop: expected {d} bytes, got {d} trunc={}\n",
-                .{ @sizeOf(TestPacket), msg.data.len, msg.flags.trunc });
+            std.debug.print("drop: expected {d} bytes, got {d} trunc={}\n", .{ @sizeOf(TestPacket), msg.data.len, msg.flags.trunc });
             continue;
         }
 
@@ -227,8 +225,7 @@ pub fn main(process: std.process.Init) !void {
             next_index += 1;
             clients.append(.{ .from = msg.from, .last_seen = now, .index = sender_index }) catch {};
             var addr_buf: [64]u8 = undefined;
-            std.debug.print("client connected: {s} [index: {d}, connected: {d}]\n",
-                .{ fmtAddr(msg.from, &addr_buf), sender_index, clients.items.len });
+            std.debug.print("client connected: {s} [index: {d}, connected: {d}]\n", .{ fmtAddr(msg.from, &addr_buf), sender_index, clients.items.len });
         }
 
         // rate-limited disconnect check even when packets arrive rapidly
@@ -243,13 +240,13 @@ pub fn main(process: std.process.Init) !void {
         for (0..n_peers) |i| peers[i] = clients.items[i].from;
 
         const task = PacketTask{
-            .buf          = buf,
-            .from         = msg.from,
-            .socket       = socket,
-            .io           = io,
-            .config       = config,
-            .peers        = peers,
-            .n_peers      = n_peers,
+            .buf = buf,
+            .from = msg.from,
+            .socket = socket,
+            .io = io,
+            .config = config,
+            .peers = peers,
+            .n_peers = n_peers,
             .sender_index = sender_index,
         };
 

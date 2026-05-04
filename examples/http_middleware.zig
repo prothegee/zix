@@ -42,9 +42,9 @@ fn isAllowedOrigin(origin: []const u8) bool {
 //
 // Usage:
 //   server.registerHandler("/path", withOriginCheck(myHandler));
-fn withOriginCheck(comptime next: zix.HandlerFn) zix.HandlerFn {
+fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
-        fn handle(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) anyerror!void {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
             const origin = req.header("origin") orelse "";
             if (!isAllowedOrigin(origin)) {
                 res.setStatus(.FORBIDDEN);
@@ -65,9 +65,9 @@ fn withOriginCheck(comptime next: zix.HandlerFn) zix.HandlerFn {
 //
 // Usage (composed — origin check runs first):
 //   server.registerHandler("/path", withOriginCheck(withBasicAuth(myHandler)));
-fn withBasicAuth(comptime next: zix.HandlerFn) zix.HandlerFn {
+fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
-        fn handle(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) anyerror!void {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
             const auth_header = req.header("authorization") orelse {
                 res.setStatus(.UNAUTHORIZED);
                 try res.addHeader("WWW-Authenticate", "Basic realm=\"zix\"");
@@ -131,7 +131,7 @@ fn withBasicAuth(comptime next: zix.HandlerFn) zix.HandlerFn {
 // curl:
 //   curl -H "Origin: http://localhost" "http://localhost:9003/public"  # 200
 //   curl "http://localhost:9003/public"                                # 403
-pub fn publicHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.sendJson("{\"message\":\"public resource — origin verified\"}");
@@ -144,7 +144,7 @@ pub fn publicHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !
 //   curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9003/private"  # 200
 //   curl -H "Origin: http://localhost" "http://localhost:9003/private"                    # 401
 //   curl "http://localhost:9003/private"                                                  # 403
-pub fn privateHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.sendJson("{\"message\":\"private resource — origin and credentials verified\"}");
@@ -156,7 +156,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

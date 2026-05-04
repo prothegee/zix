@@ -11,14 +11,14 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9000/"
-pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("hello from zix");
 }
 
 // curl usage: curl -X GET "http://localhost:9000/about"
-pub fn aboutHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("zix basic server example");
@@ -30,7 +30,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,

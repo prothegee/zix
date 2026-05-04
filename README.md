@@ -3,17 +3,19 @@
 <h1 align="center">
     <b><i>ZIX</i></b>
 </h1>
+
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <b><i>Zero sIX; 06;</i></b>
+</p>
+
+
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
+    <i>A network library written in zig.</i>
 </p>
 
 <div align="center">
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
 </div>
-
-<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A micro net-frame-work.</i>
-</p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Where the wire meets the will.</i>
@@ -27,7 +29,13 @@
     <i>No hidden cost. Just clean metal and honest code - predictable by principle</i>
 </p>
 
-<br>
+---
+
+<p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
+    <i>You are the thinker. Tinker.. Assembler... The builder, Not just as user/coder....</i>
+</p>
+
+---
 
 ## A Reason.. A Motivation...
 
@@ -60,6 +68,34 @@ __*6. Predictable, Transparent Memory Management.*__
 
 <br>
 
+## Important contribution notes
+
+- Always push Zig and their std.
+- Single file, single responsibility.
+- Use Data-Oriented Design approach first.
+- A "nice to have" and "maybe we need this" is teriary.
+- Narrowing down the system thinking first then be explicit.
+- Always fix from our side first rather than Zig feature/s side.
+
+<br>
+
+## Documentation
+
+| Document | Description |
+| :- | :- |
+| [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, memory model |
+| [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect |
+| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, planned source layout (not yet implemented) |
+| [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms |
+| [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms |
+| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- stub (not yet implemented) |
+| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols |
+| [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
+| [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
+| [`docs/tests.md`](docs/tests.md) | Test coverage and how to run |
+
+<br>
+
 ## Examples
 
 For more examples see the `examples` directory.
@@ -71,7 +107,7 @@ Auto I/O (runtime-managed thread pool):
 const std = @import("std");
 const zix = @import("zix");
 
-pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("hello from zix");
@@ -81,7 +117,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = "0.0.0.0",
@@ -111,7 +147,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = threaded.io(),
         .allocator = arena.allocator(),
         .ip = "0.0.0.0",
@@ -193,7 +229,7 @@ Two modes — the library accepts an opaque `std.Io`, so the caller owns the bac
 **Auto** — let the runtime manage threads (default for most cases):
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.HttpServer.init(.{ .io = process.io, ... });
+    var server = try zix.Http.Server.init(.{ .io = process.io, ... });
 ```
 
 **Manual** — explicit concurrency cap (useful for resource-constrained deployments):
@@ -203,7 +239,7 @@ pub fn main() !void {
         .concurrent_limit = std.Io.Limit.limited(4), // cap at 4 concurrent tasks
     });
     defer threaded.deinit();
-    var server = try zix.HttpServer.init(.{ .io = threaded.io(), ... });
+    var server = try zix.Http.Server.init(.{ .io = threaded.io(), ... });
 ```
 
 Each accepted connection runs as a concurrent task via `io.concurrent()` — non-blocking, no busy-waiting.
@@ -212,12 +248,12 @@ Each accepted connection runs as a concurrent task via `io.concurrent()` — non
 
 ### Middleware
 
-Middleware is composed at comptime using wrapper functions. Each wrapper takes a `comptime next: zix.HandlerFn` and returns a new `HandlerFn` — no heap allocation, no runtime chain runner.
+Middleware is composed at comptime using wrapper functions. Each wrapper takes a `comptime next: zix.Http.HandlerFn` and returns a new `HandlerFn` — no heap allocation, no runtime chain runner.
 
 ```zig
-fn withOriginCheck(comptime next: zix.HandlerFn) zix.HandlerFn {
+fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
-        fn handle(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) anyerror!void {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
             const origin = req.header("origin") orelse "";
             if (!isAllowedOrigin(origin)) {
                 res.setStatus(.FORBIDDEN);
@@ -229,9 +265,9 @@ fn withOriginCheck(comptime next: zix.HandlerFn) zix.HandlerFn {
     }.handle;
 }
 
-fn withBasicAuth(comptime next: zix.HandlerFn) zix.HandlerFn {
+fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
-        fn handle(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) anyerror!void {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
             // validate Authorization: Basic <base64(user:pass)>
             // ...
             return next(req, res, ctx);
@@ -269,9 +305,9 @@ For a full working example see `examples/server_middleware.zig`.
 Room-based broadcast over RFC 6455. A param handler upgrades the connection and enters a per-task frame loop — no separate thread needed.
 
 ```zig
-var ws_rooms: zix.WebSocket.RoomMap = undefined;
+var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 
-pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
 
     // Read query params BEFORE upgrade() — unavailable after the 101 handshake.
@@ -279,11 +315,11 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
 
     // extract Sec-WebSocket-Key from headers, then handshake
     var accept_buf: [64]u8 = undefined;
-    const accept = try zix.WebSocket.acceptKey(ws_key, &accept_buf);
-    try zix.WebSocket.upgrade(ctx.stream, ctx.io, accept); // writes 101 directly
+    const accept = try zix.Http.WebSocket.acceptKey(ws_key, &accept_buf);
+    try zix.Http.WebSocket.upgrade(ctx.stream, ctx.io, accept); // writes 101 directly
 
     // heap-allocate conn, join room, both are cleaned up via defer (LIFO)
-    const conn = try std.heap.smp_allocator.create(zix.WebSocket.Conn);
+    const conn = try std.heap.smp_allocator.create(zix.Http.WebSocket.Conn);
     conn.* = .{ .stream = ctx.stream, .io = ctx.io };
     defer std.heap.smp_allocator.destroy(conn);
     ws_rooms.join(room_id, conn, ctx.io);
@@ -298,7 +334,7 @@ pub fn wsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void
 }
 
 pub fn main(process: std.process.Init) !void {
-    ws_rooms = zix.WebSocket.RoomMap.init(std.heap.smp_allocator);
+    ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
     // ...
     server.registerParamHandler("/ws/:room-id", wsHandler);
@@ -342,7 +378,7 @@ fn createInitDirs(io: std.Io) void {
 pub fn main(process: std.process.Init) !void {
     createInitDirs(process.io); // idempotent — safe on every start
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         // ...
         .public_dir        = "./public", // validated at run(); "" = disabled
         .public_dir_upload = "u",
@@ -356,7 +392,7 @@ pub fn main(process: std.process.Init) !void {
 **Upload** — parse the multipart body in a handler, optionally rename before saving:
 
 ```zig
-var parser = zix.MultipartParser.init(ctx.allocator, boundary);
+var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
 defer parser.deinit();
 try parser.parse(try req.body());
 
@@ -409,7 +445,7 @@ curl "http://localhost:9005/secret/missing.txt?sec=abc123" # 404
 | `.{ .CUSTOM = N }` | N | Explicit cap, arena-allocated to exactly N slots per request |
 
 ```zig
-var server = try zix.HttpServer.init(.{
+var server = try zix.Http.Server.init(.{
     // ...
     .max_response_headers = .LARGE,                // 64 headers
     // .max_response_headers = .{ .CUSTOM = 48 },  // explicit
@@ -421,6 +457,72 @@ var server = try zix.HttpServer.init(.{
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena — no ceiling, no clamping.
 
 For security guidance and tier selection see [`docs/headers.md`](docs/headers.md). For a working demonstration see `examples/server_headers.zig`.
+
+<br>
+
+## UDP
+
+Type-safe UDP server and client. The user defines their own `extern struct` packet; zix handles endianness, size validation, and concurrency.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+const Packet = extern struct {
+    id:       [16]u8,
+    kind:     i32,
+    register: u32,
+    position: [3]f64,
+};
+
+const MyServer = zix.Udp.Server(Packet);
+
+pub fn main(process: std.process.Init) !void {
+    var server = try MyServer.init(.{
+        .allocator  = std.heap.smp_allocator,
+        .ip         = "0.0.0.0",
+        .port       = 9100,
+        .port_mode  = .REQUIRED,
+        .endianness = .LITTLE,
+        .broadcast  = true,   // relay each packet to all connected clients
+        .auto_ack   = false,
+        .disconnect_timeout_ms = 5000,
+        .poll_timeout_ms       = 2000,
+    });
+    defer server.deinit();
+    try server.run(process.io);
+}
+```
+
+Client (concurrent send + receive):
+
+```zig
+const MyClient = zix.Udp.Client(Packet);
+
+pub fn main(process: std.process.Init) !void {
+    const io = process.io;
+    var client = try MyClient.init(.{
+        .server_ip   = "127.0.0.1",
+        .server_port = 9100,
+        .bind_port   = 9101,
+        .port_mode   = .REQUIRED,
+        .endianness  = .LITTLE,
+        .send_every  = 1000,
+    }, io);
+    defer client.deinit();
+
+    // spawn receive task alongside send loop
+    _ = io.concurrent(receiveLoop, .{&client}) catch {};
+
+    const p = Packet{ .id = [_]u8{0} ** 16, .kind = 1, .register = 0, .position = .{ 0.0, 0.0, 0.0 } };
+    while (true) {
+        client.send(p) catch {};
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1000), .awake);
+    }
+}
+```
+
+See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working example with broadcast and configurable ports. For design details see [`docs/hld-udp.md`](docs/hld-udp.md).
 
 <br>
 
@@ -436,13 +538,29 @@ zig build test
 
 ## Memory Model
 
+### HTTP
+
 | Scope | Allocator | Lifetime |
 | :- | :- | :- |
 | Router route list | `config.allocator` (caller-owned) | Process |
 | Read / write I/O buffers | `smp_allocator` | Connection |
 | Per-request allocations (`ctx.allocator`) | Per-connection `ArenaAllocator`, reset each request | Request |
 
-Handlers receive `ctx.allocator` — an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
+Handlers receive `ctx.allocator` -- an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
+
+`config.allocator` (router storage) is append-only — `ArenaAllocator` is the recommended choice. All route allocations are freed together when `server.deinit()` is called.
+
+### UDP
+
+| Scope | Allocator | Lifetime |
+| :- | :- | :- |
+| Client record list | `config.allocator` (caller-owned) | Server process lifetime |
+| Peer snapshot (broadcast) | `config.allocator` | Single packet dispatch |
+| Receive buffer | Stack | Single receive loop iteration |
+
+`config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet — `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp.md`](docs/hld-udp.md) for the full explanation and PoC.
+
+For full memory details see [`docs/hld-http.md`](docs/hld-http.md) and [`docs/hld-udp.md`](docs/hld-udp.md). For threading models see [`docs/concurrency.md`](docs/concurrency.md).
 
 <br>
 

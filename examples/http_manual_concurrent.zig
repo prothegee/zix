@@ -15,14 +15,14 @@ const CONCURRENT_LIMIT: usize = 4;
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9002/"
-pub fn homeHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("hello from zix (manual concurrent)");
 }
 
 // curl usage: curl -X GET "http://localhost:9002/info"
-pub fn infoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     var buf: [128]u8 = undefined;
@@ -42,12 +42,12 @@ pub fn infoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 // Comparison:
 //   Auto (default in other examples):
 //     pub fn main(process: std.process.Init) !void {
-//         var server = try zix.HttpServer.init(.{ .io = process.io, ... });
+//         var server = try zix.Http.Server.init(.{ .io = process.io, ... });
 //
 //   Manual (this example):
 //     pub fn main() !void {
 //         var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//         var server = try zix.HttpServer.init(.{ .io = threaded.io(), ... });
+//         var server = try zix.Http.Server.init(.{ .io = threaded.io(), ... });
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -62,7 +62,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = threaded.io(),
         .allocator = arena.allocator(),
         .ip = IP,

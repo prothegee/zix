@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `HttpServerConfig.max_response_headers`, which accepts a `zix.HeaderSize` value.
+Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `HttpServerConfig.max_response_headers`, which accepts a `zix.Http.HeaderSize` value.
 
 The backing buffer is arena-allocated per request to exactly the configured cap — no wasted memory, no false ceiling. `addHeader()` returns `error.TooManyHeaders` once the cap is reached.
 
@@ -21,7 +21,7 @@ The backing buffer is arena-allocated per request to exactly the configured cap 
 Set it once in `HttpServerConfig`:
 
 ```zig
-var server = try zix.HttpServer.init(.{
+var server = try zix.Http.Server.init(.{
     // ...
     .max_response_headers = .LARGE,              // 64 headers
     // .max_response_headers = .{ .CUSTOM = 48 }, // explicit cap
