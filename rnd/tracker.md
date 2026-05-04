@@ -6,7 +6,7 @@ Open items that need follow-up. Check off when resolved.
 
 ## Lifecycle & Signal Control
 
-Reference: `rnd/zix-gmod-2.md`
+Reference: `rnd/server_lifecycle_proposal.md`
 
 - [ ] Add ADR entry for atomic server lifecycle (`IDLE → RUNNING → STOPPING → STOPPED`)
 - [ ] HTTP accept loop: replace `while (true)` with atomic status check

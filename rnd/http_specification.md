@@ -5,7 +5,7 @@ Resolved architectural decisions are in [`docs/adr.md`](../docs/adr.md).
 Public API and design rationale are in [`docs/hld-http.md`](../docs/hld-http.md).
 Implementation details are in [`docs/lld-http.md`](../docs/lld-http.md).
 
-Supersedes: `rnd/zix-gmod-1.md`, `rnd/zix-cmod-1.md` (original research documents, kept for history).
+Supersedes: `rnd/http_explicit_implicit.md`, `rnd/http_explicit_without_burden.md` (original research documents, kept for history).
 
 ---
 
@@ -65,7 +65,7 @@ server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)
 
 Pass 1 exact → Pass 2 param (first-registered) → Pass 3 prefix (longest match).
 
-First-match-wins routing was proposed as a replacement (see `rnd/zix-gmod-1.md` section 2) but
+First-match-wins routing was proposed as a replacement (see `rnd/http_explicit_implicit.md` section 2) but
 deferred: the change would be breaking and the benefit is marginal for typical route counts.
 
 ### Arena Allocator Lifetime (Accepted, ADR-003)
