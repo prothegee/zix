@@ -24,7 +24,7 @@ const MAX_PATH_SEGMENTS: usize = 9;
 // curl usage: curl -X GET "http://localhost:9005/path/hello/world"
 // curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i"
 // curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i/j"  (→ 404)
-pub fn pathsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try res.sendJson("{\"error\":\"method not allowed\"}");
@@ -68,7 +68,7 @@ pub fn pathsHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !v
 //
 // curl usage: curl -X GET "http://localhost:9005/path/user/alice"
 // curl usage: curl -X GET "http://localhost:9005/path/user/123"
-pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -104,7 +104,7 @@ pub fn userHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 // curl usage: curl -X GET "http://localhost:9005/path/acme/main"
 // curl usage: curl -X GET "http://localhost:9005/path/acme/dev"
 // curl usage: curl -X GET "http://localhost:9005/path/user/alice"   (→ userHandler, not here)
-pub fn tenantHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn tenantHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -138,7 +138,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,
