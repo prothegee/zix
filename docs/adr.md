@@ -4,7 +4,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 ---
 
-## ADR-001: std.Io event-driven concurrency model
+## ADR-001: `std.Io` event-driven concurrency model
 
 **Status:** Accepted
 
