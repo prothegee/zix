@@ -15,7 +15,7 @@ const SimpleResponse = struct {
     message: []const u8,
 };
 
-fn sendResponse(res: *zix.Response, allocator: std.mem.Allocator, response: SimpleResponse) !void {
+fn sendResponse(res: *zix.Http.Response, allocator: std.mem.Allocator, response: SimpleResponse) !void {
     const json_bytes = try std.json.Stringify.valueAlloc(allocator, response, .{});
     try res.sendJson(json_bytes);
 }
@@ -28,7 +28,7 @@ fn sendResponse(res: *zix.Response, allocator: std.mem.Allocator, response: Simp
 // /echo                  →  null
 // /echo?flag             →  {"flag":null}
 // curl usage: curl -X GET "http://localhost:9004/echo?foo=bar&baz=qux"
-pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try res.sendJson("{\"error\":\"method not allowed\"}");
@@ -64,7 +64,7 @@ pub fn echoHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !vo
 // /greet?name=alice  →  {"ok":true,"message":"hello, alice"}
 // /greet             →  {"ok":false,"message":"Error: missing required param: name"}
 // curl usage: curl -X GET "http://localhost:9004/greet?name=alice"
-pub fn greetHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn greetHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "Error: method not allowed" });
@@ -87,7 +87,7 @@ pub fn greetHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !v
 // /calc?b=4       →  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 →  {"ok":false,"message":"Error: a must be a number"}
 // curl usage: curl -X GET "http://localhost:9004/calc?a=3&b=4"
-pub fn calcHandler(req: *zix.Request, res: *zix.Response, ctx: *zix.Context) !void {
+pub fn calcHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
         try sendResponse(res, ctx.allocator, .{ .ok = false, .message = "Error: method not allowed" });
@@ -127,7 +127,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.HttpServer.init(.{
+    var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,
