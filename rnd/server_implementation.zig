@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ADDRESS_IP: []const u8 = "0.0.0.0";
+const ADDRESS_IP: []const u8 = "127.0.0.1";
 const ADDRESS_PORT: u16 = 9000;
 const WORKER_THREADS_TARGET: usize = 0; // this doesn't represent hardware thread/s
 

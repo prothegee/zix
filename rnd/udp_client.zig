@@ -130,13 +130,13 @@ pub fn main(process: std.process.Init) !void {
         }
     }
 
-    const bind_addr = try std.Io.net.IpAddress.parse("0.0.0.0", config.bind_port);
+    const bind_addr = try std.Io.net.IpAddress.parse("127.0.0.1", config.bind_port);
     const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
 
     const dest = try std.Io.net.IpAddress.parse(config.server_ip, config.server_port);
 
-    std.debug.print("zix udp client: bound 0.0.0.0:{d} -> {s}:{d}\n", .{ config.bind_port, config.server_ip, config.server_port });
+    std.debug.print("zix udp client: bound 127.0.0.1:{d} -> {s}:{d}\n", .{ config.bind_port, config.server_ip, config.server_port });
 
     // persistent receive task — reads server feedback for client lifetime
     _ = io.concurrent(receiveFeedback, .{ReceiveTask{ .socket = socket, .io = io }}) catch |err| {

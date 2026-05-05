@@ -1,7 +1,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const IP: []const u8 = "0.0.0.0";
+const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9000;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
@@ -14,7 +14,7 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
-    try res.send("hello from zix");
+    try res.send("Hello, World!");
 }
 
 // curl usage: curl -X GET "http://localhost:9000/about"

@@ -1,7 +1,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const IP: []const u8 = "0.0.0.0";
+const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9002;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
