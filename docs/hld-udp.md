@@ -53,7 +53,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UdpClient(Packet).init(config, io)"] --> B["bind 0.0.0.0:bind_port"]
+    A["UdpClient(Packet).init(config, io)"] --> B["bind 127.0.0.1:bind_port"]
     B --> C["resolve server IpAddress"]
     C --> D["client ready"]
     D --> E["send(packet)"]
