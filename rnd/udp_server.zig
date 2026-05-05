@@ -31,7 +31,7 @@ const TestPacket = extern struct {
 //   Both modes fail if the port is not provided — the distinction is the source, not the behavior.
 //   No silent defaults in either mode. Enforces "explicit over implicit."
 const ServerConfig = struct {
-    ip: []const u8 = "0.0.0.0",
+    ip: []const u8 = "127.0.0.1",
     port: u16 = 9100,
     auto_ack: bool = false, // send 0x06 ACK byte back to sender on success
     error_report: bool = false, // send 0x15 NACK byte back to sender on bad packet

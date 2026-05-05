@@ -15,14 +15,40 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
-    const test_step = b.step("test", "Run tests");
+    const test_step = b.step("unit-test", "Run tests");
 
     // --------------------------------------------------------- //
 
     // Unit test
     test_step.dependOn(&zix_tests_run.step);
 
-    // Integration test: postpone tbd
+    // Integration tests
+    const integration_test_step = b.step("integration-test", "Run integration tests");
+
+    const integration_tests = .{
+        "tests/integration/http_request_test.zig",
+        "tests/integration/http_router_test.zig",
+        "tests/integration/websocket_test.zig",
+        "tests/integration/udp_packet_test.zig",
+    };
+
+    inline for (integration_tests) |src| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(src),
+            .target = target,
+            .optimize = optimize,
+        });
+        t_mod.addImport("zix", zix);
+
+        const t_exe = b.addTest(.{ .root_module = t_mod });
+        const t_run = b.addRunArtifact(t_exe);
+        integration_test_step.dependOn(&t_run.step);
+    }
+
+    // All tests
+    const all_test_step = b.step("test-all", "Run unit and integration tests");
+    all_test_step.dependOn(&zix_tests_run.step);
+    all_test_step.dependOn(integration_test_step);
 
     // --------------------------------------------------------- //
 
