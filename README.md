@@ -120,7 +120,7 @@ pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(.{
         .io = process.io,
         .allocator = arena.allocator(),
-        .ip = "0.0.0.0",
+        .ip = "127.0.0.1",
         .port = 9000,
         .max_kernel_backlog = 1024 * 4,
         .max_client_request = 1024 * 4,
@@ -150,7 +150,7 @@ pub fn main() !void {
     var server = try zix.Http.Server.init(.{
         .io = threaded.io(),
         .allocator = arena.allocator(),
-        .ip = "0.0.0.0",
+        .ip = "127.0.0.1",
         .port = 9000,
         .max_kernel_backlog = 1024 * 4,
         .max_client_request = 1024 * 4,
@@ -480,7 +480,7 @@ const MyServer = zix.Udp.Server(Packet);
 pub fn main(process: std.process.Init) !void {
     var server = try MyServer.init(.{
         .allocator  = std.heap.smp_allocator,
-        .ip         = "0.0.0.0",
+        .ip         = "127.0.0.1",
         .port       = 9100,
         .port_mode  = .REQUIRED,
         .endianness = .LITTLE,
@@ -529,7 +529,9 @@ See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working e
 ## Testing
 
 ```sh
-zig build test
+zig build unit-test        # unit tests
+zig build integration-test # integration tests
+zig build test-all         # both
 ```
 
 `zig build` alone does not run tests. See [`docs/tests.md`](docs/tests.md) for coverage details.
