@@ -85,10 +85,10 @@ __*6. Predictable, Transparent Memory Management.*__
 | :- | :- |
 | [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, memory model |
 | [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect |
-| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, planned source layout (not yet implemented) |
+<!-- | [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, planned source layout (not yet implemented) | -->
 | [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms |
 | [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms |
-| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- stub (not yet implemented) |
+<!-- | [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- stub (not yet implemented) | -->
 | [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols |
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
 | [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
