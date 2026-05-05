@@ -43,7 +43,7 @@ None of these are wrong. They become a problem when the user can't override, obs
 var server = try zix.HttpServer.init(.{
     .io              = process.io,
     .allocator       = arena.allocator(),
-    .ip              = "0.0.0.0",
+    .ip              = "127.0.0.1",
     .port            = 9000,
 
     // explicit: what happens when no route matches
