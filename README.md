@@ -92,6 +92,7 @@ __*6. Predictable, Transparent Memory Management.*__
 | [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
 | [`docs/tests.md`](docs/tests.md) | Test coverage and how to run |
 
+<!-- NOTE: preserved table below — kept for historical reference, do not remove -->
 <!-- | Document | Description | -->
 <!-- | :- | :- | -->
 <!-- | [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, memory model | -->

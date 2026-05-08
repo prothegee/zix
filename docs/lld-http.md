@@ -33,7 +33,7 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
       b. arena.reset(.retain_capacity)
       c. extra_buf = arena.alloc(HttpHeader, max_response_headers.value())
       d. build Request(inner, &reader)
-         build Response(req.server, extra_buf)
+         build Response(req.server, io, extra_buf)   -- io stored for Date header clock
          build Context(io, arena.allocator(), stream)
       e. router.dispatch(req, res, ctx) -- calls matched handler or static.serve
       f. if public_dir and not dispatched: static.serve(...)
@@ -114,6 +114,10 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 ## response.zig -- Response
 
+### Fields
+
+`Response` carries `io: std.Io` (set during `init`) used exclusively by `send()` to obtain wall-clock time for the `Date` header via `std.Io.Clock.real`. This keeps the clock call cross-platform — `std.Io` abstracts Linux `CLOCK_REALTIME`, macOS, and Windows epoch translation behind a vtable.
+
 ### extra_buf (arena-allocated header slice)
 
 `extra_buf: []HttpHeader` is allocated from the per-request arena in `handleConnection` before building the `Response`. Its length equals `max_response_headers.value()`.
@@ -134,6 +138,7 @@ addHeader(name, value):
       "Content-Type: {content_type}\r\n"
       "Content-Length: {body.len}\r\n"
       "Connection: {keep-alive|close}\r\n"
+      "Date: {IMF-fixdate}\r\n"
       for each extra header: "{name}: {value}\r\n"
       "\r\n"
 2. error.BufferTooSmall if buffer overflows
@@ -141,6 +146,28 @@ addHeader(name, value):
 4. writer.writeAll(body)
 5. writer.flush()
 ```
+
+### Connection header logic
+
+```
+keep-alive  iff  self.keep_alive == true  AND  req.head.keep_alive == true
+close       otherwise (handler called setKeepAlive(false) OR client sent Connection: close)
+```
+
+`req.head.keep_alive` is parsed by `std.http` from the incoming request headers — no manual scanning.
+
+### Date header logic
+
+```
+1. Iterate req.iterateHeaders() for "date" (case-insensitive)
+      found -> use proxy-forwarded value verbatim
+2. Not found:
+      ts = std.Io.Clock.real.now(self.io)       -- wall-clock UTC, cross-platform
+      secs = ts.toSeconds()                      -- i64, Unix epoch
+      formatHttpDate(secs) -> "Day, DD Mon YYYY HH:MM:SS GMT"
+```
+
+`formatHttpDate` uses `std.time.epoch.EpochSeconds` for calendar decomposition. Day-of-week derived from `(epoch_day.day % 7 + 4) % 7` (Jan 1 1970 = Thursday = day 0).
 
 ---
 
