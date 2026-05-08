@@ -4,43 +4,91 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 ---
 
-## server.zig -- HttpServer
+## server.zig -- Server
 
-### Initialization
+### Public API
 
-`HttpServer.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket. Socket is opened in `run()`.
+`Server` is a namespace struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` is the private generic; callers use `var server = try zix.Http.Server.init(4096, .{...})` without naming the generic type.
 
-### run()
+`HttpServerImpl.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket — socket is opened in `run()`.
+
+### ConnQueue
+
+Shared work queue between accept threads (producers) and pool threads (consumers). Backed by `std.Io.Mutex` + `std.Io.Condition` + `std.ArrayListUnmanaged(std.Io.net.Stream)`.
 
 ```
-1. net.IpAddress.parse(ip, port)
-2. net_addr.listen(io, .{ .kernel_backlog = max_kernel_backlog }) -> NetServer
+push(stream): lock → append → unlock → signal
+pop():        lock → while empty: wait → orderedRemove(0) → unlock → return stream
+close():      lock → closed = true → unlock → broadcast   (unblocks all waiting pop())
+```
+
+### run() -- Model 2 (default, workers = 0 or workers ≥ 2)
+
+```
+1. worker_count = if (workers == 0) 2 else workers
+2. pool_size    = if (pool_size == 0) max(10, cpu_count * 2) else pool_size
+3. std.Io.Threaded.init(smp_allocator, .{ .stack_size = 512 KB }) -> thread_io
+4. ConnQueue{}
+5. spawn pool_size pool threads  -> poolEntry(self, &queue, thread_io)
+6. spawn worker_count accept threads -> workerEntry(self, &queue, thread_io)
+7. join accept threads
+8. queue.close(thread_io)
+9. join pool threads
+```
+
+### run() -- Model 1 (workers = 1)
+
+```
+1. net.IpAddress.resolve(io, ip, port)
+2. addr.listen(io, .{ .reuse_address = true, ... }) -> NetServer
 3. accept loop:
-      conn = net_server.accept(io)   -- suspends until TCP connect
-      io.concurrent(handleConnection, .{ conn, ... })
+      stream = net_server.accept(io)
+      if (io.concurrent(handleConnection, .{ stream, io, self })) |_| {}
+      else |_| { handleConnection(stream, io, self); }  -- fallback if pool exhausted
+```
+
+### workerEntry() (Model 2 accept thread)
+
+```
+1. resolve + listen with SO_REUSEPORT (reuse_address = true)
+2. loop:
+      stream = net_server.accept(io)
+      queue.push(stream, io)        -- never blocks on I/O
+```
+
+### poolEntry() (Model 2 pool thread)
+
+```
+loop:
+    stream = queue.pop(io)          -- blocks until connection arrives
+    handleConnection(stream, io, self)
 ```
 
 ### handleConnection()
 
 ```
-1. alloc read_buf  [max_client_request]u8  from smp_allocator
-2. alloc write_buf [max_client_response]u8 from smp_allocator
-3. defer: free both buffers, arena.deinit()
-4. std.http.Server.init(conn.stream, read_buf)
-5. ArenaAllocator.init(smp_allocator)
+1. setsockopt TCP_NODELAY           -- disable Nagle, send each response immediately
+2. stack_read / stack_write [stack_threshold]u8 on stack
+   read_buf  = if max_client_request  <= stack_threshold: stack slice
+               else smp_allocator.alloc(u8, max_client_request)
+   write_buf = if max_client_response <= stack_threshold: stack slice
+               else smp_allocator.alloc(u8, max_client_response)
+3. defer: heap-free if heap-allocated; stream.close()
+4. std.http.Server.init(&reader.interface, &writer.interface)
+5. ArenaAllocator.init(smp_allocator); pre-warm with max_allocator_size; reset(.retain_capacity)
 6. keep-alive loop:
-      a. receiveHead() -- suspends until request arrives, or returns on close/reset
-      b. arena.reset(.retain_capacity)
-      c. extra_buf = arena.alloc(HttpHeader, max_response_headers.value())
-      d. build Request(inner, &reader)
-         build Response(req.server, io, extra_buf)   -- io stored for Date header clock
-         build Context(io, arena.allocator(), stream)
-      e. router.dispatch(req, res, ctx) -- calls matched handler or static.serve
+      a. arena.reset(.retain_capacity)
+      b. receiveHead() -- returns on close / reset / error
+      c. refresh thread-local date cache (tl_date_secs / tl_date_buf / tl_date_len)
+      d. build Request(inner, &reader, allocator)
+         build Response(inner, io, allocator, max_response_headers.value())
+         build Context(io, allocator)
+      e. router.dispatch(req, res, ctx)
       f. if public_dir and not dispatched: static.serve(...)
-      g. if not served: send 404
+      g. if not served: 404
 ```
 
-Buffer lifetimes are explicit: `read_buf` and `write_buf` are freed in the `defer` at the top of `handleConnection`. The arena is reset between requests and deinited when the connection closes.
+Stack buffers live on the pool-thread stack for the duration of the connection. Heap buffers are freed on connection close. The arena is reset between requests and deinited when `handleConnection` returns.
 
 ---
 

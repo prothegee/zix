@@ -12,6 +12,11 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 // Any other value pins the max concurrent task limit.
 const CONCURRENT_LIMIT: usize = 4;
 
+// workers = 1 keeps the server on model 1 (single-threaded, uses the
+// caller's io directly). That is the io created below with a custom
+// concurrent_limit — the whole point of this example.
+const WORKERS: usize = 1;
+
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9002/"
@@ -42,12 +47,12 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // Comparison:
 //   Auto (default in other examples):
 //     pub fn main(process: std.process.Init) !void {
-//         var server = try zix.Http.Server.init(.{ .io = process.io, ... });
+//         var server = try zix.Http.Server.init(4096, .{ .io = process.io, ... });
 //
 //   Manual (this example):
 //     pub fn main() !void {
 //         var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//         var server = try zix.Http.Server.init(.{ .io = threaded.io(), ... });
+//         var server = try zix.Http.Server.init(4096, .{ .io = threaded.io(), ... });
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -62,7 +67,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(.{
+    var server = try zix.Http.Server.init(4096, .{
         .io = threaded.io(),
         .allocator = arena.allocator(),
         .ip = IP,
@@ -71,6 +76,7 @@ pub fn main() !void {
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
+        .workers = WORKERS,
     });
     defer server.deinit();
 
