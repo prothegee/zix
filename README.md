@@ -1,5 +1,7 @@
 # README
 
+__*STATUS: `Development`*__
+
 <h1 align="center">
     <b><i>ZIX</i></b>
 </h1>
@@ -114,7 +116,7 @@ For more examples see the `examples` directory.
 
 ### Minimal examples
 
-Auto I/O (runtime-managed thread pool):
+Auto I/O (work-queue thread pool, default):
 ```zig
 const std = @import("std");
 const zix = @import("zix");
@@ -129,7 +131,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.Http.Server.init(.{
+    var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = "127.0.0.1",
@@ -147,7 +149,7 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-Manual I/O (explicit concurrency limit):
+Manual I/O (single-threaded, explicit concurrency limit via `io.concurrent`):
 ```zig
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -159,7 +161,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(.{
+    var server = try zix.Http.Server.init(4096, .{
         .io = threaded.io(),
         .allocator = arena.allocator(),
         .ip = "127.0.0.1",
@@ -168,6 +170,7 @@ pub fn main() !void {
         .max_client_request = 1024 * 4,
         .max_allocator_size = 1024 * 4,
         .max_client_response = 1024 * 4,
+        .workers = 1, // stay on model 1 -- use the caller's io directly
     });
     defer server.deinit();
 
@@ -236,25 +239,40 @@ Any match logic expressible as string operations — extension checks, version p
 
 ### Concurrency Model
 
-Two modes — the library accepts an opaque `std.Io`, so the caller owns the backend:
+Two modes, selected via `config.workers`:
 
-**Auto** — let the runtime manage threads (default for most cases):
+**Model 2 — work-queue thread pool (default, `workers = 0`):**
+
+Dedicated accept threads push connections to a shared `ConnQueue`. Pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. `SO_REUSEPORT` lets all accept threads listen on the same port.
+
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(.{ .io = process.io, ... });
+    var server = try zix.Http.Server.init(4096, .{
+        .io = process.io,
+        // workers  = 0  → 2 accept threads (auto)
+        // pool_size = 0 → max(10, cpu_count * 2) pool threads (auto)
+        ...
+    });
 ```
 
-**Manual** — explicit concurrency cap (useful for resource-constrained deployments):
+**Model 1 — single accept, `io.concurrent` dispatch (`workers = 1`):**
+
+One accept thread dispatches each connection via `io.concurrent()`. Use this when you need explicit control over the concurrency backend or limit.
+
 ```zig
 pub fn main() !void {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-        .concurrent_limit = std.Io.Limit.limited(4), // cap at 4 concurrent tasks
+        .concurrent_limit = std.Io.Limit.limited(4),
     });
     defer threaded.deinit();
-    var server = try zix.Http.Server.init(.{ .io = threaded.io(), ... });
+    var server = try zix.Http.Server.init(4096, .{
+        .io = threaded.io(),
+        .workers = 1, // use the caller's io directly
+        ...
+    });
 ```
 
-Each accepted connection runs as a concurrent task via `io.concurrent()` — non-blocking, no busy-waiting.
+See [`docs/concurrency.md`](docs/concurrency.md) for architecture details and thread counts.
 
 <br>
 
@@ -308,7 +326,7 @@ curl -H "Origin: http://localhost" "http://localhost:9008/private"              
 curl "http://localhost:9008/private"                                                      # 403
 ```
 
-For a full working example see `examples/server_middleware.zig`.
+For a full working example see `examples/http_middleware.zig`.
 
 <br>
 
@@ -379,7 +397,7 @@ server.registerParamHandler("/ws/:room-id", wsHandler);
 
 ### Static Files & Upload
 
-Set `public_dir` in `HttpServerConfig` to enable static file serving. `server.run()` returns `error.PublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `HttpServer.init`:
+Set `public_dir` in `HttpServerConfig` to enable static file serving. `server.run()` returns `error.PublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `Server.init`:
 
 ```zig
 fn createInitDirs(io: std.Io) void {
@@ -468,7 +486,7 @@ var server = try zix.Http.Server.init(.{
 
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena — no ceiling, no clamping.
 
-For security guidance and tier selection see [`docs/headers.md`](docs/headers.md). For a working demonstration see `examples/server_headers.zig`.
+For security guidance and tier selection see [`docs/headers.md`](docs/headers.md). For a working demonstration see `examples/http_xtra_headers.zig`.
 
 <br>
 

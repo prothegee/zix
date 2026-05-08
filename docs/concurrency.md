@@ -1,74 +1,132 @@
 # Concurrency Models -- zix
 
-Two threading models are available for all server protocols (TCP, UDP, UDS, Channel).
-Both are PoC-verified on TCP/HTTP. Choose based on workload shape.
+Two threading models are available. Select via `config.workers` in `HttpServerConfig`.
 
 ---
 
-## Model 1 -- Single Accept, Per-Connection Dispatch
+## Model 1 -- Single Accept, io.concurrent Dispatch (`workers = 1`)
 
-One main thread binds the socket and calls `accept()` / `receive()` in a loop. Each accepted
-connection or packet is dispatched to a worker via `io.concurrent()` (or `std.Thread.spawn`).
+One thread binds the socket and calls `accept()` in a loop. Each accepted connection is
+dispatched as a concurrent task via `io.concurrent()` -- non-blocking, no busy-waiting.
+The caller owns and creates the `std.Io` backend; this model is suitable when you need
+explicit control over the concurrency limit.
 
 ```
 Main thread:
-  bind → listen / bind → receive
+  bind → listen
   loop:
-    conn/pkt = accept() / receive()
-    io.concurrent(handler, conn/pkt)    ← yields to OS event loop; no busy-wait
+    stream = accept(io)
+    io.concurrent(handleConnection, stream)   ← suspends; OS event loop schedules task
 
-Handler tasks (one per active connection/packet):
-  process to completion
-  task exits when connection closes or packet is handled
+Handler tasks (one per active connection):
+  handleConnection(stream)  -- keep-alive loop until client closes
+  task exits when connection closes
 ```
 
 **When to use:**
-- Default for most workloads.
-- Connection or packet arrival rate is not the bottleneck.
-- Simplest code path.
+- You need an explicit `concurrent_limit` (e.g. resource-constrained deployment).
+- Single-threaded testing or embedding.
+- `workers = 1` in `HttpServerConfig`.
 
-**Reference PoC:** `rnd/server_model_1.zig` — raw `std.Thread.spawn` per connection (no io.concurrent).
+**Example** (`examples/http_manual_concurrent.zig`):
+```zig
+var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
+    .concurrent_limit = std.Io.Limit.limited(4),
+});
+defer threaded.deinit();
 
-**Current src/ implementation:** `src/tcp/http/server.zig` uses `io.concurrent()` — same single-accept pattern.
-
-**Benchmark** (wrk, 100 connections, 2 threads, 10 s, HTTP): ~254,072 req/s
+var server = try zix.Http.Server.init(4096, .{
+    .io = threaded.io(),
+    .workers = 1, // stay on model 1 -- use the caller's io directly
+    ...
+});
+```
 
 ---
 
-## Model 2 -- Multiple Workers, Each With Own Accept Loop
+## Model 2 -- Work-Queue Thread Pool (`workers = 0` or `workers = N`, default)
 
-N worker threads are pre-spawned. Each worker independently binds to the same address using
-`SO_REUSEPORT`. Each worker runs its own accept/receive loop and submits handlers to a shared
-`io.concurrent()` pool.
+Dedicated accept threads push accepted connections to a shared `ConnQueue`. Pool threads
+pop connections and handle each one synchronously with blocking I/O -- no scheduler,
+no `io.concurrent()` overhead. `SO_REUSEPORT` allows all accept threads to listen on
+the same port in parallel.
 
 ```
 Main thread:
-  create shared std.Io.Threaded backend
-  spawn N worker threads
-  join (wait for all workers)
+  create ConnQueue + std.Io.Threaded backend
+  spawn pool_size pool threads
+  spawn worker_count accept threads
+  join accept threads → queue.close() → join pool threads
 
-Worker threads (N workers, each independent):
-  bind/listen with SO_REUSEPORT
+Accept threads (worker_count, default 2):
+  bind/listen on same port with SO_REUSEPORT
   loop:
-    conn/pkt = accept() / receive()
-    threaded.io().concurrent(handler, conn/pkt)
+    stream = accept(io)
+    queue.push(stream)   ← fast; never blocks on I/O
 
-Shared io.concurrent pool:
-  bounded by .concurrent_limit
-  handlers from all workers run on any available pool thread
+Pool threads (pool_size, default max(10, cpu_count * 2)):
+  loop:
+    stream = queue.pop()          ← blocks until a connection arrives
+    handleConnection(stream, io)  ← synchronous blocking I/O, keep-alive loop
+    (loop -- next pop)
 ```
 
 **When to use:**
-- Accept/receive rate is the bottleneck (very high connection volume, short-lived connections).
-- Distribute accept load across all CPU cores.
-- `WORKERS = 0` auto-detects CPU count (`std.Thread.getCpuCount()`).
+- Default for production workloads.
+- `workers = 0` (default) uses 2 accept threads.
+- `workers = N` (N ≥ 2) uses exactly N accept threads.
+- `pool_size = 0` (default) sizes the pool at `max(10, cpu_count * 2)`.
+- `pool_size = N` uses exactly N pool threads.
 
 **OS requirement:** `SO_REUSEPORT` -- Linux ≥ 3.9, macOS, BSD.
 
-**Reference PoC:** `rnd/server_model_2.zig`
+**Example** (default, `examples/http_basic.zig` and others):
+```zig
+pub fn main(process: std.process.Init) !void {
+    var server = try zix.Http.Server.init(4096, .{
+        .io = process.io,
+        // workers   = 0  → 2 accept threads
+        // pool_size = 0  → max(10, cpu_count * 2) pool threads
+        ...
+    });
+    try server.run();
+}
+```
 
-**Benchmark** (wrk, 100 connections, 2 threads, 10 s, HTTP): ~248,160 req/s
-(Throughput is similar to Model 1; the advantage appears in latency distribution under extreme load.)
+**Explicit thread counts:**
+```zig
+var server = try zix.Http.Server.init(4096, .{
+    .io        = process.io,
+    .workers   = 4,   // 4 accept threads
+    .pool_size = 32,  // 32 pool threads
+    ...
+});
+```
+
+---
+
+## Thread Count Reference
+
+| Field | Default | Meaning |
+| :- | :- | :- |
+| `workers = 0` | 2 accept threads | Enough to saturate the kernel accept queue |
+| `workers = 1` | model 1 (no pool) | Single accept + `io.concurrent` dispatch |
+| `workers = N` | N accept threads | Explicit accept parallelism |
+| `pool_size = 0` | `max(10, cpu_count * 2)` | Mirrors khttp's sizing heuristic |
+| `pool_size = N` | N pool threads | Explicit pool size |
+
+---
+
+## Model Comparison
+
+| | Model 1 | Model 2 |
+| :- | :- | :- |
+| Accept threads | 1 | 2 (or N) |
+| Connection dispatch | `io.concurrent()` task | `queue.pop()` + synchronous I/O |
+| Scheduler overhead | yes -- condvar wakeup per connection | no -- blocking pop, no fiber |
+| Concurrency cap | `concurrent_limit` on `std.Io.Threaded` | `pool_size` (OS threads) |
+| `SO_REUSEPORT` | no | yes |
+| Use case | explicit limit, single-threaded embed | production default |
 
 ---
 
@@ -76,28 +134,9 @@ Shared io.concurrent pool:
 
 | Protocol | Model 1 | Model 2 |
 | :- | :- | :- |
-| TCP (HTTP) | yes -- current src/ | yes -- via server_model_2 pattern |
-| UDP | yes -- current src/ | yes -- SO_REUSEPORT on UDP socket |
-| UDS | yes -- planned | yes -- planned (SO_REUSEPORT on UDS, Linux only) |
-| Channel | n/a -- in-process | n/a -- in-process |
-
----
-
-## Concurrency Limit (Model 1 and Model 2)
-
-Both models use `std.Io.Threaded` for the handler pool. The caller sets the cap:
-
-```zig
-// unlimited (runtime auto from CPU count)
-var threaded = std.Io.Threaded.init(allocator, .{});
-
-// explicit cap
-var threaded = std.Io.Threaded.init(allocator, .{
-    .concurrent_limit = std.Io.Limit.limited(4),
-});
-```
-
-See `examples/http_manual_concurrent.zig` for explicit limit usage.
+| TCP (HTTP) | yes -- `workers = 1` | yes -- default |
+| UDP | yes -- current src/ | planned |
+| UDS | planned | planned |
 
 ---
 

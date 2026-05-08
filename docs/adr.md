@@ -4,18 +4,18 @@ Each ADR records a significant design decision: the context that made it necessa
 
 ---
 
-## ADR-001: `std.Io` event-driven concurrency model
+## ADR-001: `std.Io` as the I/O abstraction
 
 **Status:** Accepted
 
 **Context:** The server must handle many concurrent connections without blocking on I/O. Zig 0.16 provides `std.Io` as an opaque event loop abstraction over OS facilities (epoll, kqueue, io_uring, etc.). The alternative was raw OS threads with explicit synchronization.
 
-**Decision:** Accept `std.Io` as a parameter in `zix.Http.Server` and `zix.Udp.Server`. The caller owns and provides the backend (`process.io` for runtime-managed or `std.Io.Threaded` for an explicit cap). Use `io.concurrent()` to dispatch each connection or packet as a task.
+**Decision:** Accept `std.Io` as a parameter in `zix.Http.Server` and `zix.Udp.Server`. The caller owns and provides the backend (`process.io` for runtime-managed or `std.Io.Threaded` for an explicit cap). The server uses `io.concurrent()` in model 1; in model 2 the pool threads call `handleConnection` directly with a `std.Io` derived from `std.Io.Threaded`.
 
 **Consequences:**
-- Tasks suspend at OS boundaries -- no busy-waiting, no per-connection thread.
 - Caller controls the concurrency model. zix does not own or deinit the backend.
-- `zix.Http.Server.run()` and `zix.Udp.Server.run()` block until error; the caller decides what to do after they return.
+- `zix.Http.Server.run()` and `zix.Udp.Server.run()` block until error.
+- `io.concurrent()` is used in model 1 (single accept, task-per-connection). Model 2 bypasses `io.concurrent()` entirely -- pool threads handle connections with blocking synchronous I/O.
 - Code that needs true parallelism (e.g. UDP broadcast) can call `io.concurrent()` from within a task.
 
 ---
@@ -245,6 +245,39 @@ var server = try MyServer.init(.{
 - Test code can now pass `std.testing.allocator` for leak detection; prod code passes `std.heap.smp_allocator`.
 - `UdpServerConfig` and `HttpServerConfig` are now consistent: both expose an explicit, required allocator field.
 - `UdpClient` remains simpler by design — no heap allocation, no allocator field required.
+
+---
+
+## ADR-014: `Server.init(comptime stack_threshold, config)` -- explicit stack buffer threshold
+
+**Status:** Accepted
+
+**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_client_request` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated; otherwise they fall back to `smp_allocator`.
+
+**Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, .{...})` -- `Server` reads as a type, `init` reads as a constructor.
+
+**Consequences:**
+- Call sites are one level simpler: `Server.init(N, config)` instead of `Server(N).init(config)`.
+- `stack_threshold` must remain `comptime` -- Zig requires comptime-known sizes for stack arrays.
+- `HttpServerImpl(stack_threshold)` is the concrete type returned; callers use `var server = try ...` without naming the generic type.
+- Breaking change: all existing call sites updated via `sed`.
+
+---
+
+## ADR-015: Model 2 work-queue architecture (ConnQueue)
+
+**Status:** Accepted
+
+**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than khttp (334 µs vs 87 µs) despite matching throughput (~145K req/s). khttp's architecture uses a dedicated accept thread + OS thread pool + blocking synchronous I/O -- no fiber scheduler in the hot path.
+
+**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` -- they never handle I/O. Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O, exactly matching khttp's model. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives; `std.Thread.Mutex` does not exist in this version).
+
+**Consequences:**
+- Pool threads handle connections with pure blocking I/O -- no condvar dispatch overhead per request, no fiber wakeup latency.
+- Throughput parity with khttp achieved (~144K req/s). Latency gap reduced but not eliminated (~320 µs vs ~90 µs); the remaining gap is attributed to Zig `std.Io.Threaded` backend overhead vs khttp's direct POSIX thread pool.
+- `pool_size` is now a configurable field in `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
+- Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue; `workers = N` allows explicit override.
+- `io.concurrent()` is still used in Model 1 (`workers = 1`) -- unaffected.
 
 ---
 

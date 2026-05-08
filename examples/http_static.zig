@@ -7,6 +7,8 @@ const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 64;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
+const WORKERS: usize = 0; // 0 = auto (2 accept threads)
+const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 const PUBLIC_DIR = "./public";
 const UPLOAD_SUBDIR = "u";
@@ -226,7 +228,7 @@ pub fn main(process: std.process.Init) !void {
 
     createInitDirs(process.io);
 
-    var server = try zix.Http.Server.init(.{
+    var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,
@@ -237,6 +239,8 @@ pub fn main(process: std.process.Init) !void {
         .max_client_response = MAX_CLIENT_RESPONSE,
         .public_dir = PUBLIC_DIR,
         .public_dir_upload = UPLOAD_SUBDIR,
+        .workers = WORKERS,
+        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
