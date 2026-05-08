@@ -67,7 +67,7 @@ test "zix integration: dispatch — exact match returns true" {
 
     var inner = makeInner(.GET, "/about");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     last_handler = "";
@@ -92,7 +92,7 @@ test "zix integration: dispatch — no match returns false" {
 
     var inner = makeInner(.GET, "/contact");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     const matched = try server.router.dispatch(&req, &res, &ctx);
@@ -117,7 +117,7 @@ test "zix integration: dispatch — exact beats param regardless of registration
 
     var inner = makeInner(.GET, "/path/user/alice");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     last_handler = "";
@@ -144,7 +144,7 @@ test "zix integration: dispatch — param beats prefix regardless of registratio
 
     var inner = makeInner(.GET, "/api/users");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     last_handler = "";
@@ -169,7 +169,7 @@ test "zix integration: dispatch — param populates path_params" {
 
     var inner = makeInner(.GET, "/users/bob");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     const matched = try server.router.dispatch(&req, &res, &ctx);
@@ -197,7 +197,7 @@ test "zix integration: dispatch — prefix: longest match wins" {
 
     var inner = makeInner(.GET, "/api/users/alice");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     last_handler = "";
@@ -222,7 +222,7 @@ test "zix integration: dispatch — prefix boundary: /api does not match /apiv2"
 
     var inner = makeInner(.GET, "/apiv2");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     const matched = try server.router.dispatch(&req, &res, &ctx);
@@ -245,7 +245,7 @@ test "zix integration: dispatch — prefix matches its own path exactly" {
 
     var inner = makeInner(.GET, "/api");
     var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = try zix.Http.Response.init(&inner, al, 32);
+    var res = try zix.Http.Response.init(&inner, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     last_handler = "";

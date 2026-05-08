@@ -42,6 +42,7 @@ pub const HeaderSize = union(enum) {
 
 pub const Response = struct {
     req: *std.http.Server.Request,
+    io: std.Io,
     allocator: std.mem.Allocator,
     status: Status.Code = .OK,
     content_type: Content.Type = .TEXT_PLAIN,
@@ -54,14 +55,16 @@ pub const Response = struct {
     ///
     /// Param:
     /// req         - *std.http.Server.Request
+    /// io          - std.Io (used for cross-platform wall-clock time in the Date header)
     /// allocator   - std.mem.Allocator (per-request arena)
     /// max_headers - usize (cap from HeaderSize.value(); default .COMMON = 32)
     ///
     /// Return:
     /// !Response
-    pub fn init(req: *std.http.Server.Request, allocator: std.mem.Allocator, max_headers: usize) !Response {
+    pub fn init(req: *std.http.Server.Request, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) !Response {
         return .{
             .req = req,
+            .io = io,
             .allocator = allocator,
             .extra_buf = try allocator.alloc(HttpHeader, max_headers),
         };
@@ -120,7 +123,9 @@ pub const Response = struct {
     /// Write and flush the HTTP response with the given body
     ///
     /// Note:
-    /// - Sends status line, Content-Type, Content-Length, Connection, and any extra headers
+    /// - Sends status line, Content-Type, Content-Length, Connection, Date, and any extra headers
+    /// - Date uses the request's Date header if present (proxy-forwarded); otherwise current UTC time
+    /// - Connection is close if either the handler or the client requested close
     ///
     /// Param:
     /// body_data - []const u8
@@ -145,10 +150,24 @@ pub const Response = struct {
         const cl = try std.fmt.bufPrint(buf[offset..], "Content-Length: {d}\r\n", .{body_data.len});
         offset += cl.len;
 
-        const conn = if (self.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
+        const conn = if (self.keep_alive and self.req.head.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
         if (offset + conn.len > buf.len) return error.BufferTooSmall;
         @memcpy(buf[offset..][0..conn.len], conn);
         offset += conn.len;
+
+        var date_buf: [40]u8 = undefined;
+        const date_value: []const u8 = blk: {
+            var it = self.req.iterateHeaders();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "date")) break :blk h.value;
+            }
+            const ts = std.Io.Clock.real.now(self.io);
+            const raw_secs = ts.toSeconds();
+            const secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
+            break :blk formatHttpDate(secs, &date_buf);
+        };
+        const date_line = try std.fmt.bufPrint(buf[offset..], "Date: {s}\r\n", .{date_value});
+        offset += date_line.len;
 
         for (self.extra_buf[0..self.extra_len]) |h| {
             const hline = try std.fmt.bufPrint(buf[offset..], "{s}: {s}\r\n", .{ h.name, h.value });
@@ -193,12 +212,38 @@ pub const Response = struct {
 };
 
 // --------------------------------------------------------- //
+
+fn formatHttpDate(secs: u64, buf: []u8) []u8 {
+    const ep = std.time.epoch;
+    const es = ep.EpochSeconds{ .secs = secs };
+    const epoch_day = es.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_secs = es.getDaySeconds();
+
+    // Jan 1 1970 = Thursday = day 0; (day % 7 + 4) % 7 maps to 0=Sun…6=Sat
+    const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const dow = (@as(u64, epoch_day.day) % 7 + 4) % 7;
+
+    return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        day_names[dow],
+        @as(u32, month_day.day_index) + 1,
+        month_names[@intFromEnum(month_day.month) - 1],
+        year_day.year,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+    }) catch buf[0..0];
+}
+
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: http response setters" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, arena.allocator(), 32);
+    var res = try Response.init(undefined, undefined, arena.allocator(), 32);
 
     res.setStatus(.CREATED);
     try std.testing.expectEqual(Status.Code.CREATED, res.status);
@@ -231,7 +276,7 @@ test "zix test: HeaderSize value()" {
 test "zix test: addHeader injection guard" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, arena.allocator(), 32);
+    var res = try Response.init(undefined, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderName, res.addHeader("X-Bad\r\nInject", "val"));
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
 }
@@ -239,8 +284,25 @@ test "zix test: addHeader injection guard" {
 test "zix test: addHeader TooManyHeaders" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, arena.allocator(), 2);
+    var res = try Response.init(undefined, undefined, arena.allocator(), 2);
     try res.addHeader("X-A", "1");
     try res.addHeader("X-B", "2");
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));
+}
+
+test "zix test: formatHttpDate known timestamps" {
+    var buf: [40]u8 = undefined;
+
+    // Unix epoch origin: Thu Jan 1 1970 00:00:00 GMT
+    try std.testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", formatHttpDate(0, &buf));
+
+    // Jan 3 1970 (Saturday) 00:00:00 GMT — 2 days after epoch
+    try std.testing.expectEqualStrings("Sat, 03 Jan 1970 00:00:00 GMT", formatHttpDate(2 * 86400, &buf));
+
+    // Jan 1 1970 01:01:01 GMT — time components
+    try std.testing.expectEqualStrings("Thu, 01 Jan 1970 01:01:01 GMT", formatHttpDate(3661, &buf));
+
+    // Feb 28 2000 12:30:45 GMT — leap year boundary
+    // 11015 days * 86400 + 45045 secs (12*3600 + 30*60 + 45)
+    try std.testing.expectEqualStrings("Mon, 28 Feb 2000 12:30:45 GMT", formatHttpDate(951_741_045, &buf));
 }

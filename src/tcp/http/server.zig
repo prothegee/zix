@@ -57,7 +57,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *HttpServer) 
             .reader = &conn_reader.interface,
             .allocator = allocator,
         };
-        var res = Response.init(&inner_req, allocator, cfg.max_response_headers.value()) catch return;
+        var res = Response.init(&inner_req, io, allocator, cfg.max_response_headers.value()) catch return;
         var ctx = Context{ .io = io, .allocator = allocator };
 
         const matched = server.router.dispatch(&req, &res, &ctx) catch false;
