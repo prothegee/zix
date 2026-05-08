@@ -36,6 +36,15 @@ pub const HttpServerConfig = struct {
     public_dir_upload: []const u8 = "u",
     /// Milliseconds before an idle or unresponsive connection is closed.
     response_timeout_ms: u32 = 30_000,
+    /// Number of accept threads (model 2 only).
+    /// 0 (default) = 2 accept threads — enough to saturate the kernel accept queue.
+    /// 1           = single-threaded mode, uses the caller's io directly (model 1).
+    /// N           = exactly N accept threads.
+    workers: usize = 0,
+    /// Number of pool threads (model 2 only).
+    /// 0 (default) = max(10, cpu_count * 2) — mirrors khttp's thread-pool sizing.
+    /// N           = exactly N pool threads.
+    pool_size: usize = 0,
 };
 
 // --------------------------------------------------------- //

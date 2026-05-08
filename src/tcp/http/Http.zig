@@ -10,7 +10,7 @@ const upload = @import("upload.zig");
 
 // --------------------------------------------------------- //
 
-pub const Server = @import("server.zig").HttpServer;
+pub const Server = @import("server.zig").Server;
 pub const ServerConfig = config.HttpServerConfig;
 pub const Request = request.Request;
 pub const Response = response.Response;

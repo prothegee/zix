@@ -7,6 +7,8 @@ const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
+const WORKERS: usize = 0; // 0 = auto (2 accept threads)
+const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 // Middleware is composed at comptime using wrapper functions.
 // Each wrapper takes a 'next' handler (comptime-known) and returns a new HandlerFn.
@@ -156,7 +158,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = try zix.Http.Server.init(.{
+    var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
         .allocator = arena.allocator(),
         .ip = IP,
@@ -165,6 +167,8 @@ pub fn main(process: std.process.Init) !void {
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
+        .workers = WORKERS,
+        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 

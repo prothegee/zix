@@ -11,8 +11,9 @@ pub const HttpHeader = struct {
 
 /// Controls how many custom response headers addHeader() will accept per request.
 ///
-/// max_response_headers in HttpServerConfig sets the cap, the backing buffer is
-/// arena-allocated per request to exactly that size — no waste, no false ceiling.
+/// max_response_headers in HttpServerConfig sets the cap. The backing buffer is
+/// arena-allocated lazily on the first addHeader() call — requests that add no
+/// custom headers pay zero allocation cost.
 /// Any addHeader() call beyond the cap returns error.TooManyHeaders.
 ///
 /// - MINIMAL     (16)  — simple APIs, constrained environments
@@ -47,26 +48,28 @@ pub const Response = struct {
     status: Status.Code = .OK,
     content_type: Content.Type = .TEXT_PLAIN,
     keep_alive: bool = true,
-    extra_buf: []HttpHeader,
+    extra_buf: ?[]HttpHeader = null,
     extra_len: usize = 0,
+    max_headers: usize,
+    date_cache: ?[]const u8 = null,
 
     /// Brief:
     /// Initialize a Response for the given request
     ///
     /// Param:
     /// req         - *std.http.Server.Request
-    /// io          - std.Io (used for cross-platform wall-clock time in the Date header)
+    /// io          - std.Io (retained for fallback clock use)
     /// allocator   - std.mem.Allocator (per-request arena)
     /// max_headers - usize (cap from HeaderSize.value(); default .COMMON = 32)
     ///
     /// Return:
-    /// !Response
-    pub fn init(req: *std.http.Server.Request, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) !Response {
+    /// Response
+    pub fn init(req: *std.http.Server.Request, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) Response {
         return .{
             .req = req,
             .io = io,
             .allocator = allocator,
-            .extra_buf = try allocator.alloc(HttpHeader, max_headers),
+            .max_headers = max_headers,
         };
     }
 
@@ -101,6 +104,7 @@ pub const Response = struct {
     /// Append a custom header to the response
     ///
     /// Note:
+    /// - Allocates the header buffer on the first call (lazy); subsequent calls reuse it
     /// - Cap is set by HeaderSize in HttpServerConfig (default: 32), returns error.TooManyHeaders if exceeded
     /// - Returns error.InvalidHeaderName if name contains CR or LF (header injection guard)
     /// - Returns error.InvalidHeaderValue if value contains CR or LF (header injection guard)
@@ -114,8 +118,12 @@ pub const Response = struct {
     pub fn addHeader(self: *Response, name: []const u8, value: []const u8) !void {
         for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
         for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
-        if (self.extra_len >= self.extra_buf.len) return error.TooManyHeaders;
-        self.extra_buf[self.extra_len] = .{ .name = name, .value = value };
+        if (self.extra_buf == null) {
+            self.extra_buf = try self.allocator.alloc(HttpHeader, self.max_headers);
+        }
+        const extra = self.extra_buf.?;
+        if (self.extra_len >= extra.len) return error.TooManyHeaders;
+        extra[self.extra_len] = .{ .name = name, .value = value };
         self.extra_len += 1;
     }
 
@@ -124,7 +132,9 @@ pub const Response = struct {
     ///
     /// Note:
     /// - Sends status line, Content-Type, Content-Length, Connection, Date, and any extra headers
-    /// - Date uses the request's Date header if present (proxy-forwarded); otherwise current UTC time
+    /// - Fixed headers are staged into a single buffer and flushed in one write
+    /// - Date uses the server-cached value (refreshed once per second); proxy-forwarded
+    ///   Date header from the request takes priority if present
     /// - Connection is close if either the handler or the client requested close
     ///
     /// Param:
@@ -133,55 +143,47 @@ pub const Response = struct {
     /// Return:
     /// !void
     pub fn send(self: *Response, body_data: []const u8) !void {
-        var buf: [4096]u8 = undefined;
-        var offset: usize = 0;
+        const out = self.req.server.out;
 
-        const status_text = Status.stringFromEnum(self.status);
-        const status_line = try std.fmt.bufPrint(
-            buf[offset..],
-            "HTTP/1.1 {d} {s}\r\n",
-            .{ @intFromEnum(self.status), status_text },
-        );
-        offset += status_line.len;
-
-        const ct = try std.fmt.bufPrint(buf[offset..], "Content-Type: {s}\r\n", .{self.content_type.asString()});
-        offset += ct.len;
-
-        const cl = try std.fmt.bufPrint(buf[offset..], "Content-Length: {d}\r\n", .{body_data.len});
-        offset += cl.len;
-
-        const conn = if (self.keep_alive and self.req.head.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
-        if (offset + conn.len > buf.len) return error.BufferTooSmall;
-        @memcpy(buf[offset..][0..conn.len], conn);
-        offset += conn.len;
-
-        var date_buf: [40]u8 = undefined;
         const date_value: []const u8 = blk: {
             var it = self.req.iterateHeaders();
             while (it.next()) |h| {
                 if (std.ascii.eqlIgnoreCase(h.name, "date")) break :blk h.value;
             }
-            const ts = std.Io.Clock.real.now(self.io);
-            const raw_secs = ts.toSeconds();
-            const secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
-            break :blk formatHttpDate(secs, &date_buf);
+            break :blk self.date_cache orelse "";
         };
-        const date_line = try std.fmt.bufPrint(buf[offset..], "Date: {s}\r\n", .{date_value});
-        offset += date_line.len;
 
-        for (self.extra_buf[0..self.extra_len]) |h| {
-            const hline = try std.fmt.bufPrint(buf[offset..], "{s}: {s}\r\n", .{ h.name, h.value });
-            offset += hline.len;
+        const status_text = Status.stringFromEnum(self.status);
+        const conn = if (self.keep_alive and self.req.head.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
+
+        // Stage fixed headers into a 320-byte stack buffer — covers the worst-case
+        // fixed header block (~190 bytes) with headroom; single writeAll instead of
+        // multiple print() calls reduces vtable dispatch and write overhead.
+        var fixed: [320]u8 = undefined;
+        var offset: usize = 0;
+        const sl = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), status_text });
+        offset += sl.len;
+        const ct = try std.fmt.bufPrint(fixed[offset..], "Content-Type: {s}\r\n", .{self.content_type.asString()});
+        offset += ct.len;
+        const cl = try std.fmt.bufPrint(fixed[offset..], "Content-Length: {d}\r\n", .{body_data.len});
+        offset += cl.len;
+        if (offset + conn.len + 2 > fixed.len) return error.BufferTooSmall;
+        @memcpy(fixed[offset..][0..conn.len], conn);
+        offset += conn.len;
+        const dl = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
+        offset += dl.len;
+
+        out.writeAll(fixed[0..offset]) catch return;
+
+        if (self.extra_buf) |extra| {
+            for (extra[0..self.extra_len]) |h| {
+                out.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return;
+            }
         }
 
-        if (offset + 2 > buf.len) return error.BufferTooSmall;
-        buf[offset] = '\r';
-        buf[offset + 1] = '\n';
-        offset += 2;
-
-        self.req.server.out.writeAll(buf[0..offset]) catch return;
-        if (body_data.len > 0) self.req.server.out.writeAll(body_data) catch return;
-        self.req.server.out.flush() catch return;
+        out.writeAll("\r\n") catch return;
+        if (body_data.len > 0) out.writeAll(body_data) catch return;
+        out.flush() catch return;
     }
 
     /// Brief:
@@ -213,7 +215,7 @@ pub const Response = struct {
 
 // --------------------------------------------------------- //
 
-fn formatHttpDate(secs: u64, buf: []u8) []u8 {
+pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
     const ep = std.time.epoch;
     const es = ep.EpochSeconds{ .secs = secs };
     const epoch_day = es.getEpochDay();
@@ -243,7 +245,7 @@ fn formatHttpDate(secs: u64, buf: []u8) []u8 {
 test "zix test: http response setters" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, undefined, arena.allocator(), 32);
+    var res = Response.init(undefined, undefined, arena.allocator(), 32);
 
     res.setStatus(.CREATED);
     try std.testing.expectEqual(Status.Code.CREATED, res.status);
@@ -256,8 +258,8 @@ test "zix test: http response setters" {
 
     try res.addHeader("X-Test", "Value");
     try std.testing.expectEqual(@as(usize, 1), res.extra_len);
-    try std.testing.expectEqualStrings("X-Test", res.extra_buf[0].name);
-    try std.testing.expectEqualStrings("Value", res.extra_buf[0].value);
+    try std.testing.expectEqualStrings("X-Test", res.extra_buf.?[0].name);
+    try std.testing.expectEqualStrings("Value", res.extra_buf.?[0].value);
 }
 
 test "zix test: HeaderSize value()" {
@@ -276,7 +278,7 @@ test "zix test: HeaderSize value()" {
 test "zix test: addHeader injection guard" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, undefined, arena.allocator(), 32);
+    var res = Response.init(undefined, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderName, res.addHeader("X-Bad\r\nInject", "val"));
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
 }
@@ -284,7 +286,7 @@ test "zix test: addHeader injection guard" {
 test "zix test: addHeader TooManyHeaders" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = try Response.init(undefined, undefined, arena.allocator(), 2);
+    var res = Response.init(undefined, undefined, arena.allocator(), 2);
     try res.addHeader("X-A", "1");
     try res.addHeader("X-B", "2");
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));

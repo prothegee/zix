@@ -16,23 +16,23 @@ HTTP server built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
+Two concurrency models, selected via `config.workers`:
+
+### Model 2 -- Work-Queue Thread Pool (default, `workers = 0` or `workers = N ≥ 2`)
+
 ```mermaid
 flowchart TD
-    A1["main(process)"] -->|auto| B["io = process.io\nruntime-managed thread pool"]
-    A2["main()"] -->|manual| B2["std.Io.Threaded.init()\nwith .concurrent_limit"]
-    B2 --> B3["io = threaded.io()"]
-    B --> C["zix.Http.Server.run()"]
-    B3 --> C
-    C --> D["net_server.accept(io)\nsuspends until TCP connection"]
-    D --> E["io.concurrent(handleConnection)"]
-    E --> D
-    E --> F["handleConnection()"]
-    F --> G["alloc read_buf + write_buf\n(smp_allocator)"]
+    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
+    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) → queue.push(stream)"]
+    SPAWN --> POOL["Pool thread\nqueue.pop()\nhandleConnection(stream)"]
+    ACC --> ACC
+    POOL --> HC["handleConnection()"]
+    HC --> G["stack/heap read_buf + write_buf"]
     G --> H["std.http.Server.init()"]
     H --> I["ArenaAllocator per-connection"]
     I --> J["keep-alive loop"]
     J --> K["receiveHead()"]
-    K -->|close or reset| Z["stream.close() -- free buffers"]
+    K -->|close or reset| Z["stream.close()"]
     K --> L["build Request + Response + Context"]
     L --> M["Router.dispatch()"]
     M -->|matched| N["HandlerFn"]
@@ -45,11 +45,41 @@ flowchart TD
     Q --> J
 ```
 
-Two I/O modes:
-- **Auto** -- `main(process: std.process.Init)`, use `process.io`. Runtime manages the thread pool.
-- **Manual** -- `main() !void`, create `std.Io.Threaded` explicitly. Caller controls `.concurrent_limit`.
+- Accept threads only call `accept()` and push to the shared `ConnQueue` -- they never handle I/O.
+- Pool threads pop and handle each connection with synchronous blocking I/O -- no `io.concurrent()` overhead.
+- Default: 2 accept threads, `max(10, cpu_count * 2)` pool threads.
 
-`zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. Each accepted connection runs as a concurrent task via `io.concurrent(handleConnection)`, suspending on I/O without busy-waiting.
+### Model 1 -- Single Accept, io.concurrent Dispatch (`workers = 1`)
+
+```mermaid
+flowchart TD
+    MAIN["main()\nServer.run()"] --> D["net_server.accept(io)\nsuspends until TCP connection"]
+    D --> E["io.concurrent(handleConnection)"]
+    E --> D
+    E --> F["handleConnection()"]
+    F --> G["stack/heap read_buf + write_buf"]
+    G --> H["std.http.Server.init()"]
+    H --> I["ArenaAllocator per-connection"]
+    I --> J["keep-alive loop"]
+    J --> K["receiveHead()"]
+    K -->|close or reset| Z["stream.close()"]
+    K --> L["build Request + Response + Context"]
+    L --> M["Router.dispatch()"]
+    M -->|matched| N["HandlerFn"]
+    M -->|no match| O{"public_dir set?"}
+    O -->|yes| P["static.serve()"]
+    O -->|no| Q["404 Not Found"]
+    P -->|file not found| Q
+    N --> J
+    P --> J
+    Q --> J
+```
+
+- One accept thread; each connection dispatched as a concurrent task via `io.concurrent()`.
+- Use when you need an explicit `concurrent_limit` (`std.Io.Threaded` with `.concurrent_limit`).
+- `workers = 1` in `HttpServerConfig`.
+
+`zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.
 
 ---
 
@@ -65,7 +95,7 @@ graph TD
     zix --> utils["utils/file.zig\nzix.utils.file"]
     Tcp -.->|re-exports| Http
 
-    Http --> server["server.zig\nHttpServer"]
+    Http --> server["server.zig\nServer + ConnQueue"]
     Http --> config["config.zig\nHttpServerConfig"]
     Http --> router["router.zig\nRouter + HandlerFn"]
     Http --> request["request.zig\nRequest"]
@@ -152,14 +182,16 @@ pub const HttpServerConfig = struct {
     allocator:            std.mem.Allocator, // used for router route list
     ip:                   []const u8,
     port:                 u16,
-    max_kernel_backlog:   usize    = 1024 * 4, // TCP listen() backlog
-    max_client_request:   usize    = 1024 * 4, // read buffer per connection (heap)
-    max_allocator_size:   usize    = 1024 * 4, // per-connection arena backing size
-    max_client_response:  usize    = 1024 * 4, // write buffer per connection (heap)
-    max_response_headers: HeaderSize = .COMMON, // custom header cap; arena-allocated per request
-    public_dir:           []const u8 = "",   // static file root; "" disables static serving
-    public_dir_upload:    []const u8 = "u",  // upload subdir under public_dir
-    response_timeout_ms:  u32      = 30_000, // reserved for future timeout enforcement
+    max_kernel_backlog:   usize      = 1024 * 4, // TCP listen() backlog
+    max_client_request:   usize      = 1024 * 4, // read buffer per connection (heap or stack)
+    max_allocator_size:   usize      = 1024 * 4, // per-connection arena backing size
+    max_client_response:  usize      = 1024 * 4, // write buffer per connection (heap or stack)
+    max_response_headers: HeaderSize = .COMMON,  // custom header cap; arena-allocated per request
+    public_dir:           []const u8 = "",        // static file root; "" disables static serving
+    public_dir_upload:    []const u8 = "u",       // upload subdir under public_dir
+    response_timeout_ms:  u32        = 30_000,    // reserved for future timeout enforcement
+    workers:              usize      = 0,  // 0 = 2 accept threads (model 2); 1 = model 1; N = N accept threads
+    pool_size:            usize      = 0,  // 0 = max(10, cpu_count * 2); N = N pool threads (model 2 only)
 };
 ```
 
@@ -173,27 +205,31 @@ For header cap selection and security guidance see [`docs/headers.md`](headers.m
 
 ## Connection Lifecycle
 
+Model 2 (default -- pool thread handles connection synchronously):
+
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Server as Http.Server.run()
-    participant Task as handleConnection task
+    participant Accept as Accept thread
+    participant Queue as ConnQueue
+    participant Pool as Pool thread
     participant Router
     participant Handler as HandlerFn
     participant Static as static.serve()
 
-    Client->>Server: TCP connect
-    Server->>Task: io.concurrent(handleConnection)
-    Note over Server: accept loop continues
+    Client->>Accept: TCP connect
+    Accept->>Queue: queue.push(stream)
+    Queue->>Pool: queue.pop() unblocks
+    Note over Accept: immediately back to accept()
 
-    Task->>Task: alloc read_buf + write_buf
-    Task->>Task: ArenaAllocator init
+    Pool->>Pool: alloc read_buf + write_buf
+    Pool->>Pool: ArenaAllocator init
 
     loop keep-alive
-        Client->>Task: HTTP request
-        Task->>Task: receiveHead()
-        Task->>Task: build Request + Response + Context
-        Task->>Router: dispatch(req, res, ctx)
+        Client->>Pool: HTTP request
+        Pool->>Pool: receiveHead()
+        Pool->>Pool: build Request + Response + Context
+        Pool->>Router: dispatch(req, res, ctx)
 
         alt route matched
             Router->>Handler: handler(req, res, ctx)
@@ -207,11 +243,12 @@ sequenceDiagram
             end
         end
 
-        Task->>Task: arena.reset()
+        Pool->>Pool: arena.reset()
     end
 
-    Client->>Task: connection close
-    Task->>Task: free read_buf + write_buf -- arena.deinit()
+    Client->>Pool: connection close
+    Pool->>Pool: free read_buf + write_buf -- arena.deinit()
+    Pool->>Queue: queue.pop() (next connection)
 ```
 
 ---
