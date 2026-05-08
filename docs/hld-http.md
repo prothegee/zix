@@ -250,6 +250,26 @@ Buffers response state, writes on `send()` or equivalent.
 
 Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size; `error.BufferTooSmall` is returned if exceeded.
 
+### Automatic headers emitted by send()
+
+`send()` always emits these headers before any custom headers added via `addHeader()`:
+
+| Header | Value | Source |
+| :- | :- | :- |
+| `Content-Type` | from `setContentType()` | default `.TEXT_PLAIN` |
+| `Content-Length` | `body.len` | computed |
+| `Connection` | `keep-alive` or `close` | see below |
+| `Date` | RFC 7231 UTC timestamp | see below |
+
+**`Connection` logic** — close if either side requests it:
+- `keep-alive` when both `self.keep_alive` (handler default `true`) and `req.head.keep_alive` (parsed from the client's `Connection` request header) are true.
+- `close` if the handler called `setKeepAlive(false)` **or** the client sent `Connection: close`.
+
+**`Date` logic** — cross-platform, proxy-aware:
+1. Walk request headers for a proxy-forwarded `Date` value; if found, use it verbatim.
+2. Otherwise call `std.Io.Clock.real.now(self.io).toSeconds()` — wall-clock UTC, translated from the OS native epoch on all platforms (Linux, macOS, Windows).
+3. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
+
 ---
 
 ## Router
