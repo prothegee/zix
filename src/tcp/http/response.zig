@@ -41,6 +41,34 @@ pub const HeaderSize = union(enum) {
     }
 };
 
+/// Writer handle returned by Response.stream() for SSE (Server-Sent Events).
+/// All writes flush immediately so each event reaches the client without buffering.
+pub const SseWriter = struct {
+    out: *std.Io.Writer,
+
+    /// Sends: data: <data>\n\n
+    pub fn writeEvent(self: SseWriter, data: []const u8) !void {
+        try self.out.writeAll("data: ");
+        try self.out.writeAll(data);
+        try self.out.writeAll("\n\n");
+        try self.out.flush();
+    }
+
+    /// Sends: event: <event>\ndata: <data>\n\n
+    pub fn writeNamedEvent(self: SseWriter, event: []const u8, data: []const u8) !void {
+        try self.out.print("event: {s}\ndata: {s}\n\n", .{ event, data });
+        try self.out.flush();
+    }
+
+    /// Sends: : <text>\n  (comment / keepalive heartbeat)
+    pub fn comment(self: SseWriter, text: []const u8) !void {
+        try self.out.writeAll(": ");
+        try self.out.writeAll(text);
+        try self.out.writeAll("\n");
+        try self.out.flush();
+    }
+};
+
 pub const Response = struct {
     req: *std.http.Server.Request,
     io: std.Io,
@@ -52,6 +80,8 @@ pub const Response = struct {
     extra_len: usize = 0,
     max_headers: usize,
     date_cache: ?[]const u8 = null,
+    /// Set to true by stream() so handleConnection breaks the keep-alive loop after the handler exits.
+    streaming: bool = false,
 
     /// Brief:
     /// Initialize a Response for the given request
@@ -173,14 +203,28 @@ pub const Response = struct {
         const dl = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
         offset += dl.len;
 
-        out.writeAll(fixed[0..offset]) catch return;
+        // Fast path: no extra headers + body fits in remaining buffer → one writeAll + flush.
+        // Covers "Hello World", short JSON, and most API responses (body ≤ ~190 bytes).
+        if (self.extra_len == 0 and offset + 2 + body_data.len <= fixed.len) {
+            fixed[offset] = '\r';
+            fixed[offset + 1] = '\n';
+            offset += 2;
+            if (body_data.len > 0) {
+                @memcpy(fixed[offset..][0..body_data.len], body_data);
+                offset += body_data.len;
+            }
+            out.writeAll(fixed[0..offset]) catch return;
+            out.flush() catch return;
+            return;
+        }
 
+        // Slow path: extra headers present or body too large for the stack buffer.
+        out.writeAll(fixed[0..offset]) catch return;
         if (self.extra_buf) |extra| {
             for (extra[0..self.extra_len]) |h| {
                 out.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return;
             }
         }
-
         out.writeAll("\r\n") catch return;
         if (body_data.len > 0) out.writeAll(body_data) catch return;
         out.flush() catch return;
@@ -200,6 +244,51 @@ pub const Response = struct {
     pub fn sendJson(self: *Response, body_data: []const u8) !void {
         self.content_type = .APPLICATION_JSON;
         return self.send(body_data);
+    }
+
+    /// Brief:
+    /// Begin an SSE (Server-Sent Events) stream and return an SseWriter
+    ///
+    /// Note:
+    /// - Sends HTTP 200 with Content-Type: text/event-stream, Cache-Control: no-cache —
+    ///   no Content-Length; the connection stays open until the handler returns or a write fails
+    /// - Sets res.streaming = true so handleConnection closes the connection after the handler exits
+    /// - Best used with workers = 1 (Model 1, io.concurrent()); long-lived SSE connections will
+    ///   exhaust a blocking pool (Model 2)
+    ///
+    /// Return:
+    /// !SseWriter
+    pub fn stream(self: *Response) !SseWriter {
+        const out = self.req.server.out;
+
+        const date_value: []const u8 = blk: {
+            var it = self.req.iterateHeaders();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "date")) break :blk h.value;
+            }
+            break :blk self.date_cache orelse "";
+        };
+
+        var fixed: [256]u8 = undefined;
+        var offset: usize = 0;
+        const hdr = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n", .{});
+        offset += hdr.len;
+        if (date_value.len > 0) {
+            const dl = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
+            offset += dl.len;
+        }
+
+        out.writeAll(fixed[0..offset]) catch return error.BrokenPipe;
+        if (self.extra_buf) |extra| {
+            for (extra[0..self.extra_len]) |h| {
+                out.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return error.BrokenPipe;
+            }
+        }
+        out.writeAll("\r\n") catch return error.BrokenPipe;
+        out.flush() catch return error.BrokenPipe;
+
+        self.streaming = true;
+        return SseWriter{ .out = out };
     }
 
     /// Brief:
@@ -290,6 +379,40 @@ test "zix test: addHeader TooManyHeaders" {
     try res.addHeader("X-A", "1");
     try res.addHeader("X-B", "2");
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));
+}
+
+test "zix test: SseWriter writeEvent format" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const sse = SseWriter{ .out = &w };
+    try sse.writeEvent("hello");
+    const expected = "data: hello\n\n";
+    try std.testing.expectEqualSlices(u8, expected, buf[0..expected.len]);
+}
+
+test "zix test: SseWriter writeNamedEvent format" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const sse = SseWriter{ .out = &w };
+    try sse.writeNamedEvent("tick", "42");
+    const expected = "event: tick\ndata: 42\n\n";
+    try std.testing.expectEqualSlices(u8, expected, buf[0..expected.len]);
+}
+
+test "zix test: SseWriter comment format" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const sse = SseWriter{ .out = &w };
+    try sse.comment("heartbeat");
+    const expected = ": heartbeat\n";
+    try std.testing.expectEqualSlices(u8, expected, buf[0..expected.len]);
+}
+
+test "zix test: Response.streaming defaults to false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = Response.init(undefined, undefined, arena.allocator(), 32);
+    try std.testing.expect(!res.streaming);
 }
 
 test "zix test: formatHttpDate known timestamps" {
