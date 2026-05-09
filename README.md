@@ -89,24 +89,12 @@ __*6. Predictable, Transparent Memory Management.*__
 | [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect |
 | [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms |
 | [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms |
-| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols |
+| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols; Channel note |
+| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel -- goals, model, proposed API (not yet implemented) |
+| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel -- proposed internal structure (not yet implemented) |
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
 | [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
 | [`docs/tests.md`](docs/tests.md) | Test coverage and how to run |
-
-<!-- NOTE: preserved table below — kept for historical reference, do not remove -->
-<!-- | Document | Description | -->
-<!-- | :- | :- | -->
-<!-- | [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, memory model | -->
-<!-- | [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect | -->
-<!-- | [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, planned source layout (not yet implemented) | -->
-<!-- | [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms | -->
-<!-- | [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms | -->
-<!-- | [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- stub (not yet implemented) | -->
-<!-- | [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols | -->
-<!-- | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records | -->
-<!-- | [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling | -->
-<!-- | [`docs/tests.md`](docs/tests.md) | Test coverage and how to run | -->
 
 <br>
 
@@ -373,11 +361,11 @@ pub fn main(process: std.process.Init) !void {
 
 ```
 # Connect with wscat or websocat, ?name sets the broadcast display name
-wscat    -c "ws://localhost:9007/ws/lobby?name=alice"
-websocat    "ws://localhost:9007/ws/lobby?name=alice"
+wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
+websocat    "ws://localhost:9008/ws/lobby?name=alice"
 
 # ?name is optional — omit for "anonymous"
-wscat    -c "ws://localhost:9007/ws/lobby"
+wscat    -c "ws://localhost:9008/ws/lobby"
 ```
 
 **Priority:** exact > param > prefix — `/ws/:room-id` is a param route, so `/ws/lobby` captures `room-id = "lobby"`.
@@ -392,6 +380,51 @@ server.registerPrefixHandler("/api", apiHandler);
 server.registerParamHandler("/ws/:room-id", wsHandler);
 // + set public_dir in HttpServerConfig for static files
 ```
+
+<br>
+
+### SSE (Server-Sent Events)
+
+One-way server push over HTTP/1.1 — no WebSocket handshake, browser-native `EventSource` reconnect.
+
+```zig
+// GET /events — streams "tick N" once per second
+pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    const sse = try res.stream(); // sends SSE headers, returns SseWriter
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "tick {d}", .{i}) catch break;
+        sse.writeEvent(msg) catch break;                                       // data: tick N\n\n
+        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(1000), .awake) catch break;
+    }
+    // handler returns → connection closes → EventSource auto-reconnects
+}
+```
+
+| `SseWriter` method | Wire format |
+| :- | :- |
+| `writeEvent(data)` | `data: <data>\n\n` |
+| `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
+| `comment(text)` | `: <text>\n` (keepalive) |
+
+**Model requirement:** use `workers = 1` (Model 1). SSE connections are long-lived — they would exhaust a blocking pool (Model 2) one thread per open stream.
+
+```zig
+var server = try zix.Http.Server.init(4096, .{
+    .io      = process.io,
+    .workers = 1, // Model 1 — io.concurrent() per connection
+    ...
+});
+server.registerHandler("/events", eventsHandler);
+```
+
+```sh
+curl -N http://localhost:9010/events
+```
+
+See `examples/http_sse.zig` for a full example with a browser-compatible HTML page.
 
 <br>
 
