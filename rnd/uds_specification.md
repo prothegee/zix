@@ -89,30 +89,46 @@ NOT YET IMPLEMENTED. See ADR-010.
 
 ---
 
-## Zig 0.16.x UDS API (To Verify)
+## Zig 0.16.x UDS API (Verified 2026-05-09)
 
-UDS socket API in Zig 0.16.x is unconfirmed. Expected:
+`std.Io.net.UnixAddress` exists and is the correct entry point:
 
+```zig
+// Create address from path (max 108 bytes on Linux/macOS)
+const ua = try std.Io.net.UnixAddress.init("/tmp/app.sock");
+
+// Server side (stream mode)
+var server = try ua.listen(io, .{ .kernel_backlog = 128 });
+defer server.deinit(io);
+const stream = try server.accept(io); // same Stream type as TCP
+
+// Client side (stream mode)
+const stream = try ua.connect(io); // same Stream type as TCP
+
+// Abstract namespace (Linux only): null-byte prefix
+const abstract = try std.Io.net.UnixAddress.init("\x00app.sock");
+_ = abstract.isAbstract(); // true
+
+// Platform guard
+if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
 ```
-Bind:    IpAddress equivalent for UDS path -- check for std.Io.net.UnixAddress or similar
-Listen:  same .listen() pattern with .mode = .stream or .dgram
-Accept:  same .accept(io) pattern for stream mode
-Send:    same .send(io, &dest, data) for datagram mode
-```
 
-Linux abstract namespace (`\x00name`) avoids filesystem cleanup but is Linux-only.
-Pathname sockets (`/tmp/name.sock`) are portable across Linux and macOS.
+**What is NOT available via `std.Io.net.UnixAddress`:**
+- Datagram mode — `UnixAddress` only exposes `listen()` and `connect()` (stream). Datagram would require raw `std.posix` syscalls.
+
+**Path cleanup:** `std.Io` does not unlink the socket file. Server `deinit()` must call `std.posix.unlink(path)` explicitly. Abstract namespace sockets (`\x00name`) are cleaned up by the kernel automatically.
 
 ---
 
 ## Open Questions
 
-| Question | Notes |
-| :- | :- |
-| Zig 0.16.x API for UDS addressing | Verify `std.Io.net` has UDS support |
-| Abstract namespace vs pathname | Both planned; pathname first for portability |
-| SO_REUSEPORT for Model 2 on UDS | Linux-only, may skip for initial implementation |
-| Datagram mode client identity | No source address enforcement -- app must include identity in payload |
+| Question | Status | Notes |
+| :- | :- | :- |
+| Zig 0.16.x API for UDS addressing | **Resolved** | `std.Io.net.UnixAddress` confirmed; see section above |
+| Abstract namespace vs pathname | Open | Both supported; pathname first for portability |
+| SO_REUSEPORT for Model 2 on UDS | Open | Linux-only; skip for initial stream implementation |
+| Datagram mode client identity | Open | Not via std.Io.net; would need raw std.posix; defer |
+| Datagram mode: include or defer? | **Decision needed** | Stream-only v1 is simpler and covers the main use cases |
 
 ---
 
