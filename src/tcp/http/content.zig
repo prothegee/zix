@@ -13,6 +13,7 @@ pub const Type = enum(u8) {
     TEXT_HTML,
     TEXT_CSS, // css, min.css
     TEXT_CSV,
+    TEXT_EVENT_STREAM,
 
     AUDIO_MPEG,
     AUDIO_WAV,
@@ -81,6 +82,7 @@ pub const Type = enum(u8) {
             .TEXT_HTML => "text/html",
             .TEXT_CSS => "text/css",
             .TEXT_CSV => "text/csv",
+            .TEXT_EVENT_STREAM => "text/event-stream",
 
             .AUDIO_MPEG => "audio/mpeg",
             .AUDIO_WAV => "audio/wav",
@@ -169,6 +171,9 @@ pub fn enumFromString(type_string: []const u8) Type {
     }
     if (std.mem.eql(u8, mod, "text/csv")) {
         return Type.TEXT_CSV;
+    }
+    if (std.mem.eql(u8, mod, "text/event-stream")) {
+        return Type.TEXT_EVENT_STREAM;
     }
 
     if (std.mem.eql(u8, mod, "audio/mpeg")) {
@@ -322,6 +327,7 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
         .TEXT_HTML => "text/html",
         .TEXT_CSS => "text/css",
         .TEXT_CSV => "text/csv",
+        .TEXT_EVENT_STREAM => "text/event-stream",
 
         .AUDIO_MPEG => "audio/mpeg",
         .AUDIO_WAV => "audio/wav",
@@ -454,6 +460,7 @@ test "zix test: tcp http content fn/s" {
         Type.TEXT_HTML,
         Type.TEXT_CSS, // css, min.css
         Type.TEXT_CSV,
+        Type.TEXT_EVENT_STREAM,
 
         Type.AUDIO_MPEG,
         Type.AUDIO_WAV,
