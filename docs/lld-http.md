@@ -79,13 +79,14 @@ loop:
 6. keep-alive loop:
       a. arena.reset(.retain_capacity)
       b. receiveHead() -- returns on close / reset / error
-      c. refresh thread-local date cache (tl_date_secs / tl_date_buf / tl_date_len)
-      d. build Request(inner, &reader, allocator)
+      c. build Request(inner, &reader, allocator)
          build Response(inner, io, allocator, max_response_headers.value())
-         build Context(io, allocator)
+         build Context(io, allocator, stream)  -- ctx.stream = stream (raw TCP, for WS/SSE)
+      d. load global atomic date cache: idx = g_date_active.load(.acquire); res.date_cache = g_date_bufs[idx]
       e. router.dispatch(req, res, ctx)
-      f. if public_dir and not dispatched: static.serve(...)
-      g. if not served: 404
+      f. if res.streaming: break  -- SSE handler opened a stream; connection closes on handler return
+      g. if public_dir and not dispatched: static.serve(...)
+      h. if not served: 404
 ```
 
 Stack buffers live on the pool-thread stack for the duration of the connection. Heap buffers are freed on connection close. The arena is reset between requests and deinited when `handleConnection` returns.
@@ -164,7 +165,7 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 ### Fields
 
-`Response` carries `io: std.Io` (set during `init`) used exclusively by `send()` to obtain wall-clock time for the `Date` header via `std.Io.Clock.real`. This keeps the clock call cross-platform — `std.Io` abstracts Linux `CLOCK_REALTIME`, macOS, and Windows epoch translation behind a vtable.
+`Response` carries `io: std.Io` (retained for potential future use; the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits.
 
 ### extra_buf (arena-allocated header slice)
 
@@ -181,18 +182,46 @@ addHeader(name, value):
 ### send() -- header write format
 
 ```
-1. Stage into 4096-byte stack buffer:
+1. Stage fixed headers into a 320-byte stack buffer:
       "HTTP/1.1 {status_code} {status_text}\r\n"
       "Content-Type: {content_type}\r\n"
       "Content-Length: {body.len}\r\n"
       "Connection: {keep-alive|close}\r\n"
       "Date: {IMF-fixdate}\r\n"
-      for each extra header: "{name}: {value}\r\n"
-      "\r\n"
-2. error.BufferTooSmall if buffer overflows
-3. writer.writeAll(header_buf[0..header_len])
-4. writer.writeAll(body)
-5. writer.flush()
+2. Fast path (no extra headers AND body fits in remaining buffer space):
+      append "\r\n" + body into the same 320-byte buffer
+      one writeAll + flush -- single syscall for most responses
+3. Slow path (extra headers present OR body too large for stack buffer):
+      writeAll(fixed headers)
+      for each extra header: print "{name}: {value}\r\n"
+      writeAll("\r\n")
+      writeAll(body)
+      flush()
+```
+
+### stream() -- SSE header write format
+
+```
+1. Stage into a 256-byte stack buffer:
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "Cache-Control: no-cache\r\n"
+      "Connection: keep-alive\r\n"
+      "Date: {IMF-fixdate}\r\n"  (if date_cache non-empty)
+2. writeAll(fixed headers)
+3. for each extra header: print "{name}: {value}\r\n"
+4. writeAll("\r\n")
+5. flush()
+6. set res.streaming = true
+7. return SseWriter{ .out = req.server.out }
+```
+
+`SseWriter` holds a `*std.Io.Writer` pointer to the connection's write buffer. Each write method flushes immediately so events reach the client without buffering.
+
+```
+writeEvent(data):      writeAll("data: ") + writeAll(data) + writeAll("\n\n") + flush
+writeNamedEvent(e, d): print("event: {e}\ndata: {d}\n\n") + flush
+comment(text):         writeAll(": ") + writeAll(text) + writeAll("\n") + flush
 ```
 
 ### Connection header logic
@@ -209,10 +238,29 @@ close       otherwise (handler called setKeepAlive(false) OR client sent Connect
 ```
 1. Iterate req.iterateHeaders() for "date" (case-insensitive)
       found -> use proxy-forwarded value verbatim
-2. Not found:
-      ts = std.Io.Clock.real.now(self.io)       -- wall-clock UTC, cross-platform
-      secs = ts.toSeconds()                      -- i64, Unix epoch
-      formatHttpDate(secs) -> "Day, DD Mon YYYY HH:MM:SS GMT"
+2. Not found: read from res.date_cache (set in handleConnection before dispatch)
+      date_cache = g_date_bufs[g_date_active.load(.acquire)][0..g_date_lens[idx]]
+      one atomic load, no clock syscall on the hot path
+```
+
+**Global date cache** (`server.zig` module-level):
+
+```
+g_date_bufs:   [2][40]u8      -- double-buffered IMF-fixdate strings
+g_date_lens:   [2]usize       -- valid length of each buffer
+g_date_active: atomic(usize)  -- index (0 or 1) of the current live buffer
+g_date_secs:   atomic(u64)    -- last wall-clock second written
+
+Model 2: timer thread calls updateDateCache every 500 ms (std.Io.sleep)
+Model 1: accept loop calls updateDateCache before each accept()
+
+updateDateCache():
+  cur_secs = std.Io.Clock.real.now(io).toSeconds()
+  if cur_secs == g_date_secs: return  (no-op within the same second)
+  next_idx = 1 - g_date_active.load(.monotonic)
+  formatHttpDate(cur_secs) -> g_date_bufs[next_idx]
+  g_date_active.store(next_idx, .release)  -- publish atomically
+  g_date_secs.store(cur_secs, .release)
 ```
 
 `formatHttpDate` uses `std.time.epoch.EpochSeconds` for calendar decomposition. Day-of-week derived from `(epoch_day.day % 7 + 4) % 7` (Jan 1 1970 = Thursday = day 0).

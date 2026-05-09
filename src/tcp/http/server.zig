@@ -10,11 +10,33 @@ const formatHttpDate = @import("response.zig").formatHttpDate;
 const Context = @import("context.zig").Context;
 const static = @import("static.zig");
 
-// Per-thread date cache — one copy per OS thread, no synchronization needed.
-// Safe in both model 1 (single thread) and model 2 (N worker threads).
-threadlocal var tl_date_secs: u64 = 0;
-threadlocal var tl_date_buf: [40]u8 = undefined;
-threadlocal var tl_date_len: usize = 0;
+// Global date cache — updated by a background timer thread (model 2) or the accept loop (model 1).
+// Readers do a single atomic load — no lock, no syscall per request.
+// Double-buffered so the writer never tears a read in progress.
+var g_date_bufs: [2][40]u8 = undefined;
+var g_date_lens: [2]usize = .{ 0, 0 };
+var g_date_active = std.atomic.Value(usize).init(0);
+var g_date_secs = std.atomic.Value(u64).init(0);
+
+fn updateDateCache(io: std.Io) void {
+    const ts = std.Io.Clock.real.now(io);
+    const raw_secs = ts.toSeconds();
+    const cur_secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
+    if (cur_secs != g_date_secs.load(.monotonic)) {
+        const next_idx = 1 - g_date_active.load(.monotonic);
+        const s = formatHttpDate(cur_secs, &g_date_bufs[next_idx]);
+        g_date_lens[next_idx] = s.len;
+        g_date_active.store(next_idx, .release);
+        g_date_secs.store(cur_secs, .release);
+    }
+}
+
+fn timerLoop(io: std.Io) void {
+    while (true) {
+        updateDateCache(io);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(500), .awake) catch break;
+    }
+}
 
 // --------------------------------------------------------- //
 
@@ -147,26 +169,19 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                     break;
                 };
 
-                // Refresh the thread-local date cache when the second ticks over
-                const ts = std.Io.Clock.real.now(io);
-                const raw_secs = ts.toSeconds();
-                const cur_secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
-                if (cur_secs != tl_date_secs) {
-                    const s = formatHttpDate(cur_secs, &tl_date_buf);
-                    tl_date_secs = cur_secs;
-                    tl_date_len = s.len;
-                }
-
                 var req = Request{
                     .inner = &inner_req,
                     .reader = &conn_reader.interface,
                     .allocator = allocator,
                 };
                 var res = Response.init(&inner_req, io, allocator, cfg.max_response_headers.value());
-                res.date_cache = tl_date_buf[0..tl_date_len];
-                var ctx = Context{ .io = io, .allocator = allocator };
+                // Zero-syscall Date: atomic load from global cache; no clock call per request.
+                const idx = g_date_active.load(.acquire);
+                res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
+                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
 
                 const matched = server.router.dispatch(&req, &res, &ctx) catch false;
+                if (res.streaming) break;
                 if (!matched) {
                     var served = false;
                     if (cfg.public_dir.len > 0) {
@@ -343,7 +358,9 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 });
                 defer net_server.deinit(io);
 
+                updateDateCache(io);
                 while (true) {
+                    updateDateCache(io);
                     const stream = net_server.accept(io) catch |err| {
                         std.debug.print("zix: accept error: {}\n", .{err});
                         continue;
@@ -370,6 +387,11 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 defer queue.deinit();
 
                 std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_size });
+
+                // Background timer thread: updates the global date cache every 500ms.
+                // Keeps the per-request hot path to one atomic load instead of a clock syscall.
+                const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{thread_io});
+                defer timer_thread.detach();
 
                 // Pool threads: block on queue.pop(), handle synchronously
                 const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_size);

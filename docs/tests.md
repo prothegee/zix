@@ -29,9 +29,9 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` |
+| `tcp/http/content.zig` | `refAllDecls` + behavioral: `TEXT_EVENT_STREAM` round-trip (asString / enumFromString) |
 | `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams |
-| `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF in name and value), TooManyHeaders |
+| `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF in name and value), TooManyHeaders, `SseWriter.writeEvent/writeNamedEvent/comment` wire format, `Response.streaming` defaults to false |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam (single param, multi-param, segment count mismatch), route registration (kind + path preserved) |
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
 | `tcp/http/upload.zig` | `refAllDecls` + behavioral: MultipartParser parse + getField |
@@ -84,6 +84,16 @@ These tests exercise the library against mock inputs — no socket, no `std.Io` 
 | Longest prefix wins | `/api/users` beats `/api` for `/api/users/alice` |
 | Prefix boundary | `/api` does **not** match `/apiv2` (next char after prefix must be `/`) |
 | Prefix matches its own path | `/api` matches `/api` exactly |
+
+#### `http_sse_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `TEXT_EVENT_STREAM` content type string | public enum → `"text/event-stream"` |
+| `SseWriter` writeEvent wire format | `"data: ping\n\n"` via public `zix.Http.SseWriter` |
+| `SseWriter` writeNamedEvent wire format | `"event: update\ndata: 99\n\n"` |
+| `SseWriter` comment wire format | `": keepalive\n"` |
+| `Response.streaming` defaults to false | public `init()` invariant |
 
 #### `websocket_test.zig`
 
