@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const integration_tests = .{
         "tests/integration/http_request_test.zig",
         "tests/integration/http_router_test.zig",
+        "tests/integration/http_sse_test.zig",
         "tests/integration/websocket_test.zig",
         "tests/integration/udp_packet_test.zig",
     };
@@ -62,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_paths", "examples/http_paths.zig" },
         .{ "example-http_static", "examples/http_static.zig" },
         .{ "example-http_timeout_resp", "examples/http_timeout_resp.zig" },
+        .{ "example-http_sse", "examples/http_sse.zig" },
         .{ "example-http_websocket", "examples/http_websocket.zig" },
         .{ "example-http_xtra_headers", "examples/http_xtra_headers.zig" },
         .{ "example-udp_server", "examples/udp_server.zig" },

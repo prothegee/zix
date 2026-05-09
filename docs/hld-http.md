@@ -150,7 +150,8 @@ Access via `const zix = @import("zix");`
 | `zix.Http.Server` | struct | Lifecycle: `init` / `registerHandler` / `registerPrefixHandler` / `registerParamHandler` / `run` |
 | `zix.Http.ServerConfig` | struct | Server configuration -- see HttpServerConfig section |
 | `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
-| `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader |
+| `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
+| `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
@@ -284,6 +285,7 @@ Buffers response state, writes on `send()` or equivalent.
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
 | `noContent()` | Sets status `.NO_CONTENT`, sends empty body |
+| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`; sets `streaming = true` so the keep-alive loop exits after the handler returns |
 
 Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size; `error.BufferTooSmall` is returned if exceeded.
 
@@ -304,7 +306,7 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 
 **`Date` logic** — cross-platform, proxy-aware:
 1. Walk request headers for a proxy-forwarded `Date` value; if found, use it verbatim.
-2. Otherwise call `std.Io.Clock.real.now(self.io).toSeconds()` — wall-clock UTC, translated from the OS native epoch on all platforms (Linux, macOS, Windows).
+2. Otherwise read from the global atomic date cache (updated by a timer thread every 500 ms in Model 2, or by the accept loop in Model 1) — one atomic load per request, no clock syscall.
 3. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
 ---
@@ -518,6 +520,60 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 | `leave(room, conn, io)` | deferred immediately after join |
 | `broadcast(room, msg, io)` | each text/binary frame |
 | `RoomMap.deinit()` | process shutdown |
+
+---
+
+## SSE (Server-Sent Events)
+
+One-way server push over HTTP/1.1. The client uses the browser's `EventSource` API or `curl -N`; no upgrade handshake is required.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (EventSource)
+    participant H as Handler task
+
+    C->>H: GET /events
+    H->>C: HTTP/1.1 200 OK\nContent-Type: text/event-stream\n...
+    loop event loop
+        H->>C: data: tick 0\n\n
+        H->>C: data: tick 1\n\n
+    end
+    H->>H: handler returns
+    H->>C: TCP close
+    C->>C: auto-reconnect after retry ms
+```
+
+### res.stream()
+
+`res.stream()` sends the SSE response headers (no `Content-Length`) and returns an `SseWriter`. The connection stays open while the handler writes events. When the handler returns, `handleConnection` sees `res.streaming == true` and closes the connection instead of looping for the next request.
+
+| `SseWriter` method | Wire format |
+| :- | :- |
+| `writeEvent(data)` | `data: <data>\n\n` |
+| `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
+| `comment(text)` | `: <text>\n` |
+
+### Concurrency requirement
+
+SSE connections are long-lived. Model 2's blocking thread pool would be exhausted (one thread per open stream, blocked for the full stream duration). SSE requires **Model 1** (`workers = 1`) so each connection runs as a concurrent task via `io.concurrent()`.
+
+### Handler pattern
+
+```zig
+pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    const sse = try res.stream();
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "tick {d}", .{i}) catch break;
+        sse.writeEvent(msg) catch break;
+        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(1000), .awake) catch break;
+    }
+}
+```
+
+See `examples/http_sse.zig`.
 
 ---
 

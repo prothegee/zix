@@ -14,6 +14,7 @@ pub const Server = @import("server.zig").Server;
 pub const ServerConfig = config.HttpServerConfig;
 pub const Request = request.Request;
 pub const Response = response.Response;
+pub const SseWriter = response.SseWriter;
 pub const Context = context.Context;
 pub const HandlerFn = router.HandlerFn;
 pub const Header = response.HttpHeader;
