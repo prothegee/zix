@@ -154,7 +154,9 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Decision:** Not yet implemented. Will follow the same pattern: `src/uds/`, namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `zix.zig`.
 
-**Consequences:** None until implemented. Tracking here to reserve the namespace and establish the design intent. For open design questions see `rnd/uds_specification.md`.
+**std.Io.net API verified (2026-05-09):** `std.Io.net.UnixAddress` exists with `init(path)`, `listen(io, opts) !Server`, and `connect(io) !Stream`. Stream mode is fully supported. Datagram mode is not exposed via `std.Io.net.UnixAddress` — datagram would require raw `std.posix`. Path cleanup (unlink) is the caller's responsibility. `has_unix_sockets = false` on WASI; supported on Linux, macOS, and Windows 10 RS4+.
+
+**Consequences:** None until implemented. Tracking here to reserve the namespace and establish the design intent. For open design questions and implementation checklist see `rnd/uds_specification.md` and `rnd/tracker.md`.
 
 ---
 
@@ -268,16 +270,64 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than khttp (334 µs vs 87 µs) despite matching throughput (~145K req/s). khttp's architecture uses a dedicated accept thread + OS thread pool + blocking synchronous I/O -- no fiber scheduler in the hot path.
+**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than a comparable blocking-thread HTTP server (334 µs vs ~88 µs) despite matching throughput (~145K req/s). A blocking-thread architecture — dedicated accept thread + OS thread pool + synchronous I/O — eliminates the fiber scheduler from the hot path entirely.
 
-**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` -- they never handle I/O. Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O, exactly matching khttp's model. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives; `std.Thread.Mutex` does not exist in this version).
+**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` -- they never handle I/O. Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives; `std.Thread.Mutex` does not exist in this version).
 
 **Consequences:**
 - Pool threads handle connections with pure blocking I/O -- no condvar dispatch overhead per request, no fiber wakeup latency.
-- Throughput parity with khttp achieved (~144K req/s). Latency gap reduced but not eliminated (~320 µs vs ~90 µs); the remaining gap is attributed to Zig `std.Io.Threaded` backend overhead vs khttp's direct POSIX thread pool.
+- Throughput ~143–144K req/s; latency ~92 µs avg. A ~3–5K req/s gap and ~4 µs latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
 - `pool_size` is now a configurable field in `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
 - Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue; `workers = N` allows explicit override.
 - `io.concurrent()` is still used in Model 1 (`workers = 1`) -- unaffected.
+
+---
+
+## ADR-017: Channel -- In-Process Typed Message Passing
+
+**Status:** Proposed
+
+**Context:** The server models (Model 1 / Model 2) handle request concurrency. There is no primitive for typed message passing between concurrent tasks within a single process. Go channels and POSIX pipes address this pattern; zix needs its own Zig-native equivalent that works alongside `io.concurrent()` tasks.
+
+**Decision:** Not yet implemented. A `zix.Channel(comptime T: type)` generic that provides buffered and unbuffered typed queues with blocking `send`/`recv` and non-blocking `trySend`/`tryRecv`. Exported as `pub const Channel = @import("channel/Channel.zig")` in `zix.zig`.
+
+**Open questions (must be resolved before implementation):**
+- Locking primitive: `std.Io.Mutex` + `std.Io.Condition` (works inside `io.concurrent` fibers) vs `std.Thread.Mutex` (OS threads only). The former is required if Channel is to be used from handler tasks.
+- Unbuffered (capacity = 0) rendezvous semantics: requires two-sided synchronization, more complex than a ring buffer send path.
+- Internal storage: fixed ring buffer with comptime-known capacity (zero alloc) vs heap-allocated list (runtime capacity, requires allocator in config).
+- Naming: `Channel` vs `Chan` — locked once first example ships.
+- `select`/multiplex over N channels: deferred, but internal design must not preclude it.
+
+**Consequences:** None until implemented. Status moves to Accepted once open questions are resolved and src is written. For design notes see `rnd/channel_specification.md` and `rnd/tracker.md`.
+
+---
+
+## ADR-016: SSE via `res.stream()` + `SseWriter`, Model 1 only
+
+**Status:** Accepted
+
+**Context:** SSE (Server-Sent Events) requires a streaming HTTP response: headers are sent once with no `Content-Length`, and the connection stays open while the handler pushes events. The existing `Response.send()` assumes a complete body and always emits `Content-Length`. A new code path is needed without breaking the existing response API.
+
+SSE connections are long-lived (seconds to minutes per stream). Model 2's blocking pool assigns one OS thread per open connection for the full stream duration. With the default `max(10, cpu_count * 2)` pool, a handful of SSE clients would exhaust all pool threads and starve regular HTTP requests. Model 1 (`workers = 1`) dispatches each connection as a concurrent fiber via `io.concurrent()`, allowing thousands of open SSE streams without thread exhaustion.
+
+**Decision:**
+
+1. Add `res.stream() !SseWriter` to `Response`. It sends `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, and `Date` (no `Content-Length`), then sets `res.streaming = true` and returns an `SseWriter`.
+
+2. `SseWriter` holds `*std.Io.Writer` (the connection's buffered writer). Each method writes the SSE wire format and flushes immediately:
+   - `writeEvent(data)` → `data: <data>\n\n`
+   - `writeNamedEvent(event, data)` → `event: <event>\ndata: <data>\n\n`
+   - `comment(text)` → `: <text>\n`
+
+3. `handleConnection` checks `if (res.streaming) break` after each dispatch. When the handler returns the keep-alive loop exits and the TCP connection closes. The browser's `EventSource` auto-reconnects after the default 3-second retry.
+
+4. SSE examples must use `workers = 1`. This is documented in the example, the README, and HLD.
+
+**Consequences:**
+- No change to `Response.send()` — existing handlers are unaffected.
+- `res.streaming` defaults to `false`; only SSE handlers set it to `true`.
+- The Model 1 requirement is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a Model 2 server will work but will block pool threads for the stream duration.
+- `SseWriter` is exported from `zix.Http.SseWriter` for handler authors who want to type-annotate the writer.
 
 ---
 
