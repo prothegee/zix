@@ -315,9 +315,9 @@ SSE connections are long-lived (seconds to minutes per stream). Model 2's blocki
 1. Add `res.stream() !SseWriter` to `Response`. It sends `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, and `Date` (no `Content-Length`), then sets `res.streaming = true` and returns an `SseWriter`.
 
 2. `SseWriter` holds `*std.Io.Writer` (the connection's buffered writer). Each method writes the SSE wire format and flushes immediately:
-   - `writeEvent(data)` → `data: <data>\n\n`
-   - `writeNamedEvent(event, data)` → `event: <event>\ndata: <data>\n\n`
-   - `comment(text)` → `: <text>\n`
+   - `writeEvent(data)` -> `data: <data>\n\n`
+   - `writeNamedEvent(event, data)` -> `event: <event>\ndata: <data>\n\n`
+   - `comment(text)` -> `: <text>\n`
 
 3. `handleConnection` checks `if (res.streaming) break` after each dispatch. When the handler returns the keep-alive loop exits and the TCP connection closes. The browser's `EventSource` auto-reconnects after the default 3-second retry.
 
@@ -328,6 +328,40 @@ SSE connections are long-lived (seconds to minutes per stream). Model 2's blocki
 - `res.streaming` defaults to `false`; only SSE handlers set it to `true`.
 - The Model 1 requirement is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a Model 2 server will work but will block pool threads for the stream duration.
 - `SseWriter` is exported from `zix.Http.SseWriter` for handler authors who want to type-annotate the writer.
+
+---
+
+## ADR-018: Timeout strategy -- B+D (ctx.timedOut + ConnRegistry eviction)
+
+**Status:** Accepted
+
+**Context:** The original `HttpServerConfig.response_timeout_ms` field was never wired into `server.zig`. It existed as a placeholder. Two classes of timeout are needed: a network-level guard for clients that stall before or during header send (holding a pool thread indefinitely), and a handler-level budget for slow application logic.
+
+`SO_RCVTIMEO` was investigated and rejected: on Linux, `SO_RCVTIMEO` fires `EAGAIN`, which `std.Io.Threaded.netReadPosix` maps to `errnoBug` -- a panic in debug mode and `error.Unexpected` in release. It cannot be used on blocking sockets in this stack. `stream.shutdown(.both)` is the correct interruption mechanism: on Linux it causes a blocked `readv()` to return 0 (EOF), which propagates as `error.HttpConnectionClosing` or `error.ReadFailed` through `std.http.Server.receiveHead()`.
+
+Four options were prototyped and tested in `rnd/http_timeout_model_{a,b,c,d}.zig`.
+
+**Option A -- Connection max-age (rejected):**
+A deadline is set once at accept time and checked at the top of each keep-alive loop iteration. This is a connection lifetime cap, not a per-idle-gap timeout. The check fires only when `receiveHead()` returns -- it cannot interrupt a client that goes permanently idle. A thread is held indefinitely inside `receiveHead()` once the client stops sending. Option A was kept in `rnd/` as documentation of the limitation; it is not wired into the server.
+
+**Option C -- Watchdog thread per connection (rejected):**
+Spawning one OS thread per accepted connection eliminates the permanent-idle problem. Each watchdog sleeps for `timeout_ms` and calls `stream.shutdown(.both)` if the connection has not finished. Tested and working: fires at exactly 5.006s. Rejected because it adds one OS thread per active connection (with a 64KB virtual stack each), which multiplies memory pressure under load. Option D achieves the same coverage at zero extra threads.
+
+**Decision:** Adopt B + D as two independent, orthogonal layers. Remove `response_timeout_ms` and replace it with two config fields:
+
+- `conn_timeout_ms: u32 = 0` -- **Layer D**: `ConnRegistry` embedded in `HttpServerImpl`. On each 500ms timer tick, `registry.evict()` scans active connections and calls `stream.shutdown(.both)` on any whose deadline has passed. `handleConnection` registers a `ConnEntry` on accept and deregisters (via `defer`) on close. Effective in model 2 only (the timer thread already exists). Eviction precision: `[deadline, deadline + 500ms]`.
+
+- `handler_timeout_ms: u32 = 0` -- **Layer B**: `ctx.deadline` is set from config before each handler dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps and responding with 408 early. Zero overhead when disabled (null check on deadline). Works in both model 1 and model 2.
+
+The two layers are orthogonal: D fires if the client stalls before the handler ever starts; B fires if the handler takes too long after it starts. Both default to 0 (disabled) so existing code is unaffected.
+
+**Consequences:**
+- `response_timeout_ms` removed -- callers that set it must migrate to `conn_timeout_ms` and/or `handler_timeout_ms`.
+- Layer D fires `shutdown(.both)` which causes `receiveHead()` to return `error.ReadFailed`. This error case is now handled in `handleConnection`.
+- Layer B is cooperative: a handler that does not call `ctx.timedOut()` is never interrupted. This is intentional -- forced cancellation across arbitrary Zig code is not safe.
+- `conn_timeout_ms` should be >= `handler_timeout_ms`. If D fires while the handler is mid-response, the connection closes abruptly instead of sending a clean 408.
+- Option C remains available in `rnd/http_timeout_model_c.zig` for reference. It is the correct choice for deployments where per-connection jitter must be bounded to exact milliseconds rather than `[deadline, deadline + 500ms]`.
+- Reference implementations and test instructions: `rnd/http_timeout_model_{a,b,c,d,bd}.zig`. Design rationale and API corrections discovered during testing: `rnd/timeout_specification.md`.
 
 ---
 
