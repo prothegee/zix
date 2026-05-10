@@ -1,7 +1,5 @@
 # README
 
-__*STATUS: `Development`*__
-
 <h1 align="center">
     <b><i>ZIX</i></b>
 </h1>
@@ -213,7 +211,7 @@ server.registerParamHandler("/path/:tenant-id/:branch", tenantHandler); // all-p
 **Regex-like matching** — zix has no regex engine. `registerPrefixHandler` is the equivalent of `/prefix/(.*)`: it covers the prefix and any sub-path below it. Additional filtering is done inside the handler with plain string operations on `req.path()`:
 
 ```zig
-// Intent: /secret/(.*)  →  only serve files with ?sec=abc123
+// Intent: /secret/(.*)  ->  only serve files with ?sec=abc123
 server.registerPrefixHandler("/secret", secretHandler);
 
 // Inside secretHandler — extract sub-path and apply custom logic
@@ -237,8 +235,8 @@ Dedicated accept threads push connections to a shared `ConnQueue`. Pool threads 
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
-        // workers  = 0  → 2 accept threads (auto)
-        // pool_size = 0 → max(10, cpu_count * 2) pool threads (auto)
+        // workers  = 0  -> 2 accept threads (auto)
+        // pool_size = 0 -> max(10, cpu_count * 2) pool threads (auto)
         ...
     });
 ```
@@ -261,6 +259,51 @@ pub fn main() !void {
 ```
 
 See [`docs/concurrency.md`](docs/concurrency.md) for architecture details and thread counts.
+
+<br>
+
+### Timeouts
+
+Two independent timeout layers, both disabled by default (`0`):
+
+**`conn_timeout_ms`** -- network-level connection guard (Layer D). The timer thread shuts down connections that have been open longer than this without completing. Protects pool threads from clients that stall before or during header send. Effective in model 2 only.
+
+**`handler_timeout_ms`** -- per-handler execution budget (Layer B). Sets `ctx.deadline` before each dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps.
+
+```zig
+var server = try zix.Http.Server.init(4096, .{
+    .io = process.io,
+    .allocator = arena.allocator(),
+    .ip = "127.0.0.1",
+    .port = 9000,
+    .conn_timeout_ms    = 30_000, // close stalled connections after 30s
+    .handler_timeout_ms = 5_000,  // handler budget: 5s
+});
+```
+
+Handler using the budget:
+
+```zig
+pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+
+    doStep1(ctx.io);
+    if (ctx.timedOut()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    doStep2(ctx.io);
+    if (ctx.timedOut()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    try res.sendJson("{\"result\":\"ok\"}");
+}
+```
+
+`ctx.timedOut()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `examples/http_timeout_resp.zig` and `docs/adr.md` (ADR-018) for design rationale.
 
 <br>
 
@@ -300,7 +343,7 @@ Compose left-to-right — the outermost wrapper runs first:
 // origin check only
 server.registerHandler("/public",  withOriginCheck(publicHandler));
 
-// origin check → basic auth → handler
+// origin check -> basic auth -> handler
 server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)));
 ```
 
@@ -344,10 +387,10 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     defer ws_rooms.leave(room_id, conn, ctx.io);  // runs before destroy
 
     // frame loop:
-    //   text/binary → broadcast "[display_name] payload" to room
-    //   ping        → pong
-    //   close       → echo close frame + break
-    //   EOF / error → best-effort close frame + break
+    //   text/binary -> broadcast "[display_name] payload" to room
+    //   ping        -> pong
+    //   close       -> echo close frame + break
+    //   EOF / error -> best-effort close frame + break
     _ = display_name;
 }
 
@@ -399,7 +442,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
         sse.writeEvent(msg) catch break;                                       // data: tick N\n\n
         std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(1000), .awake) catch break;
     }
-    // handler returns → connection closes → EventSource auto-reconnects
+    // handler returns -> connection closes -> EventSource auto-reconnects
 }
 ```
 
@@ -449,7 +492,7 @@ pub fn main(process: std.process.Init) !void {
 ```
 
 - Unmatched routes fall through to static serving from `public_dir`.
-- Range requests (`Range: bytes=…`) → `206 Partial Content` (RFC 7233).
+- Range requests (`Range: bytes=…`) -> `206 Partial Content` (RFC 7233).
 - Directory traversal (`..`) is rejected.
 
 **Upload** — parse the multipart body in a handler, optionally rename before saving:
