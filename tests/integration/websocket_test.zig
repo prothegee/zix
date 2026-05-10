@@ -1,12 +1,12 @@
 //! Integration tests: zix.Http.WebSocket protocol layer.
 //! Covers gaps not in the unit tests in src/tcp/http/websocket.zig:
 //!   - parseFrame for all non-text opcodes (close, ping, pong, binary)
-//!   - parseFrame incomplete frame → null
+//!   - parseFrame incomplete frame -> null
 //!   - parseFrame extended 16-bit payload length (126-tier)
 //!   - buildFrame for all opcodes
 //!   - buildFrame extended length encoding
 //!   - buildFrame + parseFrame round-trip for all opcodes
-//!   - acceptKey: key too long → error.KeyTooLong
+//!   - acceptKey: key too long -> error.KeyTooLong
 //!   - RoomMap: init and deinit with no connections
 
 const std = @import("std");
@@ -19,18 +19,18 @@ const WS = zix.Http.WebSocket;
 test "zix integration: parseFrame — incomplete returns null" {
     var payload_buf: [256]u8 = undefined;
 
-    // fewer than 2 bytes → null (can't read header)
+    // fewer than 2 bytes -> null (can't read header)
     try std.testing.expect(WS.parseFrame(&.{0x81}, &payload_buf) == null);
     try std.testing.expect(WS.parseFrame(&.{}, &payload_buf) == null);
 
-    // header says payload_len=5 but only 3 payload bytes present → null
+    // header says payload_len=5 but only 3 payload bytes present -> null
     const partial = [_]u8{ 0x81, 5, 'H', 'i', '!' }; // 3 of 5
     try std.testing.expect(WS.parseFrame(&partial, &payload_buf) == null);
 }
 
 test "zix integration: parseFrame — binary opcode" {
     var payload_buf: [256]u8 = undefined;
-    const data = [_]u8{0xDE, 0xAD, 0xBE, 0xEF};
+    const data = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     // build raw unmasked binary frame manually
     var frame_buf: [16]u8 = undefined;
     const len = WS.buildFrame(&frame_buf, .binary, &data);
@@ -97,7 +97,7 @@ test "zix integration: parseFrame — extended 16-bit length (126-tier)" {
 test "zix integration: buildFrame — server frames are unmasked (mask bit = 0)" {
     var buf: [32]u8 = undefined;
     _ = WS.buildFrame(&buf, .text, "hello");
-    // RFC 6455 5.1: server→client frames MUST NOT be masked; mask bit is byte[1] & 0x80
+    // RFC 6455 5.1: server->client frames MUST NOT be masked; mask bit is byte[1] & 0x80
     try std.testing.expectEqual(@as(u8, 0), buf[1] & 0x80);
 }
 
@@ -129,7 +129,7 @@ test "zix integration: buildFrame + parseFrame round-trip — all opcodes" {
 }
 
 test "zix integration: acceptKey — key too long returns error" {
-    // RFC 6455: key + GUID must fit in 128 bytes. GUID is 36 bytes → key must be ≤ 92.
+    // RFC 6455: key + GUID must fit in 128 bytes. GUID is 36 bytes -> key must be ≤ 92.
     var out: [64]u8 = undefined;
     const long_key = "A" ** 93; // 93 bytes > 92 limit
     try std.testing.expectError(error.KeyTooLong, WS.acceptKey(long_key, &out));
