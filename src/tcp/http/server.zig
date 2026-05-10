@@ -31,9 +31,59 @@ fn updateDateCache(io: std.Io) void {
     }
 }
 
-fn timerLoop(io: std.Io) void {
+// --------------------------------------------------------- //
+// Layer D -- connection registry + timer eviction
+// --------------------------------------------------------- //
+
+const ConnEntry = struct {
+    stream: std.Io.net.Stream,
+    deadline: std.Io.Clock.Timestamp,
+    done: std.atomic.Value(bool) = .init(false),
+};
+
+const ConnRegistry = struct {
+    mutex: std.Io.Mutex = .init,
+    entries: std.ArrayListUnmanaged(*ConnEntry) = .empty,
+
+    fn register(self: *ConnRegistry, entry: *ConnEntry, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.entries.append(std.heap.smp_allocator, entry) catch {};
+    }
+
+    fn deregister(self: *ConnRegistry, entry: *ConnEntry, io: std.Io) void {
+        entry.done.store(true, .release);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.entries.items, 0..) |e, i| {
+            if (e == entry) {
+                _ = self.entries.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    fn evict(self: *ConnRegistry, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const now = std.Io.Clock.Timestamp.now(io, .real);
+        for (self.entries.items) |e| {
+            if (!e.done.load(.acquire) and now.compare(.gte, e.deadline))
+                e.stream.shutdown(io, .both) catch {};
+        }
+    }
+
+    fn deinit(self: *ConnRegistry) void {
+        self.entries.deinit(std.heap.smp_allocator);
+    }
+};
+
+// --------------------------------------------------------- //
+
+fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
     while (true) {
         updateDateCache(io);
+        registry.evict(io);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(500), .awake) catch break;
     }
 }
@@ -98,6 +148,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
     return struct {
         config: Config,
         router: Router,
+        registry: ConnRegistry = .{},
 
         const Self = @This();
 
@@ -135,6 +186,23 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 
             const cfg = server.config;
 
+            // Layer D: register with the connection registry when conn_timeout_ms > 0.
+            // The timer thread calls registry.evict() every 500ms and shuts down stale
+            // connections via stream.shutdown(.both), which causes the next receiveHead()
+            // to fail with ReadFailed. Effective in model 2 only (timer thread exists).
+            var maybe_conn_entry: ?ConnEntry = null;
+            if (cfg.conn_timeout_ms > 0) {
+                maybe_conn_entry = ConnEntry{
+                    .stream = stream,
+                    .deadline = std.Io.Clock.Timestamp.fromNow(
+                        io,
+                        std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(cfg.conn_timeout_ms), .clock = .real },
+                    ),
+                };
+                server.registry.register(&maybe_conn_entry.?, io);
+            }
+            defer if (maybe_conn_entry != null) server.registry.deregister(&maybe_conn_entry.?, io);
+
             var stack_read: [stack_threshold]u8 = undefined;
             var stack_write: [stack_threshold]u8 = undefined;
 
@@ -166,6 +234,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 var inner_req = http_server.receiveHead() catch |err| {
                     if (err == error.HttpConnectionClosing) break;
                     if (err == error.ConnectionResetByPeer) break;
+                    if (err == error.ReadFailed) break; // Layer D: shutdown(.both) from registry eviction
                     break;
                 };
 
@@ -179,6 +248,11 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 const idx = g_date_active.load(.acquire);
                 res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
                 var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
+
+                // Layer B: set handler deadline from config before dispatch.
+                // Handlers check ctx.timedOut() between expensive steps and respond
+                // with 408 early rather than blocking the pool thread.
+                if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
                 const matched = server.router.dispatch(&req, &res, &ctx) catch false;
                 if (res.streaming) break;
@@ -262,9 +336,10 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         }
 
         /// Brief:
-        /// Free all router storage
+        /// Free all router and registry storage
         pub fn deinit(self: *Self) void {
             self.router.deinit();
+            self.registry.deinit();
         }
 
         /// Brief:
@@ -390,7 +465,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 
                 // Background timer thread: updates the global date cache every 500ms.
                 // Keeps the per-request hot path to one atomic load instead of a clock syscall.
-                const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{thread_io});
+                const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{ thread_io, &self.registry });
                 defer timer_thread.detach();
 
                 // Pool threads: block on queue.pop(), handle synchronously
@@ -398,7 +473,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 defer std.heap.smp_allocator.free(pool_threads);
                 for (pool_threads) |*t| {
                     t.* = try std.Thread.spawn(
-                        .{ .stack_size = 512 * 1024 },
+                        .{ .stack_size = 512 * 1024 }, // MagicNumber
                         poolEntry,
                         .{ self, &queue, thread_io },
                     );
@@ -430,9 +505,9 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 ///   buffer lives on the connection thread stack; otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
 /// - workers in config controls the concurrency model:
-///     0 (default) → auto CPU count accept threads + cpu*2 pool threads (model 2)
-///     1           → single-threaded, uses caller's io (model 1)
-///     N           → exactly N accept threads in model 2
+///     0 (default) -> auto CPU count accept threads + cpu*2 pool threads (model 2)
+///     1           -> single-threaded, uses caller's io (model 1)
+///     N           -> exactly N accept threads in model 2
 ///
 /// Usage:
 /// var server = try zix.Http.Server.init(4096, .{ .ip = "0.0.0.0", .port = 8080, ... });
