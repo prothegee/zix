@@ -17,9 +17,9 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 Shared work queue between accept threads (producers) and pool threads (consumers). Backed by `std.Io.Mutex` + `std.Io.Condition` + `std.ArrayListUnmanaged(std.Io.net.Stream)`.
 
 ```
-push(stream): lock → append → unlock → signal
-pop():        lock → while empty: wait → orderedRemove(0) → unlock → return stream
-close():      lock → closed = true → unlock → broadcast   (unblocks all waiting pop())
+push(stream): lock -> append -> unlock -> signal
+pop():        lock -> while empty: wait -> orderedRemove(0) -> unlock -> return stream
+close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiting pop())
 ```
 
 ### run() -- Model 2 (default, workers = 0 or workers ≥ 2)
@@ -29,11 +29,13 @@ close():      lock → closed = true → unlock → broadcast   (unblocks all wa
 2. pool_size    = if (pool_size == 0) max(10, cpu_count * 2) else pool_size
 3. std.Io.Threaded.init(smp_allocator, .{ .stack_size = 512 KB }) -> thread_io
 4. ConnQueue{}
-5. spawn pool_size pool threads  -> poolEntry(self, &queue, thread_io)
-6. spawn worker_count accept threads -> workerEntry(self, &queue, thread_io)
-7. join accept threads
-8. queue.close(thread_io)
-9. join pool threads
+5. spawn timer thread  -> timerLoop(thread_io, &self.registry)
+      every 500ms: updateDateCache + registry.evict (Layer D connection guard)
+6. spawn pool_size pool threads  -> poolEntry(self, &queue, thread_io)
+7. spawn worker_count accept threads -> workerEntry(self, &queue, thread_io)
+8. join accept threads
+9. queue.close(thread_io)
+10. join pool threads
 ```
 
 ### run() -- Model 1 (workers = 1)
@@ -68,28 +70,36 @@ loop:
 
 ```
 1. setsockopt TCP_NODELAY           -- disable Nagle, send each response immediately
-2. stack_read / stack_write [stack_threshold]u8 on stack
+2. Layer D: if conn_timeout_ms > 0:
+      register ConnEntry{ stream, deadline = now + conn_timeout_ms } with self.registry
+      defer deregister on return (marks done=true, removes from registry)
+3. stack_read / stack_write [stack_threshold]u8 on stack
    read_buf  = if max_client_request  <= stack_threshold: stack slice
                else smp_allocator.alloc(u8, max_client_request)
    write_buf = if max_client_response <= stack_threshold: stack slice
                else smp_allocator.alloc(u8, max_client_response)
-3. defer: heap-free if heap-allocated; stream.close()
-4. std.http.Server.init(&reader.interface, &writer.interface)
-5. ArenaAllocator.init(smp_allocator); pre-warm with max_allocator_size; reset(.retain_capacity)
-6. keep-alive loop:
+4. defer: heap-free if heap-allocated; stream.close()
+5. std.http.Server.init(&reader.interface, &writer.interface)
+6. ArenaAllocator.init(smp_allocator); pre-warm with max_allocator_size; reset(.retain_capacity)
+7. keep-alive loop:
       a. arena.reset(.retain_capacity)
-      b. receiveHead() -- returns on close / reset / error
+      b. receiveHead() -- breaks on HttpConnectionClosing / ConnectionResetByPeer / ReadFailed
+            ReadFailed: Layer D timer thread called stream.shutdown(.both) -> connection expired
       c. build Request(inner, &reader, allocator)
          build Response(inner, io, allocator, max_response_headers.value())
          build Context(io, allocator, stream)  -- ctx.stream = stream (raw TCP, for WS/SSE)
-      d. load global atomic date cache: idx = g_date_active.load(.acquire); res.date_cache = g_date_bufs[idx]
-      e. router.dispatch(req, res, ctx)
-      f. if res.streaming: break  -- SSE handler opened a stream; connection closes on handler return
-      g. if public_dir and not dispatched: static.serve(...)
-      h. if not served: 404
+      d. Layer B: if handler_timeout_ms > 0: ctx = ctx.withTimeout(handler_timeout_ms)
+            sets ctx.deadline; handler calls ctx.timedOut() between steps to check budget
+      e. load global atomic date cache: idx = g_date_active.load(.acquire); res.date_cache = g_date_bufs[idx]
+      f. router.dispatch(req, res, ctx)
+      g. if res.streaming: break  -- SSE handler opened a stream; connection closes on handler return
+      h. if public_dir and not dispatched: static.serve(...)
+      i. if not served: 404
 ```
 
 Stack buffers live on the pool-thread stack for the duration of the connection. Heap buffers are freed on connection close. The arena is reset between requests and deinited when `handleConnection` returns.
+
+Layer D (ConnRegistry) is active in model 2 only -- the timer thread that calls `registry.evict()` exists only in model 2. Layer B (`ctx.withTimeout`) is active in both models.
 
 ---
 

@@ -15,6 +15,7 @@ pub const ServerConfig = config.HttpServerConfig;
 pub const Request = request.Request;
 pub const Response = response.Response;
 pub const SseWriter = response.SseWriter;
+// Do we need WebSocketWriter for some reason?
 pub const Context = context.Context;
 pub const HandlerFn = router.HandlerFn;
 pub const Header = response.HttpHeader;

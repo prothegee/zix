@@ -2,8 +2,8 @@
 //! Covers gaps not in the unit tests in src/tcp/http/request.zig:
 //!   - pathParam() with path_params populated
 //!   - body() with body_cache pre-set (no reader needed)
-//!   - queryParam() empty-value edge case ("?k=" → "" not null)
-//!   - queryParams() empty-value edge case ("?k=" → .value = null)
+//!   - queryParam() empty-value edge case ("?k=" -> "" not null)
+//!   - queryParams() empty-value edge case ("?k=" -> .value = null)
 
 const std = @import("std");
 const zix = @import("zix");

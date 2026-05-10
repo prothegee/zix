@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const integration_tests = .{
         "tests/integration/http_request_test.zig",
         "tests/integration/http_router_test.zig",
+        "tests/integration/http_context_test.zig",
         "tests/integration/http_sse_test.zig",
         "tests/integration/websocket_test.zig",
         "tests/integration/udp_packet_test.zig",

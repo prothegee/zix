@@ -18,14 +18,14 @@ const MAX_PATH_SEGMENTS: usize = 9;
 // GET /path/<seg1>
 // GET /path/<seg1>/<seg2>
 // ... up to MAX_PATH_SEGMENTS segments after /path
-// More than MAX_PATH_SEGMENTS → 404
+// More than MAX_PATH_SEGMENTS -> 404
 // Note: /path/user/:id is handled by userHandler below (param beats prefix)
 //
 // curl usage: curl -X GET "http://localhost:9005/path"
 // curl usage: curl -X GET "http://localhost:9005/path/hello"
 // curl usage: curl -X GET "http://localhost:9005/path/hello/world"
 // curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i"
-// curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i/j"  (→ 404)
+// curl usage: curl -X GET "http://localhost:9005/path/a/b/c/d/e/f/g/h/i/j"  (-> 404)
 pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -100,12 +100,12 @@ pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // IMPORTANT registration order: within param routes, first-registered wins when two
 // patterns have the same segment count. Register more-literal patterns first so they
 // take priority over all-param patterns of the same depth.
-//   /path/user/:id         registered 1st → wins for /path/user/<anything>
-//   /path/:tenant-id/:tenant-branch  registered 2nd → wins for /path/<non-user>/<anything>
+//   /path/user/:id         registered 1st -> wins for /path/user/<anything>
+//   /path/:tenant-id/:tenant-branch  registered 2nd -> wins for /path/<non-user>/<anything>
 //
 // curl usage: curl -X GET "http://localhost:9005/path/acme/main"
 // curl usage: curl -X GET "http://localhost:9005/path/acme/dev"
-// curl usage: curl -X GET "http://localhost:9005/path/user/alice"   (→ userHandler, not here)
+// curl usage: curl -X GET "http://localhost:9005/path/user/alice"   (-> userHandler, not here)
 pub fn tenantHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {

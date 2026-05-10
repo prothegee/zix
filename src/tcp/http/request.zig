@@ -142,7 +142,7 @@ pub const Request = struct {
     ///
     /// Note:
     /// - Leading/trailing slashes produce no empty segments
-    /// - "/a/b/c" → ["a", "b", "c"]
+    /// - "/a/b/c" -> ["a", "b", "c"]
     ///
     /// Param:
     /// allocator - std.mem.Allocator

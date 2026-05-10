@@ -125,16 +125,16 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // Serves files from SECRET_DIR with a mandatory access param.
 //
 // Logic (file existence is checked before the param):
-//   1. File not found in SECRET_DIR        → 404
-//   2. File found, sec param missing/wrong → 403
-//   3. File found, sec=abc123              → 200 with MIME type resolved from extension
+//   1. File not found in SECRET_DIR        -> 404
+//   2. File found, sec param missing/wrong -> 403
+//   3. File found, sec=abc123              -> 200 with MIME type resolved from extension
 //                                            (browser-displayable types render inline;
 //                                             unknown/binary types prompt a download)
 //
 // curl usage:
 //   curl -X GET "http://localhost:9006/secret/file.txt?sec=abc123"
-//   curl -X GET "http://localhost:9006/secret/file.txt"               (→ 403 if file exists)
-//   curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (→ 404)
+//   curl -X GET "http://localhost:9006/secret/file.txt"               (-> 403 if file exists)
+//   curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (-> 404)
 pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);

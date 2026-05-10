@@ -23,7 +23,7 @@ Two concurrency models, selected via `config.workers`:
 ```mermaid
 flowchart TD
     MAIN["main(process)\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
-    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) → queue.push(stream)"]
+    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) -> queue.push(stream)"]
     SPAWN --> POOL["Pool thread\nqueue.pop()\nhandleConnection(stream)"]
     ACC --> ACC
     POOL --> HC["handleConnection()"]
@@ -152,7 +152,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
-| `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP) |
+| `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -190,7 +190,8 @@ pub const HttpServerConfig = struct {
     max_response_headers: HeaderSize = .COMMON,  // custom header cap; arena-allocated per request
     public_dir:           []const u8 = "",        // static file root; "" disables static serving
     public_dir_upload:    []const u8 = "u",       // upload subdir under public_dir
-    response_timeout_ms:  u32        = 30_000,    // reserved for future timeout enforcement
+    conn_timeout_ms:      u32        = 0,         // Layer D: connection guard; 0 = disabled; model 2 only
+    handler_timeout_ms:   u32        = 0,         // Layer B: handler budget; 0 = disabled; ctx.timedOut()
     workers:              usize      = 0,  // 0 = 2 accept threads (model 2); 1 = model 1; N = N accept threads
     pool_size:            usize      = 0,  // 0 = max(10, cpu_count * 2); N = N pool threads (model 2 only)
 };
@@ -480,6 +481,36 @@ sequenceDiagram
 - **HTTP handlers** -- receive a valid `ctx.stream` and must not use it.
 - **WebSocket handlers** -- use `ctx.stream` after `zix.Http.WebSocket.upgrade()` hands off the connection.
 
+### Context.timedOut -- handler execution budget (Layer B)
+
+When `config.handler_timeout_ms > 0`, the server sets `ctx.deadline` before each handler dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps and returning a 408 early rather than blocking the pool thread.
+
+```zig
+pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+
+    doStep1(ctx.io); // e.g. DB query, external call
+    if (ctx.timedOut()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    doStep2(ctx.io);
+    if (ctx.timedOut()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    try res.sendJson("{\"result\":\"ok\"}");
+}
+```
+
+`ctx.timedOut()` is always safe to call -- it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare; no syscall is issued when the deadline has not passed.
+
+`ctx.withTimeout(ms)` and `ctx.withDeadline(ts)` return a modified copy of ctx with a new deadline. These can be used inside a handler to set a tighter sub-budget for one step.
+
+For the network-level connection guard (Layer D, `conn_timeout_ms`) see ADR-018.
+
 ### Handler pattern
 
 ```zig
@@ -633,8 +664,7 @@ graph TD
 | Feature | Location | Note |
 | :- | :- | :- |
 | Middleware chain runner | `middleware.zig` | Comptime wrapper pattern is the current approach |
-| Response timeout enforcement | `config.response_timeout_ms` | Field reserved, not yet enforced |
-| HTTP/2 / TLS | out of scope | |
+| HTTP/2 / TLS | out of scope | n/a |
 
 For UDP design see [`docs/hld-udp.md`](hld-udp.md). For UDS see [`docs/hld-uds.md`](hld-uds.md).
 

@@ -203,7 +203,7 @@ pub const Response = struct {
         const dl = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
         offset += dl.len;
 
-        // Fast path: no extra headers + body fits in remaining buffer → one writeAll + flush.
+        // Fast path: no extra headers + body fits in remaining buffer -> one writeAll + flush.
         // Covers "Hello World", short JSON, and most API responses (body ≤ ~190 bytes).
         if (self.extra_len == 0 and offset + 2 + body_data.len <= fixed.len) {
             fixed[offset] = '\r';
