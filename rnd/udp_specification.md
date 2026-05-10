@@ -92,7 +92,7 @@ UDP has no connection state. Disconnect detection is purely timeout-based. Worst
 
 PoC `auto_echo` sends the received packet back as-is. In `src/`, feedback shape should be configurable — either echo the input or respond with a separate result struct. Define the result struct explicitly; do not leave it as a raw byte echo in production code.
 
-**Client reception (PoC):** client receives on its bound socket via a persistent `io.concurrent()` task (`receiveFeedback`). Interprets by received length: 1 byte → ACK (`0x06`) / NACK (`0x15`); `@sizeOf(TestPacket)` bytes → echo or broadcast packet decoded via `@bitCast`. Raw-byte length-dispatch is PoC-only.
+**Client reception (PoC):** client receives on its bound socket via a persistent `io.concurrent()` task (`receiveFeedback`). Interprets by received length: 1 byte -> ACK (`0x06`) / NACK (`0x15`); `@sizeOf(TestPacket)` bytes -> echo or broadcast packet decoded via `@bitCast`. Raw-byte length-dispatch is PoC-only.
 
 **Client reception (src/):** decode into a comptime-generic tagged union:
 ```zig
@@ -139,8 +139,8 @@ Export from `src/zix.zig` as `pub const Udp = @import("udp/Udp.zig");`.
 
 ### Zig 0.16.x API Facts (from PoC)
 
-- UDP socket: `std.Io.net.IpAddress.bind(io, .{ .mode = .dgram, .protocol = .udp })` → `Socket`
-- Receive: `socket.receive(io, buf)` → `IncomingMessage` (`from`, `data`, `flags.trunc`)
+- UDP socket: `std.Io.net.IpAddress.bind(io, .{ .mode = .dgram, .protocol = .udp })` -> `Socket`
+- Receive: `socket.receive(io, buf)` -> `IncomingMessage` (`from`, `data`, `flags.trunc`)
 - Receive with timeout: `socket.receiveTimeout(io, buf, timeout)` — returns `error.Timeout` on expiry
 - Send: `socket.send(io, &dest, data)`
 - Sleep: `std.Io.sleep(io, std.Io.Duration.fromMilliseconds(n), .awake)`

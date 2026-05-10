@@ -13,7 +13,7 @@ explicit control over the concurrency limit.
 
 ```
 Main thread:
-  bind → listen
+  bind -> listen
   loop:
     stream = accept(io)
     io.concurrent(handleConnection, stream)   ← suspends; OS event loop schedules task
@@ -56,7 +56,7 @@ Main thread:
   create ConnQueue + std.Io.Threaded backend
   spawn pool_size pool threads
   spawn worker_count accept threads
-  join accept threads → queue.close() → join pool threads
+  join accept threads -> queue.close() -> join pool threads
 
 Accept threads (worker_count, default 2):
   bind/listen on same port with SO_REUSEPORT
@@ -85,8 +85,8 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
-        // workers   = 0  → 2 accept threads
-        // pool_size = 0  → max(10, cpu_count * 2) pool threads
+        // workers   = 0  -> 2 accept threads
+        // pool_size = 0  -> max(10, cpu_count * 2) pool threads
         ...
     });
     try server.run();

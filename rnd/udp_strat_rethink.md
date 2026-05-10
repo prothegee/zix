@@ -1,9 +1,9 @@
 # Strategic Rethink: UDP Architecture
 
 > **Superseded.** Concerns addressed in [`rnd/udp_specification.md`](udp_specification.md):
-> - Zombie risk → `poll_timeout_ms` + `disconnect_timeout_ms` config fields
-> - Timeout strategy → `receiveTimeout` in receive loop (implemented)
-> - Worker pool → `io.concurrent(processPacket)` per packet (implemented)
+> - Zombie risk -> `poll_timeout_ms` + `disconnect_timeout_ms` config fields
+> - Timeout strategy -> `receiveTimeout` in receive loop (implemented)
+> - Worker pool -> `io.concurrent(processPacket)` per packet (implemented)
 >
 > This file is kept for historical reference only.
 

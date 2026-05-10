@@ -33,7 +33,7 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 - [ ] `build.zig` -- integration test entry
 - [ ] `docs/hld-uds.md` -- fill in actual design (currently empty stub)
 - [ ] `docs/lld-uds.md` -- fill in implementation details (currently empty stub)
-- [ ] `docs/adr.md` -- ADR-010 status: Proposed → Accepted once implemented
+- [ ] `docs/adr.md` -- ADR-010 status: Proposed -> Accepted once implemented
 - [ ] `docs/concurrency.md` -- UDS rows: update from "planned" to actual model
 - [ ] `README.md` -- add `zix.Uds` section
 - [ ] `rnd/uds_specification.md` -- close open question: Zig 0.16 API verified
@@ -62,7 +62,7 @@ Reference: `rnd/channel_specification.md`, `docs/hld-channel.md`, ADR-017 (Propo
 - [ ] `build.zig` -- integration test entry
 - [ ] `docs/hld-channel.md` -- fill in actual design (stub created)
 - [ ] `docs/lld-channel.md` -- fill in implementation details (stub created)
-- [ ] `docs/adr.md` -- ADR-017 status: Proposed → Accepted once implemented
+- [ ] `docs/adr.md` -- ADR-017 status: Proposed -> Accepted once implemented
 - [ ] `README.md` -- add `zix.Channel` section
 
 ---
@@ -71,7 +71,7 @@ Reference: `rnd/channel_specification.md`, `docs/hld-channel.md`, ADR-017 (Propo
 
 Reference: `rnd/server_lifecycle_proposal.md`
 
-- [ ] Add ADR entry for atomic server lifecycle (`IDLE → RUNNING → STOPPING → STOPPED`)
+- [ ] Add ADR entry for atomic server lifecycle (`IDLE -> RUNNING -> STOPPING -> STOPPED`)
 - [ ] HTTP accept loop: replace `while (true)` with atomic status check
 - [ ] HTTP keep-alive loop: check status, set `Connection: close` when stopping
 - [ ] HTTP WebSocket frame loop: check status, send close frame when stopping
@@ -92,7 +92,7 @@ Reference: `rnd/server_lifecycle_proposal.md`
 
 Reference: `docs/hld-udp.md` Not Yet Implemented table
 
-- [ ] `sendmmsg` batching: N sequential `send()` per broadcast → 1 syscall (Linux `sendmmsg`)
+- [ ] `sendmmsg` batching: N sequential `send()` per broadcast -> 1 syscall (Linux `sendmmsg`)
 - [ ] Sub-millisecond `send_every`: rename field from milliseconds to nanoseconds if real-time control loops are needed
 
 ---
@@ -105,7 +105,7 @@ Reference: `docs/adr.md` ADR-012
 - [ ] Add `keep_alive: bool = true` to `HttpServerConfig` — `false` closes after each response
 - [ ] Wire `not_found` into `server.zig` `handleConnection`: call config handler if set, else fall through to current 404
 - [ ] Wire `keep_alive` into `server.zig` keep-alive loop: exit loop and set `Connection: close` when false
-- [ ] Update ADR-012 status from Proposed → Accepted once implemented
+- [ ] Update ADR-012 status from Proposed -> Accepted once implemented
 - [ ] Update `docs/hld-http.md` `HttpServerConfig` section with the two new fields
 
 ---

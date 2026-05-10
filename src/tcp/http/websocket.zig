@@ -33,7 +33,7 @@ pub const ParseResult = struct {
 /// Parse one WebSocket frame from buf.
 ///
 /// Note:
-/// - Client→server frames are masked, the unmasked payload is written into payload_buf.
+/// - Client->server frames are masked, the unmasked payload is written into payload_buf.
 ///   payload_buf must be at least as large as the expected payload (max 4 KB recommended).
 /// - Returns null if buf does not yet contain a complete frame.
 ///
@@ -87,7 +87,7 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     };
 }
 
-/// Build a server→client WebSocket frame (unmasked per RFC 6455 5.1).
+/// Build a server->client WebSocket frame (unmasked per RFC 6455 5.1).
 ///
 /// Note:
 /// - buf must be large enough: payload.len + 10 bytes for the header.
@@ -147,7 +147,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
     return std.base64.standard.Encoder.encode(out[0..encoded_len], &hash);
 }
 
-/// Perform the HTTP → WebSocket upgrade handshake.
+/// Perform the HTTP -> WebSocket upgrade handshake.
 /// Writes the 101 Switching Protocols response directly onto the stream,
 /// bypassing the zix Response layer.
 ///

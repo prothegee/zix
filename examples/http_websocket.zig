@@ -25,9 +25,9 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 // (path params, query params, headers) before calling upgrade().
 //
 // After a successful handshake the connection enters a broadcast loop:
-//   text/binary frames → broadcast "[name] message" to everyone in the room
-//   ping             → pong
-//   close            → echo close frame, end loop
+//   text/binary frames -> broadcast "[name] message" to everyone in the room
+//   ping               -> pong
+//   close              -> echo close frame, end loop
 //
 // Connect (wscat / websocat):
 //   wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
@@ -166,7 +166,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
         w.interface.writeAll(close_frame[0..clen]) catch {};
         w.interface.flush() catch {};
     }
-    // defers: ws_rooms.leave → smp_allocator.destroy(conn)
+    // defers: ws_rooms.leave -> smp_allocator.destroy(conn)
 }
 
 // --------------------------------------------------------- //

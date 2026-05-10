@@ -1,8 +1,8 @@
 # HTTP: Explicit Without Burden (was: zix-cmod-1)
 
 > **Superseded.** Renamed from `rnd/zix-cmod-1.md`. Content has been redistributed:
-> - Resolved decisions → [`docs/adr.md`](../docs/adr.md) (ADR-011, ADR-012)
-> - Specification and performance notes → [`rnd/http_specification.md`](http_specification.md)
+> - Resolved decisions -> [`docs/adr.md`](../docs/adr.md) (ADR-011, ADR-012)
+> - Specification and performance notes -> [`rnd/http_specification.md`](http_specification.md)
 >
 > This file is kept for historical reference only.
 
