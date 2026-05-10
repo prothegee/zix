@@ -19,11 +19,11 @@ Planned for FIX (Financial Information eXchange) protocol as a second protocol o
 ```
 Listen:  IpAddress.listen(io, .{ .mode = .stream, .protocol = .tcp,
                                   .reuse_address = true, .kernel_backlog = N })
-         → NetServer
+         -> NetServer
 
-Accept:  net_server.accept(io)              → Stream   (blocks until TCP connect)
-Read:    stream.reader(io, &buf)            → Reader
-Write:   stream.writer(io, &buf)            → Writer
+Accept:  net_server.accept(io)              -> Stream   (blocks until TCP connect)
+Read:    stream.reader(io, &buf)            -> Reader
+Write:   stream.writer(io, &buf)            -> Writer
 HTTP:    std.http.Server.init(&read.interface, &write.interface)
 Close:   stream.close(io)
 ```
