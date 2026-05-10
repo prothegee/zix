@@ -268,7 +268,7 @@ Wraps `*std.http.Server.Request` and a `*std.Io.Reader` for body reading.
 | `queryParams(allocator)` | `![]QueryParam` | All query params; bare keys have `value = null` |
 | `pathSegments(allocator)` | `![][]const u8` | Non-empty segments split by `/` |
 | `pathParam(name)` | `?[]const u8` | Named capture from param route; null if not captured |
-| `header(name)` | `?[]const u8` | Case-insensitive header lookup |
+| `header(name)` | `?[]const u8` | Case-insensitive lookup; lazy O(1) index built on first call |
 | `body()` | `![]const u8` | Reads `Content-Length` bytes, cached after first call |
 
 ---
@@ -280,8 +280,8 @@ Buffers response state, writes on `send()` or equivalent.
 | Method | Notes |
 | :- | :- |
 | `setStatus(Status.Code)` | Default: `.OK` |
-| `setContentType(Content.Type)` | Default: `.TEXT_PLAIN` |
-| `setKeepAlive(bool)` | Default: `true` |
+| `setContentType(Content.Type)` | Opt-in; header omitted unless explicitly set |
+| `setKeepAlive(bool)` | Opt-in; header omitted unless explicitly set |
 | `addHeader(name, value)` | Up to `max_response_headers` extra headers; rejects CR/LF |
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
@@ -292,23 +292,25 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 
 ### Automatic headers emitted by send()
 
-`send()` always emits these headers before any custom headers added via `addHeader()`:
+`send()` always emits `Content-Length` and `Date`. `Content-Type` and `Connection` are emitted only when the handler explicitly sets them:
 
-| Header | Value | Source |
+| Header | Value | Emitted? |
 | :- | :- | :- |
-| `Content-Type` | from `setContentType()` | default `.TEXT_PLAIN` |
-| `Content-Length` | `body.len` | computed |
-| `Connection` | `keep-alive` or `close` | see below |
-| `Date` | RFC 7231 UTC timestamp | see below |
+| `Content-Type` | from `setContentType()` | only if `setContentType()` was called (skipped for 204) |
+| `Content-Length` | `body.len` | always (skipped for 204 No Content per RFC 7230) |
+| `Connection` | `keep-alive` or `close` | only if `setKeepAlive()` was called |
+| `Date` | RFC 7231 UTC timestamp | always |
 
-**`Connection` logic** — close if either side requests it:
-- `keep-alive` when both `self.keep_alive` (handler default `true`) and `req.head.keep_alive` (parsed from the client's `Connection` request header) are true.
+**`Connection` logic** — emitted only when the handler calls `setKeepAlive()`:
+- Omitted entirely if `setKeepAlive()` was never called.
+- `keep-alive` when `setKeepAlive(true)` was called **and** `req.head.keep_alive` (parsed from the client's `Connection` request header) is true.
 - `close` if the handler called `setKeepAlive(false)` **or** the client sent `Connection: close`.
 
 **`Date` logic** — cross-platform, proxy-aware:
-1. Walk request headers for a proxy-forwarded `Date` value; if found, use it verbatim.
-2. Otherwise read from the global atomic date cache (updated by a timer thread every 500 ms in Model 2, or by the accept loop in Model 1) — one atomic load per request, no clock syscall.
-3. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
+1. `server.zig` scans request headers once before dispatch for a proxy-forwarded `Date` value; if found, stores it in `res.date_cache`.
+2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a timer thread every 500 ms in Model 2, or by the accept loop in Model 1) — one atomic load per request, no clock syscall.
+3. `send()` reads `res.date_cache` directly — no header scan at send time.
+4. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
 ---
 
@@ -332,7 +334,7 @@ server.registerParamHandler("/:tenant/:branch", branchHandler);
 ### Dispatch -- priority rules
 
 ```
-Pass 1 -- exact routes:   first exact match wins           (registration order irrelevant)
+Pass 1 -- exact routes:   O(1) hash map lookup            (registration order irrelevant)
 Pass 2 -- param routes:   first matching pattern wins      (registration order matters)
 Pass 3 -- prefix routes:  longest matching prefix wins     (registration order irrelevant)
 
@@ -343,7 +345,7 @@ Passes 1 and 3 are deterministic regardless of registration order. **Pass 2 is t
 
 ```mermaid
 flowchart TD
-    A["dispatch(req, res, ctx)"] --> B["Pass 1: scan exact routes"]
+    A["dispatch(req, res, ctx)"] --> B["Pass 1: exact_map.get(path) O(1)"]
     B --> C{"exact match?"}
     C -->|yes| DONE["call handler -- return true"]
     C -->|no| D["Pass 2: scan param routes\nin registration order"]
