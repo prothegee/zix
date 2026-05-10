@@ -107,30 +107,32 @@ Layer D (ConnRegistry) is active in model 2 only -- the timer thread that calls 
 
 ### Route storage
 
-Three separate slices backed by `config.allocator`:
+One `routes: ArrayList(Route)` backed by `config.allocator`, plus a dedicated O(1) hash map for exact-match paths:
 
 ```
-exact_routes:  []Route  -- registerHandler()
-param_routes:  []Route  -- registerParamHandler()
-prefix_routes: []Route  -- registerPrefixHandler()
+routes:    ArrayList(Route)                  -- all routes; each has a kind field
+exact_map: StringHashMapUnmanaged(HandlerFn) -- exact-path keys only; O(1) dispatch
 ```
 
 Each `Route`:
 ```zig
+const RouteKind = enum { exact, prefix, param };
+
 const Route = struct {
     path:    []const u8,
     handler: HandlerFn,
+    kind:    RouteKind = .exact,
 };
 ```
 
-Routes are appended at registration time. The `exact_routes` and `prefix_routes` arrays are scanned in full for each dispatch (O(N)). `param_routes` is scanned in registration order -- first match wins.
+`register()` inserts into both `routes` and `exact_map`. `deinit()` frees both. `routes` is scanned for param and prefix kinds during dispatch; exact lookups bypass the scan entirely via `exact_map.get()`.
 
 ### dispatch()
 
 ```
-1. scan exact_routes: std.mem.eql(u8, req.path(), route.path) -> call handler
-2. scan param_routes: matchParam(pattern, path) -> write captured params to req, call handler
-3. scan prefix_routes: collect all where path starts with prefix (boundary-safe) -> pick longest
+1. exact_map.get(req.path()) -> call handler  (O(1))
+2. scan routes for kind == .param: matchParam(pattern, path) -> write captured params to req, call handler
+3. scan routes for kind == .prefix: collect all where path starts with prefix (boundary-safe) -> pick longest
 ```
 
 ### matchParam()
@@ -177,29 +179,41 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 `Response` carries `io: std.Io` (retained for potential future use; the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits.
 
-### extra_buf (arena-allocated header slice)
+### extra_buf (lazily-grown arena slice)
 
-`extra_buf: []HttpHeader` is allocated from the per-request arena in `handleConnection` before building the `Response`. Its length equals `max_response_headers.value()`.
+`extra_buf: ?[]HttpHeader` starts null; allocated lazily on the first `addHeader()` call. Requests that add no custom headers pay zero allocation cost.
 
 ```
 addHeader(name, value):
   1. CR/LF guard: scan name and value for \r or \n -- return error if found
-  2. if header_count >= extra_buf.len -- return error.TooManyHeaders
-  3. extra_buf[header_count] = .{ .name = name, .value = value }
-  4. header_count += 1
+  2. if extra_buf == null:
+       initial = min(4, max_headers); if 0 -> return error.TooManyHeaders
+       extra_buf = allocator.alloc(HttpHeader, initial)
+  3. else if extra_len >= extra_buf.len:
+       if extra_buf.len >= max_headers -> return error.TooManyHeaders
+       new_cap = min(extra_buf.len * 2, max_headers)
+       new_buf = allocator.alloc(HttpHeader, new_cap)
+       @memcpy(new_buf[0..extra_len], extra_buf[0..extra_len])
+       extra_buf = new_buf
+  4. extra_buf[extra_len] = .{ .name = name, .value = value }
+  5. extra_len += 1
 ```
+
+Starts at 4 slots, doubles on each overflow, capped at `max_headers` (from `HeaderSize.value()`). `TooManyHeaders` is only returned when the cap is reached.
 
 ### send() -- header write format
 
 ```
-1. Stage fixed headers into a 320-byte stack buffer:
-      "HTTP/1.1 {status_code} {status_text}\r\n"
-      "Content-Type: {content_type}\r\n"
-      "Content-Length: {body.len}\r\n"
-      "Connection: {keep-alive|close}\r\n"
-      "Date: {IMF-fixdate}\r\n"
+1. Stage fixed headers into a 512-byte stack buffer:
+      status line: Status.statusLine(code) -> @memcpy pre-built string for common codes
+                   uncommon codes: bufPrint "HTTP/1.1 {d} {s}\r\n"
+      if status != 204 No Content:
+          if content_type set: "Content-Type: {ct}\r\n"
+          "Content-Length: {N}\r\n"  -- hand-rolled writeDecimal, no std.fmt
+      if keep_alive set: "Connection: keep-alive\r\n" or "Connection: close\r\n"
+      "Date: {date_cache}\r\n"
 2. Fast path (no extra headers AND body fits in remaining buffer space):
-      append "\r\n" + body into the same 320-byte buffer
+      append "\r\n" + body into the same 512-byte buffer
       one writeAll + flush -- single syscall for most responses
 3. Slow path (extra headers present OR body too large for stack buffer):
       writeAll(fixed headers)
@@ -237,20 +251,21 @@ comment(text):         writeAll(": ") + writeAll(text) + writeAll("\n") + flush
 ### Connection header logic
 
 ```
-keep-alive  iff  self.keep_alive == true  AND  req.head.keep_alive == true
-close       otherwise (handler called setKeepAlive(false) OR client sent Connection: close)
+omitted     if keep_alive == null (setKeepAlive() was never called)
+keep-alive  if keep_alive == true  AND  req.head.keep_alive == true
+close       if keep_alive == false OR   req.head.keep_alive == false
 ```
 
-`req.head.keep_alive` is parsed by `std.http` from the incoming request headers — no manual scanning.
+`keep_alive: ?bool = null` by default. `req.head.keep_alive` is parsed by `std.http` from the incoming request headers -- no manual scanning. Connection header is only written when the handler opts in via `setKeepAlive()`.
 
 ### Date header logic
 
 ```
-1. Iterate req.iterateHeaders() for "date" (case-insensitive)
-      found -> use proxy-forwarded value verbatim
-2. Not found: read from res.date_cache (set in handleConnection before dispatch)
+1. handleConnection sets res.date_cache from the global atomic date cache (one atomic load)
+2. handleConnection then scans req.iterateHeaders() once for a proxy-forwarded "date" header
+      found -> overwrite res.date_cache with the proxy value
+3. send() reads res.date_cache directly -- no header scan at send time
       date_cache = g_date_bufs[g_date_active.load(.acquire)][0..g_date_lens[idx]]
-      one atomic load, no clock syscall on the hot path
 ```
 
 **Global date cache** (`server.zig` module-level):
