@@ -34,8 +34,16 @@ pub const HttpServerConfig = struct {
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Receives multipart uploads.
     public_dir_upload: []const u8 = "u",
-    /// Milliseconds before an idle or unresponsive connection is closed.
-    response_timeout_ms: u32 = 30_000,
+    /// Network-level connection guard (Layer D -- ConnRegistry eviction).
+    /// 0 = disabled. When non-zero, connections that exceed this lifetime are shut down
+    /// by the background timer thread. Effective only in model 2 (workers != 1).
+    /// Should be >= handler_timeout_ms to avoid cutting off an in-flight response.
+    conn_timeout_ms: u32 = 0,
+    /// Per-handler execution budget (Layer B -- ctx.timedOut).
+    /// 0 = disabled. When non-zero, ctx.deadline is set before each handler dispatch.
+    /// Handlers opt in by checking ctx.timedOut() between expensive steps and
+    /// responding with 408 early rather than blocking the pool thread.
+    handler_timeout_ms: u32 = 0,
     /// Number of accept threads (model 2 only).
     /// 0 (default) = 2 accept threads — enough to saturate the kernel accept queue.
     /// 1           = single-threaded mode, uses the caller's io directly (model 1).
