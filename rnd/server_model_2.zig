@@ -10,7 +10,7 @@
 // |  |  HttpServer.init()                                        |  |
 // |  |  (workers = CPU count)                                    |  |
 // |  |                                                           |  |
-// |  |  std.Io.Threaded.init() → global thread pool              |  |
+// |  |  std.Io.Threaded.init() -> global thread pool             |  |
 // |  |                                                           |  |
 // |  |  Spawn N worker threads (startProcess)                    |  |
 // |  |  Wait for all to join                                     |  |
