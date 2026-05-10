@@ -27,7 +27,8 @@ Current state -- named fields in config:
 | Write buffer per connection | `max_client_response` | `4096` | Named field |
 | Per-connection arena backing | `max_allocator_size` | `4096` | Named field |
 | Custom response headers cap | `max_response_headers` | `.COMMON` (32) | Named field (ADR-009) |
-| Response timeout | `response_timeout_ms` | `30_000` | Named field (not enforced) |
+| Connection guard (Layer D) | `conn_timeout_ms` | `0` (disabled) | Named field; model 2 only; ADR-018 |
+| Handler budget (Layer B) | `handler_timeout_ms` | `0` (disabled) | Named field; ctx.timedOut(); ADR-018 |
 
 Pending additions -- proposed in ADR-012:
 
@@ -63,7 +64,7 @@ server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)
 
 ### Routing Priority (3-pass, Accepted, ADR-004)
 
-Pass 1 exact → Pass 2 param (first-registered) → Pass 3 prefix (longest match).
+Pass 1 exact -> Pass 2 param (first-registered) -> Pass 3 prefix (longest match).
 
 First-match-wins routing was proposed as a replacement (see `rnd/http_explicit_implicit.md` section 2) but
 deferred: the change would be breaking and the benefit is marginal for typical route counts.
@@ -110,8 +111,8 @@ Only upload, body-parsing, or large response handlers benefit.
 
 ### 5. Zero-Copy Static Serving
 
-Current: file bytes read into buffer → written to socket (two copies).
-Proposed: `sendfile(2)` on Linux -- page cache → socket directly, no userspace copy.
+Current: file bytes read into buffer -> written to socket (two copies).
+Proposed: `sendfile(2)` on Linux -- page cache -> socket directly, no userspace copy.
 Add as runtime-detected code path in `static.zig`. Relevant for files > 64 KB.
 
 ---
@@ -122,7 +123,7 @@ Add as runtime-detected code path in `static.zig`. Relevant for files > 64 KB.
 | :- | :- |
 | ADR-012: explicit not_found / keep_alive fields | Proposed -- not yet implemented |
 | Hash map for exact routes | Proposed -- not yet implemented |
-| Response timeout enforcement | Field reserved, enforcement deferred |
+| conn_timeout_ms / handler_timeout_ms | Implemented (ADR-018) |
 | First-match-wins routing | Deferred (ADR-004) |
 | Middleware chain runner | Not needed -- comptime wrapper is the pattern |
 
