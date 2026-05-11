@@ -38,6 +38,7 @@ zig-pkg
 *.bak*
 *.zip
 
+*perf.*
 *Zone.Identifier
 
 ##
