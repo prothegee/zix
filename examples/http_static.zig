@@ -128,7 +128,7 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 //   1. File not found in SECRET_DIR        -> 404
 //   2. File found, sec param missing/wrong -> 403
 //   3. File found, sec=abc123              -> 200 with MIME type resolved from extension
-//                                            (browser-displayable types render inline;
+//                                            (browser-displayable types render inline,
 //                                             unknown/binary types prompt a download)
 //
 // curl usage:

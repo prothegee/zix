@@ -36,7 +36,7 @@ var server = try zix.Http.Server.init(.{
 
 Typical header counts by deployment:
 
-- Bare service: 2–6 (`Content-Type`, `Content-Length`, `Connection`, `Date` are emitted automatically; custom headers like `X-Request-ID` come from `addHeader()`)
+- Bare service: 2–6 (`Content-Type`, `Content-Length`, `Connection`, `Date` are emitted automatically custom headers like `X-Request-ID` come from `addHeader()`)
 - With CORS: +4–6 (`Access-Control-*`, `Vary`, `Access-Control-Max-Age`)
 - With caching: +3–4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
 - Behind k8s ingress: +5–10 (forwarding, tracing, X-Forwarded-*, X-Envoy-*)

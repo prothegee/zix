@@ -8,7 +8,7 @@
 
 ---
 
-This document outlines a path to move `zix` away from "framework magic" toward explicit configuration, without losing the "micro-framework" ease of use.
+This document outlines a path to move `zix` away from "framework magic" toward explicit configuration, without losing the "network library" ease of use.
 
 ---
 
@@ -33,7 +33,7 @@ server.registerPrefix("/", zix.Static.handler("./public"));
 
 ## 2. Top-Down Routing (Order is Truth)
 ### Current (Implicit)
-The router uses a 3-pass priority system (Exact -> Param -> Prefix). This is "magic" because the order you register routes doesn't matter; the framework decides who wins.
+The router uses a 3-pass priority system (Exact -> Param -> Prefix). This is "magic" because the order you register routes doesn't matter, the library decides who wins.
 
 ### Proposed (Explicit)
 Change the router to **First-Match-Wins** (Top-Down).

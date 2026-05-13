@@ -10,7 +10,7 @@ const HeaderSize = @import("response.zig").HeaderSize;
 pub const HttpServerConfig = struct {
     /// Event-loop backend. Caller owns and must not deinit while the server is running.
     io: std.Io,
-    /// Backing allocator for router storage. Caller owns; must outlive the server.
+    /// Backing allocator for router storage. Caller owns must outlive the server.
     /// NOTE: ArenaAllocator is suitable here — routes are append-only and never individually freed.
     ///       The entire arena is deinited together with server.deinit(), freeing all routes in one shot.
     allocator: std.mem.Allocator,

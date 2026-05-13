@@ -45,11 +45,11 @@ const std = @import("std");
 //     |
 //     +--[ while loop ]-----------------------------+
 //     |                                             |
-//     |   now >= idle_deadline? --> break (close)  |
+//     |   now >= idle_deadline? --> break (close)   |
 //     |                                             |
-//     |   receiveHead()  <-- may block here; no    |
-//     |                       interrupt possible   |
-//     |   dispatch()                               |
+//     |   receiveHead()  <-- may block here         |
+//     |                       interrupt possible    |
+//     |   dispatch()                                |
 //     |   reset idle_deadline = now + timeout_ms   <-- per idle gap
 //     |                                             |
 //     +---------------------------------------------+

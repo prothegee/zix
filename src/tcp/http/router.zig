@@ -8,16 +8,19 @@ const Context = @import("context.zig").Context;
 
 pub const HandlerFn = *const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void;
 
-const RouteKind = enum { exact, prefix, param };
+const RouteKind = enum(u8) { EXACT, PREFIX, PARAM };
 
 const Route = struct {
     path: []const u8,
     handler: HandlerFn,
-    kind: RouteKind = .exact,
+    kind: RouteKind = .EXACT,
 };
 
 pub const Router = struct {
     routes: std.ArrayList(Route),
+    // O(1) hash lookup for exact-match routes, param/prefix stay in `routes`.
+    // Insertions and lookups use the request path string directly as the key.
+    exact_map: std.StringHashMapUnmanaged(HandlerFn) = .empty,
     allocator: std.mem.Allocator,
 
     /// Brief:
@@ -36,6 +39,7 @@ pub const Router = struct {
     /// Free all route storage
     pub fn deinit(self: *Router) void {
         self.routes.deinit(self.allocator);
+        self.exact_map.deinit(self.allocator);
     }
 
     /// Brief:
@@ -43,6 +47,7 @@ pub const Router = struct {
     ///
     /// Note:
     /// - Matches only when the request path equals path character-for-character
+    /// - Inserted into both `routes` (for listing/iteration) and `exact_map` (for O(1) dispatch)
     ///
     /// Param:
     /// path    - []const u8
@@ -51,7 +56,8 @@ pub const Router = struct {
     /// Return:
     /// !void
     pub fn register(self: *Router, path: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = path, .handler = handler, .kind = .exact });
+        try self.routes.append(self.allocator, .{ .path = path, .handler = handler, .kind = .EXACT });
+        try self.exact_map.put(self.allocator, path, handler);
     }
 
     /// Brief:
@@ -68,7 +74,7 @@ pub const Router = struct {
     /// Return:
     /// !void
     pub fn registerPrefix(self: *Router, prefix: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = prefix, .handler = handler, .kind = .prefix });
+        try self.routes.append(self.allocator, .{ .path = prefix, .handler = handler, .kind = .PREFIX });
     }
 
     /// Brief:
@@ -86,14 +92,14 @@ pub const Router = struct {
     /// Return:
     /// !void
     pub fn registerParam(self: *Router, pattern: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = pattern, .handler = handler, .kind = .param });
+        try self.routes.append(self.allocator, .{ .path = pattern, .handler = handler, .kind = .PARAM });
     }
 
     /// Brief:
     /// Dispatch the request to the best matching route
     ///
     /// Note:
-    /// - Pass 1 exact:  first exact match wins
+    /// - Pass 1 exact:  O(1) hash lookup via exact_map
     /// - Pass 2 param:  first parameterized pattern that matches wins params written to req.path_params
     /// - Pass 3 prefix: longest matching prefix wins
     /// - Priority is independent of registration order
@@ -108,17 +114,15 @@ pub const Router = struct {
     pub fn dispatch(self: *Router, req: *Request, res: *Response, ctx: *Context) !bool {
         const p = req.path();
 
-        // Pass 1: exact
-        for (self.routes.items) |route| {
-            if (route.kind == .exact and std.mem.eql(u8, route.path, p)) {
-                try route.handler(req, res, ctx);
-                return true;
-            }
+        // Pass 1: exact -- O(1) hash lookup
+        if (self.exact_map.get(p)) |handler| {
+            try handler(req, res, ctx);
+            return true;
         }
 
         // Pass 2: parameterized (first match wins)
         for (self.routes.items) |route| {
-            if (route.kind == .param) {
+            if (route.kind == .PARAM) {
                 if (try matchParam(route.path, p, req)) {
                     try route.handler(req, res, ctx);
                     return true;
@@ -130,7 +134,7 @@ pub const Router = struct {
         var best_len: usize = 0;
         var best_handler: ?HandlerFn = null;
         for (self.routes.items) |route| {
-            if (route.kind == .prefix) {
+            if (route.kind == .PREFIX) {
                 const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
                 if (std.mem.startsWith(u8, p, route.path) and at_boundary and route.path.len > best_len) {
                     best_len = route.path.len;
@@ -216,10 +220,10 @@ test "zix test: http router registration" {
     try router.registerParam("/users/:id", mockHandler);
 
     try std.testing.expectEqual(@as(usize, 3), router.routes.items.len);
-    try std.testing.expectEqual(RouteKind.exact, router.routes.items[0].kind);
+    try std.testing.expectEqual(RouteKind.EXACT, router.routes.items[0].kind);
     try std.testing.expectEqualStrings("/about", router.routes.items[0].path);
-    try std.testing.expectEqual(RouteKind.prefix, router.routes.items[1].kind);
+    try std.testing.expectEqual(RouteKind.PREFIX, router.routes.items[1].kind);
     try std.testing.expectEqualStrings("/api", router.routes.items[1].path);
-    try std.testing.expectEqual(RouteKind.param, router.routes.items[2].kind);
+    try std.testing.expectEqual(RouteKind.PARAM, router.routes.items[2].kind);
     try std.testing.expectEqualStrings("/users/:id", router.routes.items[2].path);
 }

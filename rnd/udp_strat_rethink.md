@@ -32,7 +32,7 @@ Every `receive()` call must have a mandatory timeout (e.g., 500ms).
 *   **Benefit**: Guaranteed exit during shutdown within the timeout window.
 
 ### B. The "Drip-Feed" Buffer (Framework Level)
-Instead of the user calling `receive()` directly, the framework manages a background task that pumps packets into a queue.
+Instead of the user calling `receive()` directly, the library manages a background task that pumps packets into a queue.
 *   **Logic**: The `while` loop belongs to `zix`, not the user.
 *   **User API**: `server.onPacket(myHandler)`.
 *   **Benefit**: `zix` can perfectly manage the cleanup of the background thread, while the user only writes the logic for a single packet.

@@ -57,10 +57,10 @@ Key FIX characteristics relevant to `zix.Tcp.Fix`:
 | Decision | Notes |
 | :- | :- |
 | Message framing | Tag=Value pairs delimited by SOH (0x01); fixed header BeginString, BodyLength, MsgType |
-| Session management | FIX session: Logon, Heartbeat, Logout; server tracks session state per TCP stream |
-| Sequence numbers | Each message has MsgSeqNum; gap detection requires ResendRequest |
+| Session management | FIX session: Logon, Heartbeat, Logout, server tracks session state per TCP stream |
+| Sequence numbers | Each message has MsgSeqNum, gap detection requires ResendRequest |
 | Endianness | FIX is ASCII-based -- no binary endianness concern (unlike UDP binary structs) |
-| Error handling | Reject (MsgType=3) for bad messages; session-level Logout on fatal errors |
+| Error handling | Reject (MsgType=3) for bad messages, session-level Logout on fatal errors |
 | Planned namespace | `src/tcp/fix/` mirroring `src/tcp/http/` |
 
 Comparison of TCP (FIX) vs UDP for protocol selection:

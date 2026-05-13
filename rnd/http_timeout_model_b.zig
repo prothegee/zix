@@ -14,7 +14,7 @@
 //! Does NOT cover:
 //!   - receiveHead() blocking (handler has not started yet)
 //!   - Blocking I/O inside a handler (std.Io.sleep, DB, file) -- the handler
-//!     will not be interrupted; it notices only on the next explicit check
+//!     will not be interrupted, it notices only on the next explicit check
 //!   - Keep-alive idle gaps (use Option A alongside for that)
 //!
 //! Why cooperative:
@@ -63,7 +63,7 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream = undefined,
 
-    // null = no deadline set; timer check is a no-op
+    // null = no deadline set, timer check is a no-op
     deadline: ?std.Io.Clock.Timestamp = null,
 
     // Returns a copy of this context with a deadline set ms from now.
@@ -211,6 +211,6 @@ pub fn main(process: std.process.Init) !void {
 //   Expected: "model-b: handler completed within deadline"
 //
 // What is being verified:
-//   The deadline is NOT enforced by the framework -- the handler must call
+//   The deadline is NOT enforced by the library -- the handler must call
 //   ctx.timedOut() itself. Blocking ops (sleep, DB, file) inside the handler
-//   run to completion regardless; the check only fires at explicit poll points.
+//   run to completion regardless the check only fires at explicit poll points.

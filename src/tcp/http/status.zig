@@ -482,8 +482,71 @@ pub fn stringFromEnum(status_enum: Code) []const u8 {
     };
 }
 
+/// Brief:
+/// Pre-built complete status line for the hot-path response writer
+///
+/// Note:
+/// - Returns "HTTP/1.1 NNN Reason\r\n" verbatim for common status codes
+/// - Returns empty slice ("") for uncommon codes — caller falls back to bufPrint
+/// - Reason phrases match stringFromEnum() so behavior is unchanged for clients
+pub fn statusLine(c: Code) []const u8 {
+    return switch (c) {
+        .OK => "HTTP/1.1 200 Ok\r\n",
+        .CREATED => "HTTP/1.1 201 Created\r\n",
+        .ACCEPTED => "HTTP/1.1 202 Accepted\r\n",
+        .NO_CONTENT => "HTTP/1.1 204 No Content\r\n",
+        .MOVED_PERMANENTLY => "HTTP/1.1 301 Moved Permanently\r\n",
+        .FOUND => "HTTP/1.1 302 Found\r\n",
+        .NOT_MODIFIED => "HTTP/1.1 304 Not Modified\r\n",
+        .TEMPORARY_REDIRECT => "HTTP/1.1 307 Temporary Redirect\r\n",
+        .PERMANENT_REDIRECT => "HTTP/1.1 308 Permanent Redirect\r\n",
+        .BAD_REQUEST => "HTTP/1.1 400 Bad Request\r\n",
+        .UNAUTHORIZED => "HTTP/1.1 401 Unauthorized\r\n",
+        .FORBIDDEN => "HTTP/1.1 403 Forbidden\r\n",
+        .NOT_FOUND => "HTTP/1.1 404 Not Found\r\n",
+        .METHOD_NOT_ALLOWED => "HTTP/1.1 405 Method Not Allowed\r\n",
+        .REQUEST_TIMEOUT => "HTTP/1.1 408 Request Timeout\r\n",
+        .CONFLICT => "HTTP/1.1 409 Conflict\r\n",
+        .UNSUPPORTED_MEDIA_TYPE => "HTTP/1.1 415 Unsupported Media Type\r\n",
+        .UNPROCESSABLE_ENTITY => "HTTP/1.1 422 Unprocessable Entity\r\n",
+        .TOO_MANY_REQUESTS => "HTTP/1.1 429 Too Many Requests\r\n",
+        .INTERNAL_SERVER_ERROR => "HTTP/1.1 500 Internal Server Error\r\n",
+        .NOT_IMPLEMENTED => "HTTP/1.1 501 Not Implemented\r\n",
+        .BAD_GATEWAY => "HTTP/1.1 502 Bad Gateway\r\n",
+        .SERVICE_UNAVAILABLE => "HTTP/1.1 503 Service Unavailable\r\n",
+        .GATEWAY_TIMEOUT => "HTTP/1.1 504 Gateway Timeout\r\n",
+        else => "",
+    };
+}
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix test: statusLine pre-built lines" {
+    // Every pre-built entry must produce exactly what bufPrint + stringFromEnum would.
+    const pre_built = [_]Code{
+        .OK,                     .CREATED,              .ACCEPTED,            .NO_CONTENT,
+        .MOVED_PERMANENTLY,      .FOUND,                .NOT_MODIFIED,        .TEMPORARY_REDIRECT,
+        .PERMANENT_REDIRECT,     .BAD_REQUEST,          .UNAUTHORIZED,        .FORBIDDEN,
+        .NOT_FOUND,              .METHOD_NOT_ALLOWED,   .REQUEST_TIMEOUT,     .CONFLICT,
+        .UNSUPPORTED_MEDIA_TYPE, .UNPROCESSABLE_ENTITY, .TOO_MANY_REQUESTS,   .INTERNAL_SERVER_ERROR,
+        .NOT_IMPLEMENTED,        .BAD_GATEWAY,          .SERVICE_UNAVAILABLE, .GATEWAY_TIMEOUT,
+    };
+    var buf: [64]u8 = undefined;
+    for (pre_built) |code| {
+        const line = statusLine(code);
+        try std.testing.expect(line.len > 0);
+        const expected = try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(code), stringFromEnum(code) });
+        try std.testing.expectEqualStrings(expected, line);
+    }
+
+    // Uncommon codes fall back to bufPrint — statusLine must return empty.
+    try std.testing.expectEqualStrings("", statusLine(.CONTINUE));
+    try std.testing.expectEqualStrings("", statusLine(.PROCESSING));
+    try std.testing.expectEqualStrings("", statusLine(.LOCKED));
+    try std.testing.expectEqualStrings("", statusLine(.LOOP_DETECTED));
+    try std.testing.expectEqualStrings("", statusLine(.IM_USED));
+}
 
 test "zix test: tcp http status fn/s" {
     const es = [_]Code{

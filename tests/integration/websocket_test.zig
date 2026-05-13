@@ -97,7 +97,7 @@ test "zix integration: parseFrame — extended 16-bit length (126-tier)" {
 test "zix integration: buildFrame — server frames are unmasked (mask bit = 0)" {
     var buf: [32]u8 = undefined;
     _ = WS.buildFrame(&buf, .text, "hello");
-    // RFC 6455 5.1: server->client frames MUST NOT be masked; mask bit is byte[1] & 0x80
+    // RFC 6455 5.1: server->client frames MUST NOT be masked, mask bit is byte[1] & 0x80
     try std.testing.expectEqual(@as(u8, 0), buf[1] & 0x80);
 }
 

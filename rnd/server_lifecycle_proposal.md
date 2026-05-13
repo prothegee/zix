@@ -1,6 +1,6 @@
 # Server Lifecycle & Signal Control (was: zix-gmod-2)
 
-This document addresses the risks of infinite `while (true)` loops in the core network stack and proposes a controlled lifecycle model for the `zix` framework.
+This document addresses the risks of infinite `while (true)` loops in the core network stack and proposes a controlled lifecycle model for the `zix`.
 
 ---
 
@@ -21,8 +21,8 @@ Every server component should transition through a formal lifecycle.
 ### Server States
 1.  **IDLE**: Initialized but not listening.
 2.  **RUNNING**: Actively accepting/processing data.
-3.  **STOPPING**: No longer accepting new work; finishing active tasks (Graceful).
-4.  **STOPPED**: All resources released; loops exited.
+3.  **STOPPING**: No longer accepting new work, finishing active tasks (Graceful).
+4.  **STOPPED**: All resources released then loops exited.
 
 ### Atomic Flag Implementation
 Replace `while (true)` with a check against an atomic `status`:
@@ -49,19 +49,19 @@ while (self.status.load(.acquire) == .running) {
 ### Forced Shutdown (The "Hard" Stop)
 *   **Action**: Set status to `.stopped` and close the underlying socket.
 *   **Behavior**: All loops break immediately due to socket errors or status checks.
-*   **Result**: Instant termination; active connections are dropped.
+*   **Result**: Instant termination.Aactive connections are dropped.
 
 ---
 
 ## 4. Timeout Guards
-To prevent the framework from hanging during a shutdown, every loop must have a "Heartbeat" or "Read Timeout".
+To prevent the library from hanging during a shutdown, every loop must have a "Heartbeat" or "Read Timeout".
 
 *   **Logic**: If no data is received within `config.response_timeout_ms`, the loop must check the `status` flag again.
-*   **Framework Duty**: `zix` must provide a consistent way to handle these "Interrupted" states so the user doesn't have to write the boilerplate.
+*   **Library Duty**: `zix` must provide a consistent way to handle these "Interrupted" states so the user doesn't have to write the boilerplate.
 
 ---
 
-## 5. Benefits for the "Micro-Framework"
+## 5. Benefits for the Library
 1.  **Unit Testable**: We can start a server in a test, send one packet, and call `server.stop()`.
 2.  **Cloud-Native**: Properly handles `SIGTERM` from Docker/Kubernetes.
 3.  **Reliability**: Prevents the "Leaky Thread" problem where threads stay alive after the main process thinks they are gone.

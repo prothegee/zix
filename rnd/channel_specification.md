@@ -53,7 +53,7 @@ const msg = try ch.recv();
 ch.trySend(msg) catch |err| { _ = err; }; // error.Full
 ch.tryRecv() catch |err| { _ = err; };    // error.Empty
 
-// close (signals no more sends; receivers drain remaining items then get error.Closed)
+// close (signals no more sends. Receivers drain remaining items then get error.Closed)
 ch.close();
 ```
 
@@ -82,7 +82,7 @@ type level if needed via wrapper types at implementation time.
 ## Integration With io.concurrent
 
 Channels are designed to work alongside `io.concurrent()` tasks. A producer task sends to a
-channel; a consumer task receives. No shared mutable state between tasks except through the
+channel a consumer task receives. No shared mutable state between tasks except through the
 channel itself.
 
 ```zig
@@ -109,7 +109,7 @@ fn consumerFn(cap: struct { ch: *MyChan }) void {
 NOT YET DESIGNED. Marked as planned.
 
 ```
-src/channel/   -- planned; not yet implemented
+src/channel/   -- planned, not yet implemented
     channel.zig  -- Channel(comptime T: type) generic
     Channel.zig  -- namespace aggregator
 ```

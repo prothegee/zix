@@ -19,11 +19,11 @@
 //! The two layers are orthogonal:
 //!   D fires if the client stalls before the handler ever starts.
 //!   B fires if the handler takes too long after it starts.
-//!   Both can fire independently; neither depends on the other.
+//!   Both can fire independently. neither depends on the other.
 //!
 //! Integration notes (for src/tcp/http/server.zig):
-//!   D: embed ConnRegistry in HttpServerImpl; add evict() to timerLoop.
-//!   B: add deadline field to Context; set from config before dispatch.
+//!   D: embed ConnRegistry in HttpServerImpl add evict() to timerLoop.
+//!   B: add deadline field to Context set from config before dispatch.
 //!   Config: replace response_timeout_ms with conn_timeout_ms (D) and
 //!           handler_timeout_ms (B) as two distinct fields.
 
@@ -238,14 +238,14 @@ pub fn main(process: std.process.Init) !void {
 // How to test Model BD -- Combined B + D
 //
 // Note: main() is single-threaded (one connection at a time). Run each
-// test independently; do not connect two clients simultaneously.
+// test independently. Do not connect two clients simultaneously.
 //
 // --- Test 1: Layer D -- slow client, connection-level guard ---
 //
 //   zig run rnd/http_timeout_model_bd.zig
 //
 //   nc localhost 9007
-//   (send nothing; wait)
+//   (send nothing and wait)
 //   Expected: nc exits within ~10.5s (CONN_TIMEOUT_MS + up to 500ms jitter)
 //
 //   time nc localhost 9007

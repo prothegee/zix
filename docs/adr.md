@@ -1,6 +1,6 @@
 # Architecture Decision Records -- zix
 
-Each ADR records a significant design decision: the context that made it necessary, the decision taken, and its consequences. Accepted ADRs are binding; Proposed ones are under discussion.
+Each ADR records a significant design decision: the context that made it necessary, the decision taken, and its consequences. Accepted ADRs are binding. Proposed ones are under discussion.
 
 ---
 
@@ -50,7 +50,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Consequences:**
 - Handlers never call `free`. All per-request memory is reclaimed automatically at request end.
-- `ctx.allocator` allocations must not escape the request (e.g. stored in a global). The name `ctx.allocator` is intentionally brief; the arena lifetime constraint is documented rather than encoded in the name. (A rename to `ctx.request_arena` was considered and declined -- see `rnd/http_specification.md`.)
+- `ctx.allocator` allocations must not escape the request (e.g. stored in a global). The name `ctx.allocator` is intentionally brief, the arena lifetime constraint is documented rather than encoded in the name. (A rename to `ctx.request_arena` was considered and declined -- see `rnd/http_specification.md`.)
 - Retain-capacity reset amortizes arena backing block growth over the connection lifetime.
 
 ---
@@ -76,7 +76,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** UDP carries application-defined binary structs. A fixed built-in packet type would limit interoperability. A runtime `[]u8` slice would lose type safety and require the user to handle serialization manually.
 
-**Decision:** `UdpServer` and `UdpClient` are generic over a comptime `Packet: type`. The user defines their own `extern struct` and passes it at the instantiation site (`zix.Udp.Server(MyPacket)`). zix handles endianness, size validation, and framing; the application owns the packet definition and identity logic.
+**Decision:** `UdpServer` and `UdpClient` are generic over a comptime `Packet: type`. The user defines their own `extern struct` and passes it at the instantiation site (`zix.Udp.Server(MyPacket)`). zix handles endianness, size validation, and framing. The application owns the packet definition and identity logic.
 
 **Consequences:**
 - The server does not stamp or modify any packet field. The `id` field (if present) is the sender's responsibility.
@@ -137,7 +137,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** The original design stored custom response headers in a fixed `[32]HttpHeader` buffer. This caused an out-of-bounds write when `max_response_headers = .LARGE` (64 slots) and more than 32 headers were added. A compile-time cap was insufficient because the cap is runtime-configurable per server instance.
 
-**Decision:** In `Response.init()`, allocate `extra_buf = arena.alloc(HttpHeader, max_headers)` from the per-request arena. `max_headers` comes from `ServerConfig.max_response_headers.value()`. The `max_headers` field on `Response` was removed; `extra_buf.len` is the cap.
+**Decision:** In `Response.init()`, allocate `extra_buf = arena.alloc(HttpHeader, max_headers)` from the per-request arena. `max_headers` comes from `ServerConfig.max_response_headers.value()`. The `max_headers` field on `Response` was removed, `extra_buf.len` is the cap.
 
 **Consequences:**
 - The cap is exact: no `@min(..., 128)` clamp, no wasted slots.
@@ -154,7 +154,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Decision:** Not yet implemented. Will follow the same pattern: `src/uds/`, namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `zix.zig`.
 
-**std.Io.net API verified (2026-05-09):** `std.Io.net.UnixAddress` exists with `init(path)`, `listen(io, opts) !Server`, and `connect(io) !Stream`. Stream mode is fully supported. Datagram mode is not exposed via `std.Io.net.UnixAddress` — datagram would require raw `std.posix`. Path cleanup (unlink) is the caller's responsibility. `has_unix_sockets = false` on WASI; supported on Linux, macOS, and Windows 10 RS4+.
+**std.Io.net API verified (2026-05-09):** `std.Io.net.UnixAddress` exists with `init(path)`, `listen(io, opts) !Server`, and `connect(io) !Stream`. Stream mode is fully supported. Datagram mode is not exposed via `std.Io.net.UnixAddress` — datagram would require raw `std.posix`. Path cleanup (unlink) is the caller's responsibility. `has_unix_sockets = false` on WASI, supported on Linux, macOS, and Windows 10 RS4+.
 
 **Consequences:** None until implemented. Tracking here to reserve the namespace and establish the design intent. For open design questions and implementation checklist see `rnd/uds_specification.md` and `rnd/tracker.md`.
 
@@ -185,7 +185,7 @@ server.registerHandler("/private", withAuth(withLogging(privateHandler)));
 - Zero runtime overhead. Each unique `next` value generates a distinct function at comptime.
 - No heap allocation. No middleware chain runner to deinit.
 - Composition is explicit at the registration call site — readers see the full chain without looking inside any function.
-- Each unique composition generates a new comptime function; excessive combinations increase binary size.
+- Each unique composition generates a new comptime function, excessive combinations increase binary size.
 
 ---
 
@@ -195,7 +195,7 @@ server.registerHandler("/private", withAuth(withLogging(privateHandler)));
 
 **Context:** Several HTTP server behaviors are embedded in `server.zig` internals and not visible in `HttpServerConfig`: the 404 auto-response when no route matches, the keep-alive loop, and the static file fallback behavior. Users cannot override these without modifying source.
 
-**Decision:** Add named fields to `HttpServerConfig` for every configurable behavior. `null` disables a behavior; a function value enables the user's override. Proposed additions:
+**Decision:** Add named fields to `HttpServerConfig` for every configurable behavior. `null` disables a behavior, a function value enables the user's override. Proposed additions:
 
 ```zig
 pub const HttpServerConfig = struct {
@@ -210,7 +210,7 @@ The `public_dir` field already exists but its role as an opt-in feature (not a m
 **Consequences:**
 - Config struct is the complete contract -- if it is not in the struct, it does not happen.
 - Breaking change for any code that relies on the current implicit 404 behavior (minimal impact in practice).
-- `not_found = null` preserves the current default behavior; no migration required unless the user wants a custom 404.
+- `not_found = null` preserves the current default behavior, no migration required unless the user wants a custom 404.
 - Static fallback magic is removed: `public_dir = ""` (already the default) disables it, as it does now.
 
 ---
@@ -244,7 +244,7 @@ var server = try MyServer.init(.{
 
 **Consequences:**
 - Breaking change: all existing `UdpServerConfig` initialisers must add `.allocator = ...`
-- Test code can now pass `std.testing.allocator` for leak detection; prod code passes `std.heap.smp_allocator`.
+- Test code can now pass `std.testing.allocator` for leak detection, prod code passes `std.heap.smp_allocator`.
 - `UdpServerConfig` and `HttpServerConfig` are now consistent: both expose an explicit, required allocator field.
 - `UdpClient` remains simpler by design — no heap allocation, no allocator field required.
 
@@ -254,14 +254,14 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_client_request` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated; otherwise they fall back to `smp_allocator`.
+**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_client_request` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated, otherwise they fall back to `smp_allocator`.
 
 **Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, .{...})` -- `Server` reads as a type, `init` reads as a constructor.
 
 **Consequences:**
 - Call sites are one level simpler: `Server.init(N, config)` instead of `Server(N).init(config)`.
 - `stack_threshold` must remain `comptime` -- Zig requires comptime-known sizes for stack arrays.
-- `HttpServerImpl(stack_threshold)` is the concrete type returned; callers use `var server = try ...` without naming the generic type.
+- `HttpServerImpl(stack_threshold)` is the concrete type returned, callers use `var server = try ...` without naming the generic type.
 - Breaking change: all existing call sites updated via `sed`.
 
 ---
@@ -272,13 +272,13 @@ var server = try MyServer.init(.{
 
 **Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than a comparable blocking-thread HTTP server (334 µs vs ~88 µs) despite matching throughput (~145K req/s). A blocking-thread architecture — dedicated accept thread + OS thread pool + synchronous I/O — eliminates the fiber scheduler from the hot path entirely.
 
-**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` -- they never handle I/O. Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives; `std.Thread.Mutex` does not exist in this version).
+**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` -- they never handle I/O. Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives. `std.Thread.Mutex` does not exist in this version).
 
 **Consequences:**
 - Pool threads handle connections with pure blocking I/O -- no condvar dispatch overhead per request, no fiber wakeup latency.
-- Throughput ~143–144K req/s; latency ~92 µs avg. A ~3–5K req/s gap and ~4 µs latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
+- Throughput ~143–144K req/s, latency ~92 µs avg. A ~3–5K req/s gap and ~4 µs latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
 - `pool_size` is now a configurable field in `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
-- Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue; `workers = N` allows explicit override.
+- Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue, `workers = N` allows explicit override.
 - `io.concurrent()` is still used in Model 1 (`workers = 1`) -- unaffected.
 
 ---
@@ -287,7 +287,7 @@ var server = try MyServer.init(.{
 
 **Status:** Proposed
 
-**Context:** The server models (Model 1 / Model 2) handle request concurrency. There is no primitive for typed message passing between concurrent tasks within a single process. Go channels and POSIX pipes address this pattern; zix needs its own Zig-native equivalent that works alongside `io.concurrent()` tasks.
+**Context:** The server models (Model 1 / Model 2) handle request concurrency. There is no primitive for typed message passing between concurrent tasks within a single process. Go channels and POSIX pipes address this pattern, zix needs its own Zig-native equivalent that works alongside `io.concurrent()` tasks.
 
 **Decision:** Not yet implemented. A `zix.Channel(comptime T: type)` generic that provides buffered and unbuffered typed queues with blocking `send`/`recv` and non-blocking `trySend`/`tryRecv`. Exported as `pub const Channel = @import("channel/Channel.zig")` in `zix.zig`.
 
@@ -342,7 +342,7 @@ SSE connections are long-lived (seconds to minutes per stream). Model 2's blocki
 Four options were prototyped and tested in `rnd/http_timeout_model_{a,b,c,d}.zig`.
 
 **Option A -- Connection max-age (rejected):**
-A deadline is set once at accept time and checked at the top of each keep-alive loop iteration. This is a connection lifetime cap, not a per-idle-gap timeout. The check fires only when `receiveHead()` returns -- it cannot interrupt a client that goes permanently idle. A thread is held indefinitely inside `receiveHead()` once the client stops sending. Option A was kept in `rnd/` as documentation of the limitation; it is not wired into the server.
+A deadline is set once at accept time and checked at the top of each keep-alive loop iteration. This is a connection lifetime cap, not a per-idle-gap timeout. The check fires only when `receiveHead()` returns -- it cannot interrupt a client that goes permanently idle. A thread is held indefinitely inside `receiveHead()` once the client stops sending. Option A was kept in `rnd/` as documentation of the limitation, it is not wired into the server.
 
 **Option C -- Watchdog thread per connection (rejected):**
 Spawning one OS thread per accepted connection eliminates the permanent-idle problem. Each watchdog sleeps for `timeout_ms` and calls `stream.shutdown(.both)` if the connection has not finished. Tested and working: fires at exactly 5.006s. Rejected because it adds one OS thread per active connection (with a 64KB virtual stack each), which multiplies memory pressure under load. Option D achieves the same coverage at zero extra threads.
@@ -353,7 +353,7 @@ Spawning one OS thread per accepted connection eliminates the permanent-idle pro
 
 - `handler_timeout_ms: u32 = 0` -- **Layer B**: `ctx.deadline` is set from config before each handler dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps and responding with 408 early. Zero overhead when disabled (null check on deadline). Works in both model 1 and model 2.
 
-The two layers are orthogonal: D fires if the client stalls before the handler ever starts; B fires if the handler takes too long after it starts. Both default to 0 (disabled) so existing code is unaffected.
+The two layers are orthogonal: D fires if the client stalls before the handler ever starts, B fires if the handler takes too long after it starts. Both default to 0 (disabled) so existing code is unaffected.
 
 **Consequences:**
 - `response_timeout_ms` removed -- callers that set it must migrate to `conn_timeout_ms` and/or `handler_timeout_ms`.
