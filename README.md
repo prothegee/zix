@@ -675,7 +675,7 @@ For full memory details see [`docs/hld-http.md`](docs/hld-http.md) and [`docs/hl
 
 Not active tasks -- reminders for future decisions.
 
-**AoS (Array of Structures):** several current sites (`routes`, `extra_buf`, `fields`, `conns`, ...). When any becomes a throughput bottleneck, a SoA layout is a candidate.
+**AoS (Array of Structures):** remaining sites (`extra_buf`, `fields`, `conns`, ...). When any becomes a throughput bottleneck, a SoA layout is a candidate. `routes` was converted to `MultiArrayList` (SoA) so dispatch passes scan only the hot field slice.
 
 **OoP (Object-oriented Patterns):** most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
 
