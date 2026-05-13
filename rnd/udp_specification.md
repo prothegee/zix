@@ -55,8 +55,8 @@ Notes from PoC (`rnd/`) conversation to address when moving into `src/udp/`.
 
 Port binding must be governed by an explicit mode (`enum(u8)`, all uppercase values):
 
-- `CONFIGURABLE` — config struct holds a default port; `init()` receives an args iterator and reads `--port` if present, falls back to the config default if not. Never fails for a missing arg — the default covers it. The point is the port is runtime-overridable.
-- `REQUIRED` — port must be explicitly set non-zero in the config struct; `init()` takes no args iterator. Fails at `init()` with `error.PortNotConfigured` if port is zero.
+- `CONFIGURABLE` — config struct holds a default port. `init()` receives an args iterator and reads `--port` if present, falls back to the config default if not. Never fails for a missing arg — the default covers it. The point is the port is runtime-overridable.
+- `REQUIRED` — port must be explicitly set non-zero in the config struct. `init()` takes no args iterator. Fails at `init()` with `error.PortNotConfigured` if port is zero.
 
 Fail at `init()`, not at `run()`. Enforces "explicit over implicit."
 
@@ -68,11 +68,11 @@ CLI key format: `--port <value>` (server), `--bind-port <value>` / `--server-por
 
 Enum values use ALL_CAPS:
 
-- `NATIVE` — same machine only; unsafe across platforms or languages
-- `LITTLE` — recommended; most modern hardware (x86, ARM)
-- `BIG` — network byte order; use when interoperating with legacy or internet protocols
+- `NATIVE` — same machine only, unsafe across platforms or languages
+- `LITTLE` — recommended for most modern hardware (x86, ARM)
+- `BIG` — network byte order, use when interoperating with legacy or internet protocols
 
-Conversion is **transparent** — applied inside `send()` and `receive()` based on `config.endianness`. User declares once in config; no manual conversion call needed anywhere else. `packet.zig` exposes the helpers publicly so advanced users can call them directly if needed.
+Conversion is **transparent** — applied inside `send()` and `receive()` based on `config.endianness`. User declares once in config, no manual conversion call needed anywhere else. `packet.zig` exposes the helpers publicly so advanced users can call them directly if needed.
 
 <br>
 
@@ -90,7 +90,7 @@ UDP has no connection state. Disconnect detection is purely timeout-based. Worst
 
 ### Feedback Shape
 
-PoC `auto_echo` sends the received packet back as-is. In `src/`, feedback shape should be configurable — either echo the input or respond with a separate result struct. Define the result struct explicitly; do not leave it as a raw byte echo in production code.
+PoC `auto_echo` sends the received packet back as-is. In `src/`, feedback shape should be configurable — either echo the input or respond with a separate result struct. Define the result struct explicitly. Do not leave it as a raw byte echo in production code.
 
 **Client reception (PoC):** client receives on its bound socket via a persistent `io.concurrent()` task (`receiveFeedback`). Interprets by received length: 1 byte -> ACK (`0x06`) / NACK (`0x15`); `@sizeOf(TestPacket)` bytes -> echo or broadcast packet decoded via `@bitCast`. Raw-byte length-dispatch is PoC-only.
 
@@ -106,7 +106,7 @@ pub fn FeedbackResult(comptime Packet: type) type {
 ```
 The receive loop produces `FeedbackResult(Packet)` values — no raw-byte length interpretation in production code.
 
-**Broadcast (PoC):** `ServerConfig.broadcast = true` relays each received packet to all currently connected clients (not just the sender). The server snapshots connected client addresses into `PacketTask.peers[MAX_BROADCAST_CLIENTS]` at receive time and passes them by value to the concurrent task — this avoids sharing the mutable `ClientRecord` list across threads. The `MAX_BROADCAST_CLIENTS = 64` cap is a PoC constraint; in `src/`, use an arena-allocated slice per packet to remove the hard limit. `auto_echo` and `broadcast` are independent: `auto_echo` sends only to the sender, `broadcast` sends to all.
+**Broadcast (PoC):** `ServerConfig.broadcast = true` relays each received packet to all currently connected clients (not just the sender). The server snapshots connected client addresses into `PacketTask.peers[MAX_BROADCAST_CLIENTS]` at receive time and passes them by value to the concurrent task — this avoids sharing the mutable `ClientRecord` list across threads. The `MAX_BROADCAST_CLIENTS = 64` cap is a PoC constraint in `src/`, use an arena-allocated slice per packet to remove the hard limit. `auto_echo` and `broadcast` are independent: `auto_echo` sends only to the sender, `broadcast` sends to all.
 
 **Position data (PoC):** client generates random `position` values in `[-1.0, 1.0)` per packet via `std.Random.DefaultPrng` seeded from `std.crypto.random`. PRNG is seeded once in `main`; access is sequential because a sleep separates each send, so no concurrent RNG use occurs. In `src/`, if sends become truly concurrent, each worker needs its own PRNG instance.
 
@@ -131,7 +131,7 @@ src/udp/
 
 Export from `src/zix.zig` as `pub const Udp = @import("udp/Udp.zig");`.
 
-**Packet / Identity:** `packet.zig` provides helpers only — no hardcoded struct. User defines their own `extern struct` and passes it at comptime. Server does not stamp or modify the packet's `id` field (PoC behavior dropped). Client owns its identity. Server tracks clients by address; connection index is internal metadata (logs only). Broadcast relays packet as-is. Identity structure and validation are the application's responsibility.
+**Packet / Identity:** `packet.zig` provides helpers only — no hardcoded struct. User defines their own `extern struct` and passes it at comptime. Server does not stamp or modify the packet's `id` field (PoC behavior dropped). Client owns its identity. Server tracks clients by address, connection index is internal metadata (logs only). Broadcast relays packet as-is. Identity structure and validation are the application's responsibility.
 
 **Comments:** every config field gets one short inline comment. Every public function gets a brief doc block — what it does, what it fails on. Security and performance concerns marked `SECURITY:` / `PERF:`.
 
