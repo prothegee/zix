@@ -124,10 +124,10 @@ if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platf
 
 | Question | Status | Notes |
 | :- | :- | :- |
-| Zig 0.16.x API for UDS addressing | **Resolved** | `std.Io.net.UnixAddress` confirmed; see section above |
-| Abstract namespace vs pathname | Open | Both supported; pathname first for portability |
-| SO_REUSEPORT for Model 2 on UDS | Open | Linux-only; skip for initial stream implementation |
-| Datagram mode client identity | Open | Not via std.Io.net; would need raw std.posix; defer |
+| Zig 0.16.x API for UDS addressing | **Resolved** | `std.Io.net.UnixAddress` confirmed, see section above |
+| Abstract namespace vs pathname | Open | Both supported pathname first for portability |
+| SO_REUSEPORT for Model 2 on UDS | Open | Linux-only skip for initial stream implementation |
+| Datagram mode client identity | Open | Not via std.Io.net would need raw std.posix defer |
 | Datagram mode: include or defer? | **Decision needed** | Stream-only v1 is simpler and covers the main use cases |
 
 ---
