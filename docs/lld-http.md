@@ -107,12 +107,14 @@ Layer D (ConnRegistry) is active in model 2 only -- the timer thread that calls 
 
 ### Route storage
 
-One `routes: ArrayList(Route)` backed by `config.allocator`, plus a dedicated O(1) hash map for exact-match paths:
+One `routes: MultiArrayList(Route)` backed by `config.allocator`, plus a dedicated O(1) hash map for exact-match paths:
 
 ```
-routes:    ArrayList(Route)                  -- all routes, each has a kind field
+routes:    MultiArrayList(Route)             -- SoA: separate kind[], path[], handler[] arrays
 exact_map: StringHashMapUnmanaged(HandlerFn) -- exact-path keys only. O(1) dispatch
 ```
+
+`MultiArrayList` stores each field in its own contiguous array. Dispatch Pass 2 iterates only the `kind[]` slice until a PARAM match is found, then indexes into `path[]` and `handler[]`. Pass 3 zips `kind[]` and `path[]` without touching `handler[]` until a candidate is confirmed.
 
 Each `Route`:
 ```zig
