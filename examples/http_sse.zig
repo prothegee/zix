@@ -55,14 +55,13 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
         \\<head><meta charset="utf-8"><title>zix SSE</title></head>
         \\<body>
         \\<h2>zix Server-Sent Events</h2>
-        \\<div id="log" style="font-family:monospace;line-height:1.6"></div>
+        \\<pre id="stream-val" style="font-family:monospace"></pre>
         \\<script>
-        \\const log = document.getElementById('log');
-        \\function append(text) { log.innerHTML += '<div>' + text + '</div>'; }
+        \\const el = document.getElementById('stream-val');
         \\const es = new EventSource('/events');
-        \\es.onopen = () => append('[connected]');
-        \\es.onmessage = e => append(e.data);
-        \\es.onerror = () => append('[stream closed — reconnecting…]');
+        \\es.onopen = () => { el.textContent = '[connected]'; };
+        \\es.onmessage = e => { el.textContent = e.data; };
+        \\es.onerror = () => { el.textContent = '[stream closed -- reconnecting]'; };
         \\</script>
         \\</body>
         \\</html>
