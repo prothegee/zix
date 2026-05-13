@@ -146,17 +146,22 @@ Each ADR records a significant design decision: the context that made it necessa
 
 ---
 
-## ADR-010: UDS (Unix Domain Socket) -- Planned
+## ADR-010: UDS (Unix Domain Socket)
 
-**Status:** Proposed
+**Status:** Accepted -- Implemented (2026-05-13)
 
 **Context:** Unix Domain Sockets are the standard IPC mechanism on Linux and macOS for same-host communication. A `zix.Uds` namespace following the same pattern as `zix.Udp` would complete the trilogy of transport protocols.
 
-**Decision:** Not yet implemented. Will follow the same pattern: `src/uds/`, namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `zix.zig`.
+**Decision:** Implemented in `src/uds/`. Namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `zix.zig`. Stream mode only -- datagram requires raw `std.posix` (not exposed via `std.Io.net.UnixAddress`) and is deferred. Frame format: 4-byte `u32` length header (native little-endian) followed by payload bytes. `UdsClient.sendMsg`/`recvMsg` and `echoHandler` all use this frame contract.
 
-**std.Io.net API verified (2026-05-09):** `std.Io.net.UnixAddress` exists with `init(path)`, `listen(io, opts) !Server`, and `connect(io) !Stream`. Stream mode is fully supported. Datagram mode is not exposed via `std.Io.net.UnixAddress` — datagram would require raw `std.posix`. Path cleanup (unlink) is the caller's responsibility. `has_unix_sockets = false` on WASI, supported on Linux, macOS, and Windows 10 RS4+.
+**`std.Io.net` API used:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` on WASI -- both `Server.init()` and `Client.connect()` emit `@compileError` on unsupported platforms.
 
-**Consequences:** None until implemented. Tracking here to reserve the namespace and establish the design intent. For open design questions and implementation checklist see `rnd/uds_specification.md` and `rnd/tracker.md`.
+**Consequences:**
+- `zix.Uds.Server`, `zix.Uds.Client`, `zix.Uds.ServerConfig`, `zix.Uds.ClientConfig`, `zix.Uds.HandlerFn`, and `zix.Uds.echoHandler` are all public.
+- Server uses Model 1 (`io.concurrent()`) -- one accept thread, task per connection.
+- Socket path is unlinked before bind (clean restart) and again on `runWith()` return.
+- `error.PathEmpty` is returned by `Server.init()` when `config.path` is empty.
+- `allocator` field in `UdsServerConfig` is reserved for future extensions -- current implementation is allocation-free (stack buffers only).
 
 ---
 
@@ -285,20 +290,24 @@ var server = try MyServer.init(.{
 
 ## ADR-017: Channel -- In-Process Typed Message Passing
 
-**Status:** Proposed
+**Status:** Accepted -- Implemented (2026-05-13)
 
 **Context:** The server models (Model 1 / Model 2) handle request concurrency. There is no primitive for typed message passing between concurrent tasks within a single process. Go channels and POSIX pipes address this pattern, zix needs its own Zig-native equivalent that works alongside `io.concurrent()` tasks.
 
-**Decision:** Not yet implemented. A `zix.Channel(comptime T: type)` generic that provides buffered and unbuffered typed queues with blocking `send`/`recv` and non-blocking `trySend`/`tryRecv`. Exported as `pub const Channel = @import("channel/Channel.zig")` in `zix.zig`.
+**Decision:** Implemented as `zix.Channel(comptime T: type)`. Buffered only (capacity > 0 -- unbuffered rendezvous deferred). Blocking `send(io, value)` and `recv(io)`. Exported as `pub const Channel = @import("channel/Channel.zig").Channel` in `zix.zig`. Open questions resolved:
 
-**Open questions (must be resolved before implementation):**
-- Locking primitive: `std.Io.Mutex` + `std.Io.Condition` (works inside `io.concurrent` fibers) vs `std.Thread.Mutex` (OS threads only). The former is required if Channel is to be used from handler tasks.
-- Unbuffered (capacity = 0) rendezvous semantics: requires two-sided synchronization, more complex than a ring buffer send path.
-- Internal storage: fixed ring buffer with comptime-known capacity (zero alloc) vs heap-allocated list (runtime capacity, requires allocator in config).
-- Naming: `Channel` vs `Chan` — locked once first example ships.
-- `select`/multiplex over N channels: deferred, but internal design must not preclude it.
+- **Locking:** `std.Io.Mutex` + `std.Io.Condition` -- fiber-aware, works in both `io.concurrent()` handler tasks and OS threads. `std.Thread.Mutex` was rejected because it blocks the OS thread.
+- **Storage:** heap-allocated ring buffer (`allocator.alloc(T, capacity)`) -- runtime capacity, allocator required in `init()`.
+- **Naming:** `Channel` (not `Chan`) -- locked at first example.
+- **Unbuffered:** not yet implemented -- `init()` asserts `capacity > 0`.
+- **`select`/multiplex:** deferred -- ring design does not preclude it.
 
-**Consequences:** None until implemented. Status moves to Accepted once open questions are resolved and src is written. For design notes see `rnd/channel_specification.md` and `rnd/tracker.md`.
+**Consequences:**
+- `zix.Channel(T)` is a generic returning a struct. Usage: `const MyChan = zix.Channel(u32)`.
+- `init(allocator, capacity)` allocates the ring buffer. `deinit()` frees it.
+- `close(io)` unblocks all waiting `recv()` calls -- receivers drain remaining items then get `error.Closed`.
+- `send()` and `recv()` require an `io` valid on the calling thread -- each OS thread needs its own `std.Io` (e.g. from `std.Io.Threaded`).
+- Non-blocking `trySend`/`tryRecv` are deferred -- all current examples use blocking variants.
 
 ---
 
