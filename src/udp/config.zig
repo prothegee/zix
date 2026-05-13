@@ -30,7 +30,7 @@ pub const Endianness = enum(u8) {
 // --------------------------------------------------------- //
 
 pub const UdpServerConfig = struct {
-    /// Backing allocator for client list and broadcast peer snapshots. Caller owns; must outlive the server.
+    /// Backing allocator for client list and broadcast peer snapshots. Caller owns must outlive the server.
     /// NOTE: must be a general-purpose allocator (e.g. std.heap.smp_allocator).
     ///       ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
     ///       packet — ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
