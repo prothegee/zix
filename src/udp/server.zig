@@ -23,7 +23,7 @@ pub fn UdpServer(comptime Packet: type) type {
         const Self = @This();
 
         // NOTE: index is a monotonic connection counter — transient identity, not stable across reconnects.
-        // NOTE: client identity structure and validation are the application's responsibility;
+        // NOTE: client identity structure and validation are the application's responsibility,
         //       the server only assigns an index for internal tracking and log output.
         const ClientRecord = struct {
             from: std.Io.net.IpAddress,
@@ -32,8 +32,8 @@ pub fn UdpServer(comptime Packet: type) type {
         };
 
         // PERF: peers is heap-allocated per packet — no fixed cap.
-        //       Allocated before io.concurrent() dispatch; freed inside processPacket after broadcast.
-        // NOTE: socket is shared across concurrent tasks; UDP send is kernel-atomic per datagram.
+        //       Allocated before io.concurrent() dispatc, freed inside processPacket after broadcast.
+        // NOTE: socket is shared across concurrent tasks, UDP send is kernel-atomic per datagram.
         const Task = struct {
             buf: [@sizeOf(Packet)]u8,
             from: std.Io.net.IpAddress,
@@ -56,7 +56,7 @@ pub fn UdpServer(comptime Packet: type) type {
         }
 
         /// Initialize in CONFIGURABLE mode — reads --port from CLI args, falls back to config.port.
-        /// Never fails for a missing arg; config.port is the default.
+        /// Never fails for a missing arg, config.port is the default.
         pub fn initArgs(config: UdpServerConfig, args: anytype) !Self {
             var cfg = config;
             var it = std.process.Args.Iterator.init(args);
@@ -124,7 +124,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
                 const now = std.Io.Clock.Timestamp.now(io, .awake);
 
-                // track connected clients; capture sender_index for the task
+                // track connected clients, capture sender_index for the task
                 var sender_index: usize = 0;
                 var known = false;
                 for (clients.items) |*r| {
@@ -149,7 +149,7 @@ pub fn UdpServer(comptime Packet: type) type {
                     last_check = now;
                 }
 
-                // Heap-allocate peer snapshot for broadcast; freed inside processPacket after all sends.
+                // Heap-allocate peer snapshot for broadcast, freed inside processPacket after all sends.
                 // PERF: allocation only occurs when broadcast is enabled and clients list is non-empty.
                 // NOTE: must use a general-purpose allocator — the free() below is real, not a no-op.
                 var peers: []std.Io.net.IpAddress = &.{};
@@ -201,7 +201,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
             if (task.config.broadcast) {
                 // SECURITY: no sender validation — spoofed IPs can trigger broadcast to all peers
-                // PERF: N sequential send() syscalls per packet; consider sendmmsg batching for large client counts
+                // PERF: N sequential send() syscalls per packet, consider sendmmsg batching for large client counts
                 for (task.peers) |*peer| {
                     task.socket.send(task.io, peer, &task.buf) catch |err| {
                         std.debug.print("broadcast error: {}\n", .{err});
@@ -243,7 +243,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
 // --------------------------------------------------------- //
 
-// RFC 768: port 0 is reserved; binding to it is undefined behavior.
+// RFC 768: port 0 is reserved, binding to it is undefined behavior.
 // init() rejects port 0 with error.PortNotConfigured before any socket is opened.
 // run() and socket I/O are excluded from unit tests — those require live I/O.
 
