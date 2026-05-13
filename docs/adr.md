@@ -365,4 +365,21 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 
 ---
 
+## ADR-019: Router routes -- MultiArrayList (SoA) layout
+
+**Status:** Accepted
+
+**Context:** `Router.routes` was `ArrayList(Route)` where `Route = {path, handler, kind}`. Dispatch Pass 2 (PARAM) and Pass 3 (PREFIX) iterate the list filtering by `kind` before accessing `path` or `handler`. AoS interleaves all three fields in memory, so iterating `kind` pulls `path` and `handler` into cache even when they are not yet needed.
+
+**Decision:** Replace `ArrayList(Route)` with `MultiArrayList(Route)`. Each field (`kind`, `path`, `handler`) is stored in its own contiguous array. Pass 2 iterates only `items(.kind)` with an index, touching `items(.path)[i]` and `items(.handler)[i]` only on a PARAM match. Pass 3 zips `items(.kind)` and `items(.path)` without loading `items(.handler)` until a prefix candidate is confirmed.
+
+**Consequences:**
+- `routes.items.len` becomes `routes.len`; field access becomes `routes.items(.field)[i]`
+- `init()` simplified: `routes` default-initializes to `.{}`, no explicit `.empty` needed
+- `append()` and `deinit()` signatures are unchanged
+- Unit tests in `router.zig` updated; integration tests and examples unchanged (public API unaffected)
+- Practical gain is proportional to PARAM and PREFIX route count; most production deployments favour exact routes (O(1) via `exact_map`) so the improvement is cache-coherence rather than algorithmic
+
+---
+
 ###### end of adr
