@@ -35,7 +35,7 @@ const MyServer = zix.Udp.Server(Packet);
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    // REQUIRED mode — port is taken from SERVER_PORT; no CLI arg parsing.
+    // REQUIRED mode — port is taken from SERVER_PORT, no CLI arg parsing.
     // To accept --port at runtime instead, replace with:
     //   var server = try MyServer.initArgs(.{
     //       .ip        = SERVER_IP,

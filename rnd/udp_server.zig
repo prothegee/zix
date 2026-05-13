@@ -14,7 +14,7 @@ const std = @import("std");
 
 // --------------------------------------------------------- //
 
-// NOTE: native-endian layout; must match client and any foreign client (Go, C++, Rust, etc.)
+// NOTE: native-endian layout, must match client and any foreign client (Go, C++, Rust, etc.)
 // NOTE: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
 const TestPacket = extern struct {
     id: [16]u8,
@@ -26,8 +26,8 @@ const TestPacket = extern struct {
 // --------------------------------------------------------- //
 
 // NOTE (src/): port must be governed by an explicit mode, represented as enum(u8):
-//   - CONFIGURABLE: port is passed via CLI args; exit with error.PortNotConfigured if args absent
-//   - REQUIRED: port is set manually in the config struct; exit with error.PortNotConfigured if unset (0)
+//   - CONFIGURABLE: port is passed via CLI args, exit with error.PortNotConfigured if args absent
+//   - REQUIRED: port is set manually in the config struct, exit with error.PortNotConfigured if unset (0)
 //   Both modes fail if the port is not provided — the distinction is the source, not the behavior.
 //   No silent defaults in either mode. Enforces "explicit over implicit."
 const ServerConfig = struct {
@@ -49,7 +49,7 @@ const ServerConfig = struct {
 // NOTE: UDP has no connection state — the server cannot know a client is gone until silence.
 //       Disconnect detection is purely timeout-based. Worst-case detection delay is
 //       DISCONNECT_TIMEOUT_MS + POLL_TIMEOUT_MS (currently ~7s). Lower DISCONNECT_TIMEOUT_MS
-//       to reduce the window; there is no OS-level signal to hook into (unlike TCP FIN).
+//       to reduce the window, there is no OS-level signal to hook into (unlike TCP FIN).
 const DISCONNECT_TIMEOUT_MS: i64 = 5000;
 const POLL_TIMEOUT_MS: i64 = 2000;
 
@@ -61,11 +61,11 @@ const MAX_BROADCAST_CLIENTS: usize = 64;
 // --------------------------------------------------------- //
 
 // Captures all state needed by processPacket — copy semantics, safe across concurrent tasks.
-// NOTE: socket handle is shared across concurrent tasks; send on UDP is kernel-atomic per datagram
-// NOTE: peers[] is a snapshot of connected client addresses taken at receive time;
+// NOTE: socket handle is shared across concurrent tasks, send on UDP is kernel-atomic per datagram
+// NOTE: peers[] is a snapshot of connected client addresses taken at receive time
 //       avoids sharing the mutable ClientRecord list across concurrent tasks
 // PERF: peers[MAX_BROADCAST_CLIENTS] is copied by value into every PacketTask — grows with
-//       IpAddress size * MAX_BROADCAST_CLIENTS; reduce cap or switch to heap slice in src/
+//       IpAddress size * MAX_BROADCAST_CLIENTS, reduce cap or switch to heap slice in src/
 const PacketTask = struct {
     buf: [@sizeOf(TestPacket)]u8,
     from: std.Io.net.IpAddress,
@@ -80,7 +80,7 @@ const PacketTask = struct {
 // NOTE: index is a monotonic connection counter assigned at first packet from this address.
 //       It is a PoC-only identity — not stable across reconnects, not collision-safe.
 // NOTE: when identifying clients, how the id is structured, validated, and scoped is the
-//       application's responsibility; the transport layer only assigns a transient index.
+//       application's responsibility. The transport layer only assigns a transient index.
 const ClientRecord = struct {
     from: std.Io.net.IpAddress,
     last_seen: std.Io.Clock.Timestamp,
@@ -142,8 +142,8 @@ fn processPacket(task: PacketTask) void {
         _ = std.fmt.bufPrint(&stamped.id, "client-{d}", .{task.sender_index}) catch {};
 
         // SECURITY: no sender validation — any client (including spoofed IPs) can trigger
-        //           a broadcast to all peers; a single bad actor can flood all connected clients
-        // PERF: N sequential send() syscalls per packet; at high client count + packet rate
+        //           a broadcast to all peers, a single bad actor can flood all connected clients
+        // PERF: N sequential send() syscalls per packet at high client count + packet rate
         //       this becomes a bottleneck — in src/ consider batching or a dedicated relay thread
         for (task.peers[0..task.n_peers]) |*peer| {
             task.socket.send(task.io, peer, std.mem.asBytes(&stamped)) catch |err| {
@@ -209,7 +209,7 @@ pub fn main(process: std.process.Init) !void {
 
         const now = std.Io.Clock.Timestamp.now(io, .awake);
 
-        // track connected clients; capture sender_index for the task
+        // track connected clients, capture sender_index for the task
         var sender_index: usize = 0;
         var known = false;
         for (clients.items) |*r| {

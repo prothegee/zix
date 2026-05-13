@@ -74,8 +74,8 @@ pub const Response = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     status: Status.Code = .OK,
-    content_type: Content.Type = .TEXT_PLAIN,
-    keep_alive: bool = true,
+    content_type: ?Content.Type = null,
+    keep_alive: ?bool = null,
     extra_buf: ?[]HttpHeader = null,
     extra_len: usize = 0,
     max_headers: usize,
@@ -149,11 +149,17 @@ pub const Response = struct {
         for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
         for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
         if (self.extra_buf == null) {
-            self.extra_buf = try self.allocator.alloc(HttpHeader, self.max_headers);
+            const initial = @min(@as(usize, 4), self.max_headers);
+            if (initial == 0) return error.TooManyHeaders;
+            self.extra_buf = try self.allocator.alloc(HttpHeader, initial);
+        } else if (self.extra_len >= self.extra_buf.?.len) {
+            if (self.extra_buf.?.len >= self.max_headers) return error.TooManyHeaders;
+            const new_cap = @min(self.extra_buf.?.len * 2, self.max_headers);
+            const new_buf = try self.allocator.alloc(HttpHeader, new_cap);
+            @memcpy(new_buf[0..self.extra_len], self.extra_buf.?[0..self.extra_len]);
+            self.extra_buf = new_buf;
         }
-        const extra = self.extra_buf.?;
-        if (self.extra_len >= extra.len) return error.TooManyHeaders;
-        extra[self.extra_len] = .{ .name = name, .value = value };
+        self.extra_buf.?[self.extra_len] = .{ .name = name, .value = value };
         self.extra_len += 1;
     }
 
@@ -161,11 +167,15 @@ pub const Response = struct {
     /// Write and flush the HTTP response with the given body
     ///
     /// Note:
-    /// - Sends status line, Content-Type, Content-Length, Connection, Date, and any extra headers
+    /// - Sends status line, Content-Length, Date, and any extra headers
+    /// - Content-Type is only sent if explicitly set via setContentType() or sendJson()
+    /// - Connection is only sent if explicitly set via setKeepAlive()
+    /// - 204 No Content omits Content-Type and Content-Length per RFC 7230
+    /// - Status line uses Status.statusLine() lookup for common codes (memcpy);
+    ///   uncommon codes fall back to bufPrint
     /// - Fixed headers are staged into a single buffer and flushed in one write
     /// - Date uses the server-cached value (refreshed once per second); proxy-forwarded
     ///   Date header from the request takes priority if present
-    /// - Connection is close if either the handler or the client requested close
     ///
     /// Param:
     /// body_data - []const u8
@@ -174,37 +184,54 @@ pub const Response = struct {
     /// !void
     pub fn send(self: *Response, body_data: []const u8) !void {
         const out = self.req.server.out;
+        const date_value = self.date_cache orelse "";
 
-        const date_value: []const u8 = blk: {
-            var it = self.req.iterateHeaders();
-            while (it.next()) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "date")) break :blk h.value;
-            }
-            break :blk self.date_cache orelse "";
-        };
-
-        const status_text = Status.stringFromEnum(self.status);
-        const conn = if (self.keep_alive and self.req.head.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
-
-        // Stage fixed headers into a 320-byte stack buffer — covers the worst-case
-        // fixed header block (~190 bytes) with headroom; single writeAll instead of
-        // multiple print() calls reduces vtable dispatch and write overhead.
-        var fixed: [320]u8 = undefined;
+        // Stage fixed headers into a 512-byte stack buffer — covers the worst-case
+        // fixed header block (~190 bytes) plus most short bodies, single writeAll
+        // instead of multiple print() calls reduces vtable dispatch and write overhead.
+        var fixed: [512]u8 = undefined;
         var offset: usize = 0;
-        const sl = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), status_text });
-        offset += sl.len;
-        const ct = try std.fmt.bufPrint(fixed[offset..], "Content-Type: {s}\r\n", .{self.content_type.asString()});
-        offset += ct.len;
-        const cl = try std.fmt.bufPrint(fixed[offset..], "Content-Length: {d}\r\n", .{body_data.len});
-        offset += cl.len;
-        if (offset + conn.len + 2 > fixed.len) return error.BufferTooSmall;
-        @memcpy(fixed[offset..][0..conn.len], conn);
-        offset += conn.len;
+
+        // Status line: pre-built lookup for common codes, bufPrint fallback for the rest.
+        const sl_const = Status.statusLine(self.status);
+        if (sl_const.len > 0) {
+            @memcpy(fixed[offset..][0..sl_const.len], sl_const);
+            offset += sl_const.len;
+        } else {
+            const status_text = Status.stringFromEnum(self.status);
+            const sl = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), status_text });
+            offset += sl.len;
+        }
+
+        // 204 No Content: RFC 7230 forbids Content-Length, Content-Type is also customarily omitted.
+        const skip_body_headers = self.status == .NO_CONTENT;
+        if (!skip_body_headers) {
+            if (self.content_type) |ct_val| {
+                const ct = try std.fmt.bufPrint(fixed[offset..], "Content-Type: {s}\r\n", .{ct_val.asString()});
+                offset += ct.len;
+            }
+            // Content-Length: hand-rolled decimal write skips std.fmt machinery.
+            const cl_prefix = "Content-Length: ";
+            if (offset + cl_prefix.len + 22 > fixed.len) return error.BufferTooSmall;
+            @memcpy(fixed[offset..][0..cl_prefix.len], cl_prefix);
+            offset += cl_prefix.len;
+            offset += writeDecimal(fixed[offset..], body_data.len);
+            fixed[offset] = '\r';
+            fixed[offset + 1] = '\n';
+            offset += 2;
+        }
+        if (self.keep_alive) |ka| {
+            const conn: []const u8 = if (ka and self.req.head.keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
+            if (offset + conn.len > fixed.len) return error.BufferTooSmall;
+            @memcpy(fixed[offset..][0..conn.len], conn);
+            offset += conn.len;
+        }
         const dl = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
         offset += dl.len;
 
         // Fast path: no extra headers + body fits in remaining buffer -> one writeAll + flush.
-        // Covers "Hello World", short JSON, and most API responses (body ≤ ~190 bytes).
+        // Covers "Hello World", short JSON, and most API responses (body up to ~380 bytes
+        // with fixed[512]).
         if (self.extra_len == 0 and offset + 2 + body_data.len <= fixed.len) {
             fixed[offset] = '\r';
             fixed[offset + 1] = '\n';
@@ -251,7 +278,7 @@ pub const Response = struct {
     ///
     /// Note:
     /// - Sends HTTP 200 with Content-Type: text/event-stream, Cache-Control: no-cache —
-    ///   no Content-Length; the connection stays open until the handler returns or a write fails
+    ///   no Content-Length, the connection stays open until the handler returns or a write fails
     /// - Sets res.streaming = true so handleConnection closes the connection after the handler exits
     /// - Best used with workers = 1 (Model 1, io.concurrent()); long-lived SSE connections will
     ///   exhaust a blocking pool (Model 2)
@@ -260,14 +287,7 @@ pub const Response = struct {
     /// !SseWriter
     pub fn stream(self: *Response) !SseWriter {
         const out = self.req.server.out;
-
-        const date_value: []const u8 = blk: {
-            var it = self.req.iterateHeaders();
-            while (it.next()) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "date")) break :blk h.value;
-            }
-            break :blk self.date_cache orelse "";
-        };
+        const date_value = self.date_cache orelse "";
 
         var fixed: [256]u8 = undefined;
         var offset: usize = 0;
@@ -301,6 +321,31 @@ pub const Response = struct {
         return self.send("");
     }
 };
+
+// --------------------------------------------------------- //
+
+/// Hand-rolled usize -> decimal writer for Content-Length in the hot path.
+/// Returns the number of bytes written. usize max in base 10 is 20 digits.
+fn writeDecimal(buf: []u8, n: usize) usize {
+    if (n == 0) {
+        buf[0] = '0';
+        return 1;
+    }
+    var tmp: [20]u8 = undefined;
+    var i: usize = 0;
+    var x = n;
+    while (x > 0) : (x /= 10) {
+        tmp[i] = @intCast('0' + (x % 10));
+        i += 1;
+    }
+    var j: usize = 0;
+    while (i > 0) {
+        i -= 1;
+        buf[j] = tmp[i];
+        j += 1;
+    }
+    return j;
+}
 
 // --------------------------------------------------------- //
 
@@ -340,10 +385,10 @@ test "zix test: http response setters" {
     try std.testing.expectEqual(Status.Code.CREATED, res.status);
 
     res.setContentType(.APPLICATION_JSON);
-    try std.testing.expectEqual(Content.Type.APPLICATION_JSON, res.content_type);
+    try std.testing.expectEqual(Content.Type.APPLICATION_JSON, res.content_type.?);
 
     res.setKeepAlive(false);
-    try std.testing.expect(!res.keep_alive);
+    try std.testing.expectEqual(@as(?bool, false), res.keep_alive);
 
     try res.addHeader("X-Test", "Value");
     try std.testing.expectEqual(@as(usize, 1), res.extra_len);
@@ -413,6 +458,34 @@ test "zix test: Response.streaming defaults to false" {
     defer arena.deinit();
     const res = Response.init(undefined, undefined, arena.allocator(), 32);
     try std.testing.expect(!res.streaming);
+}
+
+test "zix test: writeDecimal" {
+    var buf: [24]u8 = undefined;
+
+    // zero
+    try std.testing.expectEqual(@as(usize, 1), writeDecimal(&buf, 0));
+    try std.testing.expectEqualStrings("0", buf[0..1]);
+
+    // single digit
+    try std.testing.expectEqual(@as(usize, 1), writeDecimal(&buf, 7));
+    try std.testing.expectEqualStrings("7", buf[0..1]);
+
+    // multi-digit
+    try std.testing.expectEqual(@as(usize, 3), writeDecimal(&buf, 456));
+    try std.testing.expectEqualStrings("456", buf[0..3]);
+
+    // typical Content-Length values
+    try std.testing.expectEqual(@as(usize, 2), writeDecimal(&buf, 64));
+    try std.testing.expectEqualStrings("64", buf[0..2]);
+    try std.testing.expectEqual(@as(usize, 4), writeDecimal(&buf, 1024));
+    try std.testing.expectEqualStrings("1024", buf[0..4]);
+    try std.testing.expectEqual(@as(usize, 5), writeDecimal(&buf, 65535));
+    try std.testing.expectEqualStrings("65535", buf[0..5]);
+
+    // large value (u32 max)
+    try std.testing.expectEqual(@as(usize, 10), writeDecimal(&buf, 4294967295));
+    try std.testing.expectEqualStrings("4294967295", buf[0..10]);
 }
 
 test "zix test: formatHttpDate known timestamps" {

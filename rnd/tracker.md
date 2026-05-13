@@ -11,9 +11,9 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 **std.Io.net verified (2026-05-09):**
 - `std.Io.net.UnixAddress` exists: `init(path)`, `listen(io, opts) !Server`, `connect(io) !Stream`
 - Stream mode only — datagram not exposed via `std.Io.net.UnixAddress`
-- `has_unix_sockets` = false on WASI; Windows 10 RS4+ supported; true elsewhere
+- `has_unix_sockets` = false on WASI. Windows 10 RS4+ supported, true elsewhere
 - Path cleanup (unlink) not handled by `std.Io` — requires `std.posix.unlink(path)` on deinit
-- Max path length: 108 bytes (Linux/macOS); abstract namespace via null-byte prefix supported
+- Max path length: 108 bytes (Linux/macOS) abstract namespace via null-byte prefix supported
 
 **Design decisions needed before src:**
 - [ ] Datagram mode: skip for v1 (stream only via std.Io.net) or add via raw std.posix?
@@ -21,7 +21,7 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 
 **Implementation checklist:**
 - [ ] `src/uds/config.zig` -- `UdsServerConfig`, `UdsClientConfig`, `SocketMode` enum
-- [ ] `src/uds/server.zig` -- `UdsServer` stream mode; path unlink on deinit
+- [ ] `src/uds/server.zig` -- `UdsServer` stream mode path unlink on deinit
 - [ ] `src/uds/client.zig` -- `UdsClient`
 - [ ] `src/uds/Uds.zig` -- namespace aggregator
 - [ ] `src/zix.zig` -- `pub const Uds = @import("uds/Uds.zig")`

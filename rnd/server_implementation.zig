@@ -43,7 +43,7 @@ const CLIENT_REQUEST_BUFFER_SIZE: usize = 1024 * 8;
 // --------------------------------------------------------- //
 
 // HTTP Methods (RFC 7231 + RFC 5789)
-const HttpMethod = enum {
+const HttpMethod = enum(u8) {
     GET,
     HEAD,
     POST,

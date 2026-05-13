@@ -8,7 +8,7 @@ Two threading models are available. Select via `config.workers` in `HttpServerCo
 
 One thread binds the socket and calls `accept()` in a loop. Each accepted connection is
 dispatched as a concurrent task via `io.concurrent()` -- non-blocking, no busy-waiting.
-The caller owns and creates the `std.Io` backend; this model is suitable when you need
+The caller owns and creates the `std.Io` backend. This model is suitable when you need
 explicit control over the concurrency limit.
 
 ```
@@ -16,7 +16,7 @@ Main thread:
   bind -> listen
   loop:
     stream = accept(io)
-    io.concurrent(handleConnection, stream)   ← suspends; OS event loop schedules task
+    io.concurrent(handleConnection, stream)   ← suspends, OS event loop schedules task
 
 Handler tasks (one per active connection):
   handleConnection(stream)  -- keep-alive loop until client closes
@@ -62,7 +62,7 @@ Accept threads (worker_count, default 2):
   bind/listen on same port with SO_REUSEPORT
   loop:
     stream = accept(io)
-    queue.push(stream)   ← fast; never blocks on I/O
+    queue.push(stream)   ← fast, never blocks on I/O
 
 Pool threads (pool_size, default max(10, cpu_count * 2)):
   loop:
@@ -135,7 +135,7 @@ var server = try zix.Http.Server.init(4096, .{
 | Protocol | Model 1 | Model 2 |
 | :- | :- | :- |
 | TCP (HTTP) | yes -- `workers = 1` | yes -- default |
-| TCP (SSE) | yes -- required; long-lived connections fit the async task model | not recommended -- exhausts blocking pool threads |
+| TCP (SSE) | yes -- required, long-lived connections fit the async task model | not recommended -- exhausts blocking pool threads |
 | UDP | yes -- current src/ | planned |
 | UDS (stream) | planned -- same accept/handle pattern as TCP | planned |
 | UDS (datagram) | not via `std.Io.net` -- would need raw `std.posix`; defer | defer |

@@ -159,7 +159,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         ///
         /// Note:
         /// - Sets TCP_NODELAY immediately on accepted connection
-        /// - Stack-allocates I/O buffers when config sizes fit within stack_threshold;
+        /// - Stack-allocates I/O buffers when config sizes fit within stack_threshold
         ///   heap-allocates from smp_allocator otherwise
         /// - Per-connection arena is pre-warmed with max_allocator_size then reset
         ///   with retain_capacity before the loop — first request pays no heap cost
@@ -243,8 +243,21 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                     .reader = &conn_reader.interface,
                     .allocator = allocator,
                 };
+                // Pre-compute once per request so path()/query()/method() pay no scan cost.
+                req.qmark_pos = std.mem.indexOfScalar(u8, inner_req.head.target, '?') orelse inner_req.head.target.len;
+                req.method_cache = switch (inner_req.head.method) {
+                    .GET => .GET,
+                    .HEAD => .HEAD,
+                    .POST => .POST,
+                    .PUT => .PUT,
+                    .DELETE => .DELETE,
+                    .PATCH => .PATCH,
+                    .OPTIONS => .OPTIONS,
+                    .TRACE => .TRACE,
+                    .CONNECT => .CONNECT,
+                };
                 var res = Response.init(&inner_req, io, allocator, cfg.max_response_headers.value());
-                // Zero-syscall Date: atomic load from global cache; no clock call per request.
+                // Zero-syscall Date: atomic load from global cache, no clock call per request.
                 const idx = g_date_active.load(.acquire);
                 res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
                 var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
@@ -277,7 +290,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 
         /// Brief:
         /// Accept thread — accepts connections and enqueues them immediately.
-        /// Never handles I/O; stays in the accept loop at all times.
+        /// Never handles I/O stays in the accept loop at all times.
         ///
         /// Note:
         /// - reuse_address = true sets SO_REUSEADDR + SO_REUSEPORT on POSIX,
@@ -397,12 +410,12 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         /// Start listening and accepting connections
         ///
         /// Note:
-        /// - If config.public_dir is non-empty, validates the directory exists before binding;
+        /// - If config.public_dir is non-empty, validates the directory exists before binding,
         ///   returns error.PublicDirNotFound if not
         /// - workers = 0 (default): auto CPU count accept threads + cpu*2 pool threads (model 2)
         /// - workers = 1: single-threaded, uses the caller's io directly (model 1)
         /// - workers = N: exactly N accept threads in model 2
-        /// - Model 2 accept threads listen on the same port via SO_REUSEPORT; pool threads handle
+        /// - Model 2 accept threads listen on the same port via SO_REUSEPORT, pool threads handle
         ///   connections synchronously via a shared work queue
         ///
         /// Return:
@@ -417,7 +430,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             }
 
             // Accept threads only push to the work queue — they never handle I/O.
-            // 2 is enough to saturate even a high-throughput listener; cpu_count accept
+            // 2 is enough to saturate even a high-throughput listener, cpu_count accept
             // threads would add unnecessary OS threads without throughput benefit.
             const worker_count = if (cfg.workers == 0) 2 else cfg.workers;
 
@@ -448,7 +461,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 // Model 2 — accept threads + pool threads connected by a work queue.
                 // Pool threads handle connections synchronously (blocking I/O, no scheduler),
                 // matching thread pool model. stack_size=512KB vs 8MB default reduces
-                // virtual memory and TLB pressure; handleConnection only needs ~2×stack_threshold.
+                // virtual memory and TLB pressure, handleConnection only needs ~2×stack_threshold.
                 const cpu = std.Thread.getCpuCount() catch 8;
                 const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
@@ -502,7 +515,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 /// Note:
 /// - stack_threshold sets the cutoff for stack vs heap I/O buffers per connection:
 ///   if max_client_request / max_client_response fit within stack_threshold the
-///   buffer lives on the connection thread stack; otherwise heap-allocated
+///   buffer lives on the connection thread stack, otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
 /// - workers in config controls the concurrency model:
 ///     0 (default) -> auto CPU count accept threads + cpu*2 pool threads (model 2)

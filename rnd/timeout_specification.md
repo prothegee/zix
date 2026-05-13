@@ -38,7 +38,7 @@ while (true) {
 **Verified behavior (tested):**
 Two requests sent with a 6s gap (timeout = 5s). Both requests received a response. After the
 second response, `nc` exited -- the server broke the loop at the next deadline check. The 6s
-gap passed inside `receiveHead()` undetected; the deadline fired only after `receiveHead()`
+gap passed inside `receiveHead()` undetected, the deadline fired only after `receiveHead()`
 returned with the second request.
 
 **Covers:**
@@ -110,11 +110,11 @@ Server responded with HTTP 408. Stderr: `model-b: timed out after step 2`.
 
 **Does NOT cover:**
 - Blocking I/O inside the handler (`std.Io.sleep`, DB calls, file reads) -- the handler is
-  not interrupted; it only notices on the next explicit `timedOut()` call.
+  not interrupted. It only notices on the next explicit `timedOut()` call.
 - `receiveHead()` stalling (handler has not started yet).
 - Keep-alive idle gaps.
 
-**Cost:** 0 extra threads. Null deadline is a branch-on-null; no overhead when unused.
+**Cost:** 0 extra threads. Null deadline is a branch-on-null, no overhead when unused.
 
 ---
 

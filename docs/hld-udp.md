@@ -126,9 +126,9 @@ Access via `const zix = @import("zix");`
 
 ```zig
 pub const UdpServerConfig = struct {
-    allocator:             std.mem.Allocator,          // caller-owned; used for client list and broadcast snapshots
+    allocator:             std.mem.Allocator,          // caller-owned, used for client list and broadcast snapshots
     ip:                    []const u8,                 // bind address
-    port:                  u16,                        // bind port; must be non-zero
+    port:                  u16,                        // bind port & must be non-zero
     port_mode:             PortMode   = .REQUIRED,
     endianness:            Endianness = .LITTLE,
     disconnect_timeout_ms: i64        = 5000, // silence before client considered disconnected
@@ -140,7 +140,7 @@ pub const UdpServerConfig = struct {
 };
 ```
 
-`allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent — both can be true simultaneously (ACK then echo). `broadcast` sends to all clients; `auto_echo` sends only to the sender.
+`allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent — both can be true simultaneously (ACK then echo). `broadcast` sends to all clients, `auto_echo` sends only to the sender.
 
 ---
 
@@ -149,7 +149,7 @@ pub const UdpServerConfig = struct {
 ```zig
 pub const UdpClientConfig = struct {
     server_ip:   []const u8, // server address to send packets to
-    server_port: u16,        // server port; must be non-zero
+    server_port: u16,        // server port & must be non-zero
     bind_port:   u16,        // local port -- server uses this to send responses back
     port_mode:   PortMode   = .REQUIRED,
     endianness:  Endianness = .LITTLE, // must match server
@@ -301,10 +301,10 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 
 | Feature | Note |
 | :- | :- |
-| `sendmmsg` batching | N sequential `send()` per broadcast; `sendmmsg` would reduce to 1 syscall |
+| `sendmmsg` batching | N sequential `send()` per broadcast, `sendmmsg` would reduce to 1 syscall |
 | Sub-millisecond send interval | `send_every` is in milliseconds; rename to nanoseconds if needed |
-| Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`; current src uses heap slice with no cap |
-| Configurable feedback struct | Currently echo sends the raw packet back; production could use a tagged result |
+| Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`. Current src uses heap slice with no cap |
+| Configurable feedback struct | Currently echo sends the raw packet back. Production could use a tagged result |
 
 ---
 

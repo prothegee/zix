@@ -14,6 +14,11 @@ pub const Request = struct {
     allocator: std.mem.Allocator,
     body_cache: ?[]const u8 = null,
     path_params: []const PathParam = &.{},
+    // Pre-computed by server before dispatch, null = not set (tests), falls back to scan.
+    qmark_pos: ?usize = null, // index of '?' in target, or target.len if none
+    method_cache: ?Method.Code = null,
+    // Lazy lowercase-keyed index of request headers, built on first header() call.
+    header_index: ?std.StringHashMapUnmanaged([]const u8) = null,
 
     /// Brief:
     /// Get HTTP method of the request
@@ -21,6 +26,7 @@ pub const Request = struct {
     /// Return:
     /// zix.Tcp.Http.Method.Code
     pub fn method(self: Request) Method.Code {
+        if (self.method_cache) |m| return m;
         return switch (self.inner.head.method) {
             .GET => .GET,
             .HEAD => .HEAD,
@@ -41,8 +47,8 @@ pub const Request = struct {
     /// []const u8
     pub fn path(self: Request) []const u8 {
         const target = self.inner.head.target;
-        if (std.mem.indexOfScalar(u8, target, '?')) |qpos| return target[0..qpos];
-        return target;
+        const pos = self.qmark_pos orelse (std.mem.indexOfScalar(u8, target, '?') orelse target.len);
+        return target[0..pos];
     }
 
     /// Brief:
@@ -52,8 +58,9 @@ pub const Request = struct {
     /// []const u8
     pub fn query(self: Request) []const u8 {
         const target = self.inner.head.target;
-        if (std.mem.indexOfScalar(u8, target, '?')) |qpos| return target[qpos + 1 ..];
-        return "";
+        const pos = self.qmark_pos orelse (std.mem.indexOfScalar(u8, target, '?') orelse target.len);
+        if (pos >= target.len) return "";
+        return target[pos + 1 ..];
     }
 
     /// Brief:
@@ -61,13 +68,42 @@ pub const Request = struct {
     ///
     /// Note:
     /// - Returns null if the header is not present
+    /// - First call builds a lowercase-keyed index from the request arena
+    ///   subsequent calls are O(1) hash lookups
+    /// - Falls back to a linear scan if the header_index build fails or
+    ///   the lookup name exceeds the on-stack lowercase buffer
     ///
     /// Param:
     /// name - []const u8 (header name, case-insensitive)
     ///
     /// Return:
     /// ?[]const u8
-    pub fn header(self: Request, name: []const u8) ?[]const u8 {
+    pub fn header(self: *Request, name: []const u8) ?[]const u8 {
+        if (self.header_index == null) {
+            var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+            var build_ok = true;
+            var it = self.inner.iterateHeaders();
+            while (it.next()) |h| {
+                const lower = self.allocator.alloc(u8, h.name.len) catch {
+                    build_ok = false;
+                    break;
+                };
+                _ = std.ascii.lowerString(lower, h.name);
+                map.put(self.allocator, lower, h.value) catch {
+                    build_ok = false;
+                    break;
+                };
+            }
+            if (build_ok) self.header_index = map;
+        }
+
+        var lower_buf: [128]u8 = undefined;
+        if (self.header_index != null and name.len <= lower_buf.len) {
+            const lower_name = std.ascii.lowerString(lower_buf[0..name.len], name);
+            return self.header_index.?.get(lower_name);
+        }
+
+        // Fallback: linear scan with case-insensitive compare.
         var it = self.inner.iterateHeaders();
         while (it.next()) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;

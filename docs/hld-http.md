@@ -8,7 +8,7 @@ HTTP server built on Zig 0.16.x `std.Io`.
 
 - Explicit over implicit -- no magic, every behavior named in config or registration.
 - One file, one responsibility.
-- Data-Oriented Design: flat arrays, minimal indirection.
+- Minimal indirection on the hot path.
 - No hidden allocations inside handlers.
 - Predictable routing: deterministic dispatch priority.
 
@@ -75,7 +75,7 @@ flowchart TD
     Q --> J
 ```
 
-- One accept thread; each connection dispatched as a concurrent task via `io.concurrent()`.
+- One accept thread, each connection dispatched as a concurrent task via `io.concurrent()`.
 - Use when you need an explicit `concurrent_limit` (`std.Io.Threaded` with `.concurrent_limit`).
 - `workers = 1` in `HttpServerConfig`.
 
@@ -187,13 +187,13 @@ pub const HttpServerConfig = struct {
     max_client_request:   usize      = 1024 * 4, // read buffer per connection (heap or stack)
     max_allocator_size:   usize      = 1024 * 4, // per-connection arena backing size
     max_client_response:  usize      = 1024 * 4, // write buffer per connection (heap or stack)
-    max_response_headers: HeaderSize = .COMMON,  // custom header cap; arena-allocated per request
-    public_dir:           []const u8 = "",        // static file root; "" disables static serving
+    max_response_headers: HeaderSize = .COMMON,  // custom header cap, arena-allocated per request
+    public_dir:           []const u8 = "",        // static file root "" disables static serving
     public_dir_upload:    []const u8 = "u",       // upload subdir under public_dir
-    conn_timeout_ms:      u32        = 0,         // Layer D: connection guard; 0 = disabled; model 2 only
-    handler_timeout_ms:   u32        = 0,         // Layer B: handler budget; 0 = disabled; ctx.timedOut()
-    workers:              usize      = 0,  // 0 = 2 accept threads (model 2); 1 = model 1; N = N accept threads
-    pool_size:            usize      = 0,  // 0 = max(10, cpu_count * 2); N = N pool threads (model 2 only)
+    conn_timeout_ms:      u32        = 0,         // Layer D: connection guard. 0 = disabled; model 2 only
+    handler_timeout_ms:   u32        = 0,         // Layer B: handler budget. 0 = disabled; ctx.timedOut()
+    workers:              usize      = 0,  // 0 = 2 accept threads (model 2). 1 = model 1; N = N accept threads
+    pool_size:            usize      = 0,  // 0 = max(10, cpu_count * 2). N = N pool threads (model 2 only)
 };
 ```
 
@@ -265,10 +265,10 @@ Wraps `*std.http.Server.Request` and a `*std.Io.Reader` for body reading.
 | `path()` | `[]const u8` | Target stripped of query string |
 | `query()` | `[]const u8` | Raw query string after `?` |
 | `queryParam(key)` | `?[]const u8` | Single key from query string |
-| `queryParams(allocator)` | `![]QueryParam` | All query params; bare keys have `value = null` |
+| `queryParams(allocator)` | `![]QueryParam` | All query params bare keys have `value = null` |
 | `pathSegments(allocator)` | `![][]const u8` | Non-empty segments split by `/` |
-| `pathParam(name)` | `?[]const u8` | Named capture from param route; null if not captured |
-| `header(name)` | `?[]const u8` | Case-insensitive header lookup |
+| `pathParam(name)` | `?[]const u8` | Named capture from param route, null if not captured |
+| `header(name)` | `?[]const u8` | Case-insensitive lookup. Lazy O(1) index built on first call |
 | `body()` | `![]const u8` | Reads `Content-Length` bytes, cached after first call |
 
 ---
@@ -280,35 +280,37 @@ Buffers response state, writes on `send()` or equivalent.
 | Method | Notes |
 | :- | :- |
 | `setStatus(Status.Code)` | Default: `.OK` |
-| `setContentType(Content.Type)` | Default: `.TEXT_PLAIN` |
-| `setKeepAlive(bool)` | Default: `true` |
-| `addHeader(name, value)` | Up to `max_response_headers` extra headers; rejects CR/LF |
+| `setContentType(Content.Type)` | Opt-in header omitted unless explicitly set |
+| `setKeepAlive(bool)` | Opt-in header omitted unless explicitly set |
+| `addHeader(name, value)` | Up to `max_response_headers` extra headers rejects CR/LF |
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
 | `noContent()` | Sets status `.NO_CONTENT`, sends empty body |
 | `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`; sets `streaming = true` so the keep-alive loop exits after the handler returns |
 
-Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size; `error.BufferTooSmall` is returned if exceeded.
+Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.BufferTooSmall` is returned if exceeded.
 
 ### Automatic headers emitted by send()
 
-`send()` always emits these headers before any custom headers added via `addHeader()`:
+`send()` always emits `Content-Length` and `Date`. `Content-Type` and `Connection` are emitted only when the handler explicitly sets them:
 
-| Header | Value | Source |
+| Header | Value | Emitted? |
 | :- | :- | :- |
-| `Content-Type` | from `setContentType()` | default `.TEXT_PLAIN` |
-| `Content-Length` | `body.len` | computed |
-| `Connection` | `keep-alive` or `close` | see below |
-| `Date` | RFC 7231 UTC timestamp | see below |
+| `Content-Type` | from `setContentType()` | only if `setContentType()` was called (skipped for 204) |
+| `Content-Length` | `body.len` | always (skipped for 204 No Content per RFC 7230) |
+| `Connection` | `keep-alive` or `close` | only if `setKeepAlive()` was called |
+| `Date` | RFC 7231 UTC timestamp | always |
 
-**`Connection` logic** — close if either side requests it:
-- `keep-alive` when both `self.keep_alive` (handler default `true`) and `req.head.keep_alive` (parsed from the client's `Connection` request header) are true.
+**`Connection` logic** — emitted only when the handler calls `setKeepAlive()`:
+- Omitted entirely if `setKeepAlive()` was never called.
+- `keep-alive` when `setKeepAlive(true)` was called **and** `req.head.keep_alive` (parsed from the client's `Connection` request header) is true.
 - `close` if the handler called `setKeepAlive(false)` **or** the client sent `Connection: close`.
 
 **`Date` logic** — cross-platform, proxy-aware:
-1. Walk request headers for a proxy-forwarded `Date` value; if found, use it verbatim.
-2. Otherwise read from the global atomic date cache (updated by a timer thread every 500 ms in Model 2, or by the accept loop in Model 1) — one atomic load per request, no clock syscall.
-3. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
+1. `server.zig` scans request headers once before dispatch for a proxy-forwarded `Date` value. If found, stores it in `res.date_cache`.
+2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a timer thread every 500 ms in Model 2, or by the accept loop in Model 1) — one atomic load per request, no clock syscall.
+3. `send()` reads `res.date_cache` directly — no header scan at send time.
+4. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
 ---
 
@@ -319,8 +321,8 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 | Function | Pattern example | Behaviour |
 | :- | :- | :- |
 | `registerHandler(path, h)` | `"/about"` | Exact -- matches only when the full path equals `path` |
-| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix -- matches `prefix` and any sub-path; NOT partial segments |
-| `registerParamHandler(pattern, h)` | `"/users/:id"` | Param -- `:name` segments captured; literals must match exactly |
+| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix -- matches `prefix` and any sub-path, NOT partial segments |
+| `registerParamHandler(pattern, h)` | `"/users/:id"` | Param -- `:name` segments captured literals must match exactly |
 
 ```zig
 server.registerHandler("/about", aboutHandler);
@@ -332,7 +334,7 @@ server.registerParamHandler("/:tenant/:branch", branchHandler);
 ### Dispatch -- priority rules
 
 ```
-Pass 1 -- exact routes:   first exact match wins           (registration order irrelevant)
+Pass 1 -- exact routes:   O(1) hash map lookup            (registration order irrelevant)
 Pass 2 -- param routes:   first matching pattern wins      (registration order matters)
 Pass 3 -- prefix routes:  longest matching prefix wins     (registration order irrelevant)
 
@@ -343,7 +345,7 @@ Passes 1 and 3 are deterministic regardless of registration order. **Pass 2 is t
 
 ```mermaid
 flowchart TD
-    A["dispatch(req, res, ctx)"] --> B["Pass 1: scan exact routes"]
+    A["dispatch(req, res, ctx)"] --> B["Pass 1: exact_map.get(path) O(1)"]
     B --> C{"exact match?"}
     C -->|yes| DONE["call handler -- return true"]
     C -->|no| D["Pass 2: scan param routes\nin registration order"]
@@ -374,9 +376,9 @@ zix has no regex engine. Use `registerPrefixHandler` as `/prefix/(.*)`. Addition
 
 | Regex intent | zix equivalent |
 | :- | :- |
-| `/secret/(.*)` | prefix handler; sub-path via `req.path()[len("/secret")+1..]` |
-| `/files/.*\.pdf` | prefix handler on `/files`; check `std.mem.endsWith(u8, sub, ".pdf")` in handler |
-| `/v[0-9]+/.*` | prefix handler on `/v`; parse next segment with `std.fmt.parseInt` |
+| `/secret/(.*)` | prefix handler sub-path via `req.path()[len("/secret")+1..]` |
+| `/files/.*\.pdf` | prefix handler on `/files` check `std.mem.endsWith(u8, sub, ".pdf")` in handler |
+| `/v[0-9]+/.*` | prefix handler on `/v` parse next segment with `std.fmt.parseInt` |
 
 ---
 
@@ -415,7 +417,7 @@ try parser.parse(try req.body());
 if (parser.getField("file")) |f| {
     const filename = f.filename orelse "upload";
     const path = try zix.utils.file.saveFile(ctx.io, ctx.allocator, "./public/u", filename, f.data);
-    _ = path; // arena-allocated; valid for this request
+    _ = path; // arena-allocated, valid for this request
 }
 ```
 
@@ -505,7 +507,7 @@ pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 }
 ```
 
-`ctx.timedOut()` is always safe to call -- it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare; no syscall is issued when the deadline has not passed.
+`ctx.timedOut()` is always safe to call -- it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare, no syscall is issued when the deadline has not passed.
 
 `ctx.withTimeout(ms)` and `ctx.withDeadline(ts)` return a modified copy of ctx with a new deadline. These can be used inside a handler to set a tighter sub-budget for one step.
 
@@ -652,7 +654,7 @@ graph TD
 
 | Scope | Allocator | Lifetime | Arena suitable? |
 | :- | :- | :- | :- |
-| Router route list | `config.allocator` | Process | Yes — append-only; freed via `server.deinit()` |
+| Router route list | `config.allocator` | Process | Yes — append-only. Freed via `server.deinit()` |
 | Read/write I/O buffers | `smp_allocator` | Connection | No — individually freed on connection close |
 | Per-request allocations | Per-connection `ArenaAllocator` reset each request | Request | Yes — by design |
 | WebSocket `Conn` + room entries | `smp_allocator` | WS session | No — individually freed on session end |

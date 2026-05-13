@@ -66,7 +66,7 @@ These tests exercise the library against mock inputs — no socket, no `std.Io` 
 
 | Test | What it verifies |
 | :- | :- |
-| `pathParam()` single param | captured segment returned by name; absent name -> null |
+| `pathParam()` single param | captured segment returned by name, absent name -> null |
 | `pathParam()` hyphenated names | `:tenant-id`, `:tenant-branch` (http_paths example pattern) |
 | `body()` with body_cache | pre-set `body_cache` is returned without touching `reader`; second call returns same slice |
 | `queryParam()` empty value | `?k=` -> `""` (not null) — behavioral distinction from `queryParams()` |
@@ -76,11 +76,11 @@ These tests exercise the library against mock inputs — no socket, no `std.Io` 
 
 | Test | What it verifies |
 | :- | :- |
-| Exact match | `dispatch` returns true; correct handler called |
+| Exact match | `dispatch` returns true correct handler called |
 | No match | `dispatch` returns false |
 | Exact beats param | exact registered after param still wins for the same path |
 | Param beats prefix | param registered after prefix still wins |
-| Param populates `path_params` | `req.path_params` is set after a param dispatch; `req.pathParam()` returns the value |
+| Param populates `path_params` | `req.path_params` is set after a param dispatch `req.pathParam()` returns the value |
 | Longest prefix wins | `/api/users` beats `/api` for `/api/users/alice` |
 | Prefix boundary | `/api` does **not** match `/apiv2` (next char after prefix must be `/`) |
 | Prefix matches its own path | `/api` matches `/api` exactly |
@@ -133,7 +133,7 @@ These require a running server with a clean `stop()` signal (see `rnd/server-lif
 | :- | :- |
 | HTTP handler paths | 200 response bodies, method guards, JSON parse/format round-trip |
 | HTTP middleware | Origin check (403), Basic auth (401), composed chains |
-| HTTP static serving | GET known file -> 200 + content; GET unknown -> 404 |
+| HTTP static serving | GET known file -> 200 + content, GET unknown -> 404 |
 | WebSocket | Full upgrade handshake (101), text frame broadcast, ping/pong, clean close |
 | UDP server/client | ACK, NACK, echo, broadcast relay, disconnect detection |
 
