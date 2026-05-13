@@ -50,7 +50,7 @@ var server = try zix.HttpServer.init(.{
     // null = 404 plain text (built-in); supply a handler to override
     .not_found       = null,
 
-    // explicit: static file serving; null = disabled (no fallback magic)
+    // explicit: static file serving, null = disabled (no fallback magic)
     .static_dir      = null,
     .static_prefix   = "/",
 
@@ -107,7 +107,7 @@ server.registerPrefix("/api",          v1Handler); // fallback if above didn't m
 server.registerPrefix("/",             homeHandler); // catch-all
 ```
 
-**Tradeoff:** more assembly work for the user. A minimal server now needs 3-4 calls instead of 1. Acceptable for library users who understand what they're building; potentially alienating for first-time users.
+**Tradeoff:** more assembly work for the user. A minimal server now needs 3-4 calls instead of 1. Acceptable for library users who understand what they're building, potentially alienating for first-time users.
 
 ---
 
@@ -215,13 +215,13 @@ current:  N syscalls per broadcast packet
 proposed: 1 sendmmsg call per broadcast packet (at cost of building iovec array)
 ```
 
-Benefit scales linearly with client count. For ≤4 clients the overhead of building the iovec may outweigh the gain; above that it wins. Mark for `src/udp/` implementation, not the PoC.
+Benefit scales linearly with client count. For ≤4 clients the overhead of building the iovec may outweigh the gain above that it wins. Mark for `src/udp/` implementation, not the PoC.
 
 ### 6. Zero-Copy Static Serving
 
 Current static serving reads file bytes into a buffer then writes them to the connection. On Linux, `sendfile(2)` transfers file data directly from page cache to socket without a userspace copy — relevant for large files.
 
-Applicable only when the OS supports it; add as a runtime-detected code path in `static.zig`.
+Applicable only when the OS supports it, add as a runtime-detected code path in `static.zig`.
 
 ---
 
