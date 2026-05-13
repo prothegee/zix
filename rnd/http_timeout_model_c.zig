@@ -87,7 +87,7 @@ fn watchdog(w: *WatchdogCtx) void {
 
     // Shutdown both directions: signals the peer with a FIN/RST and causes
     // the next read/write on this fd to return an error in the pool thread.
-    // Note: this does not close the fd; stream.close() is deferred in
+    // Note: this does not close the fd, stream.close() is deferred in
     // handleConnection and runs after the loop exits.
     w.stream.shutdown(w.io, .both) catch {};
 }
@@ -180,7 +180,7 @@ pub fn main(process: std.process.Init) !void {
 //
 // Note: this main() loop is single-threaded -- it handles one connection at a
 // time. While one client is connected, the next queues in the kernel and is
-// not accepted until the current connection closes. This is a PoC limitation;
+// not accepted until the current connection closes. This is a PoC limitation,
 // the real server uses a pool of threads so connections run concurrently.
 // Test nc and curl in separate steps, not simultaneously.
 //
@@ -189,10 +189,10 @@ pub fn main(process: std.process.Init) !void {
 //
 // Test A -- slow client (never sends headers):
 //   nc localhost 9007
-//   (just wait; do not type anything)
+//   (just wait, do not type anything)
 //   Expected: nc exits after ~5s when the watchdog fires shutdown(.both)
 //   Pressing Enter in nc sends \n which is not a complete HTTP request --
-//   the server keeps waiting for \r\n\r\n; nothing is sent back. This is normal.
+//   the server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
 //
 //   Confirm timing:
 //   time nc localhost 9007
@@ -200,7 +200,7 @@ pub fn main(process: std.process.Init) !void {
 //
 // Test B -- normal connection (completes before timeout):
 //   curl http://localhost:9007/
-//   Expected: responds immediately; watchdog exits cleanly without calling shutdown()
+//   Expected: responds immediately, watchdog exits cleanly without calling shutdown()
 //
 // What is being verified:
 //   The watchdog clock starts at accept(), not at first request. It covers
