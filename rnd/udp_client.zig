@@ -8,14 +8,14 @@
 //! NOTE: concurrency model uses process.Init / io.concurrent()
 //!       should be configurable later (e.g. std.Thread.spawn for constrained envs)
 //!
-//! NOTE: endianness is native-endian; must match server
+//! NOTE: endianness is native-endian, must match server
 //!
 //! NOTE: send_every is in milliseconds
 //!       can be changed to nanoseconds later for sub-ms precision (trivial: change unit + field name)
 //!       nanosecond granularity is not needed for UDP telemetry PoC
 //!
 //! NOTE: feedback reception — client reads ACK (0x06), NACK (0x15), or broadcast (TestPacket)
-//!       from server; runs as a persistent io.concurrent() task
+//!       from server runs as a persistent io.concurrent() task
 //!       the id field in received broadcasts is stamped by the server with the sender's
 //!       connection index — the client does not need to set a meaningful id
 
@@ -23,7 +23,7 @@ const std = @import("std");
 
 // --------------------------------------------------------- //
 
-// NOTE: native-endian layout; must match server definition exactly
+// NOTE: native-endian layout, must match server definition exactly
 // NOTE: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
 const TestPacket = extern struct {
     id: [16]u8,
@@ -39,16 +39,16 @@ const ClientConfig = struct {
     server_port: u16 = 9100,
     // explicit bind so server can send broadcast (and echo/ACK) back to a known port
     bind_port: u16 = 9101,
-    // if true: send one packet and exit; receive task is still spawned but response may not
+    // if true: send one packet and exit, receive task is still spawned but response may not
     // arrive before the process exits — acceptable for one-shot fire-and-forget use
     send_once: bool = false,
-    // NOTE: milliseconds; change to nanoseconds later if sub-ms precision is needed
+    // NOTE: milliseconds change to nanoseconds later if sub-ms precision is needed
     send_every: u64 = 1000,
 };
 
 // --------------------------------------------------------- //
 
-// NOTE: receive loop runs as a persistent concurrent task; occupies one thread pool slot.
+// NOTE: receive loop runs as a persistent concurrent task occupies one thread pool slot.
 //       In src/: decode into a typed result struct, not raw-byte interpretation by length.
 const ReceiveTask = struct {
     socket: std.Io.net.Socket,
@@ -143,7 +143,7 @@ pub fn main(process: std.process.Init) !void {
         std.debug.print("recv task spawn error: {}\n", .{err});
     };
 
-    // PRNG seeded from clock; access is sequential (sleep between sends prevents concurrent use)
+    // PRNG seeded from clock, access is sequential (sleep between sends prevents concurrent use)
     const prng_ts = std.Io.Clock.Timestamp.now(io, .awake);
     const prng_seed: u64 = @truncate(@as(u128, @bitCast(@as(i128, prng_ts.raw.nanoseconds))));
     var prng = std.Random.DefaultPrng.init(prng_seed);
