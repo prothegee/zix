@@ -8,7 +8,7 @@ Not yet implemented. For design intent see [`docs/hld-channel.md`](hld-channel.m
 
 ### Buffered mode (capacity > 0)
 
-Ring buffer of `[capacity]T` with head and tail indices. One mutex + one condvar (or two condvars — not-full, not-empty). Writers advance tail; readers advance head.
+Ring buffer of `[capacity]T` with head and tail indices. One mutex + one condvar (or two condvars — not-full, not-empty). Writers advance tail readers advance head.
 
 ```
 [ _ | msg | msg | msg | _ ]
@@ -24,7 +24,7 @@ No buffer. Sender blocks until a receiver calls `recv()`; receiver blocks until 
 | Option | Fiber-safe | OS thread-safe | Notes |
 | :- | :- | :- | :- |
 | `std.Io.Mutex` + `std.Io.Condition` | yes | yes | Required if Channel is used from `io.concurrent()` handler tasks |
-| `std.Thread.Mutex` + `std.Thread.Condition` | no | yes | Simpler; only safe if used exclusively from OS threads |
+| `std.Thread.Mutex` + `std.Thread.Condition` | no | yes | Simpler, only safe if used exclusively from OS threads |
 
 **Decision needed before implementation.** See ADR-017 and `rnd/channel_specification.md`.
 
