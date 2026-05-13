@@ -8,7 +8,7 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 ### Public API
 
-`Server` is a namespace struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` is the private generic; callers use `var server = try zix.Http.Server.init(4096, .{...})` without naming the generic type.
+`Server` is a namespace struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` is the private generic. Callers use `var server = try zix.Http.Server.init(4096, .{...})` without naming the generic type.
 
 `HttpServerImpl.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket — socket is opened in `run()`.
 
@@ -78,9 +78,9 @@ loop:
                else smp_allocator.alloc(u8, max_client_request)
    write_buf = if max_client_response <= stack_threshold: stack slice
                else smp_allocator.alloc(u8, max_client_response)
-4. defer: heap-free if heap-allocated; stream.close()
+4. defer: heap-free if heap-allocated stream.close()
 5. std.http.Server.init(&reader.interface, &writer.interface)
-6. ArenaAllocator.init(smp_allocator); pre-warm with max_allocator_size; reset(.retain_capacity)
+6. ArenaAllocator.init(smp_allocator), pre-warm with max_allocator_size, reset(.retain_capacity)
 7. keep-alive loop:
       a. arena.reset(.retain_capacity)
       b. receiveHead() -- breaks on HttpConnectionClosing / ConnectionResetByPeer / ReadFailed
@@ -89,10 +89,10 @@ loop:
          build Response(inner, io, allocator, max_response_headers.value())
          build Context(io, allocator, stream)  -- ctx.stream = stream (raw TCP, for WS/SSE)
       d. Layer B: if handler_timeout_ms > 0: ctx = ctx.withTimeout(handler_timeout_ms)
-            sets ctx.deadline; handler calls ctx.timedOut() between steps to check budget
-      e. load global atomic date cache: idx = g_date_active.load(.acquire); res.date_cache = g_date_bufs[idx]
+            sets ctx.deadline, handler calls ctx.timedOut() between steps to check budget
+      e. load global atomic date cache: idx = g_date_active.load(.acquire), res.date_cache = g_date_bufs[idx]
       f. router.dispatch(req, res, ctx)
-      g. if res.streaming: break  -- SSE handler opened a stream; connection closes on handler return
+      g. if res.streaming: break  -- SSE handler opened a stream, connection closes on handler return
       h. if public_dir and not dispatched: static.serve(...)
       i. if not served: 404
 ```
@@ -110,29 +110,29 @@ Layer D (ConnRegistry) is active in model 2 only -- the timer thread that calls 
 One `routes: ArrayList(Route)` backed by `config.allocator`, plus a dedicated O(1) hash map for exact-match paths:
 
 ```
-routes:    ArrayList(Route)                  -- all routes; each has a kind field
-exact_map: StringHashMapUnmanaged(HandlerFn) -- exact-path keys only; O(1) dispatch
+routes:    ArrayList(Route)                  -- all routes, each has a kind field
+exact_map: StringHashMapUnmanaged(HandlerFn) -- exact-path keys only. O(1) dispatch
 ```
 
 Each `Route`:
 ```zig
-const RouteKind = enum { exact, prefix, param };
+const RouteKind = enum { EXACT, PREFIX, PARAM };
 
 const Route = struct {
     path:    []const u8,
     handler: HandlerFn,
-    kind:    RouteKind = .exact,
+    kind:    RouteKind = .EXACT,
 };
 ```
 
-`register()` inserts into both `routes` and `exact_map`. `deinit()` frees both. `routes` is scanned for param and prefix kinds during dispatch; exact lookups bypass the scan entirely via `exact_map.get()`.
+`register()` inserts into both `routes` and `exact_map`. `deinit()` frees both. `routes` is scanned for param and prefix kinds during dispatch exact lookups bypass the scan entirely via `exact_map.get()`.
 
 ### dispatch()
 
 ```
 1. exact_map.get(req.path()) -> call handler  (O(1))
-2. scan routes for kind == .param: matchParam(pattern, path) -> write captured params to req, call handler
-3. scan routes for kind == .prefix: collect all where path starts with prefix (boundary-safe) -> pick longest
+2. scan routes for kind == .PARAM: matchParam(pattern, path) -> write captured params to req, call handler
+3. scan routes for kind == .PREFIX: collect all where path starts with prefix (boundary-safe) -> pick longest
 ```
 
 ### matchParam()
@@ -177,11 +177,11 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 ### Fields
 
-`Response` carries `io: std.Io` (retained for potential future use; the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits.
+`Response` carries `io: std.Io` (retained for potential future use, the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits.
 
 ### extra_buf (lazily-grown arena slice)
 
-`extra_buf: ?[]HttpHeader` starts null; allocated lazily on the first `addHeader()` call. Requests that add no custom headers pay zero allocation cost.
+`extra_buf: ?[]HttpHeader` starts null allocated lazily on the first `addHeader()` call. Requests that add no custom headers pay zero allocation cost.
 
 ```
 addHeader(name, value):
@@ -355,7 +355,7 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 
 - `join(room, conn, io)`: `getOrPut(room)` -> append `conn` to the list
 - `leave(room, conn, io)`: find `conn` in the list by pointer, `swapRemove`; sends close frame to removed conn
-- `broadcast(room, msg, io)`: iterate list, build and write frame to each conn's stream; silently skip write failures (dead connections removed when their own handler's leave fires)
+- `broadcast(room, msg, io)`: iterate list, build and write frame to each conn's stream, silently skip write failures (dead connections removed when their own handler's leave fires)
 
 ---
 
