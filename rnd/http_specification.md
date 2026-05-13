@@ -27,8 +27,8 @@ Current state -- named fields in config:
 | Write buffer per connection | `max_client_response` | `4096` | Named field |
 | Per-connection arena backing | `max_allocator_size` | `4096` | Named field |
 | Custom response headers cap | `max_response_headers` | `.COMMON` (32) | Named field (ADR-009) |
-| Connection guard (Layer D) | `conn_timeout_ms` | `0` (disabled) | Named field; model 2 only; ADR-018 |
-| Handler budget (Layer B) | `handler_timeout_ms` | `0` (disabled) | Named field; ctx.timedOut(); ADR-018 |
+| Connection guard (Layer D) | `conn_timeout_ms` | `0` (disabled) | Named field, model 2 only. ADR-018 |
+| Handler budget (Layer B) | `handler_timeout_ms` | `0` (disabled) | Named field, ctx.timedOut(). ADR-018 |
 
 Pending additions -- proposed in ADR-012:
 
@@ -80,13 +80,13 @@ Rename to `ctx.request_arena` was considered and declined -- the arena lifetime 
 
 These are implementation improvements, independent of API shape.
 
-### 1. Exact Route Hash Map
+### 1. Exact Route Hash Map (Implemented)
 
-Current: O(3N) per request (3 linear passes over all routes).
-Proposed: O(1) for exact match (hash map) + O(N) for param/prefix fallback.
+Was: O(N) linear scan over exact_routes per request.
+Now: O(1) via `exact_map: StringHashMapUnmanaged(HandlerFn)`. `register()` inserts into both
+`routes` (for param/prefix scanning) and `exact_map`. Pass 1 dispatch is `exact_map.get(path)`.
 
-Impact: measurable at 50+ routes. Implementation: split `Router` into
-`exact_map: std.StringHashMap(HandlerFn)` + `fallback: []Route` (param + prefix only).
+Impact: measurable at 50+ routes zero cost at low route counts.
 
 ### 2. Stack-Allocated I/O Buffers
 
@@ -122,7 +122,7 @@ Add as runtime-detected code path in `static.zig`. Relevant for files > 64 KB.
 | Question | Status |
 | :- | :- |
 | ADR-012: explicit not_found / keep_alive fields | Proposed -- not yet implemented |
-| Hash map for exact routes | Proposed -- not yet implemented |
+| Hash map for exact routes | Implemented -- `exact_map: StringHashMapUnmanaged(HandlerFn)` in router.zig |
 | conn_timeout_ms / handler_timeout_ms | Implemented (ADR-018) |
 | First-match-wins routing | Deferred (ADR-004) |
 | Middleware chain runner | Not needed -- comptime wrapper is the pattern |
