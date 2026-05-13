@@ -137,29 +137,29 @@ var server = try zix.Http.Server.init(4096, .{
 | TCP (HTTP) | yes -- `workers = 1` | yes -- default |
 | TCP (SSE) | yes -- required, long-lived connections fit the async task model | not recommended -- exhausts blocking pool threads |
 | UDP | yes -- current src/ | planned |
-| UDS (stream) | planned -- same accept/handle pattern as TCP | planned |
+| UDS (stream) | yes -- implemented, `io.concurrent()` per connection | not applicable -- no pool in UDS server |
 | UDS (datagram) | not via `std.Io.net` -- would need raw `std.posix`; defer | defer |
 
 ---
 
 ## Channel
 
-`zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive that works alongside the server models. A Channel connects two or more `io.concurrent()` tasks (or OS threads) within the same process — it does not cross a network or process boundary.
+`zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive that works alongside the server models. A Channel connects two or more `io.concurrent()` tasks (or OS threads) within the same process -- it does not cross a network or process boundary.
 
 ```
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-Both Model 1 and Model 2 servers can spawn `io.concurrent()` tasks that communicate through a Channel. The Channel itself is independent of which server model is in use.
+Both Model 1 and Model 2 servers can spawn `io.concurrent()` tasks or OS threads that communicate through a Channel. The Channel itself is independent of which server model is in use.
 
 | Property | Channel |
 | :- | :- |
 | Crossing process/network boundary | no -- in-process only |
-| Works with `io.concurrent()` tasks | yes -- if locking primitive is `std.Io.Mutex`/`std.Io.Condition` (open question) |
-| Works with OS threads | yes |
+| Works with `io.concurrent()` tasks | yes -- uses `std.Io.Mutex` + `std.Io.Condition` (fiber-aware) |
+| Works with OS threads | yes -- each thread needs its own `std.Io` from `std.Io.Threaded` |
 | Replaces Model 1 / Model 2 | no -- orthogonal |
 
-Status: Proposed. See ADR-017 and `rnd/channel_specification.md`.
+Status: Implemented. See ADR-017 and [`docs/hld-channel.md`](hld-channel.md).
 
 ---
 
