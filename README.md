@@ -82,16 +82,18 @@ __*6. Predictable, Transparent Memory Management.*__
 
 | Document | Description |
 | :- | :- |
-| [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, memory model |
+| [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, SSE, memory model |
 | [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect |
+| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, API, frame format, server/client lifecycle |
+| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel -- goals, model, API, concurrency requirement, examples |
 | [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms |
 | [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms |
-| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols; Channel note |
-| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel -- goals, model, proposed API (not yet implemented) |
-| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel -- proposed internal structure (not yet implemented) |
+| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- internal server/client structure and frame handling |
+| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel -- ring buffer internals, locking, send/recv algorithms |
+| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols -- Channel note |
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
 | [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
-| [`docs/tests.md`](docs/tests.md) | Test coverage and how to run |
+| [`docs/tests.md`](docs/tests.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
 
 <br>
 
@@ -565,6 +567,95 @@ For security guidance and tier selection see [`docs/headers.md`](docs/headers.md
 
 <br>
 
+## UDS (Unix Domain Sockets)
+
+Same-host IPC over a Unix stream socket. The server accepts connections and dispatches each as a concurrent task. Both sides use a 4-byte length-prefixed frame format.
+
+```zig
+// Process A -- UDS server (data provider)
+pub fn main(process: std.process.Init) !void {
+    var server = try zix.Uds.Server.init(.{
+        .path      = "/tmp/app.sock",
+        .allocator = std.heap.smp_allocator,
+    });
+    defer server.deinit();
+    try server.run(process.io);        // built-in echo handler
+    // try server.runWith(process.io, myHandler); // custom handler
+}
+```
+
+```zig
+// Process B -- UDS client (consumer)
+var client = try zix.Uds.Client.connect(.{ .path = "/tmp/app.sock" }, io);
+defer client.deinit(io);
+
+try client.sendMsg(io, "get");              // sends [u32 len][payload]
+var buf: [4096]u8 = undefined;
+const reply = try client.recvMsg(io, &buf); // reads [u32 len][payload]
+```
+
+Custom handler -- receives the raw stream directly:
+
+```zig
+fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
+    defer stream.close(io);
+    // read/write frames using stream.reader() and stream.writer()
+}
+
+try server.runWith(process.io, myHandler);
+```
+
+**Frame format:** `[u32 payload_len, native LE, 4 bytes][payload bytes]`. Frames with payload > `max_msg_len` (default 4096) close the connection.
+
+See `examples/uds_server.zig` and `examples/uds_http.zig` for full working examples. For design details see [`docs/hld-uds.md`](docs/hld-uds.md).
+
+<br>
+
+## Channel
+
+Typed, fiber-safe in-process message passing. A buffered ring queue that connects producer and consumer tasks (OS threads or `io.concurrent` fibers) within the same process.
+
+```zig
+const MyChan = zix.Channel(u32);
+
+// capacity 8 -- send blocks when full, recv blocks when empty
+var ch = try MyChan.init(std.heap.smp_allocator, 8);
+defer ch.deinit();
+
+// producer (runs in its own thread / task)
+try ch.send(io, 42);
+ch.close(io); // signal done -- receivers drain then get error.Closed
+
+// consumer (runs in its own thread / task)
+while (true) {
+    const v = ch.recv(io) catch break; // error.Closed when channel is drained and closed
+    // process v
+}
+```
+
+`send` and `recv` require an `io` valid on the calling thread. Each OS thread needs its own `std.Io` (e.g. from `std.Io.Threaded`):
+
+```zig
+var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+defer threaded.deinit();
+const io = threaded.io();
+
+const t = try std.Thread.spawn(.{}, workerFn, .{ &ch, io });
+t.join();
+```
+
+| Example | Pattern |
+| :- | :- |
+| `examples/channel_basic.zig` | Producer/consumer -- two OS threads, Channel(u32) |
+| `examples/channel_worker_pool.zig` | Fan-out -- one producer, many consumer workers |
+| `examples/channel_pipeline.zig` | Multi-stage pipeline -- backpressure flows upstream |
+| `examples/channel_ipc_a.zig` + `ipc_b.zig` | Inter-process coordination pair |
+| `examples/uds_http.zig` | HTTP + UDS + Channel -- full integration pattern |
+
+For design details see [`docs/hld-channel.md`](docs/hld-channel.md).
+
+<br>
+
 ## UDP
 
 Type-safe UDP server and client. The user defines their own `extern struct` packet. Zix handles endianness, size validation, and concurrency.
@@ -634,12 +725,14 @@ See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working e
 ## Testing
 
 ```sh
-zig build unit-test        # unit tests
-zig build integration-test # integration tests
-zig build test-all         # both
+zig build unit-test        # unit tests (src/ inline tests)
+zig build integration-test # integration tests (components wired together)
+zig build behaviour-test   # behaviour tests (observable API contracts)
+zig build edge-test        # edge tests (boundary conditions and error paths)
+zig build test-all         # all of the above
 ```
 
-`zig build` alone does not run tests. See [`docs/tests.md`](docs/tests.md) for coverage details.
+`zig build` alone does not run tests. See [`docs/tests.md`](docs/tests.md) for full coverage details.
 
 <br>
 
@@ -679,7 +772,7 @@ Not active tasks -- reminders for future decisions.
 
 **OoP (Object-oriented Patterns):** most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
 
-**DoD (Data-Oriented Design):** the direction to move when data layout matters more than encapsulation. For the HTTP layer specifically, the idea is a dedicated *http engine* -- a lower-level, data-oriented core sitting below `server.zig`. Not started; revisit when the current baseline hits a real ceiling.
+**DoD (Data-Oriented Design):** the direction to move when data layout matters more than encapsulation. For the HTTP layer specifically, the idea is a dedicated *http engine* -- a lower-level, data-oriented core sitting below `server.zig`. Not started -- revisit when the current baseline hits a real ceiling.
 
 <br>
 
