@@ -12,7 +12,7 @@
 //!   - One timer thread handles all connections instead of one per connection
 //!   - Lower thread count under load
 //!   - Eviction granularity = timer interval (500ms), not exact to the ms
-//!   - More complexity: handleConnection must register/deregister; registry
+//!   - More complexity: handleConnection must register/deregister. Registry
 //!     needs a mutex
 //!
 //! Covers (same as C):
@@ -86,7 +86,7 @@ const ConnEntry = struct {
 const ConnRegistry = struct {
     mutex: std.Io.Mutex = .init,
     // Unordered list -- swapRemove on deregister is O(1).
-    // evict() does a full O(n) scan each tick; acceptable for typical
+    // evict() does a full O(n) scan each tick, acceptable for typical
     // connection counts (hundreds, not millions).
     entries: std.ArrayListUnmanaged(*ConnEntry) = .empty,
 
@@ -234,7 +234,7 @@ pub fn main(process: std.process.Init) !void {
 //
 // Note: this main() loop is single-threaded -- it handles one connection at a
 // time. While one client is connected, the next queues in the kernel and is
-// not accepted until the current connection closes. This is a PoC limitation;
+// not accepted until the current connection closes. This is a PoC limitation,
 // the real server uses a pool of threads so connections run concurrently.
 // Test nc and curl in separate steps, not simultaneously.
 //
@@ -247,9 +247,9 @@ pub fn main(process: std.process.Init) !void {
 //
 // Test A -- slow client (never sends headers):
 //   nc localhost 9007
-//   (just wait; do not type anything)
+//   (just wait, do not type anything)
 //   Pressing Enter in nc sends \n which is not a complete HTTP request --
-//   the server keeps waiting for \r\n\r\n; nothing is sent back. This is normal.
+//   the server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
 //   Expected: nc exits within ~5.5s (5s deadline + up to 500ms timer granularity)
 //
 //   Confirm timing:
@@ -264,7 +264,7 @@ pub fn main(process: std.process.Init) !void {
 //
 // Test C -- normal connection (completes before timeout):
 //   curl http://localhost:9007/
-//   Expected: responds immediately; deregister() removes the entry before
+//   Expected: responds immediately, deregister() removes the entry before
 //   the timer ever sees it as expired.
 //
 // What is being verified:
