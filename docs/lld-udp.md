@@ -26,7 +26,7 @@ const ClientRecord = struct {
 };
 ```
 
-Client identity is the remote address. The index is informational; it is not stable across reconnects and is not used for routing.
+Client identity is the remote address. The index is informational, it is not stable across reconnects and is not used for routing.
 
 ### Receive loop
 
@@ -59,7 +59,7 @@ const Task = struct {
     socket:       std.Io.net.Socket,    // shared -- UDP send is kernel-atomic per datagram
     io:           std.Io,
     config:       UdpServerConfig,
-    peers:        []std.Io.net.IpAddress, // heap-allocated snapshot; freed in processPacket
+    peers:        []std.Io.net.IpAddress, // heap-allocated snapshot, freed in processPacket
     sender_index: usize,
 };
 ```
@@ -77,7 +77,7 @@ if broadcast:
     for each peer in peers:
         socket.send(io, peer, &buf)
         // SECURITY: no sender validation -- spoofed IPs can trigger broadcast
-        // PERF: N sequential send() syscalls; sendmmsg could reduce to 1
+        // PERF: N sequential send() syscalls, sendmmsg could reduce to 1
 ```
 
 ### checkDisconnections()
@@ -135,7 +135,7 @@ if msg.data.len == @sizeOf(Packet):
 return error.UnexpectedPacketSize
 ```
 
-Length dispatch is the decoding mechanism. ACK/NACK are single-byte responses; a full packet echo or broadcast relay has exactly `@sizeOf(Packet)` bytes.
+Length dispatch is the decoding mechanism. ACK/NACK are single-byte responses, a full packet echo or broadcast relay has exactly `@sizeOf(Packet)` bytes.
 
 ---
 
@@ -177,7 +177,7 @@ toEndian(Packet, pkt, endianness):
 fromEndian = toEndian   -- swap is its own inverse
 ```
 
-Both functions return a new value; the original is not modified.
+Both functions return a new value while the original is not modified.
 
 ---
 
