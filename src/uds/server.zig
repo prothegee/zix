@@ -1,0 +1,145 @@
+//! zix uds server
+
+const std = @import("std");
+const Config = @import("config.zig");
+const UdsServerConfig = Config.UdsServerConfig;
+
+// --------------------------------------------------------- //
+
+/// User-provided connection handler. Receives the accepted stream and io.
+/// The handler owns the stream for its lifetime. It must call stream.close(io) when done.
+pub const HandlerFn = *const fn (stream: std.Io.net.Stream, io: std.Io) void;
+
+// --------------------------------------------------------- //
+
+/// UDS stream server. Accepts connections and dispatches each via io.concurrent.
+///
+/// Usage:
+///   var server = try UdsServer.init(config);
+///   defer server.deinit();
+///   try server.run(io);               // default echo handler
+///   try server.runWith(io, myFn);     // custom handler
+pub const UdsServer = struct {
+    const Self = @This();
+
+    config: UdsServerConfig,
+
+    // --------------------------------------------------------- //
+
+    /// Initialize the server. Returns error.PathEmpty if config.path is empty.
+    pub fn init(config: UdsServerConfig) !Self {
+        if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+        if (config.path.len == 0) return error.PathEmpty;
+        return .{ .config = config };
+    }
+
+    /// No-op: resources are released inside run() / runWith() via defer.
+    pub fn deinit(self: *Self) void {
+        _ = self;
+    }
+
+    /// Listen and serve using the built-in echo handler.
+    /// Each accepted connection is dispatched as an io.concurrent task.
+    pub fn run(self: *Self, io: std.Io) !void {
+        try self.runWith(io, echoHandler);
+    }
+
+    /// Listen and serve using a user-provided handler.
+    /// handler(stream, io) is called for each accepted connection.
+    /// The handler owns stream and must call stream.close(io) before returning.
+    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void {
+        if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+
+        // Remove stale socket from a previous run before binding.
+        std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+
+        const ua = try std.Io.net.UnixAddress.init(self.config.path);
+        var net_server = try ua.listen(io, .{ .kernel_backlog = self.config.backlog });
+        defer {
+            net_server.deinit(io);
+            std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+        }
+
+        std.debug.print("zix uds server: listening on {s}\n", .{self.config.path});
+
+        while (true) {
+            const stream = net_server.accept(io) catch |err| {
+                std.debug.print("zix uds server: accept error: {}\n", .{err});
+                continue;
+            };
+            const task = ConnTask{ .stream = stream, .io = io, .handler = handler };
+            if (io.concurrent(dispatchConn, .{task})) |_| {} else |_| {
+                dispatchConn(task);
+            }
+        }
+    }
+};
+
+// --------------------------------------------------------- //
+
+const ConnTask = struct {
+    stream: std.Io.net.Stream,
+    io: std.Io,
+    handler: HandlerFn,
+};
+
+fn dispatchConn(task: ConnTask) void {
+    task.handler(task.stream, task.io);
+}
+
+// --------------------------------------------------------- //
+
+// Default handler: reads length-prefixed frames and echoes each back unchanged.
+// Frame format: [u32 payload_len, 4 bytes, native LE] [payload bytes]
+// Payloads larger than 4096 bytes close the connection.
+pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
+    defer stream.close(io);
+
+    var rbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var payload_buf: [4096]u8 = undefined;
+
+    var rdr = stream.reader(io, &rbuf);
+    var wtr = stream.writer(io, &wbuf);
+
+    while (true) {
+        // Read 4-byte length header
+        var hdr: [4]u8 = undefined;
+        var n: usize = 0;
+        while (n < 4) {
+            const got = rdr.interface.readSliceShort(hdr[n..]) catch return;
+            if (got == 0) return;
+            n += got;
+        }
+
+        const len = std.mem.readInt(u32, &hdr, .little);
+        if (len > payload_buf.len) return;
+
+        // Read payload
+        n = 0;
+        while (n < len) {
+            const got = rdr.interface.readSliceShort(payload_buf[n..len]) catch return;
+            if (got == 0) return;
+            n += got;
+        }
+
+        // Echo: header + payload
+        wtr.interface.writeAll(&hdr) catch return;
+        wtr.interface.writeAll(payload_buf[0..len]) catch return;
+        wtr.interface.flush() catch return;
+    }
+}
+
+// --------------------------------------------------------- //
+
+test "zix test: UdsServer init, empty path returns PathEmpty" {
+    try std.testing.expectError(
+        error.PathEmpty,
+        UdsServer.init(.{ .path = "", .allocator = std.testing.allocator }),
+    );
+}
+
+test "zix test: UdsServer init, valid path succeeds" {
+    var server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    server.deinit();
+}

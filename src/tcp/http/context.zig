@@ -6,7 +6,7 @@ pub const Context = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     response_sent: bool = false,
-    /// Raw TCP stream -- available for WebSocket upgrade handlers.
+    /// Raw TCP stream, available for WebSocket upgrade handlers.
     /// Normal HTTP handlers should not use this directly.
     stream: std.Io.net.Stream = undefined,
     /// Optional handler deadline set by the server from config.handler_timeout_ms.
@@ -32,7 +32,7 @@ pub const Context = struct {
     }
 
     /// Returns true when the deadline has passed. Always false when deadline is null.
-    /// Does not cancel or interrupt anything -- handlers must check this explicitly.
+    /// Does not cancel or interrupt anything. Handlers must check this explicitly.
     pub fn timedOut(self: Context) bool {
         const d = self.deadline orelse return false;
         return std.Io.Clock.Timestamp.now(self.io, .real).compare(.gte, d);

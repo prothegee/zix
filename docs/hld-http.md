@@ -1,16 +1,23 @@
-# HLD -- zix.Http
+# HLD: zix.Http
 
-HTTP server built on Zig 0.16.x `std.Io`.
+HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ---
 
 ## Goals
 
-- Explicit over implicit -- no magic, every behavior named in config or registration.
+### Server
+- Explicit over implicit: no magic, every behavior named in config or registration.
 - One file, one responsibility.
 - Minimal indirection on the hot path.
 - No hidden allocations inside handlers.
 - Predictable routing: deterministic dispatch priority.
+
+### Client
+- Explicit config: allocator, io, timeouts, body cap, redirect policy all named.
+- Typed response: status code, header lookup, body bytes all owned by the caller.
+- Named errors: `InvalidUrl`, `BodyTooLarge` surface before the caller has to inspect stdlib errors.
+- No hidden allocations: every allocation uses the caller-supplied allocator.
 
 ---
 
@@ -18,7 +25,7 @@ HTTP server built on Zig 0.16.x `std.Io`.
 
 Two concurrency models, selected via `config.workers`:
 
-### Model 2 -- Work-Queue Thread Pool (default, `workers = 0` or `workers = N ≥ 2`)
+### Model 2: Work-Queue Thread Pool (default, `workers = 0` or `workers = N ≥ 2`)
 
 ```mermaid
 flowchart TD
@@ -45,11 +52,11 @@ flowchart TD
     Q --> J
 ```
 
-- Accept threads only call `accept()` and push to the shared `ConnQueue` -- they never handle I/O.
-- Pool threads pop and handle each connection with synchronous blocking I/O -- no `io.concurrent()` overhead.
+- Accept threads only call `accept()` and push to the shared `ConnQueue`. They never handle I/O.
+- Pool threads pop and handle each connection with synchronous blocking I/O (no `io.concurrent()` overhead).
 - Default: 2 accept threads, `max(10, cpu_count * 2)` pool threads.
 
-### Model 1 -- Single Accept, io.concurrent Dispatch (`workers = 1`)
+### Model 1: Single Accept, io.concurrent Dispatch (`workers = 1`)
 
 ```mermaid
 flowchart TD
@@ -92,11 +99,15 @@ graph TD
     zix --> Http["tcp/http/Http.zig\nzix.Http"]
     zix --> Tcp["tcp/Tcp.zig\nzix.Tcp"]
     zix --> Udp["udp/Udp.zig\nzix.Udp"]
+    zix --> Uds["uds/Uds.zig\nzix.Uds"]
+    zix --> Channel["channel/Channel.zig\nzix.Channel"]
     zix --> utils["utils/file.zig\nzix.utils.file"]
     Tcp -.->|re-exports| Http
 
     Http --> server["server.zig\nServer + ConnQueue"]
     Http --> config["config.zig\nHttpServerConfig"]
+    Http --> client["client.zig\nHttpClient + ClientResponse"]
+    Http --> client_config["client_config.zig\nHttpClientConfig"]
     Http --> router["router.zig\nRouter + HandlerFn"]
     Http --> request["request.zig\nRequest"]
     Http --> response["response.zig\nResponse + HttpHeader"]
@@ -123,6 +134,9 @@ graph LR
     server --> context
     server --> static
 
+    client --> client_config
+    client --> method
+
     router --> request
     router --> response
     router --> context
@@ -148,7 +162,11 @@ Access via `const zix = @import("zix");`
 | Symbol | Type | Description |
 | :- | :- | :- |
 | `zix.Http.Server` | struct | Lifecycle: `init` / `registerHandler` / `registerPrefixHandler` / `registerParamHandler` / `run` |
-| `zix.Http.ServerConfig` | struct | Server configuration -- see HttpServerConfig section |
+| `zix.Http.ServerConfig` | struct | Server configuration (see HttpServerConfig section) |
+| `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
+| `zix.Http.ClientConfig` | struct | Client configuration (see HttpClientConfig section) |
+| `zix.Http.ClientResponse` | struct | Parsed response: `status` / `header` / `iterateHeaders` / `body` / `deinit` |
+| `zix.Http.ClientRequestOpts` | struct | Per-request options: `headers`, `body`, `connect_timeout_ms` override |
 | `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
@@ -179,7 +197,7 @@ Access via `const zix = @import("zix");`
 
 ```zig
 pub const HttpServerConfig = struct {
-    io:                   std.Io,            // external I/O backend -- not owned by server
+    io:                   std.Io,            // external I/O backend: not owned by server
     allocator:            std.mem.Allocator, // used for router route list
     ip:                   []const u8,
     port:                 u16,
@@ -197,7 +215,7 @@ pub const HttpServerConfig = struct {
 };
 ```
 
-The caller owns `io` and `allocator` -- `zix.Http.Server` does not call `deinit` on either.
+The caller owns `io` and `allocator`: `zix.Http.Server` does not call `deinit` on either.
 
 `ArenaAllocator` is suitable for `allocator`: routes are append-only and never individually freed during the server's lifetime. The entire arena is deinited together with `server.deinit()`, freeing all route storage in one shot. This is the recommended pattern in the README examples.
 
@@ -207,7 +225,7 @@ For header cap selection and security guidance see [`docs/headers.md`](headers.m
 
 ## Connection Lifecycle
 
-Model 2 (default -- pool thread handles connection synchronously):
+Model 2 (default, pool thread handles connection synchronously):
 
 ```mermaid
 sequenceDiagram
@@ -249,7 +267,7 @@ sequenceDiagram
     end
 
     Client->>Pool: connection close
-    Pool->>Pool: free read_buf + write_buf -- arena.deinit()
+    Pool->>Pool: free read_buf + write_buf, arena.deinit()
     Pool->>Queue: queue.pop() (next connection)
 ```
 
@@ -316,27 +334,27 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 
 ## Router
 
-### Registration -- three explicit functions
+### Registration: three explicit functions
 
 | Function | Pattern example | Behaviour |
 | :- | :- | :- |
-| `registerHandler(path, h)` | `"/about"` | Exact -- matches only when the full path equals `path` |
-| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix -- matches `prefix` and any sub-path, NOT partial segments |
-| `registerParamHandler(pattern, h)` | `"/users/:id"` | Param -- `:name` segments captured literals must match exactly |
+| `registerHandler(path, h)` | `"/about"` | Exact: matches only when the full path equals `path` |
+| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix: matches `prefix` and any sub-path, NOT partial segments |
+| `registerParamHandler(pattern, h)` | `"/users/:id"` | Param: `:name` segments captured, literals must match exactly |
 
 ```zig
 server.registerHandler("/about", aboutHandler);
-server.registerPrefixHandler("/api", apiHandler);        // /api /api/foo -- NOT /apiv2
+server.registerPrefixHandler("/api", apiHandler);        // /api /api/foo, NOT /apiv2
 server.registerParamHandler("/users/:id", userHandler);  // req.pathParam("id")
 server.registerParamHandler("/:tenant/:branch", branchHandler);
 ```
 
-### Dispatch -- priority rules
+### Dispatch: priority rules
 
 ```
-Pass 1 -- exact routes:   O(1) hash map lookup            (registration order irrelevant)
-Pass 2 -- param routes:   first matching pattern wins      (registration order matters)
-Pass 3 -- prefix routes:  longest matching prefix wins     (registration order irrelevant)
+Pass 1: exact routes   O(1) hash map lookup            (registration order irrelevant)
+Pass 2: param routes   first matching pattern wins      (registration order matters)
+Pass 3: prefix routes  longest matching prefix wins     (registration order irrelevant)
 
 exact > param > prefix (longer prefix beats shorter prefix)
 ```
@@ -347,7 +365,7 @@ Passes 1 and 3 are deterministic regardless of registration order. **Pass 2 is t
 flowchart TD
     A["dispatch(req, res, ctx)"] --> B["Pass 1: exact_map.get(path) O(1)"]
     B --> C{"exact match?"}
-    C -->|yes| DONE["call handler -- return true"]
+    C -->|yes| DONE["call handler, return true"]
     C -->|no| D["Pass 2: scan param routes\nin registration order"]
     D --> E{"pattern matches?"}
     E -->|yes| F["write path_params to req"]
@@ -368,7 +386,7 @@ flowchart TD
 | `/api/v2` (prefix) + `/api` (prefix) | `/api/v2/foo` | `/api/v2` | longer prefix wins |
 | `/path` (prefix) | `/pathfoo` | no match | next char must be `/` or end |
 | `/path/user/:id` (reg. 1st) + `/path/:a/:b` (reg. 2nd) | `/path/user/alice` | `/path/user/:id` | more literals registered first |
-| `/path/:a/:b` (reg. 1st) + `/path/user/:id` (reg. 2nd) | `/path/user/alice` | `/path/:a/:b` | wrong order -- all-param wins unexpectedly |
+| `/path/:a/:b` (reg. 1st) + `/path/user/:id` (reg. 2nd) | `/path/user/alice` | `/path/:a/:b` | wrong order, all-param wins unexpectedly |
 
 ### Regex-like matching
 
@@ -387,7 +405,7 @@ zix has no regex engine. Use `registerPrefixHandler` as `/prefix/(.*)`. Addition
 ```mermaid
 flowchart TD
     A["static.serve(req, path, public_dir, io)"] --> B{"path contains '..'?"}
-    B -->|yes| Z["return false -- traversal rejected"]
+    B -->|yes| Z["return false, traversal rejected"]
     B -->|no| C["build full_path = public_dir/path"]
     C --> D{"file exists?"}
     D -->|no| Z2["return false"]
@@ -401,13 +419,13 @@ flowchart TD
 - If `public_dir` is non-empty, `Http.Server.run()` validates the directory at startup.
 - Directory traversal (`..`) rejected.
 - MIME type resolved from file extension via `zix.Http.Content.typeFromExtension`.
-- `Range` header supported -- `206 Partial Content` (RFC 7233).
+- `Range` header supported: `206 Partial Content` (RFC 7233).
 
 ---
 
 ## Upload
 
-`zix.Http.Multipart` parses `multipart/form-data` bodies into fields. `zix.utils.file.saveFile` writes bytes to disk. Neither is wired into the server automatically -- handlers call them directly.
+`zix.Http.Multipart` parses `multipart/form-data` bodies into fields. `zix.utils.file.saveFile` writes bytes to disk. Neither is wired into the server automatically (handlers call them directly).
 
 ```zig
 var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
@@ -440,7 +458,7 @@ flowchart TD
 | :- | :- | :- | :- |
 | `/secret/file.txt?sec=abc123` | yes | yes | 200 |
 | `/secret/file.txt` | yes | no | 403 |
-| `/secret/missing.txt?sec=abc123` | no | -- | 404 |
+| `/secret/missing.txt?sec=abc123` | no | n/a | 404 |
 
 ---
 
@@ -480,10 +498,10 @@ sequenceDiagram
 
 `ctx.stream` is the raw `std.Io.net.Stream` for the current TCP connection. The server always sets it before calling any handler.
 
-- **HTTP handlers** -- receive a valid `ctx.stream` and must not use it.
-- **WebSocket handlers** -- use `ctx.stream` after `zix.Http.WebSocket.upgrade()` hands off the connection.
+- **HTTP handlers**: receive a valid `ctx.stream` and must not use it.
+- **WebSocket handlers**: use `ctx.stream` after `zix.Http.WebSocket.upgrade()` hands off the connection.
 
-### Context.timedOut -- handler execution budget (Layer B)
+### Context.timedOut: handler execution budget (Layer B)
 
 When `config.handler_timeout_ms > 0`, the server sets `ctx.deadline` before each handler dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps and returning a 408 early rather than blocking the pool thread.
 
@@ -507,7 +525,7 @@ pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 }
 ```
 
-`ctx.timedOut()` is always safe to call -- it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare, no syscall is issued when the deadline has not passed.
+`ctx.timedOut()` is always safe to call: it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare, no syscall is issued when the deadline has not passed.
 
 `ctx.withTimeout(ms)` and `ctx.withDeadline(ts)` return a modified copy of ctx with a new deadline. These can be used inside a handler to set a tighter sub-budget for one step.
 
@@ -630,7 +648,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 }
 ```
 
-Compose left-to-right -- the outermost wrapper runs first:
+Compose left-to-right: the outermost wrapper runs first:
 
 ```zig
 server.registerHandler("/public",  withOriginCheck(publicHandler));
@@ -661,12 +679,95 @@ graph TD
 
 ---
 
+## Http Client
+
+`zix.Http.Client` wraps `std.http.Client` with explicit config, named errors, and a caller-owned `ClientResponse`.
+
+### HttpClientConfig
+
+```zig
+pub const HttpClientConfig = struct {
+    allocator:           std.mem.Allocator, // owns response body + head copies
+    io:                  std.Io,            // event-loop backend, not owned by client
+    connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
+    follow_redirects:    bool = true,
+    max_redirects:       u8   = 3,
+    user_agent:          []const u8 = "zix/1", // "" omits the header
+};
+```
+
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Client as HttpClient
+    participant Std as std.http.Client
+    participant Server as HTTP server
+
+    Caller->>Client: client.get(url, opts)
+    Client->>Client: Uri.parse(url)
+    Client->>Client: Protocol.fromUri(uri)
+    Client->>Std: connectTcpOptions(host, port, .{ timeout })
+    Std->>Server: TCP connect
+    Client->>Std: request(method, uri, .{ connection, redirect_behavior, headers })
+    Client->>Std: sendBodiless() or sendBodyUnflushed() + end()
+    Std->>Server: HTTP request
+    Server->>Std: HTTP response head + body
+    Client->>Client: receiveHead(redirect_buf)
+    Client->>Client: gpa.dupe(head.bytes)
+    Client->>Client: response.reader().allocRemaining(gpa, .limited(max_response_body))
+    Client->>Caller: ClientResponse{ status_code, head_bytes, body_data }
+```
+
+### Named errors
+
+| Error | When |
+| :- | :- |
+| `error.InvalidUrl` | `Uri.parse` fails, unsupported scheme, or missing host |
+| `error.BodyTooLarge` | response body exceeds `max_response_body` bytes |
+| `error.Timeout` | TCP connect exceeded `connect_timeout_ms` (from `std.Io`) |
+
+Other errors from `std.http.Client` propagate unchanged (OutOfMemory, ConnectionRefused, etc.).
+
+### ClientResponse memory
+
+`ClientResponse` owns two heap allocations, both using `config.allocator`:
+
+| Field | Source | Must free? |
+| :- | :- | :- |
+| `head_bytes: []u8` | `gpa.dupe(response.head.bytes)` | Yes, via `deinit()` |
+| `body_data: []u8` | `body_reader.allocRemaining(gpa, ...)` | Yes if len > 0, via `deinit()` |
+
+Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `status()`, `header()`, `body()` are invalid.
+
+### Redirect handling
+
+- `follow_redirects: true` (default): `std.http.Client` follows up to `max_redirects` hops automatically. Each hop opens a new connection.
+- `follow_redirects: false`: `ClientResponse` carries the 3xx response directly (the caller reads `header("location")`).
+- Body-bearing methods (POST, PUT, PATCH) that receive a redirect return `error.RedirectRequiresResend` (std behavior).
+
+### Deferred features
+
+| Feature | Status |
+| :- | :- |
+| `response_timeout_ms` enforcement | v1: field stored, not yet applied |
+| `read_timeout_ms` enforcement | v1: field stored, not yet applied |
+| TLS / HTTPS | deferred to a future release |
+| Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
+
+---
+
 ## Not Yet Implemented
 
 | Feature | Location | Note |
 | :- | :- | :- |
 | Middleware chain runner | `middleware.zig` | Comptime wrapper pattern is the current approach |
-| HTTP/2 / TLS | out of scope | n/a |
+| HTTP/2 / TLS (server) | out of scope | n/a |
+| response/read timeout enforcement (client) | `client.zig` | Config fields stored; IO-level wiring deferred |
 
 For UDP design see [`docs/hld-udp.md`](hld-udp.md). For UDS see [`docs/hld-uds.md`](hld-uds.md).
 

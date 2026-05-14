@@ -1,21 +1,27 @@
-# Tests -- zix
+# Tests: zix
 
 ---
 
 ## Running Tests
 
 ```sh
-# unit tests only — silent on success
+# unit tests only (silent on success)
 zig build unit-test
 
-# integration tests only
+# integration tests: components wired together, no live server
 zig build integration-test
 
-# both at once
+# behaviour tests: observable API contracts
+zig build behaviour-test
+
+# edge tests: boundary conditions and error paths
+zig build edge-test
+
+# all of the above at once
 zig build test-all
 ```
 
-`zig build` alone does **not** run tests — test steps are separate named steps not wired into the default install step.
+`zig build` alone does **not** run tests: test steps are separate named steps not wired into the default install step.
 
 ---
 
@@ -29,22 +35,43 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` + behavioral: `TEXT_EVENT_STREAM` round-trip (asString / enumFromString) |
+| `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` for every enum variant |
 | `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams |
-| `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF in name and value), TooManyHeaders, `SseWriter.writeEvent/writeNamedEvent/comment` wire format, `Response.streaming` defaults to false |
-| `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam (single param, multi-param, segment count mismatch), route registration (kind + path preserved) |
+| `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
+| `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
 | `tcp/http/upload.zig` | `refAllDecls` + behavioral: MultipartParser parse + getField |
-| `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip (text), parseFrame masked frame (RFC 6455 5.7) |
+| `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
 
 ### zix.Udp
 
 | Module | Coverage |
 | :- | :- |
 | `udp/config.zig` | `refAllDecls` + defaults: `UdpServerConfig`, `UdpClientConfig`, `PortMode` and `Endianness` enum backing values |
-| `udp/packet.zig` | `refAllDecls` + behavioral: NATIVE no-op, u8 array not swapped, LITTLE/BIG round-trip identity, non-native swaps integers, non-native swaps float array elements, `FeedbackResult` all variants |
+| `udp/packet.zig` | `refAllDecls` + behavioral: NATIVE no-op, u8 array not swapped, LITTLE/BIG round-trip, non-native swaps integers and float array elements, `FeedbackResult` all variants |
 | `udp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, nonzero port succeeds, config fields preserved |
-| `udp/client.zig` | `refAllDecls` (socket bind required for behavioral tests — deferred to Tier 2 integration tests) |
+| `udp/client.zig` | `refAllDecls` |
+
+### zix.Uds
+
+| Module | Coverage |
+| :- | :- |
+| `uds/config.zig` | `refAllDecls` + defaults: `UdsServerConfig` (backlog=128, max_msg_len=4096), `UdsClientConfig` |
+| `uds/server.zig` | `refAllDecls` + behavioral: empty path -> `error.PathEmpty`, valid path succeeds and deinit is safe |
+| `uds/client.zig` | `refAllDecls` |
+
+### zix.Http.Client
+
+| Module | Coverage |
+| :- | :- |
+| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent="zix/1") |
+| `tcp/http/client.zig` | `refAllDecls` |
+
+### zix.Channel
+
+| Module | Coverage |
+| :- | :- |
+| `channel/channel.zig` | `refAllDecls` + behavioral: `Channel(u32)` init capacity and count, ring buffer tail arithmetic |
 
 ### zix.Utils
 
@@ -56,86 +83,356 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 ## Integration Tests
 
-Source: `tests/integration/`. Each file is a standalone test executable compiled with the `zix` module imported.
+Source: `tests/integration/`. Each file is a standalone test executable compiled with the `zix` module imported. These tests exercise components wired together against mock inputs, no live socket, no `std.Io` scheduler.
 
-### Tier 1 — implemented (no server lifecycle required)
+### tests/integration/http/
 
-These tests exercise the library against mock inputs — no socket, no `std.Io` scheduler.
-
-#### `http_request_test.zig`
+#### `request_test.zig`
 
 | Test | What it verifies |
 | :- | :- |
-| `pathParam()` single param | captured segment returned by name, absent name -> null |
+| `pathParam()` single param | captured segment returned by name (absent name returns null) |
 | `pathParam()` hyphenated names | `:tenant-id`, `:tenant-branch` (http_paths example pattern) |
-| `body()` with body_cache | pre-set `body_cache` is returned without touching `reader`; second call returns same slice |
-| `queryParam()` empty value | `?k=` -> `""` (not null) — behavioral distinction from `queryParams()` |
-| `queryParams()` empty value | `?k=` -> `QueryParam{ .key="k", .value=null }` |
+| `body()` with body_cache | pre-set `body_cache` returned without touching `reader`. Second call returns same slice. |
 
-#### `http_router_test.zig`
+#### `router_test.zig`
 
 | Test | What it verifies |
 | :- | :- |
-| Exact match | `dispatch` returns true correct handler called |
-| No match | `dispatch` returns false |
-| Exact beats param | exact registered after param still wins for the same path |
-| Param beats prefix | param registered after prefix still wins |
-| Param populates `path_params` | `req.path_params` is set after a param dispatch `req.pathParam()` returns the value |
-| Longest prefix wins | `/api/users` beats `/api` for `/api/users/alice` |
-| Prefix boundary | `/api` does **not** match `/apiv2` (next char after prefix must be `/`) |
-| Prefix matches its own path | `/api` matches `/api` exactly |
+| Exact match | `dispatch` returns true, correct handler called |
+| Param populates `path_params` | `req.path_params` set after param dispatch. `req.pathParam()` returns the value. |
+| Two path params both populated | multi-param route captures both segments |
+| Prefix routes to handler | prefix match returns true and calls handler |
 
-#### `http_sse_test.zig`
+#### `context_test.zig`
 
 | Test | What it verifies |
 | :- | :- |
-| `TEXT_EVENT_STREAM` content type string | public enum -> `"text/event-stream"` |
-| `SseWriter` writeEvent wire format | `"data: ping\n\n"` via public `zix.Http.SseWriter` |
-| `SseWriter` writeNamedEvent wire format | `"event: update\ndata: 99\n\n"` |
-| `SseWriter` comment wire format | `": keepalive\n"` |
-| `Response.streaming` defaults to false | public `init()` invariant |
+| `withTimeout` / `withDeadline` timing | 60s budget not expired. 10ms budget exceeded after 50ms sleep. |
+
+#### `header_index_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Empty index returns null | no headers indexed (all lookups return null) |
+| Case-insensitive lookup | pre-populated map: `Content-Type` found via `content-type` |
+
+#### `sse_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `SseWriter.writeEvent` wire format | `"data: ping\n\n"` via `std.Io.Writer.fixed` buffer |
+| `SseWriter.writeNamedEvent` wire format | `"event: update\ndata: 99\n\n"` |
+| `SseWriter.comment` wire format | `": keepalive\n"` |
+
+### tests/integration/websocket/
 
 #### `websocket_test.zig`
 
 | Test | What it verifies |
 | :- | :- |
-| `parseFrame` incomplete -> null | < 2 bytes, and header present but payload truncated |
 | `parseFrame` binary opcode | FIN, opcode, payload round-trip |
 | `parseFrame` ping with payload | opcode, payload content |
 | `parseFrame` pong opcode | opcode |
-| `parseFrame` close, empty payload | opcode, zero-length payload |
-| `parseFrame` 126-tier length | extended 16-bit encoding, 130-byte payload decoded correctly |
-| `buildFrame` server frames unmasked | mask bit (byte[1] & 0x80) is zero for all opcodes |
-| `buildFrame` FIN bit always set | byte[0] & 0x80 for text, binary, ping, pong, close |
+| `parseFrame` close with empty payload | opcode, zero-length payload |
 | Round-trip all opcodes | buildFrame -> parseFrame for text, binary, ping, pong, close |
-| `acceptKey` key too long | key ≥ 93 bytes -> `error.KeyTooLong` |
-| `RoomMap` init / deinit | no connections, no crash or leak |
+| `RoomMap` init / deinit | no connections (no crash or leak) |
 
-#### `udp_packet_test.zig`
+### tests/integration/udp/
 
-Uses the same `Packet` type as `examples/udp_server.zig` and `examples/udp_client.zig` (`id [16]u8`, `packet_type i32`, `register u32`, `position [3]f64`).
+#### `config_test.zig`
 
 | Test | What it verifies |
 | :- | :- |
-| NATIVE is a no-op | bytes unchanged |
-| `id` field never swapped | `[16]u8` arrays skipped on LITTLE and BIG |
+| `UdpServer.init` valid config | init with real ip and port succeeds |
+| `UdpServer.init` port zero | returns `error.PortNotConfigured` |
+| `UdpClient.init` zero bind_port | returns `error.PortNotConfigured` before any socket call |
+
+#### `packet_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
 | Round-trip LITTLE | `toEndian` -> `fromEndian` restores original bytes |
 | Round-trip BIG | same for BIG endian |
-| Non-native swaps numeric fields | `packet_type` (i32), `register` (u32), each `position` (f64) element |
-| `FeedbackResult.packet` value | `.packet` variant stores and returns the full packet correctly |
-| Compile-time size guard | `@sizeOf(Packet) ≤ 65,507` (RFC 768 UDP payload limit) |
+| `FeedbackResult.packet` value | `.packet` variant stores and returns the full packet |
 
-### Tier 2 — planned (requires server lifecycle control)
+### tests/integration/http/ (client)
 
-These require a running server with a clean `stop()` signal (see `rnd/server-lifecycle-proposal.md`).
+#### `client_test.zig`
 
-| Area | Planned coverage |
+| Test | What it verifies |
 | :- | :- |
-| HTTP handler paths | 200 response bodies, method guards, JSON parse/format round-trip |
-| HTTP middleware | Origin check (403), Basic auth (401), composed chains |
-| HTTP static serving | GET known file -> 200 + content, GET unknown -> 404 |
-| WebSocket | Full upgrade handshake (101), text frame broadcast, ping/pong, clean close |
-| UDP server/client | ACK, NACK, echo, broadcast relay, disconnect detection |
+| `HttpClient.init` and `deinit` | no requests: init + deinit is safe with Threaded io |
+| `ClientResponse.header()` on mock head bytes | lookup by name and case-insensitive lookup |
+| `ClientResponse.iterateHeaders()` | counts all headers from raw head bytes |
+| `ClientRequestOpts` defaults | `headers` empty, `body` null, `connect_timeout_ms` null |
+
+### tests/integration/uds/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `UdsServer.init` valid path | succeeds and `deinit` is safe |
+| `HandlerFn` type check | `zix.Uds.echoHandler` satisfies `zix.Uds.HandlerFn` |
+
+### tests/integration/channel/
+
+#### `channel_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Channel(u32)` init capacity | `buf.len == 8`, `count == 0`, `head == 0` |
+| `Channel([]const u8)` compiles | slice element type accepted |
+| `Channel(struct)` compiles | struct element type accepted |
+| `Channel(u32)` send and recv round-trip | send then recv returns the sent value |
+| `Channel(u32)` drain after close | send two items, close, recv both, third recv returns `error.Closed` |
+
+---
+
+## Behaviour Tests
+
+Source: `tests/behaviour/`. Each file verifies observable API contracts that callers rely on: the "what does this always do" properties.
+
+### tests/behaviour/http/
+
+#### `request_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `path()` strips query string | `"/api/users?limit=10"` -> `"/api/users"` |
+| `path()` returns full target when no `?` | `"/api/users/alice"` unchanged |
+| `path()` root path | `"/"` returns `"/"` |
+| `query()` returns portion after `?` | `"q=hello&lang=zig"` |
+| `query()` returns empty when no `?` | `""` |
+| `method()` uses `method_cache` when set | cached POST overrides GET inner |
+| `method()` resolves DELETE/PATCH/PUT/OPTIONS/HEAD | each method from inner when cache is null |
+
+#### `router_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Exact beats param regardless of registration order | exact registered after param still wins |
+| Param beats prefix regardless of registration order | param registered after prefix still wins |
+| Prefix: longest match wins | `/api/users` beats `/api` for `/api/users/alice` |
+| Prefix matches its own path exactly | `/api` matches `/api` |
+| Query string transparent for param dispatch | `"/users/bob?role=admin"` captures `bob` via `:id` |
+| Query string transparent for exact dispatch | `"/about?ref=menu"` matches `/about` |
+
+#### `content_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Text group extensions | html/htm/css/txt/csv |
+| Application group extensions | json/map/js/min.js/xml/pdf/wasm/zip/gz/tar/7z/rar/rtf |
+| Image group extensions | png/jpg/jpeg/gif/svg/webp/ico |
+| Audio group extensions | mp3/wav/flac/mid/midi |
+| Video group extensions | mp4/webm/ogg/mpeg/avi/mov/wmv/flv/mkv |
+| Font group extensions | ttf/otf/woff/woff2 |
+| Matching is case-insensitive | HTML, PNG, JS, JSON, JPG, JPEG, CSS, WOFF2 |
+| `fromExtension()` returns correct MIME string | representative set |
+| Alias pairs produce identical MIME strings | jpg==jpeg, mid==midi, html==htm, js==min.js, json==map |
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Buffer size defaults | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` all 4096 |
+| Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
+| Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
+| Worker pool defaults to auto-size | `workers == 0`, `pool_size == 0` |
+| `max_response_headers` defaults to COMMON (32) | enum value and `.value()` |
+| `HeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
+| `HeaderSize.CUSTOM(N)` returns N | 7 and 100 |
+| `Response` status defaults to OK | `init()` invariant |
+
+#### `sse_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `ContentType.TEXT_EVENT_STREAM.asString()` | returns `"text/event-stream"` |
+| `Response.streaming` defaults to false | `init()` invariant |
+
+### tests/behaviour/websocket/
+
+#### `websocket_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| FIN bit always set | byte[0] & 0x80 for text, binary, ping, pong, close |
+| Server frames unmasked | byte[1] & 0x80 == 0 for all opcodes (RFC 6455 5.1) |
+
+### tests/behaviour/udp/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `UdpServerConfig` disconnect_timeout_ms | default 5000 |
+| `UdpServerConfig` poll_timeout_ms | default 2000 |
+| `UdpServerConfig` auto_ack | default false |
+| `UdpServerConfig` broadcast | default false |
+| `UdpServerConfig` endianness | default LITTLE |
+| `UdpServerConfig` port_mode | default REQUIRED |
+| `UdpClientConfig` send_once | default false |
+| `UdpClientConfig` send_every | default 99 |
+| `UdpClientConfig` endianness | default LITTLE |
+
+#### `packet_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `toEndian` NATIVE is a no-op | bytes unchanged on any host |
+| u8 array fields never swapped | `id [4]u8` untouched by LITTLE and BIG |
+| Non-native swaps integer fields | `i32` field byte-swapped |
+| Non-native swaps float array elements | `[2]f64` elements each swapped |
+
+### tests/behaviour/http/ (client)
+
+#### `client_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `ClientConfig` connect/response/read timeout defaults | all 0 (disabled) |
+| `ClientConfig` max_response_body default | 4 MB (1024 * 1024 * 4) |
+| `ClientConfig` follow_redirects default | true |
+| `ClientConfig` max_redirects default | 3 |
+| `ClientConfig` user_agent default | "zix/1" |
+| `ClientResponse.status()` | returns status_code field |
+| `ClientResponse.body()` | returns body_data slice |
+| `ClientResponse.header()` case-insensitive | matches regardless of header name casing |
+| `ClientResponse.deinit()` zero-length body | safe, no crash or leak |
+
+### tests/behaviour/uds/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `UdsServerConfig` backlog default | 128 |
+| `UdsServerConfig` max_msg_len default | 4096 |
+| `UdsClientConfig` stores path | path field preserved |
+| UDS frame length header | 4-byte little-endian u32 encodes and decodes correctly |
+| UDS frame zero-length payload | encodes as four zero bytes |
+| UDS frame header size | always exactly 4 bytes |
+
+### tests/behaviour/channel/
+
+#### `channel_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `closed` field defaults to false | `init()` invariant |
+| `head` starts at zero | `init()` invariant |
+| Ring tail formula is `(head + count) % buf.len` | manually set state verifies arithmetic |
+| `send` increments count | count goes from 0 to 1 after one send |
+| `recv` decrements count | count returns to 0 after recv |
+| `close` sets closed field | `ch.closed == true` after close |
+
+---
+
+## Edge Tests
+
+Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
+
+### tests/edge/http/
+
+#### `request_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
+| `queryParam` key absent returns null | key not in query string |
+| `queryParam` no query string at all returns null | target has no `?` |
+
+#### `router_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| No registered route returns false | empty router, `dispatch` returns false |
+| Prefix `/api` does NOT match `/apiv2` | next char after prefix must be `/` or end-of-path |
+
+#### `response_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| CR in header name -> `InvalidHeaderName` | injection guard |
+| LF in header name -> `InvalidHeaderName` | injection guard |
+| CR in header value -> `InvalidHeaderValue` | injection guard |
+| LF in header value -> `InvalidHeaderValue` | injection guard |
+| Buffer grows from 4 to 5 on 5th header | initial cap=4, growth to min(8, max_headers) |
+| `max_headers=1` rejects second header | no growth: `TooManyHeaders` immediately |
+| `HeaderSize.CUSTOM(0).value()` | returns 0 |
+
+#### `content_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Unknown extension -> `APPLICATION_OCTET_STREAM` | xyz, bin, dat, unknown |
+| Empty string -> `APPLICATION_OCTET_STREAM` | `typeFromExtension("")` |
+| `fromExtension` unknown -> `"application/octet-stream"` | string form of fallback |
+
+### tests/edge/websocket/
+
+#### `websocket_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| 0 bytes -> null | fewer than 2 bytes (can't read header) |
+| 1 byte -> null | fewer than 2 bytes |
+| Truncated payload -> null | header says 5 bytes but only 3 present |
+| Extended 16-bit length (126-tier) | 130-byte payload: byte[1] carries 126 marker |
+| `acceptKey` key too long -> `error.KeyTooLong` | key >= 93 bytes exceeds 128-byte hash_input |
+
+### tests/edge/udp/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `PortMode.CONFIGURABLE` backing value | equals 0 |
+| `PortMode.REQUIRED` backing value | equals 1 |
+| Port zero with `REQUIRED` mode | `UdpServer.init` returns `error.PortNotConfigured` |
+| Non-zero port with `REQUIRED` mode | `UdpServer.init` succeeds |
+
+#### `packet_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Endianness` enum backing values stable | NATIVE=0, LITTLE=1, BIG=2 |
+| `FeedbackResult` ack/nack are tag-only | active tag matches .ack and .nack |
+
+### tests/edge/http/ (client)
+
+#### `client_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Unsupported scheme -> `error.InvalidUrl` | `ftp://` scheme not accepted |
+| Missing host -> `error.InvalidUrl` | `http://` with no host |
+| Malformed URL -> `error.InvalidUrl` | `:::bad` fails at parse |
+| `ClientResponse.header()` absent name | returns null |
+| `RequestOpts.connect_timeout_ms` override | null, 0, and non-zero are distinct values |
+
+### tests/edge/uds/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Empty path -> `error.PathEmpty` | `UdsServer.init(.{ .path = "" })` returns PathEmpty |
+
+### tests/edge/channel/
+
+#### `channel_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Capacity 1 allocates exactly one slot | `buf.len == 1`, `count == 0` |
+| Ring head wraps at `buf.len` | `(3+1) % 4 == 0` |
+| Full boundary: `count == buf.len` | tail index wraps back to head |
+| `send` after close | returns `error.Closed` |
+| `recv` on empty closed channel | returns `error.Closed` |
 
 ---
 

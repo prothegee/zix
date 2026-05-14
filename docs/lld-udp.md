@@ -1,10 +1,10 @@
-# LLD -- zix.Udp
+# LLD: zix.Udp
 
 Internal implementation details for the UDP layer. For design rationale see [`docs/hld-udp.md`](hld-udp.md).
 
 ---
 
-## server.zig -- UdpServer(Packet)
+## server.zig: UdpServer(Packet)
 
 ### Comptime size assert
 
@@ -22,7 +22,7 @@ Fires at build time, not runtime.
 const ClientRecord = struct {
     from:      std.Io.net.IpAddress,   // remote address used as client identity
     last_seen: std.Io.Clock.Timestamp, // for timeout-based disconnect detection
-    index:     usize,                  // monotonic counter -- for log output only
+    index:     usize,                  // monotonic counter: for log output only
 };
 ```
 
@@ -56,7 +56,7 @@ Client identity is the remote address. The index is informational, it is not sta
 const Task = struct {
     buf:          [@sizeOf(Packet)]u8,  // copy of received datagram bytes
     from:         std.Io.net.IpAddress, // sender address
-    socket:       std.Io.net.Socket,    // shared -- UDP send is kernel-atomic per datagram
+    socket:       std.Io.net.Socket,    // shared: UDP send is kernel-atomic per datagram
     io:           std.Io,
     config:       UdpServerConfig,
     peers:        []std.Io.net.IpAddress, // heap-allocated snapshot, freed in processPacket
@@ -64,7 +64,7 @@ const Task = struct {
 };
 ```
 
-`Task` is passed by value to `io.concurrent()`. All fields are value types or handles that are safe to copy -- no shared mutable state except `socket`, which is safe because UDP `send()` is kernel-atomic per datagram.
+`Task` is passed by value to `io.concurrent()`. All fields are value types or handles that are safe to copy (no shared mutable state except `socket`, which is safe because UDP `send()` is kernel-atomic per datagram).
 
 ### processPacket()
 
@@ -76,7 +76,7 @@ if auto_echo:  socket.send(io, &from, &buf)
 if broadcast:
     for each peer in peers:
         socket.send(io, peer, &buf)
-        // SECURITY: no sender validation -- spoofed IPs can trigger broadcast
+        // SECURITY: no sender validation, spoofed IPs can trigger broadcast
         // PERF: N sequential send() syscalls, sendmmsg could reduce to 1
 ```
 
@@ -87,7 +87,7 @@ i = 0
 while i < clients.items.len:
     elapsed = durationTo(clients.items[i].last_seen, now).raw.toMilliseconds()
     if elapsed >= timeout_ms:
-        clients.swapRemove(i)  -- O(1); order not preserved but does not matter
+        clients.swapRemove(i)  // O(1), order not preserved but does not matter
     else:
         i += 1
 ```
@@ -96,18 +96,18 @@ while i < clients.items.len:
 
 ---
 
-## client.zig -- UdpClient(Packet)
+## client.zig: UdpClient(Packet)
 
 ### Comptime size assert
 
-Same as server -- fires at build time.
+Same as server, fires at build time.
 
 ### init()
 
 ```
 1. if bind_port == 0 or server_port == 0: return error.PortNotConfigured
 2. bind_addr = IpAddress.parse("127.0.0.1", bind_port)
-3. socket = bind_addr.bind(io, .dgram .udp)  -- one socket for both send and receive
+3. socket = bind_addr.bind(io, .dgram .udp)  // one socket for both send and receive
 4. dest = IpAddress.parse(server_ip, server_port)
 5. return Self { config, socket, dest, io }
 ```
@@ -125,7 +125,7 @@ socket.send(io, &dest, std.mem.asBytes(&wire))
 
 ```
 buf: [@sizeOf(Packet)]u8 = undefined
-msg = socket.receive(io, &buf)         -- blocking
+msg = socket.receive(io, &buf)         // blocking
 if msg.data.len == 1:
     if data[0] == 0x06: return .ack
     else:               return .nack
@@ -139,7 +139,7 @@ Length dispatch is the decoding mechanism. ACK/NACK are single-byte responses, a
 
 ---
 
-## packet.zig -- Endianness helpers
+## packet.zig: Endianness helpers
 
 ### swapFields() / swapField()
 
@@ -153,12 +153,12 @@ swapField(T, ptr):
         .int   -> ptr.* = @byteSwap(ptr.*)
         .float -> Int = meta.Int(.unsigned, bits)
                   ptr.* = @bitCast(@byteSwap(@as(Int, @bitCast(ptr.*))))
-        .array -> if @sizeOf(child) > 1:   -- skip u8 arrays
+        .array -> if @sizeOf(child) > 1:   // skip u8 arrays
                       for each element: swapField(child, &elem)
         else   -> no-op
 ```
 
-`inline for` over struct fields is evaluated at comptime -- the loop body is unrolled into per-field operations with no runtime branch overhead.
+`inline for` over struct fields is evaluated at comptime: the loop body is unrolled into per-field operations with no runtime branch overhead.
 
 Float swapping uses `@bitCast` to reinterpret the float as an unsigned integer of the same bit width, applies `@byteSwap`, then reinterprets back. This is correct for IEEE 754 byte reversal.
 
@@ -166,22 +166,22 @@ Float swapping uses `@bitCast` to reinterpret the float as an unsigned integer o
 
 ```
 toEndian(Packet, pkt, endianness):
-    if endianness == .NATIVE: return pkt    -- no-op
+    if endianness == .NATIVE: return pkt    // no-op
     native = builtin.cpu.arch.endian()
     target = if endianness == .LITTLE: .little else .big
-    if native == target: return pkt         -- already correct, no-op
+    if native == target: return pkt         // already correct, no-op
     result = pkt
     swapFields(Packet, &result)
     return result
 
-fromEndian = toEndian   -- swap is its own inverse
+fromEndian = toEndian   // swap is its own inverse
 ```
 
 Both functions return a new value while the original is not modified.
 
 ---
 
-## config.zig -- PortMode / Endianness / Configs
+## config.zig: PortMode / Endianness / Configs
 
 ### Enum backing values
 

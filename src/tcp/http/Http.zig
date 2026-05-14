@@ -1,6 +1,8 @@
 //! zix http namespace
 
 const config = @import("config.zig");
+const client_config = @import("client_config.zig");
+const client = @import("client.zig");
 const response = @import("response.zig");
 const request = @import("request.zig");
 const context = @import("context.zig");
@@ -12,6 +14,10 @@ const upload = @import("upload.zig");
 
 pub const Server = @import("server.zig").Server;
 pub const ServerConfig = config.HttpServerConfig;
+pub const Client = client.HttpClient;
+pub const ClientConfig = client_config.HttpClientConfig;
+pub const ClientResponse = client.ClientResponse;
+pub const ClientRequestOpts = client.RequestOpts;
 pub const Request = request.Request;
 pub const Response = response.Response;
 pub const SseWriter = response.SseWriter;

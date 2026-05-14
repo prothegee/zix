@@ -114,7 +114,7 @@ pub const Router = struct {
     pub fn dispatch(self: *Router, req: *Request, res: *Response, ctx: *Context) !bool {
         const p = req.path();
 
-        // Pass 1: exact -- O(1) hash lookup
+        // Pass 1: exact, O(1) hash lookup
         if (self.exact_map.get(p)) |handler| {
             try handler(req, res, ctx);
             return true;
@@ -124,7 +124,7 @@ pub const Router = struct {
         const paths = self.routes.items(.path);
         const handlers = self.routes.items(.handler);
 
-        // Pass 2: parameterized (first match wins) -- kind-only scan until match
+        // Pass 2: parameterized (first match wins), kind-only scan until match
         for (kinds, 0..) |kind, i| {
             if (kind == .PARAM) {
                 if (try matchParam(paths[i], p, req)) {
