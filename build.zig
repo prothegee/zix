@@ -32,10 +32,12 @@ pub fn build(b: *std.Build) void {
         "tests/integration/http/context_test.zig",
         "tests/integration/http/header_index_test.zig",
         "tests/integration/http/sse_test.zig",
+        "tests/integration/http/client_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
         // udp
         "tests/integration/udp/packet_test.zig",
+        "tests/integration/udp/config_test.zig",
         // uds
         "tests/integration/uds/config_test.zig",
         // channel
@@ -65,10 +67,12 @@ pub fn build(b: *std.Build) void {
         "tests/behaviour/http/content_test.zig",
         "tests/behaviour/http/config_test.zig",
         "tests/behaviour/http/sse_test.zig",
+        "tests/behaviour/http/client_test.zig",
         // websocket
         "tests/behaviour/websocket/websocket_test.zig",
         // udp
         "tests/behaviour/udp/packet_test.zig",
+        "tests/behaviour/udp/config_test.zig",
         // uds
         "tests/behaviour/uds/config_test.zig",
         // channel
@@ -97,10 +101,12 @@ pub fn build(b: *std.Build) void {
         "tests/edge/http/router_test.zig",
         "tests/edge/http/response_test.zig",
         "tests/edge/http/content_test.zig",
+        "tests/edge/http/client_test.zig",
         // websocket
         "tests/edge/websocket/websocket_test.zig",
         // udp
         "tests/edge/udp/packet_test.zig",
+        "tests/edge/udp/config_test.zig",
         // uds
         "tests/edge/uds/config_test.zig",
         // channel
@@ -132,6 +138,7 @@ pub fn build(b: *std.Build) void {
     // Examples
     const examples = .{
         .{ "example-http_basic", "examples/http_basic.zig" },
+        .{ "example-http_client", "examples/http_client.zig" },
         .{ "example-http_json", "examples/http_json.zig" },
         .{ "example-http_manual_concurrent", "examples/http_manual_concurrent.zig" },
         .{ "example-http_middleware", "examples/http_middleware.zig" },
