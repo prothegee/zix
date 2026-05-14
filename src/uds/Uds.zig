@@ -20,5 +20,5 @@ pub const Client = @import("client.zig").UdsClient;
 /// Connection handler function type for custom server behavior.
 pub const HandlerFn = @import("server.zig").HandlerFn;
 
-/// Default echo handler -- reads length-prefixed frames and echoes each back.
+/// Default echo handler: reads length-prefixed frames and echoes each back.
 pub const echoHandler = @import("server.zig").echoHandler;
