@@ -82,17 +82,17 @@ __*6. Predictable, Transparent Memory Management.*__
 
 | Document | Description |
 | :- | :- |
-| [`docs/hld-http.md`](docs/hld-http.md) | HTTP -- goals, runtime model, API, router, WebSocket, SSE, memory model |
-| [`docs/hld-udp.md`](docs/hld-udp.md) | UDP -- goals, runtime model, API, packet model, endianness, disconnect |
-| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS -- goals, API, frame format, server/client lifecycle |
-| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel -- goals, model, API, concurrency requirement, examples |
-| [`docs/lld-http.md`](docs/lld-http.md) | HTTP -- internal data structures and algorithms |
-| [`docs/lld-udp.md`](docs/lld-udp.md) | UDP -- internal data structures and algorithms |
-| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS -- internal server/client structure and frame handling |
-| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel -- ring buffer internals, locking, send/recv algorithms |
-| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models -- Model 1 and Model 2 for all protocols -- Channel note |
+| [`docs/hld-http.md`](docs/hld-http.md) | HTTP: goals, runtime model, API, router, WebSocket, SSE, memory model |
+| [`docs/hld-udp.md`](docs/hld-udp.md) | UDP: goals, runtime model, API, packet model, endianness, disconnect |
+| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS: goals, API, frame format, server/client lifecycle |
+| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel: goals, model, API, concurrency requirement, examples |
+| [`docs/lld-http.md`](docs/lld-http.md) | HTTP: internal data structures and algorithms |
+| [`docs/lld-udp.md`](docs/lld-udp.md) | UDP: internal data structures and algorithms |
+| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS: internal server/client structure and frame handling |
+| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel: ring buffer internals, locking, send/recv algorithms |
+| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models: Model 1 and Model 2 for all protocols. Channel note. |
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
-| [`docs/headers.md`](docs/headers.md) | Response header cap -- tiers, security, error handling |
+| [`docs/headers.md`](docs/headers.md) | Response header cap: tiers, security, error handling |
 | [`docs/tests.md`](docs/tests.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
 
 <br>
@@ -157,7 +157,7 @@ pub fn main() !void {
         .max_client_request = 1024 * 4,
         .max_allocator_size = 1024 * 4,
         .max_client_response = 1024 * 4,
-        .workers = 1, // stay on model 1 -- use the caller's io directly
+        .workers = 1, // stay on model 1, use the caller's io directly
     });
     defer server.deinit();
 
@@ -267,9 +267,9 @@ See [`docs/concurrency.md`](docs/concurrency.md) for architecture details and th
 
 Two independent timeout layers, both disabled by default (`0`):
 
-**`conn_timeout_ms`** -- network-level connection guard (Layer D). The timer thread shuts down connections that have been open longer than this without completing. Protects pool threads from clients that stall before or during header send. Effective in model 2 only.
+**`conn_timeout_ms`**: network-level connection guard (Layer D). The timer thread shuts down connections that have been open longer than this without completing. Protects pool threads from clients that stall before or during header send. Effective in model 2 only.
 
-**`handler_timeout_ms`** -- per-handler execution budget (Layer B). Sets `ctx.deadline` before each dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps.
+**`handler_timeout_ms`**: per-handler execution budget (Layer B). Sets `ctx.deadline` before each dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps.
 
 ```zig
 var server = try zix.Http.Server.init(4096, .{
@@ -472,6 +472,68 @@ See `examples/http_sse.zig` for a full example with a browser-compatible HTML pa
 
 <br>
 
+### HTTP Client
+
+`zix.Http.Client` makes outbound HTTP requests. Each call returns a `ClientResponse` the caller owns and must release with `deinit()`.
+
+```zig
+var client = zix.Http.Client.init(.{
+    .allocator         = arena.allocator(),
+    .io                = process.io,
+    .connect_timeout_ms = 5000,       // error.Timeout if TCP connect takes > 5s
+    .max_response_body  = 64 * 1024,  // error.BodyTooLarge if body exceeds 64 KB
+});
+defer client.deinit();
+
+// GET
+var resp = try client.get("http://127.0.0.1:9000/", .{});
+defer resp.deinit();
+std.debug.print("{d}: {s}\n", .{ resp.status(), resp.body() });
+
+// GET with header inspection
+if (resp.header("content-type")) |ct| {
+    std.debug.print("content-type: {s}\n", .{ct});
+}
+
+// POST with body and custom headers
+const extra = [_]std.http.Header{
+    .{ .name = "X-Trace-Id", .value = "abc-123" },
+};
+var post_resp = try client.post("http://127.0.0.1:9000/api/items", .{
+    .headers = &extra,
+    .body    = "{\"name\":\"widget\"}",
+});
+defer post_resp.deinit();
+
+// Per-request connect timeout override
+var fast = try client.get("http://127.0.0.1:9000/health", .{
+    .connect_timeout_ms = 500,
+});
+defer fast.deinit();
+```
+
+| Method shorthand | Sends body? |
+| :- | :- |
+| `client.get(url, opts)` | no |
+| `client.head(url, opts)` | no |
+| `client.post(url, opts)` | yes (Content-Length: 0 if opts.body is null) |
+| `client.put(url, opts)` | yes |
+| `client.patch(url, opts)` | yes |
+| `client.delete(url, opts)` | no |
+| `client.request(method, url, opts)` | depends on method |
+
+| Error | Condition |
+| :- | :- |
+| `error.InvalidUrl` | malformed URL, unsupported scheme, or missing host |
+| `error.BodyTooLarge` | response body exceeded `max_response_body` |
+| `error.Timeout` | TCP connect exceeded `connect_timeout_ms` |
+
+Redirects are followed automatically up to `max_redirects` (default 3). Set `follow_redirects = false` to receive the 3xx response directly.
+
+See `examples/http_client.zig` and [`docs/hld-http.md`](docs/hld-http.md) for details.
+
+<br>
+
 ### Static Files & Upload
 
 Set `public_dir` in `HttpServerConfig` to enable static file serving. `server.run()` returns `error.PublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `Server.init`:
@@ -572,7 +634,7 @@ For security guidance and tier selection see [`docs/headers.md`](docs/headers.md
 Same-host IPC over a Unix stream socket. The server accepts connections and dispatches each as a concurrent task. Both sides use a 4-byte length-prefixed frame format.
 
 ```zig
-// Process A -- UDS server (data provider)
+// Process A: UDS server (data provider)
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Uds.Server.init(.{
         .path      = "/tmp/app.sock",
@@ -585,7 +647,7 @@ pub fn main(process: std.process.Init) !void {
 ```
 
 ```zig
-// Process B -- UDS client (consumer)
+// Process B: UDS client (consumer)
 var client = try zix.Uds.Client.connect(.{ .path = "/tmp/app.sock" }, io);
 defer client.deinit(io);
 
@@ -594,7 +656,7 @@ var buf: [4096]u8 = undefined;
 const reply = try client.recvMsg(io, &buf); // reads [u32 len][payload]
 ```
 
-Custom handler -- receives the raw stream directly:
+Custom handler: receives the raw stream directly:
 
 ```zig
 fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
@@ -618,13 +680,13 @@ Typed, fiber-safe in-process message passing. A buffered ring queue that connect
 ```zig
 const MyChan = zix.Channel(u32);
 
-// capacity 8 -- send blocks when full, recv blocks when empty
+// capacity 8: send blocks when full, recv blocks when empty
 var ch = try MyChan.init(std.heap.smp_allocator, 8);
 defer ch.deinit();
 
 // producer (runs in its own thread / task)
 try ch.send(io, 42);
-ch.close(io); // signal done -- receivers drain then get error.Closed
+ch.close(io); // signal done: receivers drain, then get error.Closed
 
 // consumer (runs in its own thread / task)
 while (true) {
@@ -646,11 +708,11 @@ t.join();
 
 | Example | Pattern |
 | :- | :- |
-| `examples/channel_basic.zig` | Producer/consumer -- two OS threads, Channel(u32) |
-| `examples/channel_worker_pool.zig` | Fan-out -- one producer, many consumer workers |
-| `examples/channel_pipeline.zig` | Multi-stage pipeline -- backpressure flows upstream |
+| `examples/channel_basic.zig` | Producer/consumer: two OS threads, Channel(u32) |
+| `examples/channel_worker_pool.zig` | Fan-out: one producer, many consumer workers |
+| `examples/channel_pipeline.zig` | Multi-stage pipeline: backpressure flows upstream |
 | `examples/channel_ipc_a.zig` + `ipc_b.zig` | Inter-process coordination pair |
-| `examples/uds_http.zig` | HTTP + UDS + Channel -- full integration pattern |
+| `examples/uds_http.zig` | HTTP + UDS + Channel: full integration pattern |
 
 For design details see [`docs/hld-channel.md`](docs/hld-channel.md).
 
@@ -746,7 +808,7 @@ zig build test-all         # all of the above
 | Read / write I/O buffers | `smp_allocator` | Connection |
 | Per-request allocations (`ctx.allocator`) | Per-connection `ArenaAllocator`, reset each request | Request |
 
-Handlers receive `ctx.allocator` -- an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
+Handlers receive `ctx.allocator`, an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
 
 `config.allocator` (router storage) is append-only — `ArenaAllocator` is the recommended choice. All route allocations are freed together when `server.deinit()` is called.
 
@@ -766,13 +828,13 @@ For full memory details see [`docs/hld-http.md`](docs/hld-http.md) and [`docs/hl
 
 ## Design Considerations
 
-Not active tasks -- reminders for future decisions.
+Not active tasks: reminders for future decisions.
 
 **AoS (Array of Structures):** remaining sites (`extra_buf`, `fields`, `conns`, ...). When any becomes a throughput bottleneck, a SoA layout is a candidate. `routes` was converted to `MultiArrayList` (SoA) so dispatch passes scan only the hot field slice.
 
 **OoP (Object-oriented Patterns):** most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
 
-**DoD (Data-Oriented Design):** the direction to move when data layout matters more than encapsulation. For the HTTP layer specifically, the idea is a dedicated *http engine* -- a lower-level, data-oriented core sitting below `server.zig`. Not started -- revisit when the current baseline hits a real ceiling.
+**DoD (Data-Oriented Design):** the direction to move when data layout matters more than encapsulation. For the HTTP layer specifically, the idea is a dedicated *http engine*: a lower-level, data-oriented core sitting below `server.zig`. Not started. Revisit when the current baseline hits a real ceiling.
 
 <br>
 

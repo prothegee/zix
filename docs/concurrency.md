@@ -1,13 +1,13 @@
-# Concurrency Models -- zix
+# Concurrency Models: zix
 
 Two threading models are available. Select via `config.workers` in `HttpServerConfig`.
 
 ---
 
-## Model 1 -- Single Accept, io.concurrent Dispatch (`workers = 1`)
+## Model 1: Single Accept, io.concurrent Dispatch (`workers = 1`)
 
 One thread binds the socket and calls `accept()` in a loop. Each accepted connection is
-dispatched as a concurrent task via `io.concurrent()` -- non-blocking, no busy-waiting.
+dispatched as a concurrent task via `io.concurrent()` (non-blocking, no busy-waiting).
 The caller owns and creates the `std.Io` backend. This model is suitable when you need
 explicit control over the concurrency limit.
 
@@ -19,7 +19,7 @@ Main thread:
     io.concurrent(handleConnection, stream)   ← suspends, OS event loop schedules task
 
 Handler tasks (one per active connection):
-  handleConnection(stream)  -- keep-alive loop until client closes
+  handleConnection(stream)  // keep-alive loop until client closes
   task exits when connection closes
 ```
 
@@ -37,18 +37,18 @@ defer threaded.deinit();
 
 var server = try zix.Http.Server.init(4096, .{
     .io = threaded.io(),
-    .workers = 1, // stay on model 1 -- use the caller's io directly
+    .workers = 1, // stay on model 1, use the caller's io directly
     ...
 });
 ```
 
 ---
 
-## Model 2 -- Work-Queue Thread Pool (`workers = 0` or `workers = N`, default)
+## Model 2: Work-Queue Thread Pool (`workers = 0` or `workers = N`, default)
 
 Dedicated accept threads push accepted connections to a shared `ConnQueue`. Pool threads
-pop connections and handle each one synchronously with blocking I/O -- no scheduler,
-no `io.concurrent()` overhead. `SO_REUSEPORT` allows all accept threads to listen on
+pop connections and handle each one synchronously with blocking I/O (no scheduler,
+no `io.concurrent()` overhead). `SO_REUSEPORT` allows all accept threads to listen on
 the same port in parallel.
 
 ```
@@ -68,7 +68,7 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
   loop:
     stream = queue.pop()          ← blocks until a connection arrives
     handleConnection(stream, io)  ← synchronous blocking I/O, keep-alive loop
-    (loop -- next pop)
+    (loop, next pop)
 ```
 
 **When to use:**
@@ -78,7 +78,7 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 - `pool_size = 0` (default) sizes the pool at `max(10, cpu_count * 2)`.
 - `pool_size = N` uses exactly N pool threads.
 
-**OS requirement:** `SO_REUSEPORT` -- Linux ≥ 3.9, macOS, BSD.
+**OS requirement:** `SO_REUSEPORT` (Linux ≥ 3.9, macOS, BSD).
 
 **Example** (default, `examples/http_basic.zig` and others):
 ```zig
@@ -123,7 +123,7 @@ var server = try zix.Http.Server.init(4096, .{
 | :- | :- | :- |
 | Accept threads | 1 | 2 (or N) |
 | Connection dispatch | `io.concurrent()` task | `queue.pop()` + synchronous I/O |
-| Scheduler overhead | yes -- condvar wakeup per connection | no -- blocking pop, no fiber |
+| Scheduler overhead | yes (condvar wakeup per connection) | no (blocking pop, no fiber) |
 | Concurrency cap | `concurrent_limit` on `std.Io.Threaded` | `pool_size` (OS threads) |
 | `SO_REUSEPORT` | no | yes |
 | Use case | explicit limit, single-threaded embed | production default |
@@ -134,17 +134,17 @@ var server = try zix.Http.Server.init(4096, .{
 
 | Protocol | Model 1 | Model 2 |
 | :- | :- | :- |
-| TCP (HTTP) | yes -- `workers = 1` | yes -- default |
-| TCP (SSE) | yes -- required, long-lived connections fit the async task model | not recommended -- exhausts blocking pool threads |
-| UDP | yes -- current src/ | planned |
-| UDS (stream) | yes -- implemented, `io.concurrent()` per connection | not applicable -- no pool in UDS server |
-| UDS (datagram) | not via `std.Io.net` -- would need raw `std.posix`; defer | defer |
+| TCP (HTTP) | yes (`workers = 1`) | yes (default) |
+| TCP (SSE) | yes, required (long-lived connections fit the async task model) | not recommended (exhausts blocking pool threads) |
+| UDP | yes (current src/) | planned |
+| UDS (stream) | yes, implemented (`io.concurrent()` per connection) | not applicable (no pool in UDS server) |
+| UDS (datagram) | not via `std.Io.net` (would need raw `std.posix`). Deferred. | defer |
 
 ---
 
 ## Channel
 
-`zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive that works alongside the server models. A Channel connects two or more `io.concurrent()` tasks (or OS threads) within the same process -- it does not cross a network or process boundary.
+`zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive that works alongside the server models. A Channel connects two or more `io.concurrent()` tasks (or OS threads) within the same process. It does not cross a network or process boundary.
 
 ```
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
@@ -154,10 +154,10 @@ Both Model 1 and Model 2 servers can spawn `io.concurrent()` tasks or OS threads
 
 | Property | Channel |
 | :- | :- |
-| Crossing process/network boundary | no -- in-process only |
-| Works with `io.concurrent()` tasks | yes -- uses `std.Io.Mutex` + `std.Io.Condition` (fiber-aware) |
-| Works with OS threads | yes -- each thread needs its own `std.Io` from `std.Io.Threaded` |
-| Replaces Model 1 / Model 2 | no -- orthogonal |
+| Crossing process/network boundary | no (in-process only) |
+| Works with `io.concurrent()` tasks | yes, uses `std.Io.Mutex` + `std.Io.Condition` (fiber-aware) |
+| Works with OS threads | yes: each thread needs its own `std.Io` from `std.Io.Threaded` |
+| Replaces Model 1 / Model 2 | no (orthogonal) |
 
 Status: Implemented. See ADR-017 and [`docs/hld-channel.md`](hld-channel.md).
 
