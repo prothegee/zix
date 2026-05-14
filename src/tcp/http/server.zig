@@ -32,7 +32,7 @@ fn updateDateCache(io: std.Io) void {
 }
 
 // --------------------------------------------------------- //
-// Layer D -- connection registry + timer eviction
+// Layer D: connection registry + timer eviction
 // --------------------------------------------------------- //
 
 const ConnEntry = struct {

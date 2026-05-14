@@ -26,13 +26,22 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("integration-test", "Run integration tests");
 
     const integration_tests = .{
-        "tests/integration/http_request_test.zig",
-        "tests/integration/http_router_test.zig",
-        "tests/integration/http_context_test.zig",
-        "tests/integration/http_header_index_test.zig",
-        "tests/integration/http_sse_test.zig",
-        "tests/integration/websocket_test.zig",
-        "tests/integration/udp_packet_test.zig",
+        // http
+        "tests/integration/http/request_test.zig",
+        "tests/integration/http/router_test.zig",
+        "tests/integration/http/context_test.zig",
+        "tests/integration/http/header_index_test.zig",
+        "tests/integration/http/sse_test.zig",
+        "tests/integration/http/client_test.zig",
+        // websocket
+        "tests/integration/websocket/websocket_test.zig",
+        // udp
+        "tests/integration/udp/packet_test.zig",
+        "tests/integration/udp/config_test.zig",
+        // uds
+        "tests/integration/uds/config_test.zig",
+        // channel
+        "tests/integration/channel/channel_test.zig",
     };
 
     inline for (integration_tests) |src| {
@@ -48,16 +57,88 @@ pub fn build(b: *std.Build) void {
         integration_test_step.dependOn(&t_run.step);
     }
 
+    // Behaviour tests
+    const behaviour_test_step = b.step("behaviour-test", "Run behaviour tests");
+
+    const behaviour_tests = .{
+        // http
+        "tests/behaviour/http/request_test.zig",
+        "tests/behaviour/http/router_test.zig",
+        "tests/behaviour/http/content_test.zig",
+        "tests/behaviour/http/config_test.zig",
+        "tests/behaviour/http/sse_test.zig",
+        "tests/behaviour/http/client_test.zig",
+        // websocket
+        "tests/behaviour/websocket/websocket_test.zig",
+        // udp
+        "tests/behaviour/udp/packet_test.zig",
+        "tests/behaviour/udp/config_test.zig",
+        // uds
+        "tests/behaviour/uds/config_test.zig",
+        // channel
+        "tests/behaviour/channel/channel_test.zig",
+    };
+
+    inline for (behaviour_tests) |src| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(src),
+            .target = target,
+            .optimize = optimize,
+        });
+        t_mod.addImport("zix", zix);
+
+        const t_exe = b.addTest(.{ .root_module = t_mod });
+        const t_run = b.addRunArtifact(t_exe);
+        behaviour_test_step.dependOn(&t_run.step);
+    }
+
+    // Edge tests
+    const edge_test_step = b.step("edge-test", "Run edge tests");
+
+    const edge_tests = .{
+        // http
+        "tests/edge/http/request_test.zig",
+        "tests/edge/http/router_test.zig",
+        "tests/edge/http/response_test.zig",
+        "tests/edge/http/content_test.zig",
+        "tests/edge/http/client_test.zig",
+        // websocket
+        "tests/edge/websocket/websocket_test.zig",
+        // udp
+        "tests/edge/udp/packet_test.zig",
+        "tests/edge/udp/config_test.zig",
+        // uds
+        "tests/edge/uds/config_test.zig",
+        // channel
+        "tests/edge/channel/channel_test.zig",
+    };
+
+    inline for (edge_tests) |src| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(src),
+            .target = target,
+            .optimize = optimize,
+        });
+        t_mod.addImport("zix", zix);
+
+        const t_exe = b.addTest(.{ .root_module = t_mod });
+        const t_run = b.addRunArtifact(t_exe);
+        edge_test_step.dependOn(&t_run.step);
+    }
+
     // All tests
-    const all_test_step = b.step("test-all", "Run unit and integration tests");
+    const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
     all_test_step.dependOn(&zix_tests_run.step);
     all_test_step.dependOn(integration_test_step);
+    all_test_step.dependOn(behaviour_test_step);
+    all_test_step.dependOn(edge_test_step);
 
     // --------------------------------------------------------- //
 
     // Examples
     const examples = .{
         .{ "example-http_basic", "examples/http_basic.zig" },
+        .{ "example-http_client", "examples/http_client.zig" },
         .{ "example-http_json", "examples/http_json.zig" },
         .{ "example-http_manual_concurrent", "examples/http_manual_concurrent.zig" },
         .{ "example-http_middleware", "examples/http_middleware.zig" },
@@ -70,6 +151,13 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_xtra_headers", "examples/http_xtra_headers.zig" },
         .{ "example-udp_server", "examples/udp_server.zig" },
         .{ "example-udp_client", "examples/udp_client.zig" },
+        .{ "example-uds_server", "examples/uds_server.zig" },
+        .{ "example-uds_http", "examples/uds_http.zig" },
+        .{ "example-channel_basic", "examples/channel_basic.zig" },
+        .{ "example-channel_worker_pool", "examples/channel_worker_pool.zig" },
+        .{ "example-channel_pipeline", "examples/channel_pipeline.zig" },
+        .{ "example-channel_ipc_a", "examples/channel_ipc_a.zig" },
+        .{ "example-channel_ipc_b", "examples/channel_ipc_b.zig" },
     };
 
     inline for (examples) |pair| {

@@ -1,4 +1,4 @@
-# HLD -- zix.Udp
+# HLD: zix.Udp
 
 UDP server and client built on Zig 0.16.x `std.Io`. No relation to the TCP/HTTP layer.
 
@@ -105,8 +105,8 @@ Access via `const zix = @import("zix");`
 
 | Method | Description |
 | :- | :- |
-| `init(config)` | REQUIRED mode -- port must be non-zero |
-| `initArgs(config, args)` | CONFIGURABLE mode -- reads `--port` from CLI args |
+| `init(config)` | REQUIRED mode: port must be non-zero |
+| `initArgs(config, args)` | CONFIGURABLE mode: reads `--port` from CLI args |
 | `run(io)` | Bind socket, enter receive loop. Blocks until error. |
 | `deinit()` | Release resources. |
 
@@ -114,10 +114,10 @@ Access via `const zix = @import("zix");`
 
 | Method | Description |
 | :- | :- |
-| `init(config, io)` | REQUIRED mode -- binds socket immediately |
-| `initArgs(config, io, args)` | CONFIGURABLE mode -- reads `--bind-port` and `--server-port` |
+| `init(config, io)` | REQUIRED mode: binds socket immediately |
+| `initArgs(config, io, args)` | CONFIGURABLE mode: reads `--bind-port` and `--server-port` |
 | `send(packet)` | Apply endianness and send to server |
-| `receiveFeedback()` | Blocking receive -- returns `FeedbackResult` |
+| `receiveFeedback()` | Blocking receive: returns `FeedbackResult` |
 | `deinit()` | Close socket. |
 
 ---
@@ -150,7 +150,7 @@ pub const UdpServerConfig = struct {
 pub const UdpClientConfig = struct {
     server_ip:   []const u8, // server address to send packets to
     server_port: u16,        // server port & must be non-zero
-    bind_port:   u16,        // local port -- server uses this to send responses back
+    bind_port:   u16,        // local port: server uses this to send responses back
     port_mode:   PortMode   = .REQUIRED,
     endianness:  Endianness = .LITTLE, // must match server
     send_once:   bool       = false,
@@ -167,7 +167,7 @@ pub const UdpClientConfig = struct {
 The user defines their own `extern struct`. zix is parameterized over it at comptime.
 
 ```zig
-// User-defined -- must be an extern struct for fixed C ABI layout.
+// User-defined: must be an extern struct for fixed C ABI layout.
 // All clients and the server must use the exact same definition.
 const Packet = extern struct {
     id:          [16]u8,   // u8 arrays are NOT byte-swapped (identity bytes)
@@ -203,17 +203,17 @@ Validation happens at `init()`, not at `run()`.
 
 | Value | Description |
 | :- | :- |
-| `NATIVE` | No swap. Same machine only -- unsafe across platforms or languages. |
+| `NATIVE` | No swap. Same machine only (unsafe across platforms or languages). |
 | `LITTLE` | Swap if native is big-endian. Recommended for cross-language use (x86, ARM). |
 | `BIG` | Swap if native is little-endian. Network byte order (RFC 791 convention). |
 
-Endianness conversion is transparent -- applied inside `send()` and `receive()`. User declares once in config. `toEndian` and `fromEndian` are the same operation (swap is its own inverse).
+Endianness conversion is transparent: applied inside `send()` and `receive()`. User declares once in config. `toEndian` and `fromEndian` are the same operation (swap is its own inverse).
 
 Swapping rules by field type:
 - `int`: `@byteSwap`
 - `float`: reinterpret as unsigned int, `@byteSwap`, reinterpret back
 - `[N]T` where T is not u8: swap each element recursively
-- `[N]u8`: no swap (identity bytes -- e.g. id fields)
+- `[N]u8`: no swap (identity bytes, e.g. id fields)
 
 ---
 
@@ -227,7 +227,7 @@ flowchart TD
     B --> C{"poll_timeout_ms\nelapsed since last check?"}
     C -->|yes| D["checkDisconnections()"]
     C -->|no| E["skip check"]
-    F["receiveTimeout -- Timeout error"] --> D
+    F["receiveTimeout (Timeout error)"] --> D
     D --> G["for each client:\nelapsed = now - last_seen"]
     G --> H{"elapsed >= disconnect_timeout_ms?"}
     H -->|yes| I["swapRemove from clients list\nlog disconnect"]
@@ -290,9 +290,9 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 
 ## RFC Notes
 
-- **RFC 768 (UDP)**: Port 0 is reserved -- `init()` rejects it with `error.PortNotConfigured`. Max payload is 65,507 bytes -- enforced at comptime via `@compileError`.
+- **RFC 768 (UDP)**: Port 0 is reserved. `init()` rejects it with `error.PortNotConfigured`. Max payload is 65,507 bytes, enforced at comptime via `@compileError`.
 - **RFC 791 / network convention**: `Endianness.BIG` corresponds to network byte order (big-endian).
-- Timeout-based disconnect detection has no RFC -- it is application-level behavior since UDP is connectionless.
+- Timeout-based disconnect detection has no RFC (application-level behavior since UDP is connectionless).
 - ACK (0x06) and NACK (0x15) byte values are ASCII control codes, not defined by any UDP RFC.
 
 ---
@@ -305,6 +305,8 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 | Sub-millisecond send interval | `send_every` is in milliseconds; rename to nanoseconds if needed |
 | Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`. Current src uses heap slice with no cap |
 | Configurable feedback struct | Currently echo sends the raw packet back. Production could use a tagged result |
+
+<!-- tickrate 64 vs 128 -->
 
 ---
 

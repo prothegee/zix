@@ -1,4 +1,4 @@
-# HLD -- zix.Channel
+# HLD: zix.Channel
 
 In-process typed message-passing channels.
 
@@ -6,78 +6,133 @@ In-process typed message-passing channels.
 
 ## Status
 
-Not yet implemented. Design intent tracked in ADR-017.
-For specification notes and open questions see [`rnd/channel_specification.md`](../rnd/channel_specification.md).
+Implemented. See ADR-017 for design rationale.
 
 ---
 
 ## Goals
 
 - Typed in-process communication between concurrent tasks (`io.concurrent`) or OS threads.
-- Blocking and non-blocking variants: `send`/`recv` (blocking), `trySend`/`tryRecv` (non-blocking).
-- Buffered (capacity > 0) and unbuffered (capacity = 0, rendezvous) modes.
-- Comptime-generic over the message type — no runtime type erasure.
-- No cross-process or cross-network boundary — in-process only.
-- Explicit over implicit: allocator provided by caller if heap-backed.
+- Blocking `send`/`recv` only. Non-blocking variants are deferred (see below).
+- Buffered (capacity > 0) mode. Unbuffered (rendezvous) is not yet supported.
+- Comptime-generic over the message type (no runtime type erasure).
+- No cross-process or cross-network boundary (in-process only).
+- Explicit over implicit: caller provides the allocator.
 
 ---
 
 ## Model
 
 ```
-Sender task  -->  [ Channel(T) ]  -->  Receiver task
-               buffered: ring buffer
-               unbuffered: rendezvous (both must be ready)
+Sender task  -->  [ Channel(T) ring buffer ]  -->  Receiver task
+               capacity N: blocks when full/empty
 ```
 
-| Mode | `send` blocks when | `recv` blocks when |
-| :- | :- | :- |
-| Buffered (capacity = N) | queue full | queue empty |
-| Unbuffered (capacity = 0) | no receiver waiting | no sender waiting |
+| Operation | Blocks when |
+| :- | :- |
+| `send(io, value)` | buffer is full |
+| `recv(io)` | buffer is empty |
+
+After `close(io)` no new sends are accepted. `recv()` drains any remaining items then returns `error.Closed`.
 
 ---
 
-## Proposed API
+## API
 
 ```zig
-const MyChan = zix.Channel(MyMessage);
+const MyChan = zix.Channel(u32);
 
-// buffered, capacity 16
-var ch = try MyChan.init(allocator, 16);
+// buffered, capacity 8
+var ch = try MyChan.init(allocator, 8);
 defer ch.deinit();
 
-// unbuffered (rendezvous)
-var ch = try MyChan.init(allocator, 0);
+// send blocks when full, returns error.Closed if ch.close() was called
+try ch.send(io, 42);
+
+// recv blocks when empty, drains remaining items after close(), then returns error.Closed
+const v = try ch.recv(io);  // v == 42
+
+// close: no more sends, blocked receivers are unblocked and drain remaining items
+ch.close(io);
+```
+
+Capacity must be > 0. `init()` asserts this at runtime. Unbuffered (rendezvous) is not yet supported.
+
+---
+
+## Source Layout
+
+```
+src/channel/
+    channel.zig   // Channel(comptime T: type) generic implementation
+    Channel.zig   // namespace aggregator (pub const Channel = channel.zig.Channel)
+```
+
+Export from `src/zix.zig`:
+```zig
+pub const Channel = @import("channel/Channel.zig").Channel;
+```
+
+---
+
+## Concurrency Requirement
+
+`Channel.send()` and `Channel.recv()` call `std.Io.Mutex.lockUncancelable(io)`. This requires an `io` that is valid on the calling thread. Each thread must have its own `std.Io` (e.g. from `std.Io.Threaded`).
+
+```zig
+var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+defer threaded.deinit();
+const io = threaded.io();
+
+var ch = try MyChan.init(std.heap.smp_allocator, 8);
 defer ch.deinit();
 
-try ch.send(msg);           // blocks if full or unbuffered with no waiting receiver
-const msg = try ch.recv();  // blocks if empty or unbuffered with no waiting sender
-
-ch.trySend(msg) catch {};   // error.Full or error.Closed
-ch.tryRecv() catch {};      // error.Empty or error.Closed
-
-ch.close(); // no more sends; receivers drain remaining items then get error.Closed
+const t = try std.Thread.spawn(.{}, workerFn, .{ &ch, io });
 ```
 
 ---
 
 ## Relation to Server Concurrency Models
 
-Channel is orthogonal to Model 1 / Model 2. It does not replace or extend either model — it is an in-process coordination primitive that can be used alongside either.
+Channel is orthogonal to Model 1 / Model 2. It does not replace or extend either model. It is an in-process coordination primitive that can be used alongside either.
 
 ```
 Model 1 or Model 2 server
   handler task A  -->  Channel(Event)  -->  background task B
 ```
 
+Integration example: `uds_http.zig` wires a UDS fetcher task into SSE handlers via a `Channel(u64)`:
+
+```
+[uds_server] /tmp/zix.sock [fetcher task] Channel(u64) [SSE handler]
+                                                      \ [/data handler]
+```
+
 See [`docs/concurrency.md`](concurrency.md) for the Channel entry in the Protocol Applicability table.
+
+---
+
+## Examples
+
+| File | Pattern |
+| :- | :- |
+| `examples/channel_basic.zig` | Producer/consumer: Channel(u32) with two OS threads |
+| `examples/channel_worker_pool.zig` | Fan-out worker pool: one producer many consumers |
+| `examples/channel_pipeline.zig` | Multi-stage pipeline: each stage runs at its own pace |
+| `examples/channel_ipc_a.zig` | IPC process side A (writer), pair with ipc_b |
+| `examples/channel_ipc_b.zig` | IPC process side B (reader), pair with ipc_a |
+| `examples/uds_http.zig` | HTTP + UDS + Channel integration: full real-world pattern |
 
 ---
 
 ## Not Yet Implemented
 
-All. See `rnd/channel_specification.md` for the full API proposal and open design questions.
-See `rnd/tracker.md` for the implementation checklist.
+| Feature | Note |
+| :- | :- |
+| Non-blocking `trySend`/`tryRecv` | Deferred. Blocking variants cover all current examples. |
+| Unbuffered (rendezvous, capacity = 0) | `init()` asserts capacity > 0. Two-sided sync adds complexity. |
+| `select` / multiplex over N channels | Deferred. Internal ring design does not preclude it. |
+| `send` / `recv` with timeout | Not implementable: `std.Io.Condition` has no `timedWait` method. Blocked until stdlib adds it. |
 
 ---
 
