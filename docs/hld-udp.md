@@ -306,6 +306,8 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 | Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`. Current src uses heap slice with no cap |
 | Configurable feedback struct | Currently echo sends the raw packet back. Production could use a tagged result |
 
+<!-- tickrate 64 vs 128 -->
+
 ---
 
 ###### end of hld-udp
