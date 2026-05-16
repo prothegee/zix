@@ -4,81 +4,94 @@
 const std = @import("std");
 const zix = @import("zix");
 
-fn makeInner(method_: std.http.Method, target_: []const u8) std.http.Server.Request {
-    return .{
-        .server = undefined,
-        .head = .{
-            .method = method_,
-            .target = target_,
-            .version = .@"HTTP/1.1",
-            .expect = null,
-            .content_type = null,
-            .content_length = null,
-            .transfer_encoding = .none,
-            .transfer_compression = .identity,
-            .keep_alive = true,
-        },
-        .head_buffer = undefined,
-        .respond_err = null,
-    };
-}
-
 // --------------------------------------------------------- //
 
 test "zix behaviour: path(), strips query string from target" {
-    var inner = makeInner(.GET, "/api/users?limit=10&offset=5");
-    const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+    const req = try zix.Http.Request.fromRaw(
+        "GET /api/users?limit=10&offset=5 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        std.testing.allocator,
+    );
     try std.testing.expectEqualStrings("/api/users", req.path());
 }
 
 test "zix behaviour: path(), returns full target when no query string" {
-    var inner = makeInner(.GET, "/api/users/alice");
-    const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+    const req = try zix.Http.Request.fromRaw(
+        "GET /api/users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        std.testing.allocator,
+    );
     try std.testing.expectEqualStrings("/api/users/alice", req.path());
 }
 
 test "zix behaviour: path(), root path returns /" {
-    var inner = makeInner(.GET, "/");
-    const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+    const req = try zix.Http.Request.fromRaw(
+        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        std.testing.allocator,
+    );
     try std.testing.expectEqualStrings("/", req.path());
 }
 
 test "zix behaviour: query(), returns portion after ?" {
-    var inner = makeInner(.GET, "/search?q=hello&lang=zig");
-    const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+    const req = try zix.Http.Request.fromRaw(
+        "GET /search?q=hello&lang=zig HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        std.testing.allocator,
+    );
     try std.testing.expectEqualStrings("q=hello&lang=zig", req.query());
 }
 
 test "zix behaviour: query(), returns empty string when no ? in target" {
-    var inner = makeInner(.GET, "/api/users");
-    const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+    const req = try zix.Http.Request.fromRaw(
+        "GET /api/users HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        std.testing.allocator,
+    );
     try std.testing.expectEqualStrings("", req.query());
 }
 
-test "zix behaviour: method(), returns method_cache when set" {
-    // inner says GET but cache says POST, method() must return the cached value.
-    var inner = makeInner(.GET, "/");
-    const req = zix.Http.Request{
-        .inner = &inner,
-        .reader = undefined,
-        .allocator = std.testing.allocator,
-        .method_cache = .POST,
-    };
-    const M = @TypeOf(req.method());
-    try std.testing.expectEqual(M.POST, req.method());
+test "zix behaviour: body(), chunked produces same payload as equivalent Content-Length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var chunked_req = try zix.Http.Request.fromRaw(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "5\r\nworld\r\n0\r\n\r\n",
+        arena.allocator(),
+    );
+    const chunked_body = try chunked_req.body();
+
+    var cl_req = try zix.Http.Request.fromRaw(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nworld",
+        arena.allocator(),
+    );
+    cl_req.body_cache = "world";
+    const cl_body = try cl_req.body();
+
+    try std.testing.expectEqualStrings(cl_body, chunked_body);
 }
 
-test "zix behaviour: method(), resolves each method from inner when cache is null" {
+test "zix behaviour: body(), chunked second call returns cached result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var req = try zix.Http.Request.fromRaw(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "4\r\ntest\r\n0\r\n\r\n",
+        arena.allocator(),
+    );
+    const b1 = try req.body();
+    const b2 = try req.body();
+    try std.testing.expect(b1.ptr == b2.ptr);
+}
+
+test "zix behaviour: method(), resolves each method" {
     const cases = .{
-        .{ std.http.Method.DELETE, "DELETE" },
-        .{ std.http.Method.PATCH, "PATCH" },
-        .{ std.http.Method.PUT, "PUT" },
-        .{ std.http.Method.OPTIONS, "OPTIONS" },
-        .{ std.http.Method.HEAD, "HEAD" },
+        .{ "DELETE / HTTP/1.1\r\nHost: x\r\n\r\n", "DELETE" },
+        .{ "PATCH / HTTP/1.1\r\nHost: x\r\n\r\n",  "PATCH"  },
+        .{ "PUT / HTTP/1.1\r\nHost: x\r\n\r\n",    "PUT"    },
+        .{ "OPTIONS / HTTP/1.1\r\nHost: x\r\n\r\n","OPTIONS" },
+        .{ "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n",   "HEAD"   },
+        .{ "GET / HTTP/1.1\r\nHost: x\r\n\r\n",    "GET"    },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\n\r\n",   "POST"   },
     };
     inline for (cases) |c| {
-        var inner = makeInner(c[0], "/");
-        const req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = std.testing.allocator };
+        const req = try zix.Http.Request.fromRaw(c[0], std.testing.allocator);
         const M = @TypeOf(req.method());
         try std.testing.expectEqual(@field(M, c[1]), req.method());
     }
