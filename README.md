@@ -109,7 +109,7 @@ zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
 or 
 
 ```sh
-zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
+zig fetch --save "git+https://codeberg.org/prothegee/zix#0.1.x" # upstream v0.1.x
 ```
 
 > You can change to mirror too as `github.com/prothegee/zix`
