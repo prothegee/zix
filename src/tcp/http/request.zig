@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Method = @import("method.zig");
+const parser = @import("parser.zig");
 
 pub const PathParam = struct {
     name: []const u8,
@@ -9,92 +10,52 @@ pub const PathParam = struct {
 };
 
 pub const Request = struct {
-    inner: *std.http.Server.Request,
-    reader: *std.Io.Reader,
+    /// Read buffer slice for this connection. All path/query/header slices point into it.
+    buf: []const u8,
+    /// Parsed offsets into buf. No data was copied during parsing.
+    head: parser.ParsedHead,
+    /// Raw socket fd — used by body() for any bytes not yet in buf.
+    fd: std.posix.fd_t,
+    /// How many bytes in buf are valid (filled by the recv loop in handleConnection).
+    buf_filled: usize,
     allocator: std.mem.Allocator,
     body_cache: ?[]const u8 = null,
     path_params: []const PathParam = &.{},
-    // Pre-computed by server before dispatch, null = not set (tests), falls back to scan.
-    qmark_pos: ?usize = null, // index of '?' in target, or target.len if none
-    method_cache: ?Method.Code = null,
-    // Lazy lowercase-keyed index of request headers, built on first header() call.
+    /// Lazy lowercase-keyed header index built on first header() call.
     header_index: ?std.StringHashMapUnmanaged([]const u8) = null,
 
-    /// Brief:
-    /// Get HTTP method of the request
-    ///
-    /// Return:
-    /// zix.Tcp.Http.Method.Code
+    /// Get HTTP method.
     pub fn method(self: Request) Method.Code {
-        if (self.method_cache) |m| return m;
-        return switch (self.inner.head.method) {
-            .GET => .GET,
-            .HEAD => .HEAD,
-            .POST => .POST,
-            .PUT => .PUT,
-            .DELETE => .DELETE,
-            .PATCH => .PATCH,
-            .OPTIONS => .OPTIONS,
-            .TRACE => .TRACE,
-            .CONNECT => .CONNECT,
-        };
+        return self.head.method;
     }
 
-    /// Brief:
-    /// Get the URL path without query string
-    ///
-    /// Return:
-    /// []const u8
+    /// Get the URL path without query string.
     pub fn path(self: Request) []const u8 {
-        const target = self.inner.head.target;
-        const pos = self.qmark_pos orelse (std.mem.indexOfScalar(u8, target, '?') orelse target.len);
-        return target[0..pos];
+        return self.buf[self.head.path_start..][0..self.head.path_len];
     }
 
-    /// Brief:
-    /// Get the raw query string (after '?'), or empty string if none
-    ///
-    /// Return:
-    /// []const u8
+    /// Get the raw query string (after '?'), or empty string if none.
     pub fn query(self: Request) []const u8 {
-        const target = self.inner.head.target;
-        const pos = self.qmark_pos orelse (std.mem.indexOfScalar(u8, target, '?') orelse target.len);
-        if (pos >= target.len) return "";
-        return target[pos + 1 ..];
+        if (self.head.query_len == 0) return "";
+        return self.buf[self.head.query_start..][0..self.head.query_len];
     }
 
-    /// Brief:
-    /// Get a request header value by name (case-insensitive)
-    ///
-    /// Note:
-    /// - Returns null if the header is not present
-    /// - First call builds a lowercase-keyed index from the request arena
-    ///   subsequent calls are O(1) hash lookups
-    /// - Falls back to a linear scan if the header_index build fails or
-    ///   the lookup name exceeds the on-stack lowercase buffer
-    ///
-    /// Param:
-    /// name - []const u8 (header name, case-insensitive)
-    ///
-    /// Return:
-    /// ?[]const u8
+    /// Get a request header value by name (case-insensitive).
+    /// First call builds a lowercase-keyed index from the arena.
+    /// Subsequent calls are O(1) hash lookups.
+    /// Falls back to a linear scan if index build fails.
     pub fn header(self: *Request, name: []const u8) ?[]const u8 {
         if (self.header_index == null) {
             var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-            var build_ok = true;
-            var it = self.inner.iterateHeaders();
-            while (it.next()) |h| {
-                const lower = self.allocator.alloc(u8, h.name.len) catch {
-                    build_ok = false;
-                    break;
-                };
-                _ = std.ascii.lowerString(lower, h.name);
-                map.put(self.allocator, lower, h.value) catch {
-                    build_ok = false;
-                    break;
-                };
+            var ok = true;
+            for (self.head.headers[0..self.head.header_count]) |h| {
+                const n = self.buf[h.name_start..][0..h.name_len];
+                const v = self.buf[h.value_start..][0..h.value_len];
+                const lower = self.allocator.alloc(u8, n.len) catch { ok = false; break; };
+                _ = std.ascii.lowerString(lower, n);
+                map.put(self.allocator, lower, v) catch { ok = false; break; };
             }
-            if (build_ok) self.header_index = map;
+            if (ok) self.header_index = map;
         }
 
         var lower_buf: [128]u8 = undefined;
@@ -103,61 +64,74 @@ pub const Request = struct {
             return self.header_index.?.get(lower_name);
         }
 
-        // Fallback: linear scan with case-insensitive compare.
-        var it = self.inner.iterateHeaders();
-        while (it.next()) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        // Fallback: linear scan.
+        for (self.head.headers[0..self.head.header_count]) |h| {
+            const n = self.buf[h.name_start..][0..h.name_len];
+            if (std.ascii.eqlIgnoreCase(n, name)) {
+                return self.buf[h.value_start..][0..h.value_len];
+            }
         }
         return null;
     }
 
-    /// Brief:
-    /// Read and return the request body
-    ///
-    /// Note:
-    /// - Cached after first read subsequent calls return the same slice
-    /// - Returns empty string if Content-Length is missing or zero
-    ///
-    /// Return:
-    /// ![]const u8
+    /// Read and return the full request body.
+    /// Cached after first call. Handles both Content-Length and Transfer-Encoding: chunked.
+    /// Returns empty string when Content-Length is absent/zero and not chunked.
+    /// Bytes already in the read buffer are used directly; remaining bytes are recv'd from fd.
     pub fn body(self: *Request) ![]const u8 {
         if (self.body_cache) |b| return b;
 
-        const cl = self.header("content-length") orelse {
-            self.body_cache = "";
-            return "";
-        };
-        const content_length = std.fmt.parseInt(usize, cl, 10) catch {
-            self.body_cache = "";
-            return "";
-        };
-        if (content_length == 0) {
+        if (self.head.chunked) return self.readChunkedBody();
+
+        const cl = self.head.content_length;
+        if (cl == 0) {
             self.body_cache = "";
             return "";
         }
 
-        const buf = try self.allocator.alloc(u8, content_length);
-        var total: usize = 0;
-        while (total < content_length) {
-            const n = self.reader.readSliceShort(buf[total..content_length]) catch break;
+        // Bytes already pulled into buf during the header read loop.
+        const in_buf_end = @min(self.buf_filled, self.buf.len);
+        const already_slice = self.buf[@min(self.head.body_offset, in_buf_end)..in_buf_end];
+        const already_len = @min(already_slice.len, cl);
+
+        const out = try self.allocator.alloc(u8, cl);
+        @memcpy(out[0..already_len], already_slice[0..already_len]);
+
+        var total: usize = already_len;
+        while (total < cl) {
+            const n = std.posix.read(self.fd, out[total..cl]) catch break;
             if (n == 0) break;
             total += n;
         }
-        self.body_cache = buf[0..total];
+        self.body_cache = out[0..total];
         return self.body_cache.?;
     }
 
-    /// Brief:
-    /// Get a single named query parameter value
-    ///
-    /// Note:
-    /// - Returns null if the key is not present
-    ///
-    /// Param:
-    /// key - []const u8 (parameter name)
-    ///
-    /// Return:
-    /// ?[]const u8
+    fn readChunkedBody(self: *Request) ![]const u8 {
+        const max_raw = self.buf.len;
+        const raw_buf = try self.allocator.alloc(u8, max_raw);
+
+        const in_buf_end = @min(self.buf_filled, self.buf.len);
+        const already_slice = self.buf[@min(self.head.body_offset, in_buf_end)..in_buf_end];
+        @memcpy(raw_buf[0..already_slice.len], already_slice);
+        var raw_total: usize = already_slice.len;
+
+        // Read from fd until terminal chunk found or buffer full.
+        // Note: "0\r\n\r\n" pattern match is a heuristic — the dechunker handles correctness.
+        while (raw_total < max_raw) {
+            if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
+            const n = std.posix.read(self.fd, raw_buf[raw_total..max_raw]) catch break;
+            if (n == 0) break;
+            raw_total += n;
+        }
+
+        const decoded = try self.allocator.alloc(u8, raw_total);
+        const decoded_len = parser.dechunk(raw_buf[0..raw_total], decoded) catch 0;
+        self.body_cache = decoded[0..decoded_len];
+        return self.body_cache.?;
+    }
+
+    /// Get a single named query parameter value.
     pub fn queryParam(self: Request, key: []const u8) ?[]const u8 {
         const q = self.query();
         if (q.len == 0) return null;
@@ -173,18 +147,7 @@ pub const Request = struct {
         return null;
     }
 
-    /// Brief:
-    /// Split the request path into non-empty segments
-    ///
-    /// Note:
-    /// - Leading/trailing slashes produce no empty segments
-    /// - "/a/b/c" -> ["a", "b", "c"]
-    ///
-    /// Param:
-    /// allocator - std.mem.Allocator
-    ///
-    /// Return:
-    /// ![][]const u8
+    /// Split the request path into non-empty segments.
     pub fn pathSegments(self: Request, allocator: std.mem.Allocator) ![][]const u8 {
         var list: std.ArrayList([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, self.path(), '/');
@@ -194,18 +157,20 @@ pub const Request = struct {
         return list.items;
     }
 
-    /// Brief:
-    /// Get a named path parameter captured from a parameterized route
-    ///
-    /// Note:
-    /// - Returns null if the name was not captured for this request
-    /// - Only populated when the request was matched by registerParamHandler
-    ///
-    /// Param:
-    /// name - []const u8 (the parameter name without the leading colon)
-    ///
-    /// Return:
-    /// ?[]const u8
+    /// Parse a complete raw HTTP/1.1 head buffer into a Request.
+    /// Useful for tests and offline parsing. buf must contain a full head (\r\n\r\n).
+    pub fn fromRaw(buf: []const u8, allocator: std.mem.Allocator) !Request {
+        const head = (try parser.parse(buf, parser.MAX_HEADERS_U8)) orelse return error.Incomplete;
+        return .{
+            .buf        = buf,
+            .head       = head,
+            .fd         = undefined,
+            .buf_filled = buf.len,
+            .allocator  = allocator,
+        };
+    }
+
+    /// Get a named path parameter captured from a parameterized route.
     pub fn pathParam(self: Request, name: []const u8) ?[]const u8 {
         for (self.path_params) |p| {
             if (std.mem.eql(u8, p.name, name)) return p.value;
@@ -218,18 +183,7 @@ pub const Request = struct {
         value: ?[]const u8,
     };
 
-    /// Brief:
-    /// Get all query parameters as a slice of QueryParam
-    ///
-    /// Note:
-    /// - Returns empty slice if there are no query params
-    /// - Value is null for bare keys (e.g. ?flag) or empty-value keys (e.g. ?k=)
-    ///
-    /// Param:
-    /// allocator - std.mem.Allocator (used to build the result slice)
-    ///
-    /// Return:
-    /// ![]QueryParam
+    /// Get all query parameters as a slice of QueryParam.
     pub fn queryParams(self: Request, allocator: std.mem.Allocator) ![]QueryParam {
         const q = self.query();
         if (q.len == 0) return &.{};
@@ -242,7 +196,7 @@ pub const Request = struct {
                 if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
                     const val = pair[eq + 1 ..];
                     try list.append(allocator, .{
-                        .key = pair[0..eq],
+                        .key   = pair[0..eq],
                         .value = if (val.len > 0) val else null,
                     });
                 } else {
@@ -259,32 +213,19 @@ pub const Request = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http request" {
+test "zix test: http request path and query" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const head = std.http.Server.Request.Head{
-        .method = .GET,
-        .target = "/api/users/123?name=alice&flag",
-        .version = .@"HTTP/1.1",
-        .expect = null,
-        .content_type = null,
-        .content_length = null,
-        .transfer_encoding = .none,
-        .transfer_compression = .identity,
-        .keep_alive = true,
-    };
-    var inner = std.http.Server.Request{
-        .server = undefined,
-        .head = head,
-        .head_buffer = undefined,
-        .respond_err = null,
-    };
+    const raw = "GET /api/users/123?name=alice&flag HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
     var req = Request{
-        .inner = &inner,
-        .reader = undefined,
-        .allocator = allocator,
+        .buf        = raw,
+        .head       = head,
+        .fd         = undefined,
+        .buf_filled = raw.len,
+        .allocator  = allocator,
     };
 
     try std.testing.expectEqual(Method.Code.GET, req.method());
@@ -295,11 +236,11 @@ test "zix test: http request" {
     try std.testing.expect(req.queryParam("flag") == null);
     try std.testing.expect(req.queryParam("missing") == null);
 
-    const segments = try req.pathSegments(allocator);
-    try std.testing.expectEqual(@as(usize, 3), segments.len);
-    try std.testing.expectEqualStrings("api", segments[0]);
-    try std.testing.expectEqualStrings("users", segments[1]);
-    try std.testing.expectEqualStrings("123", segments[2]);
+    const segs = try req.pathSegments(allocator);
+    try std.testing.expectEqual(@as(usize, 3), segs.len);
+    try std.testing.expectEqualStrings("api", segs[0]);
+    try std.testing.expectEqualStrings("users", segs[1]);
+    try std.testing.expectEqualStrings("123", segs[2]);
 
     const params = try req.queryParams(allocator);
     try std.testing.expectEqual(@as(usize, 2), params.len);
@@ -307,4 +248,22 @@ test "zix test: http request" {
     try std.testing.expectEqualStrings("alice", params[0].value.?);
     try std.testing.expectEqualStrings("flag", params[1].key);
     try std.testing.expect(params[1].value == null);
+}
+
+test "zix test: http request header lookup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const raw = "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf        = raw,
+        .head       = head,
+        .fd         = undefined,
+        .buf_filled = raw.len,
+        .allocator  = arena.allocator(),
+    };
+    try std.testing.expectEqualStrings("example.com", req.header("host").?);
+    try std.testing.expectEqualStrings("example.com", req.header("Host").?);
+    try std.testing.expectEqualStrings("application/json", req.header("content-type").?);
+    try std.testing.expect(req.header("x-missing") == null);
 }
