@@ -1,4 +1,6 @@
-//! model 1
+//! [OBSOLETE] model 1 prototype
+//! Superseded by ADR-015 (ConnQueue work-queue architecture).
+//! This file is retained for historical reference only. Do not use.
 //! Zig 0.16.0-dev.3059+42e33db9d
 
 //
