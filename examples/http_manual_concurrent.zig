@@ -12,10 +12,10 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 // Any other value pins the max concurrent task limit.
 const CONCURRENT_LIMIT: usize = 4;
 
-// workers = 1 keeps the server on model 1 (single-threaded, uses the
-// caller's io directly). That is the io created below with a custom
-// concurrent_limit — the whole point of this example.
-const WORKERS: usize = 1;
+// .ASYNC uses the caller's io directly (the Io.Threaded created below).
+// concurrent_limit on that io controls how many connections run concurrently.
+const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
+const WORKERS: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
@@ -72,6 +72,7 @@ pub fn main() !void {
         .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
+        .dispatch_model = DISPATCH_MODEL,
         .max_kernel_backlog = MAX_KERNEL_BACKLOG,
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
