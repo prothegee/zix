@@ -52,6 +52,21 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
+test "zix behaviour: ServerConfig, dispatch_model defaults to POOL" {
+    const cfg = zix.Http.ServerConfig{
+        .allocator = std.testing.allocator,
+        .ip = "127.0.0.1",
+        .port = 9000,
+    };
+    try std.testing.expectEqual(zix.Http.DispatchModel.POOL, cfg.dispatch_model);
+}
+
+test "zix behaviour: DispatchModel, integer backing values (POOL=0 is zero-value)" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Http.DispatchModel.POOL));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Http.DispatchModel.ASYNC));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Http.DispatchModel.MIXED));
+}
+
 test "zix behaviour: ServerConfig, max_response_headers defaults to COMMON (32)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
@@ -88,7 +103,7 @@ test "zix behaviour: HeaderSize.CUSTOM, value() returns the given N" {
 test "zix behaviour: Response, status defaults to OK" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const res = zix.Http.Response.init(undefined, undefined, arena.allocator(), 32);
+    const res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 32);
     const StatusCode = @TypeOf(res.status);
     try std.testing.expectEqual(StatusCode.OK, res.status);
 }
