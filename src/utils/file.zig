@@ -34,7 +34,7 @@ pub fn extension(fp: []const u8) []const u8 {
 ///
 /// Return:
 /// ![]const u8 (caller-owned full path of the saved file)
-pub fn saveFile(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
+pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 
     var path_buf: [512]u8 = undefined;

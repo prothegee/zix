@@ -10,7 +10,7 @@
 
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network library written in zig.</i>
+    <i>A network backend library written in zig.</i>
 </p>
 
 <div align="center">
@@ -72,6 +72,7 @@ __*6. Predictable, Transparent Memory Management.*__
 
 - Always push Zig and their std.
 - Single file, single responsibility.
+- Significant change/s required RnD/PoC.
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
@@ -90,7 +91,7 @@ __*6. Predictable, Transparent Memory Management.*__
 | [`docs/lld-udp.md`](docs/lld-udp.md) | UDP: internal data structures and algorithms |
 | [`docs/lld-uds.md`](docs/lld-uds.md) | UDS: internal server/client structure and frame handling |
 | [`docs/lld-channel.md`](docs/lld-channel.md) | Channel: ring buffer internals, locking, send/recv algorithms |
-| [`docs/concurrency.md`](docs/concurrency.md) | Concurrency models: Model 1 and Model 2 for all protocols. Channel note. |
+| [`docs/concurrency.md`](docs/concurrency.md) | Dispatch models: POOL, ASYNC, MIXED. Thread counts, protocol applicability, Channel note. |
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
 | [`docs/headers.md`](docs/headers.md) | Response header cap: tiers, security, error handling |
 | [`docs/tests.md`](docs/tests.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
@@ -136,7 +137,7 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-Manual I/O (single-threaded, explicit concurrency limit via `io.concurrent`):
+Manual I/O (explicit concurrency limit via `concurrent_limit`, `.ASYNC` dispatch):
 ```zig
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -157,7 +158,7 @@ pub fn main() !void {
         .max_client_request = 1024 * 4,
         .max_allocator_size = 1024 * 4,
         .max_client_response = 1024 * 4,
-        .workers = 1, // stay on model 1, use the caller's io directly
+        .dispatch_model = .ASYNC, // .ASYNC uses the caller's io directly
     });
     defer server.deinit();
 
@@ -226,37 +227,45 @@ Any match logic expressible as string operations — extension checks, version p
 
 ### Concurrency Model
 
-Two modes, selected via `config.workers`:
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.POOL`):
 
-**Model 2 — work-queue thread pool (default, `workers = 0`):**
+**`.POOL` — work-queue thread pool (default):**
 
-Dedicated accept threads push connections to a shared `ConnQueue`. Pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. `SO_REUSEPORT` lets all accept threads listen on the same port.
+N accept threads push connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. Best throughput under high connection counts. `SO_REUSEPORT` lets all accept threads listen on the same port.
 
 ```zig
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, .{
         .io = process.io,
-        // workers  = 0  -> 2 accept threads (auto)
-        // pool_size = 0 -> max(10, cpu_count * 2) pool threads (auto)
+        // dispatch_model = .POOL (default, can be omitted)
+        // workers        = 0  -> cpu_count accept threads (auto)
+        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (auto)
         ...
     });
 ```
 
-**Model 1 — single accept, `io.concurrent` dispatch (`workers = 1`):**
+**`.ASYNC` — single accept, `io.async()` dispatch:**
 
-One accept thread dispatches each connection via `io.concurrent()`. Use this when you need explicit control over the concurrency backend or limit.
+One accept thread dispatches each connection via `io.async()`. `workers` and `pool_size` are ignored. Preferred for SSE and WebSocket (long-lived connections do not hold pool threads). Also suitable for explicit `concurrent_limit`.
 
 ```zig
-pub fn main() !void {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-        .concurrent_limit = std.Io.Limit.limited(4),
-    });
-    defer threaded.deinit();
-    var server = try zix.Http.Server.init(4096, .{
-        .io = threaded.io(),
-        .workers = 1, // use the caller's io directly
-        ...
-    });
+var server = try zix.Http.Server.init(4096, .{
+    .io             = process.io,
+    .dispatch_model = .ASYNC,
+    ...
+});
+```
+
+**`.MIXED` — N accept threads, `io.async()` dispatch:**
+
+N accept threads each dispatch connections via `io.async()` directly — no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
+
+```zig
+var server = try zix.Http.Server.init(4096, .{
+    .io             = process.io,
+    .dispatch_model = .MIXED,
+    ...
+});
 ```
 
 See [`docs/concurrency.md`](docs/concurrency.md) for architecture details and thread counts.
@@ -453,12 +462,12 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 | `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
 | `comment(text)` | `: <text>\n` (keepalive) |
 
-**Model requirement:** use `workers = 1` (Model 1). SSE connections are long-lived — they would exhaust a blocking pool (Model 2) one thread per open stream.
+**Dispatch model:** use `.ASYNC`. SSE connections are long-lived — they would exhaust a blocking pool (`.POOL`) one thread per open stream. `.ASYNC` dispatches each connection via `io.async()`, keeping pool threads free.
 
 ```zig
 var server = try zix.Http.Server.init(4096, .{
-    .io      = process.io,
-    .workers = 1, // Model 1 — io.concurrent() per connection
+    .io             = process.io,
+    .dispatch_model = .ASYNC, // preferred for SSE: long-lived connections do not hold pool threads
     ...
 });
 server.registerHandler("/events", eventsHandler);
@@ -571,7 +580,7 @@ if (parser.getField("file")) |f| {
     // or build it dynamically:
     //   const filename = try std.fmt.allocPrint(ctx.allocator, "{s}_{s}", .{ sessionid, f.filename orelse "upload" });
     const filename = f.filename orelse "upload";
-    const path = try zix.utils.file.saveFile(ctx.io, ctx.allocator, "./public/u", filename, f.data);
+    const path = try zix.utils.file.save(ctx.io, ctx.allocator, "./public/u", filename, f.data);
     _ = path; // arena-allocated, valid for this request
 }
 ```
@@ -626,6 +635,29 @@ var server = try zix.Http.Server.init(.{
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena — no ceiling, no clamping.
 
 For security guidance and tier selection see [`docs/headers.md`](docs/headers.md). For a working demonstration see `examples/http_xtra_headers.zig`.
+
+<br>
+
+## Request Header Cap (`RequestHeaderSize`)
+
+`HttpServerConfig.max_request_headers` controls how many headers the server accepts per request. Requests exceeding the cap are rejected with `431 Request Header Fields Too Large`.
+
+| Variant | Cap | Note |
+| :- | :- | :- |
+| `.MINIMAL` | 16 | Strict APIs, internal services |
+| `.COMMON` | 32 | Most web applications |
+| `.LARGE` | 64 | **Default.** Parser storage limit. CDN, proxy, CORS-heavy APIs |
+| `.{ .CUSTOM = N }` | N (capped at 64) | Explicit cap; values above 64 silently capped at the parser limit |
+
+```zig
+var server = try zix.Http.Server.init(4096, .{
+    // ...
+    .max_request_headers = .COMMON,                // 32 headers
+    // .max_request_headers = .{ .CUSTOM = 24 },   // explicit
+});
+```
+
+The parser storage limit is 64 — `CUSTOM` values above 64 are silently capped. See `zix.Http.RequestHeaderSize`.
 
 <br>
 

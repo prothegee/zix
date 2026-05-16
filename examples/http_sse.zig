@@ -4,9 +4,8 @@
 //!   GET /        — HTML page that opens an EventSource (open in browser)
 //!   GET /events  — SSE stream: sends a counter every second for 10 ticks then closes
 //!
-//! Uses workers = 1 (Model 1): each accepted connection is dispatched as a concurrent
-//! task via io.concurrent().  Model 2's blocking thread pool would be exhausted by
-//! long-lived SSE connections, one thread per open stream.
+//! Uses .ASYNC dispatch: single accept thread, each SSE connection dispatched via io.async().
+//! .ASYNC is preferred for SSE: long-lived connections do not hold pool threads.
 //!
 //! curl usage:
 //!   curl -N http://localhost:9010/events
@@ -19,10 +18,13 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9010;
+const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const MAX_KERNEL_BACKLOG: usize = 1024;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
+const WORKERS: usize = 0;   // ignored by .ASYNC
+const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
@@ -83,7 +85,9 @@ pub fn main(process: std.process.Init) !void {
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
-        .workers = 1, // Model 1 — io.concurrent() per connection; avoids pool exhaustion
+        .dispatch_model = DISPATCH_MODEL,
+        .workers = WORKERS,
+        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 

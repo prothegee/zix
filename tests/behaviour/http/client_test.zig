@@ -33,9 +33,9 @@ test "zix behaviour: ClientConfig, max_redirects default is 3" {
     try std.testing.expectEqual(@as(u8, 3), cfg.max_redirects);
 }
 
-test "zix behaviour: ClientConfig, user_agent default is zix/1" {
+test "zix behaviour: ClientConfig, user_agent default is from 'zon_options.user_agent'" {
     const cfg: zix.Http.ClientConfig = .{ .allocator = std.testing.allocator, .io = undefined };
-    try std.testing.expectEqualStrings("zix/1", cfg.user_agent);
+    try std.testing.expectEqualStrings(zix.Http.default_user_agent, cfg.user_agent);
 }
 
 test "zix behaviour: ClientResponse.status(), returns status_code field" {

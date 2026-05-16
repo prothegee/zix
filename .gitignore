@@ -41,6 +41,8 @@ zig-pkg
 *perf.*
 *Zone.Identifier
 
+!/rnd/perf-example-http_basic-perf.md
+
 ##
 ## file: include
 ##

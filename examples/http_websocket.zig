@@ -3,12 +3,13 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9008;
+const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 8; // 8 KB read buffer per connection
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
-const WORKERS: usize = 0; // 0 = auto (2 accept threads)
-const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
+const WORKERS: usize = 0;   // ignored by .ASYNC
+const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // Global room registry — lives for the process lifetime.
 // join() and leave() are called by each WebSocket handler task.
@@ -54,17 +55,10 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     // Read query params NOW — they are unavailable after upgrade().
     const display_name = req.queryParam("name") orelse "anonymous";
 
-    // Validate WebSocket upgrade headers
-    var ws_key: ?[]const u8 = null;
-    var is_upgrade = false;
-    var it = req.inner.iterateHeaders();
-    while (it.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "upgrade")) {
-            is_upgrade = std.ascii.eqlIgnoreCase(h.value, "websocket");
-        } else if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-key")) {
-            ws_key = h.value;
-        }
-    }
+    // Validate WebSocket upgrade headers via req.header() (case-insensitive).
+    const upgrade_val = req.header("upgrade") orelse "";
+    const is_upgrade = std.ascii.eqlIgnoreCase(upgrade_val, "websocket");
+    const ws_key = req.header("sec-websocket-key");
 
     if (!is_upgrade or ws_key == null) {
         res.setStatus(.BAD_REQUEST);
@@ -96,12 +90,8 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     var clean_close = false; // set to true only when the peer sends a .close frame
 
     outer: while (true) {
-        // Read one syscall's worth of bytes into the frame buffer.
-        // std.Io.Writer.fixed + reader.stream() does exactly ONE readv and returns
-        // whatever arrived — unlike readSliceShort which loops until the buffer is
-        // full (blocks until 8 KB accumulate or the connection closes).
-        var tw = std.Io.Writer.fixed(frame_buf[buf_used..]);
-        const n = req.reader.stream(&tw, .unlimited) catch break;
+        // One syscall — returns whatever bytes arrived without blocking for more.
+        const n = std.posix.read(req.fd, frame_buf[buf_used..]) catch break;
         if (n == 0) break;
         buf_used += n;
 
@@ -183,6 +173,7 @@ pub fn main(process: std.process.Init) !void {
         .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
+        .dispatch_model = DISPATCH_MODEL,
         .max_kernel_backlog = MAX_KERNEL_BACKLOG,
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
