@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const zon = @import("build.zig.zon");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -12,6 +13,16 @@ pub fn build(b: *std.Build) void {
 
     const zix_tests = b.addTest(.{ .root_module = zix });
     const zix_tests_run = b.addRunArtifact(zix_tests);
+
+    // --------------------------------------------------------- //
+
+    const zon_options = b.addOptions();
+
+    // Options:
+    // user_agent
+    zon_options.addOption([]const u8, "user_agent", zon.user_agent);
+
+    zix.addOptions("zon_options", zon_options);
 
     // --------------------------------------------------------- //
 
@@ -137,7 +148,9 @@ pub fn build(b: *std.Build) void {
 
     // Examples
     const examples = .{
-        .{ "example-http_basic", "examples/http_basic.zig" },
+        .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig" },
+        .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig" },
+        .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig" },
         .{ "example-http_client", "examples/http_client.zig" },
         .{ "example-http_json", "examples/http_json.zig" },
         .{ "example-http_manual_concurrent", "examples/http_manual_concurrent.zig" },
