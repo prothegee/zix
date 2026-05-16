@@ -585,7 +585,7 @@ if (parser.getField("file")) |f| {
 }
 ```
 
-`saveFile` creates the destination directory if needed and returns a caller-owned path copy.
+`zix.utils.file.save` creates the destination directory if needed and returns a caller-owned path copy.
 
 ```
 # curl example: upload a file with JSON metadata
