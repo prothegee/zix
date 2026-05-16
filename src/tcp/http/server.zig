@@ -10,6 +10,7 @@ const Response = @import("response.zig").Response;
 const fdWriteAll = @import("response.zig").fdWriteAll;
 const formatHttpDate = @import("response.zig").formatHttpDate;
 const Context = @import("context.zig").Context;
+const method = @import("method.zig");
 const static = @import("static.zig");
 const parser = @import("parser.zig");
 
@@ -266,7 +267,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 const idx = g_date_active.load(.acquire);
                 res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
 
-                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
+                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
                 // Layer B: optional handler deadline. Handlers call ctx.timedOut() between steps.
                 if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
@@ -286,6 +287,19 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                         res.setStatus(.NOT_FOUND);
                         res.send("Not Found") catch {};
                     }
+                }
+
+                if (cfg.logger) |lg| {
+                    const ua = req.header("user-agent") orelse "";
+                    const origin = req.header("origin") orelse "";
+                    lg.access(
+                        method.stringFromEnum(req.method()),
+                        req.path(),
+                        @intFromEnum(res.status),
+                        res.bytes_written,
+                        ua,
+                        origin,
+                    );
                 }
 
                 // Keep-alive: if there is a body and the handler did not consume it,
@@ -453,7 +467,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         /// Start listening and accepting connections
         ///
         /// Note:
-        /// - workers = 0 (default): cpu_count accept threads + cpu_count*20 pool threads
+        /// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
         /// - workers = N: exactly N accept threads, same pool sizing formula
         /// - If config.public_dir is non-empty, validates the directory exists, returns error.PublicDirNotFound if not
         /// - Accept threads listen on the same port via SO_REUSEPORT
@@ -573,7 +587,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 ///   buffer lives on the connection thread stack, otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
 /// - workers in config controls accept thread count:
-///     0 (default) -> cpu_count accept threads, cpu_count*20 pool threads
+///     0 (default) -> cpu_count accept threads, max(10, cpu_count * 2) pool threads
 ///     N           -> exactly N accept threads, same pool sizing formula
 ///
 /// Usage:
