@@ -1,6 +1,6 @@
 //! zix
 //! Zero sIX; 06;
-//! A network library wirtten in zig
+//! A network backend library wirtten in zig
 
 pub const Tcp = @import("tcp/Tcp.zig");
 pub const Udp = @import("udp/Udp.zig");
