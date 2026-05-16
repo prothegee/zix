@@ -37,7 +37,30 @@ __*Fix:*__
 ## 0.1.0 (2026-05-16)
 
 __*Update:*__
-- Initial release
+- Initial release, Zig 0.16.x network library (minimum_zig_version: 0.16.0-dev.2974+83c7aba12):
+    - HTTP:
+        - Server with three dispatch models: POOL, ASYNC, MIXED
+        - Router with exact, param, and prefix matching
+        - Middleware (comptime, zero-allocation)
+        - WebSocket upgrade
+        - Server-Sent Events (SSE)
+        - Multipart upload
+        - Static file serving
+        - HTTP client
+        ---
+    - UDP:
+        - Generic server and client over user-defined packet type
+        - Broadcast peer snapshot per packet
+        ---
+    - Unix Domain Sockets (UDS):
+        - Framed server and client
+        ---
+    - Channel:
+        - In-process ring-buffer message passing, generic over element type
+        ---
+    - Utils:
+        - File save helper, MIME type resolution
+        ---
 
 <br>
 
