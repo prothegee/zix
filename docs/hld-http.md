@@ -108,6 +108,7 @@ graph TD
     zix --> Udp["udp/Udp.zig\nzix.Udp"]
     zix --> Uds["uds/Uds.zig\nzix.Uds"]
     zix --> Channel["channel/Channel.zig\nzix.Channel"]
+    zix --> Logger["logger/Logger.zig\nzix.Logger"]
     zix --> utils["utils/file.zig\nzix.utils.file"]
     Tcp -.->|re-exports| Http
 
@@ -126,6 +127,9 @@ graph TD
     Http --> method["method.zig\nMethod.Code"]
     Http --> status["status.zig\nStatus.Code"]
     Http --> content["content.zig\nContent.Type"]
+
+    Logger --> logger_impl["logger.zig\nLogger + Level\nConsoleMode + Config"]
+    server -.->|optional access log| logger_impl
 ```
 
 ---
@@ -177,7 +181,11 @@ Access via `const zix = @import("zix");`
 | `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
-| `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget) |
+| `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget), logger (optional logger pointer) |
+| `zix.Logger.Logger` | struct | File and console logger: `init` / `deinit` / `flush` / `system` / `access` |
+| `zix.Logger.Config` | struct | Logger configuration: console, save_path (must exist — caller creates it), save_file, min levels, max_lines |
+| `zix.Logger.Level` | enum(u8) | `DEBUG`(0) `INFO`(1) `WARN`(2) `ERROR`(3) |
+| `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
 | `zix.Http.DispatchModel` | enum(u8) | Dispatch model: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) |
@@ -224,6 +232,7 @@ pub const HttpServerConfig = struct {
     handler_timeout_ms:    u32                = 0,          // Layer B: handler budget; 0 = disabled; ctx.timedOut()
     workers:               usize              = 0,          // 0 = cpu_count accept threads; ignored by .ASYNC
     pool_size:             usize              = 0,          // 0 = max(10, cpu_count * 2); .POOL only
+    logger:                ?*zix.Logger.Logger = null,      // access logger; null = no HTTP access logging
 };
 ```
 
