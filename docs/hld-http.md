@@ -197,7 +197,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.WebSocket.buildFrame` | fn | Serialize a server-to-client frame (unmasked) |
 | `zix.Http.WebSocket.acceptKey` | fn | Compute `Sec-WebSocket-Accept` from `Sec-WebSocket-Key` |
 | `zix.Http.WebSocket.upgrade` | fn | Write `101 Switching Protocols` onto `ctx.stream` |
-| `zix.utils.file.saveFile` | fn | Write bytes to `dir/filename`, creates directory if needed |
+| `zix.utils.file.save` | fn | Write bytes to `dir/filename`, creates directory if needed |
 | `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
 | `zix.Tcp.Http.Status.Code` | enum | Full HTTP 1xx--5xx status codes |
 
@@ -437,7 +437,7 @@ flowchart TD
 
 ## Upload
 
-`zix.Http.Multipart` parses `multipart/form-data` bodies into fields. `zix.utils.file.saveFile` writes bytes to disk. Neither is wired into the server automatically (handlers call them directly).
+`zix.Http.Multipart` parses `multipart/form-data` bodies into fields. `zix.utils.file.save` writes bytes to disk. Neither is wired into the server automatically (handlers call them directly).
 
 ```zig
 var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
