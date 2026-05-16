@@ -74,6 +74,12 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `channel/channel.zig` | `refAllDecls` + behavioral: `Channel(u32)` init capacity and count, ring buffer tail arithmetic |
 
+### zix.Logger
+
+| Module | Coverage |
+| :- | :- |
+| `logger/logger.zig` | `refAllDecls` + behavioral: init and deinit with no save_path, system() below save_min_level is silent, access() below save_min_level is silent, statusLevel mapping (100=DEBUG 200=INFO 301=INFO 404=WARN 500=ERROR) |
+
 ### zix.Utils
 
 | Module | Coverage |
@@ -179,6 +185,19 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | :- | :- |
 | `UdsServer.init` valid path | succeeds and `deinit` is safe |
 | `HandlerFn` type check | `zix.Uds.echoHandler` satisfies `zix.Uds.HandlerFn` |
+
+### tests/integration/logger/
+
+#### `logger_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Logger.system()` writes line to file | `[component]` tag and message text appear in log file |
+| `Logger.access()` writes line to file | method, path, status, bytes all appear in log file |
+| Absent UA and origin logged as dash | empty `""` args produce `"-"` in the quoted fields |
+| Present UA appears in file | non-empty UA string written as-is |
+| 5xx status maps to ERROR level | `access()` with status 500 writes `ERROR` label |
+| `anyerror` arg formats correctly | `{}` format of an error value renders the error name |
 
 ### tests/integration/channel/
 
@@ -325,6 +344,21 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | UDS frame zero-length payload | encodes as four zero bytes |
 | UDS frame header size | always exactly 4 bytes |
 
+### tests/behaviour/logger/
+
+#### `logger_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Level` backing values | DEBUG=0 INFO=1 WARN=2 ERROR=3 |
+| `ConsoleMode` backing values | OFF=0 DEBUG_ONLY=1 ALWAYS=2 |
+| `Config` defaults | console=OFF, console_min_level=INFO, save_path="", save_file="log", save_min_level=INFO, max_lines=1_000_000 |
+| `Logger.Logger` init and deinit with no save_path | no crash or leak |
+| `Logger.Logger` flush with no save_path is a no-op | no crash |
+| `Http.ServerConfig.logger` defaults to null | `cfg.logger == null` invariant |
+| `Http.Context.logger` defaults to null | `ctx.logger == null` invariant |
+| `Http.Response.bytes_written` defaults to 0 | `res.bytes_written == 0` after `init()` |
+
 ### tests/behaviour/channel/
 
 #### `channel_test.zig`
@@ -433,6 +467,22 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Test | What it verifies |
 | :- | :- |
 | Empty path -> `error.PathEmpty` | `UdsServer.init(.{ .path = "" })` returns PathEmpty |
+
+### tests/edge/logger/
+
+#### `logger_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `statusLevel` 2xx boundary | `access()` does not crash for every status class (100–599) |
+| `Level` enum ordering | DEBUG < INFO < WARN < ERROR via `@intFromEnum` |
+| `system()` below `save_min_level` is silent | calls below threshold do not open a file (`file_fd == -1`) |
+| `access()` below `save_min_level` is silent | same: `file_fd == -1` after filtered call |
+| `system()` with empty component does not panic | `component = ""` is safe |
+| `system()` with empty format does not panic | `fmt = ""` is safe |
+| `access()` with empty method and path does not panic | empty strings are safe |
+| `init` with empty `save_path`, `file_fd` stays invalid | `file_fd == -1` with `save_path = ""` |
+| Console OFF — no output or panic for any level | all four levels produce no crash with `console = .OFF` |
 
 ### tests/edge/channel/
 
