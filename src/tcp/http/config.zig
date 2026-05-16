@@ -3,6 +3,7 @@
 const std = @import("std");
 const HeaderSize = @import("response.zig").HeaderSize;
 const RequestHeaderSize = @import("parser.zig").RequestHeaderSize;
+const Logger = @import("../../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
@@ -80,6 +81,10 @@ pub const HttpServerConfig = struct {
     /// N           = exactly N pool threads.
     /// Ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
+    /// Optional logger. When non-null, the server calls logger.access() after each
+    /// response and injects a pointer into ctx.logger for handler use.
+    /// Caller owns the Logger and must ensure it outlives the server.
+    logger: ?*Logger = null,
 };
 
 // --------------------------------------------------------- //
