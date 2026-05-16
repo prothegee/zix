@@ -2,6 +2,10 @@
 
 const std = @import("std");
 
+const zon_options = @import("zon_options");
+/// Default zix http client user agent
+pub const user_agent: []const u8 = zon_options.user_agent;
+
 // --------------------------------------------------------- //
 
 /// Configuration for an HTTP client instance.
@@ -26,7 +30,7 @@ pub const HttpClientConfig = struct {
     /// Maximum number of automatic redirect hops. Ignored when follow_redirects is false.
     max_redirects: u8 = 3,
     /// Value sent in the User-Agent request header. Empty string omits the header entirely.
-    user_agent: []const u8 = "zix/1",
+    user_agent: []const u8 = zon_options.user_agent,
 };
 
 // --------------------------------------------------------- //
@@ -43,5 +47,5 @@ test "zix test: HttpClientConfig defaults" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024 * 4), cfg.max_response_body);
     try std.testing.expect(cfg.follow_redirects);
     try std.testing.expectEqual(@as(u8, 3), cfg.max_redirects);
-    try std.testing.expectEqualStrings("zix/1", cfg.user_agent);
+    try std.testing.expectEqualStrings(user_agent, cfg.user_agent);
 }

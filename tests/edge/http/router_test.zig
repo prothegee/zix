@@ -5,25 +5,6 @@
 const std = @import("std");
 const zix = @import("zix");
 
-fn makeInner(method_: std.http.Method, target_: []const u8) std.http.Server.Request {
-    return .{
-        .server = undefined,
-        .head = .{
-            .method = method_,
-            .target = target_,
-            .version = .@"HTTP/1.1",
-            .expect = null,
-            .content_type = null,
-            .content_length = null,
-            .transfer_encoding = .none,
-            .transfer_compression = .identity,
-            .keep_alive = true,
-        },
-        .head_buffer = undefined,
-        .respond_err = null,
-    };
-}
-
 fn handlerA(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = res;
@@ -36,12 +17,11 @@ test "zix edge: dispatch, no registered route returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .io = undefined, .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
 
-    var inner = makeInner(.GET, "/missing");
-    var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = zix.Http.Response.init(&inner, undefined, al, 32);
+    var req = try zix.Http.Request.fromRaw("GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
+    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     const matched = try server.router.dispatch(&req, &res, &ctx);
@@ -55,13 +35,12 @@ test "zix edge: dispatch, prefix /api does NOT match /apiv2" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .io = undefined, .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
     server.registerPrefixHandler("/api", handlerA);
 
-    var inner = makeInner(.GET, "/apiv2/resource");
-    var req = zix.Http.Request{ .inner = &inner, .reader = undefined, .allocator = al };
-    var res = zix.Http.Response.init(&inner, undefined, al, 32);
+    var req = try zix.Http.Request.fromRaw("GET /apiv2/resource HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
+    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
     var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
 
     const matched = try server.router.dispatch(&req, &res, &ctx);

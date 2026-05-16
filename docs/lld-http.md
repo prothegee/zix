@@ -22,10 +22,10 @@ pop():        lock -> while empty: wait -> orderedRemove(0) -> unlock -> return 
 close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiting pop())
 ```
 
-### run(): Model 2 (default, workers = 0 or workers ≥ 2)
+### run(): .POOL (default, dispatch_model = .POOL)
 
 ```
-1. worker_count = if (workers == 0) 2 else workers
+1. worker_count = if (workers == 0) cpu_count else workers
 2. pool_size    = if (pool_size == 0) max(10, cpu_count * 2) else pool_size
 3. std.Io.Threaded.init(smp_allocator, .{ .stack_size = 512 KB }) -> thread_io
 4. ConnQueue{}
@@ -38,18 +38,31 @@ close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiti
 10. join pool threads
 ```
 
-### run(): Model 1 (workers = 1)
+### run(): .ASYNC (dispatch_model = .ASYNC)
 
 ```
 1. net.IpAddress.resolve(io, ip, port)
 2. addr.listen(io, .{ .reuse_address = true, ... }) -> NetServer
 3. accept loop:
       stream = net_server.accept(io)
-      if (io.concurrent(handleConnection, .{ stream, io, self })) |_| {}
+      if (io.async(handleConnection, .{ stream, io, self })) |_| {}
       else |_| { handleConnection(stream, io, self); }  // fallback if pool exhausted
 ```
 
-### workerEntry() (Model 2 accept thread)
+### run(): .MIXED (dispatch_model = .MIXED)
+
+```
+1. worker_count = if (workers == 0) cpu_count else workers
+2. spawn worker_count asyncWorkerEntry threads
+3. each asyncWorkerEntry:
+      resolve + listen with SO_REUSEPORT
+      accept loop:
+        stream = net_server.accept(io)
+        if (io.async(handleConnection, .{ stream, io, self })) |_| {}
+        else |_| { handleConnection(stream, io, self); }
+```
+
+### workerEntry() (.POOL accept thread)
 
 ```
 1. resolve + listen with SO_REUSEPORT (reuse_address = true)
@@ -58,7 +71,7 @@ close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiti
       queue.push(stream, io)        // never blocks on I/O
 ```
 
-### poolEntry() (Model 2 pool thread)
+### poolEntry() (.POOL pool thread)
 
 ```
 loop:
@@ -278,8 +291,8 @@ g_date_lens:   [2]usize       // valid length of each buffer
 g_date_active: atomic(usize)  // index (0 or 1) of the current live buffer
 g_date_secs:   atomic(u64)    // last wall-clock second written
 
-Model 2: timer thread calls updateDateCache every 500 ms (std.Io.sleep)
-Model 1: accept loop calls updateDateCache before each accept()
+.POOL: timer thread calls updateDateCache every 500 ms (std.Io.sleep)
+.ASYNC: accept loop calls updateDateCache before each accept()
 
 updateDateCache():
   cur_secs = std.Io.Clock.real.now(io).toSeconds()
@@ -478,7 +491,7 @@ Both slices are owned by `config.allocator`. Zero-length body (e.g., 204 No Cont
 
 ---
 
-## utils/file.zig: saveFile
+## utils/file.zig: save
 
 ```
 1. std.Io.Dir.cwd().makePath(io, dir) // create directory tree if absent

@@ -32,7 +32,7 @@ pub const UdsServer = struct {
        io.concurrent(dispatchConn, .{task}) catch dispatchConn(task)
 ```
 
-Accept is single-threaded (Model 1 pattern). Each connection is dispatched via `io.concurrent()` so the accept loop is not blocked by slow handlers.
+Accept is single-threaded (`.ASYNC`-style pattern). Each connection is dispatched via `io.concurrent()` so the accept loop is not blocked by slow handlers.
 
 ### ConnTask
 

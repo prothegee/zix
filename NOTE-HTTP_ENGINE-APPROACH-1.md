@@ -283,4 +283,113 @@ In ASYNC and MIXED, `io`'s `async_limit` is the primary concurrency knob for con
 
 ---
 
+## Real Server Benchmark: zix.Http.Server with DispatchModel
+
+Run against the actual `zix.Http.Server` on branch `new-http_engine_model` (debug build).
+Unlike the PoC, this includes router dispatch, Request/Response construction, and arena allocation.
+Examples used: `examples/http_basic_1_async.zig`, `examples/http_basic_2_pool.zig`, `examples/http_basic_3_mixed.zig`.
+
+### Run 1: `wrk -c100 -t1 -d10s`
+
+| Model | Avg Latency | Stdev | Max Latency | Req/s | Transfer/s |
+| :- | :- | :- | :- | :- | :- |
+| 1 (ASYNC) | 52.41µs | 21.53µs | 3.77ms | 146,305 | 12.42MB |
+| 2 (POOL) | 91.47µs | 31.14µs | 3.39ms | 145,289 | 12.33MB |
+| 3 (MIXED) | 88.72µs | 31.30µs | 3.39ms | 144,357 | 12.25MB |
+
+### Run 2: `wrk -c1000 -t4 -d10s`
+
+| Model | Avg Latency | Stdev | Max Latency | Req/s | Transfer/s |
+| :- | :- | :- | :- | :- | :- |
+| 1 (ASYNC) | 37.71µs | 21.44µs | 3.37ms | 234,600 | 19.91MB |
+| 2 (POOL) | 76.52µs | 91.95µs | 6.03ms | 245,918 | 20.87MB |
+| 3 (MIXED) | 56.53µs | 34.22µs | 4.54ms | 290,201 | 24.63MB |
+
+### Throughput Scaling (c100 to c1000)
+
+| Model | c100 req/s | c1000 req/s | Scale |
+| :- | :- | :- | :- |
+| 1 (ASYNC) | 146,305 | 234,600 | 1.60x |
+| 2 (POOL) | 145,289 | 245,918 | 1.69x |
+| 3 (MIXED) | 144,357 | 290,201 | 2.01x |
+
+### Analysis
+
+At c100 all three models are throughput-equivalent (~144-146k req/s). ASYNC holds the lowest latency (52µs). POOL and MIXED are similar at ~88-91µs — the router and arena overhead narrows the latency gap vs the PoC.
+
+At c1000, MIXED wins throughput (290k req/s, 2.01x scale). POOL stdev blows out (91.95µs > avg 76.52µs — sign of bimodal distribution from ConnQueue contention under load). ASYNC has the lowest and most stable latency at both concurrency levels.
+
+Notable difference from PoC: MIXED now beats POOL at c1000 in the real server (290k vs 245k). In the PoC, POOL won (351k vs 312k). The real server's router and arena overhead changes the balance — MIXED's no-queue path benefits more from reduced per-request overhead than POOL's pre-warmed thread advantage.
+
+---
+
+## POOL: File Descriptor Budget (RLIMIT_NOFILE)
+
+POOL mode opens file descriptors at startup before any connection arrives:
+
+```
+startup_fds ≈ pool_size + workers + io_async_limit
+            = (cpu * 20) + cpu + (cpu - 1)
+            = cpu * 22 - 1
+```
+
+The Linux default soft `RLIMIT_NOFILE` is 1024. With the current default formula `pool_size = cpu * 2 * 10`:
+
+| cpu_count | pool_size | est. startup fds | safe `ulimit -n` |
+| :- | :- | :- | :- |
+| 4 | 80 | ~87 | 4096 |
+| 8 | 160 | ~175 | 8192 |
+| 16 | 320 | ~351 | 16384 |
+| 32 | 640 | ~703 | 32768 |
+| 48 | 960 | ~1055 | 65536 (required) |
+| 64 | 1280 | ~1407 | 65536 (required) |
+
+On machines with 48+ cores, startup fds alone exceed the default limit. The server accept loop will log `error.ProcessFdQuotaExceeded` repeatedly until the limit is raised.
+
+Rule of thumb: `ulimit -n ≥ pool_size * 4` (covers startup fds plus concurrent connection headroom).
+With current default: `ulimit -n ≥ cpu * 80`.
+
+### Raising RLIMIT_NOFILE on Linux/Unix
+
+**Session (temporary, current shell only):**
+```sh
+ulimit -n 65536
+```
+
+**Check current limits:**
+```sh
+ulimit -n        # soft limit
+ulimit -Hn       # hard limit
+cat /proc/sys/fs/file-max   # system-wide kernel fd limit
+```
+
+**Persistent per-user (PAM):**
+
+`/etc/security/limits.conf`:
+```
+*    soft    nofile    65536
+*    hard    nofile    65536
+```
+Requires re-login to take effect.
+
+**Persistent for a systemd service:**
+
+In the `.service` unit file:
+```ini
+[Service]
+LimitNOFILE=65536
+```
+
+**Persistent system-wide (kernel limit):**
+```sh
+sysctl -w fs.file-max=2097152
+```
+To persist across reboots, add to `/etc/sysctl.conf`:
+```
+fs.file-max = 2097152
+```
+Then apply with `sysctl -p`.
+
+---
+
 ###### end of NOTE-HTTP_ENGINE-APPROACH-1

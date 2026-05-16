@@ -36,7 +36,8 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` for every enum variant |
-| `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams |
+| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, dechunk single/multiple/terminal/extension/invalid-hex/uppercase hex |
+| `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive) |
 | `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
@@ -64,7 +65,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent="zix/1") |
+| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
 | `tcp/http/client.zig` | `refAllDecls` |
 
 ### zix.Channel
@@ -77,7 +78,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `utils/file.zig` | `refAllDecls` + behavioral: extension, saveFile |
+| `utils/file.zig` | `refAllDecls` + behavioral: extension, save |
 
 ---
 
@@ -93,7 +94,10 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | :- | :- |
 | `pathParam()` single param | captured segment returned by name (absent name returns null) |
 | `pathParam()` hyphenated names | `:tenant-id`, `:tenant-branch` (http_paths example pattern) |
-| `body()` with body_cache | pre-set `body_cache` returned without touching `reader`. Second call returns same slice. |
+| `body()` chunked single chunk decoded correctly | `"5\r\nhello\r\n0\r\n\r\n"` -> `"hello"` |
+| `body()` chunked multiple chunks assembled | `"3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n"` -> `"foobarr"` |
+| `body()` chunked empty body returns empty string | terminal chunk only -> `""` |
+| `body()` returns body_cache without touching reader | pre-set `body_cache` short-circuits read; second call returns same pointer |
 
 #### `router_test.zig`
 
@@ -205,8 +209,9 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `path()` root path | `"/"` returns `"/"` |
 | `query()` returns portion after `?` | `"q=hello&lang=zig"` |
 | `query()` returns empty when no `?` | `""` |
-| `method()` uses `method_cache` when set | cached POST overrides GET inner |
-| `method()` resolves DELETE/PATCH/PUT/OPTIONS/HEAD | each method from inner when cache is null |
+| `body()` chunked produces same payload as Content-Length | chunked `"world"` matches `body_cache = "world"` |
+| `body()` second call returns cached result | `b1.ptr == b2.ptr` after two body() calls |
+| `method()` resolves each method | DELETE/PATCH/PUT/OPTIONS/HEAD/GET/POST all resolved |
 
 #### `router_test.zig`
 
@@ -240,7 +245,11 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Buffer size defaults | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` all 4096 |
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
+| `dispatch_model` defaults to `.POOL` | enum value equals 0 |
 | Worker pool defaults to auto-size | `workers == 0`, `pool_size == 0` |
+| `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
+| `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
+| `RequestHeaderSize.CUSTOM(N)` capped at 64 | values above 64 silently return 64 |
 | `max_response_headers` defaults to COMMON (32) | enum value and `.value()` |
 | `HeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
 | `HeaderSize.CUSTOM(N)` returns N | 7 and 100 |
@@ -297,7 +306,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `ClientConfig` max_response_body default | 4 MB (1024 * 1024 * 4) |
 | `ClientConfig` follow_redirects default | true |
 | `ClientConfig` max_redirects default | 3 |
-| `ClientConfig` user_agent default | "zix/1" |
+| `ClientConfig` user_agent default | matches `zix.Http.default_user_agent` (library version string from `build.zig.zon`) |
 | `ClientResponse.status()` | returns status_code field |
 | `ClientResponse.body()` | returns body_data slice |
 | `ClientResponse.header()` case-insensitive | matches regardless of header name casing |
@@ -344,6 +353,9 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
 | `queryParam` key absent returns null | key not in query string |
 | `queryParam` no query string at all returns null | target has no `?` |
+| `body()` chunked invalid hex returns empty string | `"zz"` chunk size -> `""` (dechunk error -> 0 bytes) |
+| `body()` chunked missing terminal chunk returns partial data | no `0\r\n\r\n` -> partial data returned |
+| `body()` chunked single-byte chunks | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
 #### `router_test.zig`
 

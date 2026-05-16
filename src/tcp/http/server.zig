@@ -2,13 +2,16 @@
 
 const std = @import("std");
 const Config = @import("config.zig").HttpServerConfig;
+const DispatchModel = @import("config.zig").DispatchModel;
 const Router = @import("router.zig").Router;
 const HandlerFn = @import("router.zig").HandlerFn;
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
+const fdWriteAll = @import("response.zig").fdWriteAll;
 const formatHttpDate = @import("response.zig").formatHttpDate;
 const Context = @import("context.zig").Context;
 const static = @import("static.zig");
+const parser = @import("parser.zig");
 
 // Global date cache — updated by a background timer thread (model 2) or the accept loop (model 1).
 // Readers do a single atomic load — no lock, no syscall per request.
@@ -173,8 +176,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *Self) void {
             defer stream.close(io);
 
-            // Disable Nagle's algorithm — sends each response immediately without
-            // waiting to coalesce packets. Critical for throughput with small responses.
+            // Disable Nagle: each response is sent immediately without waiting to coalesce.
             if (comptime @import("builtin").target.os.tag != .windows) {
                 std.posix.setsockopt(
                     stream.socket.handle,
@@ -185,11 +187,10 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             }
 
             const cfg = server.config;
+            // Raw fd — all recv/send on the hot path bypass std.Io dispatch.
+            const fd = stream.socket.handle;
 
-            // Layer D: register with the connection registry when conn_timeout_ms > 0.
-            // The timer thread calls registry.evict() every 500ms and shuts down stale
-            // connections via stream.shutdown(.both), which causes the next receiveHead()
-            // to fail with ReadFailed. Effective in model 2 only (timer thread exists).
+            // Layer D: connection guard via registry eviction (model 2 only).
             var maybe_conn_entry: ?ConnEntry = null;
             if (cfg.conn_timeout_ms > 0) {
                 maybe_conn_entry = ConnEntry{
@@ -203,24 +204,13 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             }
             defer if (maybe_conn_entry != null) server.registry.deregister(&maybe_conn_entry.?, io);
 
+            // Read buffer: stack when max_client_request <= stack_threshold, heap otherwise.
             var stack_read: [stack_threshold]u8 = undefined;
-            var stack_write: [stack_threshold]u8 = undefined;
-
             const buf_read = if (cfg.max_client_request <= stack_threshold)
                 stack_read[0..cfg.max_client_request]
             else
                 std.heap.smp_allocator.alloc(u8, cfg.max_client_request) catch return;
             defer if (cfg.max_client_request > stack_threshold) std.heap.smp_allocator.free(buf_read);
-
-            const buf_write = if (cfg.max_client_response <= stack_threshold)
-                stack_write[0..cfg.max_client_response]
-            else
-                std.heap.smp_allocator.alloc(u8, cfg.max_client_response) catch return;
-            defer if (cfg.max_client_response > stack_threshold) std.heap.smp_allocator.free(buf_write);
-
-            var conn_reader = stream.reader(io, buf_read);
-            var conn_writer = stream.writer(io, buf_write);
-            var http_server = std.http.Server.init(&conn_reader.interface, &conn_writer.interface);
 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
@@ -231,51 +221,65 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 _ = arena.reset(.retain_capacity);
                 const allocator = arena.allocator();
 
-                var inner_req = http_server.receiveHead() catch |err| {
-                    if (err == error.HttpConnectionClosing) break;
-                    if (err == error.ConnectionResetByPeer) break;
-                    if (err == error.ReadFailed) break; // Layer D: shutdown(.both) from registry eviction
+                // Incremental recv loop: accumulate bytes until \r\n\r\n is found.
+                // Only the new tail is searched each iteration to avoid re-scanning.
+                var filled: usize = 0;
+                var header_end: usize = 0;
+                var found = false;
+
+                while (filled < buf_read.len) {
+                    const n = std.posix.read(fd, buf_read[filled..]) catch break;
+                    if (n == 0) break; // peer closed
+                    const prev = filled;
+                    filled += n;
+                    const search_from = if (prev > 3) prev - 3 else 0;
+                    if (std.mem.indexOfPos(u8, buf_read[0..filled], search_from, "\r\n\r\n")) |pos| {
+                        header_end = pos;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    if (filled >= buf_read.len) {
+                        fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                    }
                     break;
-                };
+                }
+
+                // Zero-copy parse: all fields are offsets into buf_read.
+                const head = parser.parse(buf_read[0..filled], cfg.max_request_headers.value()) catch {
+                    fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+                    break;
+                } orelse break; // incomplete — should not happen since found == true
 
                 var req = Request{
-                    .inner = &inner_req,
-                    .reader = &conn_reader.interface,
-                    .allocator = allocator,
+                    .buf        = buf_read[0..filled],
+                    .head       = head,
+                    .fd         = fd,
+                    .buf_filled = filled,
+                    .allocator  = allocator,
                 };
-                // Pre-compute once per request so path()/query()/method() pay no scan cost.
-                req.qmark_pos = std.mem.indexOfScalar(u8, inner_req.head.target, '?') orelse inner_req.head.target.len;
-                req.method_cache = switch (inner_req.head.method) {
-                    .GET => .GET,
-                    .HEAD => .HEAD,
-                    .POST => .POST,
-                    .PUT => .PUT,
-                    .DELETE => .DELETE,
-                    .PATCH => .PATCH,
-                    .OPTIONS => .OPTIONS,
-                    .TRACE => .TRACE,
-                    .CONNECT => .CONNECT,
-                };
-                var res = Response.init(&inner_req, io, allocator, cfg.max_response_headers.value());
-                // Zero-syscall Date: atomic load from global cache, no clock call per request.
+                var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
+
+                // Zero-syscall Date: one atomic load from the global double-buffered cache.
                 const idx = g_date_active.load(.acquire);
                 res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
-                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
 
-                // Layer B: set handler deadline from config before dispatch.
-                // Handlers check ctx.timedOut() between expensive steps and respond
-                // with 408 early rather than blocking the pool thread.
+                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream };
+                // Layer B: optional handler deadline. Handlers call ctx.timedOut() between steps.
                 if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
                 const matched = server.router.dispatch(&req, &res, &ctx) catch false;
                 if (res.streaming) break;
+
                 if (!matched) {
                     var served = false;
                     if (cfg.public_dir.len > 0) {
                         const sub = req.path();
                         const stripped = if (sub.len > 0 and sub[0] == '/') sub[1..] else sub;
                         if (stripped.len > 0) {
-                            served = static.serve(&inner_req, stripped, cfg.public_dir, io) catch false;
+                            served = static.serve(&req, fd, stripped, cfg.public_dir, io) catch false;
                         }
                     }
                     if (!served) {
@@ -283,6 +287,10 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                         res.send("Not Found") catch {};
                     }
                 }
+
+                // Keep-alive: if there is a body and the handler did not consume it,
+                // close rather than risk misaligned reads on the next request.
+                if (head.content_length > 0 and req.body_cache == null) break;
             }
         }
 
@@ -314,7 +322,10 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 
             while (true) {
                 const stream = net_server.accept(io) catch |err| {
-                    std.debug.print("zix: worker accept error: {}\n", .{err});
+                    if (err != error.ConnectionAborted) {
+                        std.debug.print("zix: worker accept error: {}\n", .{err});
+                        break;
+                    }
                     continue;
                 };
                 queue.push(stream, io);
@@ -328,6 +339,38 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         fn poolEntry(self: *Self, queue: *ConnQueue, io: std.Io) void {
             while (queue.pop(io)) |stream| {
                 handleConnection(stream, io, self);
+            }
+        }
+
+        /// Brief:
+        /// Accept thread for MIXED dispatch — accepts connections and dispatches each via io.async().
+        /// No ConnQueue. The shared io Threaded pool handles scheduling.
+        fn asyncWorkerEntry(self: *Self, io: std.Io) void {
+            const cfg = self.config;
+
+            const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
+                std.debug.print("zix: worker resolve error: {}\n", .{err});
+                return;
+            };
+            var net_server = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                .reuse_address = true,
+            }) catch |err| {
+                std.debug.print("zix: worker listen error: {}\n", .{err});
+                return;
+            };
+            defer net_server.deinit(io);
+
+            while (true) {
+                const stream = net_server.accept(io) catch |err| {
+                    if (err != error.ConnectionAborted) {
+                        std.debug.print("zix: worker accept error: {}\n", .{err});
+                        break;
+                    }
+                    continue;
+                };
+                _ = io.async(handleConnection, .{ stream, io, self });
             }
         }
 
@@ -410,98 +453,110 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         /// Start listening and accepting connections
         ///
         /// Note:
-        /// - If config.public_dir is non-empty, validates the directory exists before binding,
-        ///   returns error.PublicDirNotFound if not
-        /// - workers = 0 (default): auto CPU count accept threads + cpu*2 pool threads (model 2)
-        /// - workers = 1: single-threaded, uses the caller's io directly (model 1)
-        /// - workers = N: exactly N accept threads in model 2
-        /// - Model 2 accept threads listen on the same port via SO_REUSEPORT, pool threads handle
-        ///   connections synchronously via a shared work queue
+        /// - workers = 0 (default): cpu_count accept threads + cpu_count*20 pool threads
+        /// - workers = N: exactly N accept threads, same pool sizing formula
+        /// - If config.public_dir is non-empty, validates the directory exists, returns error.PublicDirNotFound if not
+        /// - Accept threads listen on the same port via SO_REUSEPORT
+        /// - Pool threads handle connections synchronously via a shared work queue
         ///
         /// Return:
         /// !void
         pub fn run(self: *Self) !void {
             const cfg = self.config;
-            const io = cfg.io;
+            const cpu = try std.Thread.getCpuCount();
+
+            // Use caller's io if provided; otherwise create an internal Threaded backend.
+            // Caller-provided io: async_limit and stack_size from InitOptions are respected.
+            // Internal: stack_size=512KB reduces virtual memory and TLB pressure.
+            var internal: ?std.Io.Threaded = if (cfg.io == null)
+                std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 })
+            else
+                null;
+            defer if (internal) |*t| t.deinit();
+            const thread_io: std.Io = cfg.io orelse internal.?.io();
 
             if (cfg.public_dir.len > 0) {
-                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
-                dir.close(io);
+                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+                dir.close(thread_io);
             }
 
-            // Accept threads only push to the work queue — they never handle I/O.
-            // 2 is enough to saturate even a high-throughput listener, cpu_count accept
-            // threads would add unnecessary OS threads without throughput benefit.
-            const worker_count = if (cfg.workers == 0) 2 else cfg.workers;
+            // Background timer: updates date cache every 500ms, evicts timed-out connections.
+            const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{ thread_io, &self.registry });
+            defer timer_thread.detach();
 
-            if (worker_count <= 1) {
-                // Model 1 — single thread, caller's io
-                std.debug.print("zix: listening on {s}:{d}\n", .{ cfg.ip, cfg.port });
+            switch (cfg.dispatch_model) {
+                .POOL => {
+                    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
+                    const pool_size    = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
-                var net_server = try addr.listen(io, .{
-                    .mode = .stream,
-                    .kernel_backlog = @intCast(cfg.max_kernel_backlog),
-                    .reuse_address = true,
-                });
-                defer net_server.deinit(io);
+                    std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_size });
 
-                updateDateCache(io);
-                while (true) {
-                    updateDateCache(io);
-                    const stream = net_server.accept(io) catch |err| {
-                        std.debug.print("zix: accept error: {}\n", .{err});
-                        continue;
-                    };
-                    if (io.concurrent(handleConnection, .{ stream, io, self })) |_| {} else |_| {
-                        handleConnection(stream, io, self);
+                    var queue = ConnQueue{};
+                    defer queue.deinit();
+
+                    const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_size);
+                    defer std.heap.smp_allocator.free(pool_threads);
+                    for (pool_threads) |*t| {
+                        t.* = try std.Thread.spawn(
+                            .{ .stack_size = 512 * 1024 },
+                            poolEntry,
+                            .{ self, &queue, thread_io },
+                        );
                     }
-                }
-            } else {
-                // Model 2 — accept threads + pool threads connected by a work queue.
-                // Pool threads handle connections synchronously (blocking I/O, no scheduler),
-                // matching thread pool model. stack_size=512KB vs 8MB default reduces
-                // virtual memory and TLB pressure, handleConnection only needs ~2×stack_threshold.
-                const cpu = std.Thread.getCpuCount() catch 8;
-                const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-                    .stack_size = 512 * 1024,
-                });
-                defer threaded.deinit();
-                const thread_io = threaded.io();
+                    const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+                    defer std.heap.smp_allocator.free(acc_threads);
+                    for (acc_threads) |*t| {
+                        t.* = try std.Thread.spawn(.{}, workerEntry, .{ self, &queue, thread_io });
+                    }
 
-                var queue = ConnQueue{};
-                defer queue.deinit();
+                    for (acc_threads) |t| t.join();
+                    queue.close(thread_io);
+                    for (pool_threads) |t| t.join();
+                },
 
-                std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_size });
+                .ASYNC => {
+                    std.debug.print("zix: listening on {s}:{d} (io.async)\n", .{ cfg.ip, cfg.port });
 
-                // Background timer thread: updates the global date cache every 500ms.
-                // Keeps the per-request hot path to one atomic load instead of a clock syscall.
-                const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{ thread_io, &self.registry });
-                defer timer_thread.detach();
+                    const addr = std.Io.net.IpAddress.resolve(thread_io, cfg.ip, cfg.port) catch |err| {
+                        std.debug.print("zix: resolve error: {}\n", .{err});
+                        return;
+                    };
+                    var net_server = addr.listen(thread_io, .{
+                        .mode = .stream,
+                        .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                        .reuse_address = true,
+                    }) catch |err| {
+                        std.debug.print("zix: listen error: {}\n", .{err});
+                        return;
+                    };
+                    defer net_server.deinit(thread_io);
 
-                // Pool threads: block on queue.pop(), handle synchronously
-                const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_size);
-                defer std.heap.smp_allocator.free(pool_threads);
-                for (pool_threads) |*t| {
-                    t.* = try std.Thread.spawn(
-                        .{ .stack_size = 512 * 1024 }, // MagicNumber
-                        poolEntry,
-                        .{ self, &queue, thread_io },
-                    );
-                }
+                    while (true) {
+                        const stream = net_server.accept(thread_io) catch |err| {
+                            if (err != error.ConnectionAborted) {
+                                std.debug.print("zix: accept error: {}\n", .{err});
+                                break;
+                            }
+                            continue;
+                        };
+                        _ = thread_io.async(handleConnection, .{ stream, thread_io, self });
+                    }
+                },
 
-                // Accept threads: call accept() and push to queue, never block on I/O
-                const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
-                defer std.heap.smp_allocator.free(acc_threads);
-                for (acc_threads) |*t| {
-                    t.* = try std.Thread.spawn(.{}, workerEntry, .{ self, &queue, thread_io });
-                }
+                .MIXED => {
+                    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                for (acc_threads) |t| t.join();
-                queue.close(thread_io);
-                for (pool_threads) |t| t.join();
+                    std.debug.print("zix: listening on {s}:{d} ({d} accept, io.async)\n", .{ cfg.ip, cfg.port, worker_count });
+
+                    const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+                    defer std.heap.smp_allocator.free(acc_threads);
+                    for (acc_threads) |*t| {
+                        t.* = try std.Thread.spawn(.{}, asyncWorkerEntry, .{ self, thread_io });
+                    }
+
+                    for (acc_threads) |t| t.join();
+                },
             }
         }
     };
@@ -517,10 +572,9 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 ///   if max_client_request / max_client_response fit within stack_threshold the
 ///   buffer lives on the connection thread stack, otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
-/// - workers in config controls the concurrency model:
-///     0 (default) -> auto CPU count accept threads + cpu*2 pool threads (model 2)
-///     1           -> single-threaded, uses caller's io (model 1)
-///     N           -> exactly N accept threads in model 2
+/// - workers in config controls accept thread count:
+///     0 (default) -> cpu_count accept threads, cpu_count*20 pool threads
+///     N           -> exactly N accept threads, same pool sizing formula
 ///
 /// Usage:
 /// var server = try zix.Http.Server.init(4096, .{ .ip = "0.0.0.0", .port = 8080, ... });

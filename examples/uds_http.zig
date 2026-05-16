@@ -170,7 +170,7 @@ pub fn main(process: std.process.Init) !void {
         .max_client_request = MAX_CLIENT_REQUEST,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
-        .workers = 1, // Model 1 -- io.concurrent per connection, required for SSE
+        .dispatch_model = .ASYNC, // .ASYNC preferred for SSE: long-lived connections do not hold pool threads
     });
     defer server.deinit();
 

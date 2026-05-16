@@ -8,7 +8,7 @@
 
 ---
 
-This document outlines a path to move `zix` away from "framework magic" toward explicit configuration, without losing the "network library" ease of use.
+This document outlines a path to move `zix` away from "framework magic" toward explicit configuration, without losing the "network backend library" ease of use.
 
 ---
 
