@@ -311,13 +311,13 @@ var server = try MyServer.init(.{
 
 ---
 
-## ADR-016: SSE via `res.stream()` + `SseWriter`, Model 1 only
+## ADR-016: SSE via `res.stream()` + `SseWriter`, `.ASYNC` preferred
 
-**Status:** Accepted
+**Status:** Accepted (dispatch model updated by ADR-021)
 
 **Context:** SSE (Server-Sent Events) requires a streaming HTTP response: headers are sent once with no `Content-Length`, and the connection stays open while the handler pushes events. The existing `Response.send()` assumes a complete body and always emits `Content-Length`. A new code path is needed without breaking the existing response API.
 
-SSE connections are long-lived (seconds to minutes per stream). Model 2's blocking pool assigns one OS thread per open connection for the full stream duration. With the default `max(10, cpu_count * 2)` pool, a handful of SSE clients would exhaust all pool threads and starve regular HTTP requests. Model 1 (`workers = 1`) dispatches each connection as a concurrent fiber via `io.concurrent()`, allowing thousands of open SSE streams without thread exhaustion.
+SSE connections are long-lived (seconds to minutes per stream). `.POOL`'s blocking thread pool assigns one OS thread per open connection for the full stream duration. With the default `max(10, cpu_count * 2)` pool, a handful of SSE clients would exhaust all pool threads and starve regular HTTP requests. `.ASYNC` (`dispatch_model = .ASYNC`) dispatches each connection as a concurrent fiber via `io.async()`, allowing thousands of open SSE streams without thread exhaustion.
 
 **Decision:**
 
@@ -330,12 +330,12 @@ SSE connections are long-lived (seconds to minutes per stream). Model 2's blocki
 
 3. `handleConnection` checks `if (res.streaming) break` after each dispatch. When the handler returns the keep-alive loop exits and the TCP connection closes. The browser's `EventSource` auto-reconnects after the default 3-second retry.
 
-4. SSE examples must use `workers = 1`. This is documented in the example, the README, and HLD.
+4. SSE examples must use `dispatch_model = .ASYNC` (see ADR-021). This is documented in the example, the README, and HLD.
 
 **Consequences:**
 - No change to `Response.send()` — existing handlers are unaffected.
 - `res.streaming` defaults to `false`; only SSE handlers set it to `true`.
-- The Model 1 requirement is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a Model 2 server will work but will block pool threads for the stream duration.
+- The `.ASYNC` preference is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a `.POOL` server will work but will block pool threads for the stream duration.
 - `SseWriter` is exported from `zix.Http.SseWriter` for handler authors who want to type-annotate the writer.
 
 ---
@@ -422,8 +422,32 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 **Consequences:**
 - One extra heap allocation per request (head bytes copy via `gpa.dupe`). Size is the raw head (status line + headers), typically a few hundred bytes.
 - `ClientResponse` is not safe to use after `deinit()`.
-- TLS (HTTPS) is supported by `std.http.Client` internally but is not explicitly tested in zix v1. The `HttpClientConfig.io` field must carry a real `Io` backend (not `undefined`) for `deinit()` to close connections safely.
+- TLS (HTTPS) is out of scope for zix. The library is a network backend: TLS termination is delegated to an upstream proxy (nginx, HAProxy, Envoy). `std.http.Client` supports TLS internally, but zix does not expose, configure, or test it. Plain HTTP on the internal network is the intended usage.
 - `response_timeout_ms` and `read_timeout_ms` are stored in config and documented as "v1: not yet enforced" so callers can set them now and get enforcement in a future release without an API change.
+
+---
+
+## ADR-021: DispatchModel enum (POOL / ASYNC / MIXED)
+
+**Status:** Accepted
+
+**Context:** The original `HttpServerConfig` used `workers: usize` to select between two concurrency modes: `workers = 1` for single-accept `io.async()` dispatch and `workers = 0` / `workers = N` for the work-queue thread pool. A third mode — N accept threads each dispatching via `io.async()` without a ConnQueue — existed as a natural middle ground. The `workers` field was overloaded: a value of `1` changed the dispatch strategy entirely rather than setting an accept thread count. This was non-obvious and not self-documenting at call sites.
+
+**Decision:** Introduce `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` as a named field `dispatch_model: DispatchModel = .POOL` in `HttpServerConfig`. The three models are:
+
+- `.POOL` (default): N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count; `pool_size` controls pool thread count.
+- `.ASYNC`: Single accept thread dispatches each connection via `io.async()`. Preferred for SSE and WebSocket — long-lived connections do not hold pool threads. `workers` and `pool_size` are ignored.
+- `.MIXED`: N accept threads each dispatch via `io.async()` directly — no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
+
+The old `workers = 1` shorthand for single-accept dispatch is removed. Callers wanting that behavior set `dispatch_model = .ASYNC`.
+
+`workers = 0` now means cpu_count accept threads for `.POOL` and `.MIXED`. The former default of 2 was an undercount on machines with many cores.
+
+**Consequences:**
+- Breaking change: callers using `workers = 1` must migrate to `dispatch_model = .ASYNC`.
+- `dispatch_model` is self-documenting at the call site. The three strategies are explicit enum variants, not magic `usize` values.
+- `pool_size` is silently ignored for `.ASYNC` and `.MIXED` — no error, documented in `HttpServerConfig`.
+- Enum backing type `u8` follows the project convention for all named enums.
 
 ---
 
