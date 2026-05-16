@@ -64,11 +64,11 @@ __*6. Predictable, Transparent Memory Management.*__
 ## Repositories
 
 - [Codeberg as Main](https://codeberg.org/prothegee/zix)
-- [Github as Mirror #1](https://codeberg.org/prothegee/zix)
+- [Github as Mirror #1](https://github.com/prothegee/zix)
 
 <br>
 
-## Important contribution notes
+## Important Contribution Notes
 
 - Always push Zig and their std.
 - Single file, single responsibility.
@@ -95,6 +95,39 @@ __*6. Predictable, Transparent Memory Management.*__
 | [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
 | [`docs/headers.md`](docs/headers.md) | Response header cap: tiers, security, error handling |
 | [`docs/tests.md`](docs/tests.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
+
+<br>
+
+## Getting Started
+
+Fetch zix to your project:
+
+```sh
+zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
+```
+
+or 
+
+```sh
+zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
+```
+
+> You can change to mirror too as `github.com/prothegee/zix`
+>
+> For specifc version, use `MAJOR.MINOR.x`, i.e. `#0.1.x` and replace `#main`
+
+<br>
+
+Add to your project (`build.zig` file):
+
+```sh
+const zix = b.dependency("zix", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("zix", httpz.module("zix"));
+```
 
 <br>
 
@@ -816,6 +849,77 @@ See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working e
 
 <br>
 
+## Logger
+
+Structured file logger with automatic HTTP access logging and system event logging.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+// Logger does not create save_path automatically — caller's responsibility.
+// Silently ignores "already exists" — safe to call on every start.
+fn createLogDir(io: std.Io) void {
+    std.Io.Dir.cwd().createDirPath(io, "./logs") catch {};
+}
+
+pub fn main(process: std.process.Init) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    createLogDir(process.io);
+
+    var logger = try zix.Logger.Logger.init(arena.allocator(), .{
+        .save_path      = "./logs",
+        .save_file      = "app",
+        .save_min_level = .INFO,
+        .console        = .ALWAYS,
+    });
+    defer logger.deinit();
+
+    // System event: any component, any level
+    logger.system(.INFO,  "startup", "listening on {d}", .{9000});
+    logger.system(.ERROR, "db",      "connect failed: {}", .{error.ConnectionRefused});
+
+    // Wire into HTTP server for automatic per-request access logging
+    var server = try zix.Http.Server.init(4096, .{
+        .io        = process.io,
+        .allocator = arena.allocator(),
+        .ip        = "127.0.0.1",
+        .port      = 9000,
+        .logger    = &logger,
+    });
+    defer server.deinit();
+    try server.run();
+}
+```
+
+Log files are written to `save_path/YYYY-MM-DD/save_file-NNNNNN.log`. Each line is a newline-terminated record:
+
+```
+# System event format:
+2026-05-16 12:34:56.789 INFO   [startup] listening on 9000
+2026-05-16 12:34:56.789 ERROR  [db] connect failed: ConnectionRefused
+
+# HTTP access format (2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR, other=DEBUG):
+2026-05-16 12:34:56.789 INFO   GET /api/users 200 512 "MyBot/2.0" "http://example.com"
+2026-05-16 12:34:56.789 WARN   GET /missing 404 0 "-" "-"
+2026-05-16 12:34:56.789 ERROR  POST /crash 500 0 "-" "-"
+```
+
+| Config field | Default | Description |
+| :- | :- | :- |
+| `console` | `.OFF` | Console mode: `.OFF`, `.DEBUG_ONLY` (debug builds only), `.ALWAYS` |
+| `console_min_level` | `.INFO` | Minimum level for console output |
+| `save_path` | `""` | Directory root for log files. Must already exist — logger does not create it. `""` disables file logging |
+| `save_file` | `"log"` | Base filename. `"log"` writes `log-000000.log`, `log-000001.log`, ... |
+| `save_min_level` | `.INFO` | Minimum level for file output |
+| `max_lines` | 1,000,000 | Lines per file before rotating to the next sequence number |
+
+Levels: `.DEBUG`(0) `.INFO`(1) `.WARN`(2) `.ERROR`(3). The file backend uses a 64 KB write buffer flushed on date rollover, sequence rotation, explicit `logger.flush()`, or `logger.deinit()`.
+
+<br>
+
 ## Testing
 
 ```sh
@@ -855,18 +959,6 @@ Handlers receive `ctx.allocator`, an arena reset between requests. Any allocatio
 `config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet — `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp.md`](docs/hld-udp.md) for the full explanation and PoC.
 
 For full memory details see [`docs/hld-http.md`](docs/hld-http.md) and [`docs/hld-udp.md`](docs/hld-udp.md). For threading models see [`docs/concurrency.md`](docs/concurrency.md).
-
-<br>
-
-## Design Considerations
-
-Not active tasks: reminders for future decisions.
-
-**AoS (Array of Structures):** remaining sites (`extra_buf`, `fields`, `conns`, ...). When any becomes a throughput bottleneck, a SoA layout is a candidate. `routes` was converted to `MultiArrayList` (SoA) so dispatch passes scan only the hot field slice.
-
-**OoP (Object-oriented Patterns):** most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
-
-**DoD (Data-Oriented Design):** the direction to move when data layout matters more than encapsulation. For the HTTP layer specifically, the idea is a dedicated *http engine*: a lower-level, data-oriented core sitting below `server.zig`. Not started. Revisit when the current baseline hits a real ceiling.
 
 <br>
 
