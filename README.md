@@ -580,7 +580,7 @@ if (parser.getField("file")) |f| {
     // or build it dynamically:
     //   const filename = try std.fmt.allocPrint(ctx.allocator, "{s}_{s}", .{ sessionid, f.filename orelse "upload" });
     const filename = f.filename orelse "upload";
-    const path = try zix.utils.file.saveFile(ctx.io, ctx.allocator, "./public/u", filename, f.data);
+    const path = try zix.utils.file.save(ctx.io, ctx.allocator, "./public/u", filename, f.data);
     _ = path; // arena-allocated, valid for this request
 }
 ```
