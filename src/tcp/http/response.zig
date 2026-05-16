@@ -86,6 +86,8 @@ pub const Response = struct {
     date_cache: ?[]const u8 = null,
     /// Set to true by stream() so handleConnection breaks the keep-alive loop after the handler exits.
     streaming: bool = false,
+    /// Body bytes set by send(). Read by the server to populate the access log.
+    bytes_written: usize = 0,
 
     pub fn init(fd: std.posix.fd_t, req_keep_alive: bool, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) Response {
         return .{
@@ -135,6 +137,7 @@ pub const Response = struct {
     /// Fast path (no extra headers, body fits in staging buffer): one posix.write() syscall.
     /// Slow path (extra headers or large body): fixed headers + extra headers + body.
     pub fn send(self: *Response, body_data: []const u8) !void {
+        self.bytes_written = body_data.len;
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 

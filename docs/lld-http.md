@@ -108,6 +108,10 @@ loop:
       g. if res.streaming: break  // SSE handler opened a stream, connection closes on handler return
       h. if public_dir and not dispatched: static.serve(...)
       i. if not served: 404
+      j. if cfg.logger: lg.access(method_str, req.path(), status_code, res.bytes_written, ua, origin)
+            method_str: stringFromEnum(req.method())
+            ua:     req.header("user-agent") orelse ""
+            origin: req.header("origin") orelse ""
 ```
 
 Stack buffers live on the pool-thread stack for the duration of the connection. Heap buffers are freed on connection close. The arena is reset between requests and deinited when `handleConnection` returns.
@@ -192,7 +196,7 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 ### Fields
 
-`Response` carries `io: std.Io` (retained for potential future use, the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits.
+`Response` carries `io: std.Io` (retained for potential future use, the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits. `bytes_written: usize` is set to `body_data.len` at the start of `send()` so `handleConnection` can read the response body size for access logging without introspecting the write buffer.
 
 ### extra_buf (lazily-grown arena slice)
 

@@ -53,6 +53,8 @@ pub fn build(b: *std.Build) void {
         "tests/integration/uds/config_test.zig",
         // channel
         "tests/integration/channel/channel_test.zig",
+        // logger
+        "tests/integration/logger/logger_test.zig",
     };
 
     inline for (integration_tests) |src| {
@@ -88,6 +90,8 @@ pub fn build(b: *std.Build) void {
         "tests/behaviour/uds/config_test.zig",
         // channel
         "tests/behaviour/channel/channel_test.zig",
+        // logger
+        "tests/behaviour/logger/logger_test.zig",
     };
 
     inline for (behaviour_tests) |src| {
@@ -122,6 +126,8 @@ pub fn build(b: *std.Build) void {
         "tests/edge/uds/config_test.zig",
         // channel
         "tests/edge/channel/channel_test.zig",
+        // logger
+        "tests/edge/logger/logger_test.zig",
     };
 
     inline for (edge_tests) |src| {

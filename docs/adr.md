@@ -50,7 +50,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Consequences:**
 - Handlers never call `free`. All per-request memory is reclaimed automatically at request end.
-- `ctx.allocator` allocations must not escape the request (e.g. stored in a global). The name `ctx.allocator` is intentionally brief, the arena lifetime constraint is documented rather than encoded in the name. (A rename to `ctx.request_arena` was considered and declined: see `rnd/http_specification.md`.)
+- `ctx.allocator` allocations must not escape the request (e.g. stored in a global). The name `ctx.allocator` is intentionally brief, the arena lifetime constraint is documented rather than encoded in the name. (A rename to `ctx.request_arena` was considered and declined: the lifetime constraint is enforced by documentation and convention.)
 - Retain-capacity reset amortizes arena backing block growth over the connection lifetime.
 
 ---
@@ -66,7 +66,7 @@ Each ADR records a significant design decision: the context that made it necessa
 **Consequences:**
 - Exact and prefix routes are deterministic regardless of order. This covers the common case (most routes are exact or prefix).
 - Param routes require care: more-literal patterns must be registered before all-param patterns of the same depth. This is documented and demonstrated in examples.
-- The 3-pass design was considered for replacement with first-match-wins (see `rnd/http_specification.md`). Deferred: the change would be breaking and the benefit is marginal for typical route counts.
+- The 3-pass design was considered for replacement with first-match-wins. Deferred: the change would be breaking and the benefit is marginal for typical route counts.
 
 ---
 
@@ -348,10 +348,10 @@ SSE connections are long-lived (seconds to minutes per stream). `.POOL`'s blocki
 
 `SO_RCVTIMEO` was investigated and rejected: on Linux, `SO_RCVTIMEO` fires `EAGAIN`, which `std.Io.Threaded.netReadPosix` maps to `errnoBug` (a panic in debug mode and `error.Unexpected` in release). It cannot be used on blocking sockets in this stack. `stream.shutdown(.both)` is the correct interruption mechanism: on Linux it causes a blocked `readv()` to return 0 (EOF), which propagates as `error.HttpConnectionClosing` or `error.ReadFailed` through `std.http.Server.receiveHead()`.
 
-Four options were prototyped and tested in `rnd/http_timeout_model_{a,b,c,d}.zig`.
+Four options were prototyped and tested.
 
 **Option A: Connection max-age (rejected):**
-A deadline is set once at accept time and checked at the top of each keep-alive loop iteration. This is a connection lifetime cap, not a per-idle-gap timeout. The check fires only when `receiveHead()` returns, so it cannot interrupt a client that goes permanently idle. A thread is held indefinitely inside `receiveHead()` once the client stops sending. Option A was kept in `rnd/` as documentation of the limitation, it is not wired into the server.
+A deadline is set once at accept time and checked at the top of each keep-alive loop iteration. This is a connection lifetime cap, not a per-idle-gap timeout. The check fires only when `receiveHead()` returns, so it cannot interrupt a client that goes permanently idle. A thread is held indefinitely inside `receiveHead()` once the client stops sending. Option A is not wired into the server.
 
 **Option C: Watchdog thread per connection (rejected):**
 Spawning one OS thread per accepted connection eliminates the permanent-idle problem. Each watchdog sleeps for `timeout_ms` and calls `stream.shutdown(.both)` if the connection has not finished. Tested and working: fires at exactly 5.006s. Rejected because it adds one OS thread per active connection (with a 64KB virtual stack each), which multiplies memory pressure under load. Option D achieves the same coverage at zero extra threads.
@@ -369,8 +369,7 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 - Layer D fires `shutdown(.both)` which causes `receiveHead()` to return `error.ReadFailed`. This error case is now handled in `handleConnection`.
 - Layer B is cooperative: a handler that does not call `ctx.timedOut()` is never interrupted. This is intentional (forced cancellation across arbitrary Zig code is not safe).
 - `conn_timeout_ms` should be >= `handler_timeout_ms`. If D fires while the handler is mid-response, the connection closes abruptly instead of sending a clean 408.
-- Option C remains available in `rnd/http_timeout_model_c.zig` for reference. It is the correct choice for deployments where per-connection jitter must be bounded to exact milliseconds rather than `[deadline, deadline + 500ms]`.
-- Reference implementations and test instructions: `rnd/http_timeout_model_{a,b,c,d,bd}.zig`. Design rationale and API corrections discovered during testing: `rnd/timeout_specification.md`.
+- Option C is the correct choice for deployments where per-connection jitter must be bounded to exact milliseconds rather than `[deadline, deadline + 500ms]`.
 
 ---
 

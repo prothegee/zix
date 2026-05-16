@@ -1,11 +1,15 @@
 //! zix http context
 
 const std = @import("std");
+const Logger = @import("../../logger/logger.zig").Logger;
 
 pub const Context = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     response_sent: bool = false,
+    /// Logger injected by the server from HttpServerConfig.logger.
+    /// Null when the server was started without a logger.
+    logger: ?*Logger = null,
     /// Raw TCP stream, available for WebSocket upgrade handlers.
     /// Normal HTTP handlers should not use this directly.
     stream: std.Io.net.Stream = undefined,
