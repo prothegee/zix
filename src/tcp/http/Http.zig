@@ -34,3 +34,4 @@ pub const Content = content;
 pub const Multipart = upload.MultipartParser;
 pub const MultipartField = upload.MultipartField;
 pub const WebSocket = @import("websocket.zig");
+pub const Logger = @import("../../logger/Logger.zig");
