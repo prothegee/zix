@@ -94,10 +94,10 @@ const t = try std.Thread.spawn(.{}, workerFn, .{ &ch, io });
 
 ## Relation to Server Concurrency Models
 
-Channel is orthogonal to Model 1 / Model 2. It does not replace or extend either model. It is an in-process coordination primitive that can be used alongside either.
+Channel is orthogonal to the HTTP dispatch model (`.POOL`, `.ASYNC`, `.MIXED`). It does not replace or extend any model. It is an in-process coordination primitive that can be used alongside any of them.
 
 ```
-Model 1 or Model 2 server
+.POOL / .ASYNC / .MIXED server
   handler task A  -->  Channel(Event)  -->  background task B
 ```
 
