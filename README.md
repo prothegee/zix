@@ -118,7 +118,7 @@ zig fetch --save "git+https://codeberg.org/prothegee/zix#0.1.x" # upstream v0.1.
 
 <br>
 
-Add to your project (`build.zig` file):
+<!-- Add to your project (`build.zig` file):
 
 ```sh
 const zix = b.dependency("zix", .{
@@ -127,7 +127,7 @@ const zix = b.dependency("zix", .{
 });
 
 exe.root_module.addImport("zix", httpz.module("zix"));
-```
+``` -->
 
 <br>
 
