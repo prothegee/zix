@@ -39,6 +39,39 @@
 
 ## A Reason.. A Motivation...
 
+```
+The way we think, is how system start.
+A time to read and think from existing lines,
+made "us" re-think, arguing, and approaching for the flow of the program.
+
+When "our" next generation doesn't want to learn the past and present. What will happen?
+If they don't want to use/learn/be eager about the language and the build system, they'll ..?
+
+To be modern with less hassle, "magic" should less or more?
+
+Zig (also another programming language) could complement existing program
+and able to create a good program, but when critical-performance our options is less/hard.
+
+At early Zig (before 0.16.x), I enjoyed the language.
+But "variant of colors" made me go back to Go & C++ again.
+So in mid 2025 the plan is only idea and some architectural design.
+
+Most of my work are in backend & frontend.
+Working in monolith, microservice, and modular-microservice.
+
+Then in 2026 early March, I started the march.
+```
+<!--
+Why not rust:
+- Too many "just use tokio/smol" made me think again.
+- My code in rust as professional is still 70% sync, less async.
+- Rust in my case to complement existing system, QR & Barcode reader/writer replacing C++.
+-->
+
+<br>
+
+> Principles for the motivations:
+
 __*1. Explicit Over Implicit.*__
 
 __*2. Modular & Maintanable.*__
@@ -51,13 +84,13 @@ __*5. Modern Efficient Concurrency Model.*__
 
 __*6. Predictable, Transparent Memory Management.*__
 
-<!-- > Valued performance, clarity, and control. -->
+> We valued clarity, control, and performance.
 
 <br>
 
 ## Requirements
 
-- Zig 0.16.x
+- Zig >= 0.16.x
 
 <br>
 
@@ -70,12 +103,14 @@ __*6. Predictable, Transparent Memory Management.*__
 
 ## Important Contribution Notes
 
-- Always push Zig and their std.
+- Zig should be the ecosystem.
 - Single file, single responsibility.
-- Significant change/s required RnD/PoC.
+- Always use and push Zig and their std.
+- Any significant change/s required RnD/PoC.
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
+- If bias/ambigue, try to discuss it. At least involved with 2-3 entities.
 
 <br>
 
