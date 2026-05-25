@@ -4,26 +4,9 @@ const std = @import("std");
 const HeaderSize = @import("response.zig").HeaderSize;
 const RequestHeaderSize = @import("parser.zig").RequestHeaderSize;
 const Logger = @import("../../logger/logger.zig").Logger;
+pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 // --------------------------------------------------------- //
-
-/// Connection dispatch model. Controls how accepted connections are handed off to handlers.
-/// Zero-value (.POOL = 0) is the default — zero-init structs get the right default automatically.
-pub const DispatchModel = enum(u8) {
-    /// N accept threads (SO_REUSEPORT) push connections to a shared ConnQueue.
-    /// M pool threads block on the queue and handle each connection synchronously.
-    /// Best for throughput under high connection counts.
-    POOL  = 0,
-    /// Single accept thread dispatches each connection via io.async().
-    /// workers and pool_size are ignored.
-    /// Best for low latency at moderate connection counts.
-    /// Preferred for SSE and WebSocket (long-lived connections occupy pool threads in POOL).
-    ASYNC = 1,
-    /// N accept threads (SO_REUSEPORT) each dispatch via io.async() directly — no ConnQueue.
-    /// pool_size is ignored.
-    /// Balanced throughput and latency; higher jitter than POOL under saturation.
-    MIXED = 2,
-};
 
 /// Configuration for an HTTP server instance.
 /// Pass to Http.Server.init(). Fields without defaults (allocator, ip, port) are required.
@@ -86,5 +69,3 @@ pub const HttpServerConfig = struct {
     /// Caller owns the Logger and must ensure it outlives the server.
     logger: ?*Logger = null,
 };
-
-// --------------------------------------------------------- //

@@ -190,11 +190,11 @@ test "zix test: http router matchParam" {
     const allocator = arena.allocator();
 
     var req = Request{
-        .buf        = "",
-        .head       = std.mem.zeroes(@import("parser.zig").ParsedHead),
-        .fd         = undefined,
+        .buf = "",
+        .head = std.mem.zeroes(@import("parser.zig").ParsedHead),
+        .fd = undefined,
         .buf_filled = 0,
-        .allocator  = allocator,
+        .allocator = allocator,
     };
 
     try std.testing.expect(try matchParam("/users/:id", "/users/alice", &req));

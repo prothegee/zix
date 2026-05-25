@@ -3,13 +3,13 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9000;
-const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
+const DISPATCH_MODEL: zix.Tcp.DispatchModel = .POOL;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
-const WORKERS: usize = 0;    // 0 = auto (cpu_count accept threads)
-const POOL_SIZE: usize = 0;  // 0 = auto (cpu_count * 20 pool threads)
+const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
+const POOL_SIZE: usize = 0; // 0 = auto (cpu_count * 20 pool threads)
 
 // Logger config — uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -32,7 +32,21 @@ const POOL_SIZE: usize = 0;  // 0 = auto (cpu_count * 20 pool threads)
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
+    // res.setContentType(.TEXT_PLAIN); // need apple to apple?
     try res.send("Hello, World!");
+}
+
+// curl usage: curl -X GET "http://localhost:9000/echo"
+pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    _ = ctx;
+    res.setContentType(.APPLICATION_JSON);
+    res.setKeepAlive(true);
+    try res.addHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'");
+    try res.addHeader("X-Content-Type-Options", "nosniff");
+    try res.addHeader("X-Frame-Options", "DENY");
+    try res.addHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    try res.send("{\"status\":\"ok\"}");
 }
 
 // curl usage: curl -X GET "http://localhost:9000/about"
@@ -49,7 +63,7 @@ pub fn main(process: std.process.Init) !void {
     defer arena.deinit();
 
     // Uncomment this to add logger (console only — no save_path means no file output):
-    // var logger = try zix.Logger.Logger.init(arena.allocator(), .{
+    // var logger = try zix.Logger.init(arena.allocator(), .{
     //     .console        = .ALWAYS,
     //     .console_min_level = .INFO,
     // });
@@ -57,7 +71,7 @@ pub fn main(process: std.process.Init) !void {
 
     // Uncomment this to add logger with file output (createLogDir must run first):
     // createLogDir(process.io);
-    // var logger = try zix.Logger.Logger.init(arena.allocator(), .{
+    // var logger = try zix.Logger.init(arena.allocator(), .{
     //     .save_path      = LOG_DIR,
     //     .save_file      = LOG_FILE,
     //     .save_min_level = .INFO,
@@ -82,6 +96,7 @@ pub fn main(process: std.process.Init) !void {
     defer server.deinit();
 
     server.registerHandler("/", homeHandler);
+    server.registerHandler("/echo", echoHandler);
     server.registerHandler("/about", aboutHandler);
 
     try server.run();

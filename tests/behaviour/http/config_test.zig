@@ -58,13 +58,13 @@ test "zix behaviour: ServerConfig, dispatch_model defaults to POOL" {
         .ip = "127.0.0.1",
         .port = 9000,
     };
-    try std.testing.expectEqual(zix.Http.DispatchModel.POOL, cfg.dispatch_model);
+    try std.testing.expectEqual(zix.Tcp.DispatchModel.POOL, cfg.dispatch_model);
 }
 
 test "zix behaviour: DispatchModel, integer backing values (POOL=0 is zero-value)" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Http.DispatchModel.POOL));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Http.DispatchModel.ASYNC));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Http.DispatchModel.MIXED));
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.POOL));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
 }
 
 test "zix behaviour: ServerConfig, max_response_headers defaults to COMMON (32)" {

@@ -31,12 +31,14 @@ zig-pkg
 
 ## proj.
 /public
+/*poc*
 
 ##
 ## extension
 ##
 *.bak*
 *.zip
+*.pem
 
 *perf.*
 *Zone.Identifier

@@ -23,7 +23,7 @@ const MAX_KERNEL_BACKLOG: usize = 1024;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
-const WORKERS: usize = 0;   // ignored by .ASYNC
+const WORKERS: usize = 0; // ignored by .ASYNC
 const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //

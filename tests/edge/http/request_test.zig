@@ -38,7 +38,7 @@ test "zix edge: body(), chunked invalid hex returns empty string" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "zz\r\nbaddata\r\n0\r\n\r\n",
+            "zz\r\nbaddata\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const b = try req.body();
@@ -50,7 +50,7 @@ test "zix edge: body(), chunked missing terminal chunk returns partial data" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "5\r\nhello\r\n",
+            "5\r\nhello\r\n",
         arena.allocator(),
     );
     const b = try req.body();
@@ -62,7 +62,7 @@ test "zix edge: body(), chunked single-byte chunks" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n",
+            "1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const b = try req.body();

@@ -13,17 +13,17 @@ pub const MAX_HEADERS_U8: u8 = MAX_HEADERS;
 /// Request header cap tier. Controls how many headers the server accepts before rejecting with 431.
 /// Mirrors HeaderSize for response headers. CUSTOM values above 64 are silently capped at 64.
 pub const RequestHeaderSize = union(enum) {
-    MINIMAL,    // 16
-    COMMON,     // 32
-    LARGE,      // 64 (parser storage limit)
+    MINIMAL, // 16
+    COMMON, // 32
+    LARGE, // 64 (parser storage limit)
     CUSTOM: u8,
 
     pub fn value(self: RequestHeaderSize) u8 {
         return switch (self) {
             .MINIMAL => 16,
-            .COMMON  => 32,
-            .LARGE   => MAX_HEADERS,
-            .CUSTOM  => |n| @min(n, MAX_HEADERS),
+            .COMMON => 32,
+            .LARGE => MAX_HEADERS,
+            .CUSTOM => |n| @min(n, MAX_HEADERS),
         };
     }
 };
@@ -47,10 +47,10 @@ pub const ParsedHead = struct {
     query_len: u16,
     header_count: u8,
     headers: [MAX_HEADERS]HeaderEntry,
-    body_offset: u16,   // byte index of first body byte (header_end + 4)
-    keep_alive: bool,   // false when Connection: close was sent, true otherwise (HTTP/1.1 default)
+    body_offset: u16, // byte index of first body byte (header_end + 4)
+    keep_alive: bool, // false when Connection: close was sent, true otherwise (HTTP/1.1 default)
     content_length: u64,
-    chunked: bool,      // true when Transfer-Encoding: chunked
+    chunked: bool, // true when Transfer-Encoding: chunked
 };
 
 pub const ParseError = error{
@@ -124,15 +124,15 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         const name_len: u8 = @intCast(colon);
         const val_len: u16 = @intCast(line.len - val_off);
         headers[header_count] = .{
-            .name_start  = @intCast(pos),
-            .name_len    = name_len,
+            .name_start = @intCast(pos),
+            .name_len = name_len,
             .value_start = @intCast(pos + val_off),
-            .value_len   = val_len,
+            .value_len = val_len,
         };
         header_count += 1;
 
         // Pre-parse known headers to avoid repeat scans on the hot path.
-        const name  = line[0..colon];
+        const name = line[0..colon];
         const value = line[val_off..];
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             content_length = std.fmt.parseInt(u64, value, 10) catch 0;
@@ -146,17 +146,17 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     }
 
     return ParsedHead{
-        .method        = method_code,
-        .path_start    = path_abs,
-        .path_len      = path_len,
-        .query_start   = query_start,
-        .query_len     = query_len,
-        .header_count  = header_count,
-        .headers       = headers,
-        .body_offset   = @intCast(header_end + 4),
-        .keep_alive     = keep_alive,
+        .method = method_code,
+        .path_start = path_abs,
+        .path_len = path_len,
+        .query_start = query_start,
+        .query_len = query_len,
+        .header_count = header_count,
+        .headers = headers,
+        .body_offset = @intCast(header_end + 4),
+        .keep_alive = keep_alive,
         .content_length = content_length,
-        .chunked        = chunked,
+        .chunked = chunked,
     };
 }
 
@@ -198,20 +198,11 @@ pub fn dechunk(raw: []const u8, out: []u8) DechunkError!usize {
 
 fn parseMethod(s: []const u8) ?Method.Code {
     return switch (s.len) {
-        3 => if (std.mem.eql(u8, s, "GET")) .GET
-             else if (std.mem.eql(u8, s, "PUT")) .PUT
-             else null,
-        4 => if (std.mem.eql(u8, s, "HEAD")) .HEAD
-             else if (std.mem.eql(u8, s, "POST")) .POST
-             else null,
-        5 => if (std.mem.eql(u8, s, "PATCH")) .PATCH
-             else if (std.mem.eql(u8, s, "TRACE")) .TRACE
-             else null,
-        6 => if (std.mem.eql(u8, s, "DELETE")) .DELETE
-             else null,
-        7 => if (std.mem.eql(u8, s, "OPTIONS")) .OPTIONS
-             else if (std.mem.eql(u8, s, "CONNECT")) .CONNECT
-             else null,
+        3 => if (std.mem.eql(u8, s, "GET")) .GET else if (std.mem.eql(u8, s, "PUT")) .PUT else null,
+        4 => if (std.mem.eql(u8, s, "HEAD")) .HEAD else if (std.mem.eql(u8, s, "POST")) .POST else null,
+        5 => if (std.mem.eql(u8, s, "PATCH")) .PATCH else if (std.mem.eql(u8, s, "TRACE")) .TRACE else null,
+        6 => if (std.mem.eql(u8, s, "DELETE")) .DELETE else null,
+        7 => if (std.mem.eql(u8, s, "OPTIONS")) .OPTIONS else if (std.mem.eql(u8, s, "CONNECT")) .CONNECT else null,
         else => null,
     };
 }
@@ -271,12 +262,12 @@ test "zix test: parser keep_alive false on Connection: close" {
 
 test "zix test: parser all methods" {
     const cases = [_]struct { raw: []const u8, code: Method.Code }{
-        .{ .raw = "GET / HTTP/1.1\r\n\r\n",     .code = .GET },
-        .{ .raw = "HEAD / HTTP/1.1\r\n\r\n",    .code = .HEAD },
-        .{ .raw = "POST / HTTP/1.1\r\n\r\n",    .code = .POST },
-        .{ .raw = "PUT / HTTP/1.1\r\n\r\n",     .code = .PUT },
-        .{ .raw = "DELETE / HTTP/1.1\r\n\r\n",  .code = .DELETE },
-        .{ .raw = "PATCH / HTTP/1.1\r\n\r\n",   .code = .PATCH },
+        .{ .raw = "GET / HTTP/1.1\r\n\r\n", .code = .GET },
+        .{ .raw = "HEAD / HTTP/1.1\r\n\r\n", .code = .HEAD },
+        .{ .raw = "POST / HTTP/1.1\r\n\r\n", .code = .POST },
+        .{ .raw = "PUT / HTTP/1.1\r\n\r\n", .code = .PUT },
+        .{ .raw = "DELETE / HTTP/1.1\r\n\r\n", .code = .DELETE },
+        .{ .raw = "PATCH / HTTP/1.1\r\n\r\n", .code = .PATCH },
         .{ .raw = "OPTIONS / HTTP/1.1\r\n\r\n", .code = .OPTIONS },
     };
     for (cases) |c| {

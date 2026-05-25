@@ -36,7 +36,7 @@ test "zix integration: body(), chunked single chunk decoded correctly" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "5\r\nhello\r\n0\r\n\r\n",
+            "5\r\nhello\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const b = try req.body();
@@ -48,7 +48,7 @@ test "zix integration: body(), chunked multiple chunks assembled" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n",
+            "3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const b = try req.body();
@@ -60,7 +60,7 @@ test "zix integration: body(), chunked empty body returns empty string" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST /empty HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "0\r\n\r\n",
+            "0\r\n\r\n",
         arena.allocator(),
     );
     const b = try req.body();
