@@ -3,6 +3,7 @@
 const logger = @import("logger.zig");
 
 pub const Logger = logger.Logger;
-pub const Level = logger.Level;
-pub const ConsoleMode = logger.ConsoleMode;
-pub const Config = logger.LoggerConfig;
+pub const Level = Logger.Level;
+pub const ConsoleMode = Logger.ConsoleMode;
+pub const Dir = Logger.Dir;
+pub const Config = Logger.Config;
