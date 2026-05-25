@@ -51,9 +51,15 @@ pub const Request = struct {
             for (self.head.headers[0..self.head.header_count]) |h| {
                 const n = self.buf[h.name_start..][0..h.name_len];
                 const v = self.buf[h.value_start..][0..h.value_len];
-                const lower = self.allocator.alloc(u8, n.len) catch { ok = false; break; };
+                const lower = self.allocator.alloc(u8, n.len) catch {
+                    ok = false;
+                    break;
+                };
                 _ = std.ascii.lowerString(lower, n);
-                map.put(self.allocator, lower, v) catch { ok = false; break; };
+                map.put(self.allocator, lower, v) catch {
+                    ok = false;
+                    break;
+                };
             }
             if (ok) self.header_index = map;
         }
@@ -162,11 +168,11 @@ pub const Request = struct {
     pub fn fromRaw(buf: []const u8, allocator: std.mem.Allocator) !Request {
         const head = (try parser.parse(buf, parser.MAX_HEADERS_U8)) orelse return error.Incomplete;
         return .{
-            .buf        = buf,
-            .head       = head,
-            .fd         = undefined,
+            .buf = buf,
+            .head = head,
+            .fd = undefined,
             .buf_filled = buf.len,
-            .allocator  = allocator,
+            .allocator = allocator,
         };
     }
 
@@ -196,7 +202,7 @@ pub const Request = struct {
                 if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
                     const val = pair[eq + 1 ..];
                     try list.append(allocator, .{
-                        .key   = pair[0..eq],
+                        .key = pair[0..eq],
                         .value = if (val.len > 0) val else null,
                     });
                 } else {
@@ -221,11 +227,11 @@ test "zix test: http request path and query" {
     const raw = "GET /api/users/123?name=alice&flag HTTP/1.1\r\nHost: localhost\r\n\r\n";
     const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
     var req = Request{
-        .buf        = raw,
-        .head       = head,
-        .fd         = undefined,
+        .buf = raw,
+        .head = head,
+        .fd = undefined,
         .buf_filled = raw.len,
-        .allocator  = allocator,
+        .allocator = allocator,
     };
 
     try std.testing.expectEqual(Method.Code.GET, req.method());
@@ -256,11 +262,11 @@ test "zix test: http request header lookup" {
     const raw = "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n";
     const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
     var req = Request{
-        .buf        = raw,
-        .head       = head,
-        .fd         = undefined,
+        .buf = raw,
+        .head = head,
+        .fd = undefined,
         .buf_filled = raw.len,
-        .allocator  = arena.allocator(),
+        .allocator = arena.allocator(),
     };
     try std.testing.expectEqualStrings("example.com", req.header("host").?);
     try std.testing.expectEqualStrings("example.com", req.header("Host").?);
