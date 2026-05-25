@@ -52,7 +52,7 @@ test "zix behaviour: body(), chunked produces same payload as equivalent Content
 
     var chunked_req = try zix.Http.Request.fromRaw(
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "5\r\nworld\r\n0\r\n\r\n",
+            "5\r\nworld\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const chunked_body = try chunked_req.body();
@@ -72,7 +72,7 @@ test "zix behaviour: body(), chunked second call returns cached result" {
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-        "4\r\ntest\r\n0\r\n\r\n",
+            "4\r\ntest\r\n0\r\n\r\n",
         arena.allocator(),
     );
     const b1 = try req.body();
@@ -83,12 +83,12 @@ test "zix behaviour: body(), chunked second call returns cached result" {
 test "zix behaviour: method(), resolves each method" {
     const cases = .{
         .{ "DELETE / HTTP/1.1\r\nHost: x\r\n\r\n", "DELETE" },
-        .{ "PATCH / HTTP/1.1\r\nHost: x\r\n\r\n",  "PATCH"  },
-        .{ "PUT / HTTP/1.1\r\nHost: x\r\n\r\n",    "PUT"    },
-        .{ "OPTIONS / HTTP/1.1\r\nHost: x\r\n\r\n","OPTIONS" },
-        .{ "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n",   "HEAD"   },
-        .{ "GET / HTTP/1.1\r\nHost: x\r\n\r\n",    "GET"    },
-        .{ "POST / HTTP/1.1\r\nHost: x\r\n\r\n",   "POST"   },
+        .{ "PATCH / HTTP/1.1\r\nHost: x\r\n\r\n", "PATCH" },
+        .{ "PUT / HTTP/1.1\r\nHost: x\r\n\r\n", "PUT" },
+        .{ "OPTIONS / HTTP/1.1\r\nHost: x\r\n\r\n", "OPTIONS" },
+        .{ "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n", "HEAD" },
+        .{ "GET / HTTP/1.1\r\nHost: x\r\n\r\n", "GET" },
+        .{ "POST / HTTP/1.1\r\nHost: x\r\n\r\n", "POST" },
     };
     inline for (cases) |c| {
         const req = try zix.Http.Request.fromRaw(c[0], std.testing.allocator);
