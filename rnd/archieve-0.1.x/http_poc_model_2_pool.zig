@@ -15,7 +15,7 @@ const std = @import("std");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9101;
-const WORKERS: usize = 0;   // 0 = cpu_count accept threads
+const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = cpu_count * 2 * 10 pool threads
 
 // --------------------------------------------------------- //
@@ -66,18 +66,21 @@ fn parse(buf: []const u8) ParseError!?ParsedHead {
         const line_end = std.mem.indexOfPos(u8, head_buf, pos, "\r\n") orelse head_buf.len;
         const line = head_buf[pos..line_end];
         if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse { pos = line_end + 2; continue; };
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
+            pos = line_end + 2;
+            continue;
+        };
         var val_off = colon + 1;
         while (val_off < line.len and line[val_off] == ' ') val_off += 1;
         if (header_count >= MAX_HEADERS) return error.TooManyHeaders;
         headers[header_count] = .{
-            .name_start  = @intCast(pos),
-            .name_len    = @intCast(colon),
+            .name_start = @intCast(pos),
+            .name_len = @intCast(colon),
             .value_start = @intCast(pos + val_off),
-            .value_len   = @intCast(line.len - val_off),
+            .value_len = @intCast(line.len - val_off),
         };
         header_count += 1;
-        const name  = line[0..colon];
+        const name = line[0..colon];
         const value = line[val_off..];
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             content_length = std.fmt.parseInt(u64, value, 10) catch 0;
@@ -88,12 +91,12 @@ fn parse(buf: []const u8) ParseError!?ParsedHead {
     }
 
     return ParsedHead{
-        .path_start     = path_abs,
-        .path_len       = path_len,
-        .header_count   = header_count,
-        .headers        = headers,
-        .body_offset    = @intCast(header_end + 4),
-        .keep_alive     = keep_alive,
+        .path_start = path_abs,
+        .path_len = path_len,
+        .header_count = header_count,
+        .headers = headers,
+        .body_offset = @intCast(header_end + 4),
+        .keep_alive = keep_alive,
         .content_length = content_length,
     };
 }
@@ -110,10 +113,10 @@ fn formatHttpDate(secs: u64, buf: []u8) []u8 {
     const ep = std.time.epoch;
     const es = ep.EpochSeconds{ .secs = secs };
     const epoch_day = es.getEpochDay();
-    const year_day  = epoch_day.calculateYearDay();
+    const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
-    const day_secs  = es.getDaySeconds();
-    const day_names   = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const day_secs = es.getDaySeconds();
+    const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dow = (@as(u64, epoch_day.day) % 7 + 4) % 7;
     return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
@@ -187,7 +190,10 @@ const ConnQueue = struct {
     fn pop(self: *ConnQueue, io: std.Io) ?std.Io.net.Stream {
         self.mutex.lockUncancelable(io);
         while (self.items.items.len == 0) {
-            if (self.closed) { self.mutex.unlock(io); return null; }
+            if (self.closed) {
+                self.mutex.unlock(io);
+                return null;
+            }
             self.ready.waitUncancelable(io, &self.mutex);
         }
         const stream = self.items.orderedRemove(0);
@@ -214,7 +220,9 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io) void {
     const fd = stream.socket.handle;
 
     std.posix.setsockopt(
-        fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY,
+        fd,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
         std.mem.asBytes(&@as(c_int, 1)),
     ) catch {};
 
@@ -238,7 +246,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io) void {
 
         const head = parse(read_buf[0..filled]) catch break orelse break;
 
-        const idx  = g_date_active.load(.acquire);
+        const idx = g_date_active.load(.acquire);
         const date = g_date_bufs[idx][0..g_date_lens[idx]];
 
         var resp: [512]u8 = undefined;
@@ -271,7 +279,9 @@ const AcceptCtx = struct { queue: *ConnQueue, io: std.Io };
 fn acceptEntry(ctx: AcceptCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, IP, PORT) catch return;
     var net_server = addr.listen(ctx.io, .{
-        .mode = .stream, .kernel_backlog = 4096, .reuse_address = true,
+        .mode = .stream,
+        .kernel_backlog = 4096,
+        .reuse_address = true,
     }) catch return;
     defer net_server.deinit(ctx.io);
     while (true) {
@@ -285,7 +295,7 @@ fn acceptEntry(ctx: AcceptCtx) void {
 pub fn main() !void {
     const cpu = try std.Thread.getCpuCount();
     const worker_count = if (WORKERS == 0) cpu else WORKERS;
-    const pool_size    = if (POOL_SIZE == 0) cpu * 2 * 10 else POOL_SIZE;
+    const pool_size = if (POOL_SIZE == 0) cpu * 2 * 10 else POOL_SIZE;
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();

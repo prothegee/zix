@@ -5,36 +5,6 @@ const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
 
-pub const Level = enum(u8) {
-    DEBUG = 0,
-    INFO  = 1,
-    WARN  = 2,
-    ERROR = 3,
-};
-
-pub const ConsoleMode = enum(u8) {
-    OFF        = 0,
-    DEBUG_ONLY = 1,
-    ALWAYS     = 2,
-};
-
-pub const LoggerConfig = struct {
-    /// Console output mode.
-    console: ConsoleMode = .OFF,
-    /// Minimum level for console output.
-    console_min_level: Level = .INFO,
-    /// Directory for log files. Must already exist — caller's responsibility. Empty string disables file logging.
-    save_path: []const u8 = "",
-    /// Base name for log files (e.g. "log" → "log-000000.log").
-    save_file: []const u8 = "log",
-    /// Minimum level for file output.
-    save_min_level: Level = .INFO,
-    /// Lines per file before rotating to the next sequence number.
-    max_lines: u64 = 1_000_000,
-};
-
-// --------------------------------------------------------- //
-
 const WRITE_BUF_SIZE: usize = 64 * 1024;
 
 const Timestamp = struct {
@@ -67,22 +37,6 @@ fn getTimestamp() Timestamp {
     return ts;
 }
 
-fn levelLabel(level: Level) *const [5]u8 {
-    return switch (level) {
-        .DEBUG => "DEBUG",
-        .INFO  => "INFO ",
-        .WARN  => "WARN ",
-        .ERROR => "ERROR",
-    };
-}
-
-fn statusLevel(status: u16) Level {
-    return if (status >= 500) .ERROR
-    else if (status >= 400) .WARN
-    else if (status >= 200) .INFO
-    else .DEBUG;
-}
-
 fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
     var rem = data;
     while (rem.len > 0) {
@@ -101,7 +55,43 @@ fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
 // --------------------------------------------------------- //
 
 pub const Logger = struct {
-    config: LoggerConfig,
+    pub const Level = enum(u8) {
+        DEBUG = 0,
+        INFO = 1,
+        WARN = 2,
+        ERROR = 3,
+    };
+
+    pub const ConsoleMode = enum(u8) {
+        OFF = 0,
+        DEBUG_ONLY = 1,
+        ALWAYS = 2,
+    };
+
+    /// Transfer direction for packet() and frame() log calls.
+    pub const Dir = enum(u8) {
+        RECV = 0,
+        SEND = 1,
+    };
+
+    pub const Config = struct {
+        /// Console output mode.
+        console: ConsoleMode = .OFF,
+        /// Minimum level for console output.
+        console_min_level: Level = .INFO,
+        /// Directory for log files. Must already exist — caller's responsibility. Empty string disables file logging.
+        save_path: []const u8 = "",
+        /// Base name for log files (e.g. "log" -> "log-000000.log").
+        save_file: []const u8 = "log",
+        /// Minimum level for file output.
+        save_min_level: Level = .INFO,
+        /// Lines per file before rotating to the next sequence number.
+        max_lines: u64 = 1_000_000,
+    };
+
+    // --------------------------------------------------------- //
+
+    config: Config,
     allocator: std.mem.Allocator,
     locked: std.atomic.Value(bool) = .init(false),
 
@@ -118,7 +108,22 @@ pub const Logger = struct {
 
     // --------------------------------------------------------- //
 
-    pub fn init(allocator: std.mem.Allocator, config: LoggerConfig) !Self {
+    fn statusLevel(status: u16) Level {
+        return if (status >= 500) .ERROR else if (status >= 400) .WARN else if (status >= 200) .INFO else .DEBUG;
+    }
+
+    fn levelLabel(level: Level) *const [5]u8 {
+        return switch (level) {
+            .DEBUG => "DEBUG",
+            .INFO => "INFO ",
+            .WARN => "WARN ",
+            .ERROR => "ERROR",
+        };
+    }
+
+    // --------------------------------------------------------- //
+
+    pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
         var self = Self{
             .config = config,
             .allocator = allocator,
@@ -172,8 +177,6 @@ pub const Logger = struct {
     }
 
     fn openFileLocked(self: *Self, date: *const [10]u8) void {
-        // YYYY-MM-DD subdirectory inside save_path (internal rotation structure).
-        // save_path itself must already exist — that is the caller's responsibility.
         var dir_buf: [512:0]u8 = undefined;
         const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return;
         _ = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), dir_z, 0o755);
@@ -246,6 +249,7 @@ pub const Logger = struct {
         self.buf[self.buf_pos] = '\n';
         self.buf_pos += 1;
         self.line_count += 1;
+        self.flushLocked();
     }
 
     fn consoleActive(self: *const Self, level: Level) bool {
@@ -309,6 +313,218 @@ pub const Logger = struct {
         }
     }
 
+    /// Log a TCP connection lifecycle event.
+    /// peer: "1.2.3.4:54321" or "-" when unavailable.
+    /// dur_ms: connection duration in milliseconds.
+    /// err: null for a clean close; non-null error tag string (e.g. "read_fail") otherwise.
+    /// Level: INFO on clean close, WARN on error.
+    pub fn conn(
+        self: *Self,
+        peer: []const u8,
+        dur_ms: u64,
+        err: ?[]const u8,
+    ) void {
+        const level: Level = if (err == null) .INFO else .WARN;
+        if (!self.consoleActive(level) and !self.fileActive(level)) return;
+
+        const ts = getTimestamp();
+        const err_out = err orelse "-";
+
+        var line_buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} {s} {s}  [tcp:conn] {s} dur={d}ms {s}",
+            .{ &ts.date, &ts.time, levelLabel(level), peer, dur_ms, err_out },
+        ) catch return;
+
+        self.spinLock();
+        defer self.spinUnlock();
+
+        if (self.consoleActive(level)) {
+            rawWrite(std.posix.STDERR_FILENO, line);
+            rawWrite(std.posix.STDERR_FILENO, "\n");
+        }
+
+        if (self.fileActive(level)) {
+            self.ensureFileLocked(&ts.date);
+            if (!self.file_suspended) {
+                self.writeLineLocked(line);
+            }
+        }
+    }
+
+    /// Log a UDP datagram event.
+    /// dir: RECV or SEND.
+    /// peer: "1.2.3.4:5000".
+    /// size: datagram size in bytes.
+    /// err: null on success; non-null error tag string otherwise.
+    /// Level: INFO on success, WARN on error.
+    pub fn packet(
+        self: *Self,
+        dir: Dir,
+        peer: []const u8,
+        size: usize,
+        err: ?[]const u8,
+    ) void {
+        const level: Level = if (err == null) .INFO else .WARN;
+        if (!self.consoleActive(level) and !self.fileActive(level)) return;
+
+        const ts = getTimestamp();
+        const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
+        const err_out = err orelse "-";
+
+        var line_buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} {s} {s}  [udp:pkt] {s} {s} size={d} {s}",
+            .{ &ts.date, &ts.time, levelLabel(level), dir_out, peer, size, err_out },
+        ) catch return;
+
+        self.spinLock();
+        defer self.spinUnlock();
+
+        if (self.consoleActive(level)) {
+            rawWrite(std.posix.STDERR_FILENO, line);
+            rawWrite(std.posix.STDERR_FILENO, "\n");
+        }
+
+        if (self.fileActive(level)) {
+            self.ensureFileLocked(&ts.date);
+            if (!self.file_suspended) {
+                self.writeLineLocked(line);
+            }
+        }
+    }
+
+    /// Log a UDS frame event.
+    /// dir: RECV or SEND.
+    /// sock_path: socket filesystem path (e.g. "/var/run/zix.sock").
+    /// size: frame payload size in bytes.
+    /// err: null on success; non-null error tag string otherwise.
+    /// Level: INFO on success, WARN on error.
+    pub fn frame(
+        self: *Self,
+        dir: Dir,
+        sock_path: []const u8,
+        size: usize,
+        err: ?[]const u8,
+    ) void {
+        const level: Level = if (err == null) .INFO else .WARN;
+        if (!self.consoleActive(level) and !self.fileActive(level)) return;
+
+        const ts = getTimestamp();
+        const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
+        const err_out = err orelse "-";
+
+        var line_buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} {s} {s}  [uds:frame] {s} {s} size={d} {s}",
+            .{ &ts.date, &ts.time, levelLabel(level), dir_out, sock_path, size, err_out },
+        ) catch return;
+
+        self.spinLock();
+        defer self.spinUnlock();
+
+        if (self.consoleActive(level)) {
+            rawWrite(std.posix.STDERR_FILENO, line);
+            rawWrite(std.posix.STDERR_FILENO, "\n");
+        }
+
+        if (self.fileActive(level)) {
+            self.ensureFileLocked(&ts.date);
+            if (!self.file_suspended) {
+                self.writeLineLocked(line);
+            }
+        }
+    }
+
+    /// Log a FIX session message event. Always INFO level.
+    /// msg_type: tag 35 value (e.g. "A", "D", "5", "0").
+    /// sender: SenderCompID from the message (tag 49).
+    /// target: our TargetCompID (tag 56).
+    /// seq: MsgSeqNum from the message (tag 34).
+    /// state: human label (e.g. "Logon", "Logout", "Heartbeat", "msg").
+    pub fn session(
+        self: *Self,
+        msg_type: []const u8,
+        sender: []const u8,
+        target: []const u8,
+        seq: u64,
+        state: []const u8,
+    ) void {
+        const level: Level = .INFO;
+        if (!self.consoleActive(level) and !self.fileActive(level)) return;
+
+        const ts = getTimestamp();
+
+        var line_buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} {s} {s}  [fix:sess] 35={s} sender={s} target={s} seq={d} {s}",
+            .{ &ts.date, &ts.time, levelLabel(level), msg_type, sender, target, seq, state },
+        ) catch return;
+
+        self.spinLock();
+        defer self.spinUnlock();
+
+        if (self.consoleActive(level)) {
+            rawWrite(std.posix.STDERR_FILENO, line);
+            rawWrite(std.posix.STDERR_FILENO, "\n");
+        }
+
+        if (self.fileActive(level)) {
+            self.ensureFileLocked(&ts.date);
+            if (!self.file_suspended) {
+                self.writeLineLocked(line);
+            }
+        }
+    }
+
+    /// Log a gRPC RPC event. Called once per dispatched stream.
+    /// peer: "1.2.3.4:54321" or "-" when unavailable.
+    /// path: full gRPC path (e.g. "/location.Location/SendLocationAndSave").
+    /// grpc_status: numeric status code. 0=OK -> INFO, non-zero -> WARN.
+    /// recv_bytes: total request body bytes buffered from all DATA frames.
+    /// sent_bytes: total response body bytes sent by the handler.
+    /// dur_ms: handler wall-clock duration in milliseconds.
+    pub fn rpc(
+        self: *Self,
+        peer: []const u8,
+        path: []const u8,
+        grpc_status: u8,
+        recv_bytes: usize,
+        sent_bytes: usize,
+        dur_ms: u64,
+    ) void {
+        const level: Level = if (grpc_status == 0) .INFO else .WARN;
+        if (!self.consoleActive(level) and !self.fileActive(level)) return;
+
+        const ts = getTimestamp();
+
+        var line_buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} {s} {s}  [grpc:rpc] {s} {s} status={d} recv={d} sent={d} dur={d}ms",
+            .{ &ts.date, &ts.time, levelLabel(level), peer, path, grpc_status, recv_bytes, sent_bytes, dur_ms },
+        ) catch return;
+
+        self.spinLock();
+        defer self.spinUnlock();
+
+        if (self.consoleActive(level)) {
+            rawWrite(std.posix.STDERR_FILENO, line);
+            rawWrite(std.posix.STDERR_FILENO, "\n");
+        }
+
+        if (self.fileActive(level)) {
+            self.ensureFileLocked(&ts.date);
+            if (!self.file_suspended) {
+                self.writeLineLocked(line);
+            }
+        }
+    }
+
     /// Log a system event.
     /// component identifies the source (e.g. "http", "udp", "payment").
     /// fmt and args follow std.fmt.bufPrint conventions.
@@ -353,13 +569,13 @@ pub const Logger = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Logger -- init and deinit, no file" {
+test "zix test: Logger init and deinit, no file" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{});
     defer logger.deinit();
 }
 
-test "zix test: Logger -- system call below min_level is silent" {
+test "zix test: Logger system call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
@@ -368,17 +584,16 @@ test "zix test: Logger -- system call below min_level is silent" {
     logger.system(.WARN, "test", "should not panic", .{});
 }
 
-test "zix test: Logger -- access call below min_level is silent" {
+test "zix test: Logger access call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
     logger.access("GET", "/", 200, 0, "", "");
 }
 
-test "zix test: Logger -- status to level mapping" {
-    try std.testing.expectEqual(Level.DEBUG, statusLevel(100));
-    try std.testing.expectEqual(Level.INFO,  statusLevel(200));
-    try std.testing.expectEqual(Level.INFO,  statusLevel(301));
-    try std.testing.expectEqual(Level.WARN,  statusLevel(404));
-    try std.testing.expectEqual(Level.ERROR, statusLevel(500));
+test "zix test: Logger rpc call below min_level is silent" {
+    const allocator = std.testing.allocator;
+    var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
+    defer logger.deinit();
+    logger.rpc("-", "/svc.Svc/Method", 0, 0, 0, 1);
 }

@@ -32,11 +32,11 @@ pub const HeaderSize = union(enum) {
 
     pub fn value(self: HeaderSize) usize {
         return switch (self) {
-            .MINIMAL     => 16,
-            .COMMON      => 32,
-            .LARGE       => 64,
+            .MINIMAL => 16,
+            .COMMON => 32,
+            .LARGE => 64,
             .EXTRA_LARGE => 128,
-            .CUSTOM      => |n| n,
+            .CUSTOM => |n| n,
         };
     }
 };
@@ -91,11 +91,11 @@ pub const Response = struct {
 
     pub fn init(fd: std.posix.fd_t, req_keep_alive: bool, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) Response {
         return .{
-            .fd             = fd,
+            .fd = fd,
             .req_keep_alive = req_keep_alive,
-            .io             = io,
-            .allocator      = allocator,
-            .max_headers    = max_headers,
+            .io = io,
+            .allocator = allocator,
+            .max_headers = max_headers,
         };
     }
 
@@ -116,7 +116,7 @@ pub const Response = struct {
     /// Returns error.TooManyHeaders if exceeded.
     /// Returns error.InvalidHeaderName / error.InvalidHeaderValue on CR/LF injection.
     pub fn addHeader(self: *Response, name: []const u8, value: []const u8) !void {
-        for (name)  |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
+        for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
         for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
         if (self.extra_buf == null) {
             const initial = @min(@as(usize, 4), self.max_headers);
@@ -166,7 +166,7 @@ pub const Response = struct {
             @memcpy(fixed[offset..][0..cl_prefix.len], cl_prefix);
             offset += cl_prefix.len;
             offset += writeDecimal(fixed[offset..], body_data.len);
-            fixed[offset]     = '\r';
+            fixed[offset] = '\r';
             fixed[offset + 1] = '\n';
             offset += 2;
         }
@@ -186,7 +186,7 @@ pub const Response = struct {
 
         // Fast path: no extra headers AND body fits in the remaining buffer — one write().
         if (self.extra_len == 0 and offset + 2 + body_data.len <= fixed.len) {
-            fixed[offset]     = '\r';
+            fixed[offset] = '\r';
             fixed[offset + 1] = '\n';
             offset += 2;
             if (body_data.len > 0) {
@@ -217,7 +217,7 @@ pub const Response = struct {
                 slow_off += s.len;
             }
         }
-        slow[slow_off]     = '\r';
+        slow[slow_off] = '\r';
         slow[slow_off + 1] = '\n';
         slow_off += 2;
 
@@ -327,11 +327,11 @@ pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
     const ep = std.time.epoch;
     const es = ep.EpochSeconds{ .secs = secs };
     const epoch_day = es.getEpochDay();
-    const year_day  = epoch_day.calculateYearDay();
+    const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
-    const day_secs  = es.getDaySeconds();
+    const day_secs = es.getDaySeconds();
 
-    const day_names   = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dow = (@as(u64, epoch_day.day) % 7 + 4) % 7;
 
@@ -370,15 +370,15 @@ test "zix test: http response setters" {
 }
 
 test "zix test: HeaderSize value()" {
-    const minimal: HeaderSize   = .MINIMAL;
-    const common: HeaderSize    = .COMMON;
-    const large: HeaderSize     = .LARGE;
-    const xl: HeaderSize        = .EXTRA_LARGE;
-    try std.testing.expectEqual(@as(usize, 16),  minimal.value());
-    try std.testing.expectEqual(@as(usize, 32),  common.value());
-    try std.testing.expectEqual(@as(usize, 64),  large.value());
+    const minimal: HeaderSize = .MINIMAL;
+    const common: HeaderSize = .COMMON;
+    const large: HeaderSize = .LARGE;
+    const xl: HeaderSize = .EXTRA_LARGE;
+    try std.testing.expectEqual(@as(usize, 16), minimal.value());
+    try std.testing.expectEqual(@as(usize, 32), common.value());
+    try std.testing.expectEqual(@as(usize, 64), large.value());
     try std.testing.expectEqual(@as(usize, 128), xl.value());
-    try std.testing.expectEqual(@as(usize, 48),  (HeaderSize{ .CUSTOM = 48 }).value());
+    try std.testing.expectEqual(@as(usize, 48), (HeaderSize{ .CUSTOM = 48 }).value());
 }
 
 test "zix test: addHeader injection guard" {

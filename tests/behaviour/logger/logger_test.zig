@@ -22,40 +22,40 @@ test "zix behaviour: Logger.ConsoleMode backing values" {
 test "zix behaviour: Logger.Config defaults" {
     const cfg = zix.Logger.Config{};
     try std.testing.expectEqual(zix.Logger.ConsoleMode.OFF, cfg.console);
-    try std.testing.expectEqual(zix.Logger.Level.INFO,      cfg.console_min_level);
-    try std.testing.expectEqualStrings("",    cfg.save_path);
+    try std.testing.expectEqual(zix.Logger.Level.INFO, cfg.console_min_level);
+    try std.testing.expectEqualStrings("", cfg.save_path);
     try std.testing.expectEqualStrings("log", cfg.save_file);
     try std.testing.expectEqual(zix.Logger.Level.INFO, cfg.save_min_level);
     try std.testing.expectEqual(@as(u64, 1_000_000), cfg.max_lines);
 }
 
-test "zix behaviour: Logger.Logger init and deinit with no save_path" {
-    var logger = try zix.Logger.Logger.init(std.testing.allocator, .{});
+test "zix behaviour: Logger init and deinit with no save_path" {
+    var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
 }
 
-test "zix behaviour: Logger.Logger flush with no save_path is a no-op" {
-    var logger = try zix.Logger.Logger.init(std.testing.allocator, .{});
+test "zix behaviour: Logger flush with no save_path is a no-op" {
+    var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
     logger.flush();
 }
 
 test "zix behaviour: Http.ServerConfig.logger defaults to null" {
     const cfg = zix.Http.ServerConfig{
-        .io        = undefined,
+        .io = undefined,
         .allocator = std.testing.allocator,
-        .ip        = "127.0.0.1",
-        .port      = 8080,
+        .ip = "127.0.0.1",
+        .port = 8080,
     };
-    try std.testing.expectEqual(@as(?*zix.Logger.Logger, null), cfg.logger);
+    try std.testing.expectEqual(@as(?*zix.Logger, null), cfg.logger);
 }
 
 test "zix behaviour: Http.Context.logger defaults to null" {
     const ctx = zix.Http.Context{
-        .io        = undefined,
+        .io = undefined,
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(@as(?*zix.Logger.Logger, null), ctx.logger);
+    try std.testing.expectEqual(@as(?*zix.Logger, null), ctx.logger);
 }
 
 test "zix behaviour: Http.Response.bytes_written defaults to 0" {

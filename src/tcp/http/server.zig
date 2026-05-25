@@ -255,11 +255,11 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
                 } orelse break; // incomplete — should not happen since found == true
 
                 var req = Request{
-                    .buf        = buf_read[0..filled],
-                    .head       = head,
-                    .fd         = fd,
+                    .buf = buf_read[0..filled],
+                    .head = head,
+                    .fd = fd,
                     .buf_filled = filled,
-                    .allocator  = allocator,
+                    .allocator = allocator,
                 };
                 var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
 
@@ -501,7 +501,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             switch (cfg.dispatch_model) {
                 .POOL => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
-                    const pool_size    = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
+                    const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
                     std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_size });
 
