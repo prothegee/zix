@@ -113,8 +113,10 @@ pub const Response = struct {
 
     /// Append a custom header to the response.
     /// Allocates the header buffer on the first call (lazy). Cap is set by HeaderSize.
-    /// Returns error.TooManyHeaders if exceeded.
-    /// Returns error.InvalidHeaderName / error.InvalidHeaderValue on CR/LF injection.
+    ///
+    /// Return:
+    /// - error.TooManyHeaders if the header cap is exceeded
+    /// - error.InvalidHeaderName or error.InvalidHeaderValue on CR/LF injection
     pub fn addHeader(self: *Response, name: []const u8, value: []const u8) !void {
         for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
         for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
@@ -279,8 +281,10 @@ pub const Response = struct {
 // --------------------------------------------------------- //
 
 /// Raw write: loops until all bytes are written or an error occurs.
-/// Returns error.BrokenPipe on any write failure (caller ignores or propagates).
 /// Uses posix.system.write directly — no std.Io.Writer dispatch on the hot path.
+///
+/// Return:
+/// - error.BrokenPipe on any write failure (caller ignores or propagates)
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
