@@ -42,7 +42,7 @@ pub const TcpServerConfig = struct {
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
     pool_size: usize = 0,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
-    /// and logger.conn() after each connection closes. Caller owns; must outlive the server.
+    /// and logger.conn() after each connection closes. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
 };
 

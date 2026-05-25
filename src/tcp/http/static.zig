@@ -21,9 +21,11 @@ fn parseRangeHeader(value: []const u8) ?RangeRequest {
 }
 
 /// Serve a static file from the public directory.
-/// Returns false if the file is not found or the path is invalid; caller sends 404.
 /// Rejects paths containing ".." to prevent directory traversal.
 /// Supports Range requests (RFC 7233) for partial content (206).
+///
+/// Return:
+/// - false if the file is not found or the path is invalid (caller sends 404)
 pub fn serve(
     req: *Request,
     fd: std.posix.fd_t,

@@ -11,14 +11,17 @@ const pkt = @import("packet.zig");
 /// UDP client typed to a user-defined extern struct packet.
 ///
 /// Usage:
-///   const MyClient = zix.Udp.Client(MyPacket);
-///   var client = try MyClient.init(config, io);           // REQUIRED mode
-///   var client = try MyClient.initArgs(config, io, args); // CONFIGURABLE mode
-///   defer client.deinit();
-///   try client.send(my_packet);
-///   const fb = try client.receiveFeedback();
+/// ```zig
+/// const MyClient = zix.Udp.Client(MyPacket);
+/// var client = try MyClient.init(config, io);           // REQUIRED mode
+/// var client = try MyClient.initArgs(config, io, args); // CONFIGURABLE mode
+/// defer client.deinit();
+/// try client.send(my_packet);
+/// const fb = try client.receiveFeedback();
+/// ```
 ///
-/// NOTE: for a full concurrent send/receive loop example, see examples/udp_client.zig
+/// Note:
+/// - for a full concurrent send/receive loop example, see examples/udp_client.zig
 pub fn UdpClient(comptime Packet: type) type {
     // RFC 768: max UDP payload = 65,535 - 8 (UDP header) - 20 (min IPv4 header) = 65,507 bytes.
     // Packets larger than this cannot be sent in a single datagram.
@@ -36,7 +39,9 @@ pub fn UdpClient(comptime Packet: type) type {
 
         /// Initialize in REQUIRED mode — bind_port and server_port must be set non-zero in config.
         /// Binds the socket and resolves the server address.
-        /// Returns error.PortNotConfigured if bind_port or server_port is zero.
+        ///
+        /// Return:
+        /// - error.PortNotConfigured if bind_port or server_port is zero
         pub fn init(config: UdpClientConfig, io: std.Io) !Self {
             if (config.bind_port == 0 or config.server_port == 0) return error.PortNotConfigured;
             const bind_addr = try std.Io.net.IpAddress.parse("127.0.0.1", config.bind_port);
@@ -79,9 +84,12 @@ pub fn UdpClient(comptime Packet: type) type {
 
         /// Blocking receive — returns the next FeedbackResult from the server.
         /// Decodes the packet from wire endianness on receipt.
-        /// Returns error.UnexpectedPacketSize if the datagram size matches neither ACK/NACK nor Packet.
         ///
-        /// NOTE: for a concurrent send/receive loop, see examples/udp_client.zig
+        /// Return:
+        /// - error.UnexpectedPacketSize if the datagram size matches neither ACK/NACK nor Packet
+        ///
+        /// Note:
+        /// - for a concurrent send/receive loop, see examples/udp_client.zig
         pub fn receiveFeedback(self: *Self) !FB {
             var buf: [@sizeOf(Packet)]u8 = undefined;
             const msg = try self.socket.receive(self.io, &buf);

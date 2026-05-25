@@ -3,6 +3,7 @@
 const std = @import("std");
 const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
+const Logger = @import("../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
@@ -60,14 +61,14 @@ pub const UdsServer = struct {
             std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
         }
 
-        std.debug.print("zix uds server: listening on {s}\n", .{self.config.path});
+        if (self.config.logger) |lg| lg.system(.INFO, "uds", "listening on {s}", .{self.config.path});
 
         while (true) {
             const stream = net_server.accept(io) catch |err| {
-                std.debug.print("zix uds server: accept error: {}\n", .{err});
+                if (self.config.logger) |lg| lg.system(.WARN, "uds", "accept error: {}", .{err});
                 continue;
             };
-            const task = ConnTask{ .stream = stream, .io = io, .handler = handler };
+            const task = ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = self.config.logger };
             if (io.concurrent(dispatchConn, .{task})) |_| {} else |_| {
                 dispatchConn(task);
             }
@@ -81,9 +82,11 @@ const ConnTask = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
     handler: HandlerFn,
+    logger: ?*Logger,
 };
 
 fn dispatchConn(task: ConnTask) void {
+    if (task.logger) |lg| lg.system(.INFO, "uds", "connection accepted", .{});
     task.handler(task.stream, task.io);
 }
 

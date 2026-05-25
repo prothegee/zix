@@ -15,7 +15,7 @@ pub const HttpServerConfig = struct {
     /// (async_limit and stack_size in InitOptions are respected). When null the server
     /// creates an internal std.Io.Threaded with stack_size = 512KB.
     io: ?std.Io = null,
-    /// Backing allocator for router storage. Caller owns; must outlive the server.
+    /// Backing allocator for router storage. Caller owns. Must outlive the server.
     /// ArenaAllocator is suitable: routes are append-only, freed all at once on deinit().
     allocator: std.mem.Allocator,
     /// Bind address.
