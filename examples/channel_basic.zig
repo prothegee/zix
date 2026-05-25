@@ -1,4 +1,4 @@
-// channel_basic.zig -- producer/consumer pipeline via Channel(u32)
+// channel_basic.zig: producer/consumer pipeline via Channel(u32)
 //
 // Producer sends task IDs 1..10 into a buffered channel.
 // Consumer reads each ID, computes ID * ID, and prints the result.
@@ -8,12 +8,20 @@
 // std.Io.Threaded provides the IO backend for spawned OS threads.
 //
 // Run:
-//   zig build example-channel_basic && ./zig-out/bin/example-channel_basic
+// zig build example-channel_basic && ./zig-out/bin/example-channel_basic
 
 const std = @import("std");
 const zix = @import("zix");
 
 const MyChan = zix.Channel(u32);
+
+// Logger config — uncomment this section to add logger
+// const LOG_DIR: []const u8  = "./logs";
+// const LOG_FILE: []const u8 = "channel";
+
+// fn createLogDir(io: std.Io) void {
+//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
+// }
 
 // --------------------------------------------------------- //
 
@@ -57,6 +65,25 @@ fn consumer(cap: ConsumerCap) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
+    // Uncomment this to add logger (console only — no save_path means no file output):
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .console           = .ALWAYS,
+    //     .console_min_level = .INFO,
+    // });
+    // defer logger.deinit();
+
+    // Uncomment this to add logger with file output (createLogDir must run first):
+    // createLogDir(process.io);
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .save_path      = LOG_DIR,
+    //     .save_file      = LOG_FILE,
+    //     .save_min_level = .INFO,
+    //     .console        = .ALWAYS,
+    // });
+    // defer logger.deinit();
+
+    // logger.system(.INFO, "channel", "main started", .{});
+
     _ = process;
 
     // std.Io.Threaded provides the fiber-aware IO backend for OS threads.
