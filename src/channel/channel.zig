@@ -13,12 +13,14 @@ const std = @import("std");
 /// - capacity = 0 (rendezvous/unbuffered) is not yet supported, assert fires at init.
 ///
 /// Usage:
-///   const MyChan = zix.Channel(u32);
-///   var ch = try MyChan.init(allocator, 8);
-///   defer ch.deinit();
-///   try ch.send(io, 42);
-///   const v = try ch.recv(io);  // v == 42
-///   ch.close(io);               // no more sends: recv drains remaining items then returns error.Closed
+/// ```zig
+/// const MyChan = zix.Channel(u32);
+/// var ch = try MyChan.init(allocator, 8);
+/// defer ch.deinit();
+/// try ch.send(io, 42);
+/// const v = try ch.recv(io);  // v == 42
+/// ch.close(io);               // no more sends: recv drains remaining items then returns error.Closed
+/// ```
 pub fn Channel(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -49,7 +51,9 @@ pub fn Channel(comptime T: type) type {
         // --------------------------------------------------------- //
 
         /// Blocking send. Waits when the buffer is full.
-        /// Returns error.Closed if close() was called before or during the wait.
+        ///
+        /// Return:
+        /// - error.Closed if close() was called before or during the wait
         pub fn send(self: *Self, io: std.Io, value: T) !void {
             self.mutex.lockUncancelable(io);
             while (self.count == self.buf.len) {
