@@ -18,7 +18,7 @@ pub const Context = struct {
     deadline: ?std.Io.Clock.Timestamp = null,
 
     /// Return a copy of ctx with deadline set to now + ms.
-    /// Call before dispatching to a slow handler; check timedOut() between steps.
+    /// Call before dispatching to a slow handler. Check timedOut() between steps.
     pub fn withTimeout(self: Context, ms: u64) Context {
         var c = self;
         c.deadline = std.Io.Clock.Timestamp.fromNow(
@@ -35,8 +35,11 @@ pub const Context = struct {
         return c;
     }
 
-    /// Returns true when the deadline has passed. Always false when deadline is null.
     /// Does not cancel or interrupt anything. Handlers must check this explicitly.
+    ///
+    /// Return:
+    /// - true when the deadline has passed
+    /// - false when deadline is null
     pub fn timedOut(self: Context) bool {
         const d = self.deadline orelse return false;
         return std.Io.Clock.Timestamp.now(self.io, .real).compare(.gte, d);
@@ -45,7 +48,7 @@ pub const Context = struct {
 
 // --------------------------------------------------------- //
 
-test "zix test: Context.timedOut -- null deadline always false" {
+test "zix test: Context.timedOut null deadline always false" {
     // io is intentionally undefined: timedOut() must short-circuit on null deadline
     // without touching io at all.
     const ctx = Context{ .io = undefined, .allocator = std.testing.allocator };
