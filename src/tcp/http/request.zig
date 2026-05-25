@@ -82,8 +82,10 @@ pub const Request = struct {
 
     /// Read and return the full request body.
     /// Cached after first call. Handles both Content-Length and Transfer-Encoding: chunked.
-    /// Returns empty string when Content-Length is absent/zero and not chunked.
-    /// Bytes already in the read buffer are used directly; remaining bytes are recv'd from fd.
+    /// Bytes already in the read buffer are used directly. Remaining bytes are recv'd from fd.
+    ///
+    /// Return:
+    /// - empty string when Content-Length is absent/zero and not chunked
     pub fn body(self: *Request) ![]const u8 {
         if (self.body_cache) |b| return b;
 
