@@ -7,7 +7,7 @@ pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
 pub const Uds = @import("uds/Uds.zig");
 pub const Channel = @import("channel/Channel.zig").Channel;
-pub const Logger = @import("logger/Logger.zig");
+pub const Logger = @import("logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
@@ -47,6 +47,11 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("udp/packet.zig"));
     std.testing.refAllDecls(@import("udp/server.zig"));
     std.testing.refAllDecls(@import("udp/client.zig"));
+
+    // # zix.Tcp (raw)
+    std.testing.refAllDecls(@import("tcp/config.zig"));
+    std.testing.refAllDecls(@import("tcp/server.zig"));
+    std.testing.refAllDecls(@import("tcp/client.zig"));
 
     // # zix.Uds
     std.testing.refAllDecls(@import("uds/config.zig"));

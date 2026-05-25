@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("integration-test", "Run integration tests");
 
     const integration_tests = .{
+        // tcp
+        "tests/integration/tcp/config_test.zig",
         // http
         "tests/integration/http/request_test.zig",
         "tests/integration/http/router_test.zig",
@@ -57,6 +59,7 @@ pub fn build(b: *std.Build) void {
         "tests/integration/logger/logger_test.zig",
     };
 
+    var prev_integ: ?*std.Build.Step = null;
     inline for (integration_tests) |src| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(src),
@@ -67,6 +70,8 @@ pub fn build(b: *std.Build) void {
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t_exe);
+        if (prev_integ) |p| t_run.step.dependOn(p);
+        prev_integ = &t_run.step;
         integration_test_step.dependOn(&t_run.step);
     }
 
@@ -74,6 +79,8 @@ pub fn build(b: *std.Build) void {
     const behaviour_test_step = b.step("behaviour-test", "Run behaviour tests");
 
     const behaviour_tests = .{
+        // tcp
+        "tests/behaviour/tcp/config_test.zig",
         // http
         "tests/behaviour/http/request_test.zig",
         "tests/behaviour/http/router_test.zig",
@@ -94,6 +101,7 @@ pub fn build(b: *std.Build) void {
         "tests/behaviour/logger/logger_test.zig",
     };
 
+    var prev_behav: ?*std.Build.Step = null;
     inline for (behaviour_tests) |src| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(src),
@@ -104,6 +112,8 @@ pub fn build(b: *std.Build) void {
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t_exe);
+        if (prev_behav) |p| t_run.step.dependOn(p);
+        prev_behav = &t_run.step;
         behaviour_test_step.dependOn(&t_run.step);
     }
 
@@ -111,6 +121,8 @@ pub fn build(b: *std.Build) void {
     const edge_test_step = b.step("edge-test", "Run edge tests");
 
     const edge_tests = .{
+        // tcp
+        "tests/edge/tcp/config_test.zig",
         // http
         "tests/edge/http/request_test.zig",
         "tests/edge/http/router_test.zig",
@@ -130,6 +142,7 @@ pub fn build(b: *std.Build) void {
         "tests/edge/logger/logger_test.zig",
     };
 
+    var prev_edge: ?*std.Build.Step = null;
     inline for (edge_tests) |src| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(src),
@@ -140,10 +153,16 @@ pub fn build(b: *std.Build) void {
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t_exe);
+        if (prev_edge) |p| t_run.step.dependOn(p);
+        prev_edge = &t_run.step;
         edge_test_step.dependOn(&t_run.step);
     }
 
-    // All tests
+    // All tests — run tiers sequentially so zig build 0.16-dev IPC sends
+    // ".exit" to each test binary before the next tier starts.
+    behaviour_test_step.dependOn(integration_test_step);
+    edge_test_step.dependOn(behaviour_test_step);
+
     const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
     all_test_step.dependOn(&zix_tests_run.step);
     all_test_step.dependOn(integration_test_step);
@@ -154,6 +173,10 @@ pub fn build(b: *std.Build) void {
 
     // Examples
     const examples = .{
+        .{ "example-tcp_server_1_async", "examples/tcp_server_1_async.zig" },
+        .{ "example-tcp_server_2_pool", "examples/tcp_server_2_pool.zig" },
+        .{ "example-tcp_server_3_mixed", "examples/tcp_server_3_mixed.zig" },
+        .{ "example-tcp_client", "examples/tcp_client.zig" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig" },
         .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig" },

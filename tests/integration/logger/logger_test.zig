@@ -66,11 +66,11 @@ test "zix integration: Logger.system() writes line to file" {
     const save_path = ".zig-cache/tmp/zix-logger-test/system";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
-        .max_lines      = 1_000_000,
+        .max_lines = 1_000_000,
     });
     defer logger.deinit();
 
@@ -93,11 +93,11 @@ test "zix integration: Logger.access() writes line to file" {
     const save_path = ".zig-cache/tmp/zix-logger-test/access";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
-        .max_lines      = 1_000_000,
+        .max_lines = 1_000_000,
     });
     defer logger.deinit();
 
@@ -122,9 +122,9 @@ test "zix integration: access() absent UA and origin logged as dash" {
     const save_path = ".zig-cache/tmp/zix-logger-test/access-dash";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
     });
     defer logger.deinit();
@@ -146,9 +146,9 @@ test "zix integration: access() present UA appears in file" {
     const save_path = ".zig-cache/tmp/zix-logger-test/access-ua";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
     });
     defer logger.deinit();
@@ -170,9 +170,9 @@ test "zix integration: system() 5xx status maps to ERROR level" {
     const save_path = ".zig-cache/tmp/zix-logger-test/access-error";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
     });
     defer logger.deinit();
@@ -194,9 +194,9 @@ test "zix integration: system() with anyerror arg formats correctly" {
     const save_path = ".zig-cache/tmp/zix-logger-test/system-err";
     ensureDirAll(save_path);
 
-    var logger = try zix.Logger.Logger.init(allocator, .{
-        .save_path      = save_path,
-        .save_file      = "log",
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
         .save_min_level = .DEBUG,
     });
     defer logger.deinit();
