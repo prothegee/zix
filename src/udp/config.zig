@@ -1,5 +1,7 @@
 //! zix udp config
 
+const Logger = @import("../logger/logger.zig").Logger;
+
 // --------------------------------------------------------- //
 
 /// Port binding mode — governs how the port is sourced at init time.
@@ -31,9 +33,10 @@ pub const Endianness = enum(u8) {
 
 pub const UdpServerConfig = struct {
     /// Backing allocator for client list and broadcast peer snapshots. Caller owns must outlive the server.
-    /// NOTE: must be a general-purpose allocator (e.g. std.heap.smp_allocator).
-    ///       ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
-    ///       packet — ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
+    /// Note:
+    /// - must be a general-purpose allocator (e.g. std.heap.smp_allocator).
+    ///   ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
+    ///   packet — ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
     allocator: std.mem.Allocator,
     /// Bind address.
     ip: []const u8,
@@ -55,6 +58,9 @@ pub const UdpServerConfig = struct {
     auto_echo: bool = false,
     /// Relay the received packet to all connected clients.
     broadcast: bool = false,
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
+    /// and logger.packet() for each received datagram. Caller owns. Must outlive the server.
+    logger: ?*Logger = null,
 };
 
 // --------------------------------------------------------- //
