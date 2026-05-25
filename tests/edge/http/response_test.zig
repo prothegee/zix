@@ -10,28 +10,28 @@ const zix = @import("zix");
 test "zix edge: addHeader, CR in name returns InvalidHeaderName" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),32);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderName, res.addHeader("Bad\rName", "value"));
 }
 
 test "zix edge: addHeader, LF in name returns InvalidHeaderName" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),32);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderName, res.addHeader("Bad\nName", "value"));
 }
 
 test "zix edge: addHeader, CR in value returns InvalidHeaderValue" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),32);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Ok", "bad\rvalue"));
 }
 
 test "zix edge: addHeader, LF in value returns InvalidHeaderValue" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),32);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Ok", "bad\nvalue"));
 }
 
@@ -41,7 +41,7 @@ test "zix edge: addHeader, buffer grows from 4 to 5 on the 5th header" {
     // max_headers=5: initial buf=min(4,5)=4, the 5th add triggers growth to min(8,5)=5
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),5);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 5);
     try res.addHeader("H1", "v1");
     try res.addHeader("H2", "v2");
     try res.addHeader("H3", "v3");
@@ -60,7 +60,7 @@ test "zix edge: addHeader, max_headers=1 rejects second header without growth" {
     // initial buf=min(4,1)=1; on the second call extra_buf.len(1) >= max_headers(1) -> TooManyHeaders
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(),1);
+    var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 1);
     try res.addHeader("Only", "one");
     try std.testing.expectEqual(@as(usize, 1), res.extra_len);
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("Second", "two"));
