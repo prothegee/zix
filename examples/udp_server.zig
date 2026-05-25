@@ -28,12 +28,37 @@ const Packet = extern struct {
 const SERVER_IP: []const u8 = "127.0.0.1";
 const SERVER_PORT: u16 = 9100;
 
+// Logger config — uncomment this section to add logger
+// const LOG_DIR: []const u8  = "./logs";
+// const LOG_FILE: []const u8 = "udp";
+
+// fn createLogDir(io: std.Io) void {
+//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
+// }
+
 // --------------------------------------------------------- //
 
 const MyServer = zix.Udp.Server(Packet);
 
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
+
+    // Uncomment this to add logger (console only — no save_path means no file output):
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .console           = .ALWAYS,
+    //     .console_min_level = .INFO,
+    // });
+    // defer logger.deinit();
+
+    // Uncomment this to add logger with file output (createLogDir must run first):
+    // createLogDir(io);
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .save_path      = LOG_DIR,
+    //     .save_file      = LOG_FILE,
+    //     .save_min_level = .INFO,
+    //     .console        = .ALWAYS,
+    // });
+    // defer logger.deinit();
 
     // REQUIRED mode — port is taken from SERVER_PORT, no CLI arg parsing.
     // To accept --port at runtime instead, replace with:
@@ -78,6 +103,7 @@ pub fn main(process: std.process.Init) !void {
         // How often the receive loop checks for disconnected clients (milliseconds).
         // Lower values = faster detection but more CPU usage when idle.
         .poll_timeout_ms = 2000,
+        // .logger = &logger, // uncomment to wire logger (UDP lifecycle + packet logging)
     });
     defer server.deinit();
 

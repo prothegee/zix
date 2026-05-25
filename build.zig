@@ -57,6 +57,8 @@ pub fn build(b: *std.Build) void {
         "tests/integration/channel/channel_test.zig",
         // logger
         "tests/integration/logger/logger_test.zig",
+        // fix
+        "tests/integration/fix/server_test.zig",
     };
 
     var prev_integ: ?*std.Build.Step = null;
@@ -99,6 +101,8 @@ pub fn build(b: *std.Build) void {
         "tests/behaviour/channel/channel_test.zig",
         // logger
         "tests/behaviour/logger/logger_test.zig",
+        // fix
+        "tests/behaviour/fix/session_test.zig",
     };
 
     var prev_behav: ?*std.Build.Step = null;
@@ -140,6 +144,8 @@ pub fn build(b: *std.Build) void {
         "tests/edge/channel/channel_test.zig",
         // logger
         "tests/edge/logger/logger_test.zig",
+        // fix
+        "tests/edge/fix/session_test.zig",
     };
 
     var prev_edge: ?*std.Build.Step = null;
@@ -191,6 +197,11 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_sse", "examples/http_sse.zig" },
         .{ "example-http_websocket", "examples/http_websocket.zig" },
         .{ "example-http_xtra_headers", "examples/http_xtra_headers.zig" },
+        .{ "example-fix_server_1_async", "examples/fix_server_1_async.zig" },
+        .{ "example-fix_server_2_pool", "examples/fix_server_2_pool.zig" },
+        .{ "example-fix_server_3_mixed", "examples/fix_server_3_mixed.zig" },
+        .{ "example-fix_client", "examples/fix_client.zig" },
+        .{ "example-fix_client_raw", "examples/fix_client_raw.zig" },
         .{ "example-udp_server", "examples/udp_server.zig" },
         .{ "example-udp_client", "examples/udp_client.zig" },
         .{ "example-uds_server", "examples/uds_server.zig" },

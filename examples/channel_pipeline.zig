@@ -1,14 +1,19 @@
-// channel_pipeline.zig -- 3-stage data pipeline via chained channels
+// channel_pipeline.zig: 3-stage data pipeline via chained channels
 //
 // Stage A generates raw values and sends to ch1.
 // Stage B reads from ch1, doubles each value, sends to ch2.
 // Stage C reads from ch2, formats and prints the final result.
 //
 // Each stage runs as an independent thread. Channels decouple the stages:
-// each runs at its own pace -- backpressure flows upstream when a stage is slow.
+// each runs at its own pace, backpressure flows upstream when a stage is slow.
 //
-//   stage_a  -->  Channel(u32)  -->  stage_b  -->  Channel(u64)  -->  stage_c
-//                   (ch1)                            (ch2)
+// ```mermaid
+// flowchart LR
+//     stage_a --> ch1["Channel(u32) ch1"]
+//     ch1 --> stage_b
+//     stage_b --> ch2["Channel(u64) ch2"]
+//     ch2 --> stage_c
+// ```
 //
 // Run:
 //   zig build example-channel_pipeline && ./zig-out/bin/example-channel_pipeline
@@ -20,6 +25,14 @@ const ITEM_COUNT: u32 = 10;
 
 const RawChan = zix.Channel(u32);
 const ResultChan = zix.Channel(u64);
+
+// Logger config — uncomment this section to add logger
+// const LOG_DIR: []const u8  = "./logs";
+// const LOG_FILE: []const u8 = "channel";
+
+// fn createLogDir(io: std.Io) void {
+//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
+// }
 
 // --------------------------------------------------------- //
 
@@ -89,6 +102,25 @@ fn stageC(cap: StageCCap) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
+    // Uncomment this to add logger (console only — no save_path means no file output):
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .console           = .ALWAYS,
+    //     .console_min_level = .INFO,
+    // });
+    // defer logger.deinit();
+
+    // Uncomment this to add logger with file output (createLogDir must run first):
+    // createLogDir(process.io);
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .save_path      = LOG_DIR,
+    //     .save_file      = LOG_FILE,
+    //     .save_min_level = .INFO,
+    //     .console        = .ALWAYS,
+    // });
+    // defer logger.deinit();
+
+    // logger.system(.INFO, "channel", "main started", .{});
+
     _ = process;
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});

@@ -1,14 +1,14 @@
-// uds_http.zig -- HTTP frontend backed by a UDS data provider (Process B)
+// uds_http.zig: HTTP frontend backed by a UDS data provider (Process B)
 //
 // Requires uds_server running on /tmp/zix.sock (Process A).
 //
 // Architecture:
-//   [uds_server]--/tmp/zix.sock--[uds fetcher task]--Channel(u64)--[SSE handler]
-//                                                                \--[/data handler]
+//   [uds_server]->/tmp/zix.sock->[uds fetcher task]->Channel(u64)->[SSE handler]
+//                                                               \->[/data handler]
 //
 // Endpoints:
-//   GET /data    -- one-shot UDS query, returns JSON {"count": N}
-//   GET /stream  -- SSE stream, queries UDS every 500 ms via Channel, streams events
+//   GET /data: one-shot UDS query, returns JSON {"count": N}
+//   GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
 //
 // Run:
 //   zig build example-uds_http && ./zig-out/bin/example-uds_http
@@ -37,7 +37,7 @@ var g_channel: CountChan = undefined;
 
 // --------------------------------------------------------- //
 
-// Fetcher task capture -- passed by value to io.concurrent so it must be copyable.
+// Fetcher task capture: passed by value to io.concurrent so it must be copyable.
 const FetchCap = struct {
     io: std.Io,
 };
@@ -74,7 +74,7 @@ fn fetcherTask(cap: FetchCap) void {
 
 // --------------------------------------------------------- //
 
-// GET /data -- one-shot UDS query, returns {"count": N}
+// GET /data: one-shot UDS query, returns {"count": N}
 pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
@@ -101,7 +101,7 @@ pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send(body);
 }
 
-// GET /stream -- SSE stream, reads from Channel, sends one event per value
+// GET /stream: SSE stream, reads from Channel, sends one event per value
 pub fn streamHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
@@ -114,7 +114,7 @@ pub fn streamHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     }
 }
 
-// GET / -- HTML page with EventSource and a fetch button
+// GET /: HTML page with EventSource and a fetch button
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -151,7 +151,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    // Channel is used for the lifetime of the process -- init before server.
+    // Channel is used for the lifetime of the process, init before server.
     g_channel = try CountChan.init(arena.allocator(), 16);
     defer g_channel.deinit();
 

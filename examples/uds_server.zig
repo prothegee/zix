@@ -1,4 +1,4 @@
-// uds_server.zig -- UDS data provider (Process A)
+// uds_server.zig: UDS data provider (Process A)
 //
 // Listens on /tmp/zix.sock. For each received frame the server replies
 // with an incrementing counter so the HTTP frontend sees real data changes.
@@ -19,6 +19,14 @@ const zix = @import("zix");
 
 const SOCK_PATH: []const u8 = "/tmp/zix.sock";
 
+// Logger config — uncomment this section to add logger
+// const LOG_DIR: []const u8  = "./logs";
+// const LOG_FILE: []const u8 = "uds";
+
+// fn createLogDir(io: std.Io) void {
+//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
+// }
+
 // --------------------------------------------------------- //
 
 // Shared counter incremented per frame across all connections.
@@ -38,7 +46,7 @@ fn dataHandler(stream: std.Io.net.Stream, io: std.Io) void {
     var wtr = stream.writer(io, &wbuf);
 
     while (true) {
-        // Read 4-byte length header (any content -- treated as "get" request)
+        // Read 4-byte length header (any content, treated as "get" request)
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
@@ -76,9 +84,27 @@ fn dataHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
+    // Uncomment this to add logger (console only — no save_path means no file output):
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .console           = .ALWAYS,
+    //     .console_min_level = .INFO,
+    // });
+    // defer logger.deinit();
+
+    // Uncomment this to add logger with file output (createLogDir must run first):
+    // createLogDir(process.io);
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .save_path      = LOG_DIR,
+    //     .save_file      = LOG_FILE,
+    //     .save_min_level = .INFO,
+    //     .console        = .ALWAYS,
+    // });
+    // defer logger.deinit();
+
     var server = try zix.Uds.Server.init(.{
         .path = SOCK_PATH,
         .allocator = std.heap.smp_allocator,
+        // .logger = &logger, // uncomment to wire logger (UDS lifecycle logging)
     });
     defer server.deinit();
 

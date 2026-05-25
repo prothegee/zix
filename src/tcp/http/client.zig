@@ -70,11 +70,13 @@ pub const ClientResponse = struct {
 /// HTTP client. One instance can make many sequential requests, reusing connections via the pool.
 ///
 /// Usage:
-///   var client = zix.Http.Client.init(config);
-///   defer client.deinit();
-///   var resp = try client.get("http://localhost:9000/", .{});
-///   defer resp.deinit();
-///   std.debug.print("{d}: {s}\n", .{ resp.status(), resp.body() });
+/// ```zig
+/// var client = zix.Http.Client.init(config);
+/// defer client.deinit();
+/// var resp = try client.get("http://localhost:9000/", .{});
+/// defer resp.deinit();
+/// std.debug.print("{d}: {s}\n", .{ resp.status(), resp.body() });
+/// ```
 pub const HttpClient = struct {
     const Self = @This();
 
