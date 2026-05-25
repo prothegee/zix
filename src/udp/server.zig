@@ -4,17 +4,21 @@ const std = @import("std");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const PortMode = Config.PortMode;
+const Logger = @import("../logger/logger.zig").Logger;
+const Dir = @import("../logger/logger.zig").Dir;
 
 // --------------------------------------------------------- //
 
 /// UDP server typed to a user-defined extern struct packet.
 ///
 /// Usage:
-///   const MyServer = zix.Udp.Server(MyPacket);
-///   var server = try MyServer.init(config);           // REQUIRED mode
-///   var server = try MyServer.initArgs(config, args); // CONFIGURABLE mode
-///   defer server.deinit();
-///   try server.run(io);
+/// ```zig
+/// const MyServer = zix.Udp.Server(MyPacket);
+/// var server = try MyServer.init(config);           // REQUIRED mode
+/// var server = try MyServer.initArgs(config, args); // CONFIGURABLE mode
+/// defer server.deinit();
+/// try server.run(io);
+/// ```
 pub fn UdpServer(comptime Packet: type) type {
     // RFC 768: max UDP payload = 65,535 - 8 (UDP header) - 20 (min IPv4 header) = 65,507 bytes.
     // Packets larger than this cannot be sent in a single datagram.
@@ -42,6 +46,7 @@ pub fn UdpServer(comptime Packet: type) type {
             config: UdpServerConfig,
             peers: []std.Io.net.IpAddress,
             sender_index: usize,
+            logger: ?*Logger,
         };
 
         config: UdpServerConfig,
@@ -49,7 +54,9 @@ pub fn UdpServer(comptime Packet: type) type {
         // --------------------------------------------------------- //
 
         /// Initialize in REQUIRED mode — port must be set non-zero in config.
-        /// Returns error.PortNotConfigured if config.port is zero.
+        ///
+        /// Return:
+        /// - error.PortNotConfigured if config.port is zero
         pub fn init(config: UdpServerConfig) !Self {
             if (config.port == 0) return error.PortNotConfigured;
             return .{ .config = config };
@@ -84,7 +91,7 @@ pub fn UdpServer(comptime Packet: type) type {
             const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
             defer socket.close(io);
 
-            std.debug.print("zix udp server: listening on {s}:{d}\n", .{ self.config.ip, self.config.port });
+            if (self.config.logger) |lg| lg.system(.INFO, "udp", "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
             // NOTE: config.allocator must be a general-purpose allocator — not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
@@ -107,18 +114,18 @@ pub fn UdpServer(comptime Packet: type) type {
                 const msg = socket.receiveTimeout(io, &buf, poll_timeout) catch |err| {
                     if (err == error.Timeout) {
                         const now = std.Io.Clock.Timestamp.now(io, .awake);
-                        checkDisconnections(&clients, now, self.config.disconnect_timeout_ms);
+                        checkDisconnections(&clients, now, self.config.disconnect_timeout_ms, self.config.logger);
                         last_check = now;
                         continue;
                     }
-                    std.debug.print("receive error: {}\n", .{err});
+                    if (self.config.logger) |lg| lg.system(.WARN, "udp", "receive error: {}", .{err});
                     continue;
                 };
 
                 // overflow / size guard — drop datagrams that are not exactly Packet size
                 if (msg.flags.trunc or msg.data.len != @sizeOf(Packet)) {
                     if (self.config.error_report) socket.send(io, &msg.from, &[_]u8{0x15}) catch {};
-                    std.debug.print("drop: expected {d} bytes, got {d} trunc={}\n", .{ @sizeOf(Packet), msg.data.len, msg.flags.trunc });
+                    if (self.config.logger) |lg| lg.system(.WARN, "udp", "drop: expected {d} bytes, got {d} trunc={}", .{ @sizeOf(Packet), msg.data.len, msg.flags.trunc });
                     continue;
                 }
 
@@ -139,13 +146,15 @@ pub fn UdpServer(comptime Packet: type) type {
                     sender_index = next_index;
                     next_index += 1;
                     clients.append(.{ .from = msg.from, .last_seen = now, .index = sender_index }) catch {};
-                    var addr_buf: [64]u8 = undefined;
-                    std.debug.print("client connected: {s} [index: {d}, connected: {d}]\n", .{ fmtAddr(msg.from, &addr_buf), sender_index, clients.items.len });
+                    if (self.config.logger) |lg| {
+                        var addr_buf: [64]u8 = undefined;
+                        lg.system(.INFO, "udp", "client connected: {s} index={d} total={d}", .{ fmtAddr(msg.from, &addr_buf), sender_index, clients.items.len });
+                    }
                 }
 
                 // rate-limited disconnect check even when packets arrive rapidly
                 if (std.Io.Clock.Timestamp.durationTo(last_check, now).raw.toMilliseconds() >= self.config.poll_timeout_ms) {
-                    checkDisconnections(&clients, now, self.config.disconnect_timeout_ms);
+                    checkDisconnections(&clients, now, self.config.disconnect_timeout_ms, self.config.logger);
                     last_check = now;
                 }
 
@@ -168,11 +177,12 @@ pub fn UdpServer(comptime Packet: type) type {
                     .config = self.config,
                     .peers = peers,
                     .sender_index = sender_index,
+                    .logger = self.config.logger,
                 };
 
                 _ = io.concurrent(processPacket, .{task}) catch |err| {
-                    std.debug.print("concurrent error: {}\n", .{err});
-                    processPacket(task); // fallback: inline — blocks receive loop
+                    if (self.config.logger) |lg| lg.system(.WARN, "udp", "concurrent error: {}", .{err});
+                    processPacket(task);
                 };
             }
         }
@@ -185,26 +195,27 @@ pub fn UdpServer(comptime Packet: type) type {
             defer if (task.peers.len > 0) task.config.allocator.free(task.peers);
 
             var addr_buf: [64]u8 = undefined;
-            std.debug.print("recv from={s} [index: {d}]\n", .{ fmtAddr(task.from, &addr_buf), task.sender_index });
+            const peer = fmtAddr(task.from, &addr_buf);
+            if (task.logger) |lg| lg.packet(.RECV, peer, @sizeOf(Packet), null);
 
             if (task.config.auto_ack) {
                 task.socket.send(task.io, &task.from, &[_]u8{0x06}) catch |err| {
-                    std.debug.print("ack error: {}\n", .{err});
+                    if (task.logger) |lg| lg.system(.WARN, "udp", "ack error: {}", .{err});
                 };
             }
 
             if (task.config.auto_echo) {
                 task.socket.send(task.io, &task.from, &task.buf) catch |err| {
-                    std.debug.print("echo error: {}\n", .{err});
+                    if (task.logger) |lg| lg.system(.WARN, "udp", "echo error: {}", .{err});
                 };
             }
 
             if (task.config.broadcast) {
                 // SECURITY: no sender validation — spoofed IPs can trigger broadcast to all peers
                 // PERF: N sequential send() syscalls per packet, consider sendmmsg batching for large client counts
-                for (task.peers) |*peer| {
-                    task.socket.send(task.io, peer, &task.buf) catch |err| {
-                        std.debug.print("broadcast error: {}\n", .{err});
+                for (task.peers) |*peer_addr| {
+                    task.socket.send(task.io, peer_addr, &task.buf) catch |err| {
+                        if (task.logger) |lg| lg.system(.WARN, "udp", "broadcast error: {}", .{err});
                     };
                 }
             }
@@ -214,6 +225,7 @@ pub fn UdpServer(comptime Packet: type) type {
             clients: *std.array_list.Managed(ClientRecord),
             now: std.Io.Clock.Timestamp,
             timeout_ms: i64,
+            logger: ?*Logger,
         ) void {
             var i: usize = 0;
             while (i < clients.items.len) {
@@ -223,7 +235,7 @@ pub fn UdpServer(comptime Packet: type) type {
                     const addr_str = fmtAddr(clients.items[i].from, &buf);
                     const idx = clients.items[i].index;
                     _ = clients.swapRemove(i);
-                    std.debug.print("client disconnected: {s} [index: {d}, connected: {d}]\n", .{ addr_str, idx, clients.items.len });
+                    if (logger) |lg| lg.system(.INFO, "udp", "client disconnected: {s} index={d} total={d}", .{ addr_str, idx, clients.items.len });
                 } else {
                     i += 1;
                 }
