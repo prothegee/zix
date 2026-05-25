@@ -1,6 +1,7 @@
 //! zix uds config
 
 const std = @import("std");
+const Logger = @import("../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
@@ -15,6 +16,9 @@ pub const UdsServerConfig = struct {
     backlog: u31 = 128,
     /// Maximum payload bytes accepted per frame. Frames larger than this close the connection.
     max_msg_len: usize = 4096,
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events.
+    /// Caller owns. Must outlive the server.
+    logger: ?*Logger = null,
 };
 
 // --------------------------------------------------------- //

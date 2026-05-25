@@ -273,7 +273,7 @@ pub const Logger = struct {
 
     /// Log an HTTP access entry.
     /// Derives log level from status: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR, other=DEBUG.
-    /// Absent ua or origin should be passed as empty string; they log as "-".
+    /// Absent ua or origin should be passed as empty string. They log as "-".
     pub fn access(
         self: *Self,
         method: []const u8,
@@ -316,7 +316,7 @@ pub const Logger = struct {
     /// Log a TCP connection lifecycle event.
     /// peer: "1.2.3.4:54321" or "-" when unavailable.
     /// dur_ms: connection duration in milliseconds.
-    /// err: null for a clean close; non-null error tag string (e.g. "read_fail") otherwise.
+    /// err: null for a clean close. Non-null error tag string (e.g. "read_fail") otherwise.
     /// Level: INFO on clean close, WARN on error.
     pub fn conn(
         self: *Self,
@@ -357,7 +357,7 @@ pub const Logger = struct {
     /// dir: RECV or SEND.
     /// peer: "1.2.3.4:5000".
     /// size: datagram size in bytes.
-    /// err: null on success; non-null error tag string otherwise.
+    /// err: null on success. Non-null error tag string otherwise.
     /// Level: INFO on success, WARN on error.
     pub fn packet(
         self: *Self,
@@ -400,7 +400,7 @@ pub const Logger = struct {
     /// dir: RECV or SEND.
     /// sock_path: socket filesystem path (e.g. "/var/run/zix.sock").
     /// size: frame payload size in bytes.
-    /// err: null on success; non-null error tag string otherwise.
+    /// err: null on success. Non-null error tag string otherwise.
     /// Level: INFO on success, WARN on error.
     pub fn frame(
         self: *Self,

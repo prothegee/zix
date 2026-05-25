@@ -63,9 +63,11 @@ pub const DechunkError = error{
 };
 
 /// Parse an HTTP/1.1 request from buf.
-/// Returns null when the buffer does not contain a complete header block (\r\n\r\n not found).
-/// Returns ParseError on malformed input.
 /// On success the returned ParsedHead contains only offsets into buf — no data is copied.
+///
+/// Return:
+/// - null when the buffer does not contain a complete header block (\r\n\r\n not found)
+/// - ParseError on malformed input
 pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     // Scan for the end-of-headers marker. Search stops as soon as it is found.
     const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
@@ -163,9 +165,11 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
 /// Decode HTTP/1.1 chunked transfer encoding.
 /// raw: complete raw chunked body (including chunk framing).
 /// out: destination buffer — must be at least raw.len bytes (decoded is always <= raw).
-/// Returns the number of decoded bytes written to out.
 /// Stops at the terminal chunk (size 0) or when raw is exhausted.
 /// Chunk extensions ("; name=value" on the size line) are ignored.
+///
+/// Return:
+/// - number of decoded bytes written to out
 pub fn dechunk(raw: []const u8, out: []u8) DechunkError!usize {
     var pos: usize = 0;
     var written: usize = 0;

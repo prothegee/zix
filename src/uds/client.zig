@@ -9,11 +9,13 @@ const UdsClientConfig = Config.UdsClientConfig;
 /// UDS stream client.
 ///
 /// Usage:
-///   var client = try UdsClient.connect(config, io);
-///   defer client.deinit(io);
-///   try client.sendMsg(io, "hello");
-///   var buf: [4096]u8 = undefined;
-///   const reply = try client.recvMsg(io, &buf);
+/// ```zig
+/// var client = try UdsClient.connect(config, io);
+/// defer client.deinit(io);
+/// try client.sendMsg(io, "hello");
+/// var buf: [4096]u8 = undefined;
+/// const reply = try client.recvMsg(io, &buf);
+/// ```
 pub const UdsClient = struct {
     const Self = @This();
 
@@ -49,9 +51,12 @@ pub const UdsClient = struct {
         try wtr.interface.flush();
     }
 
-    /// Receive a length-prefixed frame into buf. Returns the payload slice.
-    /// Returns error.MessageTooLarge if the frame payload exceeds buf.len.
-    /// Returns error.ConnectionClosed if the server closed the connection.
+    /// Receive a length-prefixed frame into buf.
+    ///
+    /// Return:
+    /// - payload slice on success
+    /// - error.MessageTooLarge if the frame payload exceeds buf.len
+    /// - error.ConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         var rbuf: [4096]u8 = undefined;
         var rdr = self.stream.reader(io, &rbuf);

@@ -9,11 +9,13 @@ const TcpClientConfig = Config.TcpClientConfig;
 /// TCP stream client.
 ///
 /// Usage:
-///   var client = try TcpClient.connect(config, io);
-///   defer client.deinit(io);
-///   try client.sendMsg(io, "hello");
-///   var buf: [4096]u8 = undefined;
-///   const reply = try client.recvMsg(io, &buf);
+/// ```zig
+/// var client = try TcpClient.connect(config, io);
+/// defer client.deinit(io);
+/// try client.sendMsg(io, "hello");
+/// var buf: [4096]u8 = undefined;
+/// const reply = try client.recvMsg(io, &buf);
+/// ```
 pub const TcpClient = struct {
     const Self = @This();
 
@@ -23,7 +25,9 @@ pub const TcpClient = struct {
     // --------------------------------------------------------- //
 
     /// Connect to the server at config.ip:config.port.
-    /// Returns error.PortNotConfigured if config.port is 0.
+    ///
+    /// Return:
+    /// - error.PortNotConfigured if config.port is 0
     pub fn connect(config: TcpClientConfig, io: std.Io) !Self {
         if (config.port == 0) return error.PortNotConfigured;
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
@@ -55,7 +59,9 @@ pub const TcpClient = struct {
 
     /// Send a message as a length-prefixed frame.
     /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
-    /// Returns error.MessageTooLarge if msg.len exceeds config.max_msg_len.
+    ///
+    /// Return:
+    /// - error.MessageTooLarge if msg.len exceeds config.max_msg_len
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         if (msg.len > self.config.max_msg_len) return error.MessageTooLarge;
         var wbuf: [4096 + 4]u8 = undefined;
@@ -67,9 +73,12 @@ pub const TcpClient = struct {
         try wtr.interface.flush();
     }
 
-    /// Receive a length-prefixed frame into buf. Returns the payload slice.
-    /// Returns error.MessageTooLarge if the frame payload exceeds buf.len.
-    /// Returns error.ConnectionClosed if the server closed the connection.
+    /// Receive a length-prefixed frame into buf.
+    ///
+    /// Return:
+    /// - payload slice on success
+    /// - error.MessageTooLarge if the frame payload exceeds buf.len
+    /// - error.ConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         var rbuf: [4096 + 4]u8 = undefined;
         var rdr = self.stream.reader(io, &rbuf);

@@ -1,4 +1,4 @@
-// channel_ipc_a.zig -- bidirectional IPC via UDS (Process A, server side)
+// channel_ipc_a.zig: bidirectional IPC via UDS (Process A, server side)
 //
 // Process A listens on /tmp/zix_ipc.sock and accepts one connection from Process B.
 // After connecting, both sides send and receive independently at different rates.
@@ -7,7 +7,7 @@
 //   writer: sends "A:N" every 600 ms
 //   reader: prints whatever B sends
 //
-// Either side can be stopped (Ctrl-C) -- the other side detects the closed
+// Either side can be stopped (Ctrl-C), the other side detects the closed
 // connection and exits cleanly.
 //
 // Run Process A first:
@@ -17,9 +17,18 @@
 //   zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
 
 const std = @import("std");
+const zix = @import("zix");
 
 const SOCK_PATH: []const u8 = "/tmp/zix_ipc.sock";
 const SEND_INTERVAL_MS: i64 = 600;
+
+// Logger config — uncomment this section to add logger
+// const LOG_DIR: []const u8  = "./logs";
+// const LOG_FILE: []const u8 = "channel_ipc";
+
+// fn createLogDir(io: std.Io) void {
+//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
+// }
 
 // --------------------------------------------------------- //
 
@@ -89,6 +98,25 @@ fn reader(cap: ReaderCap) void {
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
+    // Uncomment this to add logger (console only — no save_path means no file output):
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .console           = .ALWAYS,
+    //     .console_min_level = .INFO,
+    // });
+    // defer logger.deinit();
+
+    // Uncomment this to add logger with file output (createLogDir must run first):
+    // createLogDir(io);
+    // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    //     .save_path      = LOG_DIR,
+    //     .save_file      = LOG_FILE,
+    //     .save_min_level = .INFO,
+    //     .console        = .ALWAYS,
+    // });
+    // defer logger.deinit();
+
+    // logger.system(.INFO, "ipc", "A: listening on " ++ SOCK_PATH, .{});
+
     std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
     const ua = try std.Io.net.UnixAddress.init(SOCK_PATH);
     var net_server = try ua.listen(io, .{ .kernel_backlog = 1 });
@@ -97,10 +125,10 @@ pub fn main(process: std.process.Init) !void {
         std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
     }
 
-    std.debug.print("A: listening on {s} -- start Process B\n", .{SOCK_PATH});
+    std.debug.print("A: listening on {s} start Process B\n", .{SOCK_PATH});
     const stream = try net_server.accept(io);
 
-    std.debug.print("A: B connected -- starting bidirectional exchange\n", .{});
+    std.debug.print("A: B connected, starting bidirectional exchange\n", .{});
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
