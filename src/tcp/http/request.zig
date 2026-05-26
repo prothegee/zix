@@ -21,8 +21,6 @@ pub const Request = struct {
     allocator: std.mem.Allocator,
     body_cache: ?[]const u8 = null,
     path_params: []const PathParam = &.{},
-    /// Lazy lowercase-keyed header index built on first header() call.
-    header_index: ?std.StringHashMapUnmanaged([]const u8) = null,
 
     /// Get HTTP method.
     pub fn method(self: Request) Method.Code {
@@ -41,36 +39,7 @@ pub const Request = struct {
     }
 
     /// Get a request header value by name (case-insensitive).
-    /// First call builds a lowercase-keyed index from the arena.
-    /// Subsequent calls are O(1) hash lookups.
-    /// Falls back to a linear scan if index build fails.
-    pub fn header(self: *Request, name: []const u8) ?[]const u8 {
-        if (self.header_index == null) {
-            var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-            var ok = true;
-            for (self.head.headers[0..self.head.header_count]) |h| {
-                const n = self.buf[h.name_start..][0..h.name_len];
-                const v = self.buf[h.value_start..][0..h.value_len];
-                const lower = self.allocator.alloc(u8, n.len) catch {
-                    ok = false;
-                    break;
-                };
-                _ = std.ascii.lowerString(lower, n);
-                map.put(self.allocator, lower, v) catch {
-                    ok = false;
-                    break;
-                };
-            }
-            if (ok) self.header_index = map;
-        }
-
-        var lower_buf: [128]u8 = undefined;
-        if (self.header_index != null and name.len <= lower_buf.len) {
-            const lower_name = std.ascii.lowerString(lower_buf[0..name.len], name);
-            return self.header_index.?.get(lower_name);
-        }
-
-        // Fallback: linear scan.
+    pub fn header(self: Request, name: []const u8) ?[]const u8 {
         for (self.head.headers[0..self.head.header_count]) |h| {
             const n = self.buf[h.name_start..][0..h.name_len];
             if (std.ascii.eqlIgnoreCase(n, name)) {
