@@ -15,6 +15,7 @@ test "zix edge: DispatchModel, backing values are stable" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.POOL));
     try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
 }
 
 test "zix edge: TCP frame, max u32 length encodes and decodes correctly" {

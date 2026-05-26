@@ -138,12 +138,13 @@ pub fn tenantHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    // Param routes: more-literal patterns first, all-param patterns after.
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/path/user/:id", .handler = userHandler, .kind = .PARAM },
+        .{ .path = "/path/:tenant-id/:tenant-branch", .handler = tenantHandler, .kind = .PARAM },
+        .{ .path = "/path", .handler = pathsHandler, .kind = .PREFIX },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -155,11 +156,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    // Param routes: more-literal patterns first, all-param patterns after.
-    server.registerParamHandler("/path/user/:id", userHandler);
-    server.registerParamHandler("/path/:tenant-id/:tenant-branch", tenantHandler);
-    server.registerPrefixHandler("/path", pathsHandler);
 
     try server.run();
 }

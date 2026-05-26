@@ -161,9 +161,12 @@ pub fn main(process: std.process.Init) !void {
         std.debug.print("uds_http: fetcher spawn error: {}\n", .{err});
     }
 
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/data", .handler = dataHandler },
+        .{ .path = "/stream", .handler = streamHandler },
+        .{ .path = "/", .handler = homeHandler },
+    }, .{
         .io = io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .max_kernel_backlog = MAX_KERNEL_BACKLOG,
@@ -173,10 +176,6 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = .ASYNC, // .ASYNC preferred for SSE: long-lived connections do not hold pool threads
     });
     defer server.deinit();
-
-    server.registerHandler("/data", dataHandler);
-    server.registerHandler("/stream", streamHandler);
-    server.registerHandler("/", homeHandler);
 
     std.debug.print("uds_http: listening on {s}:{d}\n", .{ IP, PORT });
     try server.run();

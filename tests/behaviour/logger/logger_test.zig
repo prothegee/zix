@@ -43,7 +43,6 @@ test "zix behaviour: Logger flush with no save_path is a no-op" {
 test "zix behaviour: Http.ServerConfig.logger defaults to null" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 8080,
     };

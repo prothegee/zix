@@ -127,12 +127,14 @@ pub fn usersHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/status", .handler = statusHandler },
+        .{ .path = "/echo", .handler = echoHandler },
+        .{ .path = "/post", .handler = postHandler },
+        .{ .path = "/user", .handler = userHandler },
+        .{ .path = "/users", .handler = usersHandler },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -144,12 +146,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    server.registerHandler("/status", statusHandler);
-    server.registerHandler("/echo", echoHandler);
-    server.registerHandler("/post", postHandler);
-    server.registerHandler("/user", userHandler);
-    server.registerHandler("/users", usersHandler);
 
     try server.run();
 }
