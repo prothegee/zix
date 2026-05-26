@@ -8,152 +8,144 @@ const Context = @import("context.zig").Context;
 
 pub const HandlerFn = *const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void;
 
-const RouteKind = enum(u8) { EXACT, PREFIX, PARAM };
+pub const RouteKind = enum(u8) { EXACT, PREFIX, PARAM };
 
-const Route = struct {
+pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
     kind: RouteKind = .EXACT,
 };
 
-pub const Router = struct {
-    routes: std.MultiArrayList(Route) = .{},
-    // O(1) hash lookup for exact-match routes, param/prefix stay in `routes`.
-    // Insertions and lookups use the request path string directly as the key.
-    exact_map: std.StringHashMapUnmanaged(HandlerFn) = .empty,
-    allocator: std.mem.Allocator,
+/// Brief:
+/// Build a router type whose dispatch table is fixed at compile time
+///
+/// Note:
+/// - Routes are partitioned by kind at comptime: EXACT routes go into
+///   a StaticStringMap for O(1) lookup, PARAM and PREFIX routes into
+///   comptime arrays iterated with inline for at each dispatch call.
+/// - Dispatch priority: EXACT > PARAM (first-registered wins) > PREFIX (longest wins).
+/// - Registration order matters only within the PARAM tier.
+/// - The returned type is zero-size: embed it as a field or call dispatch on it.
+///
+/// Param:
+/// routes - []const Route (comptime-known route table)
+///
+/// Return:
+/// type
+pub fn Router(comptime routes: []const Route) type {
+    const exact_count = blk: {
+        var n: usize = 0;
+        for (routes) |r| if (r.kind == .EXACT) {
+            n += 1;
+        };
+        break :blk n;
+    };
+    const prefix_count = blk: {
+        var n: usize = 0;
+        for (routes) |r| if (r.kind == .PREFIX) {
+            n += 1;
+        };
+        break :blk n;
+    };
+    const param_count = blk: {
+        var n: usize = 0;
+        for (routes) |r| if (r.kind == .PARAM) {
+            n += 1;
+        };
+        break :blk n;
+    };
 
-    /// Brief:
-    /// Initialize the router with the given allocator
-    ///
-    /// Param:
-    /// allocator - std.mem.Allocator
-    ///
-    /// Return:
-    /// Router
-    pub fn init(allocator: std.mem.Allocator) Router {
-        return .{ .allocator = allocator };
-    }
-
-    /// Brief:
-    /// Free all route storage
-    pub fn deinit(self: *Router) void {
-        self.routes.deinit(self.allocator);
-        self.exact_map.deinit(self.allocator);
-    }
-
-    /// Brief:
-    /// Register a handler for an exact URL path
-    ///
-    /// Note:
-    /// - Matches only when the request path equals path character-for-character
-    /// - Inserted into both `routes` (for listing/iteration) and `exact_map` (for O(1) dispatch)
-    ///
-    /// Param:
-    /// path    - []const u8
-    /// handler - HandlerFn
-    ///
-    /// Return:
-    /// !void
-    pub fn register(self: *Router, path: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = path, .handler = handler, .kind = .EXACT });
-        try self.exact_map.put(self.allocator, path, handler);
-    }
-
-    /// Brief:
-    /// Register a handler for a URL prefix
-    ///
-    /// Note:
-    /// - Matches the prefix itself and any sub-path below it
-    /// - "/api" matches "/api", "/api/foo", "/api/foo/bar" but NOT "/apiv2"
-    ///
-    /// Param:
-    /// prefix  - []const u8 (no trailing slash)
-    /// handler - HandlerFn
-    ///
-    /// Return:
-    /// !void
-    pub fn registerPrefix(self: *Router, prefix: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = prefix, .handler = handler, .kind = .PREFIX });
-    }
-
-    /// Brief:
-    /// Register a handler for a parameterized URL pattern
-    ///
-    /// Note:
-    /// - Segments prefixed with ':' are named captures others must match literally
-    /// - "/users/:id" matches "/users/alice" and captures id="alice"
-    /// - Captured values are read via req.pathParam("id") inside the handler
-    ///
-    /// Param:
-    /// pattern - []const u8 (e.g. "/users/:id/posts/:post_id")
-    /// handler - HandlerFn
-    ///
-    /// Return:
-    /// !void
-    pub fn registerParam(self: *Router, pattern: []const u8, handler: HandlerFn) !void {
-        try self.routes.append(self.allocator, .{ .path = pattern, .handler = handler, .kind = .PARAM });
-    }
-
-    /// Brief:
-    /// Dispatch the request to the best matching route
-    ///
-    /// Note:
-    /// - Pass 1 exact:  O(1) hash lookup via exact_map
-    /// - Pass 2 param:  first parameterized pattern that matches wins params written to req.path_params
-    /// - Pass 3 prefix: longest matching prefix wins
-    /// - Priority is independent of registration order
-    ///
-    /// Param:
-    /// req - *Request
-    /// res - *Response
-    /// ctx - *Context
-    ///
-    /// Return:
-    /// !bool
-    pub fn dispatch(self: *Router, req: *Request, res: *Response, ctx: *Context) !bool {
-        const p = req.path();
-
-        // Pass 1: exact, O(1) hash lookup
-        if (self.exact_map.get(p)) |handler| {
-            try handler(req, res, ctx);
-            return true;
+    const exact_pairs: [exact_count]struct { []const u8, HandlerFn } = blk: {
+        var arr: [exact_count]struct { []const u8, HandlerFn } = undefined;
+        var i: usize = 0;
+        for (routes) |r| {
+            if (r.kind == .EXACT) {
+                arr[i] = .{ r.path, r.handler };
+                i += 1;
+            }
         }
+        break :blk arr;
+    };
 
-        const kinds = self.routes.items(.kind);
-        const paths = self.routes.items(.path);
-        const handlers = self.routes.items(.handler);
+    const prefix_routes: [prefix_count]Route = blk: {
+        var arr: [prefix_count]Route = undefined;
+        var i: usize = 0;
+        for (routes) |r| {
+            if (r.kind == .PREFIX) {
+                arr[i] = r;
+                i += 1;
+            }
+        }
+        break :blk arr;
+    };
 
-        // Pass 2: parameterized (first match wins), kind-only scan until match
-        for (kinds, 0..) |kind, i| {
-            if (kind == .PARAM) {
-                if (try matchParam(paths[i], p, req)) {
-                    try handlers[i](req, res, ctx);
+    const param_routes: [param_count]Route = blk: {
+        var arr: [param_count]Route = undefined;
+        var i: usize = 0;
+        for (routes) |r| {
+            if (r.kind == .PARAM) {
+                arr[i] = r;
+                i += 1;
+            }
+        }
+        break :blk arr;
+    };
+
+    const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
+
+    return struct {
+        /// Brief:
+        /// Dispatch the request to the best matching route
+        ///
+        /// Note:
+        /// - Pass 1 exact: O(1) comptime-built hash lookup
+        /// - Pass 2 param: first parameterized pattern that matches wins, path_params written to req
+        /// - Pass 3 prefix: longest matching prefix wins
+        /// - Priority is independent of registration order
+        ///
+        /// Param:
+        /// req - *Request
+        /// res - *Response
+        /// ctx - *Context
+        ///
+        /// Return:
+        /// !bool
+        pub fn dispatch(_: @This(), req: *Request, res: *Response, ctx: *Context) !bool {
+            const p = req.path();
+
+            // Pass 1: exact, O(1) hash lookup
+            if (exact_map.get(p)) |handler| {
+                try handler(req, res, ctx);
+                return true;
+            }
+
+            // Pass 2: parameterized (first match wins)
+            inline for (param_routes) |route| {
+                if (try matchParam(route.path, p, req)) {
+                    try route.handler(req, res, ctx);
                     return true;
                 }
             }
-        }
 
-        // Pass 3: prefix (longest match wins)
-        var best_len: usize = 0;
-        var best_handler: ?HandlerFn = null;
-        for (kinds, paths, handlers) |kind, path, handler| {
-            if (kind == .PREFIX) {
-                const at_boundary = p.len == path.len or p[path.len] == '/';
-                if (std.mem.startsWith(u8, p, path) and at_boundary and path.len > best_len) {
-                    best_len = path.len;
-                    best_handler = handler;
+            // Pass 3: prefix (longest match wins)
+            var best_len: usize = 0;
+            var best_handler: ?HandlerFn = null;
+            inline for (prefix_routes) |route| {
+                const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
+                if (std.mem.startsWith(u8, p, route.path) and at_boundary and route.path.len > best_len) {
+                    best_len = route.path.len;
+                    best_handler = route.handler;
                 }
             }
-        }
-        if (best_handler) |h| {
-            try h(req, res, ctx);
-            return true;
-        }
+            if (best_handler) |h| {
+                try h(req, res, ctx);
+                return true;
+            }
 
-        return false;
-    }
-};
+            return false;
+        }
+    };
+}
 
 // Match a parameterized pattern against a concrete path.
 // On success, populates req.path_params (allocated from req.allocator) and returns true.
@@ -217,19 +209,12 @@ fn mockHandler(req: *Request, res: *Response, ctx: *Context) !void {
     _ = ctx;
 }
 
-test "zix test: http router registration" {
-    var router = Router.init(std.testing.allocator);
-    defer router.deinit();
-
-    try router.register("/about", mockHandler);
-    try router.registerPrefix("/api", mockHandler);
-    try router.registerParam("/users/:id", mockHandler);
-
-    try std.testing.expectEqual(@as(usize, 3), router.routes.len);
-    try std.testing.expectEqual(RouteKind.EXACT, router.routes.items(.kind)[0]);
-    try std.testing.expectEqualStrings("/about", router.routes.items(.path)[0]);
-    try std.testing.expectEqual(RouteKind.PREFIX, router.routes.items(.kind)[1]);
-    try std.testing.expectEqualStrings("/api", router.routes.items(.path)[1]);
-    try std.testing.expectEqual(RouteKind.PARAM, router.routes.items(.kind)[2]);
-    try std.testing.expectEqualStrings("/users/:id", router.routes.items(.path)[2]);
+test "zix test: http router comptime" {
+    const TestRouter = Router(&[_]Route{
+        .{ .path = "/about", .handler = mockHandler },
+        .{ .path = "/api", .handler = mockHandler, .kind = .PREFIX },
+        .{ .path = "/users/:id", .handler = mockHandler, .kind = .PARAM },
+    });
+    const r: TestRouter = .{};
+    _ = r;
 }
