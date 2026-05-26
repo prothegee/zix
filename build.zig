@@ -186,6 +186,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig" },
         .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig" },
+        .{ "example-http_basic_4_epoll", "examples/http_basic_4_epoll.zig" },
         .{ "example-http_client", "examples/http_client.zig" },
         .{ "example-http_json", "examples/http_json.zig" },
         .{ "example-http_manual_concurrent", "examples/http_manual_concurrent.zig" },
