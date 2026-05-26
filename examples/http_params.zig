@@ -127,12 +127,12 @@ pub fn calcHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/echo", .handler = echoHandler },
+        .{ .path = "/greet", .handler = greetHandler },
+        .{ .path = "/calc", .handler = calcHandler },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -144,10 +144,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    server.registerHandler("/echo", echoHandler);
-    server.registerHandler("/greet", greetHandler);
-    server.registerHandler("/calc", calcHandler);
 
     try server.run();
 }

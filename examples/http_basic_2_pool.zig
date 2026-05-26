@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9000;
+const PORT: u16 = 9100;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .POOL;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
@@ -79,9 +79,12 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/", .handler = homeHandler },
+        .{ .path = "/echo", .handler = echoHandler },
+        .{ .path = "/about", .handler = aboutHandler },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -94,10 +97,6 @@ pub fn main(process: std.process.Init) !void {
         // .logger = &logger, // uncomment to wire logger (automatic HTTP access logging)
     });
     defer server.deinit();
-
-    server.registerHandler("/", homeHandler);
-    server.registerHandler("/echo", echoHandler);
-    server.registerHandler("/about", aboutHandler);
 
     try server.run();
 }
