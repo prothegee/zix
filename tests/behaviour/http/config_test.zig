@@ -9,7 +9,6 @@ const zix = @import("zix");
 test "zix behaviour: ServerConfig, buffer size defaults" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };
@@ -22,7 +21,6 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
 test "zix behaviour: ServerConfig, timeout defaults are disabled (zero)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };
@@ -33,7 +31,6 @@ test "zix behaviour: ServerConfig, timeout defaults are disabled (zero)" {
 test "zix behaviour: ServerConfig, static serving is disabled by default" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };
@@ -44,7 +41,6 @@ test "zix behaviour: ServerConfig, static serving is disabled by default" {
 test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };
@@ -54,7 +50,6 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
 
 test "zix behaviour: ServerConfig, dispatch_model defaults to POOL" {
     const cfg = zix.Http.ServerConfig{
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };
@@ -65,12 +60,12 @@ test "zix behaviour: DispatchModel, integer backing values (POOL=0 is zero-value
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.POOL));
     try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
 }
 
 test "zix behaviour: ServerConfig, max_response_headers defaults to COMMON (32)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
-        .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9000,
     };

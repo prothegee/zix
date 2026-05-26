@@ -45,18 +45,19 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // This gives explicit control over the concurrency limit.
 //
 // Comparison:
-//   Auto (default in other examples):
-//     pub fn main(process: std.process.Init) !void {
-//         var server = try zix.Http.Server.init(4096, .{ .io = process.io, ... });
+// Auto (default in other examples):
+// pub fn main(process: std.process.Init) !void {
+//     var server = try zix.Http.Server.init(4096, &routes, .{ .io = process.io, ... });
+//     // ...
+// }
 //
-//   Manual (this example):
-//     pub fn main() !void {
-//         var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//         var server = try zix.Http.Server.init(4096, .{ .io = threaded.io(), ... });
+// Manual (this example):
+// pub fn main() !void {
+//     var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
+//     var server = try zix.Http.Server.init(4096, &routes, .{ .io = threaded.io(), ... });
+//     // ...
+// }
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
     const limit: std.Io.Limit = if (CONCURRENT_LIMIT == 0)
         .unlimited
     else
@@ -67,9 +68,11 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/", .handler = homeHandler },
+        .{ .path = "/info", .handler = infoHandler },
+    }, .{
         .io = threaded.io(),
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -80,9 +83,6 @@ pub fn main() !void {
         .workers = WORKERS,
     });
     defer server.deinit();
-
-    server.registerHandler("/", homeHandler);
-    server.registerHandler("/info", infoHandler);
 
     try server.run();
 }

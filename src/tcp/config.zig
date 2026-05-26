@@ -20,6 +20,12 @@ pub const DispatchModel = enum(u8) {
     /// pool_size is ignored.
     /// Balanced throughput and latency.
     MIXED = 2,
+    /// Single epoll event loop accepts connections and dispatches readable
+    /// sockets to a worker pool. Each worker handles one request then re-arms
+    /// the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
+    /// Best for very high connection counts and slow/idle clients. Linux-only.
+    /// pool_size sets the worker count. HTTP server only (Tcp falls back to .POOL).
+    EPOLL = 3,
 }; // for all Tcp
 
 // --------------------------------------------------------- //

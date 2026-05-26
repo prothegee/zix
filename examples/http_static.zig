@@ -224,14 +224,14 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
     createInitDirs(process.io);
 
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/", .handler = homeHandler },
+        .{ .path = "/upload", .handler = uploadHandler },
+        .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -245,10 +245,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    server.registerHandler("/", homeHandler);
-    server.registerHandler("/upload", uploadHandler);
-    server.registerPrefixHandler("/secret", secretHandler);
 
     try server.run();
 }

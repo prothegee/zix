@@ -165,12 +165,10 @@ pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -182,8 +180,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    server.registerParamHandler("/ws/:room-id", wsHandler);
 
     try server.run();
 }

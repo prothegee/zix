@@ -156,12 +156,13 @@ pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        // /public — origin check only
+        .{ .path = "/public", .handler = withOriginCheck(publicHandler) },
+        // /private — origin check + basic auth (composed: left = outermost = runs first)
+        .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -173,12 +174,6 @@ pub fn main(process: std.process.Init) !void {
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
-
-    // /public — origin check only
-    server.registerHandler("/public", withOriginCheck(publicHandler));
-
-    // /private — origin check + basic auth (composed: left = outermost = runs first)
-    server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)));
 
     try server.run();
 }

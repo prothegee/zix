@@ -26,9 +26,10 @@ test "zix integration: dispatch, exact match routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/about", .handler = handlerA },
+    }, .{ .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
-    server.registerHandler("/about", handlerA);
 
     var req = try zix.Http.Request.fromRaw("GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
     var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
@@ -43,9 +44,10 @@ test "zix integration: dispatch, param populates path_params" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
+    }, .{ .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
-    server.registerParamHandler("/users/:id", handlerA);
 
     var req = try zix.Http.Request.fromRaw("GET /users/bob HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
     var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
@@ -62,9 +64,10 @@ test "zix integration: dispatch, two path params both populated" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/orgs/:org/repos/:repo", .handler = handlerA, .kind = .PARAM },
+    }, .{ .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
-    server.registerParamHandler("/orgs/:org/repos/:repo", handlerA);
 
     var req = try zix.Http.Request.fromRaw("GET /orgs/zix/repos/core HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
     var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
@@ -80,9 +83,10 @@ test "zix integration: dispatch, prefix routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, .{ .allocator = al, .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/static", .handler = handlerA, .kind = .PREFIX },
+    }, .{ .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
-    server.registerPrefixHandler("/static", handlerA);
 
     var req = try zix.Http.Request.fromRaw("GET /static/css/app.css HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
     var res = zix.Http.Response.init(undefined, false, undefined, al, 32);

@@ -59,12 +59,11 @@ pub fn pingHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/slow", .handler = slowHandler },
+        .{ .path = "/ping", .handler = pingHandler },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -78,9 +77,6 @@ pub fn main(process: std.process.Init) !void {
         .handler_timeout_ms = HANDLER_TIMEOUT_MS,
     });
     defer server.deinit();
-
-    server.registerHandler("/slow", slowHandler);
-    server.registerHandler("/ping", pingHandler);
 
     try server.run();
 }
