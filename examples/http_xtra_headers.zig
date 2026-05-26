@@ -121,12 +121,13 @@ pub fn injectGuardHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: 
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-
-    var server = try zix.Http.Server.init(4096, .{
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+        .{ .path = "/info", .handler = infoHandler },
+        .{ .path = "/cors", .handler = corsHandler },
+        .{ .path = "/overflow", .handler = overflowHandler },
+        .{ .path = "/inject-guard", .handler = injectGuardHandler },
+    }, .{
         .io = process.io,
-        .allocator = arena.allocator(),
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -143,11 +144,6 @@ pub fn main(process: std.process.Init) !void {
         .max_response_headers = .LARGE,
     });
     defer server.deinit();
-
-    server.registerHandler("/info", infoHandler);
-    server.registerHandler("/cors", corsHandler);
-    server.registerHandler("/overflow", overflowHandler);
-    server.registerHandler("/inject-guard", injectGuardHandler);
 
     try server.run();
 }

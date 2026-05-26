@@ -5,6 +5,7 @@ const Config = @import("config.zig").HttpServerConfig;
 const DispatchModel = @import("config.zig").DispatchModel;
 const Router = @import("router.zig").Router;
 const HandlerFn = @import("router.zig").HandlerFn;
+const Route = @import("router.zig").Route;
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const fdWriteAll = @import("response.zig").fdWriteAll;
@@ -97,21 +98,36 @@ fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
 // Work queue shared between accept threads (producers) and pool threads (consumers).
 // Accept threads push accepted streams immediately and never block on handling.
 // Pool threads pop and handle each connection synchronously (blocking I/O, no scheduler).
+// Implemented as a heap-backed ring buffer: push and pop are both O(1).
+// The backing buffer doubles on overflow (initial capacity 16), allocated via smp_allocator.
 const ConnQueue = struct {
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Condition = .init,
-    // Uses smp_allocator directly — no per-request arena needed for the queue itself.
-    items: std.ArrayListUnmanaged(std.Io.net.Stream) = .empty,
+    buf: []std.Io.net.Stream = &.{},
+    head: usize = 0,
+    len: usize = 0,
     closed: bool = false,
 
-    // Push a new connection. On OOM the stream is closed and the connection dropped.
+    // Push a new connection. Grows the ring buffer on overflow.
+    // On OOM the stream is closed and the connection dropped.
     fn push(self: *ConnQueue, stream: std.Io.net.Stream, io: std.Io) void {
         self.mutex.lockUncancelable(io);
-        self.items.append(std.heap.smp_allocator, stream) catch {
-            self.mutex.unlock(io);
-            stream.close(io);
-            return;
-        };
+        if (self.len == self.buf.len) {
+            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_buf = std.heap.smp_allocator.alloc(std.Io.net.Stream, new_cap) catch {
+                self.mutex.unlock(io);
+                stream.close(io);
+                return;
+            };
+            if (self.buf.len > 0) {
+                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
+                std.heap.smp_allocator.free(self.buf);
+            }
+            self.buf = new_buf;
+            self.head = 0;
+        }
+        self.buf[(self.head + self.len) % self.buf.len] = stream;
+        self.len += 1;
         self.mutex.unlock(io);
         self.ready.signal(io);
     }
@@ -120,14 +136,16 @@ const ConnQueue = struct {
     // Returns null only after close() has been called and the queue is empty.
     fn pop(self: *ConnQueue, io: std.Io) ?std.Io.net.Stream {
         self.mutex.lockUncancelable(io);
-        while (self.items.items.len == 0) {
+        while (self.len == 0) {
             if (self.closed) {
                 self.mutex.unlock(io);
                 return null;
             }
             self.ready.waitUncancelable(io, &self.mutex);
         }
-        const stream = self.items.orderedRemove(0);
+        const stream = self.buf[self.head];
+        self.head = (self.head + 1) % self.buf.len;
+        self.len -= 1;
         self.mutex.unlock(io);
         return stream;
     }
@@ -141,34 +159,236 @@ const ConnQueue = struct {
     }
 
     fn deinit(self: *ConnQueue) void {
-        self.items.deinit(std.heap.smp_allocator);
+        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
     }
 };
 
 // --------------------------------------------------------- //
 
-// Internal generic implementation — use `Server.init(stack_threshold, config)` publicly.
-fn HttpServerImpl(comptime stack_threshold: usize) type {
+// Work queue of ready connection fds for the EPOLL worker pool (Linux only).
+// The single epoll loop (producer) pushes readable sockets, workers (consumers) pop them.
+// Heap-backed ring buffer: push and pop are both O(1), doubling on overflow (initial 64).
+const FdQueue = struct {
+    mutex: std.Io.Mutex = .init,
+    ready: std.Io.Condition = .init,
+    buf: []std.posix.fd_t = &.{},
+    head: usize = 0,
+    len: usize = 0,
+    closed: bool = false,
+
+    // Push a ready fd. Grows the ring buffer on overflow. On OOM the fd is closed.
+    fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        if (self.len == self.buf.len) {
+            const new_cap = if (self.buf.len == 0) 64 else self.buf.len * 2;
+            const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
+                self.mutex.unlock(io);
+                _ = std.os.linux.close(fd);
+                return;
+            };
+            if (self.buf.len > 0) {
+                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
+                std.heap.smp_allocator.free(self.buf);
+            }
+            self.buf = new_buf;
+            self.head = 0;
+        }
+        self.buf[(self.head + self.len) % self.buf.len] = fd;
+        self.len += 1;
+        self.mutex.unlock(io);
+        self.ready.signal(io);
+    }
+
+    // Pop the next ready fd, blocking until one arrives.
+    // Returns null only after close() has been called and the queue is empty.
+    fn pop(self: *FdQueue, io: std.Io) ?std.posix.fd_t {
+        self.mutex.lockUncancelable(io);
+        while (self.len == 0) {
+            if (self.closed) {
+                self.mutex.unlock(io);
+                return null;
+            }
+            self.ready.waitUncancelable(io, &self.mutex);
+        }
+        const fd = self.buf[self.head];
+        self.head = (self.head + 1) % self.buf.len;
+        self.len -= 1;
+        self.mutex.unlock(io);
+        return fd;
+    }
+
+    fn close(self: *FdQueue, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        self.closed = true;
+        self.mutex.unlock(io);
+        self.ready.broadcast(io);
+    }
+
+    fn deinit(self: *FdQueue) void {
+        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
+    }
+};
+
+// --------------------------------------------------------- //
+
+// Internal generic implementation — use `Server.init(stack_threshold, routes, config)` publicly.
+fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Route) type {
     return struct {
         config: Config,
-        router: Router,
+        router: Router(routes) = .{},
         registry: ConnRegistry = .{},
 
         const Self = @This();
 
         // --------------------------------------------------------- //
 
+        /// Outcome of processing one request: whether the connection may be reused.
+        const ReqOutcome = enum { keep_alive, close };
+
         /// Brief:
-        /// Handle a single TCP connection with a keep-alive request loop
+        /// Disable Nagle on a socket so each response flushes immediately
+        ///
+        /// Param:
+        /// fd - std.posix.fd_t
+        fn setNoDelay(fd: std.posix.fd_t) void {
+            if (comptime @import("builtin").target.os.tag != .windows) {
+                std.posix.setsockopt(
+                    fd,
+                    std.posix.IPPROTO.TCP,
+                    std.posix.TCP.NODELAY,
+                    std.mem.asBytes(&@as(c_int, 1)),
+                ) catch {};
+            }
+        }
+
+        /// Brief:
+        /// Process exactly one HTTP request on fd using caller-owned buffers
+        ///
+        /// Note:
+        /// - Shared by the POOL keep-alive loop (called repeatedly) and the EPOLL
+        ///   worker (called once per readable event)
+        /// - Incremental recv loop accumulates bytes until the end-of-headers marker
+        /// - Zero-copy parse: all request fields are offsets into buf_read
+        /// - Date header read from the global double-buffered cache (one atomic load)
+        /// - Falls back to static file serving, then 404, when no route matches
+        ///
+        /// Param:
+        /// server   - *Self
+        /// stream   - std.Io.net.Stream (passed to Context for upgrade handlers)
+        /// fd       - std.posix.fd_t (raw socket for recv/send on the hot path)
+        /// io       - std.Io
+        /// buf_read - []u8 (read buffer, owned by caller)
+        /// arena    - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
+        ///
+        /// Return:
+        /// - .keep_alive when the connection may serve another request
+        /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
+        fn handleOneRequest(
+            server: *Self,
+            stream: std.Io.net.Stream,
+            fd: std.posix.fd_t,
+            io: std.Io,
+            buf_read: []u8,
+            arena: *std.heap.ArenaAllocator,
+        ) ReqOutcome {
+            _ = arena.reset(.retain_capacity);
+            const allocator = arena.allocator();
+            const cfg = server.config;
+
+            // Incremental recv loop: accumulate bytes until \r\n\r\n is found.
+            // Only the new tail is searched each iteration to avoid re-scanning.
+            var filled: usize = 0;
+            var found = false;
+
+            while (filled < buf_read.len) {
+                const n = std.posix.read(fd, buf_read[filled..]) catch break;
+                if (n == 0) break; // peer closed
+                const prev = filled;
+                filled += n;
+                const search_from = if (prev > 3) prev - 3 else 0;
+                if (parser.findHeaderEnd(buf_read[0..filled], search_from)) |_| {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                if (filled >= buf_read.len) {
+                    fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                }
+                return .close;
+            }
+
+            // Zero-copy parse: all fields are offsets into buf_read.
+            const head = parser.parse(buf_read[0..filled], cfg.max_request_headers.value()) catch {
+                fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+                return .close;
+            } orelse return .close; // incomplete — should not happen since found == true
+
+            var req = Request{
+                .buf = buf_read[0..filled],
+                .head = head,
+                .fd = fd,
+                .buf_filled = filled,
+                .allocator = allocator,
+            };
+            var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
+
+            // Zero-syscall Date: one atomic load from the global double-buffered cache.
+            const idx = g_date_active.load(.acquire);
+            res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
+
+            var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
+            // Layer B: optional handler deadline. Handlers call ctx.timedOut() between steps.
+            if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
+
+            const matched = server.router.dispatch(&req, &res, &ctx) catch false;
+            if (res.streaming) return .close;
+
+            if (!matched) {
+                var served = false;
+                if (cfg.public_dir.len > 0) {
+                    const sub = req.path();
+                    const stripped = if (sub.len > 0 and sub[0] == '/') sub[1..] else sub;
+                    if (stripped.len > 0) {
+                        served = static.serve(&req, fd, stripped, cfg.public_dir, io) catch false;
+                    }
+                }
+                if (!served) {
+                    res.setStatus(.NOT_FOUND);
+                    res.send("Not Found") catch {};
+                }
+            }
+
+            if (cfg.logger) |lg| {
+                const ua = req.header("user-agent") orelse "";
+                const origin = req.header("origin") orelse "";
+                lg.access(
+                    method.stringFromEnum(req.method()),
+                    req.path(),
+                    @intFromEnum(res.status),
+                    res.bytes_written,
+                    ua,
+                    origin,
+                );
+            }
+
+            // Keep-alive: if there is a body and the handler did not consume it,
+            // close rather than risk misaligned reads on the next request.
+            if (head.content_length > 0 and req.body_cache == null) return .close;
+            return if (head.keep_alive) .keep_alive else .close;
+        }
+
+        /// Brief:
+        /// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
         ///
         /// Note:
         /// - Sets TCP_NODELAY immediately on accepted connection
-        /// - Stack-allocates I/O buffers when config sizes fit within stack_threshold
+        /// - Stack-allocates the read buffer when max_client_request <= stack_threshold,
         ///   heap-allocates from smp_allocator otherwise
         /// - Per-connection arena is pre-warmed with max_allocator_size then reset
         ///   with retain_capacity before the loop — first request pays no heap cost
-        /// - Date header refreshed from thread-local cache once per second
-        /// - Falls back to static file serving if no route matches, sends 404 if neither matches
+        /// - Loops calling handleOneRequest until it returns .close
         ///
         /// Param:
         /// stream - std.Io.net.Stream
@@ -176,22 +396,13 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         /// server - *Self
         fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *Self) void {
             defer stream.close(io);
-
-            // Disable Nagle: each response is sent immediately without waiting to coalesce.
-            if (comptime @import("builtin").target.os.tag != .windows) {
-                std.posix.setsockopt(
-                    stream.socket.handle,
-                    std.posix.IPPROTO.TCP,
-                    std.posix.TCP.NODELAY,
-                    std.mem.asBytes(&@as(c_int, 1)),
-                ) catch {};
-            }
+            setNoDelay(stream.socket.handle);
 
             const cfg = server.config;
             // Raw fd — all recv/send on the hot path bypass std.Io dispatch.
             const fd = stream.socket.handle;
 
-            // Layer D: connection guard via registry eviction (model 2 only).
+            // Layer D: connection guard via registry eviction.
             var maybe_conn_entry: ?ConnEntry = null;
             if (cfg.conn_timeout_ms > 0) {
                 maybe_conn_entry = ConnEntry{
@@ -219,92 +430,7 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             _ = arena.reset(.retain_capacity);
 
             while (true) {
-                _ = arena.reset(.retain_capacity);
-                const allocator = arena.allocator();
-
-                // Incremental recv loop: accumulate bytes until \r\n\r\n is found.
-                // Only the new tail is searched each iteration to avoid re-scanning.
-                var filled: usize = 0;
-                var header_end: usize = 0;
-                var found = false;
-
-                while (filled < buf_read.len) {
-                    const n = std.posix.read(fd, buf_read[filled..]) catch break;
-                    if (n == 0) break; // peer closed
-                    const prev = filled;
-                    filled += n;
-                    const search_from = if (prev > 3) prev - 3 else 0;
-                    if (std.mem.indexOfPos(u8, buf_read[0..filled], search_from, "\r\n\r\n")) |pos| {
-                        header_end = pos;
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found) {
-                    if (filled >= buf_read.len) {
-                        fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
-                    }
-                    break;
-                }
-
-                // Zero-copy parse: all fields are offsets into buf_read.
-                const head = parser.parse(buf_read[0..filled], cfg.max_request_headers.value()) catch {
-                    fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-                    break;
-                } orelse break; // incomplete — should not happen since found == true
-
-                var req = Request{
-                    .buf = buf_read[0..filled],
-                    .head = head,
-                    .fd = fd,
-                    .buf_filled = filled,
-                    .allocator = allocator,
-                };
-                var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
-
-                // Zero-syscall Date: one atomic load from the global double-buffered cache.
-                const idx = g_date_active.load(.acquire);
-                res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
-
-                var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
-                // Layer B: optional handler deadline. Handlers call ctx.timedOut() between steps.
-                if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
-
-                const matched = server.router.dispatch(&req, &res, &ctx) catch false;
-                if (res.streaming) break;
-
-                if (!matched) {
-                    var served = false;
-                    if (cfg.public_dir.len > 0) {
-                        const sub = req.path();
-                        const stripped = if (sub.len > 0 and sub[0] == '/') sub[1..] else sub;
-                        if (stripped.len > 0) {
-                            served = static.serve(&req, fd, stripped, cfg.public_dir, io) catch false;
-                        }
-                    }
-                    if (!served) {
-                        res.setStatus(.NOT_FOUND);
-                        res.send("Not Found") catch {};
-                    }
-                }
-
-                if (cfg.logger) |lg| {
-                    const ua = req.header("user-agent") orelse "";
-                    const origin = req.header("origin") orelse "";
-                    lg.access(
-                        method.stringFromEnum(req.method()),
-                        req.path(),
-                        @intFromEnum(res.status),
-                        res.bytes_written,
-                        ua,
-                        origin,
-                    );
-                }
-
-                // Keep-alive: if there is a body and the handler did not consume it,
-                // close rather than risk misaligned reads on the next request.
-                if (head.content_length > 0 and req.body_cache == null) break;
+                if (handleOneRequest(server, stream, fd, io, buf_read, &arena) == .close) break;
             }
         }
 
@@ -388,6 +514,157 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
             }
         }
 
+        /// Brief:
+        /// EPOLL worker — pops a ready socket, serves one request, then re-arms
+        /// the one-shot interest (keep-alive) or removes and closes the connection
+        ///
+        /// Note:
+        /// - Read buffer and arena are allocated once per worker thread and reused
+        ///   across requests and connections (each request is self-contained)
+        ///
+        /// Param:
+        /// self  - *Self
+        /// queue - *FdQueue
+        /// epfd  - std.posix.fd_t (epoll instance to re-arm or remove against)
+        /// io    - std.Io
+        fn epollWorkerEntry(self: *Self, queue: *FdQueue, epfd: std.posix.fd_t, io: std.Io) void {
+            const linux = std.os.linux;
+            const cfg = self.config;
+
+            const buf_read = std.heap.smp_allocator.alloc(u8, cfg.max_client_request) catch return;
+            defer std.heap.smp_allocator.free(buf_read);
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
+            _ = arena.reset(.retain_capacity);
+
+            while (queue.pop(io)) |fd| {
+                const stream = std.Io.net.Stream{ .socket = .{ .handle = fd, .address = undefined } };
+                if (handleOneRequest(self, stream, fd, io, buf_read, &arena) == .keep_alive) {
+                    // Re-arm the one-shot interest so the next request wakes the loop.
+                    var cev = linux.epoll_event{
+                        .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
+                        .data = .{ .fd = fd },
+                    };
+                    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &cev)) != .SUCCESS) {
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+                        _ = linux.close(fd);
+                    }
+                } else {
+                    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+                    _ = linux.close(fd);
+                }
+            }
+        }
+
+        /// Brief:
+        /// EPOLL dispatch: a single epoll event loop accepts connections and hands
+        /// readable sockets to a worker pool. Linux-only.
+        ///
+        /// Note:
+        /// - Listener is non-blocking and edge-triggered: accept is drained until EAGAIN
+        /// - Connections register EPOLLIN | EPOLLONESHOT | EPOLLRDHUP, so each readable
+        ///   socket is reported exactly once and one worker owns it until it re-arms
+        ///   (keep-alive) or closes it. Idle keep-alive connections hold no thread
+        /// - pool_size sets the worker count (0 = max(10, cpu * 2))
+        ///
+        /// Param:
+        /// self - *Self
+        /// io   - std.Io
+        ///
+        /// Return:
+        /// !void (returns only on setup failure, otherwise the event loop runs forever)
+        fn runEpoll(self: *Self, io: std.Io) !void {
+            const linux = std.os.linux;
+            const cfg = self.config;
+            const cpu = try std.Thread.getCpuCount();
+            const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
+
+            const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
+                std.debug.print("zix: epoll resolve error: {}\n", .{err});
+                return err;
+            };
+            var net_server = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                .reuse_address = true,
+            }) catch |err| {
+                std.debug.print("zix: epoll listen error: {}\n", .{err});
+                return err;
+            };
+            defer net_server.deinit(io);
+            const listener_fd = net_server.socket.handle;
+
+            // Make the listener non-blocking so edge-triggered accept can drain to EAGAIN.
+            const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
+            const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+            _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+            if (std.posix.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
+            const epfd: std.posix.fd_t = @intCast(epfd_rc);
+            defer _ = linux.close(epfd);
+
+            var lev = linux.epoll_event{
+                .events = linux.EPOLL.IN | linux.EPOLL.ET,
+                .data = .{ .fd = listener_fd },
+            };
+            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+                return error.EpollCtlFailed;
+
+            std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers)\n", .{ cfg.ip, cfg.port, pool_size });
+
+            var queue = FdQueue{};
+            defer queue.deinit();
+
+            const workers = try std.heap.smp_allocator.alloc(std.Thread, pool_size);
+            defer std.heap.smp_allocator.free(workers);
+            for (workers) |*t| {
+                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorkerEntry, .{ self, &queue, epfd, io });
+            }
+
+            const max_events = 256;
+            var events: [max_events]linux.epoll_event = undefined;
+            while (true) {
+                const wrc = linux.epoll_wait(epfd, &events, max_events, -1);
+                switch (std.posix.errno(wrc)) {
+                    .SUCCESS => {},
+                    .INTR => continue,
+                    else => break,
+                }
+                const n: usize = @intCast(wrc);
+                for (events[0..n]) |ev| {
+                    if (ev.data.fd == listener_fd) {
+                        // Edge-triggered: drain the accept queue until it would block.
+                        while (true) {
+                            const arc = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
+                            switch (std.posix.errno(arc)) {
+                                .SUCCESS => {},
+                                .AGAIN => break,
+                                .INTR, .CONNABORTED => continue,
+                                else => break,
+                            }
+                            const conn_fd: std.posix.fd_t = @intCast(arc);
+                            setNoDelay(conn_fd);
+                            var cev = linux.epoll_event{
+                                .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
+                                .data = .{ .fd = conn_fd },
+                            };
+                            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &cev)) != .SUCCESS) {
+                                _ = linux.close(conn_fd);
+                            }
+                        }
+                    } else {
+                        queue.push(ev.data.fd, io);
+                    }
+                }
+            }
+
+            queue.close(io);
+            for (workers) |t| t.join();
+        }
+
         // --------------------------------------------------------- //
 
         /// Brief:
@@ -399,68 +676,13 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
         /// Return:
         /// !Self
         pub fn init(config: Config) !Self {
-            return .{
-                .config = config,
-                .router = Router.init(config.allocator),
-            };
+            return .{ .config = config };
         }
 
         /// Brief:
-        /// Free all router and registry storage
+        /// Free registry storage
         pub fn deinit(self: *Self) void {
-            self.router.deinit();
             self.registry.deinit();
-        }
-
-        /// Brief:
-        /// Register a handler for an exact URL path
-        ///
-        /// Note:
-        /// - Matches only when the request path equals path character-for-character
-        /// - Logs and swallows allocation errors at runtime
-        ///
-        /// Param:
-        /// path    - []const u8
-        /// handler - HandlerFn
-        pub fn registerHandler(self: *Self, path: []const u8, handler: HandlerFn) void {
-            self.router.register(path, handler) catch |err| {
-                std.debug.print("zix: registerHandler failed for '{s}': {}\n", .{ path, err });
-            };
-        }
-
-        /// Brief:
-        /// Register a handler for a URL prefix and all sub-paths below it
-        ///
-        /// Note:
-        /// - "/api" matches "/api", "/api/foo", "/api/foo/bar" but NOT "/apiv2"
-        /// - Among multiple prefix routes, the longest matching prefix wins
-        /// - Logs and swallows allocation errors at runtime
-        ///
-        /// Param:
-        /// prefix  - []const u8 (no trailing slash)
-        /// handler - HandlerFn
-        pub fn registerPrefixHandler(self: *Self, prefix: []const u8, handler: HandlerFn) void {
-            self.router.registerPrefix(prefix, handler) catch |err| {
-                std.debug.print("zix: registerPrefixHandler failed for '{s}': {}\n", .{ prefix, err });
-            };
-        }
-
-        /// Brief:
-        /// Register a handler for a parameterized URL pattern
-        ///
-        /// Note:
-        /// - Segments prefixed with ':' are named captures, others must match literally
-        /// - "/users/:id" matches "/users/alice" and captures id="alice"
-        /// - Access captured values inside the handler via req.pathParam("id")
-        /// - Logs and swallows allocation errors at runtime
-        ///
-        /// Param:
-        /// pattern - []const u8 (e.g. "/users/:id" or "/:tenant/:branch")
-        /// handler - HandlerFn
-        pub fn registerParamHandler(self: *Self, pattern: []const u8, handler: HandlerFn) void {
-            self.router.registerParam(pattern, handler) catch |err| {
-                std.debug.print("zix: registerParamHandler failed for '{s}': {}\n", .{ pattern, err });
-            };
         }
 
         /// Brief:
@@ -571,6 +793,15 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 
                     for (acc_threads) |t| t.join();
                 },
+
+                .EPOLL => {
+                    if (comptime @import("builtin").target.os.tag == .linux) {
+                        try self.runEpoll(thread_io);
+                    } else {
+                        std.debug.print("zix: EPOLL dispatch is Linux-only. Use .POOL on this platform.\n", .{});
+                        return error.EpollUnsupported;
+                    }
+                },
             }
         }
     };
@@ -579,30 +810,43 @@ fn HttpServerImpl(comptime stack_threshold: usize) type {
 // --------------------------------------------------------- //
 
 /// Brief:
-/// HTTP server — initialize with an explicit stack buffer threshold
+/// HTTP server — initialize with a comptime stack buffer threshold and comptime route table
 ///
 /// Note:
 /// - stack_threshold sets the cutoff for stack vs heap I/O buffers per connection:
-///   if max_client_request / max_client_response fit within stack_threshold the
-///   buffer lives on the connection thread stack, otherwise heap-allocated
+///   if max_client_request fits within stack_threshold the buffer lives on the
+///   connection thread stack, otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
+/// - routes must be comptime: the router is baked into the server type at compile time
+///   (no heap allocation, no dynamic registration after init)
 /// - workers in config controls accept thread count:
 ///     0 (default) -> cpu_count accept threads, max(10, cpu_count * 2) pool threads
 ///     N           -> exactly N accept threads, same pool sizing formula
 ///
 /// Usage:
-/// var server = try zix.Http.Server.init(4096, .{ .ip = "0.0.0.0", .port = 8080, ... });
+/// ```zig
+/// var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+///     .{ .path = "/",      .handler = homeHandler },
+///     .{ .path = "/api",   .handler = apiHandler,  .kind = .PREFIX },
+///     .{ .path = "/u/:id", .handler = userHandler, .kind = .PARAM },
+/// }, .{ .ip = "0.0.0.0", .port = 8080, ... });
+/// ```
 pub const Server = struct {
     /// Brief:
     /// Initialize the HTTP server
     ///
     /// Param:
-    /// stack_threshold - comptime usize: stack buffer size cutoff (e.g. 4096)
+    /// stack_threshold - comptime usize (stack buffer size cutoff, e.g. 4096)
+    /// routes          - comptime []const Route (route table baked into server type)
     /// config          - HttpServerConfig
     ///
     /// Return:
-    /// !HttpServerImpl(stack_threshold)
-    pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold) {
-        return HttpServerImpl(stack_threshold).init(config);
+    /// !HttpServerImpl(stack_threshold, routes)
+    pub fn init(
+        comptime stack_threshold: usize,
+        comptime routes: []const Route,
+        config: Config,
+    ) !HttpServerImpl(stack_threshold, routes) {
+        return HttpServerImpl(stack_threshold, routes).init(config);
     }
 };

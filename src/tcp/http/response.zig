@@ -112,7 +112,7 @@ pub const Response = struct {
     }
 
     /// Append a custom header to the response.
-    /// Allocates the header buffer on the first call (lazy). Cap is set by HeaderSize.
+    /// Allocates the full header buffer on the first call (lazy, capacity = max_headers).
     ///
     /// Return:
     /// - error.TooManyHeaders if the header cap is exceeded
@@ -121,16 +121,10 @@ pub const Response = struct {
         for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
         for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
         if (self.extra_buf == null) {
-            const initial = @min(@as(usize, 4), self.max_headers);
-            if (initial == 0) return error.TooManyHeaders;
-            self.extra_buf = try self.allocator.alloc(HttpHeader, initial);
-        } else if (self.extra_len >= self.extra_buf.?.len) {
-            if (self.extra_buf.?.len >= self.max_headers) return error.TooManyHeaders;
-            const new_cap = @min(self.extra_buf.?.len * 2, self.max_headers);
-            const new_buf = try self.allocator.alloc(HttpHeader, new_cap);
-            @memcpy(new_buf[0..self.extra_len], self.extra_buf.?[0..self.extra_len]);
-            self.extra_buf = new_buf;
+            if (self.max_headers == 0) return error.TooManyHeaders;
+            self.extra_buf = try self.allocator.alloc(HttpHeader, self.max_headers);
         }
+        if (self.extra_len >= self.extra_buf.?.len) return error.TooManyHeaders;
         self.extra_buf.?[self.extra_len] = .{ .name = name, .value = value };
         self.extra_len += 1;
     }

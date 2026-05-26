@@ -3,13 +3,13 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9100;
-const DISPATCH_MODEL: zix.Tcp.DispatchModel = .MIXED;
+const DISPATCH_MODEL: zix.Tcp.DispatchModel = .EPOLL;
 const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_CLIENT_REQUEST: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
-const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
-const POOL_SIZE: usize = 0; // ignored by .MIXED
+const WORKERS: usize = 0; // ignored by .EPOLL (single epoll event loop accepts)
+const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) worker threads)
 
 // Logger config — uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -17,18 +17,16 @@ const POOL_SIZE: usize = 0; // ignored by .MIXED
 
 // --------------------------------------------------------- //
 
-// Creates the log directory at startup.
-// The logger does not create save_path automatically — that is the caller's responsibility.
-// Silently ignores "already exists" — safe to call on every start.
-// Similar pattern to createInitDirs in http_static.zig.
-//
-// fn createLogDir(io: std.Io) void {
-//     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
-// }
+// Note:
+// .EPOLL is Linux-only. A single epoll event loop accepts connections and hands
+// each readable socket to a worker pool. Each worker serves one request then
+// re-arms the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
+// Best for very high connection counts and slow/idle clients. On other platforms
+// the server returns error.EpollUnsupported — use .POOL there.
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9000/"
+// curl usage: curl -X GET "http://localhost:9100/"
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -36,7 +34,7 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send("Hello, World!");
 }
 
-// curl usage: curl -X GET "http://localhost:9000/echo"
+// curl usage: curl -X GET "http://localhost:9100/echo"
 pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -49,7 +47,7 @@ pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send("{\"status\":\"ok\"}");
 }
 
-// curl usage: curl -X GET "http://localhost:9000/about"
+// curl usage: curl -X GET "http://localhost:9100/about"
 pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -61,23 +59,6 @@ pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
-
-    // Uncomment this to add logger (console only — no save_path means no file output):
-    // var logger = try zix.Logger.init(arena.allocator(), .{
-    //     .console        = .ALWAYS,
-    //     .console_min_level = .INFO,
-    // });
-    // defer logger.deinit();
-
-    // Uncomment this to add logger with file output (createLogDir must run first):
-    // createLogDir(process.io);
-    // var logger = try zix.Logger.init(arena.allocator(), .{
-    //     .save_path      = LOG_DIR,
-    //     .save_file      = LOG_FILE,
-    //     .save_min_level = .INFO,
-    //     .console        = .ALWAYS,
-    // });
-    // defer logger.deinit();
 
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
@@ -94,7 +75,6 @@ pub fn main(process: std.process.Init) !void {
         .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
-        // .logger = &logger, // uncomment to wire logger (automatic HTTP access logging)
     });
     defer server.deinit();
 

@@ -9,15 +9,12 @@ pub const DispatchModel = @import("../config.zig").DispatchModel;
 // --------------------------------------------------------- //
 
 /// Configuration for an HTTP server instance.
-/// Pass to Http.Server.init(). Fields without defaults (allocator, ip, port) are required.
+/// Pass to Http.Server.init(). Fields without defaults (ip, port) are required.
 pub const HttpServerConfig = struct {
     /// Optional caller-provided io backend. When non-null the server uses it directly
     /// (async_limit and stack_size in InitOptions are respected). When null the server
     /// creates an internal std.Io.Threaded with stack_size = 512KB.
     io: ?std.Io = null,
-    /// Backing allocator for router storage. Caller owns. Must outlive the server.
-    /// ArenaAllocator is suitable: routes are append-only, freed all at once on deinit().
-    allocator: std.mem.Allocator,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero.

@@ -62,6 +62,28 @@ pub const DechunkError = error{
     InvalidChunkSize,
 };
 
+/// Find the start index of the end-of-headers marker "\r\n\r\n".
+/// Scans for '\n' with a vectorized scalar search and verifies the three
+/// preceding bytes, avoiding the per-window byte compare that a multi-byte
+/// indexOf incurs (mem.eql at every position).
+///
+/// Param:
+/// buf   - []const u8 (bytes to search)
+/// start - usize (byte index to begin scanning, clamped so a 3-byte look-back is valid)
+///
+/// Return:
+/// - index of the first '\r' of "\r\n\r\n", or null when not present
+pub fn findHeaderEnd(buf: []const u8, start: usize) ?usize {
+    var i = @max(start, 3);
+    while (std.mem.indexOfScalarPos(u8, buf, i, '\n')) |nl| {
+        if (buf[nl - 1] == '\r' and buf[nl - 2] == '\n' and buf[nl - 3] == '\r') {
+            return nl - 3;
+        }
+        i = nl + 1;
+    }
+    return null;
+}
+
 /// Parse an HTTP/1.1 request from buf.
 /// On success the returned ParsedHead contains only offsets into buf — no data is copied.
 ///
@@ -70,12 +92,14 @@ pub const DechunkError = error{
 /// - ParseError on malformed input
 pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     // Scan for the end-of-headers marker. Search stops as soon as it is found.
-    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
+    const header_end = findHeaderEnd(buf, 0) orelse return null;
     const head_buf = buf[0..header_end];
 
     // Parse request line: "METHOD TARGET HTTP/1.1"
     // When there are no additional headers, head_buf IS the request line (no \r\n inside it).
-    const first_crlf = std.mem.indexOf(u8, head_buf, "\r\n") orelse head_buf.len;
+    // Scan for '\n' (vectorized) and step back over the '\r' to locate the CRLF.
+    const first_nl = std.mem.indexOfScalar(u8, head_buf, '\n') orelse head_buf.len;
+    const first_crlf = if (first_nl > 0 and head_buf[first_nl - 1] == '\r') first_nl - 1 else first_nl;
     const req_line = head_buf[0..first_crlf];
 
     const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
@@ -107,14 +131,16 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     var content_length: u64 = 0;
     var chunked = false;
 
-    var pos: usize = first_crlf + 2;
+    var pos: usize = first_nl + 1;
     while (pos < head_buf.len) {
-        const line_end = std.mem.indexOfPos(u8, head_buf, pos, "\r\n") orelse head_buf.len;
+        // Vectorized scan for the line's '\n', then step back over the '\r'.
+        const nl = std.mem.indexOfScalarPos(u8, head_buf, pos, '\n') orelse head_buf.len;
+        const line_end = if (nl > pos and head_buf[nl - 1] == '\r') nl - 1 else nl;
         const line = head_buf[pos..line_end];
         if (line.len == 0) break;
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
-            pos = line_end + 2;
+            pos = nl + 1;
             continue;
         };
 
@@ -144,7 +170,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
             if (std.ascii.eqlIgnoreCase(value, "chunked")) chunked = true;
         }
 
-        pos = line_end + 2;
+        pos = nl + 1;
     }
 
     return ParsedHead{
