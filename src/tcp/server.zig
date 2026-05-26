@@ -249,7 +249,8 @@ pub const TcpServer = struct {
                 }
             },
 
-            .POOL => {
+            // EPOLL is HTTP-only. The generic TCP server falls back to the POOL model.
+            .POOL, .EPOLL => {
                 const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                 const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
