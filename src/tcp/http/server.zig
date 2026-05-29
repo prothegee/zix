@@ -339,7 +339,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
 
             var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
-            // Layer B: optional handler deadline. Handlers call ctx.timedOut() between steps.
+            // Layer B: optional handler deadline. Handlers call ctx.isExpired() between steps.
             if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
             const matched = server.router.dispatch(&req, &res, &ctx) catch false;
