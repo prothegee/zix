@@ -5,6 +5,9 @@
 pub const Tcp = @import("tcp/Tcp.zig");
 pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
+// reserved: Http1
+pub const Http2 = @import("tcp/http2/Http2.zig");
+pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 pub const Fix = @import("tcp/fix/Fix.zig");
 pub const Uds = @import("uds/Uds.zig");
 pub const Channel = @import("channel/Channel.zig").Channel;
@@ -36,6 +39,23 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/websocket.zig"));
     std.testing.refAllDecls(@import("tcp/http/client_config.zig"));
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
+
+    // # zix.Http2
+    std.testing.refAllDecls(@import("tcp/http2/frame.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/hpack.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/config.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/server.zig"));
+
+    // # zix.Grpc
+    std.testing.refAllDecls(@import("tcp/http2/grpc/status.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/frame.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/proto.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/timeout.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/config.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/client.zig"));
 
     // # zix.Logger
     std.testing.refAllDecls(@import("logger/logger.zig"));
