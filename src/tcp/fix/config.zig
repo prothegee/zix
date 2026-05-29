@@ -34,6 +34,11 @@ pub const FixServerConfig = struct {
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.session() for each FIX message processed. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
+    /// Heartbeat timeout in milliseconds. 0 = disabled.
+    /// When non-zero: after this interval with no incoming message, the server sends TestRequest (35=1).
+    /// If no response arrives within another interval, the server sends Logout (35=5) and closes.
+    /// Only takes effect after Logon completes. Before Logon, timeout closes silently.
+    heartbeat_timeout_ms: u32 = 0,
 };
 
 /// Configuration for a FIX 4.x session client instance.
@@ -88,6 +93,15 @@ test "zix fix: FixServerConfig kernel_backlog default" {
     const io = threaded.io();
     const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+}
+
+test "zix fix: FixServerConfig heartbeat_timeout_ms defaults to zero" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.heartbeat_timeout_ms);
 }
 
 test "zix fix: FixClientConfig fields" {
