@@ -24,4 +24,5 @@ pub const getField = core.getField;
 pub const computeChecksum = core.computeChecksum;
 pub const verifyChecksum = core.verifyChecksum;
 pub const buildMessage = core.buildMessage;
+pub const ServeOpts = core.FixServeOpts;
 pub const serveConn = core.serveConn;

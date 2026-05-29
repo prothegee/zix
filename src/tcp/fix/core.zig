@@ -150,18 +150,30 @@ pub fn buildMessage(
 // Session handler
 // --------------------------------------------------------- //
 
+/// Options for serveConn.
+pub const FixServeOpts = struct {
+    /// Optional logger. When non-null, session() is called after each message processed.
+    logger: ?*Logger = null,
+    /// Heartbeat timeout in milliseconds. 0 = disabled.
+    /// When non-zero: after this interval with no incoming message, a TestRequest (35=1) is sent.
+    /// If no response arrives within another interval, a Logout (35=5) is sent and the connection closes.
+    /// Note: applies only after Logon completes (peer CompID known). Before Logon, timeout closes silently.
+    heartbeat_timeout_ms: u32 = 0,
+};
+
 /// Serve one FIX connection: Logon handshake, echo loop, Logout.
 /// Closes the stream before returning.
 ///
 /// Param:
 /// comp_id - []const u8 (the server's SenderCompID)
-/// logger - ?*Logger (optional. when non-null, session() is called after each message processed)
-pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, logger: ?*Logger) !void {
+/// opts - FixServeOpts (logger and optional heartbeat timeout)
+pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opts: FixServeOpts) !void {
     defer stream.close(io);
     var rd_buf: [MAX_MSG_SIZE]u8 = undefined;
     var wr_buf: [MAX_MSG_SIZE]u8 = undefined;
     var rd = stream.reader(io, &rd_buf);
     var wr = stream.writer(io, &wr_buf);
+    const fd = stream.socket.handle;
 
     var recv_buf: [MAX_MSG_SIZE * 2]u8 = undefined;
     var recv_len: usize = 0;
@@ -169,15 +181,59 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, log
     var seq_out: u32 = 1;
     var peer_comp_id: [64]u8 = undefined;
     var peer_len: usize = 0;
+    var sent_test_request: bool = false;
 
     outer: while (true) {
-        const msg_end = while (true) {
-            if (findMessageEnd(recv_buf[0..recv_len])) |end| break end;
-            if (recv_len >= recv_buf.len) return error.MessageTooLarge;
-            const b = rd.interface.takeByte() catch return;
-            recv_buf[recv_len] = b;
-            recv_len += 1;
+        const msg_end = if (opts.heartbeat_timeout_ms > 0) hb: {
+            const timeout_ms: i32 = @intCast(@min(opts.heartbeat_timeout_ms, @as(u32, std.math.maxInt(i32))));
+            while (true) {
+                if (findMessageEnd(recv_buf[0..recv_len])) |end| break :hb end;
+                if (recv_len >= recv_buf.len) return error.MessageTooLarge;
+                var pfd = [1]std.posix.pollfd{.{
+                    .fd = fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                const nready = std.posix.poll(&pfd, timeout_ms) catch break :outer;
+                if (nready == 0) {
+                    if (peer_len > 0) {
+                        var hb_out: [MAX_MSG_SIZE]u8 = undefined;
+                        if (sent_test_request) {
+                            const n = buildMessage(&hb_out, comp_id, peer_comp_id[0..peer_len], seq_out, "5", &.{}) catch break :outer;
+                            seq_out += 1;
+                            wr.interface.writeAll(hb_out[0..n]) catch {};
+                            wr.interface.flush() catch {};
+                        } else {
+                            sent_test_request = true;
+                            var tr_buf: [16]u8 = undefined;
+                            const tr = std.fmt.bufPrint(&tr_buf, "{d}", .{seq_out}) catch "1";
+                            const extra = [_]BuildField{.{ .tag = 112, .value = tr }};
+                            const n = buildMessage(&hb_out, comp_id, peer_comp_id[0..peer_len], seq_out, "1", &extra) catch break :outer;
+                            seq_out += 1;
+                            wr.interface.writeAll(hb_out[0..n]) catch {};
+                            wr.interface.flush() catch {};
+                            continue;
+                        }
+                    }
+                    break :outer;
+                }
+                const n = std.posix.read(fd, recv_buf[recv_len..]) catch break :outer;
+                if (n == 0) break :outer;
+                recv_len += n;
+            }
+            unreachable;
+        } else no_hb: {
+            while (true) {
+                if (findMessageEnd(recv_buf[0..recv_len])) |end| break :no_hb end;
+                if (recv_len >= recv_buf.len) return error.MessageTooLarge;
+                const b = rd.interface.takeByte() catch break :outer;
+                recv_buf[recv_len] = b;
+                recv_len += 1;
+            }
+            unreachable;
         };
+
+        sent_test_request = false;
 
         const raw = recv_buf[0..msg_end];
 
@@ -212,13 +268,13 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, log
             seq_out += 1;
             try wr.interface.writeAll(out_buf[0..n]);
             try wr.interface.flush();
-            if (logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logon");
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logon");
         } else if (std.mem.eql(u8, msgtype, "5")) {
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, "5", &.{});
             seq_out += 1;
             try wr.interface.writeAll(out_buf[0..n]);
             try wr.interface.flush();
-            if (logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logout");
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logout");
             break :outer;
         } else if (std.mem.eql(u8, msgtype, "0")) {
             var extra_buf: [1]BuildField = undefined;
@@ -231,7 +287,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, log
             seq_out += 1;
             try wr.interface.writeAll(out_buf[0..n]);
             try wr.interface.flush();
-            if (logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
         } else if (std.mem.eql(u8, msgtype, "1")) {
             const tr = getField(fslice, 112) orelse "0";
             const extra = [_]BuildField{.{ .tag = 112, .value = tr }};
@@ -239,7 +295,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, log
             seq_out += 1;
             try wr.interface.writeAll(out_buf[0..n]);
             try wr.interface.flush();
-            if (logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
         } else {
             var body_fields: [MAX_FIELDS]BuildField = undefined;
             var body_count: usize = 0;
@@ -265,7 +321,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, log
             seq_out += 1;
             try wr.interface.writeAll(out_buf[0..n]);
             try wr.interface.flush();
-            if (logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
         }
     }
 }
