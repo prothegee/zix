@@ -1,0 +1,311 @@
+//! HTTP/2 frame codec: constants, FrameHeader, read/write, control frame senders.
+
+const std = @import("std");
+
+// --------------------------------------------------------- //
+
+pub const PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+pub const FT_DATA: u8 = 0x00;
+pub const FT_HEADERS: u8 = 0x01;
+pub const FT_PRIORITY: u8 = 0x02;
+pub const FT_RST_STREAM: u8 = 0x03;
+pub const FT_SETTINGS: u8 = 0x04;
+pub const FT_PUSH_PROMISE: u8 = 0x05;
+pub const FT_PING: u8 = 0x06;
+pub const FT_GOAWAY: u8 = 0x07;
+pub const FT_WINDOW_UPDATE: u8 = 0x08;
+pub const FT_CONTINUATION: u8 = 0x09;
+
+pub const FLAG_END_STREAM: u8 = 0x01;
+pub const FLAG_END_HEADERS: u8 = 0x04;
+pub const FLAG_PADDED: u8 = 0x08;
+pub const FLAG_PRIORITY: u8 = 0x20;
+pub const FLAG_ACK: u8 = 0x01;
+
+pub const ERR_NO_ERROR: u32 = 0x00;
+pub const ERR_PROTOCOL_ERROR: u32 = 0x01;
+pub const ERR_INTERNAL_ERROR: u32 = 0x02;
+pub const ERR_FLOW_CONTROL_ERROR: u32 = 0x03;
+pub const ERR_SETTINGS_TIMEOUT: u32 = 0x04;
+pub const ERR_STREAM_CLOSED: u32 = 0x05;
+pub const ERR_FRAME_SIZE_ERROR: u32 = 0x06;
+pub const ERR_REFUSED_STREAM: u32 = 0x07;
+pub const ERR_CANCEL: u32 = 0x08;
+pub const ERR_COMPRESSION_ERROR: u32 = 0x09;
+pub const ERR_CONNECT_ERROR: u32 = 0x0a;
+pub const ERR_ENHANCE_YOUR_CALM: u32 = 0x0b;
+pub const ERR_INADEQUATE_SECURITY: u32 = 0x0c;
+pub const ERR_HTTP_1_1_REQUIRED: u32 = 0x0d;
+
+pub const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x01;
+pub const SETTINGS_ENABLE_PUSH: u16 = 0x02;
+pub const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 0x03;
+pub const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x04;
+pub const SETTINGS_MAX_FRAME_SIZE: u16 = 0x05;
+pub const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x06;
+
+pub const DEFAULT_INITIAL_WINDOW: u32 = 65535;
+pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
+pub const MAX_HEADERS: usize = 64;
+pub const MAX_PAYLOAD: usize = 16384;
+
+// --------------------------------------------------------- //
+
+pub const FrameHeader = struct {
+    length: u24,
+    frame_type: u8,
+    flags: u8,
+    stream_id: u31,
+};
+
+pub fn readFrameHeader(fd: std.posix.fd_t) !FrameHeader {
+    var buf: [9]u8 = undefined;
+    try recvExact(fd, &buf);
+    const length: u24 = (@as(u24, buf[0]) << 16) | (@as(u24, buf[1]) << 8) | buf[2];
+    const stream_id: u31 = @intCast(
+        ((@as(u32, buf[5]) << 24) | (@as(u32, buf[6]) << 16) | (@as(u32, buf[7]) << 8) | buf[8]) & 0x7FFF_FFFF,
+    );
+    return .{
+        .length = length,
+        .frame_type = buf[3],
+        .flags = buf[4],
+        .stream_id = stream_id,
+    };
+}
+
+pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
+    var buf: [9]u8 = undefined;
+    buf[0] = @intCast((fh.length >> 16) & 0xFF);
+    buf[1] = @intCast((fh.length >> 8) & 0xFF);
+    buf[2] = @intCast(fh.length & 0xFF);
+    buf[3] = fh.frame_type;
+    buf[4] = fh.flags;
+    const sid: u32 = fh.stream_id;
+    buf[5] = @intCast((sid >> 24) & 0xFF);
+    buf[6] = @intCast((sid >> 16) & 0xFF);
+    buf[7] = @intCast((sid >> 8) & 0xFF);
+    buf[8] = @intCast(sid & 0xFF);
+    try fdWriteAll(fd, &buf);
+}
+
+// --------------------------------------------------------- //
+
+pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    var rem = data;
+    while (rem.len > 0) {
+        const rc = std.posix.system.write(fd, rem.ptr, rem.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.BrokenPipe;
+                rem = rem[n..];
+            },
+            .INTR => continue,
+            else => return error.BrokenPipe,
+        }
+    }
+}
+
+pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.posix.read(fd, buf[filled..]) catch return error.Closed;
+        if (n == 0) return error.Closed;
+        filled += n;
+    }
+}
+
+// --------------------------------------------------------- //
+
+pub fn sendSettings(fd: std.posix.fd_t, params: []const [2]u32) !void {
+    const payload_len: usize = params.len * 6;
+    try writeFrameHeader(fd, .{
+        .length = @intCast(payload_len),
+        .frame_type = FT_SETTINGS,
+        .flags = 0,
+        .stream_id = 0,
+    });
+    var buf: [6]u8 = undefined;
+    for (params) |p| {
+        const id: u16 = @intCast(p[0]);
+        const val: u32 = p[1];
+        buf[0] = @intCast((id >> 8) & 0xFF);
+        buf[1] = @intCast(id & 0xFF);
+        buf[2] = @intCast((val >> 24) & 0xFF);
+        buf[3] = @intCast((val >> 16) & 0xFF);
+        buf[4] = @intCast((val >> 8) & 0xFF);
+        buf[5] = @intCast(val & 0xFF);
+        try fdWriteAll(fd, &buf);
+    }
+}
+
+pub fn sendSettingsAck(fd: std.posix.fd_t) !void {
+    try writeFrameHeader(fd, .{
+        .length = 0,
+        .frame_type = FT_SETTINGS,
+        .flags = FLAG_ACK,
+        .stream_id = 0,
+    });
+}
+
+pub fn sendPingAck(fd: std.posix.fd_t, payload: [8]u8) !void {
+    try writeFrameHeader(fd, .{
+        .length = 8,
+        .frame_type = FT_PING,
+        .flags = FLAG_ACK,
+        .stream_id = 0,
+    });
+    try fdWriteAll(fd, &payload);
+}
+
+pub fn sendGoaway(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
+    try writeFrameHeader(fd, .{
+        .length = 8,
+        .frame_type = FT_GOAWAY,
+        .flags = 0,
+        .stream_id = 0,
+    });
+    var buf: [8]u8 = undefined;
+    const ls: u32 = last_stream;
+    buf[0] = @intCast((ls >> 24) & 0xFF);
+    buf[1] = @intCast((ls >> 16) & 0xFF);
+    buf[2] = @intCast((ls >> 8) & 0xFF);
+    buf[3] = @intCast(ls & 0xFF);
+    buf[4] = @intCast((error_code >> 24) & 0xFF);
+    buf[5] = @intCast((error_code >> 16) & 0xFF);
+    buf[6] = @intCast((error_code >> 8) & 0xFF);
+    buf[7] = @intCast(error_code & 0xFF);
+    try fdWriteAll(fd, &buf);
+}
+
+pub fn sendRstStream(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void {
+    try writeFrameHeader(fd, .{
+        .length = 4,
+        .frame_type = FT_RST_STREAM,
+        .flags = 0,
+        .stream_id = stream_id,
+    });
+    var buf: [4]u8 = undefined;
+    buf[0] = @intCast((error_code >> 24) & 0xFF);
+    buf[1] = @intCast((error_code >> 16) & 0xFF);
+    buf[2] = @intCast((error_code >> 8) & 0xFF);
+    buf[3] = @intCast(error_code & 0xFF);
+    try fdWriteAll(fd, &buf);
+}
+
+pub fn sendWindowUpdate(fd: std.posix.fd_t, stream_id: u31, increment: u31) !void {
+    try writeFrameHeader(fd, .{
+        .length = 4,
+        .frame_type = FT_WINDOW_UPDATE,
+        .flags = 0,
+        .stream_id = stream_id,
+    });
+    var buf: [4]u8 = undefined;
+    const inc: u32 = increment;
+    buf[0] = @intCast((inc >> 24) & 0xFF);
+    buf[1] = @intCast((inc >> 16) & 0xFF);
+    buf[2] = @intCast((inc >> 8) & 0xFF);
+    buf[3] = @intCast(inc & 0xFF);
+    try fdWriteAll(fd, &buf);
+}
+
+/// Send HEADERS + optional DATA for a complete response. Sets END_STREAM on DATA (or HEADERS when body is empty).
+/// Not suitable for multi-step responses (e.g. gRPC trailers). Use writeFrameHeader + fdWriteAll directly for those.
+pub fn sendResponse(
+    fd: std.posix.fd_t,
+    stream_id: u31,
+    status: u16,
+    content_type: []const u8,
+    body: []const u8,
+) !void {
+    const hpack = @import("hpack.zig");
+    var hdr_buf: [512]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hdr_buf);
+
+    var status_str: [4]u8 = undefined;
+    const status_s = std.fmt.bufPrint(&status_str, "{d}", .{status}) catch "200";
+    try enc.writeHeader(":status", status_s);
+    if (content_type.len > 0)
+        try enc.writeHeader("content-type", content_type);
+    if (body.len > 0) {
+        var cl_buf: [20]u8 = undefined;
+        const cl_s = std.fmt.bufPrint(&cl_buf, "{d}", .{body.len}) catch "0";
+        try enc.writeHeader("content-length", cl_s);
+    }
+
+    const hblock = enc.encoded();
+    const end_stream_flag: u8 = if (body.len == 0) FLAG_END_STREAM | FLAG_END_HEADERS else FLAG_END_HEADERS;
+
+    try writeFrameHeader(fd, .{
+        .length = @intCast(hblock.len),
+        .frame_type = FT_HEADERS,
+        .flags = end_stream_flag,
+        .stream_id = stream_id,
+    });
+    try fdWriteAll(fd, hblock);
+
+    if (body.len > 0) {
+        try writeFrameHeader(fd, .{
+            .length = @intCast(body.len),
+            .frame_type = FT_DATA,
+            .flags = FLAG_END_STREAM,
+            .stream_id = stream_id,
+        });
+        try fdWriteAll(fd, body);
+    }
+}
+
+// --------------------------------------------------------- //
+
+test "zix test: frame constants, FT_HEADERS is 0x01" {
+    try std.testing.expectEqual(@as(u8, 0x01), FT_HEADERS);
+}
+
+test "zix test: frame constants, FLAG_END_STREAM is 0x01" {
+    try std.testing.expectEqual(@as(u8, 0x01), FLAG_END_STREAM);
+}
+
+test "zix test: frame constants, ERR_NO_ERROR is 0" {
+    try std.testing.expectEqual(@as(u32, 0), ERR_NO_ERROR);
+}
+
+test "zix test: writeFrameHeader and readFrameHeader roundtrip via pipe" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const fh = FrameHeader{
+        .length = 42,
+        .frame_type = FT_HEADERS,
+        .flags = FLAG_END_HEADERS,
+        .stream_id = 3,
+    };
+    try writeFrameHeader(fds[1], fh);
+    _ = std.posix.system.close(fds[1]);
+
+    const got = try readFrameHeader(fds[0]);
+    try std.testing.expectEqual(fh.length, got.length);
+    try std.testing.expectEqual(fh.frame_type, got.frame_type);
+    try std.testing.expectEqual(fh.flags, got.flags);
+    try std.testing.expectEqual(fh.stream_id, got.stream_id);
+}
+
+test "zix test: PREFACE starts with PRI" {
+    try std.testing.expect(std.mem.startsWith(u8, PREFACE, "PRI"));
+    try std.testing.expectEqual(@as(usize, 24), PREFACE.len);
+}
+
+test "zix test: sendSettings empty params writes 9-byte SETTINGS frame via pipe" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try sendSettings(fds[1], &.{});
+    _ = std.posix.system.close(fds[1]);
+
+    const fh = try readFrameHeader(fds[0]);
+    try std.testing.expectEqual(@as(u8, FT_SETTINGS), fh.frame_type);
+    try std.testing.expectEqual(@as(u24, 0), fh.length);
+    try std.testing.expectEqual(@as(u31, 0), fh.stream_id);
+}

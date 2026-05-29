@@ -4,6 +4,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const FixServerConfig = @import("config.zig").FixServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
+const FixServeOpts = core.FixServeOpts;
 const Logger = @import("../../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
@@ -12,11 +13,11 @@ const ConnTask = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
     comp_id: []const u8,
-    logger: ?*Logger,
+    opts: FixServeOpts,
 };
 
 fn dispatchConn(task: ConnTask) void {
-    core.serveConn(task.stream, task.io, task.comp_id, task.logger) catch {};
+    core.serveConn(task.stream, task.io, task.comp_id, task.opts) catch {};
 }
 
 // --------------------------------------------------------- //
@@ -72,26 +73,26 @@ const WorkerCtx = struct {
     ip: []const u8,
     port: u16,
     kernel_backlog: u31,
-    logger: ?*Logger,
+    opts: FixServeOpts,
 };
 
 fn workerEntry(ctx: WorkerCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
-        if (ctx.logger) |lg| lg.system(.ERROR, "fix", "resolve error: {}", .{err});
+        if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "resolve error: {}", .{err});
         return;
     };
     var srv = addr.listen(ctx.io, .{
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
     }) catch |err| {
-        if (ctx.logger) |lg| lg.system(.ERROR, "fix", "listen error: {}", .{err});
+        if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "listen error: {}", .{err});
         return;
     };
     defer srv.deinit(ctx.io);
     while (true) {
         const stream = srv.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) {
-                if (ctx.logger) |lg| lg.system(.WARN, "fix", "accept error: {}", .{err});
+                if (ctx.opts.logger) |lg| lg.system(.WARN, "fix", "accept error: {}", .{err});
                 break;
             }
             continue;
@@ -104,12 +105,12 @@ const PoolCtx = struct {
     queue: *ConnQueue,
     io: std.Io,
     comp_id: []const u8,
-    logger: ?*Logger,
+    opts: FixServeOpts,
 };
 
 fn poolEntry(ctx: PoolCtx) void {
     while (ctx.queue.pop(ctx.io)) |stream| {
-        dispatchConn(.{ .stream = stream, .io = ctx.io, .comp_id = ctx.comp_id, .logger = ctx.logger });
+        dispatchConn(.{ .stream = stream, .io = ctx.io, .comp_id = ctx.comp_id, .opts = ctx.opts });
     }
 }
 
@@ -119,7 +120,7 @@ const AsyncWorkerCtx = struct {
     port: u16,
     kernel_backlog: u31,
     comp_id: []const u8,
-    logger: ?*Logger,
+    opts: FixServeOpts,
 };
 
 fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
@@ -138,7 +139,7 @@ fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
             .stream = stream,
             .io = ctx.io,
             .comp_id = ctx.comp_id,
-            .logger = ctx.logger,
+            .opts = ctx.opts,
         }});
     }
 }
@@ -175,6 +176,10 @@ pub const FixServer = struct {
         const cfg = self.config;
         const io = cfg.io;
         const cpu = try std.Thread.getCpuCount();
+        const conn_opts = FixServeOpts{
+            .logger = cfg.logger,
+            .heartbeat_timeout_ms = cfg.heartbeat_timeout_ms,
+        };
 
         switch (cfg.dispatch_model) {
             .ASYNC => {
@@ -196,7 +201,7 @@ pub const FixServer = struct {
                         .stream = stream,
                         .io = io,
                         .comp_id = cfg.comp_id,
-                        .logger = cfg.logger,
+                        .opts = conn_opts,
                     }});
                 }
             },
@@ -217,7 +222,7 @@ pub const FixServer = struct {
                     t.* = try std.Thread.spawn(
                         .{ .stack_size = 256 * 1024 },
                         poolEntry,
-                        .{PoolCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .logger = cfg.logger }},
+                        .{PoolCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .opts = conn_opts }},
                     );
 
                 const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
@@ -232,7 +237,7 @@ pub const FixServer = struct {
                             .ip = cfg.ip,
                             .port = cfg.port,
                             .kernel_backlog = cfg.kernel_backlog,
-                            .logger = cfg.logger,
+                            .opts = conn_opts,
                         }},
                     );
 
@@ -258,7 +263,7 @@ pub const FixServer = struct {
                             .port = cfg.port,
                             .kernel_backlog = cfg.kernel_backlog,
                             .comp_id = cfg.comp_id,
-                            .logger = cfg.logger,
+                            .opts = conn_opts,
                         }},
                     );
 

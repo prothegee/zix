@@ -18,7 +18,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
         ctx.err = e;
         return;
     };
-    zix.Fix.serveConn(stream, io, "SERVER", null) catch |e| {
+    zix.Fix.serveConn(stream, io, "SERVER", .{}) catch |e| {
         if (e != error.ConnectionClosed and e != error.BrokenPipe) ctx.err = e;
     };
 }

@@ -1,0 +1,80 @@
+//! HTTP/2 server configuration.
+
+const std = @import("std");
+const DispatchModel = @import("../config.zig").DispatchModel;
+
+// --------------------------------------------------------- //
+
+/// Configuration for an HTTP/2 h2c server instance.
+/// Pass to Http2.Server.init(). Fields without defaults (io, ip, port) are required.
+pub const Http2ServerConfig = struct {
+    /// Io backend for the server. Caller-provided; must outlive the server.
+    io: std.Io,
+    /// Bind address.
+    ip: []const u8,
+    /// Bind port. Must be non-zero.
+    port: u16,
+    /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
+    /// Default: .ASYNC (single accept thread, io.async() per connection).
+    dispatch_model: DispatchModel = .ASYNC,
+    /// TCP listen backlog.
+    kernel_backlog: u31 = 1024,
+    /// Accept thread count.
+    /// 0 (default) = cpu_count accept threads.
+    /// Ignored by .ASYNC (always 1 accept thread).
+    workers: usize = 0,
+    /// Pool thread count. Only used by .POOL.
+    /// 0 (default) = max(10, cpu_count * 2).
+    /// Ignored by .ASYNC and .MIXED.
+    pool_size: usize = 0,
+    /// Maximum concurrent streams per connection.
+    max_streams: usize = 16,
+    /// MAX_FRAME_SIZE setting sent to clients (bytes).
+    max_frame_size: u32 = 16384,
+    /// HPACK scratch buffer size per connection.
+    max_header_scratch: usize = 4096,
+    /// Maximum body buffer per stream (bytes).
+    max_body: usize = 65536,
+};
+
+// --------------------------------------------------------- //
+
+test "zix test: Http2ServerConfig required fields" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
+    try std.testing.expectEqual(@as(u16, 8082), cfg.port);
+}
+
+test "zix test: Http2ServerConfig dispatch_model defaults to ASYNC" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
+}
+
+test "zix test: Http2ServerConfig worker and pool defaults to zero" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    try std.testing.expectEqual(@as(usize, 0), cfg.workers);
+    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
+}
+
+test "zix test: Http2ServerConfig stream and frame defaults" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    try std.testing.expectEqual(@as(usize, 16), cfg.max_streams);
+    try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
+    try std.testing.expectEqual(@as(usize, 65536), cfg.max_body);
+}

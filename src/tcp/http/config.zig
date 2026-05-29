@@ -47,9 +47,9 @@ pub const HttpServerConfig = struct {
     /// by the background timer thread.
     /// Should be >= handler_timeout_ms to avoid cutting off an in-flight response.
     conn_timeout_ms: u32 = 0,
-    /// Per-handler execution budget (Layer B: ctx.timedOut).
+    /// Per-handler execution budget (Layer B: ctx.isExpired / ctx.timedOut).
     /// 0 = disabled. When non-zero, ctx.deadline is set before each handler dispatch.
-    /// Handlers opt in by checking ctx.timedOut() between expensive steps.
+    /// Handlers opt in by checking ctx.isExpired() between expensive steps.
     handler_timeout_ms: u32 = 0,
     /// Number of accept threads.
     /// 0 (default) = cpu_count accept threads.
