@@ -13,12 +13,12 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 // Layer D: network-level connection guard.
 // Connections idle or stalled beyond this are shut down by the timer thread.
-// Requires model 2 (workers != 1). Should be >= HANDLER_TIMEOUT_MS.
+// Should be >= HANDLER_TIMEOUT_MS.
 const CONN_TIMEOUT_MS: u32 = 30_000;
 
 // Layer B: per-handler execution budget.
 // ctx.deadline is set before each dispatch. Handlers opt in by calling
-// ctx.timedOut() between expensive steps and responding with 408 early.
+// ctx.isExpired() between expensive steps and responding with 408 early.
 const HANDLER_TIMEOUT_MS: u32 = 5_000;
 
 // --------------------------------------------------------- //
@@ -30,21 +30,41 @@ const HANDLER_TIMEOUT_MS: u32 = 5_000;
 pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
-    // Step 1 -- 3s of simulated work.
+    // Step 1: 3s of simulated work.
     std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(3_000), .real) catch {};
-    if (ctx.timedOut()) {
+    if (ctx.isExpired()) {
         res.setStatus(.REQUEST_TIMEOUT);
         return res.sendJson("{\"error\":\"timeout\",\"step\":1}");
     }
 
-    // Step 2 -- 3s more (total 6s > 5s budget).
+    // Step 2: 3s more (total 6s > 5s budget).
     std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(3_000), .real) catch {};
-    if (ctx.timedOut()) {
+    if (ctx.isExpired()) {
         res.setStatus(.REQUEST_TIMEOUT);
         return res.sendJson("{\"error\":\"timeout\",\"step\":2}");
     }
 
     try res.sendJson("{\"result\":\"ok\"}");
+}
+
+// Demonstrates ctx.setTimeout(): the handler overrides the server-wide deadline
+// to give itself a shorter window. Useful when one route is slower than others
+// but the global HANDLER_TIMEOUT_MS is set for the fast path.
+//
+// curl usage: curl http://localhost:9007/custom
+pub fn customTimeoutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+
+    // Override: this handler caps itself to 2s regardless of the global 5s budget.
+    ctx.setTimeout(2_000);
+
+    std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(1_500), .real) catch {};
+    if (ctx.isExpired()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\",\"handler\":\"custom\"}");
+    }
+
+    try res.sendJson("{\"result\":\"ok\",\"handler\":\"custom\"}");
 }
 
 // Fast handler to confirm unrelated requests are served normally.
@@ -61,6 +81,7 @@ pub fn pingHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/slow", .handler = slowHandler },
+        .{ .path = "/custom", .handler = customTimeoutHandler },
         .{ .path = "/ping", .handler = pingHandler },
     }, .{
         .io = process.io,
