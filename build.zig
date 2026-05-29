@@ -46,6 +46,10 @@ pub fn build(b: *std.Build) void {
         "tests/integration/http/header_index_test.zig",
         "tests/integration/http/sse_test.zig",
         "tests/integration/http/client_test.zig",
+        // http2
+        "tests/integration/http2/server_test.zig",
+        // grpc
+        "tests/integration/grpc/server_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
         // udp
@@ -90,6 +94,10 @@ pub fn build(b: *std.Build) void {
         "tests/behaviour/http/config_test.zig",
         "tests/behaviour/http/sse_test.zig",
         "tests/behaviour/http/client_test.zig",
+        // http2
+        "tests/behaviour/http2/config_test.zig",
+        // grpc
+        "tests/behaviour/grpc/config_test.zig",
         // websocket
         "tests/behaviour/websocket/websocket_test.zig",
         // udp
@@ -133,6 +141,10 @@ pub fn build(b: *std.Build) void {
         "tests/edge/http/response_test.zig",
         "tests/edge/http/content_test.zig",
         "tests/edge/http/client_test.zig",
+        // http2
+        "tests/edge/http2/server_test.zig",
+        // grpc
+        "tests/edge/grpc/server_test.zig",
         // websocket
         "tests/edge/websocket/websocket_test.zig",
         // udp
@@ -212,6 +224,18 @@ pub fn build(b: *std.Build) void {
         .{ "example-channel_pipeline", "examples/channel_pipeline.zig" },
         .{ "example-channel_ipc_a", "examples/channel_ipc_a.zig" },
         .{ "example-channel_ipc_b", "examples/channel_ipc_b.zig" },
+        .{ "example-grpc_server_1_async", "examples/grpc_server_1_async.zig" },
+        .{ "example-grpc_server_2_pool", "examples/grpc_server_2_pool.zig" },
+        .{ "example-grpc_server_3_mixed", "examples/grpc_server_3_mixed.zig" },
+        .{ "example-grpc_client", "examples/grpc_client.zig" },
+        .{ "example-grpc_location_server_1_async", "examples/grpc_location_server_1_async.zig" },
+        .{ "example-grpc_location_server_2_pool", "examples/grpc_location_server_2_pool.zig" },
+        .{ "example-grpc_location_server_3_mixed", "examples/grpc_location_server_3_mixed.zig" },
+        .{ "example-grpc_location_client", "examples/grpc_location_client.zig" },
+        .{ "example-grpc_server_4_epoll", "examples/grpc_server_4_epoll.zig" },
+        .{ "example-grpc_timeout", "examples/grpc_timeout.zig" },
+        .{ "example-grpc_multi_server", "examples/grpc_multi_server.zig" },
+        .{ "example-grpc_multi_client", "examples/grpc_multi_client.zig" },
     };
 
     inline for (examples) |pair| {
