@@ -22,7 +22,7 @@ fn getPeerAddr(fd: std.posix.fd_t, buf: []u8) []const u8 {
         const sock_in: *align(8) const std.posix.sockaddr.in = @ptrCast(&storage);
         const addr_bytes: [4]u8 = @bitCast(sock_in.addr);
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
-            addr_bytes[0],                               addr_bytes[1], addr_bytes[2], addr_bytes[3],
+            addr_bytes[0],                          addr_bytes[1], addr_bytes[2], addr_bytes[3],
             std.mem.bigToNative(u16, sock_in.port),
         }) catch "-";
     }
