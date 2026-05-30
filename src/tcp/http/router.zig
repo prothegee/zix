@@ -159,13 +159,13 @@ fn matchParam(pattern: []const u8, path: []const u8, req: *Request) !bool {
         const path_seg = path_it.next();
         if (pat_seg == null and path_seg == null) break;
         if (pat_seg == null or path_seg == null) return false;
-        const ps = pat_seg.?;
-        const vs = path_seg.?;
-        if (std.mem.startsWith(u8, ps, ":")) {
-            if (vs.len == 0) return false;
-            try params.append(req.allocator, .{ .name = ps[1..], .value = vs });
+        const pat_token = pat_seg.?;
+        const path_token = path_seg.?;
+        if (std.mem.startsWith(u8, pat_token, ":")) {
+            if (path_token.len == 0) return false;
+            try params.append(req.allocator, .{ .name = pat_token[1..], .value = path_token });
         } else {
-            if (!std.mem.eql(u8, ps, vs)) return false;
+            if (!std.mem.eql(u8, pat_token, path_token)) return false;
         }
     }
 

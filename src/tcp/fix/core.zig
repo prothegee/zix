@@ -10,13 +10,73 @@ pub const VERSION: []const u8 = "FIX.4.2";
 pub const MAX_FIELDS: usize = 64;
 pub const MAX_MSG_SIZE: usize = 8192;
 
+/// FIX 4.x standard tag numbers (nonexhaustive).
+/// Use @enumFromInt for custom or extension tags not listed here.
+pub const Tag = enum(u16) {
+    Account = 1,
+    AvgPx = 6,
+    BeginString = 8,
+    BodyLength = 9,
+    CheckSum = 10,
+    ClOrdID = 11,
+    CumQty = 14,
+    Currency = 15,
+    ExecID = 17,
+    ExecTransType = 20,
+    HandlInst = 21,
+    SecurityIDSource = 22,
+    LastPx = 31,
+    LastShares = 32,
+    MsgSeqNum = 34,
+    MsgType = 35,
+    OrderID = 37,
+    OrderQty = 38,
+    OrdStatus = 39,
+    OrdType = 40,
+    OrigClOrdID = 41,
+    PossDupFlag = 43,
+    Price = 44,
+    SecurityID = 48,
+    SenderCompID = 49,
+    SenderSubID = 50,
+    SendingTime = 52,
+    Side = 54,
+    Symbol = 55,
+    TargetCompID = 56,
+    TargetSubID = 57,
+    Text = 58,
+    TimeInForce = 59,
+    TransactTime = 60,
+    TradeDate = 75,
+    PossResend = 97,
+    EncryptMethod = 98,
+    StopPx = 99,
+    ExDestination = 100,
+    HeartBtInt = 108,
+    TestReqID = 112,
+    OrigSendingTime = 122,
+    GapFillFlag = 123,
+    NoRelatedSym = 146,
+    ExecType = 150,
+    LeavesQty = 151,
+    SecurityType = 167,
+    MaturityMonthYear = 200,
+    SecurityExchange = 207,
+    NoMDEntries = 268,
+    LastMsgSeqNumProcessed = 369,
+    NoPartyIDs = 453,
+    NoUnderlyings = 539,
+    NoLegs = 555,
+    _,
+};
+
 pub const Field = struct {
-    tag: u16,
+    tag: Tag,
     value: []const u8,
 };
 
 pub const BuildField = struct {
-    tag: u16,
+    tag: Tag,
     value: []const u8,
 };
 
@@ -54,8 +114,8 @@ pub fn parseFields(buf: []const u8, out: []Field) !usize {
         if (count >= out.len) return error.TooManyFields;
         const eq = std.mem.indexOfScalarPos(u8, buf, i, '=') orelse break;
         const soh = std.mem.indexOfScalarPos(u8, buf, eq + 1, SOH) orelse break;
-        const tag = std.fmt.parseInt(u16, buf[i..eq], 10) catch return error.BadTag;
-        out[count] = .{ .tag = tag, .value = buf[eq + 1 .. soh] };
+        const tag_num = std.fmt.parseInt(u16, buf[i..eq], 10) catch return error.BadTag;
+        out[count] = .{ .tag = @enumFromInt(tag_num), .value = buf[eq + 1 .. soh] };
         count += 1;
         i = soh + 1;
     }
@@ -63,7 +123,7 @@ pub fn parseFields(buf: []const u8, out: []Field) !usize {
 }
 
 /// Return the value of the first field with the given tag, or null.
-pub fn getField(fields: []const Field, tag: u16) ?[]const u8 {
+pub fn getField(fields: []const Field, tag: Tag) ?[]const u8 {
     for (fields) |f| {
         if (f.tag == tag) return f.value;
     }
@@ -130,7 +190,7 @@ pub fn buildMessage(
     bp += (try std.fmt.bufPrint(body[bp..], "34={d}\x01", .{seq})).len;
     bp += (try std.fmt.bufPrint(body[bp..], "52=20260520-00:00:00\x01", .{})).len;
     for (extra) |f| {
-        bp += (try std.fmt.bufPrint(body[bp..], "{d}={s}\x01", .{ f.tag, f.value })).len;
+        bp += (try std.fmt.bufPrint(body[bp..], "{d}={s}\x01", .{ @intFromEnum(f.tag), f.value })).len;
     }
 
     var pos: usize = 0;
@@ -171,8 +231,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
     defer stream.close(io);
     var rd_buf: [MAX_MSG_SIZE]u8 = undefined;
     var wr_buf: [MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var reader = stream.reader(io, &rd_buf);
+    var writer = stream.writer(io, &wr_buf);
     const fd = stream.socket.handle;
 
     var recv_buf: [MAX_MSG_SIZE * 2]u8 = undefined;
@@ -189,29 +249,29 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :hb end;
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;
-                var pfd = [1]std.posix.pollfd{.{
+                var poll_fd = [1]std.posix.pollfd{.{
                     .fd = fd,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 }};
-                const nready = std.posix.poll(&pfd, timeout_ms) catch break :outer;
+                const nready = std.posix.poll(&poll_fd, timeout_ms) catch break :outer;
                 if (nready == 0) {
                     if (peer_len > 0) {
                         var hb_out: [MAX_MSG_SIZE]u8 = undefined;
                         if (sent_test_request) {
                             const n = buildMessage(&hb_out, comp_id, peer_comp_id[0..peer_len], seq_out, "5", &.{}) catch break :outer;
                             seq_out += 1;
-                            wr.interface.writeAll(hb_out[0..n]) catch {};
-                            wr.interface.flush() catch {};
+                            writer.interface.writeAll(hb_out[0..n]) catch {};
+                            writer.interface.flush() catch {};
                         } else {
                             sent_test_request = true;
                             var tr_buf: [16]u8 = undefined;
                             const tr = std.fmt.bufPrint(&tr_buf, "{d}", .{seq_out}) catch "1";
-                            const extra = [_]BuildField{.{ .tag = 112, .value = tr }};
+                            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = tr }};
                             const n = buildMessage(&hb_out, comp_id, peer_comp_id[0..peer_len], seq_out, "1", &extra) catch break :outer;
                             seq_out += 1;
-                            wr.interface.writeAll(hb_out[0..n]) catch {};
-                            wr.interface.flush() catch {};
+                            writer.interface.writeAll(hb_out[0..n]) catch {};
+                            writer.interface.flush() catch {};
                             continue;
                         }
                     }
@@ -226,7 +286,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :no_hb end;
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;
-                const b = rd.interface.takeByte() catch break :outer;
+                const b = reader.interface.takeByte() catch break :outer;
                 recv_buf[recv_len] = b;
                 recv_len += 1;
             }
@@ -243,8 +303,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
 
         if (!verifyChecksum(raw)) return;
 
-        const msgtype = getField(fslice, 35) orelse return;
-        const sender = getField(fslice, 49) orelse "";
+        const msgtype = getField(fslice, .MsgType) orelse return;
+        const sender = getField(fslice, .SenderCompID) orelse "";
 
         const remaining = recv_len - msg_end;
         if (remaining > 0) {
@@ -254,54 +314,54 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
 
         var out_buf: [MAX_MSG_SIZE]u8 = undefined;
 
-        const seq_in = std.fmt.parseInt(u64, getField(fslice, 34) orelse "0", 10) catch 0;
+        const seq_in = std.fmt.parseInt(u64, getField(fslice, .MsgSeqNum) orelse "0", 10) catch 0;
 
         if (std.mem.eql(u8, msgtype, "A")) {
             @memcpy(peer_comp_id[0..sender.len], sender);
             peer_len = sender.len;
-            const hb_int = getField(fslice, 108) orelse "30";
+            const hb_int = getField(fslice, .HeartBtInt) orelse "30";
             const extra = [_]BuildField{
-                .{ .tag = 98, .value = "0" },
-                .{ .tag = 108, .value = hb_int },
+                .{ .tag = .EncryptMethod, .value = "0" },
+                .{ .tag = .HeartBtInt, .value = hb_int },
             };
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, "A", &extra);
             seq_out += 1;
-            try wr.interface.writeAll(out_buf[0..n]);
-            try wr.interface.flush();
+            try writer.interface.writeAll(out_buf[0..n]);
+            try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logon");
         } else if (std.mem.eql(u8, msgtype, "5")) {
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, "5", &.{});
             seq_out += 1;
-            try wr.interface.writeAll(out_buf[0..n]);
-            try wr.interface.flush();
+            try writer.interface.writeAll(out_buf[0..n]);
+            try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logout");
             break :outer;
         } else if (std.mem.eql(u8, msgtype, "0")) {
             var extra_buf: [1]BuildField = undefined;
             var extra_len: usize = 0;
-            if (getField(fslice, 112)) |tr| {
-                extra_buf[0] = .{ .tag = 112, .value = tr };
+            if (getField(fslice, .TestReqID)) |tr| {
+                extra_buf[0] = .{ .tag = .TestReqID, .value = tr };
                 extra_len = 1;
             }
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, "0", extra_buf[0..extra_len]);
             seq_out += 1;
-            try wr.interface.writeAll(out_buf[0..n]);
-            try wr.interface.flush();
+            try writer.interface.writeAll(out_buf[0..n]);
+            try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
         } else if (std.mem.eql(u8, msgtype, "1")) {
-            const tr = getField(fslice, 112) orelse "0";
-            const extra = [_]BuildField{.{ .tag = 112, .value = tr }};
+            const tr = getField(fslice, .TestReqID) orelse "0";
+            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = tr }};
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, "0", &extra);
             seq_out += 1;
-            try wr.interface.writeAll(out_buf[0..n]);
-            try wr.interface.flush();
+            try writer.interface.writeAll(out_buf[0..n]);
+            try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
         } else {
             var body_fields: [MAX_FIELDS]BuildField = undefined;
             var body_count: usize = 0;
             for (fslice) |f| {
                 switch (f.tag) {
-                    8, 9, 35, 49, 56, 34, 52, 10 => {},
+                    .BeginString, .BodyLength, .MsgType, .SenderCompID, .TargetCompID, .MsgSeqNum, .SendingTime, .CheckSum => {},
                     else => {
                         if (body_count < body_fields.len) {
                             body_fields[body_count] = .{ .tag = f.tag, .value = f.value };
@@ -319,8 +379,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                 body_fields[0..body_count],
             );
             seq_out += 1;
-            try wr.interface.writeAll(out_buf[0..n]);
-            try wr.interface.flush();
+            try writer.interface.writeAll(out_buf[0..n]);
+            try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
         }
     }
@@ -360,11 +420,11 @@ test "zix fix: parseFields extracts all tag=value pairs" {
     var fields: [16]Field = undefined;
     const n = try parseFields(msg, &fields);
     try std.testing.expectEqual(6, n);
-    try std.testing.expectEqual(8, fields[0].tag);
+    try std.testing.expectEqual(Tag.BeginString, fields[0].tag);
     try std.testing.expectEqualStrings("FIX.4.2", fields[0].value);
-    try std.testing.expectEqual(35, fields[2].tag);
+    try std.testing.expectEqual(Tag.MsgType, fields[2].tag);
     try std.testing.expectEqualStrings("A", fields[2].value);
-    try std.testing.expectEqual(56, fields[4].tag);
+    try std.testing.expectEqual(Tag.TargetCompID, fields[4].tag);
     try std.testing.expectEqualStrings("SERVER", fields[4].value);
 }
 
@@ -376,17 +436,17 @@ test "zix fix: parseFields returns error.BadTag on non-numeric tag" {
 
 test "zix fix: getField finds a tag" {
     const fields = [_]Field{
-        .{ .tag = 8, .value = "FIX.4.2" },
-        .{ .tag = 35, .value = "D" },
-        .{ .tag = 49, .value = "CLIENT" },
+        .{ .tag = .BeginString, .value = "FIX.4.2" },
+        .{ .tag = .MsgType, .value = "D" },
+        .{ .tag = .SenderCompID, .value = "CLIENT" },
     };
-    try std.testing.expectEqualStrings("D", getField(&fields, 35).?);
-    try std.testing.expectEqualStrings("CLIENT", getField(&fields, 49).?);
+    try std.testing.expectEqualStrings("D", getField(&fields, .MsgType).?);
+    try std.testing.expectEqualStrings("CLIENT", getField(&fields, .SenderCompID).?);
 }
 
 test "zix fix: getField returns null for absent tag" {
-    const fields = [_]Field{.{ .tag = 8, .value = "FIX.4.2" }};
-    try std.testing.expect(getField(&fields, 35) == null);
+    const fields = [_]Field{.{ .tag = .BeginString, .value = "FIX.4.2" }};
+    try std.testing.expect(getField(&fields, .MsgType) == null);
 }
 
 test "zix fix: computeChecksum of empty buf is 0" {
@@ -406,8 +466,8 @@ test "zix fix: computeChecksum known value" {
 test "zix fix: buildMessage produces a verifiable checksum" {
     var out: [MAX_MSG_SIZE]u8 = undefined;
     const n = try buildMessage(&out, "SERVER", "CLIENT", 1, "A", &.{
-        .{ .tag = 98, .value = "0" },
-        .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
     });
     try std.testing.expect(verifyChecksum(out[0..n]));
 }
@@ -415,19 +475,19 @@ test "zix fix: buildMessage produces a verifiable checksum" {
 test "zix fix: buildMessage parses back with correct MsgType and CompIDs" {
     var out: [MAX_MSG_SIZE]u8 = undefined;
     const n = try buildMessage(&out, "SRV", "CLT", 5, "D", &.{
-        .{ .tag = 11, .value = "ORD001" },
-        .{ .tag = 55, .value = "AAPL" },
+        .{ .tag = .ClOrdID, .value = "ORD001" },
+        .{ .tag = .Symbol, .value = "AAPL" },
     });
     var fields: [MAX_FIELDS]Field = undefined;
     const nf = try parseFields(out[0..n], &fields);
     const fslice = fields[0..nf];
 
-    try std.testing.expectEqualStrings("D", getField(fslice, 35).?);
-    try std.testing.expectEqualStrings("SRV", getField(fslice, 49).?);
-    try std.testing.expectEqualStrings("CLT", getField(fslice, 56).?);
-    try std.testing.expectEqualStrings("5", getField(fslice, 34).?);
-    try std.testing.expectEqualStrings("ORD001", getField(fslice, 11).?);
-    try std.testing.expectEqualStrings("AAPL", getField(fslice, 55).?);
+    try std.testing.expectEqualStrings("D", getField(fslice, .MsgType).?);
+    try std.testing.expectEqualStrings("SRV", getField(fslice, .SenderCompID).?);
+    try std.testing.expectEqualStrings("CLT", getField(fslice, .TargetCompID).?);
+    try std.testing.expectEqualStrings("5", getField(fslice, .MsgSeqNum).?);
+    try std.testing.expectEqualStrings("ORD001", getField(fslice, .ClOrdID).?);
+    try std.testing.expectEqualStrings("AAPL", getField(fslice, .Symbol).?);
 }
 
 test "zix fix: verifyChecksum returns false for tampered byte" {
@@ -440,13 +500,13 @@ test "zix fix: verifyChecksum returns false for tampered byte" {
 test "zix fix: bodyLength field equals byte count from tag 35 to last SOH before tag 10" {
     var out: [MAX_MSG_SIZE]u8 = undefined;
     const n = try buildMessage(&out, "SRV", "CLT", 1, "A", &.{
-        .{ .tag = 98, .value = "0" },
+        .{ .tag = .EncryptMethod, .value = "0" },
     });
     const raw = out[0..n];
 
     var fields: [MAX_FIELDS]Field = undefined;
     const nf = try parseFields(raw, &fields);
-    const bl_str = getField(fields[0..nf], 9).?;
+    const bl_str = getField(fields[0..nf], .BodyLength).?;
     const bl = try std.fmt.parseInt(usize, bl_str, 10);
 
     const tag35_start = std.mem.indexOf(u8, raw, "35=").?;

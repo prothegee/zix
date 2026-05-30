@@ -140,13 +140,13 @@ const WorkerCtx = struct {
 
 fn workerEntry(ctx: WorkerCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-    var srv = addr.listen(ctx.io, .{
+    var listener = addr.listen(ctx.io, .{
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
-    defer srv.deinit(ctx.io);
+    defer listener.deinit(ctx.io);
     while (true) {
-        const stream = srv.accept(ctx.io) catch |err| {
+        const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
             continue;
         };
@@ -201,13 +201,13 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
         fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-            var srv = addr.listen(ctx.io, .{
+            var listener = addr.listen(ctx.io, .{
                 .reuse_address = true,
                 .kernel_backlog = ctx.kernel_backlog,
             }) catch return;
-            defer srv.deinit(ctx.io);
+            defer listener.deinit(ctx.io);
             while (true) {
-                const stream = srv.accept(ctx.io) catch |err| {
+                const stream = listener.accept(ctx.io) catch |err| {
                     if (err != error.ConnectionAborted) break;
                     continue;
                 };
@@ -305,24 +305,24 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
             const max_events = 256;
             var events: [max_events]linux.epoll_event = undefined;
             while (true) {
-                const wrc = linux.epoll_wait(epfd, &events, max_events, -1);
-                switch (std.posix.errno(wrc)) {
+                const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
+                switch (std.posix.errno(wait_result)) {
                     .SUCCESS => {},
                     .INTR => continue,
                     else => break,
                 }
-                const n: usize = @intCast(wrc);
+                const n: usize = @intCast(wait_result);
                 for (events[0..n]) |ev| {
                     if (ev.data.fd != listener_fd) continue;
                     while (true) {
-                        const arc = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
-                        switch (std.posix.errno(arc)) {
+                        const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
+                        switch (std.posix.errno(accept_result)) {
                             .SUCCESS => {},
                             .AGAIN => break,
                             .INTR, .CONNABORTED => continue,
                             else => break,
                         }
-                        const conn_fd: std.posix.fd_t = @intCast(arc);
+                        const conn_fd: std.posix.fd_t = @intCast(accept_result);
                         queue.push(conn_fd, io);
                     }
                 }
@@ -373,14 +373,14 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     if (cfg.logger) |lg| lg.system(.INFO, "grpc", "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
-                    var srv = try addr.listen(io, .{
+                    var listener = try addr.listen(io, .{
                         .reuse_address = true,
                         .kernel_backlog = cfg.kernel_backlog,
                     });
-                    defer srv.deinit(io);
+                    defer listener.deinit(io);
 
                     while (true) {
-                        const stream = srv.accept(io) catch |err| {
+                        const stream = listener.accept(io) catch |err| {
                             if (err != error.ConnectionAborted) {
                                 std.debug.print("zix grpc server: accept error: {}\n", .{err});
                                 break;
@@ -465,8 +465,10 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     if (comptime @import("builtin").target.os.tag == .linux) {
                         try self.runEpoll(io);
                     } else {
-                        std.debug.print("zix grpc server: EPOLL dispatch is Linux-only. Use .POOL on this platform.\n", .{});
-                        return error.EpollUnsupported;
+                        std.debug.print("zix grpc server: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                        var fallback = self.*;
+                        fallback.config.dispatch_model = .POOL;
+                        try fallback.run();
                     }
                 },
             }

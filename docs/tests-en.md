@@ -29,6 +29,14 @@ zig build test-all
 
 Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, which verifies every public declaration compiles and any inline `test` blocks pass.
 
+### zix.Tcp (raw)
+
+| Module | Coverage |
+| :- | :- |
+| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.POOL, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
+| `tcp/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+| `tcp/client.zig` | `refAllDecls` |
+
 ### zix.Http
 
 | Module | Coverage |
@@ -43,6 +51,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
 | `tcp/http/upload.zig` | `refAllDecls` + behavioral: MultipartParser parse + getField |
 | `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
+| `tcp/http/context.zig` | `refAllDecls` + behavioral: `timedOut` null deadline returns false, `isExpired` null deadline returns false |
 
 ### zix.Udp
 
@@ -74,11 +83,43 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `channel/channel.zig` | `refAllDecls` + behavioral: `Channel(u32)` init capacity and count, ring buffer tail arithmetic |
 
+### zix.Fix
+
+| Module | Coverage |
+| :- | :- |
+| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model defaults to ASYNC, workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0; `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
+| `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
+| `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
+
+### zix.Http2
+
+| Module | Coverage |
+| :- | :- |
+| `tcp/http2/frame.zig` | `refAllDecls` + behavioral: `FT_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, `writeFrameHeader`/`readFrameHeader` roundtrip via pipe, PREFACE starts with `PRI`, `sendSettings` writes a valid 9-byte SETTINGS frame via pipe |
+| `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
+| `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
+| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model defaults to ASYNC, workers/pool_size default to 0, max_streams=16 and max_frame_size=16384 |
+| `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+
+### zix.Grpc
+
+| Module | Coverage |
+| :- | :- |
+| `tcp/http2/grpc/status.zig` | `refAllDecls` + behavioral: OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
+| `tcp/http2/grpc/frame.zig` | `refAllDecls` + behavioral: `readGrpcPrefix` / `writeGrpcPrefix` roundtrip, compress flag preserved, message length preserved |
+| `tcp/http2/grpc/proto.zig` | `refAllDecls` + behavioral: `encodeVarint` / `decodeVarint` roundtrip, `encodeString` produces LEN wire type, `encodeInt32` produces VARINT wire type, `encodeDouble` / `decodeDouble` roundtrip (positive and negative values), `MessageReader` iterates all fields |
+| `tcp/http2/grpc/timeout.zig` | `refAllDecls` + behavioral: H/M/S/m/u/n units convert correctly, single-char returns null, empty returns null |
+| `tcp/http2/grpc/core.zig` | `refAllDecls` + behavioral: `parsePath` valid and invalid inputs, `detectContentType` proto/json/unknown, `GrpcContext.recvMessage` empty body returns null, `Route.timeout_ms` defaults to zero, `GrpcContext.isExpired` null/past/future deadline, `GrpcServeOpts.handler_timeout_ms` defaults to zero, Router dispatches to matching handler |
+| `tcp/http2/grpc/config.zig` | `refAllDecls` + behavioral: `GrpcServerConfig` required fields and defaults (handler_timeout_ms=0), `GrpcClientConfig` required fields |
+| `tcp/http2/grpc/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
+| `tcp/http2/grpc/client.zig` | `refAllDecls` + behavioral: `GrpcClient.connect` port zero -> `error.PortNotConfigured` |
+
 ### zix.Logger
 
 | Module | Coverage |
 | :- | :- |
-| `logger/logger.zig` | `refAllDecls` + behavioral: init and deinit with no save_path, system() below save_min_level is silent, access() below save_min_level is silent, statusLevel mapping (100=DEBUG 200=INFO 301=INFO 404=WARN 500=ERROR) |
+| `logger/logger.zig` | `refAllDecls` + behavioral: init and deinit with no save_path, system() below save_min_level is silent, access() below save_min_level is silent, statusLevel mapping (100=DEBUG 200=INFO 301=INFO 404=WARN 500=ERROR), conn/packet/frame/session/rpc below save_min_level are silent |
 
 ### zix.Utils
 
@@ -91,6 +132,17 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 ## Integration Tests
 
 Source: `tests/integration/`. Each file is a standalone test executable compiled with the `zix` module imported. These tests exercise components wired together against mock inputs, no live socket, no `std.Io` scheduler.
+
+### tests/integration/tcp/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `TcpServer.init` valid config | init with real ip and port succeeds, deinit is safe |
+| `TcpServer.init` port zero | returns `error.PortNotConfigured` |
+| `HandlerFn` type check | `zix.Tcp.echoHandler` satisfies `zix.Tcp.HandlerFn` |
+| `TcpClient.connect` port zero | returns `error.PortNotConfigured` before any socket call |
 
 ### tests/integration/http/
 
@@ -199,6 +251,49 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | 5xx status maps to ERROR level | `access()` with status 500 writes `ERROR` label |
 | `anyerror` arg formats correctly | `{}` format of an error value renders the error name |
 
+### tests/integration/fix/
+
+#### `server_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `FixServer` init and deinit do not error | valid config succeeds, deinit is safe |
+| `FixServer` init port zero | returns `error.PortNotConfigured` |
+| Logon handshake and echo round-trip succeed | send Logon, receive Logon reply with MsgType=A; send NewOrderSingle, receive echo; send Logout, receive Logout reply |
+| Multiple sequential messages are all echoed | three NewOrderSingle messages echoed with ClOrdID preserved across all |
+
+### tests/integration/http2/
+
+#### `server_test.zig`
+
+Ports: 18082-18085.
+
+| Test | What it verifies |
+| :- | :- |
+| `Http2Server.init` and deinit do not error | valid config succeeds, deinit is safe |
+| `Http2Server.init` port zero | returns `error.PortNotConfigured` |
+| `Http2 HandlerFn` type is a function pointer | `zix.Http2.HandlerFn` assignment compiles |
+| Http2 GET / returns Hello World over h2c direct | h2c PRI preface + HEADERS + DATA round-trip returns response body |
+| Http2 POST /echo returns request body | POST with body DATA frame; server echoes body back |
+| Http2 two sequential streams on same connection | stream IDs 1 and 3 each receive correct responses |
+| Http2 h2c upgrade GET / returns Hello World | HTTP/1.1 `Upgrade: h2c` → 101 Switching Protocols → h2c response |
+
+### tests/integration/grpc/
+
+#### `server_test.zig`
+
+Ports: 18200-18204.
+
+| Test | What it verifies |
+| :- | :- |
+| `GrpcServer.init` and deinit do not error | valid config succeeds, deinit is safe |
+| `GrpcServer.init` port zero | returns `error.PortNotConfigured` |
+| gRPC unary returns greeting | `greetHandler` reads one message, replies `"Hello, world!"` |
+| gRPC server streaming sends multiple responses | `echoHandler` sends two messages; client receives both in order |
+| gRPC client streaming collects all messages | `collectHandler` buffers three messages, replies with count `"got 3"` |
+| gRPC bidirectional echoes each message | `echoHandler` echoes `"ping"` then `"pong"` from two client messages |
+| gRPC unknown method returns UNIMPLEMENTED | `dispatchHandler` replies with `GrpcStatus.UNIMPLEMENTED` for unknown path |
+
 ### tests/integration/channel/
 
 #### `channel_test.zig`
@@ -216,6 +311,23 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 ## Behaviour Tests
 
 Source: `tests/behaviour/`. Each file verifies observable API contracts that callers rely on: the "what does this always do" properties.
+
+### tests/behaviour/tcp/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `TcpServerConfig` dispatch_model default | `.POOL` (zero value) |
+| `TcpServerConfig` kernel_backlog default | 4096 |
+| `TcpServerConfig` max_msg_len default | 4096 |
+| `TcpServerConfig` workers default | 0 (auto) |
+| `TcpServerConfig` pool_size default | 0 (auto) |
+| `TcpClientConfig` max_msg_len default | 4096 |
+| TCP frame length header | 4-byte big-endian u32 encodes and decodes correctly |
+| TCP frame zero-length payload | encodes as four zero bytes |
+| TCP frame header size | always exactly 4 bytes |
+| `DispatchModel.POOL` is zero value | `@intFromEnum(.POOL) == 0` |
 
 ### tests/behaviour/http/
 
@@ -344,6 +456,16 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | UDS frame zero-length payload | encodes as four zero bytes |
 | UDS frame header size | always exactly 4 bytes |
 
+### tests/behaviour/fix/
+
+#### `session_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Logon response has MsgType=A and CompIDs swapped | reply tag-35="A", tag-49=SERVER, tag-56=CLIENT, tag-34=1 |
+| NewOrderSingle body fields are preserved in echo | tag-11 (ClOrdID), tag-55 (Symbol), tag-54 (Side), tag-38 (Qty) all present in echo |
+| Clean Logout causes no server-side error | server error field is null after Logout exchange |
+
 ### tests/behaviour/logger/
 
 #### `logger_test.zig`
@@ -353,11 +475,39 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `Level` backing values | DEBUG=0 INFO=1 WARN=2 ERROR=3 |
 | `ConsoleMode` backing values | OFF=0 DEBUG_ONLY=1 ALWAYS=2 |
 | `Config` defaults | console=OFF, console_min_level=INFO, save_path="", save_file="log", save_min_level=INFO, max_lines=1_000_000 |
-| `Logger.Logger` init and deinit with no save_path | no crash or leak |
-| `Logger.Logger` flush with no save_path is a no-op | no crash |
+| `Logger` init and deinit with no save_path | no crash or leak |
+| `Logger` flush with no save_path is a no-op | no crash |
 | `Http.ServerConfig.logger` defaults to null | `cfg.logger == null` invariant |
 | `Http.Context.logger` defaults to null | `ctx.logger == null` invariant |
 | `Http.Response.bytes_written` defaults to 0 | `res.bytes_written == 0` after `init()` |
+
+### tests/behaviour/http2/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Http2ServerConfig` dispatch_model defaults to ASYNC | `.ASYNC` is the zero-value default |
+| `Http2ServerConfig` max_streams defaults to 16 | `max_streams == 16` invariant |
+| `Http2ServerConfig` max_frame_size defaults to 16384 | `max_frame_size == 16384` invariant |
+| `Http2` HandlerFn can be assigned to a local variable | `zix.Http2.HandlerFn` type assignment compiles |
+| `Http2` PREFACE length is 24 | `zix.Http2.PREFACE.len == 24` |
+| `Http2` ERR_NO_ERROR is zero | `zix.Http2.ERR_NO_ERROR == 0` |
+| `Http2` FLAG_END_STREAM and FLAG_END_HEADERS are distinct | `FLAG_END_STREAM != FLAG_END_HEADERS` |
+
+### tests/behaviour/grpc/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `GrpcServerConfig` defaults | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=16, max_frame_size=16384, max_body=65536 |
+| `GrpcClientConfig` basic fields | ip and port fields preserved |
+| `GrpcStatus` enum values | OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
+| `GrpcContext.recvMessage` empty body | returns null immediately |
+| `GrpcPrefix` roundtrip | writePrefix -> readPrefix preserves compress flag and message length |
+| `parsePath` valid path | `/helloworld.Greeter/SayHello` -> `package_service="helloworld.Greeter"`, `method="SayHello"` |
+| `parseTimeout` seconds | `"2S"` -> 2,000,000,000 nanoseconds |
 
 ### tests/behaviour/channel/
 
@@ -377,6 +527,16 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 ## Edge Tests
 
 Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
+
+### tests/edge/tcp/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `TcpServer.init` port zero | returns `error.PortNotConfigured` |
+| `DispatchModel` backing values stable | POOL=0, ASYNC=1, MIXED=2 |
+| TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
 
 ### tests/edge/http/
 
@@ -483,6 +643,54 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `access()` with empty method and path does not panic | empty strings are safe |
 | `init` with empty `save_path`, `file_fd` stays invalid | `file_fd == -1` with `save_path = ""` |
 | Console OFF — no output or panic for any level | all four levels produce no crash with `console = .OFF` |
+
+### tests/edge/fix/
+
+#### `session_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `parseFields` handles maximum number of fields without panic | `MAX_FIELDS - 1` tag=value pairs parsed without overflow or crash |
+| `verifyChecksum` returns false for truncated message | message missing final SOH checksum delimiter |
+| `findMessageEnd` returns null for message with tag-10 value but no final SOH | partial checksum field returns null |
+| `buildMessage` with zero extra fields produces valid message | output passes `verifyChecksum` and `parseFields` round-trip |
+| Message arriving in two TCP segments is reassembled correctly | split Logon across two flushes; server still replies with MsgType=A |
+| Bad checksum causes server to close without server-side error propagation | corrupted message byte closes connection; `ctx.err == null` |
+
+### tests/edge/http2/
+
+#### `server_test.zig`
+
+Port: 18100.
+
+| Test | What it verifies |
+| :- | :- |
+| bad PRI preface causes server to close connection | malformed preface bytes → server closes the connection cleanly |
+| client sends GOAWAY and server connection loop exits | GOAWAY frame → server exits the frame loop without error |
+| `Http2Server.init` rejects port zero | returns `error.PortNotConfigured` |
+| `HpackDecoder` decode of empty block returns zero headers | `decode(&.{}, ...)` returns 0 headers without error |
+| `writeFrameHeader` stream_id high bit is cleared on read | `stream_id = 0x7FFF_FFFF` roundtrips correctly via pipe |
+
+### tests/edge/grpc/
+
+#### `server_test.zig`
+
+Port: 18220.
+
+| Test | What it verifies |
+| :- | :- |
+| `readGrpcPrefix` with 4 bytes | returns `error.TooShort` |
+| `readGrpcPrefix` with empty slice | returns `error.TooShort` |
+| `GrpcContext.recvMessage` body shorter than prefix | body has 3 bytes (need 5 for prefix): returns null |
+| `GrpcContext.recvMessage` msg_len exceeds body | prefix claims 100 bytes but body has only 5: returns null |
+| `parsePath` empty string | returns null |
+| `parsePath` no leading slash | returns null |
+| `parsePath` only slash | returns null |
+| `detectContentType` no header | returns UNKNOWN |
+| `detectContentType` text/plain | returns UNKNOWN |
+| `parseTimeout` single character | returns null |
+| `GrpcClient.connect` port zero | returns `error.PortNotConfigured` |
+| `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately; no crash or error |
 
 ### tests/edge/channel/
 

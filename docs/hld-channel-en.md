@@ -125,6 +125,25 @@ See [`docs/concurrency.md`](concurrency.md) for the Channel entry in the Protoco
 
 ---
 
+## Logger Integration
+
+`Channel` has no server config struct, so there is no `logger` field. Use `logger.system()` manually for lifecycle events:
+
+```zig
+// Uncomment to add logger (console only):
+// var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+//     .console           = .ALWAYS,
+//     .console_min_level = .INFO,
+// });
+// defer logger.deinit();
+
+// Use logger.system(.INFO, "channel", "started", .{}) for manual lifecycle logging.
+```
+
+All Channel examples include this commented block ready to enable.
+
+---
+
 ## Not Yet Implemented
 
 | Feature | Note |

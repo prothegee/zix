@@ -54,8 +54,8 @@ pub const UdsServer = struct {
         // Remove stale socket from a previous run before binding.
         std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
 
-        const ua = try std.Io.net.UnixAddress.init(self.config.path);
-        var net_server = try ua.listen(io, .{ .kernel_backlog = self.config.backlog });
+        const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
+        var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.backlog });
         defer {
             net_server.deinit(io);
             std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
@@ -98,19 +98,19 @@ fn dispatchConn(task: ConnTask) void {
 pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
 
-    var rbuf: [4096]u8 = undefined;
-    var wbuf: [4096]u8 = undefined;
+    var read_buf: [4096]u8 = undefined;
+    var write_buf: [4096]u8 = undefined;
     var payload_buf: [4096]u8 = undefined;
 
-    var rdr = stream.reader(io, &rbuf);
-    var wtr = stream.writer(io, &wbuf);
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     while (true) {
         // Read 4-byte length header
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
-            const got = rdr.interface.readSliceShort(hdr[n..]) catch return;
+            const got = reader.interface.readSliceShort(hdr[n..]) catch return;
             if (got == 0) return;
             n += got;
         }
@@ -121,15 +121,15 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
         // Read payload
         n = 0;
         while (n < len) {
-            const got = rdr.interface.readSliceShort(payload_buf[n..len]) catch return;
+            const got = reader.interface.readSliceShort(payload_buf[n..len]) catch return;
             if (got == 0) return;
             n += got;
         }
 
         // Echo: header + payload
-        wtr.interface.writeAll(&hdr) catch return;
-        wtr.interface.writeAll(payload_buf[0..len]) catch return;
-        wtr.interface.flush() catch return;
+        writer.interface.writeAll(&hdr) catch return;
+        writer.interface.writeAll(payload_buf[0..len]) catch return;
+        writer.interface.flush() catch return;
     }
 }
 

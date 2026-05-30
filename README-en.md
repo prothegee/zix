@@ -35,7 +35,40 @@
     <i>You are the thinker. Tinker.. Assembler... The builder, Not just as user/coder....</i>
 </p>
 
----
+<br>
+
+# Table of Contents
+
+- [Reason & Motivation](./README-en.md#A-Reason-A-Motivation)
+- [Requirements](./README-en.md#Requirements)
+- [Repositories](./README-en.md#Repositories)
+- [Important Contribution Notes](./README-en.md#Important-Contribution-Notes)
+- [Documentation](./README-en.md#Documentation)
+- [Getting Started](./README-en.md#Getting-Started)
+- [Examples](./README-en.md#Examples)
+- [Examples: Minimal](./README-en.md#Minimal-Examples)
+- [Examples: Routing](./README-en.md#Routing)
+- [Examples: Concurrency Model](./README-en.md#Concurrency-Model)
+- [Examples: Timeouts](./README-en.md#Timeouts)
+- [Examples: Middleware](./README-en.md#Middleware)
+- [Examples: WebSocket](./README-en.md#WebSocket)
+- [Examples: SSE](./README-en.md#SSE-Server-Sent-Events)
+- [Examples: HTTP Client](./README-en.md#HTTP-Client)
+- [Examples: Static Files & Upload](./README-en.md#Static-Files--Upload)
+- [Examples: Response Header Capacity](./README-en.md#Response-Header-Cap-Headersize)
+- [Examples: Response Header Capacity](./README-en.md#Response-Header-Cap-Headersize)
+<!-- - [Examples: HTTP/2 h2c](./README-en.md#HTTP2-h2c) -->
+- [Examples: gRPC h2c](./README-en.md#gRPC-h2c)
+- [Examples: Raw TCP](./README-en.md#Raw-TCP)
+- [Examples: FIX 4.x](./README-en.md#FIX-4x)
+- [Examples: UDS (Unix DOmain Sockets)](./README-en.md#UDS-Unix-Domain-Sockets)
+- [Examples: Channel](./README-en.md#Channel)
+- [Examples: UDP](./README-en.md#UDP)
+- [Examples: Logger](./README-en.md#Logger)
+- [Examples: Testing](./README-en.md#Testing)
+- [Examples: Memory Model](./README-en.md#Memory-Model)
+
+<br>
 
 ## A Reason.. A Motivation...
 
@@ -119,10 +152,12 @@ __*6. Predictable, Transparent Memory Management.*__
 - Single file, single responsibility.
 - Always use and push Zig and their std.
 - Any significant change/s required RnD/PoC.
+- Cover for the un-cover test/s is good contribution.
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
+- You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
 
 <br>
 
@@ -196,7 +231,7 @@ exe.root_module.addImport("zix", zix.module("zix"));
 
 For more examples see the `examples` directory.
 
-### Minimal examples
+### Minimal Examples
 
 Auto I/O (work-queue thread pool, default):
 ```zig
@@ -304,7 +339,7 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 
 ### Concurrency Model
 
-Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.POOL`):
+Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.POOL`):
 
 **`.POOL` — work-queue thread pool (default):**
 
@@ -348,7 +383,21 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-See [`docs/concurrency.md`](docs/concurrency.md) for architecture details and thread counts.
+**`.EPOLL` — single epoll event loop + worker pool (Linux-only):**
+
+One event-loop thread uses `epoll_wait` to detect readable sockets. Workers pop ready fds from a queue and serve one request each, then re-arm the socket (`EPOLLONESHOT`). Idle keep-alive connections hold no thread. Best for high connection counts with many idle or slow clients. Non-Linux builds fall back to `.POOL` automatically.
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/", .handler = homeHandler },
+}, .{
+    .io             = process.io,
+    .dispatch_model = .EPOLL,
+    .pool_size      = 32, // worker threads; workers field is ignored
+});
+```
+
+See [`docs/concurrency.md`](docs/concurrency.md) for architecture details, thread counts, and when to prefer each model.
 
 <br>
 
@@ -751,66 +800,66 @@ The parser storage limit is 64 — `CUSTOM` values above 64 are silently capped.
 
 <br>
 
-## HTTP/2 h2c
-
-`zix.Http2` is a standalone HTTP/2 server over cleartext TCP (h2c). Routes are registered at compile time.
-
-```zig
-const std = @import("std");
-const zix = @import("zix");
-
-fn homeHandler(
-    method:  []const u8,
-    headers: []const zix.Http2.Header,
-    body:    []const u8,
-    fd:      std.posix.fd_t,
-    sid:     u31,
-) void {
-    _ = method; _ = headers; _ = body;
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "Hello from Http2") catch {};
-}
-
-pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http2.Server.init(
-        &[_]zix.Http2.Route{
-            .{ .path = "/", .handler = homeHandler },
-        },
-        .{
-            .io   = process.io,
-            .ip   = "127.0.0.1",
-            .port = 8082,
-        },
-    );
-    defer server.deinit();
-    try server.run();
-}
-```
-
-```sh
-curl --http2-prior-knowledge http://127.0.0.1:8082/
-```
-
-`HandlerFn`: `fn(method, headers, body, fd, sid) void` — the handler writes response frames directly via `zix.Http2.sendResponse` or the raw frame helpers. Routes are exact-path matches baked in at compile time.
-
-**Config fields:**
-
-| Field | Default | Description |
-| :- | :- | :- |
-| `io` | required | caller-provided `std.Io` backend |
-| `ip` | required | bind address |
-| `port` | required | listen port; 0 → `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, or `.MIXED` |
-| `kernel_backlog` | 1024 | TCP listen backlog |
-| `workers` | 0 (cpu count) | accept thread count; ignored by `.ASYNC` |
-| `pool_size` | 0 (auto) | pool thread count; only used by `.POOL` |
-| `max_streams` | 16 | max concurrent HTTP/2 streams per connection |
-| `max_frame_size` | 16384 | advertised MAX_FRAME_SIZE in SETTINGS |
-| `max_header_scratch` | 4096 | HPACK scratch buffer size per connection |
-| `max_body` | 65536 | max total body buffered per stream |
-
-See [`docs/hld-grpc.md`](docs/hld-grpc.md) for gRPC on top of Http2.
-
-<br>
+<!-- ## HTTP/2 h2c -->
+<!---->
+<!-- `zix.Http2` is a standalone HTTP/2 server over cleartext TCP (h2c). Routes are registered at compile time. -->
+<!---->
+<!-- ```zig -->
+<!-- const std = @import("std"); -->
+<!-- const zix = @import("zix"); -->
+<!---->
+<!-- fn homeHandler( -->
+<!--     method:  []const u8, -->
+<!--     headers: []const zix.Http2.Header, -->
+<!--     body:    []const u8, -->
+<!--     fd:      std.posix.fd_t, -->
+<!--     sid:     u31, -->
+<!-- ) void { -->
+<!--     _ = method; _ = headers; _ = body; -->
+<!--     zix.Http2.sendResponse(fd, sid, 200, "text/plain", "Hello from Http2") catch {}; -->
+<!-- } -->
+<!---->
+<!-- pub fn main(process: std.process.Init) !void { -->
+<!--     var server = try zix.Http2.Server.init( -->
+<!--         &[_]zix.Http2.Route{ -->
+<!--             .{ .path = "/", .handler = homeHandler }, -->
+<!--         }, -->
+<!--         .{ -->
+<!--             .io   = process.io, -->
+<!--             .ip   = "127.0.0.1", -->
+<!--             .port = 8082, -->
+<!--         }, -->
+<!--     ); -->
+<!--     defer server.deinit(); -->
+<!--     try server.run(); -->
+<!-- } -->
+<!-- ``` -->
+<!---->
+<!-- ```sh -->
+<!-- curl --http2-prior-knowledge http://127.0.0.1:8082/ -->
+<!-- ``` -->
+<!---->
+<!-- `HandlerFn`: `fn(method, headers, body, fd, sid) void` — the handler writes response frames directly via `zix.Http2.sendResponse` or the raw frame helpers. Routes are exact-path matches baked in at compile time. -->
+<!---->
+<!-- **Config fields:** -->
+<!---->
+<!-- | Field | Default | Description | -->
+<!-- | :- | :- | :- | -->
+<!-- | `io` | required | caller-provided `std.Io` backend | -->
+<!-- | `ip` | required | bind address | -->
+<!-- | `port` | required | listen port; 0 → `error.PortNotConfigured` | -->
+<!-- | `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, or `.MIXED` | -->
+<!-- | `kernel_backlog` | 1024 | TCP listen backlog | -->
+<!-- | `workers` | 0 (cpu count) | accept thread count; ignored by `.ASYNC` | -->
+<!-- | `pool_size` | 0 (auto) | pool thread count; only used by `.POOL` | -->
+<!-- | `max_streams` | 16 | max concurrent HTTP/2 streams per connection | -->
+<!-- | `max_frame_size` | 16384 | advertised MAX_FRAME_SIZE in SETTINGS | -->
+<!-- | `max_header_scratch` | 4096 | HPACK scratch buffer size per connection | -->
+<!-- | `max_body` | 65536 | max total body buffered per stream | -->
+<!---->
+<!-- See [`docs/hld-grpc.md`](docs/hld-grpc.md) for gRPC on top of Http2. -->
+<!---->
+<!-- <br> -->
 
 ## gRPC h2c
 
@@ -894,7 +943,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only).
+**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming — `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency.md`](docs/concurrency.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -1018,10 +1067,10 @@ defer client.deinit(io);
 
 try client.logon(io, 30);                                       // Logon with HeartBtInt=30
 try client.sendMessage(io, "D", &[_]zix.Fix.BuildField{       // NewOrderSingle
-    .{ .tag = 11, .value = "order-001" },
-    .{ .tag = 55, .value = "AAPL" },
-    .{ .tag = 54, .value = "1" },
-    .{ .tag = 38, .value = "100" },
+    .{ .tag = .ClOrdID,  .value = "order-001" },
+    .{ .tag = .Symbol,   .value = "AAPL" },
+    .{ .tag = .Side,     .value = "1" },
+    .{ .tag = .OrderQty, .value = "100" },
 });
 const msg = try client.recvMessage(io);                         // receive echo
 _ = msg;

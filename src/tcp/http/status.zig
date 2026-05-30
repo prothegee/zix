@@ -549,7 +549,7 @@ test "zix test: statusLine pre-built lines" {
 }
 
 test "zix test: tcp http status fn/s" {
-    const es = [_]Code{
+    const all_codes = [_]Code{
         // 1xx : informational
         Code.CONTINUE,
         Code.SWITCHING_PROTOCOL,
@@ -623,7 +623,7 @@ test "zix test: tcp http status fn/s" {
         Code.NETWORK_AUTHENTICATION_REQUIRED,
     };
 
-    for (es) |e| {
+    for (all_codes) |e| {
         const e_str = stringFromEnum(e);
 
         try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));

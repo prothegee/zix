@@ -80,13 +80,13 @@ const WorkerCtx = struct {
 
 fn workerEntry(ctx: WorkerCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-    var srv = addr.listen(ctx.io, .{
+    var listener = addr.listen(ctx.io, .{
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
-    defer srv.deinit(ctx.io);
+    defer listener.deinit(ctx.io);
     while (true) {
-        const stream = srv.accept(ctx.io) catch |err| {
+        const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
             continue;
         };
@@ -141,13 +141,13 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 
         fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-            var srv = addr.listen(ctx.io, .{
+            var listener = addr.listen(ctx.io, .{
                 .reuse_address = true,
                 .kernel_backlog = ctx.kernel_backlog,
             }) catch return;
-            defer srv.deinit(ctx.io);
+            defer listener.deinit(ctx.io);
             while (true) {
-                const stream = srv.accept(ctx.io) catch |err| {
+                const stream = listener.accept(ctx.io) catch |err| {
                     if (err != error.ConnectionAborted) break;
                     continue;
                 };
@@ -196,14 +196,14 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     std.debug.print("zix http2 server (async): {s}:{d}\n", .{ cfg.ip, cfg.port });
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
-                    var srv = try addr.listen(io, .{
+                    var listener = try addr.listen(io, .{
                         .reuse_address = true,
                         .kernel_backlog = cfg.kernel_backlog,
                     });
-                    defer srv.deinit(io);
+                    defer listener.deinit(io);
 
                     while (true) {
-                        const stream = srv.accept(io) catch |err| {
+                        const stream = listener.accept(io) catch |err| {
                             if (err != error.ConnectionAborted) {
                                 std.debug.print("zix http2 server: accept error: {}\n", .{err});
                                 break;

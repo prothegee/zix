@@ -19,11 +19,11 @@ fn getPeerAddr(fd: std.posix.fd_t, buf: []u8) []const u8 {
     var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
     std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
     if (storage.family == std.posix.AF.INET) {
-        const sin: *align(8) const std.posix.sockaddr.in = @ptrCast(&storage);
-        const b: [4]u8 = @bitCast(sin.addr);
+        const sock_in: *align(8) const std.posix.sockaddr.in = @ptrCast(&storage);
+        const addr_bytes: [4]u8 = @bitCast(sock_in.addr);
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
-            b[0],                               b[1], b[2], b[3],
-            std.mem.bigToNative(u16, sin.port),
+            addr_bytes[0],                          addr_bytes[1], addr_bytes[2], addr_bytes[3],
+            std.mem.bigToNative(u16, sock_in.port),
         }) catch "-";
     }
     return "-";
@@ -33,8 +33,8 @@ fn getMonotonicMs() u64 {
     var spec: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.MONOTONIC, &spec);
     const s: u64 = if (spec.sec >= 0) @intCast(spec.sec) else 0;
-    const ms: u64 = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
-    return s * 1000 + ms;
+    const millis: u64 = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
+    return s * 1000 + millis;
 }
 
 // --------------------------------------------------------- //
@@ -301,24 +301,24 @@ pub const TcpServer = struct {
 pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
 
-    var rbuf: [4096 + 4]u8 = undefined;
-    var wbuf: [4096 + 4]u8 = undefined;
+    var read_buf: [4096 + 4]u8 = undefined;
+    var write_buf: [4096 + 4]u8 = undefined;
     var payload_buf: [4096]u8 = undefined;
 
-    var rdr = stream.reader(io, &rbuf);
-    var wtr = stream.writer(io, &wbuf);
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     while (true) {
-        const len = rdr.interface.takeVarInt(u32, .big, 4) catch return;
+        const len = reader.interface.takeVarInt(u32, .big, 4) catch return;
         if (len == 0 or len > payload_buf.len) return;
 
-        rdr.interface.readSliceAll(payload_buf[0..len]) catch return;
+        reader.interface.readSliceAll(payload_buf[0..len]) catch return;
 
         var hdr: [4]u8 = undefined;
         std.mem.writeInt(u32, &hdr, len, .big);
-        wtr.interface.writeAll(&hdr) catch return;
-        wtr.interface.writeAll(payload_buf[0..len]) catch return;
-        wtr.interface.flush() catch return;
+        writer.interface.writeAll(&hdr) catch return;
+        writer.interface.writeAll(payload_buf[0..len]) catch return;
+        writer.interface.flush() catch return;
     }
 }
 

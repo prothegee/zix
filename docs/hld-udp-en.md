@@ -297,6 +297,32 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 
 ---
 
+## Logger Integration
+
+`UdpServerConfig.logger: ?*Logger = null`. When non-null:
+- `system(.INFO, "udp", ...)` on bind and shutdown.
+- `packet(.RECV, peer, size, err)` inside `processPacket` after each received datagram. `peer` is the sender address; `size` is `@sizeOf(Packet)`.
+
+```zig
+var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    .console = .ALWAYS,
+});
+defer logger.deinit();
+
+var server = try MyServer.init(.{
+    .allocator = std.heap.smp_allocator,
+    .ip        = "127.0.0.1",
+    .port      = 9100,
+    .logger    = &logger,
+});
+```
+
+`frame()` is not auto-called by the UDP server (UDP has no framing layer). Use `logger.frame()` manually inside custom processing logic if needed.
+
+See `docs/hld-logger.md` for log line format and config details.
+
+---
+
 ## Not Yet Implemented
 
 | Feature | Note |

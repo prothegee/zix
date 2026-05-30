@@ -10,6 +10,7 @@ pub const Client = @import("client.zig").FixClient;
 pub const ClientConfig = @import("config.zig").FixClientConfig;
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 
+pub const Tag = core.Tag;
 pub const Field = core.Field;
 pub const BuildField = core.BuildField;
 

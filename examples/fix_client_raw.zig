@@ -38,8 +38,8 @@ pub fn main(process: std.process.Init) !void {
 
     var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
     var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var reader = stream.reader(io, &rd_buf);
+    var writer = stream.writer(io, &wr_buf);
 
     var seq_out: u32 = 1;
     var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
@@ -49,22 +49,22 @@ pub fn main(process: std.process.Init) !void {
     // Logon
     {
         const extra = [_]zix.Fix.BuildField{
-            .{ .tag = 98, .value = "0" },
-            .{ .tag = 108, .value = "30" },
+            .{ .tag = .EncryptMethod, .value = "0" },
+            .{ .tag = .HeartBtInt, .value = "30" },
         };
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "A", &extra);
         seq_out += 1;
-        try wr.interface.writeAll(out_buf[0..n]);
-        try wr.interface.flush();
+        try writer.interface.writeAll(out_buf[0..n]);
+        try writer.interface.flush();
         std.debug.print("client: sent Logon\n", .{});
     }
 
     // Receive Logon response.
     {
-        const raw = try recvMessage(&rd.interface, &recv_buf, &recv_len);
+        const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
-        const msgtype = zix.Fix.getField(fields[0..nf], 35) orelse return error.MissingMsgType;
+        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msgtype, "A")) return error.ExpectedLogon;
         std.debug.print("client: recv Logon from server\n", .{});
     }
@@ -72,29 +72,29 @@ pub fn main(process: std.process.Init) !void {
     // Send NewOrderSingle (35=D)
     {
         const extra = [_]zix.Fix.BuildField{
-            .{ .tag = 11, .value = "ORD001" },
-            .{ .tag = 55, .value = "AAPL" },
-            .{ .tag = 54, .value = "1" },
-            .{ .tag = 38, .value = "100" },
-            .{ .tag = 40, .value = "2" },
-            .{ .tag = 44, .value = "150.00" },
+            .{ .tag = .ClOrdID, .value = "ORD001" },
+            .{ .tag = .Symbol, .value = "AAPL" },
+            .{ .tag = .Side, .value = "1" },
+            .{ .tag = .OrderQty, .value = "100" },
+            .{ .tag = .OrdType, .value = "2" },
+            .{ .tag = .Price, .value = "150.00" },
         };
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "D", &extra);
         seq_out += 1;
-        try wr.interface.writeAll(out_buf[0..n]);
-        try wr.interface.flush();
+        try writer.interface.writeAll(out_buf[0..n]);
+        try writer.interface.flush();
         std.debug.print("client: sent NewOrderSingle\n", .{});
     }
 
     // Receive echo.
     {
-        const raw = try recvMessage(&rd.interface, &recv_buf, &recv_len);
+        const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const fslice = fields[0..nf];
-        const msgtype = zix.Fix.getField(fslice, 35) orelse return error.MissingMsgType;
-        const symbol = zix.Fix.getField(fslice, 55) orelse "(missing)";
-        const qty = zix.Fix.getField(fslice, 38) orelse "(missing)";
+        const msgtype = zix.Fix.getField(fslice, .MsgType) orelse return error.MissingMsgType;
+        const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
+        const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
         std.debug.print("client: recv echo 35={s} symbol={s} qty={s}\n", .{ msgtype, symbol, qty });
     }
 
@@ -102,24 +102,24 @@ pub fn main(process: std.process.Init) !void {
     {
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "5", &.{});
         seq_out += 1;
-        try wr.interface.writeAll(out_buf[0..n]);
-        try wr.interface.flush();
+        try writer.interface.writeAll(out_buf[0..n]);
+        try writer.interface.flush();
         std.debug.print("client: sent Logout\n", .{});
     }
 
     // Receive Logout response.
     {
-        const raw = try recvMessage(&rd.interface, &recv_buf, &recv_len);
+        const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
-        const msgtype = zix.Fix.getField(fields[0..nf], 35) orelse return error.MissingMsgType;
+        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msgtype, "5")) return error.ExpectedLogout;
         std.debug.print("client: recv Logout — session complete\n", .{});
     }
 }
 
 fn recvMessage(
-    rd: *std.Io.Reader,
+    reader: *std.Io.Reader,
     recv_buf: []u8,
     recv_len: *usize,
 ) ![]const u8 {
@@ -134,7 +134,7 @@ fn recvMessage(
             return msg;
         }
         if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
-        const b = try rd.takeByte();
+        const b = try reader.takeByte();
         recv_buf[recv_len.*] = b;
         recv_len.* += 1;
     }

@@ -46,44 +46,44 @@ pub const ParseResult = struct {
 pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     if (buf.len < 2) return null;
 
-    var off: usize = 0;
+    var byte_offset: usize = 0;
     const fin = (buf[0] & 0x80) != 0;
     const opcode: Opcode = @enumFromInt(buf[0] & 0x0F);
-    off += 1;
+    byte_offset += 1;
 
     const masked = (buf[1] & 0x80) != 0;
     var payload_len: u64 = buf[1] & 0x7F;
-    off += 1;
+    byte_offset += 1;
 
     if (payload_len == 126) {
-        if (buf.len < off + 2) return null;
-        payload_len = (@as(u64, buf[off]) << 8) | buf[off + 1];
-        off += 2;
+        if (buf.len < byte_offset + 2) return null;
+        payload_len = (@as(u64, buf[byte_offset]) << 8) | buf[byte_offset + 1];
+        byte_offset += 2;
     } else if (payload_len == 127) {
-        if (buf.len < off + 8) return null;
+        if (buf.len < byte_offset + 8) return null;
         payload_len = 0;
-        for (0..8) |i| payload_len = (payload_len << 8) | buf[off + i];
-        off += 8;
+        for (0..8) |i| payload_len = (payload_len << 8) | buf[byte_offset + i];
+        byte_offset += 8;
     }
 
     var mask: [4]u8 = .{ 0, 0, 0, 0 };
     if (masked) {
-        if (buf.len < off + 4) return null;
-        @memcpy(&mask, buf[off .. off + 4]);
-        off += 4;
+        if (buf.len < byte_offset + 4) return null;
+        @memcpy(&mask, buf[byte_offset .. byte_offset + 4]);
+        byte_offset += 4;
     }
 
-    const plen: usize = @intCast(@min(payload_len, payload_buf.len));
-    if (buf.len < off + plen) return null;
+    const capped_len: usize = @intCast(@min(payload_len, payload_buf.len));
+    if (buf.len < byte_offset + capped_len) return null;
 
     const payload: []const u8 = if (masked) blk: {
-        for (0..plen) |i| payload_buf[i] = buf[off + i] ^ mask[i % 4];
-        break :blk payload_buf[0..plen];
-    } else buf[off .. off + plen];
+        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % 4];
+        break :blk payload_buf[0..capped_len];
+    } else buf[byte_offset .. byte_offset + capped_len];
 
     return .{
         .frame = .{ .fin = fin, .opcode = opcode, .payload = payload },
-        .consumed = off + plen,
+        .consumed = byte_offset + capped_len,
     };
 }
 
@@ -101,29 +101,29 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
 /// Return:
 /// usize (bytes written into buf)
 pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
-    var off: usize = 0;
-    buf[off] = 0x80 | @intFromEnum(opcode);
-    off += 1;
+    var byte_offset: usize = 0;
+    buf[byte_offset] = 0x80 | @intFromEnum(opcode);
+    byte_offset += 1;
 
     if (payload.len <= 125) {
-        buf[off] = @intCast(payload.len);
-        off += 1;
+        buf[byte_offset] = @intCast(payload.len);
+        byte_offset += 1;
     } else if (payload.len <= 65535) {
-        buf[off] = 126;
-        buf[off + 1] = @intCast((payload.len >> 8) & 0xFF);
-        buf[off + 2] = @intCast(payload.len & 0xFF);
-        off += 3;
+        buf[byte_offset] = 126;
+        buf[byte_offset + 1] = @intCast((payload.len >> 8) & 0xFF);
+        buf[byte_offset + 2] = @intCast(payload.len & 0xFF);
+        byte_offset += 3;
     } else {
-        buf[off] = 127;
+        buf[byte_offset] = 127;
         for (0..8) |i| {
             const shift: u6 = @intCast((7 - i) * 8);
-            buf[off + 1 + i] = @intCast((payload.len >> shift) & 0xFF);
+            buf[byte_offset + 1 + i] = @intCast((payload.len >> shift) & 0xFF);
         }
-        off += 9;
+        byte_offset += 9;
     }
 
-    @memcpy(buf[off .. off + payload.len], payload);
-    return off + payload.len;
+    @memcpy(buf[byte_offset .. byte_offset + payload.len], payload);
+    return byte_offset + payload.len;
 }
 
 /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (RFC 6455 4.2.2).
@@ -240,19 +240,19 @@ pub const RoomMap = struct {
         self.mu.lock(io) catch return;
         defer self.mu.unlock(io);
 
-        const gop = self.rooms.getOrPut(room) catch return;
-        if (!gop.found_existing) {
+        const room_entry = self.rooms.getOrPut(room) catch return;
+        if (!room_entry.found_existing) {
             // Own-copy the key so it doesn't dangle when the connection's read
             // buffer is freed after the WebSocket session ends.
             const owned = self.allocator.dupe(u8, room) catch {
                 _ = self.rooms.remove(room);
                 return;
             };
-            gop.key_ptr.* = owned;
-            gop.value_ptr.* = .{ .conns = .empty };
+            room_entry.key_ptr.* = owned;
+            room_entry.value_ptr.* = .{ .conns = .empty };
         }
-        gop.value_ptr.conns.append(self.allocator, conn) catch return;
-        std.debug.print("ws: join room='{s}' total={d}\n", .{ room, gop.value_ptr.conns.items.len });
+        room_entry.value_ptr.conns.append(self.allocator, conn) catch return;
+        std.debug.print("ws: join room='{s}' total={d}\n", .{ room, room_entry.value_ptr.conns.items.len });
     }
 
     /// Brief:
@@ -317,10 +317,10 @@ pub const RoomMap = struct {
         const frame_data = frame_buf[0..frame_len];
 
         for (room_ptr.conns.items) |conn| {
-            var wb: [4106]u8 = undefined;
-            var w = conn.stream.writer(conn.io, &wb);
-            w.interface.writeAll(frame_data) catch continue;
-            w.interface.flush() catch continue;
+            var write_buf: [4106]u8 = undefined;
+            var writer = conn.stream.writer(conn.io, &write_buf);
+            writer.interface.writeAll(frame_data) catch continue;
+            writer.interface.flush() catch continue;
         }
     }
 };

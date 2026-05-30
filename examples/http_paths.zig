@@ -38,9 +38,9 @@ pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 
     // Skip the leading "path" segment — it is always present because we are
     // registered under the /path prefix.
-    const sub = if (all_segments.len > 0) all_segments[1..] else all_segments;
+    const subpath = if (all_segments.len > 0) all_segments[1..] else all_segments;
 
-    if (sub.len > MAX_PATH_SEGMENTS) {
+    if (subpath.len > MAX_PATH_SEGMENTS) {
         res.setStatus(.NOT_FOUND);
         try res.sendJson("{\"message\":\"Error: too many path segments\",\"max\":9}");
         return;
@@ -50,7 +50,7 @@ pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
     try buf.appendSlice(ctx.allocator, "{\"path\":\"");
     try buf.appendSlice(ctx.allocator, req.path());
     try buf.appendSlice(ctx.allocator, "\",\"segments\":[");
-    for (sub, 0..) |seg, i| {
+    for (subpath, 0..) |seg, i| {
         if (i > 0) try buf.appendSlice(ctx.allocator, ",");
         try buf.append(ctx.allocator, '"');
         try buf.appendSlice(ctx.allocator, seg);
@@ -58,7 +58,7 @@ pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
     }
     try buf.appendSlice(ctx.allocator, "],\"count\":");
     var count_buf: [4]u8 = undefined;
-    const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{sub.len});
+    const count_str = try std.fmt.bufPrint(&count_buf, "{d}", .{subpath.len});
     try buf.appendSlice(ctx.allocator, count_str);
     try buf.append(ctx.allocator, '}');
 
