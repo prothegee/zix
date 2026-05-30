@@ -8,7 +8,7 @@ const DispatchModel = @import("../config.zig").DispatchModel;
 /// Configuration for an HTTP/2 h2c server instance.
 /// Pass to Http2.Server.init(). Fields without defaults (io, ip, port) are required.
 pub const Http2ServerConfig = struct {
-    /// Io backend for the server. Caller-provided; must outlive the server.
+    /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
     /// Bind address.
     ip: []const u8,
