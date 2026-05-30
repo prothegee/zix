@@ -64,13 +64,13 @@ pub const TcpClient = struct {
     /// - error.MessageTooLarge if msg.len exceeds config.max_msg_len
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         if (msg.len > self.config.max_msg_len) return error.MessageTooLarge;
-        var wbuf: [4096 + 4]u8 = undefined;
-        var wtr = self.stream.writer(io, &wbuf);
+        var write_buf: [4096 + 4]u8 = undefined;
+        var writer = self.stream.writer(io, &write_buf);
         var hdr: [4]u8 = undefined;
         std.mem.writeInt(u32, &hdr, @intCast(msg.len), .big);
-        try wtr.interface.writeAll(&hdr);
-        try wtr.interface.writeAll(msg);
-        try wtr.interface.flush();
+        try writer.interface.writeAll(&hdr);
+        try writer.interface.writeAll(msg);
+        try writer.interface.flush();
     }
 
     /// Receive a length-prefixed frame into buf.
@@ -80,11 +80,11 @@ pub const TcpClient = struct {
     /// - error.MessageTooLarge if the frame payload exceeds buf.len
     /// - error.ConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
-        var rbuf: [4096 + 4]u8 = undefined;
-        var rdr = self.stream.reader(io, &rbuf);
-        const len = rdr.interface.takeVarInt(u32, .big, 4) catch return error.ConnectionClosed;
+        var read_buf: [4096 + 4]u8 = undefined;
+        var reader = self.stream.reader(io, &read_buf);
+        const len = reader.interface.takeVarInt(u32, .big, 4) catch return error.ConnectionClosed;
         if (len > buf.len) return error.MessageTooLarge;
-        rdr.interface.readSliceAll(buf[0..len]) catch return error.ConnectionClosed;
+        reader.interface.readSliceAll(buf[0..len]) catch return error.ConnectionClosed;
         return buf[0..len];
     }
 };
