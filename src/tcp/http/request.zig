@@ -60,8 +60,8 @@ pub const Request = struct {
 
         if (self.head.chunked) return self.readChunkedBody();
 
-        const cl = self.head.content_length;
-        if (cl == 0) {
+        const content_len = self.head.content_length;
+        if (content_len == 0) {
             self.body_cache = "";
             return "";
         }
@@ -69,14 +69,14 @@ pub const Request = struct {
         // Bytes already pulled into buf during the header read loop.
         const in_buf_end = @min(self.buf_filled, self.buf.len);
         const already_slice = self.buf[@min(self.head.body_offset, in_buf_end)..in_buf_end];
-        const already_len = @min(already_slice.len, cl);
+        const already_len = @min(already_slice.len, content_len);
 
-        const out = try self.allocator.alloc(u8, cl);
+        const out = try self.allocator.alloc(u8, content_len);
         @memcpy(out[0..already_len], already_slice[0..already_len]);
 
         var total: usize = already_len;
-        while (total < cl) {
-            const n = std.posix.read(self.fd, out[total..cl]) catch break;
+        while (total < content_len) {
+            const n = std.posix.read(self.fd, out[total..content_len]) catch break;
             if (n == 0) break;
             total += n;
         }
