@@ -116,8 +116,8 @@ fn serveConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: Serv
             .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
             .{ frame.SETTINGS_ENABLE_PUSH, 0 },
         });
-        var hdec = hpack.HpackDecoder.init();
-        try serveH2cLoop(routes, fd, &hdec, opts, 0);
+        var hpack_dec = hpack.HpackDecoder.init();
+        try serveH2cLoop(routes, fd, &hpack_dec, opts, 0);
     } else {
         try serveH2cUpgrade(routes, fd, opts, &peek);
     }
@@ -132,9 +132,9 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
         if (line.len == 0) break;
         if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
             if (std.ascii.eqlIgnoreCase(line[0..colon], name)) {
-                var vs: usize = colon + 1;
-                while (vs < line.len and line[vs] == ' ') vs += 1;
-                return line[vs..];
+                var val_start: usize = colon + 1;
+                while (val_start < line.len and line[val_start] == ' ') val_start += 1;
+                return line[val_start..];
             }
         }
         pos = line_end + 2;
@@ -184,7 +184,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
         return error.BadPreface;
     }
 
-    var hdec = hpack.HpackDecoder.init();
+    var hpack_dec = hpack.HpackDecoder.init();
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
         const trimmed = std.mem.trim(u8, b64, " ");
         var decoded: [256]u8 = undefined;
@@ -197,8 +197,8 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
                 const val: u32 = (@as(u32, decoded[i + 2]) << 24) | (@as(u32, decoded[i + 3]) << 16) |
                     (@as(u32, decoded[i + 4]) << 8) | decoded[i + 5];
                 if (id == frame.SETTINGS_HEADER_TABLE_SIZE) {
-                    hdec.max_size = val;
-                    hdec.evictTo(val);
+                    hpack_dec.max_size = val;
+                    hpack_dec.evictTo(val);
                 }
             }
         }
@@ -218,13 +218,13 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     };
     Router(routes).dispatch(method, path, &s1_hdrs, &.{}, fd, 1);
 
-    try serveH2cLoop(routes, fd, &hdec, opts, 1);
+    try serveH2cLoop(routes, fd, &hpack_dec, opts, 1);
 }
 
 fn serveH2cLoop(
     comptime routes: []const Route,
     fd: std.posix.fd_t,
-    hdec: *hpack.HpackDecoder,
+    hpack_dec: *hpack.HpackDecoder,
     opts: ServeOpts,
     initial_last_stream: u31,
 ) !void {
@@ -260,8 +260,8 @@ fn serveH2cLoop(
                     const val: u32 = (@as(u32, payload[i + 2]) << 24) | (@as(u32, payload[i + 3]) << 16) |
                         (@as(u32, payload[i + 4]) << 8) | payload[i + 5];
                     if (id == frame.SETTINGS_HEADER_TABLE_SIZE) {
-                        hdec.max_size = val;
-                        hdec.evictTo(val);
+                        hpack_dec.max_size = val;
+                        hpack_dec.evictTo(val);
                     }
                 }
                 try frame.sendSettingsAck(fd);
@@ -318,7 +318,7 @@ fn serveH2cLoop(
                 }
                 block = block[offset .. block.len - pad_len];
 
-                s.header_count = hdec.decode(block, &s.headers, &s.header_scratch) catch {
+                s.header_count = hpack_dec.decode(block, &s.headers, &s.header_scratch) catch {
                     frame.sendRstStream(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
@@ -339,7 +339,7 @@ fn serveH2cLoop(
                     return error.ProtocolError;
                 };
                 const s = &streams[slot];
-                const count = hdec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
+                const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
                     frame.sendRstStream(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
