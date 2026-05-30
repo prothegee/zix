@@ -63,14 +63,14 @@ pub const FixClient = struct {
         var hbt_buf: [8]u8 = undefined;
         const hbt_str = std.fmt.bufPrint(&hbt_buf, "{d}", .{heart_bt_int}) catch return error.InvalidHeartbeatInterval;
         const extra = [_]core.BuildField{
-            .{ .tag = 98, .value = "0" },
-            .{ .tag = 108, .value = hbt_str },
+            .{ .tag = .EncryptMethod, .value = "0" },
+            .{ .tag = .HeartBtInt, .value = hbt_str },
         };
         try self.sendMessage(io, "A", &extra);
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
         const nf = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..nf], 35) orelse return error.MissingMsgType;
+        const msg_type = core.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msg_type, "A")) return error.ExpectedLogon;
     }
 
@@ -80,7 +80,7 @@ pub const FixClient = struct {
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
         const nf = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..nf], 35) orelse return error.MissingMsgType;
+        const msg_type = core.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msg_type, "5")) return error.ExpectedLogout;
     }
 
@@ -90,9 +90,9 @@ pub const FixClient = struct {
         const n = try core.buildMessage(&out_buf, self.comp_id, self.target_comp_id, self.seq_out, msg_type, extra);
         self.seq_out += 1;
         var wr_buf: [core.MAX_MSG_SIZE]u8 = undefined;
-        var wr = self.stream.writer(io, &wr_buf);
-        try wr.interface.writeAll(out_buf[0..n]);
-        try wr.interface.flush();
+        var writer = self.stream.writer(io, &wr_buf);
+        try writer.interface.writeAll(out_buf[0..n]);
+        try writer.interface.flush();
     }
 
     /// Receive the next complete FIX message.
@@ -101,7 +101,7 @@ pub const FixClient = struct {
     /// - slice into the internal buffer (valid until the next recvMessage call)
     pub fn recvMessage(self: *Self, io: std.Io) ![]const u8 {
         var rd_buf: [core.MAX_MSG_SIZE]u8 = undefined;
-        var rd = self.stream.reader(io, &rd_buf);
+        var reader = self.stream.reader(io, &rd_buf);
         while (true) {
             if (core.findMessageEnd(self.recv_buf[0..self.recv_len])) |end| {
                 const msg = self.recv_buf[0..end];
@@ -113,7 +113,7 @@ pub const FixClient = struct {
                 return msg;
             }
             if (self.recv_len >= self.recv_buf.len) return error.MessageTooLarge;
-            const b = try rd.interface.takeByte();
+            const b = try reader.interface.takeByte();
             self.recv_buf[self.recv_len] = b;
             self.recv_len += 1;
         }
@@ -123,8 +123,8 @@ pub const FixClient = struct {
 // --------------------------------------------------------- //
 
 test "zix fix: FixClient.connect port zero returns PortNotConfigured" {
-    const gpa = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{});
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
