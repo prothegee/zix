@@ -31,6 +31,8 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/method.zig"));
     std.testing.refAllDecls(@import("tcp/http/status.zig"));
     std.testing.refAllDecls(@import("tcp/http/content.zig"));
+    std.testing.refAllDecls(@import("tcp/http/parser.zig"));
+    std.testing.refAllDecls(@import("tcp/http/context.zig"));
     std.testing.refAllDecls(@import("tcp/http/request.zig"));
     std.testing.refAllDecls(@import("tcp/http/response.zig"));
     std.testing.refAllDecls(@import("tcp/http/router.zig"));

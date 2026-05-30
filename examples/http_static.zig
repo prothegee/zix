@@ -146,9 +146,9 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     // Strip "/secret/" prefix to get the sub-path
     const p = req.path();
     const prefix = "/secret";
-    const sub = if (p.len > prefix.len and p[prefix.len] == '/') p[prefix.len + 1 ..] else "";
+    const subpath = if (p.len > prefix.len and p[prefix.len] == '/') p[prefix.len + 1 ..] else "";
 
-    if (sub.len == 0 or std.mem.indexOf(u8, sub, "..") != null) {
+    if (subpath.len == 0 or std.mem.indexOf(u8, subpath, "..") != null) {
         res.setStatus(.NOT_FOUND);
         try res.send("Not Found");
         return;
@@ -156,15 +156,15 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
     // Build full path: SECRET_DIR + "/" + sub
     var path_buf: [512]u8 = undefined;
-    if (SECRET_DIR.len + 1 + sub.len > path_buf.len) {
+    if (SECRET_DIR.len + 1 + subpath.len > path_buf.len) {
         res.setStatus(.NOT_FOUND);
         try res.send("Not Found");
         return;
     }
     @memcpy(path_buf[0..SECRET_DIR.len], SECRET_DIR);
     path_buf[SECRET_DIR.len] = '/';
-    @memcpy(path_buf[SECRET_DIR.len + 1 ..][0..sub.len], sub);
-    const full_path = path_buf[0 .. SECRET_DIR.len + 1 + sub.len];
+    @memcpy(path_buf[SECRET_DIR.len + 1 ..][0..subpath.len], subpath);
+    const full_path = path_buf[0 .. SECRET_DIR.len + 1 + subpath.len];
 
     // Check file existence first — always 404 before revealing the sec requirement
     const f = std.Io.Dir.cwd().openFile(ctx.io, full_path, .{}) catch {
@@ -212,7 +212,7 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     // Resolve MIME from extension via Content.fromExtension — displayable types render
     // inline in the browser, unknown/binary types fall back to octet-stream and prompt
     // a download.
-    const ext = if (std.mem.lastIndexOfScalar(u8, sub, '.')) |dot| sub[dot + 1 ..] else "";
+    const ext = if (std.mem.lastIndexOfScalar(u8, subpath, '.')) |dot| subpath[dot + 1 ..] else "";
     res.setContentType(zix.Http.Content.typeFromExtension(ext));
     try res.send(data[0..total]);
 

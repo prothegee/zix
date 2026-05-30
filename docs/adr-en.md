@@ -183,7 +183,9 @@ fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     }.handle;
 }
 
-server.registerHandler("/private", withAuth(withLogging(privateHandler)));
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
 
 **Consequences:**
@@ -224,7 +226,7 @@ The `public_dir` field already exists but its role as an opt-in feature (not a m
 
 **Status:** Accepted
 
-**Context:** `UdpServer` uses the heap for two purposes: the `Managed(ClientRecord)` client list (process lifetime) and the per-packet `[]IpAddress` broadcast snapshot (freed inside `processPacket`). Both previously used `std.heap.smp_allocator` internally — invisible to the caller. `HttpServerConfig` already exposes `allocator: std.mem.Allocator` for router storage. The project's "explicit over implicit" principle applies equally to memory ownership: hiding the allocator makes it impossible to substitute a leak-detecting allocator in tests.
+**Context:** `UdpServer` uses the heap for two purposes: the `Managed(ClientRecord)` client list (process lifetime) and the per-packet `[]IpAddress` broadcast snapshot (freed inside `processPacket`). Both previously used `std.heap.smp_allocator` internally — invisible to the caller. The project's "explicit over implicit" principle applies equally to memory ownership: hiding the allocator makes it impossible to substitute a leak-detecting allocator in tests.
 
 **Decision:** Add `allocator: std.mem.Allocator` as a required field (no default) to `UdpServerConfig`. The server uses this allocator for the client list and broadcast peer snapshots. `UdpClientConfig` receives no allocator field because `UdpClient` makes no heap allocations — all buffers are stack-allocated (`[@sizeOf(Packet)]u8`).
 
@@ -261,13 +263,13 @@ var server = try MyServer.init(.{
 
 **Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_client_request` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated, otherwise they fall back to `smp_allocator`.
 
-**Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, .{...})`: `Server` reads as a type, `init` reads as a constructor.
+**Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, comptime routes: []const Route, config: Config) !HttpServerImpl(stack_threshold, routes)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, &[_]zix.Http.Route{...}, .{...})`: `Server` reads as a type, `init` reads as a constructor.
 
 **Consequences:**
-- Call sites are one level simpler: `Server.init(N, config)` instead of `Server(N).init(config)`.
-- `stack_threshold` must remain `comptime`: Zig requires comptime-known sizes for stack arrays.
-- `HttpServerImpl(stack_threshold)` is the concrete type returned, callers use `var server = try ...` without naming the generic type.
-- Breaking change: all existing call sites updated via `sed`.
+- Call sites are one level simpler: `Server.init(N, routes, config)` instead of `Server(N).init(config)`.
+- Both `stack_threshold` and `routes` must remain `comptime`: Zig requires comptime-known sizes for stack arrays, and the route table is zero-size at runtime when comptime.
+- `HttpServerImpl(stack_threshold, routes)` is the concrete type returned, callers use `var server = try ...` without naming the generic type.
+- Breaking change: all existing call sites updated.
 
 ---
 
@@ -447,6 +449,63 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - `dispatch_model` is self-documenting at the call site. The three strategies are explicit enum variants, not magic `usize` values.
 - `pool_size` is silently ignored for `.ASYNC` and `.MIXED` — no error, documented in `HttpServerConfig`.
 - Enum backing type `u8` follows the project convention for all named enums.
+
+---
+
+## ADR-022: zix.Tcp raw stream server and client
+
+**Status:** Accepted
+
+**Context:** After the HTTP engine was complete, the next protocol layer was a generic raw TCP stream server — no HTTP framing, no router, user-defined handler owns the stream. The HTTP PoC in `rnd/` proved all three dispatch models (POOL, ASYNC, MIXED) work for TCP. The question was how to expose this as a library API without duplicating HTTP internals.
+
+**Decision:**
+
+- `zix.Tcp.Server` and `zix.Tcp.Client` are standalone types in `src/tcp/server.zig` and `src/tcp/client.zig`. No shared base with `zix.Http.Server` — same standalone-per-protocol principle as `zix.Uds.Server`.
+- `HandlerFn = *const fn(stream: std.Io.net.Stream, io: std.Io) void` — identical signature to `zix.Uds.HandlerFn`. The handler owns the stream and must close it before returning.
+- `TcpServer.run(io)` / `runWith(io, handler)` — io is passed as a parameter (not stored in config). The caller controls the `std.Io` backend lifetime.
+- All three dispatch models (POOL, ASYNC, MIXED) apply with the same `ConnQueue` + thread spawn pattern from `zix.Http.Server`. `DispatchModel` is defined once in `src/tcp/config.zig` and imported by `src/tcp/http/config.zig` — single source of truth for all TCP-based protocols.
+- Frame format: `[u32 big-endian payload_len][payload bytes]`. Big-endian (network byte order) is chosen for TCP because it is the network convention and matches what other protocol libraries expect. `zix.Uds` uses little-endian by contrast (local only, no interop requirement).
+- `initArgs()` on the server and `connectArgs()` on the client parse `--ip` and `--port` from CLI args, following the `zix.Udp.Server.initArgs()` pattern.
+
+**Consequences:**
+- `zix.Tcp.Http.*` and `zix.Tcp.Server`/`Client` coexist under the same `zix.Tcp` namespace — HTTP is the high-level protocol, raw TCP is the low-level stream layer.
+- `zix.Tcp.Server` does not allocate from a user-provided allocator. The `ConnQueue` uses `smp_allocator` directly — same approach as the HTTP server.
+- The built-in `echoHandler` uses `takeVarInt(u32, .big, 4)` and `readSliceAll` (vs. the `readSliceShort` loop in `zix.Uds.echoHandler`) — consistent with the PoC pattern confirmed during the TCP RnD phase.
+- Future Fix protocol (`zix.Tcp.Fix.*`) follows the same standalone-per-protocol pattern and will not be built on top of `zix.Tcp.Server`.
+
+---
+
+## ADR-023: zix.Logger, structured thread-safe event logger
+
+**Status:** Accepted, Implemented (2026-05-23)
+
+**Context:** Every server implementation (HTTP, TCP, UDP, UDS, FIX, gRPC) needs a logging layer. `std.debug.print` is unsafe on background OS threads because it routes through `std.Options.debug_io`, a global `Io.Threaded` singleton — calling it from any spawned thread races with the test runner's IPC channel and causes a panic. A logging primitive that is safe on background OS threads without a `std.Io` dependency is required.
+
+**Decision:** Implement `zix.Logger` as a struct with a per-instance spinlock (atomic CAS) protecting a 64 KB write buffer and file descriptor. All I/O uses raw `std.posix.write` — no `std.Io`, no `std.debug.print`. Protocol-specific log methods provide machine-parseable lines without post-processing: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Each server config accepts `logger: ?*Logger = null`; the logger is optional and the server is silent when null.
+
+**Consequences:**
+- All log methods are safe to call simultaneously from any OS thread including thread-pool workers, accept threads, and connection handlers.
+- No `std.Io` allocation per log call. The write buffer is flushed on date rollover, sequence rotation, explicit `logger.flush()`, or `logger.deinit()`.
+- File rotation is daily (`YYYY-MM-DD/` subdirectory) with per-file sequence numbering. `save_path` must exist before `Logger.init` — the logger does not create it.
+- Console output is controlled by `ConsoleMode` (`.OFF`, `.DEBUG_ONLY`, `.ALWAYS`). Both file and console paths are guarded by `save_min_level` / `console_min_level`.
+- `access()` derives log level from HTTP status: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR. `rpc()` derives from grpc-status code.
+
+---
+
+## ADR-024: zix.Fix, FIX 4.x session layer as standalone server
+
+**Status:** Accepted, Implemented (2026-05-23)
+
+**Context:** FIX (Financial Information eXchange) protocol is the dominant messaging standard for financial trading systems. It uses SOH (0x01) as a field delimiter — not a length prefix — which makes it incompatible with the `readSliceShort` recv pattern used by HTTP. A standalone server following the same config and dispatch-model pattern as `zix.Tcp` is required, with the session layer (Logon/Logout/Heartbeat handling) built in so callers do not implement it themselves.
+
+**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically; all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn` — no heap allocation in the message loop. All 3 dispatch models apply; `.ASYNC` is the default because FIX sessions are long-lived.
+
+**Consequences:**
+- `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment; subsequent `takeByte` calls drain it with no extra syscalls.
+- `serveConn` uses only stack buffers (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). No per-request allocation.
+- `buildMessage` computes and embeds the checksum. `verifyChecksum` validates incoming messages. Bad checksum closes the connection without a reply.
+- `std.debug.print` is absent from all thread entry functions — learned from the `std.Options.debug_io` test runner IPC panic described in CLAUDE.md.
+- `FixClient` provides a typed client (`logon`, `logout`, `sendMessage`, `recvMessage`) for tests and examples.
 
 ---
 

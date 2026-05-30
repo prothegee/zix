@@ -81,16 +81,16 @@ fn workerEntry(ctx: WorkerCtx) void {
         if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "resolve error: {}", .{err});
         return;
     };
-    var srv = addr.listen(ctx.io, .{
+    var listener = addr.listen(ctx.io, .{
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
     }) catch |err| {
         if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "listen error: {}", .{err});
         return;
     };
-    defer srv.deinit(ctx.io);
+    defer listener.deinit(ctx.io);
     while (true) {
-        const stream = srv.accept(ctx.io) catch |err| {
+        const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) {
                 if (ctx.opts.logger) |lg| lg.system(.WARN, "fix", "accept error: {}", .{err});
                 break;
@@ -125,13 +125,13 @@ const AsyncWorkerCtx = struct {
 
 fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-    var srv = addr.listen(ctx.io, .{
+    var listener = addr.listen(ctx.io, .{
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
-    defer srv.deinit(ctx.io);
+    defer listener.deinit(ctx.io);
     while (true) {
-        const stream = srv.accept(ctx.io) catch |err| {
+        const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
             continue;
         };
@@ -186,14 +186,14 @@ pub const FixServer = struct {
                 if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                 const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
-                var srv = try addr.listen(io, .{
+                var listener = try addr.listen(io, .{
                     .reuse_address = true,
                     .kernel_backlog = cfg.kernel_backlog,
                 });
-                defer srv.deinit(io);
+                defer listener.deinit(io);
 
                 while (true) {
-                    const stream = srv.accept(io) catch |err| {
+                    const stream = listener.accept(io) catch |err| {
                         if (err != error.ConnectionAborted) break;
                         continue;
                     };
@@ -276,8 +276,8 @@ pub const FixServer = struct {
 // --------------------------------------------------------- //
 
 test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
-    const gpa = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{});
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
@@ -287,8 +287,8 @@ test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
 }
 
 test "zix fix: FixServer.init, valid config succeeds and deinit is safe" {
-    const gpa = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{});
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     var server = try FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });

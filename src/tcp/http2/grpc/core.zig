@@ -12,9 +12,9 @@ pub const GrpcStatus = status.GrpcStatus;
 /// Return the current wall-clock time in nanoseconds (CLOCK_REALTIME basis).
 /// Use this when overriding ctx.deadline_ns at runtime inside a handler.
 pub fn wallClockNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    var timespec: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &timespec);
+    return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
 }
 
 // --------------------------------------------------------- //
@@ -232,8 +232,8 @@ fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: 
             .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
             .{ h2.SETTINGS_ENABLE_PUSH, 0 },
         });
-        var hdec = h2.HpackDecoder.init();
-        try serveGrpcLoop(routes, fd, &hdec, opts, 0);
+        var hpack_dec = h2.HpackDecoder.init();
+        try serveGrpcLoop(routes, fd, &hpack_dec, opts, 0);
     } else {
         try serveGrpcUpgrade(routes, fd, opts, &peek);
     }
@@ -248,9 +248,9 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
         if (line.len == 0) break;
         if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
             if (std.ascii.eqlIgnoreCase(line[0..colon], name)) {
-                var vs: usize = colon + 1;
-                while (vs < line.len and line[vs] == ' ') vs += 1;
-                return line[vs..];
+                var val_start: usize = colon + 1;
+                while (val_start < line.len and line[val_start] == ' ') val_start += 1;
+                return line[val_start..];
             }
         }
         pos = line_end + 2;
@@ -298,7 +298,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         return error.BadPreface;
     }
 
-    var hdec = h2.HpackDecoder.init();
+    var hpack_dec = h2.HpackDecoder.init();
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
         const trimmed = std.mem.trim(u8, b64, " ");
         var decoded: [256]u8 = undefined;
@@ -311,8 +311,8 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
                 const val: u32 = (@as(u32, decoded[i + 2]) << 24) | (@as(u32, decoded[i + 3]) << 16) |
                     (@as(u32, decoded[i + 4]) << 8) | decoded[i + 5];
                 if (id == h2.SETTINGS_HEADER_TABLE_SIZE) {
-                    hdec.max_size = val;
-                    hdec.evictTo(val);
+                    hpack_dec.max_size = val;
+                    hpack_dec.evictTo(val);
                 }
             }
         }
@@ -359,13 +359,13 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         lg.rpc(peer, path, ctx._grpc_status, ctx._body.len, ctx._sent_bytes, dur_ms);
     }
 
-    try serveGrpcLoop(routes, fd, &hdec, opts, 1);
+    try serveGrpcLoop(routes, fd, &hpack_dec, opts, 1);
 }
 
 fn serveGrpcLoop(
     comptime routes: []const Route,
     fd: std.posix.fd_t,
-    hdec: *h2.HpackDecoder,
+    hpack_dec: *h2.HpackDecoder,
     opts: GrpcServeOpts,
     initial_last_stream: u31,
 ) !void {
@@ -401,8 +401,8 @@ fn serveGrpcLoop(
                     const val: u32 = (@as(u32, payload[i + 2]) << 24) | (@as(u32, payload[i + 3]) << 16) |
                         (@as(u32, payload[i + 4]) << 8) | payload[i + 5];
                     if (id == h2.SETTINGS_HEADER_TABLE_SIZE) {
-                        hdec.max_size = val;
-                        hdec.evictTo(val);
+                        hpack_dec.max_size = val;
+                        hpack_dec.evictTo(val);
                     }
                 }
                 try h2.sendSettingsAck(fd);
@@ -459,7 +459,7 @@ fn serveGrpcLoop(
                 }
                 block = block[offset .. block.len - pad_len];
 
-                s.header_count = hdec.decode(block, &s.headers, &s.header_scratch) catch {
+                s.header_count = hpack_dec.decode(block, &s.headers, &s.header_scratch) catch {
                     h2.sendRstStream(fd, sid, h2.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
@@ -480,7 +480,7 @@ fn serveGrpcLoop(
                     return error.ProtocolError;
                 };
                 const s = &streams[slot];
-                const count = hdec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
+                const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
                     h2.sendRstStream(fd, sid, h2.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;

@@ -38,8 +38,8 @@ const WriterCap = struct {
 };
 
 fn writer(cap: WriterCap) void {
-    var wbuf: [256]u8 = undefined;
-    var wtr = cap.stream.writer(cap.io, &wbuf);
+    var write_buf: [256]u8 = undefined;
+    var stream_writer = cap.stream.writer(cap.io, &write_buf);
     var counter: u64 = 0;
     while (true) {
         var msg_buf: [32]u8 = undefined;
@@ -47,9 +47,9 @@ fn writer(cap: WriterCap) void {
 
         var hdr: [4]u8 = undefined;
         std.mem.writeInt(u32, &hdr, @intCast(msg.len), .little);
-        wtr.interface.writeAll(&hdr) catch return;
-        wtr.interface.writeAll(msg) catch return;
-        wtr.interface.flush() catch return;
+        stream_writer.interface.writeAll(&hdr) catch return;
+        stream_writer.interface.writeAll(msg) catch return;
+        stream_writer.interface.flush() catch return;
 
         std.debug.print("A -> B  {s}\n", .{msg});
         counter += 1;
@@ -66,15 +66,15 @@ const ReaderCap = struct {
 };
 
 fn reader(cap: ReaderCap) void {
-    var rbuf: [4096]u8 = undefined;
+    var read_buf: [4096]u8 = undefined;
     var payload: [4096]u8 = undefined;
-    var rdr = cap.stream.reader(cap.io, &rbuf);
+    var stream_reader = cap.stream.reader(cap.io, &read_buf);
 
     while (true) {
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
-            const got = rdr.interface.readSliceShort(hdr[n..]) catch return;
+            const got = stream_reader.interface.readSliceShort(hdr[n..]) catch return;
             if (got == 0) return;
             n += got;
         }
@@ -84,7 +84,7 @@ fn reader(cap: ReaderCap) void {
 
         n = 0;
         while (n < len) {
-            const got = rdr.interface.readSliceShort(payload[n..len]) catch return;
+            const got = stream_reader.interface.readSliceShort(payload[n..len]) catch return;
             if (got == 0) return;
             n += got;
         }
@@ -118,8 +118,8 @@ pub fn main(process: std.process.Init) !void {
     // logger.system(.INFO, "ipc", "A: listening on " ++ SOCK_PATH, .{});
 
     std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
-    const ua = try std.Io.net.UnixAddress.init(SOCK_PATH);
-    var net_server = try ua.listen(io, .{ .kernel_backlog = 1 });
+    const unix_addr = try std.Io.net.UnixAddress.init(SOCK_PATH);
+    var net_server = try unix_addr.listen(io, .{ .kernel_backlog = 1 });
     defer {
         net_server.deinit(io);
         std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
@@ -134,11 +134,11 @@ pub fn main(process: std.process.Init) !void {
     defer threaded.deinit();
     const thread_io = threaded.io();
 
-    const wt = try std.Thread.spawn(.{}, writer, .{WriterCap{ .stream = stream, .io = thread_io }});
-    const rt = try std.Thread.spawn(.{}, reader, .{ReaderCap{ .stream = stream, .io = thread_io }});
+    const writer_thread = try std.Thread.spawn(.{}, writer, .{WriterCap{ .stream = stream, .io = thread_io }});
+    const reader_thread = try std.Thread.spawn(.{}, reader, .{ReaderCap{ .stream = stream, .io = thread_io }});
 
-    wt.join();
-    rt.join();
+    writer_thread.join();
+    reader_thread.join();
 
     stream.close(io);
     std.debug.print("A: connection closed\n", .{});

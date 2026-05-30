@@ -172,7 +172,7 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http.Server` | struct | Lifecycle: `init` / `registerHandler` / `registerPrefixHandler` / `registerParamHandler` / `run` |
+| `zix.Http.Server` | struct | Lifecycle: `init(comptime stack_threshold, comptime routes, config)` / `deinit()` / `run()` |
 | `zix.Http.ServerConfig` | struct | Server configuration (see HttpServerConfig section) |
 | `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
 | `zix.Http.ClientConfig` | struct | Client configuration (see HttpClientConfig section) |
@@ -182,13 +182,13 @@ Access via `const zix = @import("zix");`
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget), logger (optional logger pointer) |
-| `zix.Logger.Logger` | struct | File and console logger: `init` / `deinit` / `flush` / `system` / `access` |
+| `zix.Logger` | struct | File and console logger: `init` / `deinit` / `flush` / `system` / `access` |
 | `zix.Logger.Config` | struct | Logger configuration: console, save_path (must exist — caller creates it), save_file, min levels, max_lines |
 | `zix.Logger.Level` | enum(u8) | `DEBUG`(0) `INFO`(1) `WARN`(2) `ERROR`(3) |
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Http.DispatchModel` | enum(u8) | Dispatch model: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) |
 | `zix.Http.RequestHeaderSize` | union(enum) | Request header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | Client user agent string from `build.zig.zon` (e.g. `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -215,30 +215,27 @@ Access via `const zix = @import("zix");`
 
 ```zig
 pub const HttpServerConfig = struct {
-    io:                    ?std.Io            = null,       // caller-provided io backend; null = internal Threaded
-    allocator:             std.mem.Allocator,               // router route list; ArenaAllocator recommended
-    ip:                    []const u8,
-    port:                  u16,
-    dispatch_model:        DispatchModel      = .POOL,      // POOL (default), ASYNC, or MIXED
-    max_kernel_backlog:    usize              = 1024 * 4,  // TCP listen() backlog
-    max_client_request:    usize              = 1024 * 4,  // read buffer per connection (heap or stack)
-    max_allocator_size:    usize              = 1024 * 4,  // per-connection arena backing size
-    max_client_response:   usize              = 1024 * 4,  // write buffer per connection (heap or stack)
-    max_request_headers:   RequestHeaderSize  = .LARGE,    // request header cap; requests exceeding -> 431
-    max_response_headers:  HeaderSize         = .COMMON,   // custom response header cap, arena-allocated per request
-    public_dir:            []const u8         = "",         // static file root; "" disables static serving
-    public_dir_upload:     []const u8         = "u",        // upload subdir under public_dir
-    conn_timeout_ms:       u32                = 0,          // Layer D: connection guard; 0 = disabled; .POOL only
-    handler_timeout_ms:    u32                = 0,          // Layer B: handler budget; 0 = disabled; ctx.timedOut()
-    workers:               usize              = 0,          // 0 = cpu_count accept threads; ignored by .ASYNC
-    pool_size:             usize              = 0,          // 0 = max(10, cpu_count * 2); .POOL only
-    logger:                ?*zix.Logger.Logger = null,      // access logger; null = no HTTP access logging
+    io:                   ?std.Io           = null,      // caller-provided io backend; null = internal Threaded
+    ip:                   []const u8,
+    port:                 u16,
+    dispatch_model:       DispatchModel     = .POOL,     // POOL (default), ASYNC, or MIXED
+    max_kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
+    max_client_request:   usize             = 1024 * 4,  // read buffer per connection
+    max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
+    max_client_response:  usize             = 1024 * 4,  // write buffer per connection
+    max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap; requests exceeding -> 431
+    max_response_headers: HeaderSize        = .COMMON,   // custom response header cap, arena-allocated per request
+    public_dir:           []const u8        = "",         // static file root; "" disables static serving
+    public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
+    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard; 0 = disabled; .POOL only
+    handler_timeout_ms:   u32               = 0,          // Layer B: handler budget; 0 = disabled; ctx.isExpired() / ctx.timedOut()
+    workers:              usize             = 0,          // 0 = cpu_count accept threads; ignored by .ASYNC
+    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only
+    logger:               ?*zix.Logger      = null,       // access logger; null = no HTTP access logging
 };
 ```
 
-The caller owns `io` and `allocator`: `zix.Http.Server` does not call `deinit` on either.
-
-`ArenaAllocator` is suitable for `allocator`: routes are append-only and never individually freed during the server's lifetime. The entire arena is deinited together with `server.deinit()`, freeing all route storage in one shot. This is the recommended pattern in the README examples.
+The caller owns `io`: `zix.Http.Server` does not call `deinit` on it. The route table is passed as a comptime argument to `Server.init` — no runtime allocation for routing.
 
 For header cap selection and security guidance see [`docs/headers.md`](headers.md).
 
@@ -355,20 +352,26 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 
 ## Router
 
-### Registration: three explicit functions
+### Registration: comptime route table
 
-| Function | Pattern example | Behaviour |
+Routes are passed at compile time as the second argument to `Server.init`. Each `Route` has a `path`, a `handler`, and an optional `kind` (`RouteKind = .EXACT` by default):
+
+| `kind` | Pattern example | Behaviour |
 | :- | :- | :- |
-| `registerHandler(path, h)` | `"/about"` | Exact: matches only when the full path equals `path` |
-| `registerPrefixHandler(prefix, h)` | `"/api"` | Prefix: matches `prefix` and any sub-path, NOT partial segments |
-| `registerParamHandler(pattern, h)` | `"/users/:id"` | Param: `:name` segments captured, literals must match exactly |
+| `.EXACT` (default) | `"/about"` | Matches only when the full path equals `path` |
+| `.PREFIX` | `"/api"` | Matches `path` and any sub-path, NOT partial segments |
+| `.PARAM` | `"/users/:id"` | `:name` segments captured, literals must match exactly |
 
 ```zig
-server.registerHandler("/about", aboutHandler);
-server.registerPrefixHandler("/api", apiHandler);        // /api /api/foo, NOT /apiv2
-server.registerParamHandler("/users/:id", userHandler);  // req.pathParam("id")
-server.registerParamHandler("/:tenant/:branch", branchHandler);
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/about",           .handler = aboutHandler },
+    .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
+    .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
+    .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
+}, .{ .ip = "127.0.0.1", .port = 9000 });
 ```
+
+Handler accesses the captured segment via `req.pathParam("id")`. Prefix sub-path is read via `req.path()["/api".len..]`.
 
 ### Dispatch: priority rules
 
@@ -411,13 +414,13 @@ flowchart TD
 
 ### Regex-like matching
 
-zix has no regex engine. Use `registerPrefixHandler` as `/prefix/(.*)`. Additional filtering is done inside the handler on `req.path()`.
+zix has no regex engine. Use `kind = .PREFIX` to match a path prefix. Additional filtering is done inside the handler on `req.path()`.
 
 | Regex intent | zix equivalent |
 | :- | :- |
-| `/secret/(.*)` | prefix handler sub-path via `req.path()[len("/secret")+1..]` |
-| `/files/.*\.pdf` | prefix handler on `/files` check `std.mem.endsWith(u8, sub, ".pdf")` in handler |
-| `/v[0-9]+/.*` | prefix handler on `/v` parse next segment with `std.fmt.parseInt` |
+| `/secret/(.*)` | `.PREFIX` route on `"/secret"`, sub-path via `req.path()["/secret".len..]` |
+| `/files/.*\.pdf` | `.PREFIX` route on `"/files"`, check `std.mem.endsWith(u8, sub, ".pdf")` in handler |
+| `/v[0-9]+/.*` | `.PREFIX` route on `"/v"`, parse next segment with `std.fmt.parseInt` |
 
 ---
 
@@ -522,22 +525,22 @@ sequenceDiagram
 - **HTTP handlers**: receive a valid `ctx.stream` and must not use it.
 - **WebSocket handlers**: use `ctx.stream` after `zix.Http.WebSocket.upgrade()` hands off the connection.
 
-### Context.timedOut: handler execution budget (Layer B)
+### Context.isExpired / timedOut: handler execution budget (Layer B)
 
-When `config.handler_timeout_ms > 0`, the server sets `ctx.deadline` before each handler dispatch. Handlers opt in by calling `ctx.timedOut()` between expensive steps and returning a 408 early rather than blocking the pool thread.
+When `config.handler_timeout_ms > 0`, the server sets `ctx.deadline` before each handler dispatch. Handlers opt in by calling `ctx.isExpired()` between expensive steps and returning a 408 early rather than blocking the pool thread. `ctx.timedOut()` is an alias for `ctx.isExpired()`.
 
 ```zig
 pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
     doStep1(ctx.io); // e.g. DB query, external call
-    if (ctx.timedOut()) {
+    if (ctx.isExpired()) {
         res.setStatus(.REQUEST_TIMEOUT);
         return res.sendJson("{\"error\":\"timeout\"}");
     }
 
     doStep2(ctx.io);
-    if (ctx.timedOut()) {
+    if (ctx.isExpired()) {
         res.setStatus(.REQUEST_TIMEOUT);
         return res.sendJson("{\"error\":\"timeout\"}");
     }
@@ -546,16 +549,24 @@ pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 }
 ```
 
-`ctx.timedOut()` is always safe to call: it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare, no syscall is issued when the deadline has not passed.
+`ctx.isExpired()` is always safe to call: it returns `false` when `deadline` is null (i.e. `handler_timeout_ms == 0`). The check is a single clock read and compare, no syscall is issued when the deadline has not passed.
 
-`ctx.withTimeout(ms)` and `ctx.withDeadline(ts)` return a modified copy of ctx with a new deadline. These can be used inside a handler to set a tighter sub-budget for one step.
+`ctx.setTimeout(ms)` mutates `ctx.deadline` in place to `now + ms`. Use this inside a handler to override the server-wide budget with a shorter or longer window:
+
+```zig
+ctx.setTimeout(2_000); // this handler caps itself to 2s regardless of global budget
+```
+
+`ctx.withTimeout(ms)` and `ctx.withDeadline(ts)` return a modified copy of ctx with a new deadline (non-mutating, for sub-budget patterns without changing the receiver's deadline).
 
 For the network-level connection guard (Layer D, `conn_timeout_ms`) see ADR-018.
 
 ### Handler pattern
 
 ```zig
-server.registerParamHandler("/ws/:room-id", wsHandler);
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
 
 pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
@@ -669,11 +680,13 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 }
 ```
 
-Compose left-to-right: the outermost wrapper runs first:
+Compose left-to-right: the outermost wrapper runs first. Routes are registered at compile time via `Server.init`:
 
 ```zig
-server.registerHandler("/public",  withOriginCheck(publicHandler));
-server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)));
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
+    .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
 
 Each unique `next` value generates a distinct function at comptime. See `examples/http_middleware.zig`.
@@ -684,7 +697,7 @@ Each unique `next` value generates a distinct function at comptime. See `example
 
 ```mermaid
 graph TD
-    PA["config.allocator\ncaller-owned"] -->|route list| RL["Router.routes\nprocess lifetime"]
+    COMPTIME["comptime route table\nzero heap cost"] -->|Router dispatch| ROUTER["Router(routes)\ncomptime zero-size type"]
     SMP["std.heap.smp_allocator"] -->|per connection| RB["read_buf + write_buf\nfreed on close"]
     SMP -->|per connection| Arena["ArenaAllocator\nreset per request\ndeinit on close"]
     Arena -->|per request| REQ["body_cache\nResponse buffers\nhandler allocations\nextra_buf ([]HttpHeader)"]
@@ -693,7 +706,7 @@ graph TD
 
 | Scope | Allocator | Lifetime | Arena suitable? |
 | :- | :- | :- | :- |
-| Router route list | `config.allocator` | Process | Yes — append-only. Freed via `server.deinit()` |
+| Route table | comptime (zero heap cost) | Process | n/a — comptime constant, no allocation |
 | Read/write I/O buffers | `smp_allocator` | Connection | No — individually freed on connection close |
 | Per-request allocations | Per-connection `ArenaAllocator` reset each request | Request | Yes — by design |
 | WebSocket `Conn` + room entries | `smp_allocator` | WS session | No — individually freed on session end |

@@ -90,7 +90,7 @@ test "zix edge: buildMessage with zero extra fields produces valid message" {
     try std.testing.expect(zix.Fix.verifyChecksum(out[0..n]));
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
     const nf = try zix.Fix.parseFields(out[0..n], &fields);
-    try std.testing.expectEqualStrings("0", zix.Fix.getField(fields[0..nf], 35).?);
+    try std.testing.expectEqualStrings("0", zix.Fix.getField(fields[0..nf], .MsgType).?);
 }
 
 // --------------------------------------------------------- //
@@ -120,7 +120,7 @@ test "zix edge: message arriving in two TCP segments is reassembled correctly" {
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
 
     const logon_n = try zix.Fix.buildMessage(&out_buf, "CLIENT", "SERVER", 1, "A", &.{
-        .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     const half = logon_n / 2;
     try wr.interface.writeAll(out_buf[0..half]);
@@ -129,7 +129,7 @@ test "zix edge: message arriving in two TCP segments is reassembled correctly" {
     try wr.interface.flush();
 
     const nf = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
-    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..nf], 35).?);
+    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..nf], .MsgType).?);
 
     const logout_n = try zix.Fix.buildMessage(&out_buf, "CLIENT", "SERVER", 2, "5", &.{});
     try wr.interface.writeAll(out_buf[0..logout_n]);
@@ -161,7 +161,7 @@ test "zix edge: bad checksum causes server to close without server-side error pr
 
     var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
     const n = try zix.Fix.buildMessage(&out_buf, "CLIENT", "SERVER", 1, "A", &.{
-        .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     out_buf[n / 2] ^= 0xFF;
 

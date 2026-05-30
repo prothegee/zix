@@ -46,12 +46,12 @@ pub fn main(process: std.process.Init) !void {
 
     // Send NewOrderSingle (35=D).
     const order_fields = [_]zix.Fix.BuildField{
-        .{ .tag = 11, .value = "ORD001" },
-        .{ .tag = 55, .value = "AAPL" },
-        .{ .tag = 54, .value = "1" },
-        .{ .tag = 38, .value = "100" },
-        .{ .tag = 40, .value = "2" },
-        .{ .tag = 44, .value = "150.00" },
+        .{ .tag = .ClOrdID, .value = "ORD001" },
+        .{ .tag = .Symbol, .value = "AAPL" },
+        .{ .tag = .Side, .value = "1" },
+        .{ .tag = .OrderQty, .value = "100" },
+        .{ .tag = .OrdType, .value = "2" },
+        .{ .tag = .Price, .value = "150.00" },
     };
     try client.sendMessage(io, "D", &order_fields);
     std.debug.print("client: sent NewOrderSingle\n", .{});
@@ -61,8 +61,8 @@ pub fn main(process: std.process.Init) !void {
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
     const nf = try zix.Fix.parseFields(raw, &fields);
     const fslice = fields[0..nf];
-    const symbol = zix.Fix.getField(fslice, 55) orelse "(missing)";
-    const qty = zix.Fix.getField(fslice, 38) orelse "(missing)";
+    const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
+    const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
     std.debug.print("client: recv echo symbol={s} qty={s}\n", .{ symbol, qty });
 
     // Logout: sends 35=5 and waits for server's Logout response.

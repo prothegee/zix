@@ -132,7 +132,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 
 test "zix test: tcp http method fn/s" {
-    const es = [_]Code{
+    const all_codes = [_]Code{
         Code.GET,
         Code.HEAD,
         Code.POST,
@@ -144,7 +144,7 @@ test "zix test: tcp http method fn/s" {
         Code.CONNECT,
     };
 
-    for (es) |e| {
+    for (all_codes) |e| {
         const e_str = stringFromEnum(e);
 
         try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));

@@ -98,15 +98,15 @@ test "zix behaviour: Logon response has MsgType=A and CompIDs swapped" {
     var seq: u32 = 1;
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "A", &.{
-        .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     const nf = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
     const fslice = fields[0..nf];
 
-    try std.testing.expectEqualStrings("A", zix.Fix.getField(fslice, 35).?);
-    try std.testing.expectEqualStrings("SERVER", zix.Fix.getField(fslice, 49).?);
-    try std.testing.expectEqualStrings("CLIENT", zix.Fix.getField(fslice, 56).?);
-    try std.testing.expectEqualStrings("1", zix.Fix.getField(fslice, 34).?);
+    try std.testing.expectEqualStrings("A", zix.Fix.getField(fslice, .MsgType).?);
+    try std.testing.expectEqualStrings("SERVER", zix.Fix.getField(fslice, .SenderCompID).?);
+    try std.testing.expectEqualStrings("CLIENT", zix.Fix.getField(fslice, .TargetCompID).?);
+    try std.testing.expectEqualStrings("1", zix.Fix.getField(fslice, .MsgSeqNum).?);
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "5", &.{});
     _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
@@ -140,24 +140,24 @@ test "zix behaviour: NewOrderSingle body fields are preserved in echo" {
     var seq: u32 = 1;
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "A", &.{
-        .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "D", &.{
-        .{ .tag = 11, .value = "ORD999" },
-        .{ .tag = 55, .value = "GOOG" },
-        .{ .tag = 54, .value = "2" },
-        .{ .tag = 38, .value = "500" },
+        .{ .tag = .ClOrdID, .value = "ORD999" },
+        .{ .tag = .Symbol, .value = "GOOG" },
+        .{ .tag = .Side, .value = "2" },
+        .{ .tag = .OrderQty, .value = "500" },
     });
     const nf = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
     const fslice = fields[0..nf];
 
-    try std.testing.expectEqualStrings("D", zix.Fix.getField(fslice, 35).?);
-    try std.testing.expectEqualStrings("ORD999", zix.Fix.getField(fslice, 11).?);
-    try std.testing.expectEqualStrings("GOOG", zix.Fix.getField(fslice, 55).?);
-    try std.testing.expectEqualStrings("2", zix.Fix.getField(fslice, 54).?);
-    try std.testing.expectEqualStrings("500", zix.Fix.getField(fslice, 38).?);
+    try std.testing.expectEqualStrings("D", zix.Fix.getField(fslice, .MsgType).?);
+    try std.testing.expectEqualStrings("ORD999", zix.Fix.getField(fslice, .ClOrdID).?);
+    try std.testing.expectEqualStrings("GOOG", zix.Fix.getField(fslice, .Symbol).?);
+    try std.testing.expectEqualStrings("2", zix.Fix.getField(fslice, .Side).?);
+    try std.testing.expectEqualStrings("500", zix.Fix.getField(fslice, .OrderQty).?);
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "5", &.{});
     _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
@@ -191,13 +191,13 @@ test "zix behaviour: clean Logout causes no server-side error" {
     var seq: u32 = 1;
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "A", &.{
-        .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" },
+        .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
 
     try sendMsg(&wr, &out_buf, "CLIENT", "SERVER", &seq, "5", &.{});
     const nf = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
-    try std.testing.expectEqualStrings("5", zix.Fix.getField(fields[0..nf], 35).?);
+    try std.testing.expectEqualStrings("5", zix.Fix.getField(fields[0..nf], .MsgType).?);
 
     t.join();
     ctx.listener.deinit(io);

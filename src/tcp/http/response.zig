@@ -107,8 +107,8 @@ pub const Response = struct {
         self.content_type = ct;
     }
 
-    pub fn setKeepAlive(self: *Response, ka: bool) void {
-        self.keep_alive = ka;
+    pub fn setKeepAlive(self: *Response, keep_alive: bool) void {
+        self.keep_alive = keep_alive;
     }
 
     /// Append a custom header to the response.
@@ -141,13 +141,13 @@ pub const Response = struct {
         var fixed: [512]u8 = undefined;
         var offset: usize = 0;
 
-        const sl = Status.statusLine(self.status);
-        if (sl.len > 0) {
-            @memcpy(fixed[offset..][0..sl.len], sl);
-            offset += sl.len;
+        const status_line = Status.statusLine(self.status);
+        if (status_line.len > 0) {
+            @memcpy(fixed[offset..][0..status_line.len], status_line);
+            offset += status_line.len;
         } else {
-            const st = Status.stringFromEnum(self.status);
-            const s = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), st });
+            const status_str = Status.stringFromEnum(self.status);
+            const s = try std.fmt.bufPrint(fixed[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), status_str });
             offset += s.len;
         }
 
@@ -166,8 +166,8 @@ pub const Response = struct {
             fixed[offset + 1] = '\n';
             offset += 2;
         }
-        if (self.keep_alive) |ka| {
-            const conn: []const u8 = if (ka and self.req_keep_alive)
+        if (self.keep_alive) |keep_alive| {
+            const conn: []const u8 = if (keep_alive and self.req_keep_alive)
                 "Connection: keep-alive\r\n"
             else
                 "Connection: close\r\n";
@@ -280,14 +280,14 @@ pub const Response = struct {
 /// Return:
 /// - error.BrokenPipe on any write failure (caller ignores or propagates)
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
-    var rem = data;
-    while (rem.len > 0) {
-        const rc = std.posix.system.write(fd, rem.ptr, rem.len);
-        switch (std.posix.errno(rc)) {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(write_result)) {
             .SUCCESS => {
-                const n: usize = @intCast(rc);
+                const n: usize = @intCast(write_result);
                 if (n == 0) return error.BrokenPipe;
-                rem = rem[n..];
+                remaining = remaining[n..];
             },
             .INTR => continue,
             else => return error.BrokenPipe,
@@ -322,12 +322,12 @@ fn writeDecimal(buf: []u8, n: usize) usize {
 // --------------------------------------------------------- //
 
 pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
-    const ep = std.time.epoch;
-    const es = ep.EpochSeconds{ .secs = secs };
-    const epoch_day = es.getEpochDay();
+    const epoch = std.time.epoch;
+    const epoch_sec = epoch.EpochSeconds{ .secs = secs };
+    const epoch_day = epoch_sec.getEpochDay();
     const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
-    const day_secs = es.getDaySeconds();
+    const day_secs = epoch_sec.getDaySeconds();
 
     const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };

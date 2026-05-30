@@ -149,6 +149,38 @@ Both limitations are stdlib-imposed, not zix design decisions. They will be revi
 
 ---
 
+## Logger Integration
+
+`UdsServerConfig.logger: ?*Logger = null`. When non-null:
+- `system(.INFO, "uds", ...)` on bind, accepted connection, and shutdown.
+
+The server does not call `frame()` automatically — `frame()` is available for manual use inside `HandlerFn` implementations that want per-frame logging:
+
+```zig
+fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
+    defer stream.close(io);
+    // ...
+    // logger.frame(.RECV, SOCK_PATH, payload_len, null);
+}
+```
+
+```zig
+var logger = try zix.Logger.init(std.heap.smp_allocator, .{
+    .console = .ALWAYS,
+});
+defer logger.deinit();
+
+var server = try zix.Uds.Server.init(.{
+    .path      = "/tmp/app.sock",
+    .allocator = std.heap.smp_allocator,
+    .logger    = &logger,
+});
+```
+
+See `docs/hld-logger.md` for log line format and config details.
+
+---
+
 ## Platform Support
 
 UDS stream sockets require `std.Io.net.has_unix_sockets == true`. This is true on Linux, macOS, and Windows 10 RS4+. WASI is not supported. Both `Server.init()` and `Client.connect()` emit `@compileError` on unsupported platforms.
