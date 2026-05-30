@@ -11,6 +11,15 @@ test "zix integration: TcpServer.init, valid config succeeds and deinit is safe"
     server.deinit();
 }
 
+test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and deinit is safe" {
+    var server = try zix.Tcp.Server.init(.{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .EPOLL,
+    });
+    server.deinit();
+}
+
 test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
     const result = zix.Tcp.Server.init(.{
         .ip = "127.0.0.1",
