@@ -66,7 +66,7 @@ pub const GrpcContext = struct {
 
     /// Read the next gRPC message from the buffered request stream.
     /// Returns null when all client messages are consumed.
-    /// Slices point into the body buffer; valid for the duration of the handler call.
+    /// Slices point into the body buffer. Valid for the duration of the handler call.
     pub fn recvMessage(self: *GrpcContext) ?[]const u8 {
         const rem = self._body[self._pos..];
         if (rem.len < 5) return null;
