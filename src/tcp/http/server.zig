@@ -24,8 +24,8 @@ var g_date_active = std.atomic.Value(usize).init(0);
 var g_date_secs = std.atomic.Value(u64).init(0);
 
 fn updateDateCache(io: std.Io) void {
-    const ts = std.Io.Clock.real.now(io);
-    const raw_secs = ts.toSeconds();
+    const timestamp = std.Io.Clock.real.now(io);
+    const raw_secs = timestamp.toSeconds();
     const cur_secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
     if (cur_secs != g_date_secs.load(.monotonic)) {
         const next_idx = 1 - g_date_active.load(.monotonic);
@@ -348,8 +348,8 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             if (!matched) {
                 var served = false;
                 if (cfg.public_dir.len > 0) {
-                    const sub = req.path();
-                    const stripped = if (sub.len > 0 and sub[0] == '/') sub[1..] else sub;
+                    const request_path = req.path();
+                    const stripped = if (request_path.len > 0 and request_path[0] == '/') request_path[1..] else request_path;
                     if (stripped.len > 0) {
                         served = static.serve(&req, fd, stripped, cfg.public_dir, io) catch false;
                     }
@@ -361,14 +361,14 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
 
             if (cfg.logger) |lg| {
-                const ua = req.header("user-agent") orelse "";
+                const user_agent = req.header("user-agent") orelse "";
                 const origin = req.header("origin") orelse "";
                 lg.access(
                     method.stringFromEnum(req.method()),
                     req.path(),
                     @intFromEnum(res.status),
                     res.bytes_written,
-                    ua,
+                    user_agent,
                     origin,
                 );
             }
@@ -543,11 +543,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 const stream = std.Io.net.Stream{ .socket = .{ .handle = fd, .address = undefined } };
                 if (handleOneRequest(self, stream, fd, io, buf_read, &arena) == .keep_alive) {
                     // Re-arm the one-shot interest so the next request wakes the loop.
-                    var cev = linux.epoll_event{
+                    var conn_event = linux.epoll_event{
                         .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
                         .data = .{ .fd = fd },
                     };
-                    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &cev)) != .SUCCESS) {
+                    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &conn_event)) != .SUCCESS) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
                         _ = linux.close(fd);
                     }
@@ -606,11 +606,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const epfd: std.posix.fd_t = @intCast(epfd_rc);
             defer _ = linux.close(epfd);
 
-            var lev = linux.epoll_event{
+            var listener_event = linux.epoll_event{
                 .events = linux.EPOLL.IN | linux.EPOLL.ET,
                 .data = .{ .fd = listener_fd },
             };
-            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
                 return error.EpollCtlFailed;
 
             std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers)\n", .{ cfg.ip, cfg.port, pool_size });
@@ -627,31 +627,31 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const max_events = 256;
             var events: [max_events]linux.epoll_event = undefined;
             while (true) {
-                const wrc = linux.epoll_wait(epfd, &events, max_events, -1);
-                switch (std.posix.errno(wrc)) {
+                const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
+                switch (std.posix.errno(wait_result)) {
                     .SUCCESS => {},
                     .INTR => continue,
                     else => break,
                 }
-                const n: usize = @intCast(wrc);
+                const n: usize = @intCast(wait_result);
                 for (events[0..n]) |ev| {
                     if (ev.data.fd == listener_fd) {
                         // Edge-triggered: drain the accept queue until it would block.
                         while (true) {
-                            const arc = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
-                            switch (std.posix.errno(arc)) {
+                            const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
+                            switch (std.posix.errno(accept_result)) {
                                 .SUCCESS => {},
                                 .AGAIN => break,
                                 .INTR, .CONNABORTED => continue,
                                 else => break,
                             }
-                            const conn_fd: std.posix.fd_t = @intCast(arc);
+                            const conn_fd: std.posix.fd_t = @intCast(accept_result);
                             setNoDelay(conn_fd);
-                            var cev = linux.epoll_event{
+                            var conn_event = linux.epoll_event{
                                 .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
                                 .data = .{ .fd = conn_fd },
                             };
-                            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &cev)) != .SUCCESS) {
+                            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &conn_event)) != .SUCCESS) {
                                 _ = linux.close(conn_fd);
                             }
                         }
@@ -720,7 +720,17 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const timer_thread = try std.Thread.spawn(.{}, timerLoop, .{ thread_io, &self.registry });
             defer timer_thread.detach();
 
-            switch (cfg.dispatch_model) {
+            const effective_model: DispatchModel = blk: {
+                if (comptime @import("builtin").target.os.tag != .linux) {
+                    if (cfg.dispatch_model == .EPOLL) {
+                        std.debug.print("zix: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                        break :blk .POOL;
+                    }
+                }
+                break :blk cfg.dispatch_model;
+            };
+
+            switch (effective_model) {
                 .POOL => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                     const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
@@ -795,12 +805,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 },
 
                 .EPOLL => {
-                    if (comptime @import("builtin").target.os.tag == .linux) {
-                        try self.runEpoll(thread_io);
-                    } else {
-                        std.debug.print("zix: EPOLL dispatch is Linux-only. Use .POOL on this platform.\n", .{});
-                        return error.EpollUnsupported;
-                    }
+                    try self.runEpoll(thread_io);
                 },
             }
         }

@@ -27,8 +27,8 @@ pub const UdsClient = struct {
     /// Connect to the server at config.path.
     pub fn connect(config: UdsClientConfig, io: std.Io) !Self {
         if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
-        const ua = try std.Io.net.UnixAddress.init(config.path);
-        const stream = try ua.connect(io);
+        const unix_addr = try std.Io.net.UnixAddress.init(config.path);
+        const stream = try unix_addr.connect(io);
         std.debug.print("zix uds client: connected to {s}\n", .{config.path});
         return .{ .stream = stream, .config = config };
     }
@@ -41,14 +41,14 @@ pub const UdsClient = struct {
     /// Send a message as a length-prefixed frame.
     /// Frame format: [u32 payload_len, 4 bytes, native LE] [payload bytes]
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
-        var wbuf: [4096]u8 = undefined;
-        var wtr = self.stream.writer(io, &wbuf);
+        var write_buf: [4096]u8 = undefined;
+        var writer = self.stream.writer(io, &write_buf);
 
         var hdr: [4]u8 = undefined;
         std.mem.writeInt(u32, &hdr, @intCast(msg.len), .little);
-        try wtr.interface.writeAll(&hdr);
-        try wtr.interface.writeAll(msg);
-        try wtr.interface.flush();
+        try writer.interface.writeAll(&hdr);
+        try writer.interface.writeAll(msg);
+        try writer.interface.flush();
     }
 
     /// Receive a length-prefixed frame into buf.
@@ -58,13 +58,13 @@ pub const UdsClient = struct {
     /// - error.MessageTooLarge if the frame payload exceeds buf.len
     /// - error.ConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
-        var rbuf: [4096]u8 = undefined;
-        var rdr = self.stream.reader(io, &rbuf);
+        var read_buf: [4096]u8 = undefined;
+        var reader = self.stream.reader(io, &read_buf);
 
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
-            const got = rdr.interface.readSliceShort(hdr[n..]) catch return error.ConnectionClosed;
+            const got = reader.interface.readSliceShort(hdr[n..]) catch return error.ConnectionClosed;
             if (got == 0) return error.ConnectionClosed;
             n += got;
         }
@@ -74,7 +74,7 @@ pub const UdsClient = struct {
 
         n = 0;
         while (n < len) {
-            const got = rdr.interface.readSliceShort(buf[n..len]) catch return error.ConnectionClosed;
+            const got = reader.interface.readSliceShort(buf[n..len]) catch return error.ConnectionClosed;
             if (got == 0) return error.ConnectionClosed;
             n += got;
         }

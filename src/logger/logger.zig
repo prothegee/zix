@@ -31,21 +31,21 @@ fn getTimestamp() Timestamp {
     const minute: u6 = day_secs.getMinutesIntoHour();
     const second: u6 = day_secs.getSecondsIntoMinute();
 
-    var ts: Timestamp = undefined;
-    _ = std.fmt.bufPrint(&ts.date, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch {};
-    _ = std.fmt.bufPrint(&ts.time, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ hour, minute, second, ms_part }) catch {};
-    return ts;
+    var timestamp: Timestamp = undefined;
+    _ = std.fmt.bufPrint(&timestamp.date, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch {};
+    _ = std.fmt.bufPrint(&timestamp.time, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ hour, minute, second, ms_part }) catch {};
+    return timestamp;
 }
 
 fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
-    var rem = data;
-    while (rem.len > 0) {
-        const rc = std.posix.system.write(fd, rem.ptr, rem.len);
-        switch (std.posix.errno(rc)) {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(write_result)) {
             .SUCCESS => {
-                const n: usize = @intCast(rc);
+                const n: usize = @intCast(write_result);
                 if (n == 0) return;
-                rem = rem[n..];
+                remaining = remaining[n..];
             },
             else => return,
         }
@@ -286,7 +286,7 @@ pub const Logger = struct {
         const level = statusLevel(status);
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
         const ua_out = if (ua.len > 0) ua else "-";
         const origin_out = if (origin.len > 0) origin else "-";
 
@@ -294,7 +294,7 @@ pub const Logger = struct {
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\"",
-            .{ &ts.date, &ts.time, levelLabel(level), method, path, status, bytes, ua_out, origin_out },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), method, path, status, bytes, ua_out, origin_out },
         ) catch return;
 
         self.spinLock();
@@ -306,7 +306,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -327,14 +327,14 @@ pub const Logger = struct {
         const level: Level = if (err == null) .INFO else .WARN;
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
         const err_out = err orelse "-";
 
         var line_buf: [4096]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [tcp:conn] {s} dur={d}ms {s}",
-            .{ &ts.date, &ts.time, levelLabel(level), peer, dur_ms, err_out },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, dur_ms, err_out },
         ) catch return;
 
         self.spinLock();
@@ -346,7 +346,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -369,7 +369,7 @@ pub const Logger = struct {
         const level: Level = if (err == null) .INFO else .WARN;
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
         const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
         const err_out = err orelse "-";
 
@@ -377,7 +377,7 @@ pub const Logger = struct {
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [udp:pkt] {s} {s} size={d} {s}",
-            .{ &ts.date, &ts.time, levelLabel(level), dir_out, peer, size, err_out },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, peer, size, err_out },
         ) catch return;
 
         self.spinLock();
@@ -389,7 +389,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -412,7 +412,7 @@ pub const Logger = struct {
         const level: Level = if (err == null) .INFO else .WARN;
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
         const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
         const err_out = err orelse "-";
 
@@ -420,7 +420,7 @@ pub const Logger = struct {
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [uds:frame] {s} {s} size={d} {s}",
-            .{ &ts.date, &ts.time, levelLabel(level), dir_out, sock_path, size, err_out },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, sock_path, size, err_out },
         ) catch return;
 
         self.spinLock();
@@ -432,7 +432,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -456,13 +456,13 @@ pub const Logger = struct {
         const level: Level = .INFO;
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
 
         var line_buf: [4096]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [fix:sess] 35={s} sender={s} target={s} seq={d} {s}",
-            .{ &ts.date, &ts.time, levelLabel(level), msg_type, sender, target, seq, state },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), msg_type, sender, target, seq, state },
         ) catch return;
 
         self.spinLock();
@@ -474,7 +474,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -500,13 +500,13 @@ pub const Logger = struct {
         const level: Level = if (grpc_status == 0) .INFO else .WARN;
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
 
         var line_buf: [4096]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [grpc:rpc] {s} {s} status={d} recv={d} sent={d} dur={d}ms",
-            .{ &ts.date, &ts.time, levelLabel(level), peer, path, grpc_status, recv_bytes, sent_bytes, dur_ms },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, path, grpc_status, recv_bytes, sent_bytes, dur_ms },
         ) catch return;
 
         self.spinLock();
@@ -518,7 +518,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }
@@ -537,7 +537,7 @@ pub const Logger = struct {
     ) void {
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
-        const ts = getTimestamp();
+        const timestamp = getTimestamp();
 
         var msg_buf: [2048]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
@@ -546,7 +546,7 @@ pub const Logger = struct {
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [{s}] {s}",
-            .{ &ts.date, &ts.time, levelLabel(level), component, msg },
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), component, msg },
         ) catch return;
 
         self.spinLock();
@@ -558,7 +558,7 @@ pub const Logger = struct {
         }
 
         if (self.fileActive(level)) {
-            self.ensureFileLocked(&ts.date);
+            self.ensureFileLocked(&timestamp.date);
             if (!self.file_suspended) {
                 self.writeLineLocked(line);
             }

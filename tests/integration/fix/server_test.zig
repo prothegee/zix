@@ -132,10 +132,10 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
         "SERVER",
         &seq,
         "A",
-        &.{ .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" } },
+        &.{ .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" } },
         &fields,
     );
-    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..logon_nf], 35).?);
+    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..logon_nf], .MsgType).?);
 
     const echo_nf = try sendAndRecv(
         &wr,
@@ -147,12 +147,12 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
         "SERVER",
         &seq,
         "D",
-        &.{ .{ .tag = 11, .value = "ORD001" }, .{ .tag = 55, .value = "AAPL" } },
+        &.{ .{ .tag = .ClOrdID, .value = "ORD001" }, .{ .tag = .Symbol, .value = "AAPL" } },
         &fields,
     );
-    try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..echo_nf], 35).?);
-    try std.testing.expectEqualStrings("ORD001", zix.Fix.getField(fields[0..echo_nf], 11).?);
-    try std.testing.expectEqualStrings("AAPL", zix.Fix.getField(fields[0..echo_nf], 55).?);
+    try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..echo_nf], .MsgType).?);
+    try std.testing.expectEqualStrings("ORD001", zix.Fix.getField(fields[0..echo_nf], .ClOrdID).?);
+    try std.testing.expectEqualStrings("AAPL", zix.Fix.getField(fields[0..echo_nf], .Symbol).?);
 
     const logout_nf = try sendAndRecv(
         &wr,
@@ -167,7 +167,7 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
         &.{},
         &fields,
     );
-    try std.testing.expectEqualStrings("5", zix.Fix.getField(fields[0..logout_nf], 35).?);
+    try std.testing.expectEqualStrings("5", zix.Fix.getField(fields[0..logout_nf], .MsgType).?);
 
     thread.join();
     ctx.listener.deinit(io);
@@ -208,7 +208,7 @@ test "zix integration: multiple sequential messages are all echoed" {
         "SERVER",
         &seq,
         "A",
-        &.{ .{ .tag = 98, .value = "0" }, .{ .tag = 108, .value = "30" } },
+        &.{ .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" } },
         &fields,
     );
 
@@ -224,11 +224,11 @@ test "zix integration: multiple sequential messages are all echoed" {
             "SERVER",
             &seq,
             "D",
-            &.{.{ .tag = 11, .value = oid }},
+            &.{.{ .tag = .ClOrdID, .value = oid }},
             &fields,
         );
-        try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..nf], 35).?);
-        try std.testing.expectEqualStrings(oid, zix.Fix.getField(fields[0..nf], 11).?);
+        try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..nf], .MsgType).?);
+        try std.testing.expectEqualStrings(oid, zix.Fix.getField(fields[0..nf], .ClOrdID).?);
     }
 
     _ = try sendAndRecv(

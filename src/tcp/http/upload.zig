@@ -79,13 +79,13 @@ pub const MultipartParser = struct {
         start = first + boundary_start.len;
 
         while (start < body.len) {
-            const ns = std.mem.indexOf(u8, body[start..], boundary_start);
-            const ne = std.mem.indexOf(u8, body[start..], boundary_end);
-            const nb = if (ns != null and ne != null) @min(ns.?, ne.?) else if (ns != null) ns.? else if (ne != null) ne.? else break;
+            const next_start = std.mem.indexOf(u8, body[start..], boundary_start);
+            const next_end = std.mem.indexOf(u8, body[start..], boundary_end);
+            const next_boundary = if (next_start != null and next_end != null) @min(next_start.?, next_end.?) else if (next_start != null) next_start.? else if (next_end != null) next_end.? else break;
 
-            const part = body[start .. start + nb];
+            const part = body[start .. start + next_boundary];
             const hend = std.mem.indexOf(u8, part, "\r\n\r\n") orelse {
-                start = start + nb + (if (ns != null and ns.? == nb) boundary_start.len else boundary_end.len);
+                start = start + next_boundary + (if (next_start != null and next_start.? == next_boundary) boundary_start.len else boundary_end.len);
                 continue;
             };
             const headers = part[0..hend];
@@ -95,18 +95,18 @@ pub const MultipartParser = struct {
             var field_filename: ?[]const u8 = null;
             var field_content_type: ?[]const u8 = null;
 
-            var hit = std.mem.splitScalar(u8, headers, '\n');
-            while (hit.next()) |line| {
+            var header_iter = std.mem.splitScalar(u8, headers, '\n');
+            while (header_iter.next()) |line| {
                 const trimmed = std.mem.trim(u8, line, "\r\n ");
                 if (std.mem.startsWith(u8, trimmed, "Content-Disposition:")) {
-                    const dv = trimmed["Content-Disposition:".len..];
-                    if (std.mem.indexOf(u8, dv, "name=\"")) |ns2| {
-                        const vs = ns2 + 6;
-                        if (std.mem.indexOf(u8, dv[vs..], "\"")) |ve| field_name = dv[vs..][0..ve];
+                    const disposition_val = trimmed["Content-Disposition:".len..];
+                    if (std.mem.indexOf(u8, disposition_val, "name=\"")) |name_offset| {
+                        const val_start = name_offset + 6;
+                        if (std.mem.indexOf(u8, disposition_val[val_start..], "\"")) |val_end| field_name = disposition_val[val_start..][0..val_end];
                     }
-                    if (std.mem.indexOf(u8, dv, "filename=\"")) |fs| {
-                        const vs = fs + 10;
-                        if (std.mem.indexOf(u8, dv[vs..], "\"")) |ve| field_filename = dv[vs..][0..ve];
+                    if (std.mem.indexOf(u8, disposition_val, "filename=\"")) |filename_offset| {
+                        const val_start = filename_offset + 10;
+                        if (std.mem.indexOf(u8, disposition_val[val_start..], "\"")) |val_end| field_filename = disposition_val[val_start..][0..val_end];
                     }
                 } else if (std.mem.startsWith(u8, trimmed, "Content-Type:")) {
                     field_content_type = std.mem.trim(u8, trimmed["Content-Type:".len..], " \r\n");
@@ -128,8 +128,8 @@ pub const MultipartParser = struct {
                 });
             }
 
-            start = start + nb + (if (ns != null and ns.? == nb) boundary_start.len else boundary_end.len);
-            if (ns == null and ne != null) break;
+            start = start + next_boundary + (if (next_start != null and next_start.? == next_boundary) boundary_start.len else boundary_end.len);
+            if (next_start == null and next_end != null) break;
         }
     }
 
