@@ -17,7 +17,7 @@ pub const DispatchModel = enum(u8) {
 
 Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (for `zix.Http`) and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All four values are present in every config.
 
-`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1) and `zix.Grpc` implement it natively on Linux. All other servers (`zix.Tcp`, `zix.Http2`, `zix.Fix`) and non-Linux builds fall back to `.POOL` automatically. See the Dispatch Model Comparison table below.
+`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `zix.Http2` and non-Linux builds fall back to `.POOL` automatically. See the Dispatch Model Comparison table below.
 
 ---
 
@@ -232,9 +232,9 @@ try server.run();
 | Item | Detail |
 | :- | :- |
 | Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux falls back to `.POOL` automatically (with a debug print) |
-| Availability | `zix.Http` (HTTP/1) and `zix.Grpc` only. `zix.Tcp`, `zix.Http2`, and `zix.Fix` fall back to `.POOL` |
+| Availability | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux. `zix.Http2` falls back to `.POOL` |
 | Accept model | Single-threaded accept inside the event loop (no `SO_REUSEPORT`). High accept rates can become a bottleneck — prefer `.MIXED` if connection churn (not connection count) is the bottleneck |
-| gRPC difference | gRPC EPOLL assigns each connection to a pool worker for its full lifetime (gRPC is streaming). `EPOLLONESHOT` is not used. The benefit is single-threaded accept vs N accept threads in `.POOL` |
+| gRPC, FIX, and TCP difference | gRPC, FIX, and TCP EPOLL assign each connection to a pool worker for its full lifetime (all are long-lived stream protocols). `EPOLLONESHOT` is not used. The benefit is single-threaded accept vs N accept threads in `.POOL` |
 | `pool_size` | Controls the number of request-handling worker threads. `workers` is ignored |
 | Keep-alive idle cost | Near-zero: idle sockets sit in the epoll set without holding any thread |
 | Debugging | `strace` or `perf` will show `epoll_wait` dominating idle time — this is expected and correct |
@@ -271,7 +271,7 @@ try server.run();
 | `SO_REUSEPORT` | yes | no | yes | no |
 | `pool_size` field used | yes | no (ignored) | no (ignored) | no (ignored) |
 | Best for | throughput, high connection counts | SSE, WebSocket, low latency | balanced, multi-accept async | high-throughput HTTP/1 or gRPC on Linux |
-| Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc (Linux-only; others fall back to .POOL) |
+| Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 falls back to .POOL) |
 
 ---
 
@@ -284,8 +284,8 @@ try server.run();
 | WebSocket | not recommended (long-lived connections) | yes, preferred | yes | n/a |
 | HTTP/2 (h2c) | yes | yes (default) | yes | n/a |
 | gRPC (h2c) | yes | yes (default) | yes | yes, Linux-only |
-| TCP (raw stream) | yes (default) | yes | yes | n/a |
-| FIX 4.x | yes | yes (default) | yes | n/a |
+| TCP (raw stream) | yes (default) | yes | yes | yes, Linux-only |
+| FIX 4.x | yes | yes (default) | yes | yes, Linux-only |
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | yes (io.concurrent() per connection) | n/a | n/a |
 
@@ -294,7 +294,7 @@ try server.run();
 ## Channel
 
 `zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive
-that works alongside all three dispatch models. A Channel connects producer and consumer tasks
+that works alongside all four dispatch models. A Channel connects producer and consumer tasks
 (OS threads or `io.async()` fibers) within the same process. It does not cross a network or
 process boundary.
 
@@ -302,7 +302,7 @@ process boundary.
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-All three dispatch models can spawn `io.async()` tasks or OS threads that communicate through
+All four dispatch models can spawn `io.async()` tasks or OS threads that communicate through
 a Channel. The Channel itself is independent of which dispatch model is in use.
 
 | Property | Channel |

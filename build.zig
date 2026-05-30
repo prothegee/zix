@@ -194,6 +194,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-tcp_server_1_async", "examples/tcp_server_1_async.zig" },
         .{ "example-tcp_server_2_pool", "examples/tcp_server_2_pool.zig" },
         .{ "example-tcp_server_3_mixed", "examples/tcp_server_3_mixed.zig" },
+        .{ "example-tcp_server_4_epoll", "examples/tcp_server_4_epoll.zig" },
         .{ "example-tcp_client", "examples/tcp_client.zig" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig" },
@@ -213,6 +214,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-fix_server_1_async", "examples/fix_server_1_async.zig" },
         .{ "example-fix_server_2_pool", "examples/fix_server_2_pool.zig" },
         .{ "example-fix_server_3_mixed", "examples/fix_server_3_mixed.zig" },
+        .{ "example-fix_server_4_epoll", "examples/fix_server_4_epoll.zig" },
         .{ "example-fix_client", "examples/fix_client.zig" },
         .{ "example-fix_client_raw", "examples/fix_client_raw.zig" },
         .{ "example-udp_server", "examples/udp_server.zig" },
@@ -231,6 +233,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-grpc_location_server_1_async", "examples/grpc_location_server_1_async.zig" },
         .{ "example-grpc_location_server_2_pool", "examples/grpc_location_server_2_pool.zig" },
         .{ "example-grpc_location_server_3_mixed", "examples/grpc_location_server_3_mixed.zig" },
+        .{ "example-grpc_location_server_4_epoll", "examples/grpc_location_server_4_epoll.zig" },
         .{ "example-grpc_location_client", "examples/grpc_location_client.zig" },
         .{ "example-grpc_server_4_epoll", "examples/grpc_server_4_epoll.zig" },
         .{ "example-grpc_timeout", "examples/grpc_timeout.zig" },
@@ -253,7 +256,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
 
         const run = b.addRunArtifact(exe);
-        const run_step = b.step("example-" ++ pair[0], "Run " ++ pair[0]);
+        const run_step = b.step(pair[0], "Run " ++ pair[0]);
         run_step.dependOn(&run.step);
     }
 }
