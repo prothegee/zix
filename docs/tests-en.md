@@ -34,7 +34,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.POOL, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
-| `tcp/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+| `tcp/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
 ### zix.Http
@@ -140,6 +140,7 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | Test | What it verifies |
 | :- | :- |
 | `TcpServer.init` valid config | init with real ip and port succeeds, deinit is safe |
+| `TcpServer.init` EPOLL dispatch model | init with `.EPOLL` dispatch model succeeds, deinit is safe |
 | `TcpServer.init` port zero | returns `error.PortNotConfigured` |
 | `HandlerFn` type check | `zix.Tcp.echoHandler` satisfies `zix.Tcp.HandlerFn` |
 | `TcpClient.connect` port zero | returns `error.PortNotConfigured` before any socket call |
@@ -535,7 +536,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Test | What it verifies |
 | :- | :- |
 | `TcpServer.init` port zero | returns `error.PortNotConfigured` |
-| `DispatchModel` backing values stable | POOL=0, ASYNC=1, MIXED=2 |
+| `DispatchModel` backing values stable | POOL=0, ASYNC=1, MIXED=2, EPOLL=3 |
 | TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
 
 ### tests/edge/http/
