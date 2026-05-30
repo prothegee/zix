@@ -1,4 +1,4 @@
-//! zix fix server — all 3 dispatch models for FIX 4.x session protocol.
+//! zix fix server — POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch for FIX 4.x.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -62,6 +62,66 @@ const ConnQueue = struct {
 
     fn deinit(self: *ConnQueue) void {
         self.items.deinit(std.heap.smp_allocator);
+    }
+};
+
+// --------------------------------------------------------- //
+
+const FdQueue = struct {
+    mutex: std.Io.Mutex = .init,
+    ready: std.Io.Condition = .init,
+    buf: []std.posix.fd_t = &.{},
+    head: usize = 0,
+    len: usize = 0,
+    closed: bool = false,
+
+    fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        if (self.len == self.buf.len) {
+            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
+                self.mutex.unlock(io);
+                _ = std.os.linux.close(fd);
+                return;
+            };
+            if (self.buf.len > 0) {
+                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
+                std.heap.smp_allocator.free(self.buf);
+            }
+            self.buf = new_buf;
+            self.head = 0;
+        }
+        self.buf[(self.head + self.len) % self.buf.len] = fd;
+        self.len += 1;
+        self.mutex.unlock(io);
+        self.ready.signal(io);
+    }
+
+    fn pop(self: *FdQueue, io: std.Io) ?std.posix.fd_t {
+        self.mutex.lockUncancelable(io);
+        while (self.len == 0) {
+            if (self.closed) {
+                self.mutex.unlock(io);
+                return null;
+            }
+            self.ready.waitUncancelable(io, &self.mutex);
+        }
+        const fd = self.buf[self.head];
+        self.head = (self.head + 1) % self.buf.len;
+        self.len -= 1;
+        self.mutex.unlock(io);
+        return fd;
+    }
+
+    fn close(self: *FdQueue, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        self.closed = true;
+        self.mutex.unlock(io);
+        self.ready.broadcast(io);
+    }
+
+    fn deinit(self: *FdQueue) void {
+        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
     }
 };
 
@@ -144,15 +204,36 @@ fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
     }
 }
 
+const EpollWorkerCtx = struct {
+    queue: *FdQueue,
+    io: std.Io,
+    comp_id: []const u8,
+    opts: FixServeOpts,
+};
+
+fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
+    while (ctx.queue.pop(ctx.io)) |conn_fd| {
+        const stream: std.Io.net.Stream = .{ .socket = .{
+            .handle = conn_fd,
+            .address = .{ .ip4 = .unspecified(0) },
+        } };
+        core.serveConn(stream, ctx.io, ctx.comp_id, ctx.opts) catch {};
+    }
+}
+
 // --------------------------------------------------------- //
 
-/// FIX 4.x session server. Dispatches connections via POOL, ASYNC, or MIXED.
+/// Brief:
+/// FIX 4.x session server. Dispatches connections via POOL, ASYNC, MIXED,
+/// or EPOLL (Linux-only: non-Linux falls back to POOL).
 /// Session logic (Logon, Logout, Heartbeat, echo) is handled by Fix.serveConn.
 ///
 /// Usage:
-///   var server = try FixServer.init(.{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" });
-///   defer server.deinit();
-///   try server.run();
+/// ```zig
+/// var server = try FixServer.init(.{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" });
+/// defer server.deinit();
+/// try server.run();
+/// ```
 pub const FixServer = struct {
     const Self = @This();
 
@@ -160,18 +241,18 @@ pub const FixServer = struct {
 
     // --------------------------------------------------------- //
 
-    /// Initialize. Returns error.PortNotConfigured if config.port is 0.
+    /// Brief: Initialize. Returns error.PortNotConfigured if config.port is 0.
     pub fn init(config: FixServerConfig) !Self {
         if (config.port == 0) return error.PortNotConfigured;
         return .{ .config = config };
     }
 
-    /// No-op: resources released inside run via defer.
+    /// Brief: No-op — resources released inside run via defer.
     pub fn deinit(self: *Self) void {
         _ = self;
     }
 
-    /// Listen and serve FIX sessions using the server's comp_id.
+    /// Brief: Listen and serve FIX sessions using the server's comp_id.
     pub fn run(self: *Self) !void {
         const cfg = self.config;
         const io = cfg.io;
@@ -206,8 +287,7 @@ pub const FixServer = struct {
                 }
             },
 
-            // EPOLL is HTTP-only. The FIX server falls back to the POOL model.
-            .POOL, .EPOLL => {
+            .POOL => {
                 const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                 const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
@@ -269,7 +349,108 @@ pub const FixServer = struct {
 
                 for (acc_threads) |t| t.join();
             },
+
+            .EPOLL => {
+                if (comptime @import("builtin").target.os.tag == .linux) {
+                    try self.runEpoll(io, conn_opts, cpu);
+                } else {
+                    std.debug.print("zix fix server: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                    var fallback = self.*;
+                    fallback.config.dispatch_model = .POOL;
+                    try fallback.run();
+                }
+            },
         }
+    }
+
+    /// Brief:
+    /// EPOLL dispatch: a single epoll event loop accepts connections and hands
+    /// each fd to a worker pool. Each worker runs the full FIX session loop.
+    /// Linux-only.
+    ///
+    /// Note:
+    /// - Workers hold each connection for its full lifetime (FIX sessions are
+    ///   stateful: seq_num, Logon state, heartbeat timer all live on the stack
+    ///   inside serveConn). EPOLLONESHOT is not used.
+    /// - The benefit over POOL is single-threaded accept vs N accept threads.
+    /// - pool_size sets the worker count (0 = max(10, cpu * 2)).
+    fn runEpoll(self: *Self, io: std.Io, conn_opts: FixServeOpts, cpu: usize) !void {
+        const linux = std.os.linux;
+        const cfg = self.config;
+        const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
+
+        const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
+            if (cfg.logger) |lg| lg.system(.ERROR, "fix", "epoll resolve error: {}", .{err});
+            return err;
+        };
+        var net_server = addr.listen(io, .{
+            .reuse_address = true,
+            .kernel_backlog = cfg.kernel_backlog,
+        }) catch |err| {
+            if (cfg.logger) |lg| lg.system(.ERROR, "fix", "epoll listen error: {}", .{err});
+            return err;
+        };
+        defer net_server.deinit(io);
+        const listener_fd = net_server.socket.handle;
+
+        const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
+        const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+        _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+        const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+        if (std.posix.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
+        const epfd: std.posix.fd_t = @intCast(epfd_rc);
+        defer _ = linux.close(epfd);
+
+        var lev = linux.epoll_event{
+            .events = linux.EPOLL.IN | linux.EPOLL.ET,
+            .data = .{ .fd = listener_fd },
+        };
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+            return error.EpollCtlFailed;
+
+        if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (epoll/{d})", .{ cfg.ip, cfg.port, pool_count });
+
+        var queue = FdQueue{};
+        defer queue.deinit();
+
+        const workers = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
+        defer std.heap.smp_allocator.free(workers);
+        for (workers) |*t|
+            t.* = try std.Thread.spawn(
+                .{ .stack_size = 512 * 1024 },
+                epollWorkerEntry,
+                .{EpollWorkerCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .opts = conn_opts }},
+            );
+
+        const max_events = 256;
+        var events: [max_events]linux.epoll_event = undefined;
+        while (true) {
+            const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
+            switch (std.posix.errno(wait_result)) {
+                .SUCCESS => {},
+                .INTR => continue,
+                else => break,
+            }
+            const n: usize = @intCast(wait_result);
+            for (events[0..n]) |ev| {
+                if (ev.data.fd != listener_fd) continue;
+                while (true) {
+                    const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
+                    switch (std.posix.errno(accept_result)) {
+                        .SUCCESS => {},
+                        .AGAIN => break,
+                        .INTR, .CONNABORTED => continue,
+                        else => break,
+                    }
+                    const conn_fd: std.posix.fd_t = @intCast(accept_result);
+                    queue.push(conn_fd, io);
+                }
+            }
+        }
+
+        queue.close(io);
+        for (workers) |t| t.join();
     }
 };
 
@@ -292,5 +473,14 @@ test "zix fix: FixServer.init, valid config succeeds and deinit is safe" {
     defer threaded.deinit();
     const io = threaded.io();
     var server = try FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
+    server.deinit();
+}
+
+test "zix fix: FixServer.init with EPOLL dispatch model succeeds" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
     server.deinit();
 }

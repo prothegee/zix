@@ -171,26 +171,26 @@ __*6. Predictable, Transparent Memory Management.*__
 
 | Document | Description |
 | :- | :- |
-| [`docs/hld-http.md`](docs/hld-http.md) | HTTP: goals, runtime model, API, router, WebSocket, SSE, memory model |
-| [`docs/hld-tcp.md`](docs/hld-tcp.md) | TCP raw stream: goals, API, frame format, dispatch models |
-| [`docs/hld-udp.md`](docs/hld-udp.md) | UDP: goals, runtime model, API, packet model, endianness, disconnect |
-| [`docs/hld-uds.md`](docs/hld-uds.md) | UDS: goals, API, frame format, server/client lifecycle |
-| [`docs/hld-channel.md`](docs/hld-channel.md) | Channel: goals, model, API, concurrency requirement, examples |
-| [`docs/hld-fix.md`](docs/hld-fix.md) | FIX 4.x: goals, protocol overview, session layer, dispatch models, config |
-| [`docs/hld-grpc.md`](docs/hld-grpc.md) | gRPC h2c: goals, architecture, API, all 4 RPC types, codec, dispatch models |
-| [`docs/hld-grpc-proxy.md`](docs/hld-grpc-proxy.md) | gRPC TLS termination via nginx and haproxy |
-| [`docs/hld-logger.md`](docs/hld-logger.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
-| [`docs/lld-http.md`](docs/lld-http.md) | HTTP: internal data structures and algorithms |
-| [`docs/lld-tcp.md`](docs/lld-tcp.md) | TCP: internal data structures and algorithms |
-| [`docs/lld-udp.md`](docs/lld-udp.md) | UDP: internal data structures and algorithms |
-| [`docs/lld-uds.md`](docs/lld-uds.md) | UDS: internal server/client structure and frame handling |
-| [`docs/lld-fix.md`](docs/lld-fix.md) | FIX: internal data structures and serveConn algorithm |
-| [`docs/lld-channel.md`](docs/lld-channel.md) | Channel: ring buffer internals, locking, send/recv algorithms |
-| [`docs/lld-logger.md`](docs/lld-logger.md) | Logger: internal write buffer, spinlock, rotation algorithm |
-| [`docs/concurrency.md`](docs/concurrency.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
-| [`docs/adr.md`](docs/adr.md) | Architecture Decision Records |
-| [`docs/headers.md`](docs/headers.md) | Response header cap: tiers, security, error handling |
-| [`docs/tests.md`](docs/tests.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
+| [`docs/hld-http-en.md`](docs/hld-http-en.md) | HTTP: goals, runtime model, API, router, WebSocket, SSE, memory model |
+| [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) | TCP raw stream: goals, API, frame format, dispatch models |
+| [`docs/hld-udp-en.md`](docs/hld-udp-en.md) | UDP: goals, runtime model, API, packet model, endianness, disconnect |
+| [`docs/hld-uds-en.md`](docs/hld-uds-en.md) | UDS: goals, API, frame format, server/client lifecycle |
+| [`docs/hld-channel-en.md`](docs/hld-channel-en.md) | Channel: goals, model, API, concurrency requirement, examples |
+| [`docs/hld-fix-en.md`](docs/hld-fix-en.md) | FIX 4.x: goals, protocol overview, session layer, dispatch models, config |
+| [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) | gRPC h2c: goals, architecture, API, all 4 RPC types, codec, dispatch models |
+| [`docs/hld-grpc-proxy-en.md`](docs/hld-grpc-proxy-en.md) | gRPC TLS termination via nginx and haproxy |
+| [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
+| [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
+| [`docs/lld-tcp-en.md`](docs/lld-tcp-en.md) | TCP: internal data structures and algorithms |
+| [`docs/lld-udp-en.md`](docs/lld-udp-en.md) | UDP: internal data structures and algorithms |
+| [`docs/lld-uds-en.md`](docs/lld-uds-en.md) | UDS: internal server/client structure and frame handling |
+| [`docs/lld-fix-en.md`](docs/lld-fix-en.md) | FIX: internal data structures and serveConn algorithm |
+| [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
+| [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
+| [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
+| [`docs/adr-en.md`](docs/adr-en.md) | Architecture Decision Records |
+| [`docs/headers-en.md`](docs/headers-en.md) | Response header cap: tiers, security, error handling |
+| [`docs/tests-en.md`](docs/tests-en.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
 
 <br>
 
@@ -397,7 +397,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-See [`docs/concurrency.md`](docs/concurrency.md) for architecture details, thread counts, and when to prefer each model.
+See [`docs/concurrency-en.md`](docs/concurrency-en.md) for architecture details, thread counts, and when to prefer each model.
 
 <br>
 
@@ -449,7 +449,7 @@ To override the deadline inside a handler (shorter or longer window than the glo
 ctx.setTimeout(2_000); // override to 2s from now regardless of global cap
 ```
 
-`ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `examples/http_timeout_resp.zig` and `docs/adr.md` (ADR-018) for design rationale.
+`ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `examples/http_timeout_resp.zig` and `docs/adr-en.md` (ADR-018) for design rationale.
 
 <br>
 
@@ -686,7 +686,7 @@ defer fast.deinit();
 
 Redirects are followed automatically up to `max_redirects` (default 3). Set `follow_redirects = false` to receive the 3xx response directly.
 
-See `examples/http_client.zig` and [`docs/hld-http.md`](docs/hld-http.md) for details.
+See `examples/http_client.zig` and [`docs/hld-http-en.md`](docs/hld-http-en.md) for details.
 
 <br>
 
@@ -772,7 +772,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena — no ceiling, no clamping.
 
-For security guidance and tier selection see [`docs/headers.md`](docs/headers.md). For a working demonstration see `examples/http_xtra_headers.zig`.
+For security guidance and tier selection see [`docs/headers-en.md`](docs/headers-en.md). For a working demonstration see `examples/http_xtra_headers.zig`.
 
 <br>
 
@@ -857,7 +857,7 @@ The parser storage limit is 64 — `CUSTOM` values above 64 are silently capped.
 <!-- | `max_header_scratch` | 4096 | HPACK scratch buffer size per connection | -->
 <!-- | `max_body` | 65536 | max total body buffered per stream | -->
 <!---->
-<!-- See [`docs/hld-grpc.md`](docs/hld-grpc.md) for gRPC on top of Http2. -->
+<!-- See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for gRPC on top of Http2. -->
 <!---->
 <!-- <br> -->
 
@@ -943,7 +943,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming — `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency.md`](docs/concurrency.md) for details.
+**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming — `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -966,7 +966,7 @@ var server = try zix.Grpc.Server.init(
 
 Handlers check `ctx.isExpired()` between steps. Override `ctx.deadline_ns` directly for per-call extension: `ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s`. See `examples/grpc_timeout.zig` for the full demo.
 
-See [`docs/hld-grpc.md`](docs/hld-grpc.md) for full documentation including all 4 RPC type patterns and TLS proxy setup.
+See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation including all 4 RPC type patterns and TLS proxy setup.
 
 <br>
 
@@ -1028,7 +1028,7 @@ var server = try zix.Tcp.Server.initArgs(.{ .ip = "127.0.0.1", .port = 9300 }, p
 var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }, io, process.minimal.args);
 ```
 
-See `examples/tcp_server_1_async.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp.md`](docs/hld-tcp.md) for details.
+See `examples/tcp_server_1_async.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
 
 <br>
 
@@ -1087,9 +1087,9 @@ try client.logout(io);
 | `1` (TestRequest) | Reply with Heartbeat |
 | any other | Echo unchanged |
 
-Default dispatch model is `.ASYNC` (FIX sessions are long-lived).
+**Dispatch models:** `.ASYNC` (default — FIX sessions are long-lived), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only: single epoll accept loop, pool workers hold each connection for its full lifetime). Non-Linux falls back to `.POOL` automatically.
 
-See `examples/fix_server_1_async.zig`, `examples/fix_client.zig`, and [`docs/hld-fix.md`](docs/hld-fix.md) for details.
+See `examples/fix_server_1_async.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_client.zig`, and [`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
 
 <br>
 
@@ -1133,7 +1133,7 @@ try server.runWith(process.io, myHandler);
 
 **Frame format:** `[u32 payload_len, native LE, 4 bytes][payload bytes]`. Frames with payload > `max_msg_len` (default 4096) close the connection.
 
-See `examples/uds_server.zig` and `examples/uds_http.zig` for full working examples. For design details see [`docs/hld-uds.md`](docs/hld-uds.md).
+See `examples/uds_server.zig` and `examples/uds_http.zig` for full working examples. For design details see [`docs/hld-uds-en.md`](docs/hld-uds-en.md).
 
 <br>
 
@@ -1178,7 +1178,7 @@ t.join();
 | `examples/channel_ipc_a.zig` + `ipc_b.zig` | Inter-process coordination pair |
 | `examples/uds_http.zig` | HTTP + UDS + Channel: full integration pattern |
 
-For design details see [`docs/hld-channel.md`](docs/hld-channel.md).
+For design details see [`docs/hld-channel-en.md`](docs/hld-channel-en.md).
 
 <br>
 
@@ -1244,7 +1244,7 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working example with broadcast and configurable ports. For design details see [`docs/hld-udp.md`](docs/hld-udp.md).
+See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working example with broadcast and configurable ports. For design details see [`docs/hld-udp-en.md`](docs/hld-udp-en.md).
 
 <br>
 
@@ -1333,7 +1333,7 @@ Log files are written to `save_path/YYYY-MM-DD/save_file-NNNNNN.log`. Each line 
 
 Levels: `.DEBUG`(0) `.INFO`(1) `.WARN`(2) `.ERROR`(3). The file backend uses a 64 KB write buffer flushed on date rollover, sequence rotation, explicit `logger.flush()`, or `logger.deinit()`.
 
-Wire a logger into any server by setting `logger: &logger` in its config. See [`docs/hld-logger.md`](docs/hld-logger.md) for full documentation.
+Wire a logger into any server by setting `logger: &logger` in its config. See [`docs/hld-logger-en.md`](docs/hld-logger-en.md) for full documentation.
 
 <br>
 
@@ -1347,7 +1347,7 @@ zig build edge-test        # edge tests (boundary conditions and error paths)
 zig build test-all         # all of the above
 ```
 
-`zig build` alone does not run tests. See [`docs/tests.md`](docs/tests.md) for full coverage details.
+`zig build` alone does not run tests. See [`docs/tests-en.md`](docs/tests-en.md) for full coverage details.
 
 <br>
 
@@ -1373,13 +1373,13 @@ Routes are baked into the server type at compile time — no allocator is needed
 | Peer snapshot (broadcast) | `config.allocator` | Single packet dispatch |
 | Receive buffer | Stack | Single receive loop iteration |
 
-`config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet — `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp.md`](docs/hld-udp.md) for the full explanation and PoC.
+`config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet — `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for the full explanation and PoC.
 
 ### HTTP/2 and gRPC
 
 Both use heap-allocated per-connection stream arrays (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed — handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
 
-For full memory details see [`docs/hld-http.md`](docs/hld-http.md) and [`docs/hld-udp.md`](docs/hld-udp.md). For threading models see [`docs/concurrency.md`](docs/concurrency.md).
+For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`docs/hld-udp-en.md`](docs/hld-udp-en.md). For threading models see [`docs/concurrency-en.md`](docs/concurrency-en.md).
 
 <br>
 

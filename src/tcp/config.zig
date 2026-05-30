@@ -24,7 +24,7 @@ pub const DispatchModel = enum(u8) {
     /// sockets to a worker pool. Each worker handles one request then re-arms
     /// the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
     /// Best for very high connection counts and slow/idle clients. Linux-only.
-    /// pool_size sets the worker count. Http and Grpc implement natively (all others fall back to .POOL).
+    /// pool_size sets the worker count. Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
     EPOLL = 3,
 }; // for all Tcp
 
