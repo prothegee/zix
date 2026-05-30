@@ -187,9 +187,9 @@ pub const HttpClient = struct {
             const b = opts.body orelse &.{};
             req.transfer_encoding = .{ .content_length = b.len };
             var write_buf: [8192]u8 = undefined;
-            var bw = try req.sendBodyUnflushed(&write_buf);
-            if (b.len > 0) try bw.writer.writeAll(b);
-            try bw.end();
+            var body_writer = try req.sendBodyUnflushed(&write_buf);
+            if (b.len > 0) try body_writer.writer.writeAll(b);
+            try body_writer.end();
         } else {
             try req.sendBodiless();
         }
