@@ -27,8 +27,8 @@ pub const UdsClient = struct {
     /// Connect to the server at config.path.
     pub fn connect(config: UdsClientConfig, io: std.Io) !Self {
         if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
-        const ua = try std.Io.net.UnixAddress.init(config.path);
-        const stream = try ua.connect(io);
+        const unix_addr = try std.Io.net.UnixAddress.init(config.path);
+        const stream = try unix_addr.connect(io);
         std.debug.print("zix uds client: connected to {s}\n", .{config.path});
         return .{ .stream = stream, .config = config };
     }
