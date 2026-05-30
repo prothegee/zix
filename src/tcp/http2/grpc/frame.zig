@@ -29,10 +29,10 @@ pub fn writeGrpcPrefix(buf: *[5]u8, compress: bool, msg_len: u32) void {
 /// Send initial response HEADERS (:status 200, content-type). No END_STREAM.
 pub fn sendGrpcHeaders(fd: std.posix.fd_t, sid: u31, content_type: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
-    var enc = h2.HpackEncoder.init(&hdr_buf);
-    try enc.writeHeader(":status", "200");
-    try enc.writeHeader("content-type", content_type);
-    const hblock = enc.encoded();
+    var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
+    try hpack_enc.writeHeader(":status", "200");
+    try hpack_enc.writeHeader("content-type", content_type);
+    const hblock = hpack_enc.encoded();
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
@@ -59,12 +59,12 @@ pub fn sendGrpcData(fd: std.posix.fd_t, sid: u31, msg: []const u8) !void {
 /// Send trailer HEADERS (grpc-status, grpc-message). FLAG_END_STREAM.
 pub fn sendGrpcTrailer(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
-    var enc = h2.HpackEncoder.init(&hdr_buf);
+    var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     var status_str: [4]u8 = undefined;
     const status_s = std.fmt.bufPrint(&status_str, "{d}", .{grpc_status}) catch "0";
-    try enc.writeHeader("grpc-status", status_s);
-    if (grpc_message.len > 0) try enc.writeHeader("grpc-message", grpc_message);
-    const hblock = enc.encoded();
+    try hpack_enc.writeHeader("grpc-status", status_s);
+    if (grpc_message.len > 0) try hpack_enc.writeHeader("grpc-message", grpc_message);
+    const hblock = hpack_enc.encoded();
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
@@ -77,13 +77,13 @@ pub fn sendGrpcTrailer(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_messa
 /// Send trailers-only error response (no DATA frame). Includes :status 200 per gRPC spec.
 pub fn sendGrpcError(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
-    var enc = h2.HpackEncoder.init(&hdr_buf);
-    try enc.writeHeader(":status", "200");
+    var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
+    try hpack_enc.writeHeader(":status", "200");
     var status_str: [4]u8 = undefined;
     const status_s = std.fmt.bufPrint(&status_str, "{d}", .{grpc_status}) catch "0";
-    try enc.writeHeader("grpc-status", status_s);
-    if (grpc_message.len > 0) try enc.writeHeader("grpc-message", grpc_message);
-    const hblock = enc.encoded();
+    try hpack_enc.writeHeader("grpc-status", status_s);
+    if (grpc_message.len > 0) try hpack_enc.writeHeader("grpc-message", grpc_message);
+    const hblock = hpack_enc.encoded();
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
