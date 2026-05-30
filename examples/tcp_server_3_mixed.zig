@@ -18,7 +18,7 @@ const POOL_SIZE: usize = 0; // ignored by .MIXED
 // --------------------------------------------------------- //
 
 // N accept threads each dispatch connections via io.async() — no shared queue.
-// Balances throughput and latency; preferred over POOL when connections are long-lived
+// Balances throughput and latency. Preferred over POOL when connections are long-lived
 // (e.g. streaming, keep-alive) or when queue contention becomes a bottleneck.
 //
 // Frame format (matches zix.Tcp.Client): [u32 big-endian len][payload]

@@ -81,7 +81,7 @@ pub fn main(process: std.process.Init) !void {
             .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
             // Echo: per-route cap of 10s (loosens nothing — global 5s cap still wins).
             .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000 },
-            // Extended: ignores per-route cap; overrides deadline_ns at runtime.
+            // Extended: ignores per-route cap. Overrides deadline_ns at runtime.
             .{ .path = "/helloworld.Greeter/Extended", .handler = extendedHandler },
         },
         .{
