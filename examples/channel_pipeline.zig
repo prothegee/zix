@@ -132,11 +132,11 @@ pub fn main(process: std.process.Init) !void {
     var ch2 = try ResultChan.init(std.heap.smp_allocator, 4);
     defer ch2.deinit();
 
-    const ta = try std.Thread.spawn(.{}, stageA, .{StageACap{ .ch = &ch1, .io = io }});
-    const tb = try std.Thread.spawn(.{}, stageB, .{StageBCap{ .in = &ch1, .out = &ch2, .io = io }});
-    const tc = try std.Thread.spawn(.{}, stageC, .{StageCCap{ .in = &ch2, .io = io }});
+    const thread_a = try std.Thread.spawn(.{}, stageA, .{StageACap{ .ch = &ch1, .io = io }});
+    const thread_b = try std.Thread.spawn(.{}, stageB, .{StageBCap{ .in = &ch1, .out = &ch2, .io = io }});
+    const thread_c = try std.Thread.spawn(.{}, stageC, .{StageCCap{ .in = &ch2, .io = io }});
 
-    ta.join();
-    tb.join();
-    tc.join();
+    thread_a.join();
+    thread_b.join();
+    thread_c.join();
 }
