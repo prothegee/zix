@@ -294,7 +294,7 @@ try server.run();
 ## Channel
 
 `zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive
-that works alongside all three dispatch models. A Channel connects producer and consumer tasks
+that works alongside all four dispatch models. A Channel connects producer and consumer tasks
 (OS threads or `io.async()` fibers) within the same process. It does not cross a network or
 process boundary.
 
@@ -302,7 +302,7 @@ process boundary.
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-All three dispatch models can spawn `io.async()` tasks or OS threads that communicate through
+All four dispatch models can spawn `io.async()` tasks or OS threads that communicate through
 a Channel. The Channel itself is independent of which dispatch model is in use.
 
 | Property | Channel |
