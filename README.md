@@ -22,8 +22,13 @@
 ## Table of Contents
 
 __*Languages:*__
-- [Bahasa](./README-id.md)
-- [English](./README-en.md)
+- [Bahasa - id](./README-id.md)
+- [English - en](./README-en.md)
+
+<br>
+
+__*License:*__
+- [BSD-3-Clause license](./LICENSE-BSD)
 
 <br>
 
