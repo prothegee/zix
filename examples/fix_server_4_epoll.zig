@@ -20,7 +20,7 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 // Note:
 // On Linux, .EPOLL runs natively: a single epoll accept loop pushes accepted
-// fds to an FdQueue; pool workers pop and hold each connection for its full
+// fds to an FdQueue. Pool workers pop and hold each connection for its full
 // lifetime (same pattern as zix.Grpc EPOLL). FIX sessions are long-lived and
 // stateful — one-thread-per-connection maps naturally to this model.
 // On non-Linux targets, .EPOLL falls back to .POOL automatically (with a
