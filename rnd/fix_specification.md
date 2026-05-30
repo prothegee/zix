@@ -365,6 +365,77 @@ Throughput is measured per session (single connection), not aggregate.
 | Encryption within FIX (tag 98=1,2,3) | EncryptMethod field; not standard SSL; rarely used |
 | FIX session persistence | store sent messages to disk for crash recovery and replay |
 | Multi-session multiplexing | one TCP connection carrying multiple virtual sessions |
+| PROXY protocol v1/v2 | parse PROXY header on accepted connections to recover real client IP when running behind nginx or haproxy TLS termination |
+
+---
+
+## Coverage Plan
+
+Scope for zix as a network library covers the FIX Technical Standards only: encoding, session, framing, and transport. FIXatdl, MMT, and Processes/Templates are application-level or governance concerns outside library scope. Orchestra belongs in a separate code generation tool, not the runtime library.
+
+### Layer 1: Classic Session Layer (ISO 3531 Part 2)
+
+Current gap. zix.Fix implements the subset needed for PoC go/no-go. Completing ISO 3531 Part 2:
+
+| Feature | Status | Notes |
+| :- | :- | :- |
+| Logon, Logout, Heartbeat, TestRequest | done | inline in serveConn |
+| ResendRequest (35=2) | pending | request retransmission of missed messages |
+| SequenceReset (35=4) | pending | reset sequence to recover from gap |
+| Reject (35=3) | pending | session-level reject of malformed or out-of-sequence messages |
+| Full session state machine | pending | not connected, connected, logged on, logged out |
+| Sequence number management | pending | inbound expected counter, outbound counter, gap detection |
+| Heartbeat timer | pending | send TestRequest on missed heartbeat, close on no reply |
+| Message store | pending | ring buffer of sent messages for retransmission on ResendRequest |
+| User handler registration per MsgType | pending | dispatch application messages to registered handlers |
+
+### Layer 2: Transport Security (FIXS)
+
+FIXS is FIX over TLS. Standard practice at most brokers. Blocked on TLS src/ implementation. No session layer changes required — the existing FIX session layer is wired on top of the TLS stream once TLS lands.
+
+Until TLS lands in zix itself, TLS termination at a reverse proxy (nginx stream or haproxy mode tcp) is the standard interim path. In this configuration, zix.Fix sees the proxy IP instead of the real client IP. PROXY protocol v1/v2 header parsing on accepted connections recovers the original client IP for accurate session logging. Not started — depends on the proxy deployment scenario being confirmed first.
+
+### Layer 3: Encoding Formats
+
+TagValue (ISO 3531 Part 1) is implemented. Additional encodings in priority order by real-world demand:
+
+| Encoding | Standard | Demand | Complexity | Status |
+| :- | :- | :- | :- | :- |
+| TagValue | ISO 3531 Part 1 | universal | low | done |
+| JSON | FIX JSON Encoding RC | medium | low | not started |
+| SBE | ISO/IEC 25390:2025 | high (market data) | high | not started |
+| FAST | FIX FAST v1.1 | medium (streaming feeds) | high | not started |
+| FIXML | FIXML v1.1 | low | high | not started |
+| Protobuf | FIX Protobuf draft | low | medium | not started |
+| ASN.1 | ISO-based | very low | very high | not started |
+
+Realistic target for zix: TagValue (done), JSON, SBE. FAST and FIXML are specialist and rarely needed outside specific venue integrations.
+
+### Layer 4: Alternative Session (FIXP)
+
+FIXP is a lightweight high-performance session layer for demanding point-to-point scenarios. It is not ISO 3531 Part 2 and is a separate design from the Classic session. If pursued: separate `zix.Fixp` namespace, not an extension of `zix.Fix`.
+
+### Out of Scope for the Library
+
+| Standard | Reason |
+| :- | :- |
+| FIXatdl | GUI metadata for algo parameters, application layer concern |
+| MMT | post-trade data flagging, application layer concern |
+| Orchestra | machine-readable spec format, belongs in a separate code generation tool |
+| SOFH | simple open framing header, follows automatically once multiple encodings coexist on one connection |
+| FIX 5.0 / FIXT 1.1 | separates transport from app layer, not pursued until FIXP is in scope |
+
+### Phased Roadmap
+
+```mermaid
+flowchart TD
+    Phase1["Phase 1: Classic Session Layer (ISO 3531 Part 2)\nResendRequest, SequenceReset, Reject\nsequence numbers, heartbeat timer\nmessage store, user MsgType handlers"]
+    Phase2["Phase 2: FIXS\nFIX over TLS (blocked on TLS src/)"]
+    Phase3["Phase 3: JSON Encoding\nFIX JSON Encoding RC"]
+    Phase4["Phase 4: SBE Encoding\nISO/IEC 25390:2025"]
+    Phase5["Phase 5: FIXP\nseparate zix.Fixp namespace"]
+    Phase1 --> Phase2 --> Phase3 --> Phase4 --> Phase5
+```
 
 ---
 
@@ -421,3 +492,189 @@ This applies to any delimiter-based protocol on raw `std.Io.Reader`. `readSliceS
 ### Session scope in PoC vs src/
 
 The PoC implements the session message subset needed for go/no-go: Logon, Logout, Heartbeat, TestRequest, and application message echo. ResendRequest, SequenceReset, Reject, and the heartbeat timer are deferred to the src/ implementation.
+
+### FIX Standard
+
+Standards published and maintained by FIX Protocol Limited (fixtrading.org). Categories below summarize scope and relevance to zix.Fix.
+
+---
+
+#### 1. The FIX Protocol
+
+https://fixtrading.org/standards/fix-protocol/
+
+A global, open, application-layer standard for exchanging financial trading information. The protocol is independent of transport, network, and encoding. Business messages are composed from tag-identified fields, grouped into components (parties, instruments, allocations), and organized into functional message categories.
+
+**Supported versions:**
+
+| Version | BeginString | Status | Notes |
+| :- | :- | :- | :- |
+| FIX 4.0 | FIX.4.0 | archived | baseline, rare today |
+| FIX 4.1 | FIX.4.1 | archived | adds ResendRequest, SequenceReset |
+| FIX 4.2 | FIX.4.2 | legacy support | most common legacy version in production |
+| FIX 4.4 | FIX.4.4 | legacy support | adds XmlData field, no structural change |
+| FIX 5.0 SP2 | FIX.5.0SP2 | archived | separates transport (FIXT 1.1) from app layer |
+| FIX Latest | (session version) | active | incremental Extension Packs (EP) since 2019, currently EP284+ |
+
+Firms are strongly recommended to adopt FIX Latest. FIX 4.2 and 4.4 are retained for legacy interoperability only.
+
+**Message categories:**
+
+| Category | Purpose |
+| :- | :- |
+| Order handling | new orders, cancels, replaces, executions |
+| Market data | quotes, snapshots, incremental updates |
+| Trade reporting | trade capture and confirmation |
+| Post-trade processing | allocations, confirmations, settlement |
+| Infrastructure | session management (Logon, Logout, Heartbeat) |
+
+**Extension packs (EP):**
+
+Since 2019 the FIX standard uses backwards-compatible Extension Packs rather than discrete version releases. Each EP adds or modifies fields and messages without breaking existing implementations.
+
+**Relevance to zix.Fix:** zix.Fix targets FIX 4.2 as primary. The tag set and session logic are compatible with 4.0, 4.1, and 4.4 without structural changes.
+
+---
+
+#### 2. FIX Algorithmic Trading Definition Language (FIXatdl)
+
+https://fixtrading.org/standards/fix-algorithmic-trading-definition-language/
+
+An XML-based vendor-neutral standard for describing user interfaces and parameters for algorithmic trading strategies. FIXatdl specifies how algorithm parameters (controls, constraints, defaults, validation rules) are expressed so that order management systems can automatically generate trader GUIs from broker-supplied XML files.
+
+**Versions:**
+
+| Version | Status | Notes |
+| :- | :- | :- |
+| 1.1 (Errata 20101221) | current release | stable |
+| 1.2 RC1 | release candidate | in development |
+
+**Key characteristics:**
+- Requires zero changes to underlying FIX infrastructure
+- Compatible with all FIX Protocol versions
+- Preserves broker freedom to innovate in execution logic (only the interface definition is standardized)
+
+**Relevance to zix.Fix:** not applicable. FIXatdl defines GUI metadata, not wire protocol or session layer.
+
+---
+
+#### 3. Market Model Typology (MMT)
+
+https://fixtrading.org/standards/market-model-typology/
+
+A protocol-agnostic standard for flagging post-trade data across venues and asset classes. Originated from a FESE (Federation of European Securities Exchanges) initiative in 2011. Maintained under FIX Protocol Limited Trust.
+
+**Versions:**
+
+| Version | Status | Notes |
+| :- | :- | :- |
+| 3.04 | superseded | earlier baseline with FAQ |
+| 4.0 / 4.1 | superseded | addressed EU RTS 1 and RTS 2 (effective 2024-01-01) |
+| 4.2 | superseded | released 2024-06-18 |
+| 5.0 | active | effective 2025-12-01 (UK), 2026-03-02 (EU) |
+
+**Regulatory context:** delivers operational solutions for MiFIR/MiFID II (RTS 1 and RTS 2) and UK FCA requirements (PS23/4, PS24/14).
+
+**Asset classes covered:** equities (original scope), bonds, others via extension packs.
+
+**FIX Extension Packs:** EP163, EP186, EP216, EP277, EP283, EP286, EP300.
+
+**Relevance to zix.Fix:** not applicable. MMT is a post-trade data flagging standard, not a session or transport standard.
+
+---
+
+#### 4. Orchestra
+
+https://fixtrading.org/standards/orchestra/
+
+A standard for creating machine-readable definitions of messaging protocols. An Orchestra file (XML, Apache License 2.0) describes a protocol implementation: message inventory, field specifications, validation rules, alternative message layouts by scenario, permitted workflows, and network or session configuration.
+
+**Key capabilities:**
+
+| Capability | Description |
+| :- | :- |
+| Communication | parties exchange Orchestra files to unambiguously define rules of engagement |
+| Normalization | handles variant FIX encodings and user-defined tags across counterparties |
+| Validation | designates fields as mandatory, conditional, forbidden, or ignorable |
+| Self-validation | tests internal systems against their own service specification |
+| Provisioning | specifies full protocol stacks (application, session, encoding, transport) |
+| FIXatdl integration | Orchestra files can reference FIXatdl configurations locally or remotely |
+
+**Tools:**
+- Log2Orchestra: converts FIX message logs to Orchestra XML
+- Playlist: creates Orchestra files from manual selections
+
+**Predecessor:** FIX Unified Repository served a similar role before Orchestra.
+
+**Relevance to zix.Fix:** potential future use for code generation and validation tooling. Orchestra XML could drive automatic Tag enum and message-type generation.
+
+---
+
+#### 5. Technical Standards
+
+https://fixtrading.org/standards/technical-standards/
+
+Encoding, session, framing, and transport specifications. Most directly relevant to zix.Fix.
+
+**Encoding standards:**
+
+| Standard | Format | Status | Primary use |
+| :- | :- | :- | :- |
+| FIX TagValue (ISO 3531 Part 1) | ASCII tag=value SOH | ISO standard (2022) | universal. implemented by zix.Fix |
+| FIXML | XML | v1.1 active | derivatives post-trade clearing and settlement |
+| Simple Binary Encoding (ISO/IEC 25390:2025) | binary | ISO/IEC standard (2025) | high-performance market data and transactions |
+| FAST (FIX Adapted for Streaming) | binary compressed | v1.1 active | market data bandwidth and latency reduction |
+| JSON Encoding | JSON | release candidate | web-based applications and internal APIs |
+| Google Protocol Buffers | binary | draft | internal company messaging |
+| ASN.1 Encoding | binary | ISO-based | alternate encoding with multiple variant forms |
+
+**Session standards:**
+
+| Standard | Description | Notes |
+| :- | :- | :- |
+| Classic FIX Session Layer (ISO 3531 Part 2) | Logon, Heartbeat, sequence numbering, Logout, gap recovery | what zix.Fix implements |
+| FIXP (High Performance Session Layer) | lightweight point-to-point for demanding environments | GitHub-hosted spec |
+
+**Framing:**
+
+| Standard | Description | Notes |
+| :- | :- | :- |
+| SOFH (Simple Open Framing Header) | length and type header prepended to any FIX message | enables mixed encoding on one connection |
+
+**Transport:**
+
+| Standard | Description | Notes |
+| :- | :- | :- |
+| FIXS (FIX over TLS) | TLS encryption for FIX connections | standard practice at many brokers |
+
+**Relevance to zix.Fix:**
+- Implements: FIX TagValue encoding (ISO 3531 Part 1), Classic FIX Session Layer (ISO 3531 Part 2)
+- Pending: FIXS (blocked on TLS src/ implementation)
+- Out of scope: SBE, FAST, FIXML, FIXP, SOFH (no current design)
+
+---
+
+#### 6. Processes and Templates
+
+https://fixtrading.org/standards/processes-templates/
+
+Governance documents for proposing and reviewing FIX standards. Not implementation specifications.
+
+**Processes:**
+
+| Document | Purpose |
+| :- | :- |
+| Recommended Practices/Guidelines Process | governs how best practice guidance is developed and approved |
+| Gap Analysis Specification Proposal Process | formal procedure for proposing gaps against existing standards |
+| Technical Standard Proposal Process | methodology for creating new technical standards |
+
+**Templates:**
+
+| Document | Latest | Purpose |
+| :- | :- | :- |
+| Gap Analysis Template | v3.3 (2023-02-28) | standardizes documentation of gaps in current standards |
+| Recommended Practices/Guidelines Template | May 2020 | structure for developing implementation guidance |
+| Technical Standard Proposal Template | May 2020 | framework for proposing new technical standards |
+
+**Relevance to zix.Fix:** not applicable. These are governance materials for the FIX standards body.
+
