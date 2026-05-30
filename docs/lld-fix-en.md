@@ -66,19 +66,24 @@ serveConn(stream, io, comp_id, opts):
 
         switch msg_type:
             "A" -> buildMessage(logon reply, sender/target swapped, seq=1)
-                   writer.writeAll; writer.flush
+                   writer.writeAll
+                   writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "Logon")
             "5" -> buildMessage(logout reply)
-                   writer.writeAll; writer.flush
+                   writer.writeAll
+                   writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "Logout")
                    return
             "0" -> buildMessage(heartbeat reply)
-                   writer.writeAll; writer.flush
+                   writer.writeAll
+                   writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "Heartbeat")
             "1" -> buildMessage(heartbeat reply)
-                   writer.writeAll; writer.flush
+                   writer.writeAll
+                   writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "TestRequest")
-            _   -> writer.writeAll(raw); writer.flush
+            _   -> writer.writeAll(raw)
+                   writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "msg")
 
         shift leftover bytes: recv_buf[0..] = recv_buf[end..recv_len]

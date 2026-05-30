@@ -10,7 +10,7 @@ const Logger = @import("../../../logger/logger.zig").Logger;
 /// Pass to Grpc.Server.init(). Fields without defaults (io, ip, port) are required.
 /// No allocator field — the server uses smp_allocator internally.
 pub const GrpcServerConfig = struct {
-    /// Io backend for the server. Caller-provided; must outlive the server.
+    /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
     /// Bind address.
     ip: []const u8,
@@ -38,7 +38,7 @@ pub const GrpcServerConfig = struct {
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
-    /// and logger.rpc() for each gRPC stream dispatched. Caller owns; must outlive the server.
+    /// and logger.rpc() for each gRPC stream dispatched. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
     /// Global handler timeout cap (milliseconds). 0 = disabled.
     /// When non-zero, each gRPC stream dispatch sets GrpcContext.deadline_ns to

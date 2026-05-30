@@ -43,7 +43,7 @@ pub const ParsedHead = struct {
     method: Method.Code,
     path_start: u16,
     path_len: u16,
-    query_start: u16, // 0 when no query string; check query_len instead
+    query_start: u16, // 0 when no query string. Check query_len instead.
     query_len: u16,
     header_count: u8,
     headers: [MAX_HEADERS]HeaderEntry,

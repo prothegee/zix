@@ -77,7 +77,7 @@ const TestPacket = extern struct {
 
 // RFC 768: these tests verify correct wire-format encoding/decoding of packet fields.
 // Endianness discipline is required for cross-language interoperability (Go, C++, Rust, etc.).
-// All integer and float fields must be swapped; u8 arrays (e.g. id) must not be touched.
+// All integer and float fields must be swapped. u8 arrays (e.g. id) must not be touched.
 
 test "zix test: toEndian, NATIVE is a no-op" {
     const pkt = TestPacket{ .id = "abcd".*, .value = 42, .ratio = 1.5, .coords = .{ 1.0, -2.0 } };
