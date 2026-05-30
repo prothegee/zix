@@ -1,0 +1,810 @@
+# HLD: zix.Http
+
+HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
+
+---
+
+## Tujuan
+
+### Server
+- Eksplisit lebih utama dari implisit: tidak ada magic, setiap perilaku dinamai dalam config atau registrasi.
+- Satu berkas, satu tanggung jawab.
+- Indirection minimal pada hot path.
+- Tidak ada alokasi tersembunyi di dalam handler.
+- Routing yang dapat diprediksi: prioritas dispatch bersifat deterministik.
+
+### Client
+- Konfigurasi eksplisit: allocator, io, timeout, batas body, dan kebijakan redirect semuanya dinamai.
+- Response bertipe: status code, pencarian header, dan bytes body semuanya dimiliki oleh pemanggil.
+- Error yang dinamai: `InvalidUrl`, `BodyTooLarge` muncul sebelum pemanggil harus memeriksa error stdlib.
+- Tidak ada alokasi tersembunyi: setiap alokasi menggunakan allocator yang disuplai pemanggil.
+
+---
+
+## Model Runtime
+
+Empat model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.POOL`.
+
+### .POOL: Work-Queue Thread Pool (default)
+
+```mermaid
+flowchart TD
+    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
+    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) -> queue.push(stream)"]
+    SPAWN --> POOL["Pool thread\nqueue.pop()\nhandleConnection(stream)"]
+    ACC --> ACC
+    POOL --> HC["handleConnection()"]
+    HC --> G["stack/heap read_buf + write_buf"]
+    G --> H["std.http.Server.init()"]
+    H --> I["ArenaAllocator per-connection"]
+    I --> J["keep-alive loop"]
+    J --> K["receiveHead()"]
+    K -->|close or reset| Z["stream.close()"]
+    K --> L["build Request + Response + Context"]
+    L --> M["Router.dispatch()"]
+    M -->|matched| N["HandlerFn"]
+    M -->|no match| O{"public_dir set?"}
+    O -->|yes| P["static.serve()"]
+    O -->|no| Q["404 Not Found"]
+    P -->|file not found| Q
+    N --> J
+    P --> J
+    Q --> J
+```
+
+- Accept thread hanya memanggil `accept()` dan mendorong koneksi ke `ConnQueue` yang dipakai bersama. Accept thread tidak pernah menangani I/O.
+- Pool thread mengambil dan menangani setiap koneksi dengan I/O blocking sinkron (tanpa overhead `io.async()`).
+- Default: cpu_count accept thread, `max(10, cpu_count * 2)` pool thread.
+- `workers` dan `pool_size` mengatur jumlah thread. Lihat `HttpServerConfig`.
+
+### .ASYNC: Accept Tunggal, Dispatch io.async()
+
+```mermaid
+flowchart TD
+    MAIN["main()\nServer.run()"] --> D["net_server.accept(io)\nsuspends until TCP connection"]
+    D --> E["io.async(handleConnection)"]
+    E --> D
+    E --> F["handleConnection()"]
+    F --> G["stack/heap read_buf + write_buf"]
+    G --> H["std.http.Server.init()"]
+    H --> I["ArenaAllocator per-connection"]
+    I --> J["keep-alive loop"]
+    J --> K["receiveHead()"]
+    K -->|close or reset| Z["stream.close()"]
+    K --> L["build Request + Response + Context"]
+    L --> M["Router.dispatch()"]
+    M -->|matched| N["HandlerFn"]
+    M -->|no match| O{"public_dir set?"}
+    O -->|yes| P["static.serve()"]
+    O -->|no| Q["404 Not Found"]
+    P -->|file not found| Q
+    N --> J
+    P --> J
+    Q --> J
+```
+
+- Satu accept thread. Setiap koneksi di-dispatch sebagai task konkuren melalui `io.async()`.
+- `workers` dan `pool_size` diabaikan.
+- Direkomendasikan untuk SSE dan WebSocket: koneksi berumur panjang tidak menahan pool thread.
+
+### .MIXED: N Accept Thread, Dispatch io.async()
+
+- N accept thread (default cpu_count, `SO_REUSEPORT`). Setiap thread men-dispatch koneksi langsung melalui `io.async()` tanpa `ConnQueue`.
+- `pool_size` diabaikan. `workers` mengontrol jumlah accept thread.
+- Throughput dan latency seimbang. Jitter lebih tinggi dibanding `.POOL` saat saturasi.
+
+`zix.Http.Server` menerima nilai `std.Io` yang opak dan tidak memiliki atau memanggil deinit pada backend tersebut. Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk detail jumlah thread dan perbandingan model.
+
+---
+
+## Struktur Berkas
+
+```mermaid
+graph TD
+    zix["src/zix.zig\npublic API root"]
+
+    zix --> Http["tcp/http/Http.zig\nzix.Http"]
+    zix --> Tcp["tcp/Tcp.zig\nzix.Tcp"]
+    zix --> Udp["udp/Udp.zig\nzix.Udp"]
+    zix --> Uds["uds/Uds.zig\nzix.Uds"]
+    zix --> Channel["channel/Channel.zig\nzix.Channel"]
+    zix --> Logger["logger/Logger.zig\nzix.Logger"]
+    zix --> utils["utils/file.zig\nzix.utils.file"]
+    Tcp -.->|re-exports| Http
+
+    Http --> server["server.zig\nServer + ConnQueue"]
+    Http --> config["config.zig\nHttpServerConfig"]
+    Http --> client["client.zig\nHttpClient + ClientResponse"]
+    Http --> client_config["client_config.zig\nHttpClientConfig"]
+    Http --> router["router.zig\nRouter + HandlerFn"]
+    Http --> request["request.zig\nRequest"]
+    Http --> response["response.zig\nResponse + HttpHeader"]
+    Http --> context["context.zig\nContext"]
+    Http --> middleware["middleware.zig"]
+    Http --> static["static.zig"]
+    Http --> upload["upload.zig\nMultipartParser"]
+    Http --> websocket["websocket.zig\nWebSocket"]
+    Http --> method["method.zig\nMethod.Code"]
+    Http --> status["status.zig\nStatus.Code"]
+    Http --> content["content.zig\nContent.Type"]
+
+    Logger --> logger_impl["logger.zig\nLogger + Level\nConsoleMode + Config"]
+    server -.->|optional access log| logger_impl
+```
+
+---
+
+## Dependensi Modul
+
+```mermaid
+graph LR
+    server --> config
+    server --> router
+    server --> request
+    server --> response
+    server --> context
+    server --> static
+
+    client --> client_config
+    client --> method
+
+    router --> request
+    router --> response
+    router --> context
+
+    request --> method
+    response --> status
+
+    static --> content
+    static --> utils_file["utils/file.zig"]
+    upload --> self["self-contained"]
+
+    middleware --> request
+    middleware --> response
+    middleware --> context
+```
+
+---
+
+## API Publik
+
+Diakses melalui `const zix = @import("zix");`
+
+| Simbol | Tipe | Deskripsi |
+| :- | :- | :- |
+| `zix.Http.Server` | struct | Siklus hidup: `init(comptime stack_threshold, comptime routes, config)` / `deinit()` / `run()` |
+| `zix.Http.ServerConfig` | struct | Konfigurasi server (lihat bagian HttpServerConfig) |
+| `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
+| `zix.Http.ClientConfig` | struct | Konfigurasi client (lihat bagian HttpClientConfig) |
+| `zix.Http.ClientResponse` | struct | Response yang telah di-parse: `status` / `header` / `iterateHeaders` / `body` / `deinit` |
+| `zix.Http.ClientRequestOpts` | struct | Opsi per-request: `headers`, `body`, override `connect_timeout_ms` |
+| `zix.Http.Request` | struct | Reader per-request: method, path, query, header, body |
+| `zix.Http.Response` | struct | Writer per-request: send, sendJson, noContent, addHeader, stream |
+| `zix.Http.SseWriter` | struct | Penulis event SSE yang dikembalikan oleh `res.stream()`: writeEvent, writeNamedEvent, comment |
+| `zix.Http.Context` | struct | Konteks per-request: io, allocator, stream (TCP mentah), deadline (anggaran handler opsional), logger (pointer logger opsional) |
+| `zix.Logger` | struct | Logger berkas dan konsol: `init` / `deinit` / `flush` / `system` / `access` |
+| `zix.Logger.Config` | struct | Konfigurasi logger: console, save_path (harus sudah ada, dibuat oleh pemanggil), save_file, level minimum, max_lines |
+| `zix.Logger.Level` | enum(u8) | `DEBUG`(0) `INFO`(1) `WARN`(2) `ERROR`(3) |
+| `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
+| `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
+| `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
+| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) |
+| `zix.Http.RequestHeaderSize` | union(enum) | Batas header request: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
+| `zix.Http.default_user_agent` | `[]const u8` | String user agent client dari `build.zig.zon` (contoh: `"zix/0.1.0"`) |
+| `zix.Http.HeaderSize` | union(enum) | Batas header response: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
+| `zix.Http.ContentType` | enum | Representasi MIME bertipe aman |
+| `zix.Http.Content` | namespace | `typeFromExtension(ext)`, `fromExtension(ext)` |
+| `zix.Http.Multipart` | struct | Parse body `multipart/form-data` |
+| `zix.Http.MultipartField` | struct | `{ name, filename, content_type, data, is_file }` |
+| `zix.Http.WebSocket` | namespace | Parsing frame, handshake, broadcast room |
+| `zix.Http.WebSocket.Opcode` | enum | continuation text binary close ping pong |
+| `zix.Http.WebSocket.Frame` | struct | `{ fin, opcode, payload }` |
+| `zix.Http.WebSocket.Conn` | struct | Handle per-koneksi `{ stream, io }` |
+| `zix.Http.WebSocket.RoomMap` | struct | Registri room bernama: init / join / leave / broadcast / deinit |
+| `zix.Http.WebSocket.parseFrame` | fn | Parse satu frame dari buffer byte, mengembalikan `?ParseResult` |
+| `zix.Http.WebSocket.buildFrame` | fn | Serialisasi frame server-ke-client (tanpa mask) |
+| `zix.Http.WebSocket.acceptKey` | fn | Hitung `Sec-WebSocket-Accept` dari `Sec-WebSocket-Key` |
+| `zix.Http.WebSocket.upgrade` | fn | Tulis `101 Switching Protocols` ke `ctx.stream` |
+| `zix.utils.file.save` | fn | Tulis bytes ke `dir/filename`, membuat direktori bila belum ada |
+| `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
+| `zix.Tcp.Http.Status.Code` | enum | Status code HTTP lengkap 1xx--5xx |
+
+---
+
+## HttpServerConfig
+
+```zig
+pub const HttpServerConfig = struct {
+    io:                   ?std.Io           = null,      // caller-provided io backend; null = internal Threaded
+    ip:                   []const u8,
+    port:                 u16,
+    dispatch_model:       DispatchModel     = .POOL,     // POOL (default), ASYNC, MIXED, or EPOLL (Linux-only)
+    max_kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
+    max_client_request:   usize             = 1024 * 4,  // read buffer per connection
+    max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
+    max_client_response:  usize             = 1024 * 4,  // write buffer per connection
+    max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap; requests exceeding -> 431
+    max_response_headers: HeaderSize        = .COMMON,   // custom response header cap, arena-allocated per request
+    public_dir:           []const u8        = "",         // static file root; "" disables static serving
+    public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
+    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard; 0 = disabled; .POOL only
+    handler_timeout_ms:   u32               = 0,          // Layer B: handler budget; 0 = disabled; ctx.isExpired() / ctx.timedOut()
+    workers:              usize             = 0,          // 0 = cpu_count accept threads; ignored by .ASYNC
+    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only
+    logger:               ?*zix.Logger      = null,       // access logger; null = no HTTP access logging
+};
+```
+
+Pemanggil memiliki `io`: `zix.Http.Server` tidak memanggil `deinit` padanya. Tabel route dioper sebagai argumen comptime ke `Server.init` sehingga tidak ada alokasi runtime untuk routing.
+
+Untuk panduan pemilihan batas header dan keamanan, lihat [`docs/headers.md`](headers.md).
+
+---
+
+## Siklus Hidup Koneksi
+
+`.POOL` (default: pool thread menangani koneksi secara sinkron):
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Accept as Accept thread
+    participant Queue as ConnQueue
+    participant Pool as Pool thread
+    participant Router
+    participant Handler as HandlerFn
+    participant Static as static.serve()
+
+    Client->>Accept: TCP connect
+    Accept->>Queue: queue.push(stream)
+    Queue->>Pool: queue.pop() unblocks
+    Note over Accept: immediately back to accept()
+
+    Pool->>Pool: alloc read_buf + write_buf
+    Pool->>Pool: ArenaAllocator init
+
+    loop keep-alive
+        Client->>Pool: HTTP request
+        Pool->>Pool: receiveHead()
+        Pool->>Pool: build Request + Response + Context
+        Pool->>Router: dispatch(req, res, ctx)
+
+        alt route matched
+            Router->>Handler: handler(req, res, ctx)
+            Handler->>Client: HTTP response
+        else no route
+            Router->>Static: serve(req_path, public_dir)
+            alt file found
+                Static->>Client: 200 or 206 response
+            else file not found
+                Static->>Client: 404 Not Found
+            end
+        end
+
+        Pool->>Pool: arena.reset()
+    end
+
+    Client->>Pool: connection close
+    Pool->>Pool: free read_buf + write_buf, arena.deinit()
+    Pool->>Queue: queue.pop() (next connection)
+```
+
+---
+
+## Request
+
+Membungkus `*std.http.Server.Request` dan `*std.Io.Reader` untuk pembacaan body.
+
+| Method | Mengembalikan | Catatan |
+| :- | :- | :- |
+| `method()` | `Method.Code` | Dipetakan dari `std.http.Method` |
+| `path()` | `[]const u8` | Target tanpa query string |
+| `query()` | `[]const u8` | Raw query string setelah `?` |
+| `queryParam(key)` | `?[]const u8` | Satu key dari query string |
+| `queryParams(allocator)` | `![]QueryParam` | Semua query param. Key tanpa nilai memiliki `value = null` |
+| `pathSegments(allocator)` | `![][]const u8` | Segmen tidak kosong yang dipisahkan oleh `/` |
+| `pathParam(name)` | `?[]const u8` | Capture bernama dari param route. null bila tidak ditangkap |
+| `header(name)` | `?[]const u8` | Pencarian case-insensitive. Indeks O(1) dibangun pada pemanggilan pertama |
+| `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode. Di-cache setelah pemanggilan pertama. |
+
+---
+
+## Response
+
+Menyangga status response dan menulis saat `send()` atau padanannya dipanggil.
+
+| Method | Catatan |
+| :- | :- |
+| `setStatus(Status.Code)` | Default: `.OK` |
+| `setContentType(Content.Type)` | Header opt-in, tidak dikirim kecuali diset secara eksplisit |
+| `setKeepAlive(bool)` | Header opt-in, tidak dikirim kecuali diset secara eksplisit |
+| `addHeader(name, value)` | Hingga `max_response_headers` header tambahan. CR/LF ditolak |
+| `send(body)` | Menulis response HTTP/1.1 penuh dan flush |
+| `sendJson(body)` | Menetapkan `content_type = application/json`, lalu memanggil `send` |
+| `noContent()` | Menetapkan status `.NO_CONTENT`, mengirim body kosong |
+| `stream()` | Mengirim header SSE (tanpa `Content-Length`), mengembalikan `SseWriter`. Menetapkan `streaming = true` sehingga loop keep-alive keluar setelah handler kembali |
+
+Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membatasi ukuran header gabungan. `error.BufferTooSmall` dikembalikan jika terlampaui.
+
+### Header otomatis yang dikirim oleh send()
+
+`send()` selalu mengirim `Content-Length` dan `Date`. `Content-Type` dan `Connection` hanya dikirim bila handler menetapkannya secara eksplisit:
+
+| Header | Nilai | Dikirim? |
+| :- | :- | :- |
+| `Content-Type` | dari `setContentType()` | hanya bila `setContentType()` dipanggil (dilewati untuk 204) |
+| `Content-Length` | `body.len` | selalu (dilewati untuk 204 No Content sesuai RFC 7230) |
+| `Connection` | `keep-alive` atau `close` | hanya bila `setKeepAlive()` dipanggil |
+| `Date` | timestamp UTC RFC 7231 | selalu |
+
+**Logika `Connection`** — dikirim hanya bila handler memanggil `setKeepAlive()`:
+- Tidak dikirim sama sekali bila `setKeepAlive()` tidak pernah dipanggil.
+- `keep-alive` bila `setKeepAlive(true)` dipanggil **dan** `req.head.keep_alive` (di-parse dari header request `Connection` client) bernilai true.
+- `close` bila handler memanggil `setKeepAlive(false)` **atau** client mengirim `Connection: close`.
+
+**Logika `Date`** — lintas platform, sadar proxy:
+1. `server.zig` memindai header request satu kali sebelum dispatch untuk nilai `Date` yang diteruskan proxy. Bila ditemukan, disimpan di `res.date_cache`.
+2. Bila tidak ada, `res.date_cache` diisi dari cache date atomik global (diperbarui oleh timer thread setiap 500 ms pada `.POOL`, atau oleh accept loop pada `.ASYNC`). Satu atomic load per request, tanpa syscall clock.
+3. `send()` membaca `res.date_cache` langsung tanpa pemindaian header saat pengiriman.
+4. Format IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
+
+---
+
+## Routing
+
+### Registrasi: tabel route comptime
+
+Route dioper saat kompilasi sebagai argumen kedua ke `Server.init`. Setiap `Route` memiliki `path`, sebuah `handler`, dan `kind` opsional (`RouteKind = .EXACT` sebagai default):
+
+| `kind` | Contoh pola | Perilaku |
+| :- | :- | :- |
+| `.EXACT` (default) | `"/about"` | Cocok hanya bila path penuh sama dengan `path` |
+| `.PREFIX` | `"/api"` | Cocok dengan `path` dan sub-path apapun, BUKAN segmen parsial |
+| `.PARAM` | `"/users/:id"` | Segmen `:name` ditangkap, literal harus cocok persis |
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/about",           .handler = aboutHandler },
+    .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
+    .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
+    .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
+}, .{ .ip = "127.0.0.1", .port = 9000 });
+```
+
+Handler mengakses segmen yang ditangkap melalui `req.pathParam("id")`. Sub-path prefix dibaca melalui `req.path()["/api".len..]`.
+
+### Dispatch: aturan prioritas
+
+```
+Pass 1: exact routes   pencarian hash map O(1)          (urutan registrasi tidak relevan)
+Pass 2: param routes   pola pertama yang cocok menang   (urutan registrasi penting)
+Pass 3: prefix routes  prefix terpanjang yang cocok menang  (urutan registrasi tidak relevan)
+
+exact > param > prefix (prefix lebih panjang mengalahkan prefix lebih pendek)
+```
+
+Pass 1 dan 3 bersifat deterministik terlepas dari urutan registrasi. **Pass 2 adalah pengecualian**: bila dua pola param memiliki jumlah segmen yang sama dan keduanya cocok, yang terdaftar pertama menang. Daftarkan pola yang lebih literal sebelum pola all-param dengan kedalaman yang sama.
+
+```mermaid
+flowchart TD
+    A["dispatch(req, res, ctx)"] --> B["Pass 1: exact_map.get(path) O(1)"]
+    B --> C{"exact match?"}
+    C -->|yes| DONE["call handler, return true"]
+    C -->|no| D["Pass 2: scan param routes\nin registration order"]
+    D --> E{"pattern matches?"}
+    E -->|yes| F["write path_params to req"]
+    F --> DONE
+    E -->|no| G["Pass 3: scan prefix routes\ncollect all that match"]
+    G --> H{"any prefix matched?"}
+    H -->|no| Z["return false"]
+    H -->|yes| I["pick longest prefix"]
+    I --> DONE
+```
+
+### Tabel prioritas
+
+| Route yang terdaftar | Request | Pemenang | Alasan |
+| :- | :- | :- | :- |
+| `/path/info` (exact) + `/path/:id` (param) | `/path/info` | `/path/info` | exact mengalahkan semua |
+| `/path/:id` (param) + `/path` (prefix) | `/path/alice` | `/path/:id` | param mengalahkan prefix |
+| `/api/v2` (prefix) + `/api` (prefix) | `/api/v2/foo` | `/api/v2` | prefix lebih panjang menang |
+| `/path` (prefix) | `/pathfoo` | tidak ada cocok | karakter berikutnya harus `/` atau akhir string |
+| `/path/user/:id` (reg. ke-1) + `/path/:a/:b` (reg. ke-2) | `/path/user/alice` | `/path/user/:id` | lebih banyak literal terdaftar pertama |
+| `/path/:a/:b` (reg. ke-1) + `/path/user/:id` (reg. ke-2) | `/path/user/alice` | `/path/:a/:b` | urutan salah, all-param menang secara tak terduga |
+
+### Pencocokan mirip regex
+
+zix tidak memiliki regex engine. Gunakan `kind = .PREFIX` untuk mencocokkan prefix path. Penyaringan tambahan dilakukan di dalam handler pada `req.path()`.
+
+| Maksud regex | Padanan zix |
+| :- | :- |
+| `/secret/(.*)` | Route `.PREFIX` pada `"/secret"`, sub-path via `req.path()["/secret".len..]` |
+| `/files/.*\.pdf` | Route `.PREFIX` pada `"/files"`, periksa `std.mem.endsWith(u8, sub, ".pdf")` di handler |
+| `/v[0-9]+/.*` | Route `.PREFIX` pada `"/v"`, parse segmen berikutnya dengan `std.fmt.parseInt` |
+
+---
+
+## Berkas Statis
+
+```mermaid
+flowchart TD
+    A["static.serve(req, path, public_dir, io)"] --> B{"path contains '..'?"}
+    B -->|yes| Z["return false, traversal rejected"]
+    B -->|no| C["build full_path = public_dir/path"]
+    C --> D{"file exists?"}
+    D -->|no| Z2["return false"]
+    D -->|yes| E{"Range header present?"}
+    E -->|yes| F["parse Range\n206 Partial Content or 416"]
+    E -->|no| G["200 OK\nstream in 8 KB chunks"]
+    F --> H["return true"]
+    G --> H
+```
+
+- Bila `public_dir` tidak kosong, `Http.Server.run()` memvalidasi direktori saat startup.
+- Directory traversal (`..`) ditolak.
+- Tipe MIME diselesaikan dari ekstensi berkas melalui `zix.Http.Content.typeFromExtension`.
+- Header `Range` didukung: `206 Partial Content` (RFC 7233).
+
+---
+
+## Upload
+
+`zix.Http.Multipart` mem-parse body `multipart/form-data` menjadi field. `zix.utils.file.save` menulis bytes ke disk. Keduanya tidak dihubungkan ke server secara otomatis (handler memanggilnya langsung).
+
+```zig
+var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+defer parser.deinit();
+try parser.parse(try req.body());
+
+if (parser.getField("file")) |f| {
+    const filename = f.filename orelse "upload";
+    const path = try zix.utils.file.save(ctx.io, ctx.allocator, "./public/u", filename, f.data);
+    _ = path; // arena-allocated, valid for this request
+}
+```
+
+---
+
+## Serving Berkas dengan Kontrol Akses
+
+Periksa keberadaan berkas sebelum param agar persyaratan autentikasi tidak terungkap untuk path yang tidak ada.
+
+```mermaid
+flowchart TD
+    A["GET /secret/<file>"] --> B{"file exists?"}
+    B -->|no| C["404 Not Found"]
+    B -->|yes| D{"sec param present and correct?"}
+    D -->|no| E["403 Forbidden"]
+    D -->|yes| F["200 with MIME type"]
+```
+
+| Request | Berkas ada | sec=abc123 | Response |
+| :- | :- | :- | :- |
+| `/secret/file.txt?sec=abc123` | ya | ya | 200 |
+| `/secret/file.txt` | ya | tidak | 403 |
+| `/secret/missing.txt?sec=abc123` | tidak | n/a | 404 |
+
+---
+
+## WebSocket
+
+Broadcast berbasis room mengikuti RFC 6455, diimplementasikan di atas TCP stream mentah yang sudah dipegang server HTTP.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as wsHandler task
+    participant R as RoomMap
+
+    C->>H: GET /ws/:room-id (Upgrade: websocket)
+    H->>H: acceptKey(Sec-WebSocket-Key)
+    H->>C: 101 Switching Protocols
+    H->>R: join(room-id, conn)
+
+    loop frame loop
+        C->>H: WS frame (text/binary/ping/close)
+        alt text or binary
+            H->>R: broadcast(room-id, "[name] payload")
+            R->>C: frame to all room members
+        else ping
+            H->>C: pong frame
+        else close (peer-initiated)
+            H->>C: echo close frame
+        else EOF or RST or error
+            H->>C: best-effort close frame
+        end
+    end
+
+    H->>R: leave(room-id, conn)
+```
+
+### Context.stream
+
+`ctx.stream` adalah `std.Io.net.Stream` mentah untuk koneksi TCP yang aktif. Server selalu menetapkannya sebelum memanggil handler apapun.
+
+- **HTTP handler**: menerima `ctx.stream` yang valid dan tidak boleh menggunakannya.
+- **WebSocket handler**: menggunakan `ctx.stream` setelah `zix.Http.WebSocket.upgrade()` menyerahkan koneksi.
+
+### Context.isExpired / timedOut: anggaran eksekusi handler (Layer B)
+
+Bila `config.handler_timeout_ms > 0`, server menetapkan `ctx.deadline` sebelum setiap dispatch handler. Handler opt-in dengan memanggil `ctx.isExpired()` di antara langkah-langkah yang mahal dan mengembalikan 408 lebih awal alih-alih memblokir pool thread. `ctx.timedOut()` adalah alias dari `ctx.isExpired()`.
+
+```zig
+pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+
+    doStep1(ctx.io); // e.g. DB query, external call
+    if (ctx.isExpired()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    doStep2(ctx.io);
+    if (ctx.isExpired()) {
+        res.setStatus(.REQUEST_TIMEOUT);
+        return res.sendJson("{\"error\":\"timeout\"}");
+    }
+
+    try res.sendJson("{\"result\":\"ok\"}");
+}
+```
+
+`ctx.isExpired()` selalu aman dipanggil: mengembalikan `false` bila `deadline` null (yaitu `handler_timeout_ms == 0`). Pemeriksaan adalah satu kali baca dan bandingkan clock, tanpa syscall bila deadline belum terlampaui.
+
+`ctx.setTimeout(ms)` mengubah `ctx.deadline` di tempat menjadi `now + ms`. Gunakan ini di dalam handler untuk menimpa anggaran global server dengan jendela yang lebih pendek atau lebih panjang:
+
+```zig
+ctx.setTimeout(2_000); // this handler caps itself to 2s regardless of global budget
+```
+
+`ctx.withTimeout(ms)` dan `ctx.withDeadline(ts)` mengembalikan salinan ctx yang dimodifikasi dengan deadline baru (non-mutating, untuk pola sub-anggaran tanpa mengubah deadline penerima).
+
+Untuk connection guard level jaringan (Layer D, `conn_timeout_ms`) lihat ADR-018.
+
+### Pola handler
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
+
+pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    const room_id = req.pathParam("room-id") orelse return;
+    const display_name = req.queryParam("name") orelse "anonymous";
+
+    // extract Sec-WebSocket-Key before upgrade
+    var ws_key: ?[]const u8 = null;
+    var it = req.inner.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-key")) ws_key = h.value;
+    }
+
+    var accept_buf: [64]u8 = undefined;
+    const accept = try zix.Http.WebSocket.acceptKey(ws_key.?, &accept_buf);
+    try zix.Http.WebSocket.upgrade(ctx.stream, ctx.io, accept);
+
+    const conn = try std.heap.smp_allocator.create(zix.Http.WebSocket.Conn);
+    conn.* = .{ .stream = ctx.stream, .io = ctx.io };
+    defer std.heap.smp_allocator.destroy(conn);
+    ws_rooms.join(room_id, conn, ctx.io);
+    defer ws_rooms.leave(room_id, conn, ctx.io);
+
+    _ = display_name; // used in frame loop broadcast prefix
+    // frame loop: read, dispatch, compact buffer ...
+}
+```
+
+### Siklus hidup RoomMap
+
+| Panggilan | Kapan |
+| :- | :- |
+| `RoomMap.init(smp_allocator)` | satu kali di `main()` sebelum `server.run()` |
+| `join(room, conn, io)` | awal setiap WS handler |
+| `leave(room, conn, io)` | di-defer segera setelah join |
+| `broadcast(room, msg, io)` | setiap frame text/binary |
+| `RoomMap.deinit()` | proses shutdown |
+
+---
+
+## SSE (Server-Sent Events)
+
+Push server satu arah melalui HTTP/1.1. Client menggunakan API `EventSource` browser atau `curl -N`. Tidak diperlukan handshake upgrade.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (EventSource)
+    participant H as Handler task
+
+    C->>H: GET /events
+    H->>C: HTTP/1.1 200 OK\nContent-Type: text/event-stream\n...
+    loop event loop
+        H->>C: data: tick 0\n\n
+        H->>C: data: tick 1\n\n
+    end
+    H->>H: handler returns
+    H->>C: TCP close
+    C->>C: auto-reconnect after retry ms
+```
+
+### res.stream()
+
+`res.stream()` mengirim header response SSE (tanpa `Content-Length`) dan mengembalikan `SseWriter`. Koneksi tetap terbuka selama handler menulis event. Saat handler kembali, `handleConnection` melihat `res.streaming == true` dan menutup koneksi alih-alih mengulang untuk request berikutnya.
+
+| Method `SseWriter` | Format wire |
+| :- | :- |
+| `writeEvent(data)` | `data: <data>\n\n` |
+| `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
+| `comment(text)` | `: <text>\n` |
+
+### Persyaratan konkurensi
+
+Koneksi SSE berumur panjang. Thread pool blocking milik `.POOL` akan habis (satu thread per stream terbuka, diblokir selama durasi penuh stream). `.ASYNC` lebih disarankan: setiap koneksi berjalan sebagai task konkuren melalui `io.async()` tanpa menempati pool thread.
+
+### Pola handler
+
+```zig
+pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    const sse = try res.stream();
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "tick {d}", .{i}) catch break;
+        sse.writeEvent(msg) catch break;
+        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(1000), .awake) catch break;
+    }
+}
+```
+
+Lihat `examples/http_sse.zig`.
+
+---
+
+## Middleware
+
+Disusun saat comptime menggunakan fungsi wrapper. Tidak ada alokasi heap, tidak ada runtime chain runner.
+
+```zig
+fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
+    return struct {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
+            const origin = req.header("origin") orelse "";
+            if (!isAllowedOrigin(origin)) {
+                res.setStatus(.FORBIDDEN);
+                try res.sendJson("{\"error\":\"forbidden origin\"}");
+                return;
+            }
+            return next(req, res, ctx);
+        }
+    }.handle;
+}
+```
+
+Susun dari kiri ke kanan: wrapper paling luar berjalan pertama. Route didaftarkan saat kompilasi melalui `Server.init`:
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
+    .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
+```
+
+Setiap nilai `next` yang unik menghasilkan fungsi tersendiri saat comptime. Lihat `examples/http_middleware.zig`.
+
+---
+
+## Model Memori
+
+```mermaid
+graph TD
+    COMPTIME["comptime route table\nzero heap cost"] -->|Router dispatch| ROUTER["Router(routes)\ncomptime zero-size type"]
+    SMP["std.heap.smp_allocator"] -->|per connection| RB["read_buf + write_buf\nfreed on close"]
+    SMP -->|per connection| Arena["ArenaAllocator\nreset per request\ndeinit on close"]
+    Arena -->|per request| REQ["body_cache\nResponse buffers\nhandler allocations\nextra_buf ([]HttpHeader)"]
+    SMP -->|WebSocket| WS["Conn + room list entries\nWS session lifetime"]
+```
+
+| Cakupan | Allocator | Masa hidup | Cocok untuk Arena? |
+| :- | :- | :- | :- |
+| Tabel route | comptime (tanpa biaya heap) | Proses | n/a: konstanta comptime, tidak ada alokasi |
+| Buffer I/O baca/tulis | `smp_allocator` | Koneksi | Tidak: dibebaskan secara individual saat koneksi ditutup |
+| Alokasi per-request | `ArenaAllocator` per-koneksi yang direset setiap request | Request | Ya: sudah by design |
+| `Conn` WebSocket + entri room | `smp_allocator` | Sesi WS | Tidak: dibebaskan secara individual saat sesi berakhir |
+
+---
+
+## Http Client
+
+`zix.Http.Client` membungkus `std.http.Client` dengan konfigurasi eksplisit, error yang dinamai, dan `ClientResponse` yang dimiliki pemanggil.
+
+### HttpClientConfig
+
+```zig
+pub const HttpClientConfig = struct {
+    allocator:           std.mem.Allocator, // owns response body + head copies
+    io:                  std.Io,            // event-loop backend, not owned by client
+    connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
+    follow_redirects:    bool = true,
+    max_redirects:       u8   = 3,
+    user_agent:          []const u8 = zon_options.user_agent, // library version string (e.g. "zix/0.1.0"); "" omits
+};
+```
+
+### Siklus hidup request
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Client as HttpClient
+    participant Std as std.http.Client
+    participant Server as HTTP server
+
+    Caller->>Client: client.get(url, opts)
+    Client->>Client: Uri.parse(url)
+    Client->>Client: Protocol.fromUri(uri)
+    Client->>Std: connectTcpOptions(host, port, .{ timeout })
+    Std->>Server: TCP connect
+    Client->>Std: request(method, uri, .{ connection, redirect_behavior, headers })
+    Client->>Std: sendBodiless() or sendBodyUnflushed() + end()
+    Std->>Server: HTTP request
+    Server->>Std: HTTP response head + body
+    Client->>Client: receiveHead(redirect_buf)
+    Client->>Client: gpa.dupe(head.bytes)
+    Client->>Client: response.reader().allocRemaining(gpa, .limited(max_response_body))
+    Client->>Caller: ClientResponse{ status_code, head_bytes, body_data }
+```
+
+### Error yang dinamai
+
+| Error | Kapan |
+| :- | :- |
+| `error.InvalidUrl` | `Uri.parse` gagal, skema tidak didukung, atau host tidak ada |
+| `error.BodyTooLarge` | body response melebihi `max_response_body` bytes |
+| `error.Timeout` | koneksi TCP melebihi `connect_timeout_ms` (dari `std.Io`) |
+
+Error lain dari `std.http.Client` diteruskan tanpa perubahan (OutOfMemory, ConnectionRefused, dll.).
+
+### Memori ClientResponse
+
+`ClientResponse` memiliki dua alokasi heap, keduanya menggunakan `config.allocator`:
+
+| Field | Sumber | Perlu dibebaskan? |
+| :- | :- | :- |
+| `head_bytes: []u8` | `gpa.dupe(response.head.bytes)` | Ya, melalui `deinit()` |
+| `body_data: []u8` | `body_reader.allocRemaining(gpa, ...)` | Ya bila len > 0, melalui `deinit()` |
+
+Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice yang dikembalikan oleh `status()`, `header()`, `body()` tidak lagi valid.
+
+### Penanganan redirect
+
+- `follow_redirects: true` (default): `std.http.Client` mengikuti hingga `max_redirects` hop secara otomatis. Setiap hop membuka koneksi baru.
+- `follow_redirects: false`: `ClientResponse` membawa response 3xx langsung (pemanggil membaca `header("location")`).
+- Method yang membawa body (POST, PUT, PATCH) yang menerima redirect mengembalikan `error.RedirectRequiresResend` (perilaku std).
+
+### Fitur yang ditangguhkan
+
+| Fitur | Status |
+| :- | :- |
+| Penerapan `response_timeout_ms` | v1: field tersimpan, belum diterapkan |
+| Penerapan `read_timeout_ms` | v1: field tersimpan, belum diterapkan |
+| TLS / HTTPS | di luar cakupan: terminasi TLS dilakukan di lapisan proxy (nginx, HAProxy, Envoy). zix berbicara HTTP biasa di belakang proxy |
+| Reuse koneksi keep-alive pool | diwarisi dari pool `std.http.Client` (aktif secara default) |
+
+---
+
+## Belum Diimplementasikan
+
+| Fitur | Lokasi | Catatan |
+| :- | :- | :- |
+| Chain runner middleware | `middleware.zig` | Pola wrapper comptime adalah pendekatan saat ini |
+| HTTP/2 / TLS (server) | di luar cakupan: terminasi TLS adalah tanggung jawab proxy upstream (nginx, HAProxy, Envoy). zix adalah library backend jaringan dan tidak menghadap internet secara langsung. | n/a |
+| Penerapan timeout response/baca (client) | `client.zig` | Field konfigurasi tersimpan. Pemasangan level IO ditangguhkan |
+
+Untuk desain UDP lihat [`docs/hld-udp-id.md`](hld-udp-id.md). Untuk UDS lihat [`docs/hld-uds-id.md`](hld-uds-id.md).
+
+---
+
+###### end of hld-http
