@@ -114,20 +114,20 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
                 },
                 .ping => {
                     var pong_frame: [128]u8 = undefined;
-                    const plen = zix.Http.WebSocket.buildFrame(&pong_frame, .pong, result.frame.payload);
-                    var wb: [128]u8 = undefined;
-                    var w = ctx.stream.writer(ctx.io, &wb);
-                    w.interface.writeAll(pong_frame[0..plen]) catch break :outer;
-                    w.interface.flush() catch break :outer;
+                    const pong_frame_len = zix.Http.WebSocket.buildFrame(&pong_frame, .pong, result.frame.payload);
+                    var write_buf: [128]u8 = undefined;
+                    var frame_writer = ctx.stream.writer(ctx.io, &write_buf);
+                    frame_writer.interface.writeAll(pong_frame[0..pong_frame_len]) catch break :outer;
+                    frame_writer.interface.flush() catch break :outer;
                 },
                 .close => {
                     // Echo close frame back then exit — RFC 6455 5.5.1
                     var close_frame: [16]u8 = undefined;
                     const clen = zix.Http.WebSocket.buildFrame(&close_frame, .close, &.{});
-                    var wb: [16]u8 = undefined;
-                    var w = ctx.stream.writer(ctx.io, &wb);
-                    w.interface.writeAll(close_frame[0..clen]) catch {};
-                    w.interface.flush() catch {};
+                    var write_buf: [16]u8 = undefined;
+                    var frame_writer = ctx.stream.writer(ctx.io, &write_buf);
+                    frame_writer.interface.writeAll(close_frame[0..clen]) catch {};
+                    frame_writer.interface.flush() catch {};
                     clean_close = true;
                     break :outer;
                 },
@@ -151,10 +151,10 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     if (!clean_close) {
         var close_frame: [16]u8 = undefined;
         const clen = zix.Http.WebSocket.buildFrame(&close_frame, .close, &.{});
-        var wb: [16]u8 = undefined;
-        var w = ctx.stream.writer(ctx.io, &wb);
-        w.interface.writeAll(close_frame[0..clen]) catch {};
-        w.interface.flush() catch {};
+        var write_buf: [16]u8 = undefined;
+        var frame_writer = ctx.stream.writer(ctx.io, &write_buf);
+        frame_writer.interface.writeAll(close_frame[0..clen]) catch {};
+        frame_writer.interface.flush() catch {};
     }
     // defers: ws_rooms.leave -> smp_allocator.destroy(conn)
 }
