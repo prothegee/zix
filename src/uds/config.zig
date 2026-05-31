@@ -8,7 +8,7 @@ const Logger = @import("../logger/logger.zig").Logger;
 /// UDS stream server configuration.
 pub const UdsServerConfig = struct {
     /// Filesystem path for the socket file (max 107 bytes on Linux/macOS).
-    /// Server unlinks this path before binding and again when run() returns.
+    /// Server unlinks this path before binding and again when run() exits.
     path: []const u8,
     /// Backing allocator. Caller owns, must outlive the server.
     allocator: std.mem.Allocator,
