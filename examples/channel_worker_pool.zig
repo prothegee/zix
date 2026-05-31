@@ -8,7 +8,7 @@
 // who is ready first, no fixed assignment.
 //
 // Run:
-//   zig build example-channel_worker_pool && ./zig-out/bin/example-channel_worker_pool
+// zig build example-channel_worker_pool && ./zig-out/bin/example-channel_worker_pool
 
 const std = @import("std");
 const zix = @import("zix");
