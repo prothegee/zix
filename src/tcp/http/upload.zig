@@ -15,7 +15,6 @@ pub const MultipartParser = struct {
     fields: std.ArrayList(MultipartField),
     allocator: std.mem.Allocator,
 
-    /// Brief:
     /// Initialize the multipart parser with the given boundary
     ///
     /// Param:
@@ -32,7 +31,6 @@ pub const MultipartParser = struct {
         };
     }
 
-    /// Brief:
     /// Free all parsed field data and the fields list
     ///
     /// Note:
@@ -44,7 +42,6 @@ pub const MultipartParser = struct {
         self.fields.deinit(self.allocator);
     }
 
-    /// Brief:
     /// Parse the multipart body into individual fields
     ///
     /// Note:
@@ -133,11 +130,10 @@ pub const MultipartParser = struct {
         }
     }
 
-    /// Brief:
     /// Look up a parsed field by name
     ///
     /// Note:
-    /// - Returns null if no field with that name was parsed
+    /// - null if no field with that name was parsed
     ///
     /// Param:
     /// name - []const u8

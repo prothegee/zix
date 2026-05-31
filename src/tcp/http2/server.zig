@@ -160,7 +160,6 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Initialize the HTTP/2 server with the given config.
         ///
         /// Return:
@@ -175,7 +174,6 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
             _ = self;
         }
 
-        /// Brief:
         /// Listen and serve. Routes are baked in at compile time via Server.init.
         ///
         /// Return:

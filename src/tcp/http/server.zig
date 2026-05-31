@@ -245,7 +245,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// Outcome of processing one request: whether the connection may be reused.
         const ReqOutcome = enum { keep_alive, close };
 
-        /// Brief:
         /// Disable Nagle on a socket so each response flushes immediately
         ///
         /// Param:
@@ -261,7 +260,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Process exactly one HTTP request on fd using caller-owned buffers
         ///
         /// Note:
@@ -379,7 +377,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             return if (head.keep_alive) .keep_alive else .close;
         }
 
-        /// Brief:
         /// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
         ///
         /// Note:
@@ -388,7 +385,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///   heap-allocates from smp_allocator otherwise
         /// - Per-connection arena is pre-warmed with max_allocator_size then reset
         ///   with retain_capacity before the loop — first request pays no heap cost
-        /// - Loops calling handleOneRequest until it returns .close
+        /// - Loops calling handleOneRequest until it yields .close
         ///
         /// Param:
         /// stream - std.Io.net.Stream
@@ -436,7 +433,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Accept thread — accepts connections and enqueues them immediately.
         /// Never handles I/O stays in the accept loop at all times.
         ///
@@ -472,7 +468,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Pool thread — pops connections from the queue and handles each one
         /// synchronously with blocking I/O (no scheduler, no fiber overhead).
         /// Exits when the queue is closed and drained.
@@ -482,7 +477,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Accept thread for MIXED dispatch — accepts connections and dispatches each via io.async().
         /// No ConnQueue. The shared io Threaded pool handles scheduling.
         fn asyncWorkerEntry(self: *Self, io: std.Io) void {
@@ -558,7 +552,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// EPOLL dispatch: a single epoll event loop accepts connections and hands
         /// readable sockets to a worker pool. Linux-only.
         ///
@@ -574,7 +567,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// io   - std.Io
         ///
         /// Return:
-        /// !void (returns only on setup failure, otherwise the event loop runs forever)
+        /// - !void (exits only on setup failure, otherwise the event loop runs forever)
         fn runEpoll(self: *Self, io: std.Io) !void {
             const linux = std.os.linux;
             const cfg = self.config;
@@ -667,7 +660,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Initialize the HTTP server with the given config
         ///
         /// Param:
@@ -679,19 +671,17 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             return .{ .config = config };
         }
 
-        /// Brief:
         /// Free registry storage
         pub fn deinit(self: *Self) void {
             self.registry.deinit();
         }
 
-        /// Brief:
         /// Start listening and accepting connections
         ///
         /// Note:
         /// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
         /// - workers = N: exactly N accept threads, same pool sizing formula
-        /// - If config.public_dir is non-empty, validates the directory exists, returns error.PublicDirNotFound if not
+        /// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
         /// - Accept threads listen on the same port via SO_REUSEPORT
         /// - Pool threads handle connections synchronously via a shared work queue
         ///
@@ -814,7 +804,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
 // --------------------------------------------------------- //
 
-/// Brief:
 /// HTTP server — initialize with a comptime stack buffer threshold and comptime route table
 ///
 /// Note:
@@ -837,7 +826,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 /// }, .{ .ip = "0.0.0.0", .port = 8080, ... });
 /// ```
 pub const Server = struct {
-    /// Brief:
     /// Initialize the HTTP server
     ///
     /// Param:

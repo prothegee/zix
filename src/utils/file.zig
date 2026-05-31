@@ -2,11 +2,10 @@
 
 const std = @import("std");
 
-/// Brief:
 /// Get file extension from file path
 ///
 /// Note:
-/// - Returns "" if '.' is not found or if '.' is the last character
+/// - "" if '.' is not found or '.' is the last character
 ///
 /// Param:
 /// fp - []const u8 (file path)
@@ -22,7 +21,6 @@ pub fn extension(fp: []const u8) []const u8 {
     return "";
 }
 
-/// Brief:
 /// Save file data to a directory, creating it if it does not exist
 ///
 /// Param:

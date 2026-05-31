@@ -39,6 +39,13 @@ pub const FixServerConfig = struct {
     /// If no response arrives within another interval, the server sends Logout (35=5) and closes.
     /// Only takes effect after Logon completes. Before Logon, timeout closes silently.
     heartbeat_timeout_ms: u32 = 0,
+    /// Idle connection timeout in milliseconds. 0 = disabled.
+    /// When non-zero and heartbeat_timeout_ms is 0: the connection is closed if no message arrives
+    /// within this interval (no TestRequest is sent before closing).
+    connection_timeout_ms: u32 = 0,
+    /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
+    /// Applied to each routed message dispatch. Per-route Route.timeout_ms overrides this.
+    handler_timeout_ms: u32 = 0,
 };
 
 /// Configuration for a FIX 4.x session client instance.
@@ -102,6 +109,24 @@ test "zix fix: FixServerConfig heartbeat_timeout_ms defaults to zero" {
     const io = threaded.io();
     const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
     try std.testing.expectEqual(@as(u32, 0), cfg.heartbeat_timeout_ms);
+}
+
+test "zix fix: FixServerConfig connection_timeout_ms defaults to zero" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.connection_timeout_ms);
+}
+
+test "zix fix: FixServerConfig handler_timeout_ms defaults to zero" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.handler_timeout_ms);
 }
 
 test "zix fix: FixClientConfig fields" {

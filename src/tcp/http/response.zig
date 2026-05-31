@@ -14,7 +14,7 @@ pub const HttpHeader = struct {
 /// max_response_headers in HttpServerConfig sets the cap. The backing buffer is
 /// arena-allocated lazily on the first addHeader() call — requests that add no
 /// custom headers pay zero allocation cost.
-/// Any addHeader() call beyond the cap returns error.TooManyHeaders.
+/// Any addHeader() call beyond the cap yields error.TooManyHeaders.
 ///
 /// - MINIMAL     (16)  — simple APIs, constrained environments
 /// - COMMON      (32)  — most web applications, single proxy/load balancer (default)

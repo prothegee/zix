@@ -4,18 +4,18 @@
 //! Usage: zig run rnd/udp_server.zig -- [--port <port>]
 //!        --port  bind port (default: 9100)
 //!
-//! NOTE: concurrency model uses process.Init / io.concurrent()
+//! Note: concurrency model uses process.Init / io.concurrent()
 //!       should be configurable later (e.g. std.Thread.spawn for constrained envs)
 //!
-//! NOTE: endianness is native-endian
+//! Note: endianness is native-endian
 //!       must be explicitly configured for cross-language support later
 
 const std = @import("std");
 
 // --------------------------------------------------------- //
 
-// NOTE: native-endian layout, must match client and any foreign client (Go, C++, Rust, etc.)
-// NOTE: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
+// Note: native-endian layout, must match client and any foreign client (Go, C++, Rust, etc.)
+// Note: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
 const TestPacket = extern struct {
     id: [16]u8,
     packet_type: i32,
@@ -35,10 +35,10 @@ const ServerConfig = struct {
     port: u16 = 9100,
     auto_ack: bool = false, // send 0x06 ACK byte back to sender on success
     error_report: bool = false, // send 0x15 NACK byte back to sender on bad packet
-    // NOTE: if auto_echo is true, echoes the received packet as-is back to sender only
+    // Note: if auto_echo is true, echoes the received packet as-is back to sender only
     //       feedback shape (e.g. result struct) should be configurable later
     auto_echo: bool = false,
-    // NOTE: if broadcast is true, relays the received packet to ALL connected clients
+    // Note: if broadcast is true, relays the received packet to ALL connected clients
     //       server stamps the sender's connection index into the id field before relaying —
     //       receivers use the id to distinguish which peer sent the data
     broadcast: bool = true,
@@ -46,7 +46,7 @@ const ServerConfig = struct {
 
 // --------------------------------------------------------- //
 
-// NOTE: UDP has no connection state — the server cannot know a client is gone until silence.
+// Note: UDP has no connection state — the server cannot know a client is gone until silence.
 //       Disconnect detection is purely timeout-based. Worst-case detection delay is
 //       DISCONNECT_TIMEOUT_MS + POLL_TIMEOUT_MS (currently ~7s). Lower DISCONNECT_TIMEOUT_MS
 //       to reduce the window, there is no OS-level signal to hook into (unlike TCP FIN).
@@ -61,8 +61,8 @@ const MAX_BROADCAST_CLIENTS: usize = 64;
 // --------------------------------------------------------- //
 
 // Captures all state needed by processPacket — copy semantics, safe across concurrent tasks.
-// NOTE: socket handle is shared across concurrent tasks, send on UDP is kernel-atomic per datagram
-// NOTE: peers[] is a snapshot of connected client addresses taken at receive time
+// Note: socket handle is shared across concurrent tasks, send on UDP is kernel-atomic per datagram
+// Note: peers[] is a snapshot of connected client addresses taken at receive time
 //       avoids sharing the mutable ClientRecord list across concurrent tasks
 // PERF: peers[MAX_BROADCAST_CLIENTS] is copied by value into every PacketTask — grows with
 //       IpAddress size * MAX_BROADCAST_CLIENTS, reduce cap or switch to heap slice in src/
@@ -77,9 +77,9 @@ const PacketTask = struct {
     sender_index: usize,
 };
 
-// NOTE: index is a monotonic connection counter assigned at first packet from this address.
+// Note: index is a monotonic connection counter assigned at first packet from this address.
 //       It is a PoC-only identity — not stable across reconnects, not collision-safe.
-// NOTE: when identifying clients, how the id is structured, validated, and scoped is the
+// Note: when identifying clients, how the id is structured, validated, and scoped is the
 //       application's responsibility. The transport layer only assigns a transient index.
 const ClientRecord = struct {
     from: std.Io.net.IpAddress,

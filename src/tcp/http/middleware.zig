@@ -4,7 +4,6 @@ const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 
-/// Brief:
 /// Next function to call
 pub const NextFn = *const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void;
 

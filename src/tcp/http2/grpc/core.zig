@@ -37,7 +37,10 @@ pub const GrpcPath = struct {
     method: []const u8,
 };
 
-/// Parse /<package.Service>/<Method> path. Returns null for invalid paths.
+/// Parse /<package.Service>/<Method> path.
+///
+/// Return:
+/// - ?GrpcPath (null for invalid paths)
 pub fn parsePath(path: []const u8) ?GrpcPath {
     if (path.len < 2 or path[0] != '/') return null;
     const rest = path[1..];
@@ -65,8 +68,10 @@ pub const GrpcContext = struct {
     deadline_ns: ?u64 = null,
 
     /// Read the next gRPC message from the buffered request stream.
-    /// Returns null when all client messages are consumed.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
+    ///
+    /// Return:
+    /// - ?[]const u8 (null when all client messages are consumed)
     pub fn recvMessage(self: *GrpcContext) ?[]const u8 {
         const rem = self._body[self._pos..];
         if (rem.len < 5) return null;
@@ -117,19 +122,21 @@ pub const GrpcContext = struct {
 
 /// gRPC handler function type. Called once per inbound gRPC call (h2 stream).
 /// Handler must call ctx.finish() before returning.
+///
 /// Param:
-///   headers - []const h2.Header (request headers)
-///   ctx - *GrpcContext (stream context for sending responses)
+/// headers - []const h2.Header (request headers)
+/// ctx - *GrpcContext (stream context for sending responses)
 pub const HandlerFn = *const fn (
     headers: []const h2.Header,
     ctx: *GrpcContext,
 ) void;
 
 /// gRPC route: exact full path to handler mapping.
+///
 /// Param:
-///   path - []const u8 (full gRPC path, e.g. "/package.Service/Method")
-///   handler - HandlerFn
-///   timeout_ms - u32 (per-route timeout in milliseconds. 0 = use GrpcServerConfig.handler_timeout_ms)
+/// path - []const u8 (full gRPC path, e.g. "/package.Service/Method")
+/// handler - HandlerFn
+/// timeout_ms - u32 (per-route timeout in milliseconds. 0 = use GrpcServerConfig.handler_timeout_ms)
 pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
@@ -138,8 +145,10 @@ pub const Route = struct {
     timeout_ms: u32 = 0,
 };
 
-/// Comptime path router. Returns a zero-size type with a dispatch function.
-/// Dispatches by exact match on path. Sends UNIMPLEMENTED if no route matches.
+/// Comptime path router. Dispatches by exact match on path. Sends UNIMPLEMENTED if no route matches.
+///
+/// Return:
+/// - type (zero-size, with a dispatch function)
 /// Tightens ctx.deadline_ns with Route.timeout_ms when non-zero and shorter than current deadline.
 pub fn Router(comptime routes: []const Route) type {
     return struct {
@@ -199,7 +208,7 @@ const Stream = struct {
 // --------------------------------------------------------- //
 
 /// Serve one gRPC h2c connection (h2c direct or h2c upgrade).
-/// Caller owns fd and must close it after this returns.
+/// Caller owns fd and must close it after this exits.
 pub fn serveGrpcConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
         std.posix.setsockopt(

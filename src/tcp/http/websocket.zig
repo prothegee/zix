@@ -35,7 +35,7 @@ pub const ParseResult = struct {
 /// Note:
 /// - Client->server frames are masked, the unmasked payload is written into payload_buf.
 ///   payload_buf must be at least as large as the expected payload (max 4 KB recommended).
-/// - Returns null if buf does not yet contain a complete frame.
+/// - null if buf does not yet contain a complete frame.
 ///
 /// Param:
 /// buf         - []const u8 (raw bytes from the TCP connection)
@@ -199,7 +199,6 @@ pub const RoomMap = struct {
     mu: std.Io.Mutex,
     allocator: std.mem.Allocator,
 
-    /// Brief:
     /// Initialize the room map
     ///
     /// Param:
@@ -215,7 +214,6 @@ pub const RoomMap = struct {
         };
     }
 
-    /// Brief:
     /// Free all room and connection list storage, including owned-copy room keys
     pub fn deinit(self: *RoomMap) void {
         var it = self.rooms.iterator();
@@ -226,7 +224,6 @@ pub const RoomMap = struct {
         self.rooms.deinit();
     }
 
-    /// Brief:
     /// Add a connection to a room, creating the room if needed
     ///
     /// Note:
@@ -255,7 +252,6 @@ pub const RoomMap = struct {
         std.debug.print("ws: join room='{s}' total={d}\n", .{ room, room_entry.value_ptr.conns.items.len });
     }
 
-    /// Brief:
     /// Remove a connection from its room, removes the room if it becomes empty
     ///
     /// Note:
@@ -293,7 +289,6 @@ pub const RoomMap = struct {
         }
     }
 
-    /// Brief:
     /// Broadcast a text message to all connections in a room
     ///
     /// Note:

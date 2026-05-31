@@ -9,7 +9,7 @@ const CLIENT_REQUEST_BUFFER_SIZE: usize = 1024 * 8;
 // --------------------------------------------------------- //
 
 //
-// NOTE:
+// Note:
 // TESTED with: zig 0.16.0-dev.3006+94355f192
 // consider std.Io.Evented (epoll/kqueue/io_uring) for more burst/high concurrent,
 // but I'm not sure for the next steps for specific platform ()
@@ -1223,7 +1223,7 @@ fn getCurrentTimestamp(io: std.Io) i64 {
 // --------------------------------------------------------- //
 
 //
-// NOTE:
+// Note:
 // - Adding middleware may affect your requests/sec test
 //
 

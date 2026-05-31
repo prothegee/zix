@@ -223,36 +223,51 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 
 // --------------------------------------------------------- //
 
-/// Brief:
 /// FIX 4.x session server. Dispatches connections via POOL, ASYNC, MIXED,
 /// or EPOLL (Linux-only: non-Linux falls back to POOL).
-/// Session logic (Logon, Logout, Heartbeat, echo) is handled by Fix.serveConn.
+/// Session messages (Logon, Logout, Heartbeat, TestRequest) are handled internally.
+/// Application messages are dispatched to registered routes.
 ///
 /// Usage:
 /// ```zig
-/// var server = try FixServer.init(.{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" });
+/// var server = try FixServer.init(
+///     &[_]FixRoute{
+///         .{ .msg_type = "D", .handler = handleOrder },
+///         .{ .msg_type = "F", .handler = handleCancel },
+///     },
+///     .{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" },
+/// );
 /// defer server.deinit();
 /// try server.run();
 /// ```
 pub const FixServer = struct {
     const Self = @This();
 
+    routes: []const core.FixRoute,
     config: FixServerConfig,
 
     // --------------------------------------------------------- //
 
-    /// Brief: Initialize. Returns error.PortNotConfigured if config.port is 0.
-    pub fn init(config: FixServerConfig) !Self {
+    /// Initialize.
+    ///
+    /// Param:
+    /// routes - []const FixRoute (application message route table; pass &.{} for echo-only mode)
+    /// config - FixServerConfig
+    ///
+    /// Return:
+    /// - !Self
+    /// - error.PortNotConfigured if config.port is 0
+    pub fn init(routes: []const core.FixRoute, config: FixServerConfig) !Self {
         if (config.port == 0) return error.PortNotConfigured;
-        return .{ .config = config };
+        return .{ .routes = routes, .config = config };
     }
 
-    /// Brief: No-op — resources released inside run via defer.
+    /// No-op — resources released inside run via defer.
     pub fn deinit(self: *Self) void {
         _ = self;
     }
 
-    /// Brief: Listen and serve FIX sessions using the server's comp_id.
+    /// Listen and serve FIX sessions using the server's comp_id.
     pub fn run(self: *Self) !void {
         const cfg = self.config;
         const io = cfg.io;
@@ -260,6 +275,9 @@ pub const FixServer = struct {
         const conn_opts = FixServeOpts{
             .logger = cfg.logger,
             .heartbeat_timeout_ms = cfg.heartbeat_timeout_ms,
+            .connection_timeout_ms = cfg.connection_timeout_ms,
+            .handler_timeout_ms = cfg.handler_timeout_ms,
+            .routes = self.routes,
         };
 
         switch (cfg.dispatch_model) {
@@ -363,7 +381,6 @@ pub const FixServer = struct {
         }
     }
 
-    /// Brief:
     /// EPOLL dispatch: a single epoll event loop accepts connections and hands
     /// each fd to a worker pool. Each worker runs the full FIX session loop.
     /// Linux-only.
@@ -463,7 +480,7 @@ test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER" }),
+        FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER" }),
     );
 }
 
@@ -472,7 +489,7 @@ test "zix fix: FixServer.init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
+    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
     server.deinit();
 }
 
@@ -481,6 +498,6 @@ test "zix fix: FixServer.init with EPOLL dispatch model succeeds" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try FixServer.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
+    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
     server.deinit();
 }

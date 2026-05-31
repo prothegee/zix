@@ -28,10 +28,6 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 // --------------------------------------------------------- //
 
-// Connects:
-//   zig build example-fix_client
-//   zig build example-fix_client -- --port 9500 --target ZIX
-
 pub fn main(process: std.process.Init) !void {
     // Uncomment this to add logger (console only — no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
@@ -50,7 +46,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Fix.Server.init(.{
+    var server = try zix.Fix.Server.init(&.{}, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

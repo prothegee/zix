@@ -16,7 +16,6 @@ pub const Route = struct {
     kind: RouteKind = .EXACT,
 };
 
-/// Brief:
 /// Build a router type whose dispatch table is fixed at compile time
 ///
 /// Note:
@@ -94,7 +93,6 @@ pub fn Router(comptime routes: []const Route) type {
     const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
 
     return struct {
-        /// Brief:
         /// Dispatch the request to the best matching route
         ///
         /// Note:
