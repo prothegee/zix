@@ -233,7 +233,6 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
             }
         }
 
-        /// Brief:
         /// EPOLL dispatch: a single epoll event loop accepts connections and hands
         /// them to a worker pool. Each worker runs the full gRPC connection loop.
         /// Linux-only.
@@ -334,7 +333,6 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Initialize the gRPC server with the given config.
         ///
         /// Return:
@@ -349,7 +347,6 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
             _ = self;
         }
 
-        /// Brief:
         /// Listen and serve. Routes are baked in at compile time via Server.init.
         ///
         /// Return:
