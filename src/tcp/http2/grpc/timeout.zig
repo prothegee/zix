@@ -8,7 +8,9 @@ const std = @import("std");
 /// Parse a grpc-timeout header value to nanoseconds.
 /// Unit characters: H (hours), M (minutes), S (seconds),
 /// m (milliseconds), u (microseconds), n (nanoseconds).
-/// Returns null on invalid format.
+///
+/// Return:
+/// - ?u64 (null on invalid format)
 pub fn parseTimeout(value: []const u8) ?u64 {
     if (value.len < 2) return null;
     const unit_char = value[value.len - 1];
