@@ -1,5 +1,5 @@
 //! Edge tests: zix.Http.Router dispatch boundary conditions.
-//! Verifies: no-match returns false, and a prefix does NOT match a path that
+//! Verifies: no-match yields false, and a prefix does NOT match a path that
 //! merely starts with the same characters but is a different segment.
 
 const std = @import("std");
