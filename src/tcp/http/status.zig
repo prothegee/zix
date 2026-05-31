@@ -82,7 +82,6 @@ pub const Code = enum(u16) {
 
     // --------------------------------------------------------- //
 
-    /// Brief:
     /// Get string from enum
     ///
     /// Note:
@@ -168,7 +167,6 @@ pub const Code = enum(u16) {
             .NETWORK_AUTHENTICATION_REQUIRED => "Network Authentication Required",
         };
     }
-    /// Brief:
     /// Get self object as string
     ///
     /// Return:
@@ -180,13 +178,12 @@ pub const Code = enum(u16) {
 
 // --------------------------------------------------------- //
 
-/// Brief:
 /// Get enum from string
 ///
 /// Note:
 /// - If not match, it will return Code.IM_A_TEAPOT
 ///
-/// Params:
+/// Param:
 /// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
@@ -394,7 +391,6 @@ pub fn enumFromString(status_string: []const u8) Code {
     return Code.IM_A_TEAPOT;
 }
 
-/// Brief:
 /// Get string from enum
 ///
 /// Note:
@@ -482,12 +478,11 @@ pub fn stringFromEnum(status_enum: Code) []const u8 {
     };
 }
 
-/// Brief:
 /// Pre-built complete status line for the hot-path response writer
 ///
 /// Note:
-/// - Returns "HTTP/1.1 NNN Reason\r\n" verbatim for common status codes
-/// - Returns empty slice ("") for uncommon codes — caller falls back to bufPrint
+/// - "HTTP/1.1 NNN Reason\r\n" verbatim for common status codes
+/// - "" for uncommon codes — caller falls back to bufPrint
 /// - Reason phrases match stringFromEnum() so behavior is unchanged for clients
 pub fn statusLine(c: Code) []const u8 {
     return switch (c) {
