@@ -21,9 +21,11 @@ pub const GrpcClientResponse = union(enum) {
 /// gRPC h2c client. One TCP connection, sequential calls.
 ///
 /// Usage:
-///   var client = try GrpcClient.connect(.{ .ip = "127.0.0.1", .port = 8083 }, io);
-///   defer client.deinit();
-///   const data = try client.unary("/pkg.Svc/Method", "application/grpc+proto", req, &buf);
+/// ```zig
+/// var client = try GrpcClient.connect(.{ .ip = "127.0.0.1", .port = 8083 }, io);
+/// defer client.deinit();
+/// const data = try client.unary("/pkg.Svc/Method", "application/grpc+proto", req, &buf);
+/// ```
 pub const GrpcClient = struct {
     const Self = @This();
 
@@ -38,7 +40,10 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Connect to a gRPC h2c server and perform the HTTP/2 preface exchange.
-    /// Returns error.PortNotConfigured if config.port is 0.
+    ///
+    /// Return:
+    /// - !Self
+    /// - error.PortNotConfigured if config.port is 0
     pub fn connect(config: GrpcClientConfig, io: std.Io) !Self {
         if (config.port == 0) return error.PortNotConfigured;
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
@@ -79,7 +84,9 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Open a new h2 stream and send the initial gRPC request headers.
-    /// Returns the stream ID for subsequent sendMessage / recvResponse calls.
+    ///
+    /// Return:
+    /// - !u31 (stream ID for subsequent sendMessage / recvResponse calls)
     pub fn openStream(self: *Self, path: []const u8, content_type: []const u8) !u31 {
         const sid = self.next_sid;
         self.next_sid += 2;
@@ -131,8 +138,10 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Receive the next event on the specified stream.
-    /// Returns .data for each gRPC response message, .status for the trailer.
     /// Handles SETTINGS, WINDOW_UPDATE, and PING frames transparently.
+    ///
+    /// Return:
+    /// - !GrpcClientResponse (.data for each gRPC response message, .status for the trailer)
     pub fn recvResponse(self: *Self, sid: u31, buf: []u8) !GrpcClientResponse {
         while (true) {
             const fh = try h2.readFrameHeader(self.fd);
@@ -191,7 +200,9 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Unary call: send one message, receive one response.
-    /// Returns a slice into buf containing the response message payload.
+    ///
+    /// Return:
+    /// - ![]const u8 (slice into buf containing the response message payload)
     pub fn unary(
         self: *Self,
         path: []const u8,
