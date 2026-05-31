@@ -82,8 +82,7 @@ pub fn UdpClient(comptime Packet: type) type {
             try self.socket.send(self.io, &self.dest, std.mem.asBytes(&wire));
         }
 
-        /// Blocking receive — returns the next FeedbackResult from the server.
-        /// Decodes the packet from wire endianness on receipt.
+        /// Blocking receive. Decodes the packet from wire endianness on receipt.
         ///
         /// Return:
         /// - error.UnexpectedPacketSize if the datagram size matches neither ACK/NACK nor Packet
