@@ -16,10 +16,12 @@ pub const HandlerFn = *const fn (stream: std.Io.net.Stream, io: std.Io) void;
 /// UDS stream server. Accepts connections and dispatches each via io.concurrent.
 ///
 /// Usage:
-///   var server = try UdsServer.init(config);
-///   defer server.deinit();
-///   try server.run(io);               // default echo handler
-///   try server.runWith(io, myFn);     // custom handler
+/// ```zig
+/// var server = try UdsServer.init(config);
+/// defer server.deinit();
+/// try server.run(io);               // default echo handler
+/// try server.runWith(io, myFn);     // custom handler
+/// ```
 pub const UdsServer = struct {
     const Self = @This();
 
@@ -27,7 +29,11 @@ pub const UdsServer = struct {
 
     // --------------------------------------------------------- //
 
-    /// Initialize the server. Returns error.PathEmpty if config.path is empty.
+    /// Initialize the server.
+    ///
+    /// Return:
+    /// - !Self
+    /// - error.PathEmpty if config.path is empty
     pub fn init(config: UdsServerConfig) !Self {
         if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
         if (config.path.len == 0) return error.PathEmpty;
