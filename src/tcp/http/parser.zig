@@ -2,7 +2,7 @@
 //!
 //! Pure zero-copy HTTP/1.1 request parser.
 //! No I/O, no allocation. All output fields are byte offsets into the caller's buffer.
-//! parse() returns null when the buffer does not yet contain a complete header block.
+//! parse() yields null when the buffer does not yet contain a complete header block.
 
 const std = @import("std");
 const Method = @import("method.zig");
