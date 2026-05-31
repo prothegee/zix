@@ -9,8 +9,8 @@ const COMP_ID: []const u8 = "CLIENT";
 // --------------------------------------------------------- //
 
 // Usage:
-//   zig build example-fix_client
-//   zig build example-fix_client -- --port 9500 --target ZIX
+// zig build example-fix_client_raw
+// zig build example-fix_client_raw -- --port 9500 --target ZIX
 
 pub fn main(process: std.process.Init) !void {
     var ip: []const u8 = DEFAULT_IP;
@@ -52,7 +52,7 @@ pub fn main(process: std.process.Init) !void {
             .{ .tag = .EncryptMethod, .value = "0" },
             .{ .tag = .HeartBtInt, .value = "30" },
         };
-        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "A", &extra);
+        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.Logon, &extra);
         seq_out += 1;
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
@@ -65,7 +65,7 @@ pub fn main(process: std.process.Init) !void {
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msgtype, "A")) return error.ExpectedLogon;
+        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logon)) return error.ExpectedLogon;
         std.debug.print("client: recv Logon from server\n", .{});
     }
 
@@ -79,7 +79,7 @@ pub fn main(process: std.process.Init) !void {
             .{ .tag = .OrdType, .value = "2" },
             .{ .tag = .Price, .value = "150.00" },
         };
-        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "D", &extra);
+        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.NewOrderSingle, &extra);
         seq_out += 1;
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
@@ -100,7 +100,7 @@ pub fn main(process: std.process.Init) !void {
 
     // Logout
     {
-        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, "5", &.{});
+        const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.Logout, &.{});
         seq_out += 1;
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
@@ -113,7 +113,7 @@ pub fn main(process: std.process.Init) !void {
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msgtype, "5")) return error.ExpectedLogout;
+        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logout)) return error.ExpectedLogout;
         std.debug.print("client: recv Logout — session complete\n", .{});
     }
 }
