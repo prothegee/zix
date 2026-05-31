@@ -253,10 +253,12 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 /// TCP stream server. Dispatches connections via POOL, ASYNC, MIXED, or EPOLL (Linux-only: non-Linux falls back to POOL).
 ///
 /// Usage:
-///   var server = try TcpServer.init(config);
-///   defer server.deinit();
-///   try server.run(io);               // built-in echo handler
-///   try server.runWith(io, myFn);     // custom handler
+/// ```zig
+/// var server = try TcpServer.init(config);
+/// defer server.deinit();
+/// try server.run(io);               // built-in echo handler
+/// try server.runWith(io, myFn);     // custom handler
+/// ```
 pub const TcpServer = struct {
     const Self = @This();
 
@@ -264,7 +266,11 @@ pub const TcpServer = struct {
 
     // --------------------------------------------------------- //
 
-    /// Initialize. Returns error.PortNotConfigured if config.port is 0.
+    /// Initialize.
+    ///
+    /// Return:
+    /// - !Self
+    /// - error.PortNotConfigured if config.port is 0
     pub fn init(config: TcpServerConfig) !Self {
         if (config.port == 0) return error.PortNotConfigured;
         return .{ .config = config };
@@ -381,7 +387,6 @@ pub const TcpServer = struct {
         }
     }
 
-    /// Brief:
     /// EPOLL dispatch: a single epoll event loop accepts connections and hands
     /// each fd to a worker pool. Each worker runs the handler for the full
     /// connection lifetime. Linux-only.
