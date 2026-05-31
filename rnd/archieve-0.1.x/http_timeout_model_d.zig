@@ -37,33 +37,32 @@ const std = @import("std");
 
 //
 // Registry lifecycle with Option D:
-//
-//   Server starts
-//     |
-//     +-- spawn timer thread (timerLoop)
-//     |
-//   accept()
-//     |
-//     v
-//   ConnEntry { stream, deadline, done=false }
-//   registry.register(&entry)          <-- mutex lock/unlock
-//     |
-//     v
-//   handleConnection loop
-//     |
-//     +-- receiveHead() / dispatch() / send()
-//     |
-//     |        [every 500ms, timer thread]
-//     |        registry.evict()
-//     |          for each entry:
-//     |            if !done and now >= deadline:
-//     |              stream.shutdown(.both)
-//     |
-//   loop exit
-//     |
-//   defer registry.deregister(&entry)  <-- marks done=true, removes from list
-//     |
-//   stream.close()
+// Server starts
+//   |
+//   +-- spawn timer thread (timerLoop)
+//   |
+// accept()
+//   |
+//   v
+// ConnEntry { stream, deadline, done=false }
+// registry.register(&entry)          <-- mutex lock/unlock
+//   |
+//   v
+// handleConnection loop
+//   |
+//   +-- receiveHead() / dispatch() / send()
+//   |
+//   |        [every 500ms, timer thread]
+//   |        registry.evict()
+//   |          for each entry:
+//   |            if !done and now >= deadline:
+//   |              stream.shutdown(.both)
+//   |
+// loop exit
+//   |
+// defer registry.deregister(&entry)  <-- marks done=true, removes from list
+//   |
+// stream.close()
 //
 
 // --------------------------------------------------------- //
