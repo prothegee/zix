@@ -63,7 +63,6 @@ pub const Type = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// Brief:
     /// Get self object string from enum
     ///
     /// Note:
@@ -131,7 +130,6 @@ pub const Type = enum(u8) {
             .FONT_WOFF2 => "font/woff2",
         };
     }
-    /// Brief:
     /// Get self object as a string
     ///
     /// Return:
@@ -141,13 +139,12 @@ pub const Type = enum(u8) {
     }
 };
 
-/// Brief:
 /// Get enum from string
 ///
 /// Note:
 /// - If not match, it will return NA
 ///
-/// Params:
+/// Param:
 /// type_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
@@ -307,7 +304,6 @@ pub fn enumFromString(type_string: []const u8) Type {
     return Type.NA;
 }
 
-/// Brief:
 /// Get string from enum
 ///
 /// Note:
@@ -377,12 +373,11 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
     };
 }
 
-/// Brief:
 /// Get Content.Type enum from a file extension
 ///
 /// Note:
 /// - Case-insensitive
-/// - Returns .APPLICATION_OCTET_STREAM for unknown extensions
+/// - .APPLICATION_OCTET_STREAM for unknown extensions
 ///
 /// Param:
 /// ext - []const u8 (without leading dot, e.g. "html", "png")
@@ -431,12 +426,11 @@ pub fn typeFromExtension(ext: []const u8) Type {
     return .APPLICATION_OCTET_STREAM;
 }
 
-/// Brief:
 /// Get MIME type string from a file extension
 ///
 /// Note:
 /// - Case-insensitive
-/// - Returns "application/octet-stream" for unknown extensions
+/// - "application/octet-stream" for unknown extensions
 /// - Convenience wrapper around typeFromExtension().asString()
 ///
 /// Param:
