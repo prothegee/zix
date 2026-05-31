@@ -1,6 +1,6 @@
 // Usage:
-//   zig run examples/udp_client.zig -- --bind-port 9101 --server-port 9100
-//   zig run examples/udp_client.zig -- --bind-port 9102 --server-port 9100
+// zig run examples/udp_client.zig -- --bind-port 9101 --server-port 9100
+// zig run examples/udp_client.zig -- --bind-port 9102 --server-port 9100
 //
 // Run multiple instances with different --bind-port values to observe broadcast.
 // Each client will receive packets relayed from all other connected clients.
@@ -39,9 +39,9 @@ const MyClient = zix.Udp.Client(Packet);
 const ReceiveCapture = struct { client: *MyClient };
 
 // Persistent receive task — runs for the client's lifetime alongside the send loop.
-// Returns FeedbackResult(Packet): .ack, .nack, or .packet (echo or broadcast relay).
+// Yields FeedbackResult(Packet): .ack, .nack, or .packet (echo or broadcast relay).
 //
-// NOTE: this function must run in a concurrent task, not in the same loop as send().
+// Note: this function must run in a concurrent task, not in the same loop as send().
 //       Calling receiveFeedback() and send() sequentially would cause each to block the other.
 fn receiveLoop(cap: ReceiveCapture) void {
     while (true) {
@@ -73,13 +73,13 @@ pub fn main(process: std.process.Init) !void {
     // CONFIGURABLE mode — reads --bind-port and --server-port from CLI args.
     // Falls back to CLIENT_BIND_PORT / SERVER_PORT if the args are absent.
     // To use fixed ports instead, replace with:
-    //   var client = try MyClient.init(.{
-    //       .server_ip   = SERVER_IP,
-    //       .server_port = SERVER_PORT,
-    //       .bind_port   = CLIENT_BIND_PORT,
-    //       .port_mode   = .REQUIRED,
-    //       ...
-    //   }, io);
+    // var client = try MyClient.init(.{
+    //     .server_ip   = SERVER_IP,
+    //     .server_port = SERVER_PORT,
+    //     .bind_port   = CLIENT_BIND_PORT,
+    //     .port_mode   = .REQUIRED,
+    //     ...
+    // }, io);
     var client = try MyClient.initArgs(.{
         .server_ip = SERVER_IP,
         .server_port = SERVER_PORT,
