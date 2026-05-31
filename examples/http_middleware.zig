@@ -44,7 +44,7 @@ fn isAllowedOrigin(origin: []const u8) bool {
 // If no Origin header is present the request is rejected (403).
 //
 // Usage:
-//   server.registerHandler("/path", withOriginCheck(myHandler));
+// server.registerHandler("/path", withOriginCheck(myHandler));
 fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
         fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
@@ -64,10 +64,10 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 // Returns 401 with WWW-Authenticate on missing or invalid credentials.
 //
 // Usage (standalone):
-//   server.registerHandler("/path", withBasicAuth(myHandler));
+// server.registerHandler("/path", withBasicAuth(myHandler));
 //
 // Usage (composed — origin check runs first):
-//   server.registerHandler("/path", withOriginCheck(withBasicAuth(myHandler)));
+// server.registerHandler("/path", withOriginCheck(withBasicAuth(myHandler)));
 fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
         fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
@@ -132,8 +132,8 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 // Protected by origin check only.
 //
 // curl:
-//   curl -H "Origin: http://localhost" "http://localhost:9003/public"  # 200
-//   curl "http://localhost:9003/public"                                # 403
+// curl -H "Origin: http://localhost" "http://localhost:9003/public"  # 200
+// curl "http://localhost:9003/public"                                # 403
 pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -144,9 +144,9 @@ pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // Protected by origin check then Basic auth (outer wrapper runs first).
 //
 // curl:
-//   curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9003/private"  # 200
-//   curl -H "Origin: http://localhost" "http://localhost:9003/private"                    # 401
-//   curl "http://localhost:9003/private"                                                  # 403
+// curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9003/private"  # 200
+// curl -H "Origin: http://localhost" "http://localhost:9003/private"                    # 401
+// curl "http://localhost:9003/private"                                                  # 403
 pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
