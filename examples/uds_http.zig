@@ -7,14 +7,14 @@
 //                                                               \->[/data handler]
 //
 // Endpoints:
-//   GET /data: one-shot UDS query, returns JSON {"count": N}
-//   GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
+// GET /data: one-shot UDS query, returns JSON {"count": N}
+// GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
 //
 // Run:
-//   zig build example-uds_http && ./zig-out/bin/example-uds_http
-//   curl http://localhost:9200/data
-//   curl -N http://localhost:9200/stream
-//   browser: http://localhost:9200/
+// zig build example-uds_http && ./zig-out/bin/example-uds_http
+// curl http://localhost:9200/data
+// curl -N http://localhost:9200/stream
+// browser: http://localhost:9200/
 
 const std = @import("std");
 const zix = @import("zix");
