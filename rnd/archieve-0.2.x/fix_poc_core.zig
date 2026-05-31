@@ -25,7 +25,9 @@ pub const BuildField = struct {
 // ------------------------------------------------------------------- //
 
 /// Scan buf for the end of the first complete FIX message.
-/// Returns index one past the final SOH of the tag-10 field, or null.
+///
+/// Return:
+/// - ?usize (index one past the final SOH of the tag-10 field, or null)
 pub fn findMessageEnd(buf: []const u8) ?usize {
     var i: usize = 0;
     while (i + 4 <= buf.len) : (i += 1) {
@@ -43,7 +45,10 @@ pub fn findMessageEnd(buf: []const u8) ?usize {
 // ------------------------------------------------------------------- //
 
 /// Parse tag=value fields from a raw FIX message buf.
-/// Fields are zero-copy slices into buf. Returns the number of fields parsed.
+/// Fields are zero-copy slices into buf.
+///
+/// Return:
+/// - !usize (number of fields parsed)
 pub fn parseFields(buf: []const u8, out: []Field) !usize {
     var count: usize = 0;
     var i: usize = 0;
@@ -100,9 +105,11 @@ pub fn verifyChecksum(raw: []const u8) bool {
 // ------------------------------------------------------------------- //
 
 /// Build a complete FIX 4.2 message into out.
-/// sender: our SenderCompID; target: peer TargetCompID; seq: outbound sequence.
-/// msgtype: tag-35 value; extra: additional body fields after the standard header.
-/// Returns the number of bytes written.
+/// sender: our SenderCompID. target: peer TargetCompID. seq: outbound sequence.
+/// msgtype: tag-35 value. extra: additional body fields after the standard header.
+///
+/// Return:
+/// - !usize (number of bytes written)
 pub fn buildMessage(
     out: []u8,
     sender: []const u8,

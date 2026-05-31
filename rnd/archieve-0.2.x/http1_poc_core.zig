@@ -41,8 +41,10 @@ pub const HandlerFn = *const fn (
 
 /// Parse a complete HTTP/1.x request from buf using std.http.HeadParser.
 /// buf must contain the full header block ending with \r\n\r\n.
-/// Returns body_offset (index of first body byte) on success.
 /// All slices in ParsedHead point into buf — zero copy.
+///
+/// Return:
+/// - !struct{ head: ParsedHead, body_offset: usize } (body_offset: index of first body byte)
 pub fn parseHead(buf: []const u8) !struct { head: ParsedHead, body_offset: usize } {
     var hp: std.http.HeadParser = .{};
     const body_offset = hp.feed(buf);
@@ -133,13 +135,18 @@ pub fn getHeader(head: *const ParsedHead, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Percent-decode buf in place. Returns the decoded slice (shorter or same length).
+/// Percent-decode buf in place.
+///
+/// Return:
+/// - []u8 (decoded slice, shorter or same length as buf)
 pub fn percentDecode(buf: []u8) []u8 {
     return std.Uri.percentDecodeInPlace(buf);
 }
 
 /// Parse "bytes=start-end" or "bytes=start-" (open-ended).
-/// Returns null for any invalid or unsatisfiable range.
+///
+/// Return:
+/// - ?Range (null for any invalid or unsatisfiable range)
 pub fn parseRange(val: []const u8, total: u64) ?Range {
     if (!std.mem.startsWith(u8, val, "bytes=")) return null;
     const spec = val[6..];
@@ -405,8 +412,10 @@ pub const RecvHeadResult = struct {
 };
 
 /// Bulk-read into buf until \r\n\r\n is found. pre_filled bytes are already
-/// in buf from a previous iteration (keep-alive leftover). Returns body_offset
-/// (index of first body byte) and total bytes filled.
+/// in buf from a previous iteration (keep-alive leftover).
+///
+/// Return:
+/// - !RecvHeadResult (body_offset: index of first body byte, filled: total bytes read)
 pub fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
     var filled = pre_filled;
     if (filled >= 4) {
@@ -427,8 +436,10 @@ pub fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResul
 }
 
 /// Decode a chunked request body (RFC 9112 7.1). peeked contains bytes already
-/// read past the header (carry-over from recvHead). Returns decoded bytes written
-/// into out. Ignores chunk extensions. Skips trailer section.
+/// read past the header (carry-over from recvHead). Ignores chunk extensions. Skips trailer section.
+///
+/// Return:
+/// - !usize (decoded bytes written into out)
 pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize {
     const Rd = struct {
         fd: std.posix.fd_t,

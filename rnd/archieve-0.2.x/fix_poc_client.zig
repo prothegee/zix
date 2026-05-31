@@ -121,8 +121,10 @@ pub fn main(process: std.process.Init) !void {
 }
 
 /// Read bytes from rd until a complete FIX message is found.
-/// recv_buf is the accumulation buffer; recv_len tracks how many bytes are filled.
-/// Returns a slice into recv_buf containing exactly one complete message.
+/// recv_buf is the accumulation buffer. recv_len tracks how many bytes are filled.
+///
+/// Return:
+/// - ![]const u8 (slice into recv_buf containing exactly one complete message)
 fn recvMessage(
     rd: *std.Io.Reader,
     recv_buf: []u8,
