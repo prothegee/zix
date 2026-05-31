@@ -7,12 +7,13 @@ const hpack = @import("hpack.zig");
 // --------------------------------------------------------- //
 
 /// HTTP/2 handler function type. Called once per completed h2 stream.
+///
 /// Param:
-///   method - []const u8 (HTTP method, e.g. "GET", "POST")
-///   headers - []const hpack.Header (decoded request headers including pseudo-headers)
-///   body - []const u8 (request body, empty for GET)
-///   fd - std.posix.fd_t (connection fd for sending responses)
-///   sid - u31 (HTTP/2 stream id)
+/// method - []const u8 (HTTP method, e.g. "GET", "POST")
+/// headers - []const hpack.Header (decoded request headers including pseudo-headers)
+/// body - []const u8 (request body, empty for GET)
+/// fd - std.posix.fd_t (connection fd for sending responses)
+/// sid - u31 (HTTP/2 stream id)
 pub const HandlerFn = *const fn (
     method: []const u8,
     headers: []const hpack.Header,
@@ -22,16 +23,19 @@ pub const HandlerFn = *const fn (
 ) void;
 
 /// HTTP/2 route: exact path to handler mapping.
+///
 /// Param:
-///   path - []const u8 (e.g. "/", "/echo")
-///   handler - HandlerFn
+/// path - []const u8 (e.g. "/", "/echo")
+/// handler - HandlerFn
 pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
 };
 
-/// Comptime path router. Returns a zero-size type with a dispatch function.
-/// Dispatches by exact match on path. Sends 404 if no route matches.
+/// Comptime path router. Dispatches by exact match on path. Sends 404 if no route matches.
+///
+/// Return:
+/// - type (zero-size, with a dispatch function)
 pub fn Router(comptime routes: []const Route) type {
     return struct {
         pub fn dispatch(
@@ -83,7 +87,7 @@ const Stream = struct {
 // --------------------------------------------------------- //
 
 /// Serve one h2c connection. Takes raw fd extracted by the server dispatch layer.
-/// Caller owns the fd and must close it after this returns.
+/// Caller owns the fd and must close it after this exits.
 pub fn serveConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
         std.posix.setsockopt(
