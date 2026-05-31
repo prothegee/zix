@@ -11,6 +11,7 @@ pub const ClientConfig = @import("config.zig").FixClientConfig;
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 pub const Tag = core.Tag;
+pub const MsgType = core.MsgType;
 pub const Field = core.Field;
 pub const BuildField = core.BuildField;
 
@@ -27,3 +28,9 @@ pub const verifyChecksum = core.verifyChecksum;
 pub const buildMessage = core.buildMessage;
 pub const ServeOpts = core.FixServeOpts;
 pub const serveConn = core.serveConn;
+
+pub const HandlerFn = core.HandlerFn;
+pub const Route = core.FixRoute;
+pub const Context = core.FixContext;
+pub const Router = @import("router.zig").FixRouter;
+pub const wallClockNs = core.wallClockNs;
