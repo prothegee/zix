@@ -16,7 +16,7 @@
 // ```
 //
 // Run:
-//   zig build example-channel_pipeline && ./zig-out/bin/example-channel_pipeline
+// zig build example-channel_pipeline && ./zig-out/bin/example-channel_pipeline
 
 const std = @import("std");
 const zix = @import("zix");
