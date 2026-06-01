@@ -1,6 +1,6 @@
 # Concurrency Models: zix
 
-Four dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Default: `.POOL`.
+Four dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Default: `.ASYNC`.
 
 ---
 
@@ -8,8 +8,8 @@ Four dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    POOL  = 0, // work-queue thread pool (default)
-    ASYNC = 1, // single accept, io.async() dispatch
+    ASYNC = 0, // single accept, io.async() dispatch
+    POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
     EPOLL = 3, // single epoll event loop, Linux-only
 };
@@ -21,7 +21,7 @@ Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (
 
 ---
 
-## .POOL: Work-Queue Thread Pool (default)
+## .POOL: Work-Queue Thread Pool
 
 N accept threads push accepted connections to a shared `ConnQueue`. M pool threads pop
 connections and handle each one synchronously with blocking I/O. `SO_REUSEPORT` allows all
@@ -48,9 +48,8 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 ```
 
 **When to use:**
-- Default for production workloads.
 - Best throughput under high connection counts.
-- `dispatch_model = .POOL` (default, can be omitted).
+- `dispatch_model = .POOL` (explicit).
 - `workers = 0` (default) uses cpu_count accept threads.
 - `workers = N` uses exactly N accept threads.
 - `pool_size = 0` (default) sizes the pool at `max(10, cpu_count * 2)`.
@@ -58,16 +57,16 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 
 **OS requirement:** `SO_REUSEPORT` (Linux >= 3.9, macOS, BSD).
 
-**Example** (default, `examples/http_basic.zig` and others):
+**Example** (`examples/http_basic.zig` with explicit POOL):
 ```zig
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
-        .io = process.io,
-        // dispatch_model = .POOL  (default, can be omitted)
-        // workers        = 0  -> cpu_count accept threads
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads
+        .io             = process.io,
+        .dispatch_model = .POOL,
+        // workers   = 0  -> cpu_count accept threads
+        // pool_size = 0  -> max(10, cpu_count * 2) pool threads
     });
     try server.run();
 }
@@ -279,12 +278,12 @@ try server.run();
 
 | Protocol | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
 | :- | :- | :- | :- | :- |
-| HTTP | yes (default) | yes | yes | yes, Linux-only |
+| HTTP | yes | yes (default) | yes | yes, Linux-only |
 | SSE | not recommended (exhausts pool threads) | yes, preferred | yes | n/a |
 | WebSocket | not recommended (long-lived connections) | yes, preferred | yes | n/a |
 | HTTP/2 (h2c) | yes | yes (default) | yes | n/a |
 | gRPC (h2c) | yes | yes (default) | yes | yes, Linux-only |
-| TCP (raw stream) | yes (default) | yes | yes | yes, Linux-only |
+| TCP (raw stream) | yes | yes (default) | yes | yes, Linux-only |
 | FIX 4.x | yes | yes (default) | yes | yes, Linux-only |
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | yes (io.concurrent() per connection) | n/a | n/a |

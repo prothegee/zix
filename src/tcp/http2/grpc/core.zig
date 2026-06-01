@@ -74,11 +74,11 @@ pub const GrpcContext = struct {
     /// - ?[]const u8 (null when all client messages are consumed)
     pub fn recvMessage(self: *GrpcContext) ?[]const u8 {
         const rem = self._body[self._pos..];
-        if (rem.len < 5) return null;
-        const msg_len = std.mem.readInt(u32, rem[1..5], .big);
-        const total = 5 + @as(usize, msg_len);
+        if (rem.len < frm.grpc_prefix_len) return null;
+        const msg_len = std.mem.readInt(u32, rem[1..frm.grpc_prefix_len], .big);
+        const total = frm.grpc_prefix_len + @as(usize, msg_len);
         if (total > rem.len) return null;
-        const msg = rem[5..total];
+        const msg = rem[frm.grpc_prefix_len..total];
         self._pos += total;
         return msg;
     }
@@ -730,7 +730,7 @@ test "zix grpc: GrpcContext.isExpired past deadline returns true" {
 }
 
 test "zix grpc: GrpcContext.isExpired future deadline returns false" {
-    const far_future: u64 = wallClockNs() + 1_000_000_000_000;
+    const far_future: u64 = wallClockNs() + 1000 * std.time.ns_per_s;
     var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
     try std.testing.expect(!ctx.isExpired());
 }

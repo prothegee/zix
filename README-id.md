@@ -343,9 +343,9 @@ Lihat `examples/http_params.zig` untuk penanganan parameter query dan form. Liha
 
 ### Model Konkurensi
 
-Empat model dispatch, dipilih via `config.dispatch_model` (enum `DispatchModel`, default `.POOL`):
+Empat model dispatch, dipilih via `config.dispatch_model` (enum `DispatchModel`, default `.ASYNC`):
 
-**`.POOL` — work-queue thread pool (default):**
+**`.POOL` — work-queue thread pool:**
 
 N accept thread mendorong koneksi ke `ConnQueue` bersama. M pool thread mengambil dan menangani setiap koneksi secara sinkron dengan blocking I/O — tanpa overhead scheduler. Throughput terbaik di bawah jumlah koneksi tinggi. `SO_REUSEPORT` memungkinkan semua accept thread mendengarkan di port yang sama.
 
@@ -355,7 +355,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
-        // dispatch_model = .POOL (default, bisa dihilangkan)
+        // dispatch_model = .ASYNC (default, bisa dihilangkan)
         // workers        = 0  -> cpu_count accept thread (otomatis)
         // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (otomatis)
     });

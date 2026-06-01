@@ -343,9 +343,9 @@ See `examples/http_params.zig` for query and form parameter handling. See `examp
 
 ### Concurrency Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.POOL`):
+Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.ASYNC`):
 
-**`.POOL` — work-queue thread pool (default):**
+**`.POOL` — work-queue thread pool:**
 
 N accept threads push connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. Best throughput under high connection counts. `SO_REUSEPORT` lets all accept threads listen on the same port.
 
@@ -355,7 +355,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
-        // dispatch_model = .POOL (default, can be omitted)
+        // dispatch_model = .ASYNC (default, can be omitted)
         // workers        = 0  -> cpu_count accept threads (auto)
         // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (auto)
     });

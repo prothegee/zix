@@ -5,6 +5,17 @@ const std = @import("std");
 
 // --------------------------------------------------------- //
 
+const ws_len_max_7bit = 125;
+const ws_len_16bit_marker = 126;
+const ws_len_64bit_marker = 127;
+const ws_len_max_16bit = std.math.maxInt(u16);
+const ws_mask_len: usize = 4;
+const ws_len_64bit_field_size: usize = 8;
+const broadcast_payload_max: usize = 4096;
+const ws_max_frame_header: usize = 10;
+
+// --------------------------------------------------------- //
+
 /// RFC 6455 5.2 — WebSocket opcodes.
 pub const Opcode = enum(u8) {
     continuation = 0x0,
@@ -55,29 +66,29 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     var payload_len: u64 = buf[1] & 0x7F;
     byte_offset += 1;
 
-    if (payload_len == 126) {
+    if (payload_len == ws_len_16bit_marker) {
         if (buf.len < byte_offset + 2) return null;
         payload_len = (@as(u64, buf[byte_offset]) << 8) | buf[byte_offset + 1];
         byte_offset += 2;
-    } else if (payload_len == 127) {
-        if (buf.len < byte_offset + 8) return null;
+    } else if (payload_len == ws_len_64bit_marker) {
+        if (buf.len < byte_offset + ws_len_64bit_field_size) return null;
         payload_len = 0;
-        for (0..8) |i| payload_len = (payload_len << 8) | buf[byte_offset + i];
-        byte_offset += 8;
+        for (0..ws_len_64bit_field_size) |i| payload_len = (payload_len << 8) | buf[byte_offset + i];
+        byte_offset += ws_len_64bit_field_size;
     }
 
-    var mask: [4]u8 = .{ 0, 0, 0, 0 };
+    var mask: [ws_mask_len]u8 = .{ 0, 0, 0, 0 };
     if (masked) {
-        if (buf.len < byte_offset + 4) return null;
-        @memcpy(&mask, buf[byte_offset .. byte_offset + 4]);
-        byte_offset += 4;
+        if (buf.len < byte_offset + ws_mask_len) return null;
+        @memcpy(&mask, buf[byte_offset .. byte_offset + ws_mask_len]);
+        byte_offset += ws_mask_len;
     }
 
     const capped_len: usize = @intCast(@min(payload_len, payload_buf.len));
     if (buf.len < byte_offset + capped_len) return null;
 
     const payload: []const u8 = if (masked) blk: {
-        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % 4];
+        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % ws_mask_len];
         break :blk payload_buf[0..capped_len];
     } else buf[byte_offset .. byte_offset + capped_len];
 
@@ -105,21 +116,21 @@ pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
     buf[byte_offset] = 0x80 | @intFromEnum(opcode);
     byte_offset += 1;
 
-    if (payload.len <= 125) {
+    if (payload.len <= ws_len_max_7bit) {
         buf[byte_offset] = @intCast(payload.len);
         byte_offset += 1;
-    } else if (payload.len <= 65535) {
-        buf[byte_offset] = 126;
+    } else if (payload.len <= ws_len_max_16bit) {
+        buf[byte_offset] = ws_len_16bit_marker;
         buf[byte_offset + 1] = @intCast((payload.len >> 8) & 0xFF);
         buf[byte_offset + 2] = @intCast(payload.len & 0xFF);
         byte_offset += 3;
     } else {
-        buf[byte_offset] = 127;
-        for (0..8) |i| {
+        buf[byte_offset] = ws_len_64bit_marker;
+        for (0..ws_len_64bit_field_size) |i| {
             const shift: u6 = @intCast((7 - i) * 8);
             buf[byte_offset + 1 + i] = @intCast((payload.len >> shift) & 0xFF);
         }
-        byte_offset += 9;
+        byte_offset += 1 + ws_len_64bit_field_size;
     }
 
     @memcpy(buf[byte_offset .. byte_offset + payload.len], payload);
@@ -306,13 +317,13 @@ pub const RoomMap = struct {
 
         const room_ptr = self.rooms.getPtr(room) orelse return;
 
-        const payload = message[0..@min(message.len, 4096)];
-        var frame_buf: [4106]u8 = undefined; // 4096 payload + up to 10 header bytes
+        const payload = message[0..@min(message.len, broadcast_payload_max)];
+        var frame_buf: [broadcast_payload_max + ws_max_frame_header]u8 = undefined;
         const frame_len = buildFrame(&frame_buf, .text, payload);
         const frame_data = frame_buf[0..frame_len];
 
         for (room_ptr.conns.items) |conn| {
-            var write_buf: [4106]u8 = undefined;
+            var write_buf: [broadcast_payload_max + ws_max_frame_header]u8 = undefined;
             var writer = conn.stream.writer(conn.io, &write_buf);
             writer.interface.writeAll(frame_data) catch continue;
             writer.interface.flush() catch continue;

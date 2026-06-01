@@ -15,6 +15,12 @@ const method = @import("method.zig");
 const static = @import("static.zig");
 const parser = @import("parser.zig");
 
+// --------------------------------------------------------- //
+
+const timer_interval_ms: u32 = 500;
+const conn_queue_initial_cap: usize = 16;
+const epoll_max_events: usize = 256;
+
 // Global date cache — updated by a background timer thread (model 2) or the accept loop (model 1).
 // Readers do a single atomic load — no lock, no syscall per request.
 // Double-buffered so the writer never tears a read in progress.
@@ -90,7 +96,7 @@ fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
     while (true) {
         updateDateCache(io);
         registry.evict(io);
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(500), .awake) catch break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(timer_interval_ms), .awake) catch break;
     }
 }
 
@@ -100,7 +106,7 @@ fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
 // Accept threads push accepted streams immediately and never block on handling.
 // Pool threads pop and handle each connection synchronously (blocking I/O, no scheduler).
 // Implemented as a heap-backed ring buffer: push and pop are both O(1).
-// The backing buffer doubles on overflow (initial capacity 16), allocated via smp_allocator.
+// The backing buffer doubles on overflow (initial capacity conn_queue_initial_cap), allocated via smp_allocator.
 const ConnQueue = struct {
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Condition = .init,
@@ -114,7 +120,7 @@ const ConnQueue = struct {
     fn push(self: *ConnQueue, stream: std.Io.net.Stream, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_cap = if (self.buf.len == 0) conn_queue_initial_cap else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.Io.net.Stream, new_cap) catch {
                 self.mutex.unlock(io);
                 stream.close(io);
@@ -618,7 +624,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorkerEntry, .{ self, &queue, epfd, io });
             }
 
-            const max_events = 256;
+            const max_events = epoll_max_events;
             var events: [max_events]linux.epoll_event = undefined;
             while (true) {
                 const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);

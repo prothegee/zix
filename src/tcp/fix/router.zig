@@ -35,7 +35,7 @@ pub fn FixRouter(comptime routes: []const FixRoute) type {
         /// Param:
         /// fields - []const Field (parsed fields from the received FIX message)
         /// ctx - *FixContext (per-connection context)
-        /// server_timeout_ms - u32 (server-wide handler timeout; 0 = disabled)
+        /// server_timeout_ms - u32 (server-wide handler timeout. 0 = disabled)
         pub fn dispatch(fields: []const Field, ctx: *FixContext, server_timeout_ms: u32) void {
             const msgtype = core.getField(fields, .MsgType) orelse return;
             inline for (routes) |route| {
