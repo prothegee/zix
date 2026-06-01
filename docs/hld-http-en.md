@@ -23,9 +23,9 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.POOL`.
+Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
 
-### .POOL: Work-Queue Thread Pool (default)
+### .POOL: Work-Queue Thread Pool
 
 ```mermaid
 flowchart TD
@@ -188,7 +188,7 @@ Access via `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively; non-Linux and non-HTTP/Grpc protocols use `.POOL` automatically) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively; non-Linux and non-HTTP/Grpc protocols use `.POOL` automatically) |
 | `zix.Http.RequestHeaderSize` | union(enum) | Request header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | Client user agent string from `build.zig.zon` (e.g. `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -218,7 +218,7 @@ pub const HttpServerConfig = struct {
     io:                   ?std.Io           = null,      // caller-provided io backend; null = internal Threaded
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel     = .POOL,     // POOL (default), ASYNC, MIXED, or EPOLL (Linux-only)
+    dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
     max_kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_client_request:   usize             = 1024 * 4,  // read buffer per connection
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
@@ -243,7 +243,7 @@ For header cap selection and security guidance see [`docs/headers.md`](headers.m
 
 ## Connection Lifecycle
 
-`.POOL` (default — pool thread handles connection synchronously):
+`.POOL` (pool thread handles connection synchronously):
 
 ```mermaid
 sequenceDiagram
