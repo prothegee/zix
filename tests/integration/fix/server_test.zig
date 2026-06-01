@@ -83,7 +83,7 @@ test "zix integration: FixServer init and deinit do not error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try zix.Fix.Server.init(.{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
+    var server = try zix.Fix.Server.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
     server.deinit();
 }
 
@@ -94,7 +94,7 @@ test "zix integration: FixServer init, port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        zix.Fix.Server.init(.{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER" }),
+        zix.Fix.Server.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER" }),
     );
 }
 

@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+// --------------------------------------------------------- //
+
 pub const MultipartField = struct {
     name: []const u8,
     filename: ?[]const u8,
@@ -15,7 +17,6 @@ pub const MultipartParser = struct {
     fields: std.ArrayList(MultipartField),
     allocator: std.mem.Allocator,
 
-    /// Brief:
     /// Initialize the multipart parser with the given boundary
     ///
     /// Param:
@@ -32,7 +33,6 @@ pub const MultipartParser = struct {
         };
     }
 
-    /// Brief:
     /// Free all parsed field data and the fields list
     ///
     /// Note:
@@ -44,7 +44,6 @@ pub const MultipartParser = struct {
         self.fields.deinit(self.allocator);
     }
 
-    /// Brief:
     /// Parse the multipart body into individual fields
     ///
     /// Note:
@@ -84,12 +83,12 @@ pub const MultipartParser = struct {
             const next_boundary = if (next_start != null and next_end != null) @min(next_start.?, next_end.?) else if (next_start != null) next_start.? else if (next_end != null) next_end.? else break;
 
             const part = body[start .. start + next_boundary];
-            const hend = std.mem.indexOf(u8, part, "\r\n\r\n") orelse {
+            const header_end = std.mem.indexOf(u8, part, "\r\n\r\n") orelse {
                 start = start + next_boundary + (if (next_start != null and next_start.? == next_boundary) boundary_start.len else boundary_end.len);
                 continue;
             };
-            const headers = part[0..hend];
-            const content = part[hend + 4 ..];
+            const headers = part[0..header_end];
+            const content = part[header_end + 4 ..];
 
             var field_name: ?[]const u8 = null;
             var field_filename: ?[]const u8 = null;
@@ -133,11 +132,10 @@ pub const MultipartParser = struct {
         }
     }
 
-    /// Brief:
     /// Look up a parsed field by name
     ///
     /// Note:
-    /// - Returns null if no field with that name was parsed
+    /// - null if no field with that name was parsed
     ///
     /// Param:
     /// name - []const u8

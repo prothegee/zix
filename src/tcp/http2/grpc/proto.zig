@@ -12,7 +12,10 @@ pub const WT_I32: u3 = 5;
 
 // --------------------------------------------------------- //
 
-/// Encode value as unsigned varint into buf. Returns bytes written.
+/// Encode value as unsigned varint into buf.
+///
+/// Return:
+/// - usize (bytes written)
 pub fn encodeVarint(buf: []u8, value: u64) usize {
     var v = value;
     var pos: usize = 0;
@@ -25,7 +28,12 @@ pub fn encodeVarint(buf: []u8, value: u64) usize {
     return pos + 1;
 }
 
-/// Decode unsigned varint from buf. Returns value and bytes consumed.
+/// Decode unsigned varint from buf.
+///
+/// Return:
+/// - !struct{ value: u64, consumed: usize }
+/// - error.UnexpectedEOF if buf ends before the varint terminates
+/// - error.VarintOverflow if the encoded value exceeds 64 bits
 pub fn decodeVarint(buf: []const u8) error{ UnexpectedEOF, VarintOverflow }!struct { value: u64, consumed: usize } {
     var val: u64 = 0;
     var shift: u6 = 0;
@@ -41,8 +49,11 @@ pub fn decodeVarint(buf: []const u8) error{ UnexpectedEOF, VarintOverflow }!stru
     return error.UnexpectedEOF;
 }
 
-/// Encode a LEN field (string or bytes). Returns bytes written.
+/// Encode a LEN field (string or bytes).
 /// Tag encoding: (field_number << 3) | WT_LEN.
+///
+/// Return:
+/// - usize (bytes written)
 pub fn encodeString(field_number: u32, s: []const u8, buf: []u8) usize {
     const tag: u64 = (@as(u64, field_number) << 3) | WT_LEN;
     var pos = encodeVarint(buf, tag);
@@ -51,8 +62,11 @@ pub fn encodeString(field_number: u32, s: []const u8, buf: []u8) usize {
     return pos + s.len;
 }
 
-/// Encode a VARINT field (int32). Returns bytes written.
+/// Encode a VARINT field (int32).
 /// Tag encoding: (field_number << 3) | WT_VARINT.
+///
+/// Return:
+/// - usize (bytes written)
 pub fn encodeInt32(field_number: u32, val: i32, buf: []u8) usize {
     const tag: u64 = (@as(u64, field_number) << 3) | WT_VARINT;
     var pos = encodeVarint(buf, tag);
@@ -60,8 +74,11 @@ pub fn encodeInt32(field_number: u32, val: i32, buf: []u8) usize {
     return pos;
 }
 
-/// Encode a double (f64) field. Wire type WT_I64 (8 bytes, little-endian). Returns bytes written.
+/// Encode a double (f64) field. Wire type WT_I64 (8 bytes, little-endian).
 /// Tag encoding: (field_number << 3) | WT_I64.
+///
+/// Return:
+/// - usize (bytes written)
 pub fn encodeDouble(field_number: u32, val: f64, buf: []u8) usize {
     const tag: u64 = (@as(u64, field_number) << 3) | WT_I64;
     const pos = encodeVarint(buf, tag);
@@ -94,7 +111,10 @@ pub const MessageReader = struct {
         return .{ .buf = buf, .pos = 0 };
     }
 
-    /// Read the next field. Returns null at end of message.
+    /// Read the next field.
+    ///
+    /// Return:
+    /// - !?ProtoField (null at end of message)
     pub fn next(self: *MessageReader) !?ProtoField {
         if (self.pos >= self.buf.len) return null;
         const tag_r = try decodeVarint(self.buf[self.pos..]);
@@ -134,6 +154,7 @@ pub const MessageReader = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix grpc: encodeVarint single byte" {

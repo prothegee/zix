@@ -7,12 +7,12 @@
 //   [u32 payload_len, 4 bytes, native LE] [payload bytes]
 //
 // Run Process A first:
-//   zig build example-uds_server && ./zig-out/bin/example-uds_server
+// zig build example-uds_server && ./zig-out/bin/example-uds_server
 //
 // Then Process B in a second terminal:
-//   zig build example-uds_http && ./zig-out/bin/example-uds_http
-//   curl http://localhost:9200/data
-//   curl -N http://localhost:9200/stream
+// zig build example-uds_http && ./zig-out/bin/example-uds_http
+// curl http://localhost:9200/data
+// curl -N http://localhost:9200/stream
 
 const std = @import("std");
 const zix = @import("zix");
@@ -108,5 +108,5 @@ pub fn main(process: std.process.Init) !void {
     });
     defer server.deinit();
 
-    try server.runWith(process.io, dataHandler);
+    try server.run(process.io, dataHandler);
 }

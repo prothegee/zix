@@ -28,7 +28,7 @@
 //!
 //! Does NOT cover:
 //!   - A client that goes idle mid-keep-alive (deadline passes inside the
-//!     blocking receiveHead(); the check runs only when receiveHead() returns)
+//!     blocking receiveHead(); the check runs only when receiveHead() exits)
 //!   - Handler execution time or slow response drain
 
 const std = @import("std");

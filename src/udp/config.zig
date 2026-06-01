@@ -1,8 +1,10 @@
 //! zix udp config
 
-const Logger = @import("../logger/logger.zig").Logger;
+const std = @import("std");
 
 // --------------------------------------------------------- //
+
+const Logger = @import("../logger/logger.zig").Logger;
 
 /// Port binding mode — governs how the port is sourced at init time.
 /// Validation happens at init(), not at run(). Enforces "explicit over implicit."
@@ -83,8 +85,7 @@ pub const UdpClientConfig = struct {
 };
 
 // --------------------------------------------------------- //
-
-const std = @import("std");
+// --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved and must not be used for binding.
 // init() enforces this — port 0 in config yields error.PortNotConfigured.

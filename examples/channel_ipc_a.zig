@@ -4,17 +4,17 @@
 // After connecting, both sides send and receive independently at different rates.
 //
 // Two threads per process:
-//   writer: sends "A:N" every 600 ms
-//   reader: prints whatever B sends
+// writer: sends "A:N" every 600 ms
+// reader: prints whatever B sends
 //
 // Either side can be stopped (Ctrl-C), the other side detects the closed
 // connection and exits cleanly.
 //
 // Run Process A first:
-//   zig build example-channel_ipc_a && ./zig-out/bin/example-channel_ipc_a
+// zig build example-channel_ipc_a && ./zig-out/bin/example-channel_ipc_a
 //
 // Then Process B in a second terminal:
-//   zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
+// zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
 
 const std = @import("std");
 const zix = @import("zix");
@@ -41,6 +41,7 @@ fn writer(cap: WriterCap) void {
     var write_buf: [256]u8 = undefined;
     var stream_writer = cap.stream.writer(cap.io, &write_buf);
     var counter: u64 = 0;
+
     while (true) {
         var msg_buf: [32]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "A:{d}", .{counter}) catch return;

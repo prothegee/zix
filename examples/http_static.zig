@@ -43,11 +43,11 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 
 // POST /upload
 // Accepts multipart/form-data with two fields:
-//   file  - the file to upload
-//   data  - JSON string: {"userid": 0, "sessionid": "<uuidv7>"}
+// file  - the file to upload
+// data  - JSON string: {"userid": 0, "sessionid": "<uuidv7>"}
 //
 // curl usage:
-//   curl -X POST "http://localhost:9006/upload" \
+// curl -X POST "http://localhost:9006/upload" \
 //     -F "file=@/path/to/file.txt" \
 //     -F 'data={"userid":0,"sessionid":"01944f5a-0000-7000-8000-000000000000"}'
 //
@@ -79,6 +79,7 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
     var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
     defer parser.deinit();
+
     try parser.parse(body);
 
     const file_field = parser.getField("file") orelse {
@@ -126,16 +127,16 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // Serves files from SECRET_DIR with a mandatory access param.
 //
 // Logic (file existence is checked before the param):
-//   1. File not found in SECRET_DIR        -> 404
-//   2. File found, sec param missing/wrong -> 403
-//   3. File found, sec=abc123              -> 200 with MIME type resolved from extension
-//                                            (browser-displayable types render inline,
-//                                             unknown/binary types prompt a download)
+// 1. File not found in SECRET_DIR        -> 404
+// 2. File found, sec param missing/wrong -> 403
+// 3. File found, sec=abc123              -> 200 with MIME type resolved from extension
+//                                           (browser-displayable types render inline,
+//                                           unknown/binary types prompt a download)
 //
 // curl usage:
-//   curl -X GET "http://localhost:9006/secret/file.txt?sec=abc123"
-//   curl -X GET "http://localhost:9006/secret/file.txt"               (-> 403 if file exists)
-//   curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (-> 404)
+// curl -X GET "http://localhost:9006/secret/file.txt?sec=abc123"
+// curl -X GET "http://localhost:9006/secret/file.txt"               (-> 403 if file exists)
+// curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (-> 404)
 pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);

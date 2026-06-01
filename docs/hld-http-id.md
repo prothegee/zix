@@ -23,9 +23,9 @@ HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
 
 ## Model Runtime
 
-Empat model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.POOL`.
+Empat model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.ASYNC`.
 
-### .POOL: Work-Queue Thread Pool (default)
+### .POOL: Work-Queue Thread Pool
 
 ```mermaid
 flowchart TD
@@ -188,7 +188,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.POOL`(0) `.ASYNC`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) |
 | `zix.Http.RequestHeaderSize` | union(enum) | Batas header request: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | String user agent client dari `build.zig.zon` (contoh: `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Batas header response: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -218,7 +218,7 @@ pub const HttpServerConfig = struct {
     io:                   ?std.Io           = null,      // caller-provided io backend; null = internal Threaded
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel     = .POOL,     // POOL (default), ASYNC, MIXED, or EPOLL (Linux-only)
+    dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
     max_kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_client_request:   usize             = 1024 * 4,  // read buffer per connection
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
@@ -243,7 +243,7 @@ Untuk panduan pemilihan batas header dan keamanan, lihat [`docs/headers.md`](hea
 
 ## Siklus Hidup Koneksi
 
-`.POOL` (default: pool thread menangani koneksi secara sinkron):
+`.POOL` (pool thread menangani koneksi secara sinkron):
 
 ```mermaid
 sequenceDiagram

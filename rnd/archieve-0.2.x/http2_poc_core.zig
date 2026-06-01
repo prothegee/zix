@@ -471,7 +471,9 @@ const HUFF_EOS_CODE: u32 = 0x3fffffff;
 const HUFF_EOS_BITS: u5 = 30;
 
 /// Decode a Huffman-encoded byte string into out_buf.
-/// Returns the number of decoded bytes.
+///
+/// Return:
+/// - !usize (number of decoded bytes)
 pub fn huffDecode(src: []const u8, out: []u8) !usize {
     var acc: u64 = 0; // bit accumulator (up to 30 bits needed)
     var bits: u8 = 0; // valid bits in acc (MSB side)
@@ -504,7 +506,10 @@ pub fn huffDecode(src: []const u8, out: []u8) !usize {
     return out_pos;
 }
 
-/// Encode src into out using HPACK Huffman. Returns bytes written.
+/// Encode src into out using HPACK Huffman.
+///
+/// Return:
+/// - !usize (bytes written)
 pub fn huffEncode(src: []const u8, out: []u8) !usize {
     var acc: u64 = 0;
     var bits: u8 = 0;

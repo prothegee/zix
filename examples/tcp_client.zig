@@ -2,7 +2,7 @@
 //
 // Default target: 127.0.0.1:9300 (tcp_server_1_async).
 // Override at runtime:
-//   zig build example-tcp_client -- --ip 127.0.0.1 --port 9301
+// zig build example-tcp_client -- --ip 127.0.0.1 --port 9301
 
 const std = @import("std");
 const zix = @import("zix");

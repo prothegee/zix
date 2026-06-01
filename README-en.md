@@ -26,7 +26,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>No hidden cost. Just clean metal and honest code - predictable by principle</i>
+    <i>No hidden cost. Just clean-metal and honest code - predictable by principle</i>
 </p>
 
 ---
@@ -278,6 +278,8 @@ pub fn main() !void {
 }
 ```
 
+See `examples/http_basic_1_async.zig`, `examples/http_basic_2_pool.zig`, `examples/http_basic_3_mixed.zig`, and `examples/http_basic_4_epoll.zig` for per-dispatch-model minimal servers. See `examples/http_manual_concurrent.zig` for explicit concurrency control via `Io.Threaded`.
+
 <br>
 
 ### Routing
@@ -335,13 +337,15 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 // check extension, depth, query params, headers, etc.
 ```
 
+See `examples/http_params.zig` for query and form parameter handling. See `examples/http_paths.zig` for path parameter routing patterns. See `examples/http_json.zig` for JSON response handling.
+
 <br>
 
 ### Concurrency Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.POOL`):
+Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.ASYNC`):
 
-**`.POOL` — work-queue thread pool (default):**
+**`.POOL` — work-queue thread pool:**
 
 N accept threads push connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. Best throughput under high connection counts. `SO_REUSEPORT` lets all accept threads listen on the same port.
 
@@ -351,7 +355,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
-        // dispatch_model = .POOL (default, can be omitted)
+        // dispatch_model = .ASYNC (default, can be omitted)
         // workers        = 0  -> cpu_count accept threads (auto)
         // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (auto)
     });
@@ -581,6 +585,8 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
+See `examples/http_websocket.zig` for a full working example.
+
 <br>
 
 ### SSE (Server-Sent Events)
@@ -744,6 +750,8 @@ curl -X POST "http://localhost:9005/upload" \
   -F "file=@/path/to/file.txt" \
   -F 'data={"userid":0,"sessionid":"01944f5a-0000-7000-8000-000000000000"}'
 ```
+
+See `examples/http_static.zig` for a full working example including static serving, range requests, and multipart upload.
 
 <br>
 
@@ -966,6 +974,21 @@ var server = try zix.Grpc.Server.init(
 
 Handlers check `ctx.isExpired()` between steps. Override `ctx.deadline_ns` directly for per-call extension: `ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s`. See `examples/grpc_timeout.zig` for the full demo.
 
+| Example | Pattern |
+| :- | :- |
+| `examples/grpc_server_1_async.zig` | gRPC server: ASYNC dispatch |
+| `examples/grpc_server_2_pool.zig` | gRPC server: POOL dispatch |
+| `examples/grpc_server_3_mixed.zig` | gRPC server: MIXED dispatch |
+| `examples/grpc_server_4_epoll.zig` | gRPC server: EPOLL dispatch (Linux-only) |
+| `examples/grpc_client.zig` | gRPC client: unary and streaming |
+| `examples/grpc_multi_server.zig` + `grpc_multi_client.zig` | One port, two services |
+| `examples/grpc_location_server_1_async.zig` | Location service: ASYNC dispatch |
+| `examples/grpc_location_server_2_pool.zig` | Location service: POOL dispatch |
+| `examples/grpc_location_server_3_mixed.zig` | Location service: MIXED dispatch |
+| `examples/grpc_location_server_4_epoll.zig` | Location service: EPOLL dispatch (Linux-only) |
+| `examples/grpc_location_client.zig` | Location service client |
+| `examples/grpc_timeout.zig` | Context timeout: global, per-route, override |
+
 See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation including all 4 RPC type patterns and TLS proxy setup.
 
 <br>
@@ -1028,20 +1051,22 @@ var server = try zix.Tcp.Server.initArgs(.{ .ip = "127.0.0.1", .port = 9300 }, p
 var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }, io, process.minimal.args);
 ```
 
-See `examples/tcp_server_1_async.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
+See `examples/tcp_server_1_async.zig`, `examples/tcp_server_2_pool.zig`, `examples/tcp_server_3_mixed.zig`, `examples/tcp_server_4_epoll.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
 
 <br>
 
 ## FIX 4.x
 
-`zix.Fix` is a FIX 4.x session layer server and client. SOH-delimited (0x01) framing. Session handling (Logon/Logout/Heartbeat) is built in — no handler callback needed.
+`zix.Fix` is a FIX 4.x session layer server and client. SOH-delimited (0x01) framing. Session handling (Logon/Logout/Heartbeat) is built in. Application messages are dispatched to a comptime router or echoed when no routes are registered.
+
+Echo mode (no routing):
 
 ```zig
 const std = @import("std");
 const zix = @import("zix");
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Fix.Server.init(.{
+    var server = try zix.Fix.Server.init(&.{}, .{
         .io                   = process.io,
         .ip                   = "127.0.0.1",
         .port                 = 9500,
@@ -1052,6 +1077,34 @@ pub fn main(process: std.process.Init) !void {
     defer server.deinit();
     try server.run();
 }
+```
+
+Router mode (application message dispatch):
+
+```zig
+fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+    if (ctx.isExpired()) return;
+    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
+    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+        .{ .tag = .Symbol, .value = symbol },
+        .{ .tag = .OrdStatus, .value = "0" },
+    });
+}
+
+var server = try zix.Fix.Server.init(
+    &[_]zix.Fix.Route{
+        .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder, .timeout_ms = 500 },
+    },
+    .{
+        .io             = process.io,
+        .ip             = "0.0.0.0",
+        .port           = 9500,
+        .comp_id        = "BROKER",
+        .dispatch_model = .ASYNC,
+        .handler_timeout_ms    = 200,
+        .connection_timeout_ms = 60_000,
+    },
+);
 ```
 
 `FixClient`:
@@ -1065,14 +1118,14 @@ var client = try zix.Fix.Client.connect(.{
 }, io);
 defer client.deinit(io);
 
-try client.logon(io, 30);                                       // Logon with HeartBtInt=30
-try client.sendMessage(io, "D", &[_]zix.Fix.BuildField{       // NewOrderSingle
+try client.logon(io, 30);
+try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &[_]zix.Fix.BuildField{
     .{ .tag = .ClOrdID,  .value = "order-001" },
     .{ .tag = .Symbol,   .value = "AAPL" },
     .{ .tag = .Side,     .value = "1" },
     .{ .tag = .OrderQty, .value = "100" },
 });
-const msg = try client.recvMessage(io);                         // receive echo
+const msg = try client.recvMessage(io);
 _ = msg;
 try client.logout(io);
 ```
@@ -1085,11 +1138,14 @@ try client.logout(io);
 | `5` (Logout) | Reply with Logout, then close |
 | `0` (Heartbeat) | Reply with Heartbeat |
 | `1` (TestRequest) | Reply with Heartbeat |
-| any other | Echo unchanged |
+| any other (routes non-empty) | Dispatch to matching route handler |
+| any other (routes empty) | Echo unchanged |
+
+**`zix.Fix.MsgType`** — namespace struct of 47 compile-time string constants for FIX MsgType values (FIX 4.0–4.4). Use named constants instead of raw strings: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), etc.
 
 **Dispatch models:** `.ASYNC` (default — FIX sessions are long-lived), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only: single epoll accept loop, pool workers hold each connection for its full lifetime). Non-Linux falls back to `.POOL` automatically.
 
-See `examples/fix_server_1_async.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_client.zig`, and [`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
+See `examples/fix_server_1_async.zig`, `examples/fix_server_2_pool.zig`, `examples/fix_server_3_mixed.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_server_trading.zig`, `examples/fix_client.zig`, `examples/fix_client_raw.zig`, `examples/fix_client_trading.zig`, and [`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
 
 <br>
 

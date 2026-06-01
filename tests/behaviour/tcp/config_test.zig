@@ -6,9 +6,9 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix behaviour: TcpServerConfig, dispatch_model defaults to .POOL" {
+test "zix behaviour: TcpServerConfig, dispatch_model defaults to .ASYNC" {
     const cfg = zix.Tcp.ServerConfig{ .ip = "127.0.0.1", .port = 9300 };
-    try std.testing.expectEqual(zix.Tcp.DispatchModel.POOL, cfg.dispatch_model);
+    try std.testing.expectEqual(zix.Tcp.DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
 test "zix behaviour: TcpServerConfig, kernel_backlog defaults to 4096" {
@@ -56,6 +56,6 @@ test "zix behaviour: TCP frame, header is always exactly 4 bytes" {
     try std.testing.expectEqual(@as(usize, 4), hdr.len);
 }
 
-test "zix behaviour: DispatchModel, POOL is zero value" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.POOL));
+test "zix behaviour: DispatchModel, ASYNC is zero value" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
 }

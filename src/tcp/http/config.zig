@@ -20,8 +20,8 @@ pub const HttpServerConfig = struct {
     /// Bind port. Must be non-zero.
     port: u16,
     /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
-    /// Default: .POOL (throughput-first, pre-warmed blocking thread pool).
-    dispatch_model: DispatchModel = .POOL,
+    /// Default: .ASYNC (single accept thread, io.async() per connection).
+    dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog — maximum pending connections queued by the kernel before accept().
     max_kernel_backlog: usize = 1024 * 4,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.

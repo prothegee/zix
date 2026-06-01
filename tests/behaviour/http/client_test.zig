@@ -47,6 +47,7 @@ test "zix behaviour: ClientResponse.status(), returns status_code field" {
         .allocator = std.testing.allocator,
     };
     defer resp.deinit();
+
     try std.testing.expectEqual(@as(u16, 404), resp.status());
 }
 
@@ -60,6 +61,7 @@ test "zix behaviour: ClientResponse.body(), returns body_data slice" {
         .allocator = std.testing.allocator,
     };
     defer resp.deinit();
+
     try std.testing.expectEqualStrings("hello", resp.body());
 }
 
@@ -72,6 +74,7 @@ test "zix behaviour: ClientResponse.header(), case-insensitive match" {
         .allocator = std.testing.allocator,
     };
     defer resp.deinit();
+
     try std.testing.expectEqualStrings("text/plain", resp.header("content-type").?);
     try std.testing.expectEqualStrings("text/plain", resp.header("CONTENT-TYPE").?);
     try std.testing.expectEqualStrings("text/plain", resp.header("Content-Type").?);

@@ -33,7 +33,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.POOL, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.ASYNC, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
 | `tcp/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -319,7 +319,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `TcpServerConfig` dispatch_model default | `.POOL` (zero value) |
+| `TcpServerConfig` dispatch_model default | `.ASYNC` |
 | `TcpServerConfig` kernel_backlog default | 4096 |
 | `TcpServerConfig` max_msg_len default | 4096 |
 | `TcpServerConfig` workers default | 0 (auto) |
@@ -328,7 +328,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | TCP frame length header | 4-byte big-endian u32 encodes and decodes correctly |
 | TCP frame zero-length payload | encodes as four zero bytes |
 | TCP frame header size | always exactly 4 bytes |
-| `DispatchModel.POOL` is zero value | `@intFromEnum(.POOL) == 0` |
+| `DispatchModel.ASYNC` is zero value | `@intFromEnum(.ASYNC) == 0` |
 
 ### tests/behaviour/http/
 
@@ -377,7 +377,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Buffer size defaults | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` all 4096 |
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` defaults to `.POOL` | enum value equals 0 |
+| `dispatch_model` defaults to `.ASYNC` | explicit field default in `HttpServerConfig` |
 | Worker pool defaults to auto-size | `workers == 0`, `pool_size == 0` |
 | `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
 | `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
@@ -536,7 +536,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Test | What it verifies |
 | :- | :- |
 | `TcpServer.init` port zero | returns `error.PortNotConfigured` |
-| `DispatchModel` backing values stable | POOL=0, ASYNC=1, MIXED=2, EPOLL=3 |
+| `DispatchModel` backing values stable | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 |
 | TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
 
 ### tests/edge/http/
