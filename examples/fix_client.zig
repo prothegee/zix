@@ -63,6 +63,7 @@ pub fn main(process: std.process.Init) !void {
     const fslice = fields[0..nf];
     const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
     const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
+
     std.debug.print("client: recv echo symbol={s} qty={s}\n", .{ symbol, qty });
 
     // Logout: sends 35=5 and waits for server's Logout response.
