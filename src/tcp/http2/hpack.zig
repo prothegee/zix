@@ -634,6 +634,7 @@ pub const HpackEncoder = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix test: huffEncode and huffDecode roundtrip ascii" {
     const src = "hello";
