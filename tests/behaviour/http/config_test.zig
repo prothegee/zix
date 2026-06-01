@@ -48,17 +48,17 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
-test "zix behaviour: ServerConfig, dispatch_model defaults to POOL" {
+test "zix behaviour: ServerConfig, dispatch_model defaults to ASYNC" {
     const cfg = zix.Http.ServerConfig{
         .ip = "127.0.0.1",
         .port = 9000,
     };
-    try std.testing.expectEqual(zix.Tcp.DispatchModel.POOL, cfg.dispatch_model);
+    try std.testing.expectEqual(zix.Tcp.DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix behaviour: DispatchModel, integer backing values (POOL=0 is zero-value)" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.POOL));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
+test "zix behaviour: DispatchModel, integer backing values (ASYNC=0 is zero-value)" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.POOL));
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
 }
