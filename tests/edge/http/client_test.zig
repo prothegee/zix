@@ -51,6 +51,7 @@ test "zix edge: ClientResponse.header(), absent name returns null" {
         .allocator = std.testing.allocator,
     };
     defer resp.deinit();
+
     try std.testing.expectEqual(null, resp.header("x-missing"));
 }
 
