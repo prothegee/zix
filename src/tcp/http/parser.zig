@@ -10,6 +10,8 @@ const Method = @import("method.zig");
 pub const MAX_HEADERS: usize = 64;
 pub const MAX_HEADERS_U8: u8 = MAX_HEADERS;
 
+// --------------------------------------------------------- //
+
 /// Request header cap tier. Controls how many headers the server accepts before rejecting with 431.
 /// Mirrors HeaderSize for response headers. CUSTOM values above 64 are silently capped at 64.
 pub const RequestHeaderSize = union(enum) {
@@ -68,7 +70,7 @@ pub const DechunkError = error{
 /// indexOf incurs (mem.eql at every position).
 ///
 /// Param:
-/// buf   - []const u8 (bytes to search)
+/// buf - []const u8 (bytes to search)
 /// start - usize (byte index to begin scanning, clamped so a 3-byte look-back is valid)
 ///
 /// Return:
@@ -102,21 +104,21 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     const first_crlf = if (first_nl > 0 and head_buf[first_nl - 1] == '\r') first_nl - 1 else first_nl;
     const req_line = head_buf[0..first_crlf];
 
-    const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
-    const method_code = parseMethod(req_line[0..sp1]) orelse return error.InvalidRequest;
+    const first_space = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
+    const method_code = parseMethod(req_line[0..first_space]) orelse return error.InvalidRequest;
 
-    const after_method = req_line[sp1 + 1 ..];
-    const sp2 = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.InvalidRequest;
-    const target = after_method[0..sp2];
+    const after_method = req_line[first_space + 1 ..];
+    const second_space = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.InvalidRequest;
+    const target = after_method[0..second_space];
 
     // Absolute offsets of path and query into buf.
-    const path_abs: u16 = @intCast(sp1 + 1);
+    const path_abs: u16 = @intCast(first_space + 1);
     var path_len: u16 = undefined;
     var query_start: u16 = 0;
     var query_len: u16 = 0;
     if (std.mem.indexOfScalar(u8, target, '?')) |q| {
         path_len = @intCast(q);
-        query_start = @intCast(sp1 + 1 + q + 1);
+        query_start = @intCast(first_space + 1 + q + 1);
         const qlen = target.len - q - 1;
         query_len = @intCast(qlen);
     } else {
@@ -271,15 +273,15 @@ test "zix test: parser header offsets" {
     try std.testing.expectEqual(@as(u64, 5), h.content_length);
     try std.testing.expectEqual(@as(u8, 2), h.header_count);
     // First header: Content-Length
-    const n0 = raw[h.headers[0].name_start..][0..h.headers[0].name_len];
-    const v0 = raw[h.headers[0].value_start..][0..h.headers[0].value_len];
-    try std.testing.expectEqualStrings("Content-Length", n0);
-    try std.testing.expectEqualStrings("5", v0);
+    const header0_name = raw[h.headers[0].name_start..][0..h.headers[0].name_len];
+    const header0_value = raw[h.headers[0].value_start..][0..h.headers[0].value_len];
+    try std.testing.expectEqualStrings("Content-Length", header0_name);
+    try std.testing.expectEqualStrings("5", header0_value);
     // Second header: X-Foo
-    const n1 = raw[h.headers[1].name_start..][0..h.headers[1].name_len];
-    const v1 = raw[h.headers[1].value_start..][0..h.headers[1].value_len];
-    try std.testing.expectEqualStrings("X-Foo", n1);
-    try std.testing.expectEqualStrings("bar", v1);
+    const header1_name = raw[h.headers[1].name_start..][0..h.headers[1].name_len];
+    const header1_value = raw[h.headers[1].value_start..][0..h.headers[1].value_len];
+    try std.testing.expectEqualStrings("X-Foo", header1_name);
+    try std.testing.expectEqualStrings("bar", header1_value);
     // Body offset points right after \r\n\r\n
     try std.testing.expectEqualStrings("hello", raw[h.body_offset..]);
 }
