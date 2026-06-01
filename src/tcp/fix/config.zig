@@ -62,6 +62,7 @@ pub const FixClientConfig = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix fix: FixServerConfig required fields" {
     const gpa = std.testing.allocator;
