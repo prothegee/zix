@@ -7,20 +7,14 @@ const Logger = @import("../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
-/// User-provided connection handler. Receives the accepted stream and io.
-/// The handler owns the stream for its lifetime. It must call stream.close(io) when done.
-pub const HandlerFn = *const fn (stream: std.Io.net.Stream, io: std.Io) void;
-
-// --------------------------------------------------------- //
-
 /// UDS stream server. Accepts connections and dispatches each via io.concurrent.
 ///
 /// Usage:
 /// ```zig
 /// var server = try UdsServer.init(config);
 /// defer server.deinit();
-/// try server.run(io);               // default echo handler
-/// try server.runWith(io, myFn);     // custom handler
+/// try server.run(io, echoHandler);  // built-in echo handler
+/// try server.run(io, myHandler);    // custom handler
 /// ```
 pub const UdsServer = struct {
     const Self = @This();
@@ -37,24 +31,19 @@ pub const UdsServer = struct {
     pub fn init(config: UdsServerConfig) !Self {
         if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
         if (config.path.len == 0) return error.PathEmpty;
+
         return .{ .config = config };
     }
 
-    /// No-op: resources are released inside run() / runWith() via defer.
+    /// No-op: resources are released inside run() via defer.
     pub fn deinit(self: *Self) void {
         _ = self;
     }
 
-    /// Listen and serve using the built-in echo handler.
-    /// Each accepted connection is dispatched as an io.concurrent task.
-    pub fn run(self: *Self, io: std.Io) !void {
-        try self.runWith(io, echoHandler);
-    }
-
-    /// Listen and serve using a user-provided handler.
+    /// Listen and serve using a comptime handler.
     /// handler(stream, io) is called for each accepted connection.
     /// The handler owns stream and must call stream.close(io) before returning.
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void {
+    pub fn run(self: *Self, io: std.Io, comptime handler: fn (std.Io.net.Stream, std.Io) void) !void {
         if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
 
         // Remove stale socket from a previous run before binding.
@@ -69,32 +58,32 @@ pub const UdsServer = struct {
 
         if (self.config.logger) |lg| lg.system(.INFO, "uds", "listening on {s}", .{self.config.path});
 
+        const ConnTask = struct {
+            stream: std.Io.net.Stream,
+            io: std.Io,
+            logger: ?*Logger,
+        };
+
+        const dispatch = struct {
+            fn call(task: ConnTask) void {
+                if (task.logger) |lg| lg.system(.INFO, "uds", "connection accepted", .{});
+                handler(task.stream, task.io);
+            }
+        }.call;
+
         while (true) {
             const stream = net_server.accept(io) catch |err| {
                 if (self.config.logger) |lg| lg.system(.WARN, "uds", "accept error: {}", .{err});
                 continue;
             };
-            const task = ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = self.config.logger };
-            if (io.concurrent(dispatchConn, .{task})) |_| {} else |_| {
-                dispatchConn(task);
+
+            const task = ConnTask{ .stream = stream, .io = io, .logger = self.config.logger };
+            if (io.concurrent(dispatch, .{task})) |_| {} else |_| {
+                dispatch(task);
             }
         }
     }
 };
-
-// --------------------------------------------------------- //
-
-const ConnTask = struct {
-    stream: std.Io.net.Stream,
-    io: std.Io,
-    handler: HandlerFn,
-    logger: ?*Logger,
-};
-
-fn dispatchConn(task: ConnTask) void {
-    if (task.logger) |lg| lg.system(.INFO, "uds", "connection accepted", .{});
-    task.handler(task.stream, task.io);
-}
 
 // --------------------------------------------------------- //
 
@@ -139,6 +128,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     }
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: UdsServer init, empty path returns PathEmpty" {
