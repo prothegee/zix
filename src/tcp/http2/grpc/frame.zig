@@ -5,6 +5,9 @@ const h2 = @import("../Http2.zig");
 
 // --------------------------------------------------------- //
 
+/// gRPC length-prefix header size: 1 compress flag + 4 message length bytes.
+pub const grpc_prefix_len: usize = 5;
+
 /// gRPC 5-byte length-prefix header.
 pub const GrpcPrefix = struct {
     compress: bool,
@@ -13,15 +16,15 @@ pub const GrpcPrefix = struct {
 
 /// Parse the 5-byte gRPC prefix from the start of body.
 pub fn readGrpcPrefix(body: []const u8) error{TooShort}!GrpcPrefix {
-    if (body.len < 5) return error.TooShort;
-    const msg_len = std.mem.readInt(u32, body[1..5], .big);
+    if (body.len < grpc_prefix_len) return error.TooShort;
+    const msg_len = std.mem.readInt(u32, body[1..grpc_prefix_len], .big);
     return .{ .compress = body[0] != 0, .msg_len = msg_len };
 }
 
 /// Write a 5-byte gRPC prefix into buf.
-pub fn writeGrpcPrefix(buf: *[5]u8, compress: bool, msg_len: u32) void {
+pub fn writeGrpcPrefix(buf: *[grpc_prefix_len]u8, compress: bool, msg_len: u32) void {
     buf[0] = if (compress) 1 else 0;
-    std.mem.writeInt(u32, buf[1..5], msg_len, .big);
+    std.mem.writeInt(u32, buf[1..grpc_prefix_len], msg_len, .big);
 }
 
 // --------------------------------------------------------- //
