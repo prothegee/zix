@@ -220,15 +220,15 @@ Pattern shared by `TcpServer.initArgs` and `TcpClient.connectArgs`. Unknown args
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    POOL  = 0,
-    ASYNC = 1,
+    ASYNC = 0,
+    POOL  = 1,
     MIXED = 2,
 };
 
 pub const TcpServerConfig = struct {
     ip:             []const u8,
     port:           u16,
-    dispatch_model: DispatchModel = .POOL,
+    dispatch_model: DispatchModel = .ASYNC,
     kernel_backlog: u31           = 4096,
     max_msg_len:    usize         = 4096,
     workers:        usize         = 0,
