@@ -38,6 +38,7 @@ pub const Http2ServerConfig = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix test: Http2ServerConfig required fields" {
     const gpa = std.testing.allocator;
