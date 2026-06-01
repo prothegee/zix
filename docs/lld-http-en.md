@@ -22,7 +22,7 @@ pop():        lock -> while empty: wait -> orderedRemove(0) -> unlock -> return 
 close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiting pop())
 ```
 
-### run(): .POOL (default, dispatch_model = .POOL)
+### run(): .POOL (dispatch_model = .POOL)
 
 ```
 1. worker_count = if (workers == 0) cpu_count else workers
