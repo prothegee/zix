@@ -56,7 +56,7 @@ pub fn parsePath(path: []const u8) ?GrpcPath {
 /// and sendMessage()/finish() to respond.
 pub const GrpcContext = struct {
     fd: std.posix.fd_t,
-    sid: u31,
+    stream_id: u31,
     _body: []const u8,
     _pos: usize,
     _hdr_sent: bool,
@@ -86,7 +86,7 @@ pub const GrpcContext = struct {
     /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
     pub fn sendHeaders(self: *GrpcContext, content_type: []const u8) void {
         if (self._hdr_sent) return;
-        frm.sendGrpcHeaders(self.fd, self.sid, content_type) catch {};
+        frm.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
         self._hdr_sent = true;
     }
 
@@ -94,7 +94,7 @@ pub const GrpcContext = struct {
     /// Sends initial headers first if not yet sent.
     pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
         if (!self._hdr_sent) self.sendHeaders(content_type);
-        frm.sendGrpcData(self.fd, self.sid, data) catch {};
+        frm.sendGrpcData(self.fd, self.stream_id, data) catch {};
         self._sent_bytes += data.len;
     }
 
@@ -104,9 +104,9 @@ pub const GrpcContext = struct {
         self._grpc_status = @intFromEnum(stat);
         const code = self._grpc_status;
         if (self._hdr_sent) {
-            frm.sendGrpcTrailer(self.fd, self.sid, code, grpc_message) catch {};
+            frm.sendGrpcTrailer(self.fd, self.stream_id, code, grpc_message) catch {};
         } else {
-            frm.sendGrpcError(self.fd, self.sid, code, grpc_message) catch {};
+            frm.sendGrpcError(self.fd, self.stream_id, code, grpc_message) catch {};
         }
     }
 
@@ -147,9 +147,11 @@ pub const Route = struct {
 
 /// Comptime path router. Dispatches by exact match on path. Sends UNIMPLEMENTED if no route matches.
 ///
+/// Note:
+/// - Tightens ctx.deadline_ns with Route.timeout_ms when non-zero and shorter than current deadline.
+///
 /// Return:
 /// - type (zero-size, with a dispatch function)
-/// Tightens ctx.deadline_ns with Route.timeout_ms when non-zero and shorter than current deadline.
 pub fn Router(comptime routes: []const Route) type {
     return struct {
         pub fn dispatch(path: []const u8, headers: []const h2.Header, ctx: *GrpcContext) void {
@@ -289,9 +291,9 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     }
 
     var path: []const u8 = "/";
-    if (std.mem.indexOfScalar(u8, head_buf[0..hdr_end], ' ')) |sp1| {
-        const after = head_buf[sp1 + 1 .. hdr_end];
-        if (std.mem.indexOfScalar(u8, after, ' ')) |sp2| path = after[0..sp2];
+    if (std.mem.indexOfScalar(u8, head_buf[0..hdr_end], ' ')) |first_space| {
+        const after = head_buf[first_space + 1 .. hdr_end];
+        if (std.mem.indexOfScalar(u8, after, ' ')) |second_space| path = after[0..second_space];
     }
 
     try h2.fdWriteAll(
@@ -344,7 +346,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
 
     var ctx = GrpcContext{
         .fd = fd,
-        .sid = 1,
+        .stream_id = 1,
         ._body = &.{},
         ._pos = 0,
         ._hdr_sent = false,
@@ -432,24 +434,24 @@ fn serveGrpcLoop(
             },
 
             h2.FT_HEADERS => {
-                const sid = fh.stream_id;
-                if (sid == 0) {
+                const stream_id = fh.stream_id;
+                if (stream_id == 0) {
                     h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
-                if (sid <= last_stream_id and sid % 2 == 1) {
-                    h2.sendRstStream(fd, sid, h2.ERR_STREAM_CLOSED) catch {};
+                if (stream_id <= last_stream_id and stream_id % 2 == 1) {
+                    h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
                     continue;
                 }
-                last_stream_id = @max(last_stream_id, sid);
+                last_stream_id = @max(last_stream_id, stream_id);
 
-                const slot = slotFor(sid, streams, stream_slots) orelse {
-                    h2.sendRstStream(fd, sid, h2.ERR_REFUSED_STREAM) catch {};
+                const slot = slotFor(stream_id, streams, stream_slots) orelse {
+                    h2.sendRstStream(fd, stream_id, h2.ERR_REFUSED_STREAM) catch {};
                     continue;
                 };
                 const s = &streams[slot];
                 s.* = std.mem.zeroes(Stream);
-                s.id = sid;
+                s.id = stream_id;
                 s.state = .OPEN;
 
                 var block = payload;
@@ -469,7 +471,7 @@ fn serveGrpcLoop(
                 block = block[offset .. block.len - pad_len];
 
                 s.header_count = hpack_dec.decode(block, &s.headers, &s.header_scratch) catch {
-                    h2.sendRstStream(fd, sid, h2.ERR_COMPRESSION_ERROR) catch {};
+                    h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
                 };
@@ -483,14 +485,14 @@ fn serveGrpcLoop(
             },
 
             h2.FT_CONTINUATION => {
-                const sid = fh.stream_id;
-                const slot = findSlot(sid, streams, stream_slots) orelse {
+                const stream_id = fh.stream_id;
+                const slot = findSlot(stream_id, streams, stream_slots) orelse {
                     h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 };
                 const s = &streams[slot];
                 const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
-                    h2.sendRstStream(fd, sid, h2.ERR_COMPRESSION_ERROR) catch {};
+                    h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
                 };
@@ -503,13 +505,13 @@ fn serveGrpcLoop(
             },
 
             h2.FT_DATA => {
-                const sid = fh.stream_id;
-                if (sid == 0) {
+                const stream_id = fh.stream_id;
+                if (stream_id == 0) {
                     h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
-                const slot = findSlot(sid, streams, stream_slots) orelse {
-                    h2.sendRstStream(fd, sid, h2.ERR_STREAM_CLOSED) catch {};
+                const slot = findSlot(stream_id, streams, stream_slots) orelse {
+                    h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
                     continue;
                 };
                 const s = &streams[slot];
@@ -528,7 +530,7 @@ fn serveGrpcLoop(
 
                 if (data.len > 0) {
                     h2.sendWindowUpdate(fd, 0, @intCast(data.len)) catch {};
-                    h2.sendWindowUpdate(fd, sid, @intCast(data.len)) catch {};
+                    h2.sendWindowUpdate(fd, stream_id, @intCast(data.len)) catch {};
                 }
 
                 const to_copy = @min(data.len, s.body.len - s.body_len);
@@ -543,8 +545,8 @@ fn serveGrpcLoop(
             },
 
             h2.FT_RST_STREAM => {
-                const sid = fh.stream_id;
-                if (findSlot(sid, streams, stream_slots)) |slot| stream_slots[slot] = false;
+                const stream_id = fh.stream_id;
+                if (findSlot(stream_id, streams, stream_slots)) |slot| stream_slots[slot] = false;
             },
 
             h2.FT_GOAWAY => return,
@@ -567,20 +569,20 @@ fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
     return "-";
 }
 
-fn slotFor(sid: u31, streams: []Stream, used: []bool) ?usize {
+fn slotFor(stream_id: u31, streams: []Stream, used: []bool) ?usize {
     for (used, 0..) |u, i| {
         if (!u) {
             used[i] = true;
-            streams[i].id = sid;
+            streams[i].id = stream_id;
             return i;
         }
     }
     return null;
 }
 
-fn findSlot(sid: u31, streams: []Stream, used: []bool) ?usize {
+fn findSlot(stream_id: u31, streams: []Stream, used: []bool) ?usize {
     for (used, 0..) |u, i| {
-        if (u and streams[i].id == sid) return i;
+        if (u and streams[i].id == stream_id) return i;
     }
     return null;
 }
@@ -619,7 +621,7 @@ fn dispatchGrpcStream(comptime routes: []const Route, s: *Stream, fd: std.posix.
 
     var ctx = GrpcContext{
         .fd = fd,
-        .sid = s.id,
+        .stream_id = s.id,
         ._body = s.body[0..s.body_len],
         ._pos = 0,
         ._hdr_sent = false,
@@ -642,9 +644,10 @@ fn dispatchGrpcStream(comptime routes: []const Route, s: *Stream, fd: std.posix.
 }
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: GrpcContext recvMessage empty body returns null" {
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
@@ -653,7 +656,7 @@ test "zix grpc: GrpcContext recvMessage parses one message" {
     var body: [10]u8 = undefined;
     frm_mod.writeGrpcPrefix(body[0..5], false, 5);
     @memcpy(body[5..], "hello");
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     const msg = ctx.recvMessage().?;
     try std.testing.expectEqualStrings("hello", msg);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -666,7 +669,7 @@ test "zix grpc: GrpcContext recvMessage two messages" {
     @memcpy(body[5..8], "foo");
     frm_mod.writeGrpcPrefix(body[8..13], false, 3);
     @memcpy(body[13..16], "bar");
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expectEqualStrings("foo", ctx.recvMessage().?);
     try std.testing.expectEqualStrings("bar", ctx.recvMessage().?);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -717,18 +720,18 @@ test "zix grpc: Route timeout_ms defaults to zero" {
 }
 
 test "zix grpc: GrpcContext.isExpired null deadline returns false" {
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(!ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired past deadline returns true" {
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1 };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1 };
     try std.testing.expect(ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired future deadline returns false" {
     const far_future: u64 = wallClockNs() + 1_000_000_000_000;
-    var ctx = GrpcContext{ .fd = 0, .sid = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
+    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
     try std.testing.expect(!ctx.isExpired());
 }
 
