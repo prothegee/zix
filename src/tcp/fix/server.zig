@@ -253,7 +253,7 @@ pub const FixServer = struct {
     /// Initialize.
     ///
     /// Param:
-    /// routes - []const FixRoute (application message route table; pass &.{} for echo-only mode)
+    /// routes - []const FixRoute (application message route table. pass &.{} for echo-only mode)
     /// config - FixServerConfig
     ///
     /// Return:
