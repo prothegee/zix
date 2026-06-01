@@ -6,6 +6,9 @@ const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const Logger = @import("../logger/logger.zig").Logger;
 
+const queue_initial_cap: usize = 16;
+const epoll_max_events: usize = 256;
+
 // --------------------------------------------------------- //
 
 /// User-provided connection handler. Receives the accepted stream and io.
@@ -97,7 +100,7 @@ const FdQueue = struct {
     fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_cap = if (self.buf.len == 0) queue_initial_cap else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
                 self.mutex.unlock(io);
                 _ = std.os.linux.close(fd);
@@ -449,7 +452,7 @@ pub const TcpServer = struct {
                 .{EpollWorkerCtx{ .queue = &queue, .io = io, .handler = handler, .logger = cfg.logger }},
             );
 
-        const max_events = 256;
+        const max_events = epoll_max_events;
         var events: [max_events]linux.epoll_event = undefined;
         while (true) {
             const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
