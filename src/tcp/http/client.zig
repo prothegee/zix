@@ -130,8 +130,8 @@ pub const HttpClient = struct {
     /// Make an HTTP request and return the parsed response.
     ///
     /// Errors (named):
-    ///   error.InvalidUrl    - malformed URL, unsupported scheme, or missing host
-    ///   error.BodyTooLarge  - response body exceeded config.max_response_body bytes
+    /// error.InvalidUrl    - malformed URL, unsupported scheme, or missing host
+    /// error.BodyTooLarge  - response body exceeded config.max_response_body bytes
     ///
     /// Other errors propagate from std.http.Client (network failures, protocol errors, OOM).
     pub fn request(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {

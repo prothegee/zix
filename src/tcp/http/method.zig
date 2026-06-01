@@ -20,7 +20,6 @@ pub const Code = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// Brief:
     /// Get self object string from enum
     ///
     /// Note:
@@ -44,7 +43,6 @@ pub const Code = enum(u8) {
             .CONNECT => "CONNECT",
         };
     }
-    /// Brief:
     /// Get self object as a string
     ///
     /// Return:
@@ -56,13 +54,12 @@ pub const Code = enum(u8) {
 
 // --------------------------------------------------------- //
 
-/// Brief:
 /// Get enum from string
 ///
 /// Note:
 /// - If not match, it will return GET
 ///
-/// Params:
+/// Param:
 /// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
@@ -102,7 +99,6 @@ pub fn enumFromString(method_string: []const u8) Code {
     return Code.GET;
 }
 
-/// Brief:
 /// Get string from enum
 ///
 /// Note:

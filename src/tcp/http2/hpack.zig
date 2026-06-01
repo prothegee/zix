@@ -336,7 +336,10 @@ pub const HUFF: [256]HuffSym = .{
     .{ .code = 0x3ffffee, .bits = 26 }, // 255
 };
 
-/// Decode a Huffman-encoded byte string into out. Returns the number of decoded bytes.
+/// Decode a Huffman-encoded byte string into out.
+///
+/// Return:
+/// - !usize (number of decoded bytes)
 pub fn huffDecode(src: []const u8, out: []u8) !usize {
     var acc: u64 = 0;
     var bits: u8 = 0;
@@ -368,7 +371,10 @@ pub fn huffDecode(src: []const u8, out: []u8) !usize {
     return out_pos;
 }
 
-/// Encode src into out using HPACK Huffman. Returns bytes written.
+/// Encode src into out using HPACK Huffman.
+///
+/// Return:
+/// - !usize (bytes written)
 pub fn huffEncode(src: []const u8, out: []u8) !usize {
     var acc: u64 = 0;
     var bits: u8 = 0;
@@ -492,8 +498,11 @@ pub const HpackDecoder = struct {
         return out;
     }
 
-    /// Decode a HPACK header block into out. Returns the number of headers decoded.
-    /// Slices in returned headers point into scratch or static table literals.
+    /// Decode a HPACK header block into out.
+    /// Slices in decoded headers point into scratch or static table literals.
+    ///
+    /// Return:
+    /// - !usize (number of headers decoded)
     pub fn decode(
         self: *HpackDecoder,
         block: []const u8,
@@ -624,6 +633,7 @@ pub const HpackEncoder = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: huffEncode and huffDecode roundtrip ascii" {

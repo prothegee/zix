@@ -33,7 +33,7 @@ Sumber: `src/zix.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (dispatch_model=.POOL, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), default `TcpClientConfig` (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (dispatch_model=.ASYNC, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), default `TcpClientConfig` (max_msg_len=4096) |
 | `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -328,7 +328,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Header panjang frame TCP | u32 big-endian 4-byte di-encode dan di-decode dengan benar |
 | Payload panjang nol frame TCP | di-encode sebagai empat byte nol |
 | Ukuran header frame TCP | selalu tepat 4 byte |
-| `DispatchModel.POOL` adalah nilai nol | `@intFromEnum(.POOL) == 0` |
+| `DispatchModel.ASYNC` adalah nilai nol | `@intFromEnum(.ASYNC) == 0` |
 
 ### tests/behaviour/http/
 
@@ -377,7 +377,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Default ukuran buffer | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` semuanya 4096 |
 | Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` default ke `.POOL` | nilai enum sama dengan 0 |
+| `dispatch_model` default ke `.ASYNC` | default field eksplisit di `HttpServerConfig` |
 | Default worker pool ukuran otomatis | `workers == 0`, `pool_size == 0` |
 | `max_request_headers` default ke `.LARGE` | varian enum dan `.value()` == 64 |
 | Nilai tier `RequestHeaderSize` | MINIMAL=16, COMMON=32, LARGE=64 |
@@ -536,7 +536,7 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `TcpServer.init` port nol | menghasilkan `error.PortNotConfigured` |
-| Nilai backing `DispatchModel` stabil | POOL=0, ASYNC=1, MIXED=2, EPOLL=3 |
+| Nilai backing `DispatchModel` stabil | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 |
 | Panjang frame TCP maksimum u32 | `maxInt(u32)` di-encode dan di-decode dengan benar melalui big-endian |
 
 ### tests/edge/http/

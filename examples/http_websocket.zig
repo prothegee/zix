@@ -26,16 +26,16 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 // (path params, query params, headers) before calling upgrade().
 //
 // After a successful handshake the connection enters a broadcast loop:
-//   text/binary frames -> broadcast "[name] message" to everyone in the room
-//   ping               -> pong
-//   close              -> echo close frame, end loop
+// text/binary frames -> broadcast "[name] message" to everyone in the room
+// ping               -> pong
+// close              -> echo close frame, end loop
 //
 // Connect (wscat / websocat):
-//   wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
-//   websocat    "ws://localhost:9008/ws/lobby?name=alice"
+// wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
+// websocat    "ws://localhost:9008/ws/lobby?name=alice"
 //
 // If ?name is omitted the display name defaults to "anonymous":
-//   wscat    -c "ws://localhost:9008/ws/lobby"
+// wscat    -c "ws://localhost:9008/ws/lobby"
 //
 // After connecting, any message you type is broadcast to every other client
 // in the same room, prefixed with the sender's display name.

@@ -217,6 +217,8 @@ pub fn build(b: *std.Build) void {
         .{ "example-fix_server_4_epoll", "examples/fix_server_4_epoll.zig" },
         .{ "example-fix_client", "examples/fix_client.zig" },
         .{ "example-fix_client_raw", "examples/fix_client_raw.zig" },
+        .{ "example-fix_server_trading", "examples/fix_server_trading.zig" },
+        .{ "example-fix_client_trading", "examples/fix_client_trading.zig" },
         .{ "example-udp_server", "examples/udp_server.zig" },
         .{ "example-udp_client", "examples/udp_client.zig" },
         .{ "example-uds_server", "examples/uds_server.zig" },

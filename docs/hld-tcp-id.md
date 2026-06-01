@@ -45,9 +45,9 @@ pub const Tcp = @import("tcp/Tcp.zig");
 | :- | :- | :- |
 | `zix.Tcp.Server` | struct | `init(config)` / `initArgs(config, args)` / `run(io)` / `runWith(io, handler)` / `deinit()` |
 | `zix.Tcp.Client` | struct | `connect(config, io)` / `connectArgs(config, io, args)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Tcp.ServerConfig` | struct | `ip`, `port`, `dispatch_model` (.POOL), `kernel_backlog` (4096), `max_msg_len` (4096), `workers` (0), `pool_size` (0) |
+| `zix.Tcp.ServerConfig` | struct | `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_msg_len` (4096), `workers` (0), `pool_size` (0) |
 | `zix.Tcp.ClientConfig` | struct | `ip`, `port`, `max_msg_len` (4096) |
-| `zix.Tcp.DispatchModel` | enum(u8) | `POOL=0`, `ASYNC=1`, `MIXED=2`, `EPOLL=3` (fallback ke POOL) |
+| `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `POOL=1`, `MIXED=2`, `EPOLL=3` (fallback ke POOL) |
 | `zix.Tcp.HandlerFn` | tipe | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` |
 | `zix.Tcp.echoHandler` | fn | Echo handler default: membaca frame length-prefixed dan memantulkan setiap frame kembali |
 
@@ -70,7 +70,7 @@ Frame dengan `payload_len == 0` atau `payload_len > max_msg_len` (default 4096) 
 
 ## Model Dispatch
 
-### POOL (default)
+### POOL
 
 N accept thread mendorong koneksi yang diterima ke `ConnQueue` bersama. M pool thread mengambil dan menangani setiap koneksi secara sinkron dengan blocking I/O.
 

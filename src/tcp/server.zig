@@ -6,6 +6,9 @@ const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const Logger = @import("../logger/logger.zig").Logger;
 
+const queue_initial_cap: usize = 16;
+const epoll_max_events: usize = 256;
+
 // --------------------------------------------------------- //
 
 /// User-provided connection handler. Receives the accepted stream and io.
@@ -97,7 +100,7 @@ const FdQueue = struct {
     fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_cap = if (self.buf.len == 0) queue_initial_cap else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
                 self.mutex.unlock(io);
                 _ = std.os.linux.close(fd);
@@ -179,6 +182,7 @@ fn workerEntry(cfg: TcpServerConfig, queue: *ConnQueue, io: std.Io) void {
         return;
     };
     defer net_server.deinit(io);
+
     while (true) {
         const stream = net_server.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
@@ -218,6 +222,7 @@ fn asyncWorkerEntry(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) void {
         return;
     };
     defer net_server.deinit(io);
+
     while (true) {
         const stream = net_server.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
@@ -253,10 +258,12 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 /// TCP stream server. Dispatches connections via POOL, ASYNC, MIXED, or EPOLL (Linux-only: non-Linux falls back to POOL).
 ///
 /// Usage:
-///   var server = try TcpServer.init(config);
-///   defer server.deinit();
-///   try server.run(io);               // built-in echo handler
-///   try server.runWith(io, myFn);     // custom handler
+/// ```zig
+/// var server = try TcpServer.init(config);
+/// defer server.deinit();
+/// try server.run(io);               // built-in echo handler
+/// try server.runWith(io, myFn);     // custom handler
+/// ```
 pub const TcpServer = struct {
     const Self = @This();
 
@@ -264,7 +271,11 @@ pub const TcpServer = struct {
 
     // --------------------------------------------------------- //
 
-    /// Initialize. Returns error.PortNotConfigured if config.port is 0.
+    /// Initialize.
+    ///
+    /// Return:
+    /// - !Self
+    /// - error.PortNotConfigured if config.port is 0
     pub fn init(config: TcpServerConfig) !Self {
         if (config.port == 0) return error.PortNotConfigured;
         return .{ .config = config };
@@ -381,7 +392,6 @@ pub const TcpServer = struct {
         }
     }
 
-    /// Brief:
     /// EPOLL dispatch: a single epoll event loop accepts connections and hands
     /// each fd to a worker pool. Each worker runs the handler for the full
     /// connection lifetime. Linux-only.
@@ -421,11 +431,11 @@ pub const TcpServer = struct {
         const epfd: std.posix.fd_t = @intCast(epfd_rc);
         defer _ = linux.close(epfd);
 
-        var lev = linux.epoll_event{
+        var listener_event = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.ET,
             .data = .{ .fd = listener_fd },
         };
-        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
             return error.EpollCtlFailed;
 
         if (cfg.logger) |lg| lg.system(.INFO, "tcp", "listening on {s}:{d} (epoll/{d})", .{ cfg.ip, cfg.port, pool_count });
@@ -442,7 +452,7 @@ pub const TcpServer = struct {
                 .{EpollWorkerCtx{ .queue = &queue, .io = io, .handler = handler, .logger = cfg.logger }},
             );
 
-        const max_events = 256;
+        const max_events = epoll_max_events;
         var events: [max_events]linux.epoll_event = undefined;
         while (true) {
             const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
@@ -502,6 +512,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     }
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: TcpServer init, port zero returns PortNotConfigured" {

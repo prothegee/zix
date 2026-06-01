@@ -23,7 +23,7 @@ pub const HttpClientConfig = struct {
     /// Time allowed to finish reading the full response body, in milliseconds.
     /// 0 = no timeout. v1: stored for future enforcement, not yet applied.
     read_timeout_ms: u32 = 0,
-    /// Maximum response body size in bytes. Returns error.BodyTooLarge when exceeded.
+    /// Maximum response body size in bytes. Yields error.BodyTooLarge when exceeded.
     max_response_body: usize = 1024 * 1024 * 4,
     /// Follow HTTP 3xx redirects automatically up to max_redirects hops.
     follow_redirects: bool = true,

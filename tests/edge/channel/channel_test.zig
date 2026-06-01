@@ -12,6 +12,7 @@ test "zix edge: Channel, capacity 1 allocates exactly one slot" {
     defer arena.deinit();
     var ch = try zix.Channel(u32).init(arena.allocator(), 1);
     defer ch.deinit();
+
     try std.testing.expectEqual(@as(usize, 1), ch.buf.len);
     try std.testing.expectEqual(@as(usize, 0), ch.count);
 }
@@ -60,6 +61,7 @@ test "zix edge: Channel, send after close returns error.Closed" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     ch.close(io);
     try std.testing.expectError(error.Closed, ch.send(io, 1));
 }
@@ -71,6 +73,7 @@ test "zix edge: Channel, recv on empty closed channel returns error.Closed" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     ch.close(io);
     try std.testing.expectError(error.Closed, ch.recv(io));
 }

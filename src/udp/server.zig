@@ -26,8 +26,8 @@ pub fn UdpServer(comptime Packet: type) type {
     return struct {
         const Self = @This();
 
-        // NOTE: index is a monotonic connection counter — transient identity, not stable across reconnects.
-        // NOTE: client identity structure and validation are the application's responsibility,
+        // Note: index is a monotonic connection counter — transient identity, not stable across reconnects.
+        // Note: client identity structure and validation are the application's responsibility,
         //       the server only assigns an index for internal tracking and log output.
         const ClientRecord = struct {
             from: std.Io.net.IpAddress,
@@ -37,7 +37,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
         // PERF: peers is heap-allocated per packet — no fixed cap.
         //       Allocated before io.concurrent() dispatc, freed inside processPacket after broadcast.
-        // NOTE: socket is shared across concurrent tasks, UDP send is kernel-atomic per datagram.
+        // Note: socket is shared across concurrent tasks, UDP send is kernel-atomic per datagram.
         const Task = struct {
             buf: [@sizeOf(Packet)]u8,
             from: std.Io.net.IpAddress,
@@ -79,7 +79,7 @@ pub fn UdpServer(comptime Packet: type) type {
             return .{ .config = cfg };
         }
 
-        /// Release resources. Call after run() returns or errors.
+        /// Release resources. Call after run() exits or errors.
         pub fn deinit(self: *Self) void {
             _ = self;
         }
@@ -93,7 +93,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
             if (self.config.logger) |lg| lg.system(.INFO, "udp", "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
-            // NOTE: config.allocator must be a general-purpose allocator — not an ArenaAllocator.
+            // Note: config.allocator must be a general-purpose allocator — not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
             //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
             //       so snapshots would accumulate unboundedly until the server stops.
@@ -160,7 +160,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
                 // Heap-allocate peer snapshot for broadcast, freed inside processPacket after all sends.
                 // PERF: allocation only occurs when broadcast is enabled and clients list is non-empty.
-                // NOTE: must use a general-purpose allocator — the free() below is real, not a no-op.
+                // Note: must use a general-purpose allocator — the free() below is real, not a no-op.
                 var peers: []std.Io.net.IpAddress = &.{};
                 if (self.config.broadcast and clients.items.len > 0) {
                     if (self.config.allocator.alloc(std.Io.net.IpAddress, clients.items.len)) |p| {
@@ -191,7 +191,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
         fn processPacket(task: Task) void {
             // Free peer snapshot allocated in run() before io.concurrent() dispatch.
-            // NOTE: this free() is real — config.allocator must not be an ArenaAllocator.
+            // Note: this free() is real — config.allocator must not be an ArenaAllocator.
             defer if (task.peers.len > 0) task.config.allocator.free(task.peers);
 
             var addr_buf: [64]u8 = undefined;
@@ -233,9 +233,9 @@ pub fn UdpServer(comptime Packet: type) type {
                 if (elapsed >= timeout_ms) {
                     var buf: [64]u8 = undefined;
                     const addr_str = fmtAddr(clients.items[i].from, &buf);
-                    const idx = clients.items[i].index;
+                    const client_index = clients.items[i].index;
                     _ = clients.swapRemove(i);
-                    if (logger) |lg| lg.system(.INFO, "udp", "client disconnected: {s} index={d} total={d}", .{ addr_str, idx, clients.items.len });
+                    if (logger) |lg| lg.system(.INFO, "udp", "client disconnected: {s} index={d} total={d}", .{ addr_str, client_index, clients.items.len });
                 } else {
                     i += 1;
                 }
@@ -253,6 +253,7 @@ pub fn UdpServer(comptime Packet: type) type {
     };
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved, binding to it is undefined behavior.
@@ -282,6 +283,7 @@ test "zix test: UdpServer init, config fields are preserved" {
         .auto_ack = true,
     });
     defer server.deinit();
+
     try std.testing.expectEqual(std.testing.allocator.ptr, server.config.allocator.ptr);
     try std.testing.expectEqual(@as(u16, 9200), server.config.port);
     try std.testing.expect(server.config.broadcast);

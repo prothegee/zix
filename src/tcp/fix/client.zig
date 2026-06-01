@@ -66,22 +66,25 @@ pub const FixClient = struct {
             .{ .tag = .EncryptMethod, .value = "0" },
             .{ .tag = .HeartBtInt, .value = hbt_str },
         };
-        try self.sendMessage(io, "A", &extra);
+
+        try self.sendMessage(io, core.MsgType.Logon, &extra);
+
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
-        const nf = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msg_type, "A")) return error.ExpectedLogon;
+        const field_count = try core.parseFields(raw, &fields);
+        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.MissingMsgType;
+        if (!std.mem.eql(u8, msg_type, core.MsgType.Logon)) return error.ExpectedLogon;
     }
 
     /// Send Logout (35=5) and wait for the server's Logout response.
     pub fn logout(self: *Self, io: std.Io) !void {
-        try self.sendMessage(io, "5", &.{});
+        try self.sendMessage(io, core.MsgType.Logout, &.{});
+
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
-        const nf = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msg_type, "5")) return error.ExpectedLogout;
+        const field_count = try core.parseFields(raw, &fields);
+        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.MissingMsgType;
+        if (!std.mem.eql(u8, msg_type, core.MsgType.Logout)) return error.ExpectedLogout;
     }
 
     /// Build and send a FIX message. Increments the outgoing sequence number.
@@ -89,6 +92,7 @@ pub const FixClient = struct {
         var out_buf: [core.MAX_MSG_SIZE]u8 = undefined;
         const n = try core.buildMessage(&out_buf, self.comp_id, self.target_comp_id, self.seq_out, msg_type, extra);
         self.seq_out += 1;
+
         var wr_buf: [core.MAX_MSG_SIZE]u8 = undefined;
         var writer = self.stream.writer(io, &wr_buf);
         try writer.interface.writeAll(out_buf[0..n]);
@@ -120,6 +124,7 @@ pub const FixClient = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix fix: FixClient.connect port zero returns PortNotConfigured" {

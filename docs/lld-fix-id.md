@@ -78,11 +78,24 @@ serveConn(stream, io, comp_id, opts):
                    writer.writeAll
                    writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "Heartbeat")
-            "1" -> buildMessage(heartbeat reply)
+            "1" -> buildMessage(heartbeat reply dengan TestReqID di-echo)
                    writer.writeAll
                    writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "TestRequest")
-            _   -> writer.writeAll(raw)
+            _ (routes non-kosong, setelah Logon):
+                   for route in opts.routes:
+                       if msg_type == route.msg_type:
+                           effective_ms = min(route.timeout_ms, opts.handler_timeout_ms) atau yang non-zero
+                           ctx = FixContext{ sender_comp_id, target_comp_id=comp_id, deadline_ns, fd, &seq_out }
+                           route.handler(fslice, &ctx)
+                           logger.session(msg_type, sender, comp_id, seq, "dispatch")
+                           break
+                   (tidak ada rute yang cocok: diabaikan diam-diam)
+            _ (routes kosong, mode echo):
+                   saring field header sesi (BeginString, BodyLength, MsgType, SenderCompID,
+                       TargetCompID, MsgSeqNum, SendingTime, CheckSum) dari fslice
+                   buildMessage(out_buf, comp_id, peer, seq_out, msg_type, body_fields)
+                   writer.writeAll(out_buf[0..n])
                    writer.flush
                    logger.session(msg_type, sender, comp_id, seq, "msg")
 

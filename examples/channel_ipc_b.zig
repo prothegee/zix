@@ -4,14 +4,14 @@
 // After connecting, both sides send and receive independently at different rates.
 //
 // Two threads per process:
-//   writer: sends "B:N" every 400 ms (different rate from A to show independence)
-//   reader: prints whatever A sends
+// writer: sends "B:N" every 400 ms (different rate from A to show independence)
+// reader: prints whatever A sends
 //
 // Either side can be stopped (Ctrl-C), the other side detects the closed
 // connection and exits cleanly.
 //
 // Start Process A first, then run this:
-//   zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
+// zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
 
 const std = @import("std");
 const zix = @import("zix");

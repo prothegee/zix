@@ -27,6 +27,7 @@ pub const GrpcStatus = enum(u8) {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: GrpcStatus OK is 0" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(GrpcStatus.OK));

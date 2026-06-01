@@ -4,6 +4,8 @@ const std = @import("std");
 const Status = @import("status.zig");
 const Content = @import("content.zig");
 
+// --------------------------------------------------------- //
+
 pub const HttpHeader = struct {
     name: []const u8,
     value: []const u8,
@@ -14,7 +16,7 @@ pub const HttpHeader = struct {
 /// max_response_headers in HttpServerConfig sets the cap. The backing buffer is
 /// arena-allocated lazily on the first addHeader() call — requests that add no
 /// custom headers pay zero allocation cost.
-/// Any addHeader() call beyond the cap returns error.TooManyHeaders.
+/// Any addHeader() call beyond the cap yields error.TooManyHeaders.
 ///
 /// - MINIMAL     (16)  — simple APIs, constrained environments
 /// - COMMON      (32)  — most web applications, single proxy/load balancer (default)
@@ -206,8 +208,8 @@ pub const Response = struct {
                     // Extra header too large for staging buffer — write what we have and continue.
                     fdWriteAll(fd, slow[0..slow_off]) catch return;
                     slow_off = 0;
-                    const s2 = std.fmt.bufPrint(&slow, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
-                    fdWriteAll(fd, s2) catch return;
+                    const header_str = std.fmt.bufPrint(&slow, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
+                    fdWriteAll(fd, header_str) catch return;
                     continue;
                 };
                 slow_off += s.len;

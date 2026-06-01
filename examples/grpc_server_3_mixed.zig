@@ -18,8 +18,10 @@ fn sayHelloHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) vo
         ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
+
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
+
     ctx.sendMessage("application/grpc+proto", resp);
     ctx.finish(zix.Grpc.Status.OK, "");
 }
@@ -29,6 +31,7 @@ fn echoHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
     while (ctx.recvMessage()) |msg| {
         ctx.sendMessage("application/grpc+proto", msg);
     }
+
     ctx.finish(zix.Grpc.Status.OK, "");
 }
 
@@ -46,5 +49,6 @@ pub fn main(process: std.process.Init) !void {
         },
     );
     defer server.deinit();
+
     try server.run();
 }

@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` — mengirim UNIMPLEMENTED jika tidak ada route yang cocok |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | POOL=0, ASYNC=1 (default), MIXED=2, EPOLL=3 (hanya Linux) |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts` — opsi per koneksi yang diteruskan ke `serveConn` |

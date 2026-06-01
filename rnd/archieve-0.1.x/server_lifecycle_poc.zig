@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-// NOTE:
+// Note:
 // - This one is kind of attraction for the approach (in small scale)
 const ServerStatus = enum(u8) {
     idle,

@@ -7,14 +7,14 @@
 //                                                               \->[/data handler]
 //
 // Endpoints:
-//   GET /data: one-shot UDS query, returns JSON {"count": N}
-//   GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
+// GET /data: one-shot UDS query, returns JSON {"count": N}
+// GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
 //
 // Run:
-//   zig build example-uds_http && ./zig-out/bin/example-uds_http
-//   curl http://localhost:9200/data
-//   curl -N http://localhost:9200/stream
-//   browser: http://localhost:9200/
+// zig build example-uds_http && ./zig-out/bin/example-uds_http
+// curl http://localhost:9200/data
+// curl -N http://localhost:9200/stream
+// browser: http://localhost:9200/
 
 const std = @import("std");
 const zix = @import("zix");
@@ -97,6 +97,7 @@ pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 
     var json_buf: [64]u8 = undefined;
     const body = std.fmt.bufPrint(&json_buf, "{{\"count\": {s}}}", .{reply}) catch return;
+
     res.setContentType(.APPLICATION_JSON);
     try res.send(body);
 }
@@ -108,8 +109,10 @@ pub fn streamHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     const sse = try res.stream();
     while (true) {
         const count = g_channel.recv(ctx.io) catch break;
+
         var buf: [32]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "count: {d}", .{count}) catch break;
+
         sse.writeEvent(msg) catch break;
     }
 }

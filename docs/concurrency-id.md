@@ -1,6 +1,6 @@
 # Model Konkurensi: zix
 
-Empat model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Default: `.POOL`.
+Empat model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Default: `.ASYNC`.
 
 ---
 
@@ -8,8 +8,8 @@ Empat model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_mode
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    POOL  = 0, // work-queue thread pool (default)
-    ASYNC = 1, // single accept, io.async() dispatch
+    ASYNC = 0, // single accept, io.async() dispatch
+    POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
     EPOLL = 3, // single epoll event loop, Linux-only
 };
@@ -21,7 +21,7 @@ Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/
 
 ---
 
-## .POOL: Work-Queue Thread Pool (default)
+## .POOL: Work-Queue Thread Pool
 
 N accept thread mendorong koneksi yang diterima ke `ConnQueue` bersama. M pool thread mengambil koneksi dan menanganinya secara sinkron dengan blocking I/O. `SO_REUSEPORT` memungkinkan semua accept thread mendengarkan port yang sama secara paralel.
 
@@ -46,9 +46,8 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 ```
 
 **Kapan menggunakan:**
-- Default untuk beban kerja produksi.
 - Throughput terbaik pada jumlah koneksi yang tinggi.
-- `dispatch_model = .POOL` (default, dapat dihilangkan).
+- `dispatch_model = .POOL` (eksplisit).
 - `workers = 0` (default) menggunakan cpu_count accept thread.
 - `workers = N` menggunakan tepat N accept thread.
 - `pool_size = 0` (default) mengatur ukuran pool menjadi `max(10, cpu_count * 2)`.
@@ -56,16 +55,16 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 
 **Persyaratan OS:** `SO_REUSEPORT` (Linux >= 3.9, macOS, BSD).
 
-**Contoh** (default, `examples/http_basic.zig` dan lainnya):
+**Contoh** (`examples/http_basic.zig` dengan POOL eksplisit):
 ```zig
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
-        .io = process.io,
-        // dispatch_model = .POOL  (default, can be omitted)
-        // workers        = 0  -> cpu_count accept threads
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads
+        .io             = process.io,
+        .dispatch_model = .POOL,
+        // workers   = 0  -> cpu_count accept threads
+        // pool_size = 0  -> max(10, cpu_count * 2) pool threads
     });
     try server.run();
 }
@@ -273,12 +272,12 @@ try server.run();
 
 | Protokol | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
 | :- | :- | :- | :- | :- |
-| HTTP | ya (default) | ya | ya | ya, Linux-only |
+| HTTP | ya | ya (default) | ya | ya, Linux-only |
 | SSE | tidak direkomendasikan (menghabiskan pool thread) | ya, direkomendasikan | ya | n/a |
 | WebSocket | tidak direkomendasikan (koneksi berumur panjang) | ya, direkomendasikan | ya | n/a |
 | HTTP/2 (h2c) | ya | ya (default) | ya | n/a |
 | gRPC (h2c) | ya | ya (default) | ya | ya, Linux-only |
-| TCP (raw stream) | ya (default) | ya | ya | ya, Linux-only |
+| TCP (raw stream) | ya | ya (default) | ya | ya, Linux-only |
 | FIX 4.x | ya | ya (default) | ya | ya, Linux-only |
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | ya (io.concurrent() per koneksi) | n/a | n/a |

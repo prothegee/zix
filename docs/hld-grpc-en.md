@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` — sends UNIMPLEMENTED if no route matches |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | POOL=0, ASYNC=1 (default), MIXED=2, EPOLL=3 (Linux-only) |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (Linux-only) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts` — per-connection options passed to `serveConn` |

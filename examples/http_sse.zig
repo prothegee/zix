@@ -37,6 +37,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     _ = req;
 
     const sse = try res.stream();
+
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
         var buf: [32]u8 = undefined;

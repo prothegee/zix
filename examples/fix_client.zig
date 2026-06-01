@@ -9,8 +9,8 @@ const COMP_ID: []const u8 = "CLIENT";
 // --------------------------------------------------------- //
 
 // Usage:
-//   zig build example-fix_client
-//   zig build example-fix_client -- --port 9500 --target ZIX
+// zig build example-fix_client
+// zig build example-fix_client -- --port 9500 --target ZIX
 
 pub fn main(process: std.process.Init) !void {
     var ip: []const u8 = DEFAULT_IP;
@@ -53,7 +53,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .tag = .OrdType, .value = "2" },
         .{ .tag = .Price, .value = "150.00" },
     };
-    try client.sendMessage(io, "D", &order_fields);
+    try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
     std.debug.print("client: sent NewOrderSingle\n", .{});
 
     // Receive echo from server.
@@ -63,6 +63,7 @@ pub fn main(process: std.process.Init) !void {
     const fslice = fields[0..nf];
     const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
     const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
+
     std.debug.print("client: recv echo symbol={s} qty={s}\n", .{ symbol, qty });
 
     // Logout: sends 35=5 and waits for server's Logout response.

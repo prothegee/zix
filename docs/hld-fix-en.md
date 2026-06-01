@@ -26,9 +26,10 @@ Implemented. See ADR-024 for design rationale.
 ```
 src/tcp/fix/
     Fix.zig      // namespace aggregator
-    core.zig     // parsing, building, checksum, serveConn
+    core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
     server.zig   // FixServer — POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
+    router.zig   // comptime FixRouter
     client.zig   // FixClient
 ```
 
@@ -44,13 +45,19 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Fix.Server` | struct | `init(config)` / `deinit()` / `run()` |
+| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` — routes is `[]const zix.Fix.Route` |
 | `zix.Fix.ServerConfig` | struct | See Server Config Fields below |
-| `zix.Fix.ServeOpts` | struct | `{ logger: ?*Logger = null, heartbeat_timeout_ms: u32 = 0 }` — options for `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }` — options for `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | See Client Config Fields below |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export of `zix.Tcp.DispatchModel` |
 | `zix.Fix.Tag` | enum(u16) | Nonexhaustive enum of standard FIX 4.x tag numbers. Use `@enumFromInt` for custom tags not listed |
+| `zix.Fix.MsgType` | struct | Namespace of compile-time string constants for FIX MsgType (tag 35) values. See MsgType Constants section |
+| `zix.Fix.HandlerFn` | type | `*const fn (fields: []const Field, ctx: *Context) void` — application message handler |
+| `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }` — one application message route |
+| `zix.Fix.Context` | struct | Per-connection context passed to each handler. Fields: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Methods: `sendMessage`, `isExpired` |
+| `zix.Fix.Router(routes)` | comptime fn | Returns a comptime dispatch type with `dispatch(fields, ctx, server_timeout_ms)` |
+| `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` → u64 nanoseconds (same as `zix.Grpc.wallClockNs`) |
 | `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }` — zero-copy slice into receive buffer |
 | `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }` — input to `buildMessage` |
 | `zix.Fix.SOH` | u8 | `0x01` — field delimiter |
@@ -63,7 +70,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `zix.Fix.computeChecksum` | fn | Sum of all bytes mod 256 |
 | `zix.Fix.verifyChecksum` | fn | Returns true if tag-10 checksum matches computed value |
 | `zix.Fix.buildMessage` | fn | Builds a complete FIX message into caller-supplied output buffer |
-| `zix.Fix.serveConn` | fn | Session handler: `serveConn(stream, io, comp_id, opts)` — reads messages, dispatches Logon/Logout/Heartbeat/echo |
+| `zix.Fix.serveConn` | fn | Session handler: `serveConn(stream, io, comp_id, opts)` — reads messages, dispatches Logon/Logout/Heartbeat, routes application messages |
 
 ---
 
@@ -81,6 +88,8 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
 | `logger` | null | Optional logger for lifecycle and per-message session events |
 | `heartbeat_timeout_ms` | 0 | Heartbeat timeout in ms. 0 = disabled. When non-zero: after this interval with no incoming message, TestRequest (35=1) is sent. If no response arrives within another interval, Logout (35=5) is sent and the connection closes. Only applies after Logon; before Logon, timeout closes silently. |
+| `connection_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. When non-zero: if no message arrives within this interval (even with heartbeat disabled), the connection is closed. Distinct from `heartbeat_timeout_ms` — no TestRequest dance, just close. |
+| `handler_timeout_ms` | 0 | Server-wide default max handler processing time in ms. 0 = no cap. Tightened per-route by `Route.timeout_ms`. Sets `Context.deadline_ns` before dispatch. |
 
 ---
 
@@ -198,9 +207,133 @@ const extra = [_]zix.Fix.BuildField{
 | `5` (Logout) | Respond with Logout (`5`), then close connection |
 | `0` (Heartbeat) | Respond with Heartbeat (`0`) |
 | `1` (TestRequest) | Respond with Heartbeat (`0`) |
-| any other | Echo the message back unchanged |
+| any other (routes non-empty) | Dispatch to matching `Route.handler` via `FixRouter`. If no route matches, message is silently ignored |
+| any other (routes empty) | Echo the message back unchanged (backward-compatible echo mode) |
 
 Bad checksum closes the connection without a response.
+
+---
+
+## MsgType Constants
+
+FIX MsgType values (tag 35) are ASCII strings, not integers. `zix.Fix.MsgType` is a namespace struct of 47 compile-time string constants covering FIX 4.0–4.4. Use these instead of raw string literals to avoid typos and aid readability.
+
+```zig
+// Session
+zix.Fix.MsgType.Heartbeat                   // "0"
+zix.Fix.MsgType.TestRequest                 // "1"
+zix.Fix.MsgType.ResendRequest               // "2"
+zix.Fix.MsgType.Reject                      // "3"
+zix.Fix.MsgType.SequenceReset               // "4"
+zix.Fix.MsgType.Logout                      // "5"
+zix.Fix.MsgType.Logon                       // "A"
+
+// Application (single-char)
+zix.Fix.MsgType.ExecutionReport             // "8"
+zix.Fix.MsgType.OrderCancelReject           // "9"
+zix.Fix.MsgType.IOIAcknowledgement          // "6"
+zix.Fix.MsgType.IOI                         // "C"
+zix.Fix.MsgType.NewOrderSingle              // "D"
+zix.Fix.MsgType.NewOrderList                // "E"
+zix.Fix.MsgType.OrderCancelRequest          // "F"
+zix.Fix.MsgType.OrderCancelReplaceRequest   // "G"
+zix.Fix.MsgType.OrderStatusRequest          // "H"
+zix.Fix.MsgType.Allocation                  // "J"
+// ... and more (Quote, MarketData*, Security*, TradingSession*, etc.)
+
+// Application (two-char, FIX 4.3-4.4)
+zix.Fix.MsgType.TradeCaptureReport          // "AE"
+zix.Fix.MsgType.OrderMassStatusRequest      // "AF"
+```
+
+Usage in route table and `sendMessage`:
+
+```zig
+&[_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder },
+    .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel },
+},
+
+// in handler:
+ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{ ... });
+
+// in client:
+try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
+```
+
+---
+
+## Router and Application Message Dispatch
+
+Routes are passed at `Fix.Server.init()`. Session messages (Logon/Logout/Heartbeat/TestRequest) are always handled internally by `serveConn`. Only application messages (everything else) reach the router.
+
+```zig
+var server = try zix.Fix.Server.init(
+    &[_]zix.Fix.Route{
+        .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder,   .timeout_ms = 500 },
+        .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel,     .timeout_ms = 500 },
+    },
+    .{
+        .io                    = process.io,
+        .ip                    = "0.0.0.0",
+        .port                  = 9500,
+        .comp_id               = "BROKER",
+        .dispatch_model        = .ASYNC,
+        .connection_timeout_ms = 60_000,
+        .handler_timeout_ms    = 200,
+    },
+);
+```
+
+Empty routes (`&.{}`) enable echo mode (backward-compatible: all non-session messages are echoed).
+
+### HandlerFn
+
+```zig
+fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+    if (ctx.isExpired()) return;
+    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
+    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+        .{ .tag = .Symbol,    .value = symbol },
+        .{ .tag = .OrdStatus, .value = "0" },
+    });
+}
+```
+
+### FixContext Fields
+
+| Field | Type | Description |
+| :- | :- | :- |
+| `sender_comp_id` | `[]const u8` | Peer's SenderCompID from session Logon |
+| `target_comp_id` | `[]const u8` | Server's comp_id (our identity) |
+| `deadline_ns` | `?u64` | Absolute deadline (CLOCK_REALTIME nanoseconds). Set from tightest of `handler_timeout_ms`, `Route.timeout_ms`. Null = no deadline |
+
+### FixContext Methods
+
+| Method | Description |
+| :- | :- |
+| `sendMessage(msg_type, fields)` | Build and send a FIX response on this connection (swapped CompIDs) |
+| `isExpired()` bool | Returns true when `deadline_ns` is set and has passed |
+
+### Deadline Override
+
+```zig
+ctx.deadline_ns = zix.Fix.wallClockNs() + 2 * std.time.ns_per_s; // extend to 2 s
+ctx.deadline_ns = null;                                            // disable
+```
+
+### FixRouter (comptime)
+
+`FixRouter(routes)` generates a comptime `dispatch` function — `inline for` unrolled at comptime, zero runtime cost.
+
+```zig
+const r = zix.Fix.Router(&[_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder },
+});
+r.dispatch(fields, ctx, server_handler_timeout_ms);
+```
+
+The router is wired automatically when routes are passed to `Server.init`. Use it directly only when calling `serveConn` manually.
 
 ---
 
@@ -253,12 +386,14 @@ See `docs/hld-logger.md` for log line format details.
 
 | File | Role | Port |
 | :- | :- | :- |
-| `examples/fix_server_1_async.zig` | `.ASYNC` server | 9500 |
-| `examples/fix_server_2_pool.zig` | `.POOL` server | 9500 |
-| `examples/fix_server_3_mixed.zig` | `.MIXED` server | 9500 |
+| `examples/fix_server_1_async.zig` | `.ASYNC` server (echo mode) | 9500 |
+| `examples/fix_server_2_pool.zig` | `.POOL` server (echo mode) | 9500 |
+| `examples/fix_server_3_mixed.zig` | `.MIXED` server (echo mode) | 9500 |
 | `examples/fix_server_4_epoll.zig` | `.EPOLL` server (Linux-only: native epoll. Non-Linux falls back to POOL) | 9500 |
+| `examples/fix_server_trading.zig` | `.ASYNC` server with router: NewOrderSingle + OrderCancelRequest, JSON append, logger, timeouts | 9500 |
 | `examples/fix_client.zig` | `FixClient` high-level client | 9500 |
 | `examples/fix_client_raw.zig` | raw core primitives client | 9500 |
+| `examples/fix_client_trading.zig` | trading client: buy/cancel/sell/cancel flow | 9500 |
 
 ---
 

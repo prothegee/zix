@@ -15,6 +15,12 @@ const method = @import("method.zig");
 const static = @import("static.zig");
 const parser = @import("parser.zig");
 
+// --------------------------------------------------------- //
+
+const timer_interval_ms: u32 = 500;
+const conn_queue_initial_cap: usize = 16;
+const epoll_max_events: usize = 256;
+
 // Global date cache — updated by a background timer thread (model 2) or the accept loop (model 1).
 // Readers do a single atomic load — no lock, no syscall per request.
 // Double-buffered so the writer never tears a read in progress.
@@ -22,6 +28,8 @@ var g_date_bufs: [2][40]u8 = undefined;
 var g_date_lens: [2]usize = .{ 0, 0 };
 var g_date_active = std.atomic.Value(usize).init(0);
 var g_date_secs = std.atomic.Value(u64).init(0);
+
+// --------------------------------------------------------- //
 
 fn updateDateCache(io: std.Io) void {
     const timestamp = std.Io.Clock.real.now(io);
@@ -38,7 +46,6 @@ fn updateDateCache(io: std.Io) void {
 
 // --------------------------------------------------------- //
 // Layer D: connection registry + timer eviction
-// --------------------------------------------------------- //
 
 const ConnEntry = struct {
     stream: std.Io.net.Stream,
@@ -89,7 +96,7 @@ fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
     while (true) {
         updateDateCache(io);
         registry.evict(io);
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(500), .awake) catch break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(timer_interval_ms), .awake) catch break;
     }
 }
 
@@ -99,7 +106,7 @@ fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
 // Accept threads push accepted streams immediately and never block on handling.
 // Pool threads pop and handle each connection synchronously (blocking I/O, no scheduler).
 // Implemented as a heap-backed ring buffer: push and pop are both O(1).
-// The backing buffer doubles on overflow (initial capacity 16), allocated via smp_allocator.
+// The backing buffer doubles on overflow (initial capacity conn_queue_initial_cap), allocated via smp_allocator.
 const ConnQueue = struct {
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Condition = .init,
@@ -113,7 +120,7 @@ const ConnQueue = struct {
     fn push(self: *ConnQueue, stream: std.Io.net.Stream, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_cap = if (self.buf.len == 0) conn_queue_initial_cap else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.Io.net.Stream, new_cap) catch {
                 self.mutex.unlock(io);
                 stream.close(io);
@@ -245,7 +252,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// Outcome of processing one request: whether the connection may be reused.
         const ReqOutcome = enum { keep_alive, close };
 
-        /// Brief:
         /// Disable Nagle on a socket so each response flushes immediately
         ///
         /// Param:
@@ -261,7 +267,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Process exactly one HTTP request on fd using caller-owned buffers
         ///
         /// Note:
@@ -273,12 +278,12 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// - Falls back to static file serving, then 404, when no route matches
         ///
         /// Param:
-        /// server   - *Self
-        /// stream   - std.Io.net.Stream (passed to Context for upgrade handlers)
-        /// fd       - std.posix.fd_t (raw socket for recv/send on the hot path)
-        /// io       - std.Io
+        /// server - *Self
+        /// stream - std.Io.net.Stream (passed to Context for upgrade handlers)
+        /// fd - std.posix.fd_t (raw socket for recv/send on the hot path)
+        /// io - std.Io
         /// buf_read - []u8 (read buffer, owned by caller)
-        /// arena    - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
+        /// arena - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
         ///
         /// Return:
         /// - .keep_alive when the connection may serve another request
@@ -339,6 +344,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
 
             var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
+
             // Layer B: optional handler deadline. Handlers call ctx.isExpired() between steps.
             if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
@@ -379,7 +385,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             return if (head.keep_alive) .keep_alive else .close;
         }
 
-        /// Brief:
         /// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
         ///
         /// Note:
@@ -388,11 +393,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///   heap-allocates from smp_allocator otherwise
         /// - Per-connection arena is pre-warmed with max_allocator_size then reset
         ///   with retain_capacity before the loop — first request pays no heap cost
-        /// - Loops calling handleOneRequest until it returns .close
+        /// - Loops calling handleOneRequest until it yields .close
         ///
         /// Param:
         /// stream - std.Io.net.Stream
-        /// io     - std.Io
+        /// io - std.Io
         /// server - *Self
         fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *Self) void {
             defer stream.close(io);
@@ -436,9 +441,8 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Accept thread — accepts connections and enqueues them immediately.
-        /// Never handles I/O stays in the accept loop at all times.
+        /// Stays in the accept loop at all times. Does not handle I/O.
         ///
         /// Note:
         /// - reuse_address = true sets SO_REUSEADDR + SO_REUSEPORT on POSIX,
@@ -472,7 +476,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Pool thread — pops connections from the queue and handles each one
         /// synchronously with blocking I/O (no scheduler, no fiber overhead).
         /// Exits when the queue is closed and drained.
@@ -482,7 +485,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// Accept thread for MIXED dispatch — accepts connections and dispatches each via io.async().
         /// No ConnQueue. The shared io Threaded pool handles scheduling.
         fn asyncWorkerEntry(self: *Self, io: std.Io) void {
@@ -514,7 +516,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// EPOLL worker — pops a ready socket, serves one request, then re-arms
         /// the one-shot interest (keep-alive) or removes and closes the connection
         ///
@@ -523,10 +524,10 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///   across requests and connections (each request is self-contained)
         ///
         /// Param:
-        /// self  - *Self
+        /// self - *Self
         /// queue - *FdQueue
-        /// epfd  - std.posix.fd_t (epoll instance to re-arm or remove against)
-        /// io    - std.Io
+        /// epfd - std.posix.fd_t (epoll instance to re-arm or remove against)
+        /// io - std.Io
         fn epollWorkerEntry(self: *Self, queue: *FdQueue, epfd: std.posix.fd_t, io: std.Io) void {
             const linux = std.os.linux;
             const cfg = self.config;
@@ -558,7 +559,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// EPOLL dispatch: a single epoll event loop accepts connections and hands
         /// readable sockets to a worker pool. Linux-only.
         ///
@@ -571,10 +571,10 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Param:
         /// self - *Self
-        /// io   - std.Io
+        /// io - std.Io
         ///
         /// Return:
-        /// !void (returns only on setup failure, otherwise the event loop runs forever)
+        /// - !void (exits only on setup failure, otherwise the event loop runs forever)
         fn runEpoll(self: *Self, io: std.Io) !void {
             const linux = std.os.linux;
             const cfg = self.config;
@@ -624,7 +624,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorkerEntry, .{ self, &queue, epfd, io });
             }
 
-            const max_events = 256;
+            const max_events = epoll_max_events;
             var events: [max_events]linux.epoll_event = undefined;
             while (true) {
                 const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
@@ -667,7 +667,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         // --------------------------------------------------------- //
 
-        /// Brief:
         /// Initialize the HTTP server with the given config
         ///
         /// Param:
@@ -679,19 +678,17 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             return .{ .config = config };
         }
 
-        /// Brief:
         /// Free registry storage
         pub fn deinit(self: *Self) void {
             self.registry.deinit();
         }
 
-        /// Brief:
         /// Start listening and accepting connections
         ///
         /// Note:
         /// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
         /// - workers = N: exactly N accept threads, same pool sizing formula
-        /// - If config.public_dir is non-empty, validates the directory exists, returns error.PublicDirNotFound if not
+        /// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
         /// - Accept threads listen on the same port via SO_REUSEPORT
         /// - Pool threads handle connections synchronously via a shared work queue
         ///
@@ -814,7 +811,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
 // --------------------------------------------------------- //
 
-/// Brief:
 /// HTTP server — initialize with a comptime stack buffer threshold and comptime route table
 ///
 /// Note:
@@ -837,13 +833,12 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 /// }, .{ .ip = "0.0.0.0", .port = 8080, ... });
 /// ```
 pub const Server = struct {
-    /// Brief:
     /// Initialize the HTTP server
     ///
     /// Param:
     /// stack_threshold - comptime usize (stack buffer size cutoff, e.g. 4096)
-    /// routes          - comptime []const Route (route table baked into server type)
-    /// config          - HttpServerConfig
+    /// routes - comptime []const Route (route table baked into server type)
+    /// config - HttpServerConfig
     ///
     /// Return:
     /// !HttpServerImpl(stack_threshold, routes)

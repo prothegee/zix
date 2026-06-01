@@ -37,7 +37,7 @@ test "zix behaviour: GrpcStatus enum values are correct" {
 test "zix behaviour: GrpcContext.recvMessage empty body returns null" {
     var ctx = zix.Grpc.Context{
         .fd = 0,
-        .sid = 1,
+        .stream_id = 1,
         ._body = &.{},
         ._pos = 0,
         ._hdr_sent = false,

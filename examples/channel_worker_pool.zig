@@ -8,7 +8,7 @@
 // who is ready first, no fixed assignment.
 //
 // Run:
-//   zig build example-channel_worker_pool && ./zig-out/bin/example-channel_worker_pool
+// zig build example-channel_worker_pool && ./zig-out/bin/example-channel_worker_pool
 
 const std = @import("std");
 const zix = @import("zix");
@@ -35,6 +35,7 @@ const ProducerCap = struct {
 
 fn producer(cap: ProducerCap) void {
     defer cap.ch.close(cap.io);
+
     for (0..TASK_COUNT) |i| {
         cap.ch.send(cap.io, @intCast(i)) catch |err| {
             std.debug.print("producer: send error: {}\n", .{err});
