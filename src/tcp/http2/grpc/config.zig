@@ -57,6 +57,7 @@ pub const GrpcClientConfig = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: GrpcServerConfig required fields" {
     const gpa = std.testing.allocator;
