@@ -2,20 +2,22 @@
 
 const std = @import("std");
 
+// --------------------------------------------------------- //
+
 /// Get file extension from file path
 ///
 /// Note:
 /// - "" if '.' is not found or '.' is the last character
 ///
 /// Param:
-/// fp - []const u8 (file path)
+/// file_path - []const u8
 ///
 /// Return:
 /// []const u8
-pub fn extension(fp: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, fp, '.')) |dot_pos| {
-        if (dot_pos + 1 < fp.len) {
-            return fp[dot_pos + 1 ..];
+pub fn extension(file_path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, file_path, '.')) |dot_pos| {
+        if (dot_pos + 1 < file_path.len) {
+            return file_path[dot_pos + 1 ..];
         }
     }
     return "";
