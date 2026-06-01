@@ -37,6 +37,7 @@ test "zix behaviour: Logger init and deinit with no save_path" {
 test "zix behaviour: Logger flush with no save_path is a no-op" {
     var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
+
     logger.flush();
 }
 

@@ -10,6 +10,7 @@ test "zix integration: Channel(u32), init allocates requested capacity" {
     defer arena.deinit();
     var ch = try zix.Channel(u32).init(arena.allocator(), 8);
     defer ch.deinit();
+
     try std.testing.expectEqual(@as(usize, 8), ch.buf.len);
     try std.testing.expectEqual(@as(usize, 0), ch.count);
     try std.testing.expectEqual(@as(usize, 0), ch.head);
@@ -20,6 +21,7 @@ test "zix integration: Channel([]const u8), slice element type compiles" {
     defer arena.deinit();
     var ch = try zix.Channel([]const u8).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try std.testing.expectEqual(@as(usize, 4), ch.buf.len);
 }
 
@@ -29,6 +31,7 @@ test "zix integration: Channel(struct), struct element type compiles" {
     defer arena.deinit();
     var ch = try zix.Channel(Msg).init(arena.allocator(), 2);
     defer ch.deinit();
+
     try std.testing.expectEqual(@as(usize, 2), ch.buf.len);
 }
 
@@ -39,6 +42,7 @@ test "zix integration: Channel(u32), send and recv round-trip" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try ch.send(io, 42);
     const v = try ch.recv(io);
     try std.testing.expectEqual(@as(u32, 42), v);
@@ -51,6 +55,7 @@ test "zix integration: Channel(u32), drain remaining items after close" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try ch.send(io, 10);
     try ch.send(io, 20);
     ch.close(io);

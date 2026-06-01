@@ -79,6 +79,7 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
     var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
     defer parser.deinit();
+
     try parser.parse(body);
 
     const file_field = parser.getField("file") orelse {

@@ -11,6 +11,7 @@ test "zix behaviour: Channel, closed field defaults to false after init" {
     defer arena.deinit();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try std.testing.expect(!ch.closed);
 }
 
@@ -19,6 +20,7 @@ test "zix behaviour: Channel, head starts at zero" {
     defer arena.deinit();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try std.testing.expectEqual(@as(usize, 0), ch.head);
 }
 
@@ -46,6 +48,7 @@ test "zix behaviour: Channel, send increments count" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try ch.send(io, 99);
     try std.testing.expectEqual(@as(usize, 1), ch.count);
 }
@@ -57,6 +60,7 @@ test "zix behaviour: Channel, recv decrements count" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try ch.send(io, 7);
     _ = try ch.recv(io);
     try std.testing.expectEqual(@as(usize, 0), ch.count);
@@ -69,6 +73,7 @@ test "zix behaviour: Channel, close sets closed field to true" {
     const io = threaded.io();
     var ch = try zix.Channel(u32).init(arena.allocator(), 4);
     defer ch.deinit();
+
     try std.testing.expect(!ch.closed);
     ch.close(io);
     try std.testing.expect(ch.closed);

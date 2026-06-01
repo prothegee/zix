@@ -52,14 +52,14 @@ test "zix edge: readGrpcPrefix with empty slice returns TooShort" {
 
 test "zix edge: GrpcContext.recvMessage body shorter than prefix returns null" {
     const body = [_]u8{ 0, 0, 0 };
-    var ctx = zix.Grpc.Context{ .fd = 0, .sid = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
 test "zix edge: GrpcContext.recvMessage msg_len exceeds body returns null" {
     var body: [5]u8 = undefined;
     zix.Grpc.writePrefix(body[0..5], false, 100);
-    var ctx = zix.Grpc.Context{ .fd = 0, .sid = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 

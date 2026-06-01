@@ -441,6 +441,7 @@ fn dispatchStream(comptime routes: []const Route, s: *Stream, fd: std.posix.fd_t
 }
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix test: ServeOpts defaults" {
     const opts = ServeOpts{};

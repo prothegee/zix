@@ -145,6 +145,7 @@ fn workerEntry(ctx: WorkerCtx) void {
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
     defer listener.deinit(ctx.io);
+
     while (true) {
         const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
@@ -206,6 +207,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .kernel_backlog = ctx.kernel_backlog,
             }) catch return;
             defer listener.deinit(ctx.io);
+
             while (true) {
                 const stream = listener.accept(ctx.io) catch |err| {
                     if (err != error.ConnectionAborted) break;
@@ -497,6 +499,7 @@ pub const GrpcServer = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix grpc: GrpcServer.init port zero returns PortNotConfigured" {

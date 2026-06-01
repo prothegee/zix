@@ -149,6 +149,7 @@ fn workerEntry(ctx: WorkerCtx) void {
         return;
     };
     defer listener.deinit(ctx.io);
+
     while (true) {
         const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) {
@@ -190,6 +191,7 @@ fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
     defer listener.deinit(ctx.io);
+
     while (true) {
         const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
@@ -419,11 +421,11 @@ pub const FixServer = struct {
         const epfd: std.posix.fd_t = @intCast(epfd_rc);
         defer _ = linux.close(epfd);
 
-        var lev = linux.epoll_event{
+        var listener_event = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.ET,
             .data = .{ .fd = listener_fd },
         };
-        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
             return error.EpollCtlFailed;
 
         if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (epoll/{d})", .{ cfg.ip, cfg.port, pool_count });
@@ -471,6 +473,7 @@ pub const FixServer = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix fix: FixServer.init, port zero returns PortNotConfigured" {

@@ -6,6 +6,8 @@ const PathParam = @import("request.zig").PathParam;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 
+// --------------------------------------------------------- //
+
 pub const HandlerFn = *const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void;
 
 pub const RouteKind = enum(u8) { EXACT, PREFIX, PARAM };

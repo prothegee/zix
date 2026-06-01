@@ -54,6 +54,7 @@ pub fn main(process: std.process.Init) !void {
         };
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.Logon, &extra);
         seq_out += 1;
+
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
         std.debug.print("client: sent Logon\n", .{});
@@ -62,6 +63,7 @@ pub fn main(process: std.process.Init) !void {
     // Receive Logon response.
     {
         const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
+
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
@@ -81,6 +83,7 @@ pub fn main(process: std.process.Init) !void {
         };
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.NewOrderSingle, &extra);
         seq_out += 1;
+
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
         std.debug.print("client: sent NewOrderSingle\n", .{});
@@ -89,12 +92,14 @@ pub fn main(process: std.process.Init) !void {
     // Receive echo.
     {
         const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
+
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const fslice = fields[0..nf];
         const msgtype = zix.Fix.getField(fslice, .MsgType) orelse return error.MissingMsgType;
         const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
         const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
+
         std.debug.print("client: recv echo 35={s} symbol={s} qty={s}\n", .{ msgtype, symbol, qty });
     }
 
@@ -102,6 +107,7 @@ pub fn main(process: std.process.Init) !void {
     {
         const n = try zix.Fix.buildMessage(&out_buf, COMP_ID, target, seq_out, zix.Fix.MsgType.Logout, &.{});
         seq_out += 1;
+
         try writer.interface.writeAll(out_buf[0..n]);
         try writer.interface.flush();
         std.debug.print("client: sent Logout\n", .{});
@@ -110,6 +116,7 @@ pub fn main(process: std.process.Init) !void {
     // Receive Logout response.
     {
         const raw = try recvMessage(&reader.interface, &recv_buf, &recv_len);
+
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;

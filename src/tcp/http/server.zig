@@ -23,6 +23,8 @@ var g_date_lens: [2]usize = .{ 0, 0 };
 var g_date_active = std.atomic.Value(usize).init(0);
 var g_date_secs = std.atomic.Value(u64).init(0);
 
+// --------------------------------------------------------- //
+
 fn updateDateCache(io: std.Io) void {
     const timestamp = std.Io.Clock.real.now(io);
     const raw_secs = timestamp.toSeconds();
@@ -38,7 +40,6 @@ fn updateDateCache(io: std.Io) void {
 
 // --------------------------------------------------------- //
 // Layer D: connection registry + timer eviction
-// --------------------------------------------------------- //
 
 const ConnEntry = struct {
     stream: std.Io.net.Stream,
@@ -271,12 +272,12 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// - Falls back to static file serving, then 404, when no route matches
         ///
         /// Param:
-        /// server   - *Self
-        /// stream   - std.Io.net.Stream (passed to Context for upgrade handlers)
-        /// fd       - std.posix.fd_t (raw socket for recv/send on the hot path)
-        /// io       - std.Io
+        /// server - *Self
+        /// stream - std.Io.net.Stream (passed to Context for upgrade handlers)
+        /// fd - std.posix.fd_t (raw socket for recv/send on the hot path)
+        /// io - std.Io
         /// buf_read - []u8 (read buffer, owned by caller)
-        /// arena    - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
+        /// arena - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
         ///
         /// Return:
         /// - .keep_alive when the connection may serve another request
@@ -337,6 +338,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
 
             var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
+
             // Layer B: optional handler deadline. Handlers call ctx.isExpired() between steps.
             if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
@@ -389,7 +391,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Param:
         /// stream - std.Io.net.Stream
-        /// io     - std.Io
+        /// io - std.Io
         /// server - *Self
         fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: *Self) void {
             defer stream.close(io);
@@ -434,7 +436,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         // --------------------------------------------------------- //
 
         /// Accept thread — accepts connections and enqueues them immediately.
-        /// Never handles I/O stays in the accept loop at all times.
+        /// Stays in the accept loop at all times. Does not handle I/O.
         ///
         /// Note:
         /// - reuse_address = true sets SO_REUSEADDR + SO_REUSEPORT on POSIX,
@@ -508,7 +510,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Brief:
         /// EPOLL worker — pops a ready socket, serves one request, then re-arms
         /// the one-shot interest (keep-alive) or removes and closes the connection
         ///
@@ -517,10 +518,10 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///   across requests and connections (each request is self-contained)
         ///
         /// Param:
-        /// self  - *Self
+        /// self - *Self
         /// queue - *FdQueue
-        /// epfd  - std.posix.fd_t (epoll instance to re-arm or remove against)
-        /// io    - std.Io
+        /// epfd - std.posix.fd_t (epoll instance to re-arm or remove against)
+        /// io - std.Io
         fn epollWorkerEntry(self: *Self, queue: *FdQueue, epfd: std.posix.fd_t, io: std.Io) void {
             const linux = std.os.linux;
             const cfg = self.config;
@@ -564,7 +565,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Param:
         /// self - *Self
-        /// io   - std.Io
+        /// io - std.Io
         ///
         /// Return:
         /// - !void (exits only on setup failure, otherwise the event loop runs forever)
@@ -830,8 +831,8 @@ pub const Server = struct {
     ///
     /// Param:
     /// stack_threshold - comptime usize (stack buffer size cutoff, e.g. 4096)
-    /// routes          - comptime []const Route (route table baked into server type)
-    /// config          - HttpServerConfig
+    /// routes - comptime []const Route (route table baked into server type)
+    /// config - HttpServerConfig
     ///
     /// Return:
     /// !HttpServerImpl(stack_threshold, routes)

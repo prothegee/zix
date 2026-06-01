@@ -32,6 +32,7 @@ const ProducerCap = struct {
 
 fn producer(cap: ProducerCap) void {
     defer cap.ch.close(cap.io);
+
     for (1..11) |i| {
         cap.ch.send(cap.io, @intCast(i)) catch |err| {
             std.debug.print("producer: send error: {}\n", .{err});

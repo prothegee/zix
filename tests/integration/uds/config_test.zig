@@ -11,7 +11,8 @@ test "zix integration: UdsServer.init, valid path succeeds and deinit is safe" {
     server.deinit();
 }
 
-test "zix integration: UDS HandlerFn, echoHandler satisfies the type" {
-    const handler: zix.Uds.HandlerFn = zix.Uds.echoHandler;
+test "zix integration: UDS echoHandler, signature matches expected type" {
+    const HandlerType = fn (std.Io.net.Stream, std.Io) void;
+    const handler: HandlerType = zix.Uds.echoHandler;
     _ = handler;
 }

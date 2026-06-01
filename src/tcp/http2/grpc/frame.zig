@@ -27,7 +27,7 @@ pub fn writeGrpcPrefix(buf: *[5]u8, compress: bool, msg_len: u32) void {
 // --------------------------------------------------------- //
 
 /// Send initial response HEADERS (:status 200, content-type). No END_STREAM.
-pub fn sendGrpcHeaders(fd: std.posix.fd_t, sid: u31, content_type: []const u8) !void {
+pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     try hpack_enc.writeHeader(":status", "200");
@@ -37,27 +37,27 @@ pub fn sendGrpcHeaders(fd: std.posix.fd_t, sid: u31, content_type: []const u8) !
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
         .flags = h2.FLAG_END_HEADERS,
-        .stream_id = sid,
+        .stream_id = stream_id,
     });
     try h2.fdWriteAll(fd, hblock);
 }
 
 /// Send one DATA frame with 5-byte gRPC prefix. No END_STREAM.
-pub fn sendGrpcData(fd: std.posix.fd_t, sid: u31, msg: []const u8) !void {
+pub fn sendGrpcData(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !void {
     var prefix: [5]u8 = undefined;
-    writeGrpcPrefix(&prefix, false, @intCast(msg.len));
+    writeGrpcPrefix(&prefix, false, @intCast(message.len));
     try h2.writeFrameHeader(fd, .{
-        .length = @intCast(5 + msg.len),
+        .length = @intCast(5 + message.len),
         .frame_type = h2.FT_DATA,
         .flags = 0,
-        .stream_id = sid,
+        .stream_id = stream_id,
     });
     try h2.fdWriteAll(fd, &prefix);
-    try h2.fdWriteAll(fd, msg);
+    try h2.fdWriteAll(fd, message);
 }
 
 /// Send trailer HEADERS (grpc-status, grpc-message). FLAG_END_STREAM.
-pub fn sendGrpcTrailer(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message: []const u8) !void {
+pub fn sendGrpcTrailer(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     var status_str: [4]u8 = undefined;
@@ -69,13 +69,13 @@ pub fn sendGrpcTrailer(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_messa
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
         .flags = h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM,
-        .stream_id = sid,
+        .stream_id = stream_id,
     });
     try h2.fdWriteAll(fd, hblock);
 }
 
 /// Send trailers-only error response (no DATA frame). Includes :status 200 per gRPC spec.
-pub fn sendGrpcError(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message: []const u8) !void {
+pub fn sendGrpcError(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     try hpack_enc.writeHeader(":status", "200");
@@ -88,11 +88,12 @@ pub fn sendGrpcError(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
         .flags = h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM,
-        .stream_id = sid,
+        .stream_id = stream_id,
     });
     try h2.fdWriteAll(fd, hblock);
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix grpc: readGrpcPrefix too short" {

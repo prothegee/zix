@@ -6,6 +6,8 @@ const file_utils = @import("../../utils/file.zig");
 const Request = @import("request.zig").Request;
 const fdWriteAll = @import("response.zig").fdWriteAll;
 
+// --------------------------------------------------------- //
+
 const RangeRequest = struct {
     start: u64,
     end: ?u64,

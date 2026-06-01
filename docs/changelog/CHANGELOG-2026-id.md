@@ -34,7 +34,7 @@ __*Fix:*__
 
 <br>
 
-## 0.2.0 (2026-06-1)
+## 0.2.0 (2026-06-2)
 
 __*Ditambahkan:*__
 - Menambahkan TCP raw

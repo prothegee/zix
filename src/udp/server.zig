@@ -233,9 +233,9 @@ pub fn UdpServer(comptime Packet: type) type {
                 if (elapsed >= timeout_ms) {
                     var buf: [64]u8 = undefined;
                     const addr_str = fmtAddr(clients.items[i].from, &buf);
-                    const idx = clients.items[i].index;
+                    const client_index = clients.items[i].index;
                     _ = clients.swapRemove(i);
-                    if (logger) |lg| lg.system(.INFO, "udp", "client disconnected: {s} index={d} total={d}", .{ addr_str, idx, clients.items.len });
+                    if (logger) |lg| lg.system(.INFO, "udp", "client disconnected: {s} index={d} total={d}", .{ addr_str, client_index, clients.items.len });
                 } else {
                     i += 1;
                 }
@@ -253,6 +253,7 @@ pub fn UdpServer(comptime Packet: type) type {
     };
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved, binding to it is undefined behavior.
@@ -282,6 +283,7 @@ test "zix test: UdpServer init, config fields are preserved" {
         .auto_ack = true,
     });
     defer server.deinit();
+
     try std.testing.expectEqual(std.testing.allocator.ptr, server.config.allocator.ptr);
     try std.testing.expectEqual(@as(u16, 9200), server.config.port);
     try std.testing.expect(server.config.broadcast);

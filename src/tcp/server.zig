@@ -179,6 +179,7 @@ fn workerEntry(cfg: TcpServerConfig, queue: *ConnQueue, io: std.Io) void {
         return;
     };
     defer net_server.deinit(io);
+
     while (true) {
         const stream = net_server.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
@@ -218,6 +219,7 @@ fn asyncWorkerEntry(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) void {
         return;
     };
     defer net_server.deinit(io);
+
     while (true) {
         const stream = net_server.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
@@ -426,11 +428,11 @@ pub const TcpServer = struct {
         const epfd: std.posix.fd_t = @intCast(epfd_rc);
         defer _ = linux.close(epfd);
 
-        var lev = linux.epoll_event{
+        var listener_event = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.ET,
             .data = .{ .fd = listener_fd },
         };
-        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS)
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
             return error.EpollCtlFailed;
 
         if (cfg.logger) |lg| lg.system(.INFO, "tcp", "listening on {s}:{d} (epoll/{d})", .{ cfg.ip, cfg.port, pool_count });
@@ -507,6 +509,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     }
 }
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: TcpServer init, port zero returns PortNotConfigured" {

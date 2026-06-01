@@ -155,6 +155,7 @@ pub const MessageReader = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: encodeVarint single byte" {
     var buf: [10]u8 = undefined;

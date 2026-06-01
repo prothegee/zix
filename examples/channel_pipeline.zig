@@ -44,6 +44,7 @@ const StageACap = struct {
 
 fn stageA(cap: StageACap) void {
     defer cap.ch.close(cap.io);
+
     for (1..ITEM_COUNT + 1) |i| {
         cap.ch.send(cap.io, @intCast(i)) catch |err| {
             std.debug.print("stage_a: send error: {}\n", .{err});
@@ -64,6 +65,7 @@ const StageBCap = struct {
 
 fn stageB(cap: StageBCap) void {
     defer cap.out.close(cap.io);
+
     while (true) {
         const raw = cap.in.recv(cap.io) catch |err| {
             if (err != error.Closed) std.debug.print("stage_b: recv error: {}\n", .{err});

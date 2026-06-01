@@ -108,5 +108,5 @@ pub fn main(process: std.process.Init) !void {
     });
     defer server.deinit();
 
-    try server.runWith(process.io, dataHandler);
+    try server.run(process.io, dataHandler);
 }

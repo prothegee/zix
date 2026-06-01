@@ -229,6 +229,7 @@ pub const GrpcClient = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: GrpcClient.connect port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;

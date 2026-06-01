@@ -30,6 +30,7 @@ pub const UdsClientConfig = struct {
 };
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix test: UdsServerConfig, default field values" {
     const cfg = UdsServerConfig{

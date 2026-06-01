@@ -41,6 +41,7 @@ fn writer(cap: WriterCap) void {
     var write_buf: [256]u8 = undefined;
     var stream_writer = cap.stream.writer(cap.io, &write_buf);
     var counter: u64 = 0;
+
     while (true) {
         var msg_buf: [32]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "A:{d}", .{counter}) catch return;
