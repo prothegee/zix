@@ -85,6 +85,7 @@ fn workerEntry(ctx: WorkerCtx) void {
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
     defer listener.deinit(ctx.io);
+
     while (true) {
         const stream = listener.accept(ctx.io) catch |err| {
             if (err != error.ConnectionAborted) break;
@@ -146,6 +147,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 .kernel_backlog = ctx.kernel_backlog,
             }) catch return;
             defer listener.deinit(ctx.io);
+
             while (true) {
                 const stream = listener.accept(ctx.io) catch |err| {
                     if (err != error.ConnectionAborted) break;
@@ -312,6 +314,7 @@ pub const Http2Server = struct {
     }
 };
 
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: Http2Server.init, port zero returns PortNotConfigured" {
