@@ -9,6 +9,7 @@ pub const SOH: u8 = 0x01;
 pub const VERSION: []const u8 = "FIX.4.2";
 pub const MAX_FIELDS: usize = 64;
 pub const MAX_MSG_SIZE: usize = 8192;
+pub const CHECKSUM_MODULUS: u32 = 256;
 
 // --------------------------------------------------------- //
 
@@ -201,7 +202,7 @@ pub fn getField(fields: []const Field, tag: Tag) ?[]const u8 {
 pub fn computeChecksum(buf: []const u8) u8 {
     var sum: u32 = 0;
     for (buf) |b| sum += b;
-    return @truncate(sum % 256);
+    return @truncate(sum % CHECKSUM_MODULUS);
 }
 
 /// Verify the tag-10 CheckSum field in a complete raw FIX message.
