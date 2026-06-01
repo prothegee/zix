@@ -28,6 +28,7 @@ pub fn parseTimeout(value: []const u8) ?u64 {
 }
 
 // --------------------------------------------------------- //
+// --------------------------------------------------------- //
 
 test "zix grpc: parseTimeout seconds" {
     try std.testing.expectEqual(@as(?u64, 5_000_000_000), parseTimeout("5S"));
