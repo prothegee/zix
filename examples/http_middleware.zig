@@ -54,6 +54,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
                 try res.sendJson("{\"error\":\"forbidden origin\"}");
                 return;
             }
+
             return next(req, res, ctx);
         }
     }.handle;
@@ -103,6 +104,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
                 try res.sendJson("{\"error\":\"invalid base64 encoding\"}");
                 return;
             };
+
             const decoded = decoded_buf[0..decoded_len];
 
             // Split "user:pass" at the first ':'
