@@ -8,7 +8,6 @@
     <b><i>Zero sIX; 06;</i></b>
 </p>
 
-
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>A network backend library written in zig.</i>
 </p>
@@ -88,7 +87,7 @@ To be modern with less hassle, "magic" should less or more?
 Zig (also another programming language) could complement existing program
 and able to create a good program, but when critical-performance our options is less/hard.
 
-My work mostly 80% backend nad 20% frontend.
+My work mostly 80% backend and 20% frontend.
 So network/communication system is essential in my end.
 From monolith, micro-service, and modular micro-service.
 
@@ -98,6 +97,7 @@ But "variant of colors" made me go back to Go & C++ again.
 So in mid 2025 the plan is only idea and some architectural design.
 
 So when Zig 0.16.x release, and in 2026 early March. I started the march.
+Now I can regain transparency, more control, and more explicit in approach.
 ```
 
 <!--
@@ -148,6 +148,7 @@ __*6. Predictable, Transparent Memory Management.*__
 
 ## Important Contribution Notes
 
+- Helping Zig, helping Zix.
 - Zig should be the ecosystem.
 - Single file, single responsibility.
 - Always use and push Zig and their std.

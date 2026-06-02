@@ -8,7 +8,6 @@
     <b><i>Zero sIX; 06;</i></b>
 </p>
 
-
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Pustaka backend jaringan yang ditulis dalam zig.</i>
 </p>
@@ -98,6 +97,7 @@ Tetapi "varian warna" membuat saya kembali ke Go & C++.
 Jadi pada pertengahan 2025 rencananya hanya ide dan beberapa desain arsitektur.
 
 Jadi ketika Zig 0.16.x dirilis, dan awal Maret 2026. Saya memulai langkah.
+Sekarang saya bisa mendapatkan kembali transparansi, kendali yang lebih, dan pendekatan yang lebih eksplisit.
 ```
 
 <!--
@@ -148,6 +148,7 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 
 ## Catatan Kontribusi Penting
 
+- Membantu Zig, membantu Zix.
 - Zig harus menjadi ekosistemnya.
 - Satu file, satu tanggung jawab.
 - Selalu gunakan dan dorong penggunaan Zig dan std-nya.
