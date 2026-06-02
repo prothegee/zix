@@ -34,14 +34,18 @@ __*Fix:*__
 
 <br>
 
-## 0.2.0 (2026-06-2)
+## 0.2.0 (2026-06-02)
 
 __*Ditambahkan:*__
 - Menambahkan TCP raw
 - Menambahkan gRPC h2c
 - Menambahkan FIX (over TCP)
+- Menambahkan EPOLL ke dispatch model
+- ASYNC adalah default dispatch model
 - Handler/router (Http & gRPC) kini menggunakan comptime
 - Dokumentasi dibagi menjadi Bahasa Inggris (en) dan Bahasa Indonesia (id)
+
+<br>
 
 __*Diperbaiki:*__
 - n/a
