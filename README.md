@@ -12,18 +12,27 @@
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
 </div>
 
+<hr>
+
+<h4 align="center">
+    <b><i>Languages:</i></b>
+</h4>
+
+<p align="center">
+    <a href="./README-id.md">Bahasa - id</a>
+    |
+    <a href="./README-en.md">English - en</a>
+</p>
+
 <br>
 
-## Table of Contents
+<h4 align="center">
+    <b><i>License:</i></b>
+</h4>
 
-__*Languages:*__
-- [Bahasa - id](./README-id.md)
-- [English - en](./README-en.md)
-
-<br>
-
-__*License:*__
-- [BSD-3-Clause license](./LICENSE-BSD)
+<p align="center">
+    <a href="./LICENSE-BSD">BSD-3-Clause license</a>
+</p>
 
 <br>
 
