@@ -3,15 +3,15 @@
 //! Port: 10101
 //!
 //! Proto schema: examples/protobuf/location.proto
-//!   message LocationReq  { double long = 1; double lat = 2; string message = 3; }
-//!   message LocationResp { string message = 1; bool ok = 2; }
+//! message LocationReq  { double long = 1; double lat = 2; string message = 3; }
+//! message LocationResp { string message = 1; bool ok = 2; }
 //!
 //! Run:
-//!   zig build example-grpc_location_server_3_mixed
-//!   ./zig-out/bin/example-grpc_location_server_3_mixed
+//! zig build example-grpc_location_server_3_mixed
+//! ./zig-out/bin/example-grpc_location_server_3_mixed
 //!
 //! Test with the location client:
-//!   ./zig-out/bin/example-grpc_location_client
+//! ./zig-out/bin/example-grpc_location_client
 
 const std = @import("std");
 const zix = @import("zix");
