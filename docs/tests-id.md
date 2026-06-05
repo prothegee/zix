@@ -107,7 +107,7 @@ Sumber: `src/zix.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `tcp/http2/grpc/status.zig` | `refAllDecls` + perilaku: OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
-| `tcp/http2/grpc/frame.zig` | `refAllDecls` + perilaku: round-trip `readGrpcPrefix` / `writeGrpcPrefix`, flag compress tersimpan, panjang pesan tersimpan |
+| `tcp/http2/grpc/frame.zig` | `refAllDecls` + perilaku: round-trip `readGrpcPrefix` / `writeGrpcPrefix`, flag compress tersimpan, panjang pesan tersimpan, `sendGrpcError` menyertakan header `content-type` |
 | `tcp/http2/grpc/proto.zig` | `refAllDecls` + perilaku: round-trip `encodeVarint` / `decodeVarint`, `encodeString` menghasilkan wire type LEN, `encodeInt32` menghasilkan wire type VARINT, round-trip `encodeDouble` / `decodeDouble` (nilai positif dan negatif), `MessageReader` mengiterasi semua field |
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + perilaku: satuan H/M/S/m/u/n dikonversi dengan benar, karakter tunggal menghasilkan null, kosong menghasilkan null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + perilaku: `parsePath` input valid dan tidak valid, `detectContentType` proto/json/tidak diketahui, `GrpcContext.recvMessage` body kosong menghasilkan null, `Route.timeout_ms` default nol, `GrpcContext.isExpired` deadline null/lampau/mendatang, `GrpcServeOpts.handler_timeout_ms` default nol, Router mendispatch ke handler yang cocok |
@@ -283,7 +283,7 @@ Port: 18082-18085.
 
 #### `server_test.zig`
 
-Port: 18200-18204.
+Port: 18200-18206.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
@@ -294,6 +294,8 @@ Port: 18200-18204.
 | gRPC client streaming mengumpulkan semua pesan | `collectHandler` menyangga tiga pesan, membalas dengan jumlah `"got 3"` |
 | gRPC bidirectional meng-echo setiap pesan | `echoHandler` meng-echo `"ping"` lalu `"pong"` dari dua pesan client |
 | gRPC method tidak dikenal mengembalikan UNIMPLEMENTED | `dispatchHandler` membalas dengan `GrpcStatus.UNIMPLEMENTED` untuk path tidak dikenal |
+| gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `ctx.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data; client menerima status error |
+| gRPC dua stream pada koneksi yang sama keduanya mengembalikan OK | dua RPC unary berurutan pada satu koneksi; kedua stream menerima respons yang benar |
 
 ### tests/integration/channel/
 
@@ -676,7 +678,7 @@ Port: 18100.
 
 #### `server_test.zig`
 
-Port: 18220.
+Port: 18220-18221.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
@@ -692,6 +694,7 @@ Port: 18220.
 | `parseTimeout` karakter tunggal | menghasilkan null |
 | `GrpcClient.connect` port nol | menghasilkan `error.PortNotConfigured` |
 | `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera; tanpa crash atau error |
+| gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `ctx.finish(INVALID_ARGUMENT, ...)`; client menerima status error tanpa frame data apa pun |
 
 ### tests/edge/channel/
 

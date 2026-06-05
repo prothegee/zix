@@ -107,7 +107,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/http2/grpc/status.zig` | `refAllDecls` + behavioral: OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
-| `tcp/http2/grpc/frame.zig` | `refAllDecls` + behavioral: `readGrpcPrefix` / `writeGrpcPrefix` roundtrip, compress flag preserved, message length preserved |
+| `tcp/http2/grpc/frame.zig` | `refAllDecls` + behavioral: `readGrpcPrefix` / `writeGrpcPrefix` roundtrip, compress flag preserved, message length preserved, `sendGrpcError` includes `content-type` header |
 | `tcp/http2/grpc/proto.zig` | `refAllDecls` + behavioral: `encodeVarint` / `decodeVarint` roundtrip, `encodeString` produces LEN wire type, `encodeInt32` produces VARINT wire type, `encodeDouble` / `decodeDouble` roundtrip (positive and negative values), `MessageReader` iterates all fields |
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + behavioral: H/M/S/m/u/n units convert correctly, single-char returns null, empty returns null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + behavioral: `parsePath` valid and invalid inputs, `detectContentType` proto/json/unknown, `GrpcContext.recvMessage` empty body returns null, `Route.timeout_ms` defaults to zero, `GrpcContext.isExpired` null/past/future deadline, `GrpcServeOpts.handler_timeout_ms` defaults to zero, Router dispatches to matching handler |
@@ -283,7 +283,7 @@ Ports: 18082-18085.
 
 #### `server_test.zig`
 
-Ports: 18200-18204.
+Ports: 18200-18206.
 
 | Test | What it verifies |
 | :- | :- |
@@ -294,6 +294,8 @@ Ports: 18200-18204.
 | gRPC client streaming collects all messages | `collectHandler` buffers three messages, replies with count `"got 3"` |
 | gRPC bidirectional echoes each message | `echoHandler` echoes `"ping"` then `"pong"` from two client messages |
 | gRPC unknown method returns UNIMPLEMENTED | `dispatchHandler` replies with `GrpcStatus.UNIMPLEMENTED` for unknown path |
+| gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `ctx.finish(INVALID_ARGUMENT, ...)` without sending data; client receives the error status |
+| gRPC two streams on same connection both return OK | two sequential unary RPCs on one connection; both streams receive correct responses |
 
 ### tests/integration/channel/
 
@@ -676,7 +678,7 @@ Port: 18100.
 
 #### `server_test.zig`
 
-Port: 18220.
+Ports: 18220-18221.
 
 | Test | What it verifies |
 | :- | :- |
@@ -692,6 +694,7 @@ Port: 18220.
 | `parseTimeout` single character | returns null |
 | `GrpcClient.connect` port zero | returns `error.PortNotConfigured` |
 | `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately; no crash or error |
+| gRPC finish-only handler delivers error status to client | handler calls `ctx.finish(INVALID_ARGUMENT, ...)` only; client receives the error status without any data frames |
 
 ### tests/edge/channel/
 
