@@ -40,11 +40,17 @@ zig-pkg
 *.bak*
 *.zip
 *.pem
+*.bin
 
 *perf.*
 *Zone.Identifier
 
 !/rnd/perf-example-http_basic-perf.md
+!/examples/grpc_hello_req.bin
+!/examples/grpc_location_req.bin
+!/rnd/bug-0.2.x/grpc_server_4_epoll_h2load_c512.perf.data
+!/rnd/bug-0.2.x/grpc_server_4_epoll_h2load_c1024.perf.data
+!/rnd/bug-0.2.x/grpc_location_server_4_epoll_ghz_c64.perf.data
 
 ##
 ## file: include
