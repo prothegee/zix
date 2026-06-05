@@ -34,6 +34,26 @@ __*Fix:*__
 
 <br>
 
+## 0.2.2 (2026-06-06)
+
+__*Ditambahkan:*__
+- grpc-unary-inline-dispatch:
+    - Route unary (`Route.is_server_streaming = false`, default) kini di-dispatch secara sinkron pada connection thread. Tidak ada alokasi Task per panggilan, tidak ada salinan `header_scratch` 4 KB, tidak ada enqueue `io.async`, tidak ada acquire/release ConnMutex.
+    - Route server-streaming memerlukan `is_server_streaming = true` pada entri `Route` untuk menggunakan dispatch thread-per-stream.
+    - Field baru pada `zix.Grpc.Route`: `is_server_streaming: bool = false`.
+    ---
+- grpc-bench-fixtures:
+    - Menambahkan `examples/grpc_hello_req.bin` dan `examples/grpc_location_req.bin`: fixture biner berframing gRPC untuk benchmarking dengan h2load dan ghz.
+    - Perintah benchmark h2load dan ghz ditambahkan ke seluruh 8 contoh server gRPC.
+    ---
+
+<br>
+
+__*Diperbaiki:*__
+- n/a
+
+<br>
+
 ## 0.2.1 (2026-06-05)
 
 __*Ditambahkan:*__
