@@ -1,17 +1,17 @@
 //! http_sse.zig — Server-Sent Events example
 //!
 //! Two endpoints:
-//!   GET /        — HTML page that opens an EventSource (open in browser)
-//!   GET /events  — SSE stream: sends a counter every second for 10 ticks then closes
+//! GET /        — HTML page that opens an EventSource (open in browser)
+//! GET /events  — SSE stream: sends a counter every second for 10 ticks then closes
 //!
 //! Uses .ASYNC dispatch: single accept thread, each SSE connection dispatched via io.async().
 //! .ASYNC is preferred for SSE: long-lived connections do not hold pool threads.
 //!
 //! curl usage:
-//!   curl -N http://localhost:9010/events
+//! curl -N http://localhost:9010/events
 //!
 //! browser:
-//!   http://localhost:9010/
+//! http://localhost:9010/
 
 const std = @import("std");
 const zix = @import("zix");

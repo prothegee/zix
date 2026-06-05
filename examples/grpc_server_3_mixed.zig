@@ -2,12 +2,12 @@
 //! Port: 8083
 //!
 //! Run:
-//!   zig build example-grpc_server_3_mixed
-//!   ./zig-out/bin/example-grpc_server_3_mixed
+//! zig build example-grpc_server_3_mixed
+//! ./zig-out/bin/example-grpc_server_3_mixed
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!   grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
 
 const std = @import("std");
 const zix = @import("zix");

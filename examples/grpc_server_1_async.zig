@@ -3,15 +3,15 @@
 //! Port: 8083
 //!
 //! Run:
-//!   zig build example-grpc_server_1_async
-//!   ./zig-out/bin/example-grpc_server_1_async
+//! zig build example-grpc_server_1_async
+//! ./zig-out/bin/example-grpc_server_1_async
 //!
 //! Test with the gRPC client:
-//!   ./zig-out/bin/example-grpc_client
+//! ./zig-out/bin/example-grpc_client
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!   grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
 
 const std = @import("std");
 const zix = @import("zix");

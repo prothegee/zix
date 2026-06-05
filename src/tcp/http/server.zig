@@ -457,7 +457,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             var net_server = addr.listen(io, .{
                 .mode = .stream,
                 .kernel_backlog = @intCast(cfg.max_kernel_backlog),
-                .reuse_address = true,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: worker listen error: {}\n", .{err});
                 return;
@@ -497,7 +497,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             var net_server = addr.listen(io, .{
                 .mode = .stream,
                 .kernel_backlog = @intCast(cfg.max_kernel_backlog),
-                .reuse_address = true,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: worker listen error: {}\n", .{err});
                 return;
@@ -588,7 +588,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             var net_server = addr.listen(io, .{
                 .mode = .stream,
                 .kernel_backlog = @intCast(cfg.max_kernel_backlog),
-                .reuse_address = true,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: epoll listen error: {}\n", .{err});
                 return err;
@@ -768,7 +768,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     var net_server = addr.listen(thread_io, .{
                         .mode = .stream,
                         .kernel_backlog = @intCast(cfg.max_kernel_backlog),
-                        .reuse_address = true,
+                        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                     }) catch |err| {
                         std.debug.print("zix: listen error: {}\n", .{err});
                         return;
@@ -821,8 +821,8 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 /// - routes must be comptime: the router is baked into the server type at compile time
 ///   (no heap allocation, no dynamic registration after init)
 /// - workers in config controls accept thread count:
-///     0 (default) -> cpu_count accept threads, max(10, cpu_count * 2) pool threads
-///     N           -> exactly N accept threads, same pool sizing formula
+///   0 (default) = cpu_count accept threads, max(10, cpu_count * 2) pool threads.
+///   N           = exactly N accept threads, same pool sizing formula.
 ///
 /// Usage:
 /// ```zig

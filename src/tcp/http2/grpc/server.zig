@@ -141,7 +141,7 @@ const WorkerCtx = struct {
 fn workerEntry(ctx: WorkerCtx) void {
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
     var listener = addr.listen(ctx.io, .{
-        .reuse_address = true,
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
         .kernel_backlog = ctx.kernel_backlog,
     }) catch return;
     defer listener.deinit(ctx.io);
@@ -203,7 +203,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var listener = addr.listen(ctx.io, .{
-                .reuse_address = true,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                 .kernel_backlog = ctx.kernel_backlog,
             }) catch return;
             defer listener.deinit(ctx.io);
@@ -263,7 +263,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 return err;
             };
             var net_server = addr.listen(io, .{
-                .reuse_address = true,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                 .kernel_backlog = cfg.kernel_backlog,
             }) catch |err| {
                 std.debug.print("zix grpc server: epoll listen error: {}\n", .{err});
@@ -373,7 +373,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
                     var listener = try addr.listen(io, .{
-                        .reuse_address = true,
+                        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                         .kernel_backlog = cfg.kernel_backlog,
                     });
                     defer listener.deinit(io);

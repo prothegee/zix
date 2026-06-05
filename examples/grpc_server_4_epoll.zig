@@ -9,12 +9,12 @@
 //! Use POOL or ASYNC on non-Linux platforms.
 //!
 //! Run:
-//!   zig build example-grpc_server_4_epoll
-//!   ./zig-out/bin/example-grpc_server_4_epoll
+//! zig build example-grpc_server_4_epoll
+//! ./zig-out/bin/example-grpc_server_4_epoll
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!   grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
 
 const std = @import("std");
 const zix = @import("zix");
