@@ -60,7 +60,7 @@
 - [Examples: gRPC h2c](./README-en.md#gRPC-h2c)
 - [Examples: Raw TCP](./README-en.md#Raw-TCP)
 - [Examples: FIX 4.x](./README-en.md#FIX-4x)
-- [Examples: UDS (Unix DOmain Sockets)](./README-en.md#UDS-Unix-Domain-Sockets)
+- [Examples: UDS (Unix Domain Sockets)](./README-en.md#UDS-Unix-Domain-Sockets)
 - [Examples: Channel](./README-en.md#Channel)
 - [Examples: UDP](./README-en.md#UDP)
 - [Examples: Logger](./README-en.md#Logger)
@@ -401,6 +401,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
     .pool_size      = 32, // worker threads; workers field is ignored
 });
 ```
+
+__*In the nutshell:*__
+- Looking for high throughput? Use `.EPOLL`.
+- Looking for consistent latency? Use `.ASYNC`.
+- For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
 
 See [`docs/concurrency-en.md`](docs/concurrency-en.md) for architecture details, thread counts, and when to prefer each model.
 
@@ -968,7 +973,7 @@ var server = try zix.Grpc.Server.init(
         .io                = process.io,
         .ip                = "127.0.0.1",
         .port              = 8083,
-        .handler_timeout_ms = 5_000, // global cap; also combined with Route.timeout_ms and grpc-timeout header
+        .handler_timeout_ms = 5_000, // global cap, also combined with Route.timeout_ms and grpc-timeout header
     },
 );
 ```
