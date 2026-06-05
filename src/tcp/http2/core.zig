@@ -115,7 +115,7 @@ fn serveConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: Serv
             return error.BadPreface;
         }
         try frame.sendSettings(fd, &.{
-            .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, 128 },
+            .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
             .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
             .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
             .{ frame.SETTINGS_ENABLE_PUSH, 0 },
@@ -209,7 +209,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     }
 
     try frame.sendSettings(fd, &.{
-        .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, 128 },
+        .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
         .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
         .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
         .{ frame.SETTINGS_ENABLE_PUSH, 0 },
