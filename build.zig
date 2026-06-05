@@ -261,4 +261,38 @@ pub fn build(b: *std.Build) void {
         const run_step = b.step(pair[0], "Run " ++ pair[0]);
         run_step.dependOn(&run.step);
     }
+
+    // --------------------------------------------------------- //
+
+    // Bug reproduction programs — not built by default.
+
+    const bugs_0_2_x = .{
+        .{ "bug-grpc_error_response_server", "rnd/bug-0.2.x/grpc_error_response_server.zig", "Bug 1: gRPC error response missing content-type" },
+        .{ "bug-grpc_stream_concurrent_server", "rnd/bug-0.2.x/grpc_stream_concurrent_server.zig", "Bug 2: gRPC blocking dispatch under concurrent streams" },
+    };
+
+    // Reserved
+
+    const bug_all_step = b.step("bug-all", "Build all bug reproduction programs");
+    const bug_0_2_x_step = b.step("bug-0.2.x", "Build all 0.2.x bug reproduction programs");
+
+    bug_all_step.dependOn(bug_0_2_x_step);
+
+    inline for (bugs_0_2_x) |entry| {
+        const bug_mod = b.createModule(.{
+            .root_source_file = b.path(entry[1]),
+            .target = target,
+            .optimize = optimize,
+        });
+        bug_mod.addImport("zix", zix);
+
+        const bug_exe = b.addExecutable(.{
+            .name = entry[0],
+            .root_module = bug_mod,
+        });
+
+        const bug_step = b.step(entry[0], entry[2]);
+        bug_step.dependOn(&b.addInstallArtifact(bug_exe, .{}).step);
+        bug_0_2_x_step.dependOn(bug_step);
+    }
 }

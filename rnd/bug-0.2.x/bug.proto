@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package bug;
+
+message Request  {}
+message Response {}
+
+service BugService {
+  rpc Trigger (Request) returns (Response);
+  rpc Stream  (Request) returns (stream Response);
+}
