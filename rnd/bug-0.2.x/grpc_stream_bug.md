@@ -44,38 +44,34 @@ zig build bug-grpc_error_response_server
 ./zig-out/bin/bug-grpc_error_response_server
 ```
 
-Send one request with ghz:
+Send one request with curl (no proto file needed):
 
 ```sh
-# run from the root project
-ghz --insecure \
---proto rnd/bug-0.2.x/bug.proto \
---call bug.BugService.Trigger \
--d '{}' -c 1 -n 1 \
-127.0.0.1:9091
+curl -v --http2-prior-knowledge \
+  -H 'content-type: application/grpc+proto' \
+  -H 'te: trailers' \
+  -X POST \
+  http://127.0.0.1:9091/bug.BugService/Trigger
 ```
 
-**Expected output (unpatched):**
+**Expected output (unpatched) — `content-type` absent from response headers:**
 
 ```
-Summary:
-  Count:    1
-  Failed:   1
-
-Error Distribution:
-  [1]   rpc error: code = Unknown desc = malformed header: missing HTTP content-type
+< HTTP/2 200 
+< grpc-status: 3
+< grpc-message: trigger
 ```
 
-**Expected output (after fix):**
+**Expected output (after fix) — `content-type` present:**
 
 ```
-Summary:
-  Count:    1
-  Failed:   0
-
-Status code distribution:
-  [1]   OK
+< HTTP/2 200 
+< content-type: application/grpc+proto
+< grpc-status: 3
+< grpc-message: trigger
 ```
+
+**Resolved:** 0.2.1 — `sendGrpcError` now includes `content-type: application/grpc+proto`.
 
 ---
 
@@ -180,6 +176,8 @@ Summary:
 Status code distribution:
   [~100%]   OK
 ```
+
+**Resolved:** 0.2.1 — each stream is now dispatched on a dedicated thread with a shared connection-level write mutex (`ConnMutex`), unblocking the h2 read loop.
 
 ---
 

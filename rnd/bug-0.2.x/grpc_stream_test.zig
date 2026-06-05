@@ -3,10 +3,10 @@
 // Run with (from the zix/ directory):
 //   zig test bug_grpc_stream_test.zig
 //
-// Both tests are expected to FAIL on the unpatched zix 0.2.0 source.
+// Both tests pass on zix 0.2.1 and later.
 
 const std = @import("std");
-const frm = @import("src/tcp/http2/grpc/frame.zig");
+const frame = @import("src/tcp/http2/grpc/frame.zig");
 const core = @import("src/tcp/http2/grpc/core.zig");
 
 // --------------------------------------------------------- //
@@ -20,16 +20,16 @@ const core = @import("src/tcp/http2/grpc/core.zig");
 // content-type, so any gRPC client that enforces the spec (ghz, grpc-go)
 // reports "malformed header: missing HTTP content-type".
 //
-// Expected to FAIL on zix 0.2.0.
+// Fixed in 0.2.1.
 test "Bug1: sendGrpcError response contains content-type header" {
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
+    const pipe_fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(pipe_fds[0]);
 
-    frm.sendGrpcError(fds[1], 1, 3, "empty request") catch {};
-    _ = std.posix.system.close(fds[1]);
+    frame.sendGrpcError(pipe_fds[1], 1, 3, "empty request") catch {};
+    _ = std.posix.system.close(pipe_fds[1]);
 
     var buf: [512]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try std.posix.read(pipe_fds[0], &buf);
     const raw = buf[0..n];
 
     // HPACK encodes content-type as a literal; the ASCII string "content-type"
@@ -52,13 +52,13 @@ test "Bug1: sendGrpcError response contains content-type header" {
 // triggers Bug 1.
 //
 // This test pins the null-body -> sendGrpcError path.
-// Expected to FAIL on zix 0.2.0 (sendGrpcError lacks content-type).
+// Fixed in 0.2.1.
 test "Bug2: GrpcContext finish without sendMessage still emits content-type" {
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
+    const pipe_fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(pipe_fds[0]);
 
     var ctx = core.GrpcContext{
-        .fd = fds[1],
+        .fd = pipe_fds[1],
         .stream_id = 1,
         ._body = &.{},
         ._pos = 0,
@@ -73,15 +73,13 @@ test "Bug2: GrpcContext finish without sendMessage still emits content-type" {
 
     // Handler takes the early-exit path used in streamSumHandler / getSumHandler.
     ctx.finish(.INVALID_ARGUMENT, "empty request");
-    _ = std.posix.system.close(fds[1]);
+    _ = std.posix.system.close(pipe_fds[1]);
 
     var buf: [512]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try std.posix.read(pipe_fds[0], &buf);
     const raw = buf[0..n];
 
     // The response must carry content-type per gRPC spec.
-    // FAILS because _hdr_sent=false -> finish() calls sendGrpcError which
-    // omits content-type (Bug 1).
     const has_content_type = std.mem.indexOf(u8, raw, "content-type") != null;
     try std.testing.expect(has_content_type);
 }
