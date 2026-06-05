@@ -34,6 +34,26 @@ __*Fix:*__
 
 <br>
 
+## 0.2.2 (2026-06-06)
+
+__*Update:*__
+- grpc-unary-inline-dispatch:
+    - Unary routes (`Route.is_server_streaming = false`, the default) now dispatch synchronously on the connection thread. No per-call Task alloc, no 4 KB `header_scratch` copy, no `io.async` enqueue, no ConnMutex acquire/release.
+    - Server-streaming routes require `is_server_streaming = true` on the `Route` entry to use thread-per-stream dispatch.
+    - New field on `zix.Grpc.Route`: `is_server_streaming: bool = false`.
+    ---
+- grpc-bench-fixtures:
+    - Added `examples/grpc_hello_req.bin` and `examples/grpc_location_req.bin`: properly gRPC-framed binary fixtures for h2load and ghz benchmarking.
+    - h2load and ghz benchmark commands added to all 8 gRPC server examples.
+    ---
+
+<br>
+
+__*Fix:*__
+- n/a
+
+<br>
+
 ## 0.2.1 (2026-06-05)
 
 __*Update:*__

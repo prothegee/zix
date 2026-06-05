@@ -870,6 +870,7 @@ grpcurl -plaintext -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHe
 - `ctx.recvMessage()` mengembalikan setiap pesan client yang di-buffer atau `null` jika selesai.
 - `ctx.sendMessage(content_type, data)` mengirim frame DATA respons (panggilan pertama juga mengirim HEADERS).
 - `ctx.finish(status, message)` mengirim trailer grpc-status. Harus dipanggil tepat sekali.
+- Route unary (`is_server_streaming = false`, default) di-dispatch secara sinkron pada connection thread. Route server-streaming memerlukan `is_server_streaming = true` pada entri `Route` dan masing-masing berjalan pada thread tersendiri.
 
 **GrpcClient:**
 
@@ -910,8 +911,8 @@ var server = try zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // cap per-rute 3 detik, memperketat cap global 5 detik
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-        // cap per-rute 10 detik, cap global 5 detik tetap menang
-        .{ .path = "/helloworld.Greeter/Echo",     .handler = echoHandler,     .timeout_ms = 10_000 },
+        // cap per-rute 10 detik, cap global 5 detik tetap menang; Echo mengirim N respons sehingga is_server_streaming = true
+        .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
     },
     .{
         .io                = process.io,

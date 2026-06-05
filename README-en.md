@@ -926,6 +926,7 @@ grpcurl -plaintext -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHe
 - `ctx.recvMessage()` returns each buffered client message or `null` when done.
 - `ctx.sendMessage(content_type, data)` sends a response DATA frame (first call also sends HEADERS).
 - `ctx.finish(status, message)` sends the grpc-status trailer. Must be called exactly once.
+- Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes require `is_server_streaming = true` on the `Route` entry and each run on a dedicated thread.
 
 **GrpcClient:**
 
@@ -966,8 +967,8 @@ var server = try zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // per-route 3s cap, tightens the 5s global cap
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-        // per-route 10s cap, global 5s cap still wins
-        .{ .path = "/helloworld.Greeter/Echo",     .handler = echoHandler,     .timeout_ms = 10_000 },
+        // per-route 10s cap, global 5s cap still wins; Echo sends N responses so is_server_streaming = true
+        .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
     },
     .{
         .io                = process.io,

@@ -79,7 +79,8 @@ pub fn main() !void {
     var server = try zix.Grpc.Server.init(
         &[_]zix.Grpc.Route{
             .{ .path = "/bug.BugService/Stream", .handler = streamHandler },
-        }, .{
+        },
+        .{
             .io = io_backend,
             .ip = "127.0.0.1",
             .port = 9092,

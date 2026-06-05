@@ -413,6 +413,10 @@ pub const HpackDecoder = struct {
     dyn_count: usize = 0,
     dyn_size: usize = 0,
     max_size: usize = 4096,
+    // dyn[] entries always slice into here, never into per-call scratch.
+    // Scratch buffers are zeroed on stream-slot reuse; dyn_buf persists for the connection lifetime.
+    dyn_buf: [8192]u8 = undefined,
+    dyn_buf_pos: usize = 0,
 
     pub fn init() HpackDecoder {
         return .{};
@@ -441,17 +445,56 @@ pub const HpackDecoder = struct {
         }
     }
 
+    // Repack live dyn[] entries contiguously at the start of dyn_buf.
+    // Called when dyn_buf_pos + needed > dyn_buf.len after eviction freed entries.
+    // Safe: entries are stored oldest (low addr) -> newest (high addr); compaction
+    // writes oldest first at new_pos=0 so source always >= dest, no overlap.
+    fn compactDynBuf(self: *HpackDecoder) void {
+        var new_pos: usize = 0;
+        var index: usize = self.dyn_count;
+
+        while (index > 0) {
+            index -= 1;
+            const entry = &self.dyn[index];
+
+            @memcpy(self.dyn_buf[new_pos..][0..entry.name.len], entry.name);
+            entry.name = self.dyn_buf[new_pos..][0..entry.name.len];
+            new_pos += entry.name.len;
+
+            @memcpy(self.dyn_buf[new_pos..][0..entry.value.len], entry.value);
+            entry.value = self.dyn_buf[new_pos..][0..entry.value.len];
+            new_pos += entry.value.len;
+        }
+
+        self.dyn_buf_pos = new_pos;
+    }
+
     fn addDynamic(self: *HpackDecoder, name: []const u8, value: []const u8) void {
         const entry_size = name.len + value.len + 32;
         if (entry_size > self.max_size) {
             self.evictTo(0);
             return;
         }
+
         self.evictTo(self.max_size - entry_size);
         if (self.dyn_count >= 128) return;
+
+        // Copy name+value into dyn_buf so entries never alias per-stream scratch.
+        const needed = name.len + value.len;
+        if (self.dyn_buf_pos + needed > self.dyn_buf.len) self.compactDynBuf();
+        if (self.dyn_buf_pos + needed > self.dyn_buf.len) return;
+
+        @memcpy(self.dyn_buf[self.dyn_buf_pos..][0..name.len], name);
+        const name_copy = self.dyn_buf[self.dyn_buf_pos..][0..name.len];
+        self.dyn_buf_pos += name.len;
+
+        @memcpy(self.dyn_buf[self.dyn_buf_pos..][0..value.len], value);
+        const value_copy = self.dyn_buf[self.dyn_buf_pos..][0..value.len];
+        self.dyn_buf_pos += value.len;
+
         var i: usize = self.dyn_count;
         while (i > 0) : (i -= 1) self.dyn[i] = self.dyn[i - 1];
-        self.dyn[0] = .{ .name = name, .value = value };
+        self.dyn[0] = .{ .name = name_copy, .value = value_copy };
         self.dyn_count += 1;
         self.dyn_size += entry_size;
     }
@@ -498,8 +541,21 @@ pub const HpackDecoder = struct {
         return out;
     }
 
+    // Copy src into scratch[pos..] and advance pos. All decoded output (including
+    // indexed lookups) goes through scratch so callers get a stable, mutable slice.
+    fn copyIntoScratch(src: []const u8, scratch: []u8, pos: *usize) ![]const u8 {
+        if (pos.* + src.len > scratch.len) return error.ScratchFull;
+
+        @memcpy(scratch[pos.*..][0..src.len], src);
+        const result = scratch[pos.*..][0..src.len];
+        pos.* += src.len;
+
+        return result;
+    }
+
     /// Decode a HPACK header block into out.
-    /// Slices in decoded headers point into scratch or static table literals.
+    /// All slices in decoded headers point into scratch (caller-owned, stable for call duration).
+    /// dyn[] entries are stored in dyn_buf (connection-lifetime), never in scratch.
     ///
     /// Return:
     /// - !usize (number of headers decoded)
@@ -518,9 +574,14 @@ pub const HpackDecoder = struct {
             const first = block[pos];
 
             if ((first & 0x80) != 0) {
+                // Indexed: copy from static/dynamic table into scratch so callers get
+                // stable slices even when dyn[] points into dyn_buf across requests.
                 const idx: usize = @intCast(try decodeInt(block, &pos, 7));
                 const entry = self.getEntry(idx) orelse return error.InvalidIndex;
-                out[n_out] = .{ .name = entry.name, .value = entry.value };
+                out[n_out] = .{
+                    .name = try copyIntoScratch(entry.name, scratch, &scratch_pos),
+                    .value = try copyIntoScratch(entry.value, scratch, &scratch_pos),
+                };
                 n_out += 1;
             } else if ((first & 0x40) != 0) {
                 const idx: usize = @intCast(try decodeInt(block, &pos, 6));
@@ -528,7 +589,7 @@ pub const HpackDecoder = struct {
                     break :blk try decodeString(block, &pos, scratch, &scratch_pos);
                 } else blk: {
                     const entry = self.getEntry(idx) orelse return error.InvalidIndex;
-                    break :blk entry.name;
+                    break :blk try copyIntoScratch(entry.name, scratch, &scratch_pos);
                 };
                 const value = try decodeString(block, &pos, scratch, &scratch_pos);
                 self.addDynamic(name, value);
@@ -545,7 +606,7 @@ pub const HpackDecoder = struct {
                     break :blk try decodeString(block, &pos, scratch, &scratch_pos);
                 } else blk: {
                     const entry = self.getEntry(idx) orelse return error.InvalidIndex;
-                    break :blk entry.name;
+                    break :blk try copyIntoScratch(entry.name, scratch, &scratch_pos);
                 };
                 const value = try decodeString(block, &pos, scratch, &scratch_pos);
                 out[n_out] = .{ .name = name, .value = value };
@@ -675,6 +736,94 @@ test "zix test: HpackDecoder dynamic table eviction respects max_size" {
     const before = dec.dyn_count;
     dec.addDynamic("another-long-name-that-fills-budget", "val");
     try std.testing.expect(dec.dyn_count <= before + 1);
+}
+
+test "zix test: HpackDecoder addDynamic copies strings into dyn_buf" {
+    var dec = HpackDecoder.init();
+    const name = "x-custom";
+    const value = "hello";
+    dec.addDynamic(name, value);
+    try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
+    const dyn_base = @intFromPtr(&dec.dyn_buf[0]);
+    const dyn_end = dyn_base + dec.dyn_buf.len;
+    try std.testing.expect(@intFromPtr(dec.dyn[0].name.ptr) >= dyn_base);
+    try std.testing.expect(@intFromPtr(dec.dyn[0].name.ptr) < dyn_end);
+    try std.testing.expect(@intFromPtr(dec.dyn[0].value.ptr) >= dyn_base);
+    try std.testing.expect(@intFromPtr(dec.dyn[0].value.ptr) < dyn_end);
+    try std.testing.expectEqualStrings(name, dec.dyn[0].name);
+    try std.testing.expectEqualStrings(value, dec.dyn[0].value);
+}
+
+test "zix test: HpackDecoder indexed lookup after scratch zeroed returns correct value" {
+    // Regression: dyn[] entries used to alias per-stream scratch. When scratch is zeroed
+    // on stream-slot reuse, indexed HPACK lookups returned empty strings -> UNIMPLEMENTED.
+    var dec = HpackDecoder.init();
+
+    // Simulate request 1: incremental-indexing (0x40) adds :path to dynamic table.
+    var scratch1: [256]u8 = undefined;
+    var out1: [8]Header = undefined;
+    // 0x44 = 0x40 | 4 (incremental indexing, name from static idx 4 = :path)
+    // followed by literal value "/svc.Svc/Greet" (length-prefixed, not huffman)
+    const path_value = "/svc.Svc/Greet";
+    var block1: [32]u8 = undefined;
+    block1[0] = 0x44;
+    block1[1] = @intCast(path_value.len);
+    @memcpy(block1[2..][0..path_value.len], path_value);
+    _ = try dec.decode(block1[0 .. 2 + path_value.len], &out1, &scratch1);
+    try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
+    try std.testing.expectEqualStrings(":path", dec.dyn[0].name);
+    try std.testing.expectEqualStrings(path_value, dec.dyn[0].value);
+
+    // Zero the scratch (simulates stream-slot reuse: stream.* = std.mem.zeroes(Stream)).
+    @memset(&scratch1, 0);
+
+    // Simulate request 2: fully-indexed (0x80 | 62 = 0xBE) references :path from dyn table.
+    // dyn[0] = :path, overall HPACK idx = 61 (static) + 1 (dyn slot) = 62 -> 0x80|62 = 0xBE.
+    // Without fix: dec.dyn[0].value pointed into zeroed scratch -> empty string -> UNIMPLEMENTED.
+    // With fix: dec.dyn[0].value points into dyn_buf -> "/svc.Svc/Greet" -> OK.
+    var scratch2: [256]u8 = undefined;
+    var out2: [8]Header = undefined;
+    const block2 = [_]u8{0xBE}; // 0x80 | 62
+    const count = try dec.decode(&block2, &out2, &scratch2);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualStrings(":path", out2[0].name);
+    try std.testing.expectEqualStrings(path_value, out2[0].value);
+}
+
+test "zix test: HpackDecoder indexed output slices point into scratch not dyn_buf" {
+    var dec = HpackDecoder.init();
+    dec.addDynamic("x-test", "value");
+
+    var scratch: [256]u8 = undefined;
+    var out: [8]Header = undefined;
+    const block = [_]u8{0xBE}; // dyn slot 1 -> overall HPACK idx 62 -> 0x80|62 = 0xBE
+    _ = try dec.decode(&block, &out, &scratch);
+
+    const scratch_base = @intFromPtr(&scratch[0]);
+    const scratch_end = scratch_base + scratch.len;
+    try std.testing.expect(@intFromPtr(out[0].name.ptr) >= scratch_base);
+    try std.testing.expect(@intFromPtr(out[0].name.ptr) < scratch_end);
+    try std.testing.expect(@intFromPtr(out[0].value.ptr) >= scratch_base);
+    try std.testing.expect(@intFromPtr(out[0].value.ptr) < scratch_end);
+}
+
+test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
+    var dec = HpackDecoder.init();
+    // Fill dyn_buf near capacity with one large entry, then evict it and add another.
+    // Compaction must run and the surviving entry must remain readable.
+    const large_value: [4000]u8 = [_]u8{'x'} ** 4000;
+    dec.addDynamic("x-big", &large_value);
+    try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
+
+    // Evict the large entry by setting max_size = 0.
+    dec.evictTo(0);
+    try std.testing.expectEqual(@as(usize, 0), dec.dyn_count);
+
+    // dyn_buf_pos still at 4000+5=4005. Now add a new entry — needs compaction.
+    dec.addDynamic("x-new", "world");
+    try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
+    try std.testing.expectEqualStrings("x-new", dec.dyn[0].name);
+    try std.testing.expectEqualStrings("world", dec.dyn[0].value);
 }
 
 test "zix test: HPACK_STATIC index 8 is :status 200" {
