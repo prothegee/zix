@@ -509,4 +509,20 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 ---
 
+## ADR-025: `reuse_address = true` on all dispatch models (SO_REUSEADDR + SO_REUSEPORT)
+
+**Status:** Accepted
+
+**Context:** Every server in zix (Http, Http2, Grpc, Tcp, Fix) calls `addr.listen(io, .{ .reuse_address = true })`. In Zig's `std.Io.Threaded`, `reuse_address = true` sets both `SO_REUSEADDR` and `SO_REUSEPORT` on POSIX. `SO_REUSEPORT` is strictly required by the POOL dispatch model: each accept thread calls `addr.listen()` on the same port independently — without it, the second bind fails with `EADDRINUSE`. The choice was whether to set it conditionally (POOL only) or unconditionally (all models).
+
+**Decision:** Apply `reuse_address = true` unconditionally on every `addr.listen()` call regardless of dispatch model. All models share the same socket setup path — no branching on `dispatch_model` at the socket level. This is socket-level behavior; it is documented here and inline in source, not exposed as a config field.
+
+**Consequences:**
+- POOL works correctly: all accept threads bind to the same port and the kernel load-balances incoming connections across them.
+- ASYNC, MIXED, and EPOLL also receive `SO_REUSEPORT` as a side effect. Multiple server instances on the same port do not crash — the kernel silently distributes connections between them.
+- This is intentional. Port-sharing between processes is a valid deployment pattern (rolling restart, staged rollout). Examples that share a port number coexist without error when run simultaneously for the same reason.
+- No `ServerConfig` field is added to expose or toggle this behavior.
+
+---
+
 ###### end of adr
