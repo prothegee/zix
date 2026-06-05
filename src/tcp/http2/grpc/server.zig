@@ -256,6 +256,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .max_body = cfg.max_body,
                 .logger = cfg.logger,
                 .handler_timeout_ms = cfg.handler_timeout_ms,
+                .io = io,
             };
 
             const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
@@ -364,6 +365,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .max_body = cfg.max_body,
                 .logger = cfg.logger,
                 .handler_timeout_ms = cfg.handler_timeout_ms,
+                .io = io,
             };
 
             switch (cfg.dispatch_model) {

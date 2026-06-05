@@ -12,6 +12,20 @@
 //!
 //! Test with the location client:
 //! ./zig-out/bin/example-grpc_location_client
+//!
+//! Benchmark with h2load (requires nghttp2):
+//! h2load -n 999999 -c 256 -t 4 -D 10 \
+//!   --header 'content-type: application/grpc+proto' \
+//!   --header 'te: trailers' \
+//!   --data examples/grpc_location_req.bin \
+//!   http://127.0.0.1:10101/location.Location/SendLocationAndSave
+//!
+//! Benchmark with ghz (requires ghz):
+//! ghz --insecure \
+//!   --proto examples/protobuf/location.proto \
+//!   --call location.Location/SendLocationAndSave \
+//!   -d '{"long":106.8,"lat":-6.2,"message":"test"}' -c 64 -z 10s \
+//!   127.0.0.1:10101
 
 const std = @import("std");
 const zix = @import("zix");

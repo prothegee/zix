@@ -181,6 +181,50 @@ Status code distribution:
 
 ---
 
+## Post-0.2.1 benchmark findings
+
+The document marks both bugs as "Resolved: 0.2.1" — but ghz benchmarks run against 0.2.1
+show the failure rate only changed error text, not failure rate.
+
+### Streaming (Bug 2) — ghz 64c, 5s, StreamSum
+
+| Version | OK rate | Dominant error |
+| :- | :- | :- |
+| 0.2.0 | ~0.00% | Unknown: malformed header: missing HTTP content-type |
+| 0.2.1 | ~0.06% | Unimplemented: unknown method |
+
+Only ~24 OK responses per 5s run regardless of connection count. The route is
+registered and unary passes. `Unimplemented` on streaming indicates an empty `:path`
+after HPACK cross-request indexed encoding — root cause: `HpackDecoder.addDynamic()`
+stored slices into per-stream `header_scratch`, which is zeroed on slot reuse. Fixed
+by `dyn_buf[8192]` owned storage in `HpackDecoder` (second pass, 2026-06-05).
+
+### Unary regression — ghz c256 and c1024
+
+SIGNIFICANT REGRESSION: unary throughput dropped ~10x in 0.2.1.
+
+| Version | 256c req/s | 1024c req/s | Failure rate |
+| :- | :- | :- | :- |
+| 0.2.0 | ~87k | ~95k | 0% |
+| 0.2.1 | ~9.1k | ~9.3k | 5-8% |
+
+87k -> 9.1k at c256. 95k -> 9.3k at c1024. Both drop by ~10x with a new 5-8%
+failure rate that was 0% in 0.2.0. Root cause: `ConnMutex` (introduced for Bug 2
+fix) serializes ALL writes on a connection, including unary responses that have no
+concurrent stream to protect against. Each unary RPC waits for the shared lock even
+when no other stream is active. Fixed by `io.async` dispatch in `GrpcServeOpts.io`
+(second pass, 2026-06-05) — work-stealing pool replaces per-request
+`std.Thread.spawn`, removing the per-request lock contention hot path.
+
+Both second-pass fixes need ghz benchmark verification on the current branch to
+confirm the numbers return to 0.2.0 baseline.
+
+#### Result log
+
+See: [grpc http arena log](./grpc_http_arena.log.txt)
+
+---
+
 ## Relationship
 
 Bug 2 produces the empty-body condition. The handler takes the early-exit path and
