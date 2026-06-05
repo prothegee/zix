@@ -4,16 +4,16 @@
 //! Port: 8084
 //!
 //! Run:
-//!   zig build example-grpc_timeout
-//!   ./zig-out/bin/example-grpc_timeout
+//! zig build example-grpc_timeout
+//! ./zig-out/bin/example-grpc_timeout
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!   grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
 //!
-//!   grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -rpc-header 'grpc-timeout: 1S' \
-//!     -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -rpc-header 'grpc-timeout: 1S' \
+//! -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
 
 const std = @import("std");
 const zix = @import("zix");

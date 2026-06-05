@@ -3,23 +3,23 @@
 //! Port: 10102
 //!
 //! Services:
-//!     helloworld.Greeter / SayHello       (examples/protobuf/helloworld.proto)
-//!     location.Location  / SendLocationAndSave  (examples/protobuf/location.proto)
+//! helloworld.Greeter / SayHello            (examples/protobuf/helloworld.proto)
+//! location.Location  / SendLocationAndSave (examples/protobuf/location.proto)
 //!
 //! Run:
-//!     zig build example-grpc_multi_server
-//!     ./zig-out/bin/example-grpc_multi_server
+//! zig build example-grpc_multi_server
+//! ./zig-out/bin/example-grpc_multi_server
 //!
 //! Test with the multi client:
-//!     ./zig-out/bin/example-grpc_multi_client
+//! ./zig-out/bin/example-grpc_multi_client
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!     grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//!     -d '{"name":"world"}' localhost:10102 helloworld.Greeter/SayHello
+//! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
+//! -d '{"name":"world"}' localhost:10102 helloworld.Greeter/SayHello
 //!
-//!     grpcurl -proto examples/protobuf/location.proto -plaintext \
-//!     -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
-//!     localhost:10102 location.Location/SendLocationAndSave
+//! grpcurl -proto examples/protobuf/location.proto -plaintext \
+//! -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
+//! localhost:10102 location.Location/SendLocationAndSave
 
 const std = @import("std");
 const zix = @import("zix");

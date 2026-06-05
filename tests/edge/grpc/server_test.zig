@@ -1,5 +1,5 @@
 //! Edge tests: gRPC boundary conditions — malformed prefix, empty body, truncated message,
-//! path parse failures, and content-type detection edge cases.
+//! path parse failures, content-type detection edge cases, and finish-only handler behavior.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -18,6 +18,11 @@ fn nopHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
     ctx.finish(zix.Grpc.Status.OK, "");
 }
 
+fn errorOnlyHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
+    _ = headers;
+    ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad");
+}
+
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
     const stream = ctx.listener.accept(io) catch |e| {
         ctx.err = e;
@@ -25,6 +30,16 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
     };
     const fd = stream.socket.handle;
     zix.Grpc.serveConn(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = nopHandler }}, fd, .{});
+    _ = std.posix.system.close(fd);
+}
+
+fn runErrorServer(ctx: *ServerCtx, io: std.Io) void {
+    const stream = ctx.listener.accept(io) catch |e| {
+        ctx.err = e;
+        return;
+    };
+    const fd = stream.socket.handle;
+    zix.Grpc.serveConn(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = errorOnlyHandler }}, fd, .{});
     _ = std.posix.system.close(fd);
 }
 
@@ -37,6 +52,17 @@ fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
         .kernel_backlog = 4,
     });
     return std.Thread.spawn(.{ .stack_size = 512 * 1024 }, runServer, .{ ctx, io });
+}
+
+fn spawnErrorServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
+    ctx.err = null;
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", port);
+    ctx.listener = try addr.listen(io, .{
+        .mode = .stream,
+        .reuse_address = true,
+        .kernel_backlog = 4,
+    });
+    return std.Thread.spawn(.{ .stack_size = 512 * 1024 }, runErrorServer, .{ ctx, io });
 }
 
 // --------------------------------------------------------- //
@@ -115,4 +141,31 @@ test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
 
     t.join();
     ctx.listener.deinit(io);
+}
+
+test "zix edge: gRPC finish-only handler delivers error status to client" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx: ServerCtx = undefined;
+    const t = try spawnErrorServer(&ctx, io, TEST_PORT + 1);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 1 }, io);
+    defer client.deinit();
+
+    const stream_id = try client.openStream("/nop/Nop", "application/grpc+proto");
+    try client.sendMessage(stream_id, "trigger");
+    try client.endStream(stream_id);
+
+    var buf: [64]u8 = undefined;
+    const resp = try client.recvResponse(stream_id, &buf);
+    try std.testing.expect(resp == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.INVALID_ARGUMENT, resp.status);
+
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    t.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
 }

@@ -1,5 +1,6 @@
 //! Integration tests: gRPC h2c round-trips over real TCP using zix.Grpc.serveConn.
-//! Covers: server init, unary, server streaming, client streaming, bidirectional, unknown path.
+//! Covers: server init, unary, server streaming, client streaming, bidirectional, unknown path,
+//! trailers-only error response, and two sequential streams on one connection.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -34,6 +35,11 @@ fn greetHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void 
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{name}) catch "Hello!";
     ctx.sendMessage("application/grpc+proto", resp);
     ctx.finish(zix.Grpc.Status.OK, "");
+}
+
+fn errorOnlyHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
+    _ = headers;
+    ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad req");
 }
 
 fn collectHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
@@ -106,11 +112,11 @@ test "zix integration: gRPC unary returns greeting" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT, R.run);
+    const t = try spawnServer(&ctx, io, TEST_PORT, Runner.run);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT }, io);
     defer client.deinit();
@@ -131,33 +137,33 @@ test "zix integration: gRPC server streaming sends multiple responses" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Echo", .handler = echoHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 1, R.run);
+    const t = try spawnServer(&ctx, io, TEST_PORT + 1, Runner.run);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 1 }, io);
     defer client.deinit();
 
-    const sid = try client.openStream("/svc.Svc/Echo", "application/grpc+proto");
-    try client.sendMessage(sid, "aaa");
-    try client.sendMessage(sid, "bbb");
-    try client.endStream(sid);
+    const stream_id = try client.openStream("/svc.Svc/Echo", "application/grpc+proto");
+    try client.sendMessage(stream_id, "aaa");
+    try client.sendMessage(stream_id, "bbb");
+    try client.endStream(stream_id);
 
-    var b1: [32]u8 = undefined;
-    var b2: [32]u8 = undefined;
-    const r1 = try client.recvResponse(sid, &b1);
-    try std.testing.expectEqualStrings("aaa", r1.data);
+    var buf1: [32]u8 = undefined;
+    var buf2: [32]u8 = undefined;
+    const resp1 = try client.recvResponse(stream_id, &buf1);
+    try std.testing.expectEqualStrings("aaa", resp1.data);
 
-    const r2 = try client.recvResponse(sid, &b2);
-    try std.testing.expectEqualStrings("bbb", r2.data);
+    const resp2 = try client.recvResponse(stream_id, &buf2);
+    try std.testing.expectEqualStrings("bbb", resp2.data);
 
-    const fin = try client.recvResponse(sid, &b1);
+    const fin = try client.recvResponse(stream_id, &buf1);
     try std.testing.expect(fin == .status);
     try std.testing.expectEqual(zix.Grpc.Status.OK, fin.status);
 
-    zix.Http2.sendGoaway(client.fd, sid, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -169,30 +175,30 @@ test "zix integration: gRPC client streaming collects all messages" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Collect", .handler = collectHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 2, R.run);
+    const t = try spawnServer(&ctx, io, TEST_PORT + 2, Runner.run);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 2 }, io);
     defer client.deinit();
 
-    const sid = try client.openStream("/svc.Svc/Collect", "application/grpc+proto");
-    try client.sendMessage(sid, "a");
-    try client.sendMessage(sid, "b");
-    try client.sendMessage(sid, "c");
-    try client.endStream(sid);
+    const stream_id = try client.openStream("/svc.Svc/Collect", "application/grpc+proto");
+    try client.sendMessage(stream_id, "a");
+    try client.sendMessage(stream_id, "b");
+    try client.sendMessage(stream_id, "c");
+    try client.endStream(stream_id);
 
     var buf: [64]u8 = undefined;
-    const r = try client.recvResponse(sid, &buf);
-    try std.testing.expectEqualStrings("got 3", r.data);
+    const resp = try client.recvResponse(stream_id, &buf);
+    try std.testing.expectEqualStrings("got 3", resp.data);
 
-    const fin = try client.recvResponse(sid, &buf);
+    const fin = try client.recvResponse(stream_id, &buf);
     try std.testing.expect(fin == .status);
     try std.testing.expectEqual(zix.Grpc.Status.OK, fin.status);
 
-    zix.Http2.sendGoaway(client.fd, sid, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -204,29 +210,29 @@ test "zix integration: gRPC bidirectional echoes each message" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/BidiEcho", .handler = echoHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 3, R.run);
+    const t = try spawnServer(&ctx, io, TEST_PORT + 3, Runner.run);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 3 }, io);
     defer client.deinit();
 
-    const sid = try client.openStream("/svc.Svc/BidiEcho", "application/grpc+proto");
-    try client.sendMessage(sid, "ping");
-    try client.sendMessage(sid, "pong");
-    try client.endStream(sid);
+    const stream_id = try client.openStream("/svc.Svc/BidiEcho", "application/grpc+proto");
+    try client.sendMessage(stream_id, "ping");
+    try client.sendMessage(stream_id, "pong");
+    try client.endStream(stream_id);
 
-    var b1: [32]u8 = undefined;
-    var b2: [32]u8 = undefined;
-    const rx1 = try client.recvResponse(sid, &b1);
-    try std.testing.expectEqualStrings("ping", rx1.data);
+    var buf1: [32]u8 = undefined;
+    var buf2: [32]u8 = undefined;
+    const resp1 = try client.recvResponse(stream_id, &buf1);
+    try std.testing.expectEqualStrings("ping", resp1.data);
 
-    const rx2 = try client.recvResponse(sid, &b2);
-    try std.testing.expectEqualStrings("pong", rx2.data);
+    const resp2 = try client.recvResponse(stream_id, &buf2);
+    try std.testing.expectEqualStrings("pong", resp2.data);
 
-    zix.Http2.sendGoaway(client.fd, sid, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -238,25 +244,98 @@ test "zix integration: gRPC unknown method returns UNIMPLEMENTED" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 4, R.run);
+    const t = try spawnServer(&ctx, io, TEST_PORT + 4, Runner.run);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 4 }, io);
     defer client.deinit();
 
-    const sid = try client.openStream("/svc.Svc/Unknown", "application/grpc+proto");
-    try client.sendMessage(sid, "test");
-    try client.endStream(sid);
+    const stream_id = try client.openStream("/svc.Svc/Unknown", "application/grpc+proto");
+    try client.sendMessage(stream_id, "test");
+    try client.endStream(stream_id);
 
     var buf: [64]u8 = undefined;
-    const resp = try client.recvResponse(sid, &buf);
+    const resp = try client.recvResponse(stream_id, &buf);
     try std.testing.expect(resp == .status);
     try std.testing.expectEqual(zix.Grpc.Status.UNIMPLEMENTED, resp.status);
 
-    zix.Http2.sendGoaway(client.fd, sid, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    t.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
+}
+
+test "zix integration: gRPC trailers-only error is received as INVALID_ARGUMENT" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
+        .{ .path = "/svc.Svc/Fail", .handler = errorOnlyHandler },
+    });
+    var ctx: ServerCtx = undefined;
+    const t = try spawnServer(&ctx, io, TEST_PORT + 5, Runner.run);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 5 }, io);
+    defer client.deinit();
+
+    const stream_id = try client.openStream("/svc.Svc/Fail", "application/grpc+proto");
+    try client.sendMessage(stream_id, "trigger");
+    try client.endStream(stream_id);
+
+    var buf: [64]u8 = undefined;
+    const resp = try client.recvResponse(stream_id, &buf);
+    try std.testing.expect(resp == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.INVALID_ARGUMENT, resp.status);
+
+    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    t.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
+}
+
+test "zix integration: gRPC two streams on same connection both return OK" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Runner = makeRunner(&[_]zix.Grpc.Route{
+        .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
+    });
+    var ctx: ServerCtx = undefined;
+    const t = try spawnServer(&ctx, io, TEST_PORT + 6, Runner.run);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 6 }, io);
+    defer client.deinit();
+
+    const stream_id1 = try client.openStream("/svc.Svc/Greet", "application/grpc+proto");
+    try client.sendMessage(stream_id1, "alice");
+    try client.endStream(stream_id1);
+
+    var buf_alice: [64]u8 = undefined;
+    const resp_alice = try client.recvResponse(stream_id1, &buf_alice);
+    try std.testing.expectEqualStrings("Hello, alice!", resp_alice.data);
+    const status_alice = try client.recvResponse(stream_id1, &buf_alice);
+    try std.testing.expect(status_alice == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.OK, status_alice.status);
+
+    const stream_id2 = try client.openStream("/svc.Svc/Greet", "application/grpc+proto");
+    try client.sendMessage(stream_id2, "bob");
+    try client.endStream(stream_id2);
+
+    var buf_bob: [64]u8 = undefined;
+    const resp_bob = try client.recvResponse(stream_id2, &buf_bob);
+    try std.testing.expectEqualStrings("Hello, bob!", resp_bob.data);
+    const status_bob = try client.recvResponse(stream_id2, &buf_bob);
+    try std.testing.expect(status_bob == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.OK, status_bob.status);
+
+    zix.Http2.sendGoaway(client.fd, stream_id2, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const h2 = @import("../Http2.zig");
-const frm = @import("frame.zig");
+const frame = @import("frame.zig");
 const status = @import("status.zig");
 const Logger = @import("../../../logger/logger.zig").Logger;
 const parseTimeout = @import("timeout.zig").parseTimeout;
@@ -23,10 +23,10 @@ pub const GrpcContentType = enum { PROTO, JSON, UNKNOWN };
 
 /// Detect gRPC content-type from request headers.
 pub fn detectContentType(headers: []const h2.Header) GrpcContentType {
-    for (headers) |hdr| {
-        if (!std.ascii.eqlIgnoreCase(hdr.name, "content-type")) continue;
-        if (std.mem.startsWith(u8, hdr.value, "application/grpc+json")) return .JSON;
-        if (std.mem.startsWith(u8, hdr.value, "application/grpc")) return .PROTO;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "content-type")) continue;
+        if (std.mem.startsWith(u8, header.value, "application/grpc+json")) return .JSON;
+        if (std.mem.startsWith(u8, header.value, "application/grpc")) return .PROTO;
     }
     return .UNKNOWN;
 }
@@ -66,6 +66,9 @@ pub const GrpcContext = struct {
     /// Set at dispatch from tighter_of(Route.timeout_ms, config.handler_timeout_ms, grpc-timeout header).
     /// Handler may read and overwrite. Use isExpired() to check.
     deadline_ns: ?u64 = null,
+    /// Shared connection-level write spinlock. Null when no concurrent writes are possible.
+    /// Held for the entire duration of each frame write to prevent interleaving across streams.
+    _write_mutex: ?*ConnMutex = null,
 
     /// Read the next gRPC message from the buffered request stream.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
@@ -73,28 +76,45 @@ pub const GrpcContext = struct {
     /// Return:
     /// - ?[]const u8 (null when all client messages are consumed)
     pub fn recvMessage(self: *GrpcContext) ?[]const u8 {
-        const rem = self._body[self._pos..];
-        if (rem.len < frm.grpc_prefix_len) return null;
-        const msg_len = std.mem.readInt(u32, rem[1..frm.grpc_prefix_len], .big);
-        const total = frm.grpc_prefix_len + @as(usize, msg_len);
-        if (total > rem.len) return null;
-        const msg = rem[frm.grpc_prefix_len..total];
+        const remaining = self._body[self._pos..];
+        if (remaining.len < frame.grpc_prefix_len) return null;
+        const msg_len = std.mem.readInt(u32, remaining[1..frame.grpc_prefix_len], .big);
+        const total = frame.grpc_prefix_len + @as(usize, msg_len);
+        if (total > remaining.len) return null;
+        const message = remaining[frame.grpc_prefix_len..total];
         self._pos += total;
-        return msg;
+        return message;
+    }
+
+    /// Write initial HEADERS if not already sent. No lock acquired — caller must hold _write_mutex.
+    fn _flushHeaders(self: *GrpcContext, content_type: []const u8) void {
+        if (self._hdr_sent) return;
+
+        frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+        self._hdr_sent = true;
     }
 
     /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
     pub fn sendHeaders(self: *GrpcContext, content_type: []const u8) void {
-        if (self._hdr_sent) return;
-        frm.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
-        self._hdr_sent = true;
+        if (self._write_mutex) |mutex| mutex.lock();
+        defer {
+            if (self._write_mutex) |mutex| mutex.unlock();
+        }
+
+        self._flushHeaders(content_type);
     }
 
     /// Send one gRPC response message DATA frame.
     /// Sends initial headers first if not yet sent.
+    /// Headers and data are written under a single lock to prevent frame interleaving.
     pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
-        if (!self._hdr_sent) self.sendHeaders(content_type);
-        frm.sendGrpcData(self.fd, self.stream_id, data) catch {};
+        if (self._write_mutex) |mutex| mutex.lock();
+        defer {
+            if (self._write_mutex) |mutex| mutex.unlock();
+        }
+
+        self._flushHeaders(content_type);
+        frame.sendGrpcData(self.fd, self.stream_id, data) catch {};
         self._sent_bytes += data.len;
     }
 
@@ -102,19 +122,25 @@ pub const GrpcContext = struct {
     /// If no response messages were sent, sends a trailers-only (error) response.
     pub fn finish(self: *GrpcContext, stat: GrpcStatus, grpc_message: []const u8) void {
         self._grpc_status = @intFromEnum(stat);
-        const code = self._grpc_status;
+        const status_code = self._grpc_status;
+
+        if (self._write_mutex) |mutex| mutex.lock();
+        defer {
+            if (self._write_mutex) |mutex| mutex.unlock();
+        }
+
         if (self._hdr_sent) {
-            frm.sendGrpcTrailer(self.fd, self.stream_id, code, grpc_message) catch {};
+            frame.sendGrpcTrailer(self.fd, self.stream_id, status_code, grpc_message) catch {};
         } else {
-            frm.sendGrpcError(self.fd, self.stream_id, code, grpc_message) catch {};
+            frame.sendGrpcError(self.fd, self.stream_id, status_code, grpc_message) catch {};
         }
     }
 
     /// Return true when deadline_ns has passed. False when deadline_ns is null.
     /// Does not cancel or interrupt anything — handler must check explicitly.
     pub fn isExpired(self: *const GrpcContext) bool {
-        const d = self.deadline_ns orelse return false;
-        return wallClockNs() >= d;
+        const deadline = self.deadline_ns orelse return false;
+        return wallClockNs() >= deadline;
     }
 };
 
@@ -155,17 +181,17 @@ pub const Route = struct {
 pub fn Router(comptime routes: []const Route) type {
     return struct {
         pub fn dispatch(path: []const u8, headers: []const h2.Header, ctx: *GrpcContext) void {
-            inline for (routes) |r| {
-                if (std.mem.eql(u8, r.path, path)) {
-                    if (r.timeout_ms > 0) {
-                        const route_deadline: u64 = wallClockNs() + @as(u64, r.timeout_ms) * std.time.ns_per_ms;
-                        if (ctx.deadline_ns) |cur| {
-                            if (route_deadline < cur) ctx.deadline_ns = route_deadline;
+            inline for (routes) |route| {
+                if (std.mem.eql(u8, route.path, path)) {
+                    if (route.timeout_ms > 0) {
+                        const route_deadline: u64 = wallClockNs() + @as(u64, route.timeout_ms) * std.time.ns_per_ms;
+                        if (ctx.deadline_ns) |current_deadline| {
+                            if (route_deadline < current_deadline) ctx.deadline_ns = route_deadline;
                         } else {
                             ctx.deadline_ns = route_deadline;
                         }
                     }
-                    r.handler(headers, ctx);
+                    route.handler(headers, ctx);
                     return;
                 }
             }
@@ -206,6 +232,165 @@ const Stream = struct {
     end_headers: bool,
     end_stream: bool,
 };
+
+// --------------------------------------------------------- //
+
+/// Heap-allocated ref-counted write spinlock for one h2 connection.
+/// Shared between the read loop and all per-stream handler threads.
+/// Ensures H2 frames from concurrent streams are not interleaved on the fd.
+const ConnMutex = struct {
+    locked: std.atomic.Value(bool) = .init(false),
+    refs: std.atomic.Value(u32) = .init(1),
+
+    fn lock(self: *ConnMutex) void {
+        while (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *ConnMutex) void {
+        self.locked.store(false, .release);
+    }
+
+    fn retain(self: *ConnMutex) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *ConnMutex) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) {
+            std.heap.smp_allocator.destroy(self);
+        }
+    }
+};
+
+/// Heap-allocated per-stream dispatch task. Owns a deep copy of the stream's headers
+/// and body so the read loop can immediately reuse the stream slot after spawning.
+fn DispatchTask(comptime routes: []const Route) type {
+    return struct {
+        const Self = @This();
+
+        fd: std.posix.fd_t,
+        stream_id: u31,
+        header_count: usize,
+        headers: [h2.MAX_HEADERS]h2.Header,
+        header_scratch: [4096]u8,
+        body_len: usize,
+        body: [65536]u8,
+        opts: GrpcServeOpts,
+        conn_mutex: *ConnMutex,
+
+        fn run(self: *Self) void {
+            const conn_mutex_ptr = self.conn_mutex;
+            defer {
+                std.heap.smp_allocator.destroy(self);
+                conn_mutex_ptr.release();
+            }
+
+            var path: []const u8 = "/";
+            for (self.headers[0..self.header_count]) |header| {
+                if (std.mem.eql(u8, header.name, ":path")) path = header.value;
+            }
+
+            var time_start: std.os.linux.timespec = undefined;
+            if (self.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+
+            var ctx = GrpcContext{
+                .fd = self.fd,
+                .stream_id = self.stream_id,
+                ._body = self.body[0..self.body_len],
+                ._pos = 0,
+                ._hdr_sent = false,
+                ._sent_bytes = 0,
+                ._grpc_status = 0,
+                .deadline_ns = computeDeadline(self.opts.handler_timeout_ms, self.headers[0..self.header_count]),
+                ._write_mutex = conn_mutex_ptr,
+            };
+            Router(routes).dispatch(path, self.headers[0..self.header_count], &ctx);
+
+            if (self.opts.logger) |logger| {
+                var time_end: std.os.linux.timespec = undefined;
+                _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
+                const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
+                    (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
+                const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+                var peer_buf: [64]u8 = undefined;
+                const peer = peerStr(self.fd, &peer_buf);
+                logger.rpc(peer, path, ctx._grpc_status, self.body_len, ctx._sent_bytes, dur_ms);
+            }
+        }
+    };
+}
+
+/// Spawn a detached handler thread for one gRPC stream.
+/// Deep-copies stream data so the slot can be freed immediately.
+/// Rebases header slice pointers from the stream's scratch buffer into the task's copy.
+/// Falls back to an inline INTERNAL error if allocation or spawn fails.
+fn spawnGrpcStream(
+    comptime routes: []const Route,
+    s: *Stream,
+    fd: std.posix.fd_t,
+    opts: GrpcServeOpts,
+    conn_mutex: *ConnMutex,
+) void {
+    const Task = DispatchTask(routes);
+    const task = std.heap.smp_allocator.create(Task) catch {
+        var ctx = GrpcContext{
+            .fd = fd,
+            .stream_id = s.id,
+            ._body = &.{},
+            ._pos = 0,
+            ._hdr_sent = false,
+            ._sent_bytes = 0,
+            ._grpc_status = 0,
+            ._write_mutex = conn_mutex,
+        };
+        ctx.finish(.INTERNAL, "server overloaded");
+        return;
+    };
+
+    task.fd = fd;
+    task.stream_id = s.id;
+    task.header_count = s.header_count;
+    task.headers = s.headers;
+    task.header_scratch = s.header_scratch;
+    task.body_len = s.body_len;
+    @memcpy(task.body[0..s.body_len], s.body[0..s.body_len]);
+    task.opts = opts;
+
+    const old_base = @intFromPtr(&s.header_scratch[0]);
+    const old_end = old_base + s.header_scratch.len;
+    for (task.headers[0..task.header_count]) |*hdr| {
+        const name_ptr = @intFromPtr(hdr.name.ptr);
+        if (name_ptr >= old_base and name_ptr < old_end) {
+            hdr.name = task.header_scratch[name_ptr - old_base ..][0..hdr.name.len];
+        }
+        const val_ptr = @intFromPtr(hdr.value.ptr);
+        if (val_ptr >= old_base and val_ptr < old_end) {
+            hdr.value = task.header_scratch[val_ptr - old_base ..][0..hdr.value.len];
+        }
+    }
+
+    conn_mutex.retain();
+    task.conn_mutex = conn_mutex;
+
+    const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch {
+        conn_mutex.release();
+        std.heap.smp_allocator.destroy(task);
+        var ctx = GrpcContext{
+            .fd = fd,
+            .stream_id = s.id,
+            ._body = &.{},
+            ._pos = 0,
+            ._hdr_sent = false,
+            ._sent_bytes = 0,
+            ._grpc_status = 0,
+            ._write_mutex = conn_mutex,
+        };
+        ctx.finish(.INTERNAL, "spawn failed");
+        return;
+    };
+    thread.detach();
+}
 
 // --------------------------------------------------------- //
 
@@ -310,14 +495,14 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     }
 
     var hpack_dec = h2.HpackDecoder.init();
-    if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
-        const trimmed = std.mem.trim(u8, b64, " ");
+    if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |settings_encoded| {
+        const trimmed = std.mem.trim(u8, settings_encoded, " ");
         var decoded: [256]u8 = undefined;
-        const dlen = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(trimmed) catch 0;
-        if (dlen > 0 and dlen <= decoded.len) {
-            std.base64.url_safe_no_pad.Decoder.decode(decoded[0..dlen], trimmed) catch {};
+        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(trimmed) catch 0;
+        if (decoded_len > 0 and decoded_len <= decoded.len) {
+            std.base64.url_safe_no_pad.Decoder.decode(decoded[0..decoded_len], trimmed) catch {};
             var i: usize = 0;
-            while (i + 6 <= dlen) : (i += 6) {
+            while (i + 6 <= decoded_len) : (i += 6) {
                 const id: u16 = (@as(u16, decoded[i]) << 8) | decoded[i + 1];
                 const val: u32 = (@as(u32, decoded[i + 2]) << 24) | (@as(u32, decoded[i + 3]) << 16) |
                     (@as(u32, decoded[i + 4]) << 8) | decoded[i + 5];
@@ -336,14 +521,18 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         .{ h2.SETTINGS_ENABLE_PUSH, 0 },
     });
 
-    var s1_hdrs = [2]h2.Header{
+    var stream1_headers = [2]h2.Header{
         .{ .name = ":path", .value = path },
         .{ .name = ":scheme", .value = "http" },
     };
 
-    var ts0: std.os.linux.timespec = undefined;
-    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &ts0);
+    var time_start: std.os.linux.timespec = undefined;
+    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
 
+    // Note:
+    // Stream 1 (h2c upgrade) is dispatched synchronously before the read loop starts.
+    // A long-running streaming handler here will delay the loop. This is a known limitation
+    // of the upgrade path; h2c direct does not have this issue.
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = 1,
@@ -357,17 +546,17 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         else
             null,
     };
-    Router(routes).dispatch(path, &s1_hdrs, &ctx);
+    Router(routes).dispatch(path, &stream1_headers, &ctx);
 
-    if (opts.logger) |lg| {
-        var ts1: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts1);
-        const dur_ns: i64 = (@as(i64, ts1.sec) - @as(i64, ts0.sec)) * 1_000_000_000 +
-            (@as(i64, ts1.nsec) - @as(i64, ts0.nsec));
+    if (opts.logger) |logger| {
+        var time_end: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
+        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
+            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
         const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
         var peer_buf: [64]u8 = undefined;
         const peer = peerStr(fd, &peer_buf);
-        lg.rpc(peer, path, ctx._grpc_status, ctx._body.len, ctx._sent_bytes, dur_ms);
+        logger.rpc(peer, path, ctx._grpc_status, ctx._body.len, ctx._sent_bytes, dur_ms);
     }
 
     try serveGrpcLoop(routes, fd, &hpack_dec, opts, 1);
@@ -392,20 +581,28 @@ fn serveGrpcLoop(
 
     var last_stream_id: u31 = initial_last_stream;
 
-    while (true) {
-        const fh = try h2.readFrameHeader(fd);
+    const conn_mutex = try std.heap.smp_allocator.create(ConnMutex);
+    conn_mutex.* = .{};
+    defer conn_mutex.release();
 
-        if (fh.length > max_payload) {
-            h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+    while (true) {
+        const frame_header = try h2.readFrameHeader(fd);
+
+        if (frame_header.length > max_payload) {
+            {
+                conn_mutex.lock();
+                defer conn_mutex.unlock();
+                h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+            }
             return error.FrameTooLarge;
         }
 
-        const payload = payload_buf[0..fh.length];
-        if (fh.length > 0) try h2.recvExact(fd, payload);
+        const payload = payload_buf[0..frame_header.length];
+        if (frame_header.length > 0) try h2.recvExact(fd, payload);
 
-        switch (fh.frame_type) {
+        switch (frame_header.frame_type) {
             h2.FT_SETTINGS => {
-                if ((fh.flags & h2.FLAG_ACK) != 0) continue;
+                if ((frame_header.flags & h2.FLAG_ACK) != 0) continue;
                 var i: usize = 0;
                 while (i + 6 <= payload.len) : (i += 6) {
                     const id: u16 = (@as(u16, payload[i]) << 8) | payload[i + 1];
@@ -416,136 +613,190 @@ fn serveGrpcLoop(
                         hpack_dec.evictTo(val);
                     }
                 }
-                try h2.sendSettingsAck(fd);
-                try h2.sendWindowUpdate(fd, 0, 65535);
+                {
+                    conn_mutex.lock();
+                    defer conn_mutex.unlock();
+                    try h2.sendSettingsAck(fd);
+                    try h2.sendWindowUpdate(fd, 0, 65535);
+                }
             },
 
             h2.FT_WINDOW_UPDATE => {},
 
             h2.FT_PING => {
-                if ((fh.flags & h2.FLAG_ACK) != 0) continue;
+                if ((frame_header.flags & h2.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 }
-                var p8: [8]u8 = undefined;
-                @memcpy(&p8, payload[0..8]);
-                try h2.sendPingAck(fd, p8);
+                var ping_payload: [8]u8 = undefined;
+                @memcpy(&ping_payload, payload[0..8]);
+                {
+                    conn_mutex.lock();
+                    defer conn_mutex.unlock();
+                    try h2.sendPingAck(fd, ping_payload);
+                }
             },
 
             h2.FT_HEADERS => {
-                const stream_id = fh.stream_id;
+                const stream_id = frame_header.stream_id;
                 if (stream_id == 0) {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 }
                 if (stream_id <= last_stream_id and stream_id % 2 == 1) {
-                    h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                    }
                     continue;
                 }
                 last_stream_id = @max(last_stream_id, stream_id);
 
                 const slot = slotFor(stream_id, streams, stream_slots) orelse {
-                    h2.sendRstStream(fd, stream_id, h2.ERR_REFUSED_STREAM) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendRstStream(fd, stream_id, h2.ERR_REFUSED_STREAM) catch {};
+                    }
                     continue;
                 };
-                const s = &streams[slot];
-                s.* = std.mem.zeroes(Stream);
-                s.id = stream_id;
-                s.state = .OPEN;
+                const stream = &streams[slot];
+                stream.* = std.mem.zeroes(Stream);
+                stream.id = stream_id;
+                stream.state = .OPEN;
 
                 var block = payload;
                 var offset: usize = 0;
                 var pad_len: usize = 0;
-                if ((fh.flags & h2.FLAG_PADDED) != 0 and block.len > 0) {
+                if ((frame_header.flags & h2.FLAG_PADDED) != 0 and block.len > 0) {
                     pad_len = block[0];
                     offset = 1;
                 }
-                if ((fh.flags & h2.FLAG_PRIORITY) != 0 and offset + 5 <= block.len) {
+                if ((frame_header.flags & h2.FLAG_PRIORITY) != 0 and offset + 5 <= block.len) {
                     offset += 5;
                 }
                 if (pad_len + offset > block.len) {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 }
                 block = block[offset .. block.len - pad_len];
 
-                s.header_count = hpack_dec.decode(block, &s.headers, &s.header_scratch) catch {
-                    h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                stream.header_count = hpack_dec.decode(block, &stream.headers, &stream.header_scratch) catch {
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                    }
                     stream_slots[slot] = false;
                     continue;
                 };
-                s.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
-                s.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
+                stream.end_headers = (frame_header.flags & h2.FLAG_END_HEADERS) != 0;
+                stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
-                if (s.end_headers and s.end_stream) {
-                    dispatchGrpcStream(routes, s, fd, opts);
+                if (stream.end_headers and stream.end_stream) {
+                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
 
             h2.FT_CONTINUATION => {
-                const stream_id = fh.stream_id;
+                const stream_id = frame_header.stream_id;
                 const slot = findSlot(stream_id, streams, stream_slots) orelse {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 };
-                const s = &streams[slot];
-                const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
-                    h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                const stream = &streams[slot];
+                const count = hpack_dec.decode(payload, stream.headers[stream.header_count..], &stream.header_scratch) catch {
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                    }
                     stream_slots[slot] = false;
                     continue;
                 };
-                s.header_count += count;
-                s.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
-                if (s.end_headers and s.end_stream) {
-                    dispatchGrpcStream(routes, s, fd, opts);
+                stream.header_count += count;
+                stream.end_headers = (frame_header.flags & h2.FLAG_END_HEADERS) != 0;
+                if (stream.end_headers and stream.end_stream) {
+                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
 
             h2.FT_DATA => {
-                const stream_id = fh.stream_id;
+                const stream_id = frame_header.stream_id;
                 if (stream_id == 0) {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 }
                 const slot = findSlot(stream_id, streams, stream_slots) orelse {
-                    h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                    }
                     continue;
                 };
-                const s = &streams[slot];
+                const stream = &streams[slot];
 
                 var data = payload;
                 var pad_len: usize = 0;
-                if ((fh.flags & h2.FLAG_PADDED) != 0 and data.len > 0) {
+                if ((frame_header.flags & h2.FLAG_PADDED) != 0 and data.len > 0) {
                     pad_len = data[0];
                     data = data[1..];
                 }
                 if (pad_len > data.len) {
-                    h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                    }
                     return error.ProtocolError;
                 }
                 data = data[0 .. data.len - pad_len];
 
                 if (data.len > 0) {
+                    conn_mutex.lock();
+                    defer conn_mutex.unlock();
                     h2.sendWindowUpdate(fd, 0, @intCast(data.len)) catch {};
                     h2.sendWindowUpdate(fd, stream_id, @intCast(data.len)) catch {};
                 }
 
-                const to_copy = @min(data.len, s.body.len - s.body_len);
-                @memcpy(s.body[s.body_len..][0..to_copy], data[0..to_copy]);
-                s.body_len += to_copy;
-                s.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
+                const to_copy = @min(data.len, stream.body.len - stream.body_len);
+                @memcpy(stream.body[stream.body_len..][0..to_copy], data[0..to_copy]);
+                stream.body_len += to_copy;
+                stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
-                if (s.end_stream) {
-                    dispatchGrpcStream(routes, s, fd, opts);
+                if (stream.end_stream) {
+                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
 
             h2.FT_RST_STREAM => {
-                const stream_id = fh.stream_id;
+                const stream_id = frame_header.stream_id;
                 if (findSlot(stream_id, streams, stream_slots)) |slot| stream_slots[slot] = false;
             },
 
@@ -561,17 +812,17 @@ fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
     var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
     std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
     if (storage.family == std.posix.AF.INET) {
-        const sin: *const std.posix.sockaddr.in = @ptrCast(&storage);
-        const b: [4]u8 = @bitCast(sin.addr);
-        const port = std.mem.readInt(u16, @as([2]u8, @bitCast(sin.port))[0..2], .big);
-        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ b[0], b[1], b[2], b[3], port }) catch "-";
+        const sock_addr_in: *const std.posix.sockaddr.in = @ptrCast(&storage);
+        const addr_bytes: [4]u8 = @bitCast(sock_addr_in.addr);
+        const port = std.mem.readInt(u16, @as([2]u8, @bitCast(sock_addr_in.port))[0..2], .big);
+        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3], port }) catch "-";
     }
     return "-";
 }
 
 fn slotFor(stream_id: u31, streams: []Stream, used: []bool) ?usize {
-    for (used, 0..) |u, i| {
-        if (!u) {
+    for (used, 0..) |slot_in_use, i| {
+        if (!slot_in_use) {
             used[i] = true;
             streams[i].id = stream_id;
             return i;
@@ -581,8 +832,8 @@ fn slotFor(stream_id: u31, streams: []Stream, used: []bool) ?usize {
 }
 
 fn findSlot(stream_id: u31, streams: []Stream, used: []bool) ?usize {
-    for (used, 0..) |u, i| {
-        if (u and streams[i].id == stream_id) return i;
+    for (used, 0..) |slot_in_use, i| {
+        if (slot_in_use and streams[i].id == stream_id) return i;
     }
     return null;
 }
@@ -595,12 +846,12 @@ fn computeDeadline(handler_timeout_ms: u32, headers: []const h2.Header) ?u64 {
         best = now + @as(u64, handler_timeout_ms) * std.time.ns_per_ms;
     }
 
-    for (headers) |hdr| {
-        if (!std.mem.eql(u8, hdr.name, "grpc-timeout")) continue;
-        if (parseTimeout(hdr.value)) |t_ns| {
+    for (headers) |header| {
+        if (!std.mem.eql(u8, header.name, "grpc-timeout")) continue;
+        if (parseTimeout(header.value)) |t_ns| {
             const candidate = now + t_ns;
-            if (best) |cur| {
-                if (candidate < cur) best = candidate;
+            if (best) |current_deadline| {
+                if (candidate < current_deadline) best = candidate;
             } else {
                 best = candidate;
             }
@@ -608,39 +859,6 @@ fn computeDeadline(handler_timeout_ms: u32, headers: []const h2.Header) ?u64 {
     }
 
     return best;
-}
-
-fn dispatchGrpcStream(comptime routes: []const Route, s: *Stream, fd: std.posix.fd_t, opts: GrpcServeOpts) void {
-    var path: []const u8 = "/";
-    for (s.headers[0..s.header_count]) |hdr| {
-        if (std.mem.eql(u8, hdr.name, ":path")) path = hdr.value;
-    }
-
-    var ts0: std.os.linux.timespec = undefined;
-    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &ts0);
-
-    var ctx = GrpcContext{
-        .fd = fd,
-        .stream_id = s.id,
-        ._body = s.body[0..s.body_len],
-        ._pos = 0,
-        ._hdr_sent = false,
-        ._sent_bytes = 0,
-        ._grpc_status = 0,
-        .deadline_ns = computeDeadline(opts.handler_timeout_ms, s.headers[0..s.header_count]),
-    };
-    Router(routes).dispatch(path, s.headers[0..s.header_count], &ctx);
-
-    if (opts.logger) |lg| {
-        var ts1: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts1);
-        const dur_ns: i64 = (@as(i64, ts1.sec) - @as(i64, ts0.sec)) * 1_000_000_000 +
-            (@as(i64, ts1.nsec) - @as(i64, ts0.nsec));
-        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
-        var peer_buf: [64]u8 = undefined;
-        const peer = peerStr(fd, &peer_buf);
-        lg.rpc(peer, path, ctx._grpc_status, s.body_len, ctx._sent_bytes, dur_ms);
-    }
 }
 
 // --------------------------------------------------------- //
@@ -657,8 +875,8 @@ test "zix grpc: GrpcContext recvMessage parses one message" {
     frm_mod.writeGrpcPrefix(body[0..5], false, 5);
     @memcpy(body[5..], "hello");
     var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
-    const msg = ctx.recvMessage().?;
-    try std.testing.expectEqualStrings("hello", msg);
+    const message = ctx.recvMessage().?;
+    try std.testing.expectEqualStrings("hello", message);
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
@@ -676,9 +894,9 @@ test "zix grpc: GrpcContext recvMessage two messages" {
 }
 
 test "zix grpc: parsePath valid" {
-    const p = parsePath("/helloworld.Greeter/SayHello").?;
-    try std.testing.expectEqualStrings("helloworld.Greeter", p.package_service);
-    try std.testing.expectEqualStrings("SayHello", p.method);
+    const grpc_path = parsePath("/helloworld.Greeter/SayHello").?;
+    try std.testing.expectEqualStrings("helloworld.Greeter", grpc_path.package_service);
+    try std.testing.expectEqualStrings("SayHello", grpc_path.method);
 }
 
 test "zix grpc: parsePath no package returns null" {
@@ -690,18 +908,18 @@ test "zix grpc: parsePath trailing slash returns null" {
 }
 
 test "zix grpc: detectContentType proto" {
-    const hdrs = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc+proto" }};
-    try std.testing.expectEqual(GrpcContentType.PROTO, detectContentType(&hdrs));
+    const headers = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc+proto" }};
+    try std.testing.expectEqual(GrpcContentType.PROTO, detectContentType(&headers));
 }
 
 test "zix grpc: detectContentType json" {
-    const hdrs = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc+json" }};
-    try std.testing.expectEqual(GrpcContentType.JSON, detectContentType(&hdrs));
+    const headers = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc+json" }};
+    try std.testing.expectEqual(GrpcContentType.JSON, detectContentType(&headers));
 }
 
 test "zix grpc: detectContentType grpc no subtype is PROTO" {
-    const hdrs = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc" }};
-    try std.testing.expectEqual(GrpcContentType.PROTO, detectContentType(&hdrs));
+    const headers = [_]h2.Header{.{ .name = "content-type", .value = "application/grpc" }};
+    try std.testing.expectEqual(GrpcContentType.PROTO, detectContentType(&headers));
 }
 
 test "zix grpc: GrpcServeOpts defaults" {

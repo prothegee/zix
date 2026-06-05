@@ -2,12 +2,12 @@
 //! Sends a SendLocationAndSave request to the location server on port 10101.
 //!
 //! Proto schema: examples/protobuf/location.proto
-//!   message LocationReq  { double long = 1; double lat = 2; string message = 3; }
-//!   message LocationResp { string message = 1; bool ok = 2; }
+//! message LocationReq  { double long = 1; double lat = 2; string message = 3; }
+//! message LocationResp { string message = 1; bool ok = 2; }
 //!
 //! Run (server must be running on port 10101):
-//!   zig build example-grpc_location_client
-//!   ./zig-out/bin/example-grpc_location_client
+//! zig build example-grpc_location_client
+//! ./zig-out/bin/example-grpc_location_client
 
 const std = @import("std");
 const zix = @import("zix");

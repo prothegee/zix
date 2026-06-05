@@ -1,7 +1,8 @@
 //! Bug 1 reproduction: sendGrpcError omits content-type header.
 //!
 //! Issue: https://codeberg.org/prothegee/zix/issues/67
-//! Status: not resolved
+//! Appear: version 0.2.0
+//! Status: resolved (0.2.1)
 //!
 //! Every gRPC response HEADERS frame must carry content-type per spec,
 //! including trailers-only error responses. sendGrpcError sends :status 200

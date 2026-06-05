@@ -402,6 +402,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
+__*In the nutshell:*__
+- Looking for high throughput? Use `.EPOLL`.
+- Looking for consistent latency? Use `.ASYNC`.
+- For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
+
 Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail arsitektur, jumlah thread, dan kapan sebaiknya memilih masing-masing model.
 
 <br>
@@ -912,7 +917,7 @@ var server = try zix.Grpc.Server.init(
         .io                = process.io,
         .ip                = "127.0.0.1",
         .port              = 8083,
-        .handler_timeout_ms = 5_000, // cap global; juga digabungkan dengan Route.timeout_ms dan header grpc-timeout
+        .handler_timeout_ms = 5_000, // cap global, juga digabungkan dengan Route.timeout_ms dan header grpc-timeout
     },
 );
 ```

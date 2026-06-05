@@ -2,7 +2,8 @@
 //! concurrent server-streaming requests on the same connection.
 //!
 //! Issue: https://codeberg.org/prothegee/zix/issues/68
-//! Status: not resolved
+//! Appear: version 0.2.0
+//! Status: resolved (0.2.1)
 //!
 //! dispatchGrpcStream is called synchronously inside serveGrpcLoop. While a
 //! streaming handler writes thousands of DATA frames, the entire read loop is

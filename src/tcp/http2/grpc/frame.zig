@@ -36,6 +36,7 @@ pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const
     try hpack_enc.writeHeader(":status", "200");
     try hpack_enc.writeHeader("content-type", content_type);
     const hblock = hpack_enc.encoded();
+
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
@@ -49,6 +50,7 @@ pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const
 pub fn sendGrpcData(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !void {
     var prefix: [5]u8 = undefined;
     writeGrpcPrefix(&prefix, false, @intCast(message.len));
+
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(5 + message.len),
         .frame_type = h2.FT_DATA,
@@ -68,6 +70,7 @@ pub fn sendGrpcTrailer(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc
     try hpack_enc.writeHeader("grpc-status", status_s);
     if (grpc_message.len > 0) try hpack_enc.writeHeader("grpc-message", grpc_message);
     const hblock = hpack_enc.encoded();
+
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
@@ -77,16 +80,18 @@ pub fn sendGrpcTrailer(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc
     try h2.fdWriteAll(fd, hblock);
 }
 
-/// Send trailers-only error response (no DATA frame). Includes :status 200 per gRPC spec.
+/// Send trailers-only error response (no DATA frame). Includes :status 200 and content-type per gRPC spec.
 pub fn sendGrpcError(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     try hpack_enc.writeHeader(":status", "200");
+    try hpack_enc.writeHeader("content-type", "application/grpc+proto");
     var status_str: [4]u8 = undefined;
     const status_s = std.fmt.bufPrint(&status_str, "{d}", .{grpc_status}) catch "0";
     try hpack_enc.writeHeader("grpc-status", status_s);
     if (grpc_message.len > 0) try hpack_enc.writeHeader("grpc-message", grpc_message);
     const hblock = hpack_enc.encoded();
+
     try h2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = h2.FT_HEADERS,
@@ -123,4 +128,33 @@ test "zix grpc: readGrpcPrefix exactly 5 bytes is valid" {
     writeGrpcPrefix(&body, false, 0);
     const p = try readGrpcPrefix(&body);
     try std.testing.expectEqual(@as(u32, 0), p.msg_len);
+}
+
+test "zix grpc: sendGrpcError includes content-type header" {
+    const pipe_fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(pipe_fds[0]);
+    defer _ = std.posix.system.close(pipe_fds[1]);
+
+    try sendGrpcError(pipe_fds[1], 1, 3, "");
+
+    var buf: [256]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    const hpack_block = buf[9..n];
+
+    var decoder = h2.HpackDecoder.init();
+    var headers: [8]h2.Header = undefined;
+    var scratch: [256]u8 = undefined;
+    const header_count = try decoder.decode(hpack_block, &headers, &scratch);
+
+    var found = false;
+    for (headers[0..header_count]) |header| {
+        if (std.mem.eql(u8, header.name, "content-type") and
+            std.mem.eql(u8, header.value, "application/grpc+proto"))
+        {
+            found = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(found);
 }
