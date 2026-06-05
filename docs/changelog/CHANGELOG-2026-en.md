@@ -34,6 +34,26 @@ __*Fix:*__
 
 <br>
 
+## 0.2.1 (2026-06-05)
+
+__*Update:*__
+- n/a
+
+<br>
+
+__*Fix:*__
+- grpc-content-type:
+    - https://codeberg.org/prothegee/zix/issues/67
+    - `sendGrpcError` omitted `content-type` in the trailers-only HEADERS frame. gRPC clients rejected the response with a content-type error. All HEADERS frames sent by the server now include `content-type: application/grpc+proto` per the gRPC spec.
+
+<br>
+
+- grpc-concurrent-stream:
+    - https://codeberg.org/prothegee/zix/issues/68
+    - Concurrent server-streaming RPCs on the same h2 connection could deadlock when the TCP send buffer filled under backpressure. Each stream is now dispatched on a dedicated thread sharing a connection-level write mutex, preventing frame interleaving.
+
+<br>
+
 ## 0.2.0 (2026-06-02)
 
 __*Update:*__
