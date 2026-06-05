@@ -8,6 +8,20 @@
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
 //! -d '{"name":"world"}' 127.0.0.1:8083 helloworld.Greeter/SayHello
+//!
+//! Benchmark with h2load (requires nghttp2):
+//! h2load -n 999999 -c 256 -t 4 -D 10 \
+//!   --header 'content-type: application/grpc+proto' \
+//!   --header 'te: trailers' \
+//!   --data examples/grpc_hello_req.bin \
+//!   http://127.0.0.1:8083/helloworld.Greeter/SayHello
+//!
+//! Benchmark with ghz (requires ghz):
+//! ghz --insecure \
+//!   --proto examples/protobuf/helloworld.proto \
+//!   --call helloworld.Greeter/SayHello \
+//!   -d '{"name":"world"}' -c 64 -z 10s \
+//!   127.0.0.1:8083
 
 const std = @import("std");
 const zix = @import("zix");
@@ -39,7 +53,7 @@ pub fn main(process: std.process.Init) !void {
     var server = try zix.Grpc.Server.init(
         &[_]zix.Grpc.Route{
             .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
-            .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler },
+            .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .is_server_streaming = true },
         },
         .{
             .io = process.io,

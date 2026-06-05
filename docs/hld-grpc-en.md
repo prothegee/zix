@@ -44,7 +44,7 @@ graph LR
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
-| `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }` |
+| `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` — sends UNIMPLEMENTED if no route matches |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
@@ -103,7 +103,7 @@ fn echoHandler(
 
 var server = try zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
-        .{ .path = "/pkg.Svc/Echo", .handler = echoHandler },
+        .{ .path = "/pkg.Svc/Echo", .handler = echoHandler, .is_server_streaming = true },
     },
     .{ .io = io, .ip = "127.0.0.1", .port = 8083 },
 );
@@ -115,7 +115,7 @@ Key rules:
 - `ctx.finish()` must always be called before returning. It sends the grpc-status trailer.
 - `ctx.sendMessage()` sends initial response HEADERS on the first call. Do not call `ctx.sendHeaders()` manually if using `sendMessage`.
 - `ctx.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
-- The handler runs on a dedicated per-stream thread. Concurrent streams on the same connection share a connection-level write mutex.
+- Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes (`is_server_streaming = true`) each run on a dedicated thread sharing a connection-level write mutex.
 - The server buffers all client DATA before dispatching the handler.
 - `parsePath` and path-based dispatch inside the handler are not needed — the route table handles that.
 
@@ -174,6 +174,8 @@ var server = try zix.Grpc.Server.init(
 ```
 
 ## All 4 RPC Types
+
+Unary and client-streaming handlers use `is_server_streaming = false` (the default). Server-streaming and bidirectional handlers must set `is_server_streaming = true` on their `Route` entry to prevent deadlock under flow-control backpressure.
 
 ### Unary (1 request, 1 response)
 
@@ -325,8 +327,11 @@ flowchart TD
     H --> J[frame loop]
     I --> J
     J -->|HEADERS stream| K[buffer DATA]
-    K -->|END_STREAM| L[spawnGrpcStream]
-    L --> M[HandlerFn with GrpcContext]
+    K -->|END_STREAM| L[dispatchStream]
+    L -->|is_server_streaming=false| LI[inline on conn thread]
+    L -->|is_server_streaming=true| LS[spawn thread]
+    LI --> M[HandlerFn with GrpcContext]
+    LS --> M
     M --> N[ctx.finish sends trailers]
 ```
 
