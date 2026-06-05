@@ -175,7 +175,7 @@ fn workerEntry(cfg: TcpServerConfig, queue: *ConnQueue, io: std.Io) void {
     var net_server = addr.listen(io, .{
         .mode = .stream,
         .protocol = .tcp,
-        .reuse_address = true,
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
         .kernel_backlog = cfg.kernel_backlog,
     }) catch |err| {
         if (cfg.logger) |lg| lg.system(.ERROR, "tcp", "listen error: {}", .{err});
@@ -215,7 +215,7 @@ fn asyncWorkerEntry(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) void {
     var net_server = addr.listen(io, .{
         .mode = .stream,
         .protocol = .tcp,
-        .reuse_address = true,
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
         .kernel_backlog = cfg.kernel_backlog,
     }) catch |err| {
         if (cfg.logger) |lg| lg.system(.ERROR, "tcp", "listen error: {}", .{err});
@@ -322,7 +322,7 @@ pub const TcpServer = struct {
                 var net_server = try addr.listen(io, .{
                     .mode = .stream,
                     .protocol = .tcp,
-                    .reuse_address = true,
+                    .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                     .kernel_backlog = cfg.kernel_backlog,
                 });
                 defer net_server.deinit(io);
@@ -413,7 +413,7 @@ pub const TcpServer = struct {
         var net_server = addr.listen(io, .{
             .mode = .stream,
             .protocol = .tcp,
-            .reuse_address = true,
+            .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             .kernel_backlog = cfg.kernel_backlog,
         }) catch |err| {
             if (cfg.logger) |lg| lg.system(.ERROR, "tcp", "epoll listen error: {}", .{err});

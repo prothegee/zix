@@ -2,7 +2,7 @@
 //! Demonstrates unary and streaming calls against the grpc_server_1_async example.
 //!
 //! Run (server must be running on port 8083):
-//!   zig build example-grpc_client
+//! zig build example-grpc_client
 
 const std = @import("std");
 const zix = @import("zix");

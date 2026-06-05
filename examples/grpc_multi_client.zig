@@ -2,8 +2,8 @@
 //! Calls two services on the same server (port 10102), one connection.
 //!
 //! Run (grpc_multi_server must be running on port 10102):
-//!   zig build example-grpc_multi_client
-//!   ./zig-out/bin/example-grpc_multi_client
+//! zig build example-grpc_multi_client
+//! ./zig-out/bin/example-grpc_multi_client
 
 const std = @import("std");
 const zix = @import("zix");

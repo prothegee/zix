@@ -115,7 +115,8 @@ Key rules:
 - `ctx.finish()` must always be called before returning. It sends the grpc-status trailer.
 - `ctx.sendMessage()` sends initial response HEADERS on the first call. Do not call `ctx.sendHeaders()` manually if using `sendMessage`.
 - `ctx.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
-- The handler runs synchronously. The server buffers all client DATA before dispatching.
+- The handler runs on a dedicated per-stream thread. Concurrent streams on the same connection share a connection-level write mutex.
+- The server buffers all client DATA before dispatching the handler.
 - `parsePath` and path-based dispatch inside the handler are not needed — the route table handles that.
 
 ## Context Timeout
@@ -292,7 +293,7 @@ Compress flag is always 0 (compression not implemented).
 
 ### Error path (trailers-only)
 
-When the handler calls `ctx.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `grpc-status`, and `grpc-message` and `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol; the actual gRPC error is in the `grpc-status` trailer.
+When the handler calls `ctx.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `content-type`, `grpc-status`, and `grpc-message` with `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol; the actual gRPC error is in the `grpc-status` trailer. `content-type` is always included per the gRPC spec to ensure client compatibility.
 
 ## Dispatch Models
 
@@ -324,7 +325,7 @@ flowchart TD
     H --> J[frame loop]
     I --> J
     J -->|HEADERS stream| K[buffer DATA]
-    K -->|END_STREAM| L[dispatchGrpcStream]
+    K -->|END_STREAM| L[spawnGrpcStream]
     L --> M[HandlerFn with GrpcContext]
     M --> N[ctx.finish sends trailers]
 ```
@@ -388,11 +389,11 @@ See [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) for nginx and haproxy configur
 | Tier | File | Count |
 | :- | :- | :- |
 | unit | inline in `src/tcp/http2/grpc/*.zig` via `refAllDecls` | ~40 |
-| integration | `tests/integration/grpc/server_test.zig` | 7 |
+| integration | `tests/integration/grpc/server_test.zig` | 9 |
 | behaviour | `tests/behaviour/grpc/config_test.zig` | 7 |
-| edge | `tests/edge/grpc/server_test.zig` | 12 |
+| edge | `tests/edge/grpc/server_test.zig` | 13 |
 
-Ports: integration 18200-18204, edge 18220.
+Ports: integration 18200-18206, edge 18220-18221.
 
 ---
 
