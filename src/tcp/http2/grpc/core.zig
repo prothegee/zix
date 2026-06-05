@@ -215,6 +215,10 @@ pub const GrpcServeOpts = struct {
     /// Global handler timeout cap (milliseconds). Passed from GrpcServerConfig.handler_timeout_ms.
     /// 0 = disabled. Combined with Route.timeout_ms and grpc-timeout header at dispatch.
     handler_timeout_ms: u32 = 0,
+    /// When set, spawnGrpcStream uses io.async (work-stealing pool) instead of std.Thread.spawn.
+    /// Avoids per-request clone() syscall cost (~20-50µs per stream) under concurrent load.
+    /// Null falls back to std.Thread.spawn for compatibility with standalone serveConn callers.
+    io: ?std.Io = null,
 };
 
 // --------------------------------------------------------- //
@@ -373,23 +377,28 @@ fn spawnGrpcStream(
     conn_mutex.retain();
     task.conn_mutex = conn_mutex;
 
-    const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch {
-        conn_mutex.release();
-        std.heap.smp_allocator.destroy(task);
-        var ctx = GrpcContext{
-            .fd = fd,
-            .stream_id = s.id,
-            ._body = &.{},
-            ._pos = 0,
-            ._hdr_sent = false,
-            ._sent_bytes = 0,
-            ._grpc_status = 0,
-            ._write_mutex = conn_mutex,
+    if (opts.io) |spawn_io| {
+        // Use the work-stealing thread pool: no per-request clone() syscall.
+        _ = spawn_io.async(Task.run, .{task});
+    } else {
+        const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch {
+            conn_mutex.release();
+            std.heap.smp_allocator.destroy(task);
+            var ctx = GrpcContext{
+                .fd = fd,
+                .stream_id = s.id,
+                ._body = &.{},
+                ._pos = 0,
+                ._hdr_sent = false,
+                ._sent_bytes = 0,
+                ._grpc_status = 0,
+                ._write_mutex = conn_mutex,
+            };
+            ctx.finish(.INTERNAL, "spawn failed");
+            return;
         };
-        ctx.finish(.INTERNAL, "spawn failed");
-        return;
-    };
-    thread.detach();
+        thread.detach();
+    }
 }
 
 // --------------------------------------------------------- //
@@ -928,6 +937,7 @@ test "zix grpc: GrpcServeOpts defaults" {
     try std.testing.expectEqual(h2.DEFAULT_MAX_FRAME_SIZE, opts.max_frame_size);
     try std.testing.expectEqual(@as(usize, 65536), opts.max_body);
     try std.testing.expectEqual(@as(u32, 0), opts.handler_timeout_ms);
+    try std.testing.expect(opts.io == null);
 }
 
 test "zix grpc: Route timeout_ms defaults to zero" {
