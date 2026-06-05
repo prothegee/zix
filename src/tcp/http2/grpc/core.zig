@@ -163,12 +163,19 @@ pub const HandlerFn = *const fn (
 /// path - []const u8 (full gRPC path, e.g. "/package.Service/Method")
 /// handler - HandlerFn
 /// timeout_ms - u32 (per-route timeout in milliseconds. 0 = use GrpcServerConfig.handler_timeout_ms)
+/// is_server_streaming - bool (true for server-streaming routes that send multiple DATA frames)
 pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
     /// Per-route handler timeout (milliseconds). 0 = use GrpcServerConfig.handler_timeout_ms.
     /// When non-zero, tightens ctx.deadline_ns if shorter than the global cap.
     timeout_ms: u32 = 0,
+    /// Set to true for server-streaming routes (handler calls sendMessage in a loop or
+    /// requires client flow-control window updates while writing). When false (default),
+    /// the handler runs synchronously on the connection thread: no task alloc, no 4KB
+    /// header copy, no mutex. Synchronous dispatch blocks the read loop for the handler
+    /// duration — only safe for short unary handlers.
+    is_server_streaming: bool = false,
 };
 
 /// Comptime path router. Dispatches by exact match on path. Sends UNIMPLEMENTED if no route matches.
@@ -245,6 +252,9 @@ const Stream = struct {
 const ConnMutex = struct {
     locked: std.atomic.Value(bool) = .init(false),
     refs: std.atomic.Value(u32) = .init(1),
+    /// Count of server-streaming tasks currently writing on this connection.
+    /// Read by the inline unary fast-path to decide whether the write mutex is needed.
+    active_streaming: std.atomic.Value(u32) = .init(0),
 
     fn lock(self: *ConnMutex) void {
         while (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
@@ -286,6 +296,7 @@ fn DispatchTask(comptime routes: []const Route) type {
         fn run(self: *Self) void {
             const conn_mutex_ptr = self.conn_mutex;
             defer {
+                _ = conn_mutex_ptr.active_streaming.fetchSub(1, .acq_rel);
                 std.heap.smp_allocator.destroy(self);
                 conn_mutex_ptr.release();
             }
@@ -374,6 +385,7 @@ fn spawnGrpcStream(
         }
     }
 
+    _ = conn_mutex.active_streaming.fetchAdd(1, .monotonic);
     conn_mutex.retain();
     task.conn_mutex = conn_mutex;
 
@@ -382,6 +394,7 @@ fn spawnGrpcStream(
         _ = spawn_io.async(Task.run, .{task});
     } else {
         const thread = std.Thread.spawn(.{}, Task.run, .{task}) catch {
+            _ = conn_mutex.active_streaming.fetchSub(1, .acq_rel);
             conn_mutex.release();
             std.heap.smp_allocator.destroy(task);
             var ctx = GrpcContext{
@@ -398,6 +411,72 @@ fn spawnGrpcStream(
             return;
         };
         thread.detach();
+    }
+}
+
+fn headerPath(headers: []const h2.Header) []const u8 {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, ":path")) return header.value;
+    }
+    return "/";
+}
+
+fn routeIsStreaming(comptime routes: []const Route, path: []const u8) bool {
+    inline for (routes) |route| {
+        if (std.mem.eql(u8, route.path, path)) return route.is_server_streaming;
+    }
+    return false;
+}
+
+fn dispatchGrpcInline(
+    comptime routes: []const Route,
+    stream: *const Stream,
+    fd: std.posix.fd_t,
+    opts: GrpcServeOpts,
+    conn_mutex: *ConnMutex,
+    path: []const u8,
+) void {
+    var time_start: std.os.linux.timespec = undefined;
+    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+
+    var ctx = GrpcContext{
+        .fd = fd,
+        .stream_id = stream.id,
+        ._body = stream.body[0..stream.body_len],
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        .deadline_ns = computeDeadline(opts.handler_timeout_ms, stream.headers[0..stream.header_count]),
+        ._write_mutex = if (conn_mutex.active_streaming.load(.acquire) > 0) conn_mutex else null,
+    };
+    Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+
+    if (opts.logger) |logger| {
+        var time_end: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
+        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
+            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
+        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+        var peer_buf: [64]u8 = undefined;
+        const peer = peerStr(fd, &peer_buf);
+        logger.rpc(peer, path, ctx._grpc_status, stream.body_len, ctx._sent_bytes, dur_ms);
+    }
+}
+
+fn dispatchStream(
+    comptime routes: []const Route,
+    stream: *Stream,
+    fd: std.posix.fd_t,
+    opts: GrpcServeOpts,
+    conn_mutex: *ConnMutex,
+) void {
+    const path = headerPath(stream.headers[0..stream.header_count]);
+
+    if (routeIsStreaming(routes, path)) {
+        spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
+    } else {
+        dispatchGrpcInline(routes, stream, fd, opts, conn_mutex, path);
     }
 }
 
@@ -680,9 +759,9 @@ fn serveGrpcLoop(
                     continue;
                 };
                 const stream = &streams[slot];
-                stream.* = std.mem.zeroes(Stream);
                 stream.id = stream_id;
                 stream.state = .OPEN;
+                stream.body_len = 0;
 
                 var block = payload;
                 var offset: usize = 0;
@@ -717,7 +796,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_headers and stream.end_stream) {
-                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
@@ -745,7 +824,7 @@ fn serveGrpcLoop(
                 stream.header_count += count;
                 stream.end_headers = (frame_header.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
-                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
@@ -799,7 +878,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
-                    spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(routes, stream, fd, opts, conn_mutex);
                     stream_slots[slot] = false;
                 }
             },
@@ -945,6 +1024,13 @@ test "zix grpc: Route timeout_ms defaults to zero" {
         fn h(_: []const h2.Header, _: *GrpcContext) void {}
     }.h };
     try std.testing.expectEqual(@as(u32, 0), r.timeout_ms);
+}
+
+test "zix grpc: Route is_server_streaming defaults to false" {
+    const r = Route{ .path = "/svc.Svc/Method", .handler = struct {
+        fn h(_: []const h2.Header, _: *GrpcContext) void {}
+    }.h };
+    try std.testing.expect(!r.is_server_streaming);
 }
 
 test "zix grpc: GrpcContext.isExpired null deadline returns false" {
