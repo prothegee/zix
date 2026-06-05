@@ -511,7 +511,7 @@ fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: 
             return error.BadPreface;
         }
         try h2.sendSettings(fd, &.{
-            .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, 128 },
+            .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
             .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
             .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
             .{ h2.SETTINGS_ENABLE_PUSH, 0 },
@@ -603,7 +603,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     }
 
     try h2.sendSettings(fd, &.{
-        .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, 128 },
+        .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
         .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
         .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
         .{ h2.SETTINGS_ENABLE_PUSH, 0 },
