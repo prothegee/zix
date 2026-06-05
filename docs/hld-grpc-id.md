@@ -115,7 +115,8 @@ Aturan penting:
 - `ctx.finish()` harus selalu dipanggil sebelum return. Fungsi ini mengirim trailer grpc-status.
 - `ctx.sendMessage()` mengirim HEADERS respons awal pada panggilan pertama. Jangan memanggil `ctx.sendHeaders()` secara manual jika menggunakan `sendMessage`.
 - `ctx.recvMessage()` mengembalikan `null` saat semua pesan client telah dikonsumsi (client mengirim END_STREAM).
-- Handler berjalan secara sinkron. Server mem-buffer semua DATA client sebelum melakukan dispatch.
+- Handler berjalan pada thread tersendiri per stream. Stream bersamaan pada koneksi yang sama berbagi write mutex tingkat koneksi.
+- Server mem-buffer semua DATA client sebelum melakukan dispatch handler.
 - `parsePath` dan dispatch berbasis path di dalam handler tidak diperlukan — tabel route menangani hal tersebut.
 
 ## Deadline Konteks
@@ -292,7 +293,7 @@ Flag compress selalu 0 (kompresi belum diimplementasikan).
 
 ### Jalur error (trailers-only)
 
-Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, server mengirim satu frame HEADERS dengan `:status 200`, `grpc-status`, `grpc-message`, dan `FLAG_END_STREAM`. HTTP `:status` selalu 200 sesuai protokol wire gRPC; error gRPC yang sebenarnya ada di trailer `grpc-status`.
+Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, server mengirim satu frame HEADERS dengan `:status 200`, `content-type`, `grpc-status`, dan `grpc-message` dengan `FLAG_END_STREAM`. HTTP `:status` selalu 200 sesuai protokol wire gRPC; error gRPC yang sebenarnya ada di trailer `grpc-status`. `content-type` selalu disertakan sesuai spesifikasi gRPC untuk memastikan kompatibilitas client.
 
 ## Model Dispatch
 
@@ -324,7 +325,7 @@ flowchart TD
     H --> J[frame loop]
     I --> J
     J -->|HEADERS stream| K[buffer DATA]
-    K -->|END_STREAM| L[dispatchGrpcStream]
+    K -->|END_STREAM| L[spawnGrpcStream]
     L --> M[HandlerFn dengan GrpcContext]
     M --> N[ctx.finish mengirim trailers]
 ```
@@ -388,11 +389,11 @@ Lihat [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) untuk contoh konfigurasi ngi
 | Tier | Berkas | Jumlah |
 | :- | :- | :- |
 | unit | inline di `src/tcp/http2/grpc/*.zig` melalui `refAllDecls` | ~40 |
-| integration | `tests/integration/grpc/server_test.zig` | 7 |
+| integration | `tests/integration/grpc/server_test.zig` | 9 |
 | behaviour | `tests/behaviour/grpc/config_test.zig` | 7 |
-| edge | `tests/edge/grpc/server_test.zig` | 12 |
+| edge | `tests/edge/grpc/server_test.zig` | 13 |
 
-Port: integration 18200-18204, edge 18220.
+Port: integration 18200-18206, edge 18220-18221.
 
 ---
 
