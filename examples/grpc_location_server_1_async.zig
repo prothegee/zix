@@ -3,20 +3,20 @@
 //! Port: 10101
 //!
 //! Proto schema: examples/protobuf/location.proto
-//!   message LocationReq  { double long = 1; double lat = 2; string message = 3; }
-//!   message LocationResp { string message = 1; bool ok = 2; }
+//! message LocationReq  { double long = 1; double lat = 2; string message = 3; }
+//! message LocationResp { string message = 1; bool ok = 2; }
 //!
 //! Run:
-//!   zig build example-grpc_location_server_1_async
-//!   ./zig-out/bin/example-grpc_location_server_1_async
+//! zig build example-grpc_location_server_1_async
+//! ./zig-out/bin/example-grpc_location_server_1_async
 //!
 //! Test with the location client:
-//!   ./zig-out/bin/example-grpc_location_client
+//! ./zig-out/bin/example-grpc_location_client
 //!
 //! Test with grpcurl (requires grpcurl installed):
-//!   grpcurl -proto examples/protobuf/location.proto -plaintext \
-//!     -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
-//!     localhost:10101 location.Location/SendLocationAndSave
+//! grpcurl -proto examples/protobuf/location.proto -plaintext \
+//! -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
+//! localhost:10101 location.Location/SendLocationAndSave
 
 const std = @import("std");
 const zix = @import("zix");
