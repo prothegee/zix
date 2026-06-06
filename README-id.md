@@ -38,34 +38,34 @@
 
 # Daftar Isi
 
-- [Alasan & Motivasi](./README-id.md#Alasan--Motivasi)
-- [Persyaratan](./README-id.md#Persyaratan)
-- [Repositori](./README-id.md#Repositori)
-- [Catatan Kontribusi Penting](./README-id.md#Catatan-Kontribusi-Penting)
-- [Dokumentasi](./README-id.md#Dokumentasi)
-- [Memulai](./README-id.md#Memulai)
-- [Contoh](./README-id.md#Contoh)
-- [Contoh: Minimal](./README-id.md#Contoh-Minimal)
-- [Contoh: Routing](./README-id.md#Routing)
-- [Contoh: Model Konkurensi](./README-id.md#Model-Konkurensi)
-- [Contoh: Timeout](./README-id.md#Timeout)
-- [Contoh: Middleware](./README-id.md#Middleware)
-- [Contoh: WebSocket](./README-id.md#WebSocket)
-- [Contoh: SSE](./README-id.md#SSE-Server-Sent-Events)
-- [Contoh: HTTP Client](./README-id.md#HTTP-Client)
-- [Contoh: File Statis & Unggah](./README-id.md#File-Statis--Unggah)
-- [Contoh: Kapasitas Header Respons](./README-id.md#Kapasitas-Header-Respons-HeaderSize)
-- [Contoh: Kapasitas Header Respons](./README-id.md#Kapasitas-Header-Respons-HeaderSize)
-<!-- - [Contoh: HTTP/2 h2c](./README-id.md#HTTP2-h2c) -->
-- [Contoh: gRPC h2c](./README-id.md#gRPC-h2c)
-- [Contoh: Raw TCP](./README-id.md#Raw-TCP)
-- [Contoh: FIX 4.x](./README-id.md#FIX-4x)
-- [Contoh: UDS (Unix Domain Sockets)](./README-id.md#UDS-Unix-Domain-Sockets)
-- [Contoh: Channel](./README-id.md#Channel)
-- [Contoh: UDP](./README-id.md#UDP)
-- [Contoh: Logger](./README-id.md#Logger)
-- [Contoh: Pengujian](./README-id.md#Pengujian)
-- [Contoh: Model Memori](./README-id.md#Model-Memori)
+- [Alasan & Motivasi](./README-id.md#alasan--motivasi)
+- [Persyaratan](./README-id.md#persyaratan)
+- [Repositori](./README-id.md#repositori)
+- [Catatan Kontribusi Penting](./README-id.md#catatan-kontribusi-penting)
+- [Dokumentasi](./README-id.md#dokumentasi)
+- [Memulai](./README-id.md#memulai)
+- [Contoh](./README-id.md#contoh)
+- [Contoh: Minimal](./README-id.md#contoh-minimal)
+- [Contoh: Routing](./README-id.md#routing)
+- [Contoh: Model Konkurensi](./README-id.md#model-konkurensi)
+- [Contoh: Timeout](./README-id.md#timeout)
+- [Contoh: Middleware](./README-id.md#middleware)
+- [Contoh: WebSocket](./README-id.md#websocket)
+- [Contoh: SSE](./README-id.md#sse-server-sent-events)
+- [Contoh: HTTP Client](./README-id.md#http-client)
+- [Contoh: File Statis & Unggah](./README-id.md#file-statis--unggah)
+- [Contoh: Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
+- [Contoh: Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
+<!-- - [Contoh: HTTP/2 h2c](./README-id.md#http2-h2c) -->
+- [Contoh: gRPC h2c](./README-id.md#grpc-h2c)
+- [Contoh: Raw TCP](./README-id.md#raw-tcp)
+- [Contoh: FIX 4.x](./README-id.md#fix-4x)
+- [Contoh: UDS (Unix Domain Sockets)](./README-id.md#uds-unix-domain-sockets)
+- [Contoh: Channel](./README-id.md#channel)
+- [Contoh: UDP](./README-id.md#udp)
+- [Contoh: Logger](./README-id.md#logger)
+- [Pengujian](./README-id.md#pengujian)
+- [Model Memori](./README-id.md#model-memori)
 
 <br>
 
@@ -1391,9 +1391,5 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 <br>
 
 ---
-
-<!--
-perf record -F 99 -o my_custom_output.perf.data ./myprogram;
--->
 
 ###### end of readme
