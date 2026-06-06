@@ -38,34 +38,34 @@
 
 # Table of Contents
 
-- [Reason & Motivation](./README-en.md#A-Reason-A-Motivation)
-- [Requirements](./README-en.md#Requirements)
-- [Repositories](./README-en.md#Repositories)
-- [Important Contribution Notes](./README-en.md#Important-Contribution-Notes)
-- [Documentation](./README-en.md#Documentation)
-- [Getting Started](./README-en.md#Getting-Started)
-- [Examples](./README-en.md#Examples)
-- [Examples: Minimal](./README-en.md#Minimal-Examples)
-- [Examples: Routing](./README-en.md#Routing)
-- [Examples: Concurrency Model](./README-en.md#Concurrency-Model)
-- [Examples: Timeouts](./README-en.md#Timeouts)
-- [Examples: Middleware](./README-en.md#Middleware)
-- [Examples: WebSocket](./README-en.md#WebSocket)
-- [Examples: SSE](./README-en.md#SSE-Server-Sent-Events)
-- [Examples: HTTP Client](./README-en.md#HTTP-Client)
-- [Examples: Static Files & Upload](./README-en.md#Static-Files--Upload)
-- [Examples: Response Header Capacity](./README-en.md#Response-Header-Cap-Headersize)
-- [Examples: Response Header Capacity](./README-en.md#Response-Header-Cap-Headersize)
-<!-- - [Examples: HTTP/2 h2c](./README-en.md#HTTP2-h2c) -->
-- [Examples: gRPC h2c](./README-en.md#gRPC-h2c)
-- [Examples: Raw TCP](./README-en.md#Raw-TCP)
-- [Examples: FIX 4.x](./README-en.md#FIX-4x)
-- [Examples: UDS (Unix Domain Sockets)](./README-en.md#UDS-Unix-Domain-Sockets)
-- [Examples: Channel](./README-en.md#Channel)
-- [Examples: UDP](./README-en.md#UDP)
-- [Examples: Logger](./README-en.md#Logger)
-- [Examples: Testing](./README-en.md#Testing)
-- [Examples: Memory Model](./README-en.md#Memory-Model)
+- [Reason & Motivation](./README-en.md#a-reason-a-motivation)
+- [Requirements](./README-en.md#requirements)
+- [Repositories](./README-en.md#repositories)
+- [Important Contribution Notes](./README-en.md#important-contribution-notes)
+- [Documentation](./README-en.md#documentation)
+- [Getting Started](./README-en.md#getting-started)
+- [Examples](./README-en.md#examples)
+- [Examples: Minimal](./README-en.md#minimal-examples)
+- [Examples: Routing](./README-en.md#routing)
+- [Examples: Concurrency Model](./README-en.md#concurrency-model)
+- [Examples: Timeouts](./README-en.md#timeouts)
+- [Examples: Middleware](./README-en.md#middleware)
+- [Examples: WebSocket](./README-en.md#websocket)
+- [Examples: SSE](./README-en.md#sse-server-sent-events)
+- [Examples: HTTP Client](./README-en.md#http-client)
+- [Examples: Static Files & Upload](./README-en.md#static-files--upload)
+- [Examples: Response Header Capacity](./README-en.md#response-header-cap-headersize)
+- [Examples: Response Header Capacity](./README-en.md#response-header-cap-headersize)
+<!-- - [Examples: HTTP/2 h2c](./README-en.md#http2-h2c) -->
+- [Examples: gRPC h2c](./README-en.md#grpc-h2c)
+- [Examples: Raw TCP](./README-en.md#raw-tcp)
+- [Examples: FIX 4.x](./README-en.md#fix-4x)
+- [Examples: UDS (Unix Domain Sockets)](./README-en.md#uds-unix-domain-sockets)
+- [Examples: Channel](./README-en.md#channel)
+- [Examples: UDP](./README-en.md#udp)
+- [Examples: Logger](./README-en.md#logger)
+- [Testing](./README-en.md#testing)
+- [Memory Model](./README-en.md#memory-model)
 
 <br>
 
@@ -1447,9 +1447,5 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 <br>
 
 ---
-
-<!--
-perf record -F 99 -o my_custom_output.perf.data ./myprogram;
--->
 
 ###### end of readme
