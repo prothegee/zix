@@ -18,11 +18,11 @@
     <b><i>Languages:</i></b>
 </h4>
 
-<p align="center">
-    <a href="README-id.md">Bahasa - id</a>
-    |
-    <a href="README-en.md">English - en</a>
-</p>
+<div align="center">
+
+[Bahasa - id](README-id.md) | [English - en](README-en.md)
+
+</div>
 
 <br>
 
