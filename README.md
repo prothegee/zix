@@ -19,9 +19,9 @@
 </h4>
 
 <p align="center">
-    <a href="./README-id.md">Bahasa - id</a>
+    <a href="README-id.md">Bahasa - id</a>
     |
-    <a href="./README-en.md">English - en</a>
+    <a href="README-en.md">English - en</a>
 </p>
 
 <br>
@@ -31,7 +31,7 @@
 </h4>
 
 <p align="center">
-    <a href="./LICENSE-BSD">BSD-3-Clause license</a>
+    <a href="LICENSE-BSD">BSD-3-Clause license</a>
 </p>
 
 <br>
