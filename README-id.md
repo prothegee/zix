@@ -56,7 +56,7 @@
 - [Contoh: File Statis & Unggah](./README-id.md#file-statis--unggah)
 - [Contoh: Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
 - [Contoh: Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
-<!-- - [Contoh: HTTP/2 h2c](./README-id.md#http2-h2c) -->
+- [Contoh: HTTP/2](./README-id.md#http2)
 - [Contoh: gRPC h2c](./README-id.md#grpc-h2c)
 - [Contoh: Raw TCP](./README-id.md#raw-tcp)
 - [Contoh: FIX 4.x](./README-id.md#fix-4x)
@@ -66,6 +66,7 @@
 - [Contoh: Logger](./README-id.md#logger)
 - [Pengujian](./README-id.md#pengujian)
 - [Model Memori](./README-id.md#model-memori)
+- [Catatan Penting](./README-id.md#catatan-penting)
 
 <br>
 
@@ -398,7 +399,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker thread; field workers diabaikan
+    .pool_size      = 32, // worker thread, field workers diabaikan
 });
 ```
 
@@ -799,7 +800,7 @@ Untuk panduan keamanan dan pemilihan tingkatan lihat [`docs/headers-id.md`](docs
 | `.MINIMAL` | 16 | API ketat, layanan internal |
 | `.COMMON` | 32 | Sebagian besar aplikasi web |
 | `.LARGE` | 64 | **Default.** Batas penyimpanan parser. CDN, proxy, API berat CORS |
-| `.{ .CUSTOM = N }` | N (dibatasi 64) | Cap eksplisit; nilai di atas 64 secara diam-diam dibatasi ke batas parser |
+| `.{ .CUSTOM = N }` | N (dibatasi 64) | Cap eksplisit nilai di atas 64 secara diam-diam dibatasi ke batas parser |
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -814,10 +815,11 @@ Batas penyimpanan parser adalah 64 — nilai `CUSTOM` di atas 64 secara diam-dia
 
 <br>
 
-<!-- ## HTTP/2 h2c -->
-<!---->
-<!-- `zix.Http2` adalah server HTTP/2 standalone melalui cleartext TCP (h2c). Rute didaftarkan pada waktu kompilasi. -->
-<!-- ... -->
+## HTTP/2 h2c
+
+HTTP/2 hanya sebagai persyaratan untuk pendekatan gRPC h2c.
+
+<br>
 
 ## gRPC h2c
 
@@ -911,7 +913,7 @@ var server = try zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // cap per-rute 3 detik, memperketat cap global 5 detik
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-        // cap per-rute 10 detik, cap global 5 detik tetap menang; Echo mengirim N respons sehingga is_server_streaming = true
+        // cap per-rute 10 detik, cap global 5 detik tetap menang. Echo mengirim N respons sehingga is_server_streaming = true
         .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
     },
     .{
@@ -1387,6 +1389,16 @@ Rute dibuat dalam tipe server pada waktu kompilasi — tidak diperlukan allocato
 Keduanya menggunakan array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos — handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
 
 Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) dan [`docs/hld-udp-id.md`](docs/hld-udp-id.md). Untuk model threading lihat [`docs/concurrency-id.md`](docs/concurrency-id.md).
+
+<br>
+
+## Important Notes
+
+Dalam kondisi saat ini, zix tidak akan:
+- Mencapai Implementasi TLS.
+- Membuat driver basis data.
+- Implementasi Http2 (hanya sebagai implementasi gRPC terlebih dahulu).
+- Http3.
 
 <br>
 

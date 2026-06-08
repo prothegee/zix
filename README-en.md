@@ -56,7 +56,7 @@
 - [Examples: Static Files & Upload](./README-en.md#static-files--upload)
 - [Examples: Response Header Capacity](./README-en.md#response-header-cap-headersize)
 - [Examples: Response Header Capacity](./README-en.md#response-header-cap-headersize)
-<!-- - [Examples: HTTP/2 h2c](./README-en.md#http2-h2c) -->
+- [Examples: HTTP/2](./README-en.md#http2)
 - [Examples: gRPC h2c](./README-en.md#grpc-h2c)
 - [Examples: Raw TCP](./README-en.md#raw-tcp)
 - [Examples: FIX 4.x](./README-en.md#fix-4x)
@@ -66,6 +66,7 @@
 - [Examples: Logger](./README-en.md#logger)
 - [Testing](./README-en.md#testing)
 - [Memory Model](./README-en.md#memory-model)
+- [Important Notes](./README-en.md#important-notes)
 
 <br>
 
@@ -398,7 +399,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker threads; workers field is ignored
+    .pool_size      = 32, // worker threads, workers field is ignored
 });
 ```
 
@@ -799,7 +800,7 @@ For security guidance and tier selection see [`docs/headers-en.md`](docs/headers
 | `.MINIMAL` | 16 | Strict APIs, internal services |
 | `.COMMON` | 32 | Most web applications |
 | `.LARGE` | 64 | **Default.** Parser storage limit. CDN, proxy, CORS-heavy APIs |
-| `.{ .CUSTOM = N }` | N (capped at 64) | Explicit cap; values above 64 silently capped at the parser limit |
+| `.{ .CUSTOM = N }` | N (capped at 64) | Explicit cap values above 64 silently capped at the parser limit |
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -814,66 +815,11 @@ The parser storage limit is 64 — `CUSTOM` values above 64 are silently capped.
 
 <br>
 
-<!-- ## HTTP/2 h2c -->
-<!---->
-<!-- `zix.Http2` is a standalone HTTP/2 server over cleartext TCP (h2c). Routes are registered at compile time. -->
-<!---->
-<!-- ```zig -->
-<!-- const std = @import("std"); -->
-<!-- const zix = @import("zix"); -->
-<!---->
-<!-- fn homeHandler( -->
-<!--     method:  []const u8, -->
-<!--     headers: []const zix.Http2.Header, -->
-<!--     body:    []const u8, -->
-<!--     fd:      std.posix.fd_t, -->
-<!--     sid:     u31, -->
-<!-- ) void { -->
-<!--     _ = method; _ = headers; _ = body; -->
-<!--     zix.Http2.sendResponse(fd, sid, 200, "text/plain", "Hello from Http2") catch {}; -->
-<!-- } -->
-<!---->
-<!-- pub fn main(process: std.process.Init) !void { -->
-<!--     var server = try zix.Http2.Server.init( -->
-<!--         &[_]zix.Http2.Route{ -->
-<!--             .{ .path = "/", .handler = homeHandler }, -->
-<!--         }, -->
-<!--         .{ -->
-<!--             .io   = process.io, -->
-<!--             .ip   = "127.0.0.1", -->
-<!--             .port = 8082, -->
-<!--         }, -->
-<!--     ); -->
-<!--     defer server.deinit(); -->
-<!--     try server.run(); -->
-<!-- } -->
-<!-- ``` -->
-<!---->
-<!-- ```sh -->
-<!-- curl --http2-prior-knowledge http://127.0.0.1:8082/ -->
-<!-- ``` -->
-<!---->
-<!-- `HandlerFn`: `fn(method, headers, body, fd, sid) void` — the handler writes response frames directly via `zix.Http2.sendResponse` or the raw frame helpers. Routes are exact-path matches baked in at compile time. -->
-<!---->
-<!-- **Config fields:** -->
-<!---->
-<!-- | Field | Default | Description | -->
-<!-- | :- | :- | :- | -->
-<!-- | `io` | required | caller-provided `std.Io` backend | -->
-<!-- | `ip` | required | bind address | -->
-<!-- | `port` | required | listen port; 0 → `error.PortNotConfigured` | -->
-<!-- | `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, or `.MIXED` | -->
-<!-- | `kernel_backlog` | 1024 | TCP listen backlog | -->
-<!-- | `workers` | 0 (cpu count) | accept thread count; ignored by `.ASYNC` | -->
-<!-- | `pool_size` | 0 (auto) | pool thread count; only used by `.POOL` | -->
-<!-- | `max_streams` | 16 | max concurrent HTTP/2 streams per connection | -->
-<!-- | `max_frame_size` | 16384 | advertised MAX_FRAME_SIZE in SETTINGS | -->
-<!-- | `max_header_scratch` | 4096 | HPACK scratch buffer size per connection | -->
-<!-- | `max_body` | 65536 | max total body buffered per stream | -->
-<!---->
-<!-- See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for gRPC on top of Http2. -->
-<!---->
-<!-- <br> -->
+## HTTP/2
+
+HTTP/2 only requirement for gRPC h2c approach.
+
+<br>
 
 ## gRPC h2c
 
@@ -967,7 +913,7 @@ var server = try zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // per-route 3s cap, tightens the 5s global cap
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-        // per-route 10s cap, global 5s cap still wins; Echo sends N responses so is_server_streaming = true
+        // per-route 10s cap, global 5s cap still wins. Echo sends N responses so is_server_streaming = true
         .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
     },
     .{
@@ -1443,6 +1389,16 @@ Routes are baked into the server type at compile time — no allocator is needed
 Both use heap-allocated per-connection stream arrays (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed — handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
 
 For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`docs/hld-udp-en.md`](docs/hld-udp-en.md). For threading models see [`docs/concurrency-en.md`](docs/concurrency-en.md).
+
+<br>
+
+## Important Notes
+
+As current state, zix will not:
+- Reaching TLS Implementation.
+- create database driver.
+- Http2 implementation (only as gRPC implementation prior first).
+- Http3.
 
 <br>
 
