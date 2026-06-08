@@ -134,7 +134,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .MIXED: N Accept Thread, Dispatch io.async()
 
-N accept thread masing-masing mendispatch koneksi melalui `io.async()` secara langsung — tanpa `ConnQueue`. Throughput dan latensi yang seimbang; jitter lebih tinggi dibanding `.POOL` saat saturasi karena fallback `io.async()` ke eksekusi inline.
+N accept thread masing-masing mendispatch koneksi melalui `io.async()` secara langsung — tanpa `ConnQueue`. Throughput dan latensi yang seimbang, jitter lebih tinggi dibanding `.POOL` saat saturasi karena fallback `io.async()` ke eksekusi inline.
 
 ```
 Main thread:
