@@ -200,6 +200,24 @@ __*6. Predictable, Transparent Memory Management.*__
 
 Fetch zix to your project:
 
+Add to build.zig.zon:
+```zig
+.{
+    .name = .backend_api,
+    .version = "0.2.2",
+    .dependencies = .{
+        .zix = .{
+            .url = "https://codeberg.org/prothegee/zix/archive/0.2.x.tar.gz",
+            // .hash will be filled in by `zig fetch --save`
+        },
+    },
+    .paths = .{""},
+}
+```
+
+or,
+
+Use zig fetch:
 ```sh
 zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
 ```
