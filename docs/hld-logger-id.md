@@ -17,7 +17,7 @@ Sudah diimplementasi. Lihat ADR-023 untuk dasar keputusan desain.
 - Tipe log spesifik per protokol: `conn()`, `packet()`, `frame()`, `session()` menghasilkan baris yang dapat di-parse oleh mesin tanpa pasca-pemrosesan.
 - Rotasi file: subdirektori harian plus nomor urut per berkas, tanpa perlu tooling eksternal.
 - Nol alokasi di hot path: write buffer 64 KB di-flush setelah setiap baris ditulis.
-- Pemanggil memiliki allocator; lifetime logger adalah `init`/`deinit`.
+- Pemanggil memiliki allocator, lifetime logger adalah `init`/`deinit`.
 
 ---
 
@@ -131,7 +131,7 @@ Setiap server menerima `logger: ?*Logger = null` opsional di konfigurasinya. Saa
 | UDS | `system()` lifecycle | `UdsServerConfig.logger` |
 | FIX | `session()` per pesan, `system()` lifecycle | `FixServerConfig.logger` |
 | gRPC | `rpc()` saat stream ditutup, `system()` lifecycle | `GrpcServerConfig.logger` |
-| Channel | tidak ada server config; panggil `logger.system()` secara manual | n/a |
+| Channel | tidak ada server config, panggil `logger.system()` secara manual | n/a |
 
 `frame()` tersedia untuk penggunaan manual di dalam UDS handler (handler memiliki stream, sehingga event di level frame dikendalikan oleh pemanggil).
 

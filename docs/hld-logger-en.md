@@ -17,7 +17,7 @@ Implemented. See ADR-023 for design rationale.
 - Protocol-specific log types: `conn()`, `packet()`, `frame()`, `session()` give machine-parseable lines without post-processing.
 - File rotation: daily subdirectory + per-file sequence number, no external tooling required.
 - Zero allocation on the hot path: 64 KB write buffer flushed after every line written.
-- Caller owns the allocator; logger is `init`/`deinit` lifetime.
+- Caller owns the allocator, logger is `init`/`deinit` lifetime.
 
 ---
 
@@ -131,7 +131,7 @@ Each server accepts an optional `logger: ?*Logger = null` in its config. When no
 | UDS | `system()` lifecycle | `UdsServerConfig.logger` |
 | FIX | `session()` per message, `system()` lifecycle | `FixServerConfig.logger` |
 | gRPC | `rpc()` per stream close, `system()` lifecycle | `GrpcServerConfig.logger` |
-| Channel | no server config; call `logger.system()` manually | n/a |
+| Channel | no server config, call `logger.system()` manually | n/a |
 
 `frame()` is available for manual use inside UDS handlers (the handler owns the stream, so frame-level events are caller-driven).
 
