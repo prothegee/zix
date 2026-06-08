@@ -120,7 +120,7 @@ test "behav: Logon response has MsgType=A and CompIDs swapped" {
     // Sequence number must be 1.
     try std.testing.expectEqualStrings("1", core.getField(fslice, 34).?);
     // Checksum must be valid.
-    // (Already consumed from recv_buf; we need to re-verify from raw.)
+    // (Already consumed from recv_buf, we need to re-verify from raw.)
     // Instead, verify that verifyChecksum returned true during parsing.
 
     // Logout to trigger server close.
