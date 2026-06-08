@@ -87,7 +87,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model defaults to ASYNC, workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0; `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model defaults to ASYNC, workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
 | `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
 | `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
@@ -156,7 +156,7 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | `body()` chunked single chunk decoded correctly | `"5\r\nhello\r\n0\r\n\r\n"` -> `"hello"` |
 | `body()` chunked multiple chunks assembled | `"3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n"` -> `"foobarr"` |
 | `body()` chunked empty body returns empty string | terminal chunk only -> `""` |
-| `body()` returns body_cache without touching reader | pre-set `body_cache` short-circuits read; second call returns same pointer |
+| `body()` returns body_cache without touching reader | pre-set `body_cache` short-circuits read, second call returns same pointer |
 
 #### `router_test.zig`
 
@@ -260,7 +260,7 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | :- | :- |
 | `FixServer` init and deinit do not error | valid config succeeds, deinit is safe |
 | `FixServer` init port zero | returns `error.PortNotConfigured` |
-| Logon handshake and echo round-trip succeed | send Logon, receive Logon reply with MsgType=A; send NewOrderSingle, receive echo; send Logout, receive Logout reply |
+| Logon handshake and echo round-trip succeed | send Logon, receive Logon reply with MsgType=A send NewOrderSingle, receive echo, send Logout, receive Logout reply |
 | Multiple sequential messages are all echoed | three NewOrderSingle messages echoed with ClOrdID preserved across all |
 
 ### tests/integration/http2/
@@ -275,7 +275,7 @@ Ports: 18082-18085.
 | `Http2Server.init` port zero | returns `error.PortNotConfigured` |
 | `Http2 HandlerFn` type is a function pointer | `zix.Http2.HandlerFn` assignment compiles |
 | Http2 GET / returns Hello World over h2c direct | h2c PRI preface + HEADERS + DATA round-trip returns response body |
-| Http2 POST /echo returns request body | POST with body DATA frame; server echoes body back |
+| Http2 POST /echo returns request body | POST with body DATA frame, server echoes body back |
 | Http2 two sequential streams on same connection | stream IDs 1 and 3 each receive correct responses |
 | Http2 h2c upgrade GET / returns Hello World | HTTP/1.1 `Upgrade: h2c` → 101 Switching Protocols → h2c response |
 
@@ -290,12 +290,12 @@ Ports: 18200-18206.
 | `GrpcServer.init` and deinit do not error | valid config succeeds, deinit is safe |
 | `GrpcServer.init` port zero | returns `error.PortNotConfigured` |
 | gRPC unary returns greeting | `greetHandler` reads one message, replies `"Hello, world!"` |
-| gRPC server streaming sends multiple responses | `echoHandler` sends two messages; client receives both in order |
+| gRPC server streaming sends multiple responses | `echoHandler` sends two messages, client receives both in order |
 | gRPC client streaming collects all messages | `collectHandler` buffers three messages, replies with count `"got 3"` |
 | gRPC bidirectional echoes each message | `echoHandler` echoes `"ping"` then `"pong"` from two client messages |
 | gRPC unknown method returns UNIMPLEMENTED | `dispatchHandler` replies with `GrpcStatus.UNIMPLEMENTED` for unknown path |
-| gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `ctx.finish(INVALID_ARGUMENT, ...)` without sending data; client receives the error status |
-| gRPC two streams on same connection both return OK | two sequential unary RPCs on one connection; both streams receive correct responses |
+| gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `ctx.finish(INVALID_ARGUMENT, ...)` without sending data, client receives the error status |
+| gRPC two streams on same connection both return OK | two sequential unary RPCs on one connection, both streams receive correct responses |
 
 ### tests/integration/channel/
 
@@ -657,8 +657,8 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `verifyChecksum` returns false for truncated message | message missing final SOH checksum delimiter |
 | `findMessageEnd` returns null for message with tag-10 value but no final SOH | partial checksum field returns null |
 | `buildMessage` with zero extra fields produces valid message | output passes `verifyChecksum` and `parseFields` round-trip |
-| Message arriving in two TCP segments is reassembled correctly | split Logon across two flushes; server still replies with MsgType=A |
-| Bad checksum causes server to close without server-side error propagation | corrupted message byte closes connection; `ctx.err == null` |
+| Message arriving in two TCP segments is reassembled correctly | split Logon across two flushes, server still replies with MsgType=A |
+| Bad checksum causes server to close without server-side error propagation | corrupted message byte closes connection `ctx.err == null` |
 
 ### tests/edge/http2/
 
@@ -693,8 +693,8 @@ Ports: 18220-18221.
 | `detectContentType` text/plain | returns UNKNOWN |
 | `parseTimeout` single character | returns null |
 | `GrpcClient.connect` port zero | returns `error.PortNotConfigured` |
-| `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately; no crash or error |
-| gRPC finish-only handler delivers error status to client | handler calls `ctx.finish(INVALID_ARGUMENT, ...)` only; client receives the error status without any data frames |
+| `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately, no crash or error |
+| gRPC finish-only handler delivers error status to client | handler calls `ctx.finish(INVALID_ARGUMENT, ...)` only, client receives the error status without any data frames |
 
 ### tests/edge/channel/
 

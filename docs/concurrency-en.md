@@ -139,7 +139,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 ## .MIXED: N Accept Threads, io.async() Dispatch
 
 N accept threads each dispatch connections via `io.async()` directly — no `ConnQueue`. Balanced
-throughput and latency; higher jitter than `.POOL` under saturation due to `io.async()` fallback
+throughput and latency, higher jitter than `.POOL` under saturation due to `io.async()` fallback
 to inline execution.
 
 ```

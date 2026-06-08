@@ -6,7 +6,7 @@
 - All 4 RPC types: unary, server streaming, client streaming, bidirectional streaming.
 - All 4 dispatch models: ASYNC (default), POOL, MIXED, EPOLL (Linux-only).
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
-- grpc-timeout header parsing; grpc-status trailer serialization.
+- grpc-timeout header parsing, grpc-status trailer serialization.
 - TLS delegated to a reverse proxy (nginx, haproxy). Backend speaks h2c only.
 
 ## Architecture
@@ -73,8 +73,8 @@ graph LR
 | :- | :- | :- |
 | `io` | required | caller-provided `std.Io` backend |
 | `ip` | required | bind address |
-| `port` | required | listen port; 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, or `.EPOLL` (Linux-only; native) |
+| `port` | required | listen port, 0 -> `error.PortNotConfigured` |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, or `.EPOLL` (Linux-only, native) |
 | `kernel_backlog` | 1024 | `listen()` backlog |
 | `workers` | 0 | 0 -> cpu_count accept threads (POOL and MIXED) |
 | `pool_size` | 0 | 0 -> max(10, cpu_count * 2) pool threads (POOL only) |
@@ -82,8 +82,8 @@ graph LR
 | `max_frame_size` | 16384 | advertised max HTTP/2 frame size |
 | `max_header_scratch` | 4096 | HPACK decode scratch buffer per connection |
 | `max_body` | 65536 | max total gRPC body buffered per stream (all DATA frames) |
-| `logger` | `null` | optional `*zix.Logger`; when set, logs each stream close via `rpc()` and startup/shutdown via `system()` |
-| `handler_timeout_ms` | 0 | global handler timeout cap (ms); 0 = disabled. Combined with `Route.timeout_ms` and `grpc-timeout` header at dispatch |
+| `logger` | `null` | optional `*zix.Logger`, when set, logs each stream close via `rpc()` and startup/shutdown via `system()` |
+| `handler_timeout_ms` | 0 | global handler timeout cap (ms), 0 = disabled. Combined with `Route.timeout_ms` and `grpc-timeout` header at dispatch |
 
 ## Handler Pattern
 
@@ -295,7 +295,7 @@ Compress flag is always 0 (compression not implemented).
 
 ### Error path (trailers-only)
 
-When the handler calls `ctx.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `content-type`, `grpc-status`, and `grpc-message` with `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol; the actual gRPC error is in the `grpc-status` trailer. `content-type` is always included per the gRPC spec to ensure client compatibility.
+When the handler calls `ctx.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `content-type`, `grpc-status`, and `grpc-message` with `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol, the actual gRPC error is in the `grpc-status` trailer. `content-type` is always included per the gRPC spec to ensure client compatibility.
 
 ## Dispatch Models
 
@@ -303,8 +303,8 @@ When the handler calls `ctx.finish(status, msg)` without sending any data, the s
 | :- | :- | :- | :- |
 | `.ASYNC` (default) | 1 | `io.async()` per connection | preferred for gRPC (long-lived streams) |
 | `.POOL` | cpu_count | shared `ConnQueue` + blocking pool | workers and pool_size apply |
-| `.MIXED` | cpu_count | `io.async()` per accept thread | no ConnQueue; pool_size ignored |
-| `.EPOLL` | 1 | epoll event loop (Linux only) | no pool threads; high-throughput Linux workloads |
+| `.MIXED` | cpu_count | `io.async()` per accept thread | no ConnQueue, pool_size ignored |
+| `.EPOLL` | 1 | epoll event loop (Linux only) | no pool threads, high-throughput Linux workloads |
 
 MIXED accept threads use `.{}` default stack size (system default ~8MB) to prevent stack overflow when `io.async()` falls back to inline execution.
 
@@ -341,12 +341,12 @@ flowchart TD
 
 | Function | Notes |
 | :- | :- |
-| `encodeVarint(buf, value)` | encodes u64 as 1-10 bytes; returns bytes written |
+| `encodeVarint(buf, value)` | encodes u64 as 1-10 bytes, returns bytes written |
 | `decodeVarint(buf)` | returns `{value: u64, consumed: usize}` or error |
-| `encodeString(field_number, s, buf)` | LEN wire type (2); returns bytes written |
-| `encodeInt32(field_number, val, buf)` | VARINT wire type (0); returns bytes written |
-| `encodeDouble(field_number, val, buf)` | I64 wire type (1); 8-byte little-endian IEEE 754; returns bytes written |
-| `decodeDouble(payload)` | reads `*const [8]u8`; returns `f64` |
+| `encodeString(field_number, s, buf)` | LEN wire type (2), returns bytes written |
+| `encodeInt32(field_number, val, buf)` | VARINT wire type (0), returns bytes written |
+| `encodeDouble(field_number, val, buf)` | I64 wire type (1), 8-byte little-endian IEEE 754, returns bytes written |
+| `decodeDouble(payload)` | reads `*const [8]u8`, returns `f64` |
 | `MessageReader.init(buf)` | wraps a serialized message buffer |
 | `MessageReader.next()` | returns `?ProtoField` with `field_number`, `wire_type`, `payload` |
 

@@ -274,7 +274,7 @@ test "integ: h2c upgrade GET / returns Hello World via HTTP/1.1 Upgrade" {
         "\r\n";
     try core.fdWriteAll(fd, upgrade_req);
 
-    // Read 101 Switching Protocols (fits in one read; response is ~70 bytes).
+    // Read 101 Switching Protocols (fits in one read, response is ~70 bytes).
     var resp101: [256]u8 = undefined;
     const n101 = try std.posix.read(fd, &resp101);
     try std.testing.expect(std.mem.startsWith(u8, resp101[0..n101], "HTTP/1.1 101"));

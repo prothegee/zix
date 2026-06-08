@@ -144,7 +144,7 @@ const Route = struct {
 };
 ```
 
-`register()` memasukkan ke `routes` dan `exact_map`. `deinit()` membebaskan keduanya. `routes` di-scan untuk jenis param dan prefix saat dispatch; pencarian exact melewati scan sepenuhnya melalui `exact_map.get()`.
+`register()` memasukkan ke `routes` dan `exact_map`. `deinit()` membebaskan keduanya. `routes` di-scan untuk jenis param dan prefix saat dispatch, pencarian exact melewati scan sepenuhnya melalui `exact_map.get()`.
 
 ### dispatch()
 
@@ -196,7 +196,7 @@ Ditulis oleh `Router.matchParam()` saat dispatch. `pathParam(name)` melakukan sc
 
 ### Field
 
-`Response` menyimpan `io: std.Io` (dipertahankan untuk kemungkinan penggunaan di masa depan; header `Date` sekarang bersumber dari atomic date cache global melalui `date_cache: ?[]const u8`, bukan dari pemanggilan clock per request). `streaming: bool` diatur ke `true` oleh `stream()` agar `handleConnection` memutus keep-alive loop setelah handler keluar. `bytes_written: usize` diatur ke `body_data.len` di awal `send()` agar `handleConnection` dapat membaca ukuran body respons untuk access logging tanpa harus menginspeksi write buffer.
+`Response` menyimpan `io: std.Io` (dipertahankan untuk kemungkinan penggunaan di masa depan, header `Date` sekarang bersumber dari atomic date cache global melalui `date_cache: ?[]const u8`, bukan dari pemanggilan clock per request). `streaming: bool` diatur ke `true` oleh `stream()` agar `handleConnection` memutus keep-alive loop setelah handler keluar. `bytes_written: usize` diatur ke `body_data.len` di awal `send()` agar `handleConnection` dapat membaca ukuran body respons untuk access logging tanpa harus menginspeksi write buffer.
 
 ### extra_buf (slice arena yang tumbuh secara lazy)
 
@@ -447,7 +447,7 @@ Memastikan semua request selesai (pool yang digunakan kosong) sebelum menutup.
       if connect_ms > 0: .{ .duration = .{ .raw = Duration.fromMilliseconds(connect_ms), .clock = .real } }
       else .none
 6. inner.connectTcpOptions(.{ host, port, protocol, timeout })
-      gunakan kembali koneksi dari pool jika ada yang cocok; buka koneksi TCP baru jika tidak
+      gunakan kembali koneksi dari pool jika ada yang cocok, buka koneksi TCP baru jika tidak
 7. Bangun RedirectBehavior:
       follow_redirects = false -> .unhandled  (pemanggil menerima 3xx apa adanya)
       max_redirects = 0        -> .not_allowed (error.TooManyHttpRedirects pada redirect apa pun)

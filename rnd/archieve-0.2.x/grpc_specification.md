@@ -70,7 +70,7 @@ gRPC does not mandate TLS. The choice depends on where clients are relative to t
 | :- | :- | :- |
 | Internet-facing API (mobile, external partners) | `grpcs://` (TLS) | Mandatory — network is untrusted |
 | Internal microservices (same cluster, same DC) | `grpc://` h2c | Standard in Kubernetes + service mesh |
-| Local development / testing | `grpc://` h2c | Simplest; no cert management |
+| Local development / testing | `grpc://` h2c | Simplest, no cert management |
 | Public port with no proxy in front | `grpcs://` (TLS) | Requires TLS src/ implementation |
 
 **Rule:** implement TLS src/ only if you need a public-facing gRPC port with no proxy. For everything else, let the proxy handle TLS and keep the backend h2c.
@@ -357,8 +357,8 @@ the gRPC transport layer before building the serialization layer.
 | grpc-timeout parser | small utility |
 | gRPC status code type | small enum |
 | Trailer-only response (error before body) | special HTTP/2 HEADERS with END_STREAM |
-| Protobuf v3 encoder and decoder | significant; can defer with JSON PoC |
-| .proto file parser and Zig codegen | optional; manual struct definitions work for small schemas |
+| Protobuf v3 encoder and decoder | significant, can defer with JSON PoC |
+| .proto file parser and Zig codegen | optional, manual struct definitions work for small schemas |
 
 ---
 
@@ -386,9 +386,9 @@ Planned file structure:
 | :- | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | public namespace — re-exports all public types | done (2026-05-25) |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` | done (2026-05-25) |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED dispatch; standalone serveGrpcConn loop | done (2026-05-25) |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED dispatch, standalone serveGrpcConn loop | done (2026-05-25) |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient` — openStream, sendMessage, endStream, recvResponse, unary | done (2026-05-25) |
-| `src/tcp/http2/grpc/frame.zig` | 5-byte prefix read/write; sendGrpcHeaders/Data/Trailer/Error | done (2026-05-25) |
+| `src/tcp/http2/grpc/frame.zig` | 5-byte prefix read/write, sendGrpcHeaders/Data/Trailer/Error | done (2026-05-25) |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn`, `parsePath`, `detectContentType` | done (2026-05-25) |
 | `src/tcp/http2/grpc/proto.zig` | varint encode/decode, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` | done (2026-05-25) |
 | `src/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (OK=0 to UNAUTHENTICATED=16) | done (2026-05-25) |
@@ -480,11 +480,11 @@ Use `std.heap.smp_allocator` for one-off allocations (e.g. `std.json.parseFromSl
 | Missing | Notes |
 | :- | :- |
 | gRPC client | only server in PoC |
-| Streaming RPCs | only unary; server/client/bidirectional streaming deferred to src/ |
+| Streaming RPCs | only unary, server/client/bidirectional streaming deferred to src/ |
 | grpc-timeout header | deadline propagation not implemented |
 | Compression (compress flag = 1) | all messages use compress = 0 (uncompressed) |
 | gRPC reflection | needed for grpcurl without a .proto file |
-| h2c upgrade path | HTTP/1.1 Upgrade: h2c available in http2_poc_core.zig; gRPC server uses h2c direct only |
+| h2c upgrade path | HTTP/1.1 Upgrade: h2c available in http2_poc_core.zig, gRPC server uses h2c direct only |
 
 ### Go/no-go verification
 
@@ -517,11 +517,11 @@ grpcurl requires server reflection or a .proto file — not supported in this Po
 
 | Topic | Notes |
 | :- | :- |
-| gRPC reflection (grpc.reflection.v1) | exposes proto descriptors at runtime; needed by grpcurl |
+| gRPC reflection (grpc.reflection.v1) | exposes proto descriptors at runtime, needed by grpcurl |
 | gRPC health check (grpc.health.v1) | standard health probe for Kubernetes and load balancers |
-| gRPC-Web | HTTP/1.1 compatible subset for browser clients; different framing |
+| gRPC-Web | HTTP/1.1 compatible subset for browser clients, different framing |
 | gRPC transcoding | mapping REST/JSON requests to gRPC handlers (googleapis annotations) |
-| Client-side and server-side interceptors | middleware chain for gRPC; similar to zix.Http.middleware |
+| Client-side and server-side interceptors | middleware chain for gRPC, similar to zix.Http.middleware |
 | Retry policy and hedging | client retries on transient failures with backoff |
 | Metadata: binary headers (-bin suffix) | base64-encoded binary metadata headers |
 | gRPC over TLS (h2) | blocked on tls_specification |

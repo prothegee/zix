@@ -13,8 +13,8 @@ Sudah diimplementasikan. Lihat ADR-024 untuk alasan desain.
 ## Tujuan
 
 - Eksplisit bukan implisit: pola konfigurasi dan dispatch model yang sama dengan `zix.Tcp`.
-- Framing berbasis delimiter SOH: tanpa length prefix; deteksi batas pesan berbasis delimiter.
-- Lapisan sesi sudah terintegrasi: Logon / Logout / Heartbeat / TestRequest ditangani secara otomatis; semua pesan lainnya di-echo.
+- Framing berbasis delimiter SOH: tanpa length prefix, deteksi batas pesan berbasis delimiter.
+- Lapisan sesi sudah terintegrasi: Logon / Logout / Heartbeat / TestRequest ditangani secara otomatis, semua pesan lainnya di-echo.
 - Tidak ada heap allocation di `serveConn`: stack buffer digunakan di seluruh implementasi.
 - Dispatch POOL, ASYNC, MIXED, dan EPOLL. Default: ASYNC (sesi FIX berumur panjang). EPOLL berjalan secara native di Linux (pola gRPC: single epoll accept loop, pool worker memegang setiap koneksi selama masa hidupnya). Fallback ke POOL di non-Linux.
 - `io: std.Io` di dalam konfigurasi (tidak diteruskan ke `run()`).
@@ -64,7 +64,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `zix.Fix.VERSION` | []const u8 | `"FIX.4.2"` |
 | `zix.Fix.MAX_FIELDS` | usize | 64 — jumlah field maksimum yang diparse per pesan |
 | `zix.Fix.MAX_MSG_SIZE` | usize | 8192 — byte pesan maksimum |
-| `zix.Fix.findMessageEnd` | fn | Memindai buf untuk akhir pesan FIX pertama yang lengkap; mengembalikan indeks setelah SOH terakhir atau null |
+| `zix.Fix.findMessageEnd` | fn | Memindai buf untuk akhir pesan FIX pertama yang lengkap, mengembalikan indeks setelah SOH terakhir atau null |
 | `zix.Fix.parseFields` | fn | Mengurai byte mentah menjadi `[]Field` (zero-copy slice ke buf) |
 | `zix.Fix.getField` | fn | Mengembalikan value field pertama dengan `Tag` yang diberikan, atau null |
 | `zix.Fix.computeChecksum` | fn | Jumlah semua byte mod 256 |
@@ -78,7 +78,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Field | Default | Deskripsi |
 | :- | :- | :- |
-| `io` | wajib | Backend Io. Disediakan pemanggil; harus melampaui masa hidup server |
+| `io` | wajib | Backend Io. Disediakan pemanggil, harus melampaui masa hidup server |
 | `ip` | wajib | Alamat bind |
 | `port` | wajib | Port bind. Harus bukan nol |
 | `comp_id` | wajib | SenderCompID server (tag 49) |
@@ -87,7 +87,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `workers` | 0 (cpu_count) | Jumlah accept thread. Diabaikan oleh ASYNC |
 | `pool_size` | 0 (otomatis) | Pool thread (`max(10, cpu_count * 2)`). Hanya digunakan oleh POOL |
 | `logger` | null | Logger opsional untuk event siklus hidup dan sesi per-pesan |
-| `heartbeat_timeout_ms` | 0 | Heartbeat timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: setelah interval ini tanpa pesan masuk, TestRequest (35=1) dikirim. Jika tidak ada respons yang datang dalam interval berikutnya, Logout (35=5) dikirim dan koneksi ditutup. Hanya berlaku setelah Logon; sebelum Logon, timeout menutup koneksi secara diam-diam. |
+| `heartbeat_timeout_ms` | 0 | Heartbeat timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: setelah interval ini tanpa pesan masuk, TestRequest (35=1) dikirim. Jika tidak ada respons yang datang dalam interval berikutnya, Logout (35=5) dikirim dan koneksi ditutup. Hanya berlaku setelah Logon, sebelum Logon, timeout menutup koneksi secara diam-diam. |
 | `connection_timeout_ms` | 0 | Idle connection timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: jika tidak ada pesan yang datang dalam interval ini (meski heartbeat dinonaktifkan), koneksi ditutup. Berbeda dari `heartbeat_timeout_ms` — tidak ada TestRequest dance, langsung tutup. |
 | `handler_timeout_ms` | 0 | Batas waktu pemrosesan handler server-wide dalam ms. 0 = tanpa batas. Diperketat per-rute oleh `Route.timeout_ms`. Mengatur `Context.deadline_ns` sebelum dispatch. |
 
@@ -344,7 +344,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Model Dispatch
 
-Sama seperti empat model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX berumur panjang; POOL dapat menghabiskan thread di bawah beban berkelanjutan):
+Sama seperti empat model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX berumur panjang. POOL dapat menghabiskan thread di bawah beban berkelanjutan):
 
 | Model | Accept thread | Catatan |
 | :- | :- | :- |

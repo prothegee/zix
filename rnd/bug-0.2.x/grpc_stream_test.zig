@@ -32,7 +32,7 @@ test "Bug1: sendGrpcError response contains content-type header" {
     const n = try std.posix.read(pipe_fds[0], &buf);
     const raw = buf[0..n];
 
-    // HPACK encodes content-type as a literal; the ASCII string "content-type"
+    // HPACK encodes content-type as a literal, the ASCII string "content-type"
     // will appear verbatim in the encoded header block.
     const has_content_type = std.mem.indexOf(u8, raw, "content-type") != null;
     try std.testing.expect(has_content_type);
