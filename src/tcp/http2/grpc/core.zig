@@ -620,7 +620,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     // Note:
     // Stream 1 (h2c upgrade) is dispatched synchronously before the read loop starts.
     // A long-running streaming handler here will delay the loop. This is a known limitation
-    // of the upgrade path; h2c direct does not have this issue.
+    // of the upgrade path, h2c direct does not have this issue.
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = 1,

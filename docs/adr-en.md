@@ -387,8 +387,8 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 - `routes.items.len` becomes `routes.len`; field access becomes `routes.items(.field)[i]`
 - `init()` simplified: `routes` default-initializes to `.{}`, no explicit `.empty` needed
 - `append()` and `deinit()` signatures are unchanged
-- Unit tests in `router.zig` updated; integration tests and examples unchanged (public API unaffected)
-- Practical gain is proportional to PARAM and PREFIX route count; most production deployments favour exact routes (O(1) via `exact_map`) so the improvement is cache-coherence rather than algorithmic
+- Unit tests in `router.zig` updated, integration tests and examples unchanged (public API unaffected)
+- Practical gain is proportional to PARAM and PREFIX route count, most production deployments favour exact routes (O(1) via `exact_map`) so the improvement is cache-coherence rather than algorithmic
 
 ---
 
@@ -498,10 +498,10 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Context:** FIX (Financial Information eXchange) protocol is the dominant messaging standard for financial trading systems. It uses SOH (0x01) as a field delimiter — not a length prefix — which makes it incompatible with the `readSliceShort` recv pattern used by HTTP. A standalone server following the same config and dispatch-model pattern as `zix.Tcp` is required, with the session layer (Logon/Logout/Heartbeat handling) built in so callers do not implement it themselves.
 
-**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically; all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn` — no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` is the default because FIX sessions are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime — same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
+**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically, all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn` — no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` is the default because FIX sessions are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime — same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
 
 **Consequences:**
-- `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment; subsequent `takeByte` calls drain it with no extra syscalls.
+- `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment, subsequent `takeByte` calls drain it with no extra syscalls.
 - `serveConn` uses only stack buffers (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). No per-request allocation.
 - `buildMessage` computes and embeds the checksum. `verifyChecksum` validates incoming messages. Bad checksum closes the connection without a reply.
 - `std.debug.print` is absent from all thread entry functions — learned from the `std.Options.debug_io` test runner IPC panic described in CLAUDE.md.
@@ -515,7 +515,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Context:** Every server in zix (Http, Http2, Grpc, Tcp, Fix) calls `addr.listen(io, .{ .reuse_address = true })`. In Zig's `std.Io.Threaded`, `reuse_address = true` sets both `SO_REUSEADDR` and `SO_REUSEPORT` on POSIX. `SO_REUSEPORT` is strictly required by the POOL dispatch model: each accept thread calls `addr.listen()` on the same port independently — without it, the second bind fails with `EADDRINUSE`. The choice was whether to set it conditionally (POOL only) or unconditionally (all models).
 
-**Decision:** Apply `reuse_address = true` unconditionally on every `addr.listen()` call regardless of dispatch model. All models share the same socket setup path — no branching on `dispatch_model` at the socket level. This is socket-level behavior; it is documented here and inline in source, not exposed as a config field.
+**Decision:** Apply `reuse_address = true` unconditionally on every `addr.listen()` call regardless of dispatch model. All models share the same socket setup path — no branching on `dispatch_model` at the socket level. This is socket-level behavior, it is documented here and inline in source, not exposed as a config field.
 
 **Consequences:**
 - POOL works correctly: all accept threads bind to the same port and the kernel load-balances incoming connections across them.

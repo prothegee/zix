@@ -215,7 +215,7 @@ Diakses melalui `const zix = @import("zix");`
 
 ```zig
 pub const HttpServerConfig = struct {
-    io:                   ?std.Io           = null,      // caller-provided io backend; null = internal Threaded
+    io:                   ?std.Io           = null,      // caller-provided io backend. null = internal Threaded
     ip:                   []const u8,
     port:                 u16,
     dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
@@ -223,15 +223,15 @@ pub const HttpServerConfig = struct {
     max_client_request:   usize             = 1024 * 4,  // read buffer per connection
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
     max_client_response:  usize             = 1024 * 4,  // write buffer per connection
-    max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap; requests exceeding -> 431
+    max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap, requests exceeding -> 431
     max_response_headers: HeaderSize        = .COMMON,   // custom response header cap, arena-allocated per request
-    public_dir:           []const u8        = "",         // static file root; "" disables static serving
+    public_dir:           []const u8        = "",         // static file root, "" disables static serving
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
-    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard; 0 = disabled; .POOL only
-    handler_timeout_ms:   u32               = 0,          // Layer B: handler budget; 0 = disabled; ctx.isExpired() / ctx.timedOut()
-    workers:              usize             = 0,          // 0 = cpu_count accept threads; ignored by .ASYNC
-    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only
-    logger:               ?*zix.Logger      = null,       // access logger; null = no HTTP access logging
+    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
+    handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
+    workers:              usize             = 0,          // 0 = cpu_count accept threads, ignored by .ASYNC
+    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2) .POOL only
+    logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
 };
 ```
 

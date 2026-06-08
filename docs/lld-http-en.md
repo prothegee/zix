@@ -447,7 +447,7 @@ Asserts all requests are complete (used pool is empty) before closing.
       if connect_ms > 0: .{ .duration = .{ .raw = Duration.fromMilliseconds(connect_ms), .clock = .real } }
       else .none
 6. inner.connectTcpOptions(.{ host, port, protocol, timeout })
-      reuses a pooled connection if one matches; opens a new TCP connection otherwise
+      reuses a pooled connection if one matches, opens a new TCP connection otherwise
 7. Build RedirectBehavior:
       follow_redirects = false -> .unhandled  (caller receives 3xx as-is)
       max_redirects = 0        -> .not_allowed (error.TooManyHttpRedirects on any redirect)

@@ -8,7 +8,7 @@ UDP server dan client yang dibangun di atas Zig 0.16.x `std.Io`. Tidak terkait d
 
 - Eksplisit bukan implisit: setiap perilaku disebutkan secara langsung dalam konfigurasi.
 - Interoperabilitas lintas bahasa: client dapat berupa Go, C++, Rust, atau bahasa lain yang menggunakan layout `extern struct` yang sama.
-- Tidak ada tipe paket yang dikodekan secara tetap: pengguna mendefinisikan `extern struct` sendiri; zix diparameterisasi atas tipe tersebut saat comptime.
+- Tidak ada tipe paket yang dikodekan secara tetap: pengguna mendefinisikan `extern struct` sendiri, zix diparameterisasi atas tipe tersebut saat comptime.
 - Endianness yang dapat dikonfigurasi diterapkan secara transparan saat mengirim dan menerima.
 - Pemisahan tanggung jawab: `src/udp/` tidak mengimpor apapun dari `src/tcp/`.
 
@@ -328,7 +328,7 @@ Lihat `docs/hld-logger-id.md` untuk format baris log dan detail konfigurasi.
 | Fitur | Catatan |
 | :- | :- |
 | Batching `sendmmsg` | N `send()` berurutan per broadcast, `sendmmsg` akan mereduksi menjadi 1 syscall |
-| Interval pengiriman sub-milidetik | `send_every` dalam milidetik; ganti nama ke nanodetik jika diperlukan |
+| Interval pengiriman sub-milidetik | `send_every` dalam milidetik, ganti nama ke nanodetik jika diperlukan |
 | Penghapusan batas peer yang dialokasikan arena | PoC menggunakan `MAX_BROADCAST_CLIENTS=64`. Implementasi src saat ini menggunakan heap slice tanpa batas |
 | Struct feedback yang dapat dikonfigurasi | Saat ini echo mengirimkan kembali packet mentah. Produksi dapat menggunakan tagged result |
 
