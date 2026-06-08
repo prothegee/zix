@@ -39,6 +39,9 @@ pub fn build(b: *std.Build) void {
     const integration_tests = .{
         // tcp
         "tests/integration/tcp/config_test.zig",
+        // http1
+        "tests/integration/http1/server_test.zig",
+        "tests/integration/http1/router_test.zig",
         // http
         "tests/integration/http/request_test.zig",
         "tests/integration/http/router_test.zig",
@@ -87,6 +90,9 @@ pub fn build(b: *std.Build) void {
     const behaviour_tests = .{
         // tcp
         "tests/behaviour/tcp/config_test.zig",
+        // http1
+        "tests/behaviour/http1/config_test.zig",
+        "tests/behaviour/http1/core_test.zig",
         // http
         "tests/behaviour/http/request_test.zig",
         "tests/behaviour/http/router_test.zig",
@@ -135,6 +141,8 @@ pub fn build(b: *std.Build) void {
     const edge_tests = .{
         // tcp
         "tests/edge/tcp/config_test.zig",
+        // http1
+        "tests/edge/http1/core_test.zig",
         // http
         "tests/edge/http/request_test.zig",
         "tests/edge/http/router_test.zig",
@@ -196,6 +204,15 @@ pub fn build(b: *std.Build) void {
         .{ "example-tcp_server_3_mixed", "examples/tcp_server_3_mixed.zig" },
         .{ "example-tcp_server_4_epoll", "examples/tcp_server_4_epoll.zig" },
         .{ "example-tcp_client", "examples/tcp_client.zig" },
+        .{ "example-http1_basic_1_async", "examples/http1_basic_1_async.zig" },
+        .{ "example-http1_basic_2_pool", "examples/http1_basic_2_pool.zig" },
+        .{ "example-http1_basic_3_mixed", "examples/http1_basic_3_mixed.zig" },
+        .{ "example-http1_basic_4_epoll", "examples/http1_basic_4_epoll.zig" },
+        .{ "example-http1_json", "examples/http1_json.zig" },
+        .{ "example-http1_middleware", "examples/http1_middleware.zig" },
+        .{ "example-http1_params", "examples/http1_params.zig" },
+        .{ "example-http1_paths", "examples/http1_paths.zig" },
+        .{ "example-http1_static", "examples/http1_static.zig" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig" },
         .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig" },
@@ -264,7 +281,7 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
-    // Bug reproduction programs — not built by default.
+    // Bug reproduction programs - not built by default.
 
     const bugs_0_2_x = .{
         .{ "bug-grpc_error_response_server", "rnd/bug-0.2.x/grpc_error_response_server.zig", "Bug 1: gRPC error response missing content-type" },
