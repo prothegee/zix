@@ -87,7 +87,7 @@ Sumber: `src/zix.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model default ASYNC, workers/pool_size default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0; field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model default ASYNC, workers/pool_size default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + perilaku: round-trip `parseFields`, pencarian `getField` dan kasus null, vektor `computeChecksum` yang diketahui, `verifyChecksum` valid/terpotong/salah, `findMessageEnd` lengkap/parsial/tanpa-terminator, `buildMessage` menghasilkan checksum valid |
 | `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
 | `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.PortNotConfigured` |
@@ -156,7 +156,7 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | `body()` chunk tunggal chunked didekode dengan benar | `"5\r\nhello\r\n0\r\n\r\n"` -> `"hello"` |
 | `body()` beberapa chunk chunked dirakit | `"3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n"` -> `"foobarr"` |
 | `body()` body chunked kosong menghasilkan string kosong | hanya chunk terminal -> `""` |
-| `body()` mengembalikan body_cache tanpa menyentuh reader | `body_cache` yang sudah diset mempersingkat pembacaan; panggilan kedua mengembalikan pointer yang sama |
+| `body()` mengembalikan body_cache tanpa menyentuh reader | `body_cache` yang sudah diset mempersingkat pembacaan, panggilan kedua mengembalikan pointer yang sama |
 
 #### `router_test.zig`
 
@@ -260,7 +260,7 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | :- | :- |
 | `FixServer` init dan deinit tidak error | konfigurasi valid berhasil, deinit aman |
 | `FixServer` init port nol | menghasilkan `error.PortNotConfigured` |
-| Handshake Logon dan round-trip echo berhasil | kirim Logon, terima balasan Logon dengan MsgType=A; kirim NewOrderSingle, terima echo; kirim Logout, terima balasan Logout |
+| Handshake Logon dan round-trip echo berhasil | kirim Logon, terima balasan Logon dengan MsgType=A kirim NewOrderSingle, terima echo, kirim Logout, terima balasan Logout |
 | Beberapa pesan berurutan semuanya di-echo | tiga pesan NewOrderSingle di-echo dengan ClOrdID tersimpan di semua |
 
 ### tests/integration/http2/
@@ -275,7 +275,7 @@ Port: 18082-18085.
 | `Http2Server.init` port nol | menghasilkan `error.PortNotConfigured` |
 | Tipe `Http2 HandlerFn` adalah function pointer | penugasan `zix.Http2.HandlerFn` berhasil dikompilasi |
 | Http2 GET / mengembalikan Hello World melalui h2c direct | round-trip h2c preface PRI + HEADERS + DATA mengembalikan body response |
-| Http2 POST /echo mengembalikan body request | POST dengan frame DATA body; server meng-echo body kembali |
+| Http2 POST /echo mengembalikan body request | POST dengan frame DATA body, server meng-echo body kembali |
 | Http2 dua stream berurutan pada koneksi yang sama | stream ID 1 dan 3 masing-masing menerima response yang benar |
 | Http2 h2c upgrade GET / mengembalikan Hello World | HTTP/1.1 `Upgrade: h2c` -> 101 Switching Protocols -> response h2c |
 
@@ -290,12 +290,12 @@ Port: 18200-18206.
 | `GrpcServer.init` dan deinit tidak error | konfigurasi valid berhasil, deinit aman |
 | `GrpcServer.init` port nol | menghasilkan `error.PortNotConfigured` |
 | gRPC unary mengembalikan salam | `greetHandler` membaca satu pesan, membalas `"Hello, world!"` |
-| gRPC server streaming mengirim beberapa response | `echoHandler` mengirim dua pesan; client menerima keduanya berurutan |
+| gRPC server streaming mengirim beberapa response | `echoHandler` mengirim dua pesan, client menerima keduanya berurutan |
 | gRPC client streaming mengumpulkan semua pesan | `collectHandler` menyangga tiga pesan, membalas dengan jumlah `"got 3"` |
 | gRPC bidirectional meng-echo setiap pesan | `echoHandler` meng-echo `"ping"` lalu `"pong"` dari dua pesan client |
 | gRPC method tidak dikenal mengembalikan UNIMPLEMENTED | `dispatchHandler` membalas dengan `GrpcStatus.UNIMPLEMENTED` untuk path tidak dikenal |
-| gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `ctx.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data; client menerima status error |
-| gRPC dua stream pada koneksi yang sama keduanya mengembalikan OK | dua RPC unary berurutan pada satu koneksi; kedua stream menerima respons yang benar |
+| gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `ctx.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data, client menerima status error |
+| gRPC dua stream pada koneksi yang sama keduanya mengembalikan OK | dua RPC unary berurutan pada satu koneksi, kedua stream menerima respons yang benar |
 
 ### tests/integration/channel/
 
@@ -657,8 +657,8 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | `verifyChecksum` menghasilkan false untuk pesan terpotong | pesan yang tidak memiliki delimiter checksum SOH akhir |
 | `findMessageEnd` menghasilkan null untuk pesan dengan nilai tag-10 tetapi tanpa SOH akhir | field checksum parsial menghasilkan null |
 | `buildMessage` dengan nol field extra menghasilkan pesan valid | output lolos `verifyChecksum` dan round-trip `parseFields` |
-| Pesan yang datang dalam dua segmen TCP dirakit dengan benar | Logon terpecah di dua flush; server tetap membalas dengan MsgType=A |
-| Checksum yang buruk menyebabkan server menutup tanpa propagasi error di sisi server | byte pesan yang rusak menutup koneksi; `ctx.err == null` |
+| Pesan yang datang dalam dua segmen TCP dirakit dengan benar | Logon terpecah di dua flush, server tetap membalas dengan MsgType=A |
+| Checksum yang buruk menyebabkan server menutup tanpa propagasi error di sisi server | byte pesan yang rusak menutup koneksi `ctx.err == null` |
 
 ### tests/edge/http2/
 
@@ -693,8 +693,8 @@ Port: 18220-18221.
 | `detectContentType` text/plain | menghasilkan UNKNOWN |
 | `parseTimeout` karakter tunggal | menghasilkan null |
 | `GrpcClient.connect` port nol | menghasilkan `error.PortNotConfigured` |
-| `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera; tanpa crash atau error |
-| gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `ctx.finish(INVALID_ARGUMENT, ...)`; client menerima status error tanpa frame data apa pun |
+| `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera, tanpa crash atau error |
+| gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `ctx.finish(INVALID_ARGUMENT, ...)`, client menerima status error tanpa frame data apa pun |
 
 ### tests/edge/channel/
 

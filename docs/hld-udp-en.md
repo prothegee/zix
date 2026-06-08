@@ -8,7 +8,7 @@ UDP server and client built on Zig 0.16.x `std.Io`. No relation to the TCP/HTTP 
 
 - Explicit over implicit: every behavior named in config.
 - Cross-language interoperability: client can be Go, C++, Rust, or any language that speaks the same extern struct layout.
-- No hardcoded packet type: user defines their own `extern struct`; zix is parameterized over it at comptime.
+- No hardcoded packet type: user defines their own `extern struct`, zix is parameterized over it at comptime.
 - Configurable endianness applied transparently on send and receive.
 - Separation of concern: `src/udp/` has no import from `src/tcp/`.
 
@@ -328,7 +328,7 @@ See `docs/hld-logger.md` for log line format and config details.
 | Feature | Note |
 | :- | :- |
 | `sendmmsg` batching | N sequential `send()` per broadcast, `sendmmsg` would reduce to 1 syscall |
-| Sub-millisecond send interval | `send_every` is in milliseconds; rename to nanoseconds if needed |
+| Sub-millisecond send interval | `send_every` is in milliseconds, rename to nanoseconds if needed |
 | Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`. Current src uses heap slice with no cap |
 | Configurable feedback struct | Currently echo sends the raw packet back. Production could use a tagged result |
 

@@ -100,7 +100,7 @@ The `DispatchModel` enum is defined in `src/tcp/config.zig` and re-exported as `
 ## Concurrency Primitives (std.Io)
 
 ```
-io.concurrent(fn, args)     -- POOL: submits to shared thread pool; falls back inline
+io.concurrent(fn, args)     -- POOL: submits to shared thread pool, falls back inline
 io.async(fn, args)          -- ASYNC/MIXED: io_uring/kqueue event-driven dispatch
 std.Io.Threaded             -- when server creates its own io backend
 std.Thread.spawn            -- for spawning N accept threads (POOL/MIXED)

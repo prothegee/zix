@@ -6,7 +6,7 @@
 - Semua 4 tipe RPC: unary, server streaming, client streaming, bidirectional streaming.
 - Semua 4 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux).
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
-- Parsing header grpc-timeout; serialisasi trailer grpc-status.
+- Parsing header grpc-timeout, serialisasi trailer grpc-status.
 - TLS didelegasikan ke reverse proxy (nginx, haproxy). Backend berbicara h2c saja.
 
 ## Arsitektur
@@ -73,8 +73,8 @@ graph LR
 | :- | :- | :- |
 | `io` | wajib | backend `std.Io` yang disediakan pemanggil |
 | `ip` | wajib | alamat bind |
-| `port` | wajib | port listen; 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, atau `.EPOLL` (hanya Linux; native) |
+| `port` | wajib | port listen, 0 -> `error.PortNotConfigured` |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, atau `.EPOLL` (hanya Linux, native) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count accept thread (POOL dan MIXED) |
 | `pool_size` | 0 | 0 -> max(10, cpu_count * 2) pool thread (hanya POOL) |
@@ -82,8 +82,8 @@ graph LR
 | `max_frame_size` | 16384 | ukuran frame HTTP/2 maksimum yang diiklankan |
 | `max_header_scratch` | 4096 | buffer scratch decode HPACK per koneksi |
 | `max_body` | 65536 | total maksimum body gRPC yang di-buffer per stream (semua frame DATA) |
-| `logger` | `null` | `*zix.Logger` opsional; jika diatur, mencatat setiap penutupan stream melalui `rpc()` dan startup/shutdown melalui `system()` |
-| `handler_timeout_ms` | 0 | batas timeout handler global (ms); 0 = dinonaktifkan. Digabungkan dengan `Route.timeout_ms` dan header `grpc-timeout` saat dispatch |
+| `logger` | `null` | `*zix.Logger` opsional, jika diatur, mencatat setiap penutupan stream melalui `rpc()` dan startup/shutdown melalui `system()` |
+| `handler_timeout_ms` | 0 | batas timeout handler global (ms), 0 = dinonaktifkan. Digabungkan dengan `Route.timeout_ms` dan header `grpc-timeout` saat dispatch |
 
 ## Pola Handler
 
@@ -295,7 +295,7 @@ Flag compress selalu 0 (kompresi belum diimplementasikan).
 
 ### Jalur error (trailers-only)
 
-Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, server mengirim satu frame HEADERS dengan `:status 200`, `content-type`, `grpc-status`, dan `grpc-message` dengan `FLAG_END_STREAM`. HTTP `:status` selalu 200 sesuai protokol wire gRPC; error gRPC yang sebenarnya ada di trailer `grpc-status`. `content-type` selalu disertakan sesuai spesifikasi gRPC untuk memastikan kompatibilitas client.
+Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, server mengirim satu frame HEADERS dengan `:status 200`, `content-type`, `grpc-status`, dan `grpc-message` dengan `FLAG_END_STREAM`. HTTP `:status` selalu 200 sesuai protokol wire gRPC, error gRPC yang sebenarnya ada di trailer `grpc-status`. `content-type` selalu disertakan sesuai spesifikasi gRPC untuk memastikan kompatibilitas client.
 
 ## Model Dispatch
 
@@ -303,8 +303,8 @@ Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, se
 | :- | :- | :- | :- |
 | `.ASYNC` (default) | 1 | `io.async()` per koneksi | direkomendasikan untuk gRPC (stream berumur panjang) |
 | `.POOL` | cpu_count | `ConnQueue` bersama + pool blocking | workers dan pool_size berlaku |
-| `.MIXED` | cpu_count | `io.async()` per accept thread | tanpa ConnQueue; pool_size diabaikan |
-| `.EPOLL` | 1 | event loop epoll (hanya Linux) | tanpa pool thread; beban kerja Linux throughput tinggi |
+| `.MIXED` | cpu_count | `io.async()` per accept thread | tanpa ConnQueue, pool_size diabaikan |
+| `.EPOLL` | 1 | event loop epoll (hanya Linux) | tanpa pool thread, beban kerja Linux throughput tinggi |
 
 Accept thread MIXED menggunakan ukuran stack default `.{}` (default sistem ~8MB) untuk mencegah stack overflow saat `io.async()` jatuh kembali ke eksekusi inline.
 
@@ -341,12 +341,12 @@ flowchart TD
 
 | Fungsi | Catatan |
 | :- | :- |
-| `encodeVarint(buf, value)` | encode u64 menjadi 1-10 byte; mengembalikan byte yang ditulis |
+| `encodeVarint(buf, value)` | encode u64 menjadi 1-10 byte, mengembalikan byte yang ditulis |
 | `decodeVarint(buf)` | mengembalikan `{value: u64, consumed: usize}` atau error |
-| `encodeString(field_number, s, buf)` | tipe wire LEN (2); mengembalikan byte yang ditulis |
-| `encodeInt32(field_number, val, buf)` | tipe wire VARINT (0); mengembalikan byte yang ditulis |
-| `encodeDouble(field_number, val, buf)` | tipe wire I64 (1); IEEE 754 little-endian 8 byte; mengembalikan byte yang ditulis |
-| `decodeDouble(payload)` | membaca `*const [8]u8`; mengembalikan `f64` |
+| `encodeString(field_number, s, buf)` | tipe wire LEN (2), mengembalikan byte yang ditulis |
+| `encodeInt32(field_number, val, buf)` | tipe wire VARINT (0), mengembalikan byte yang ditulis |
+| `encodeDouble(field_number, val, buf)` | tipe wire I64 (1), IEEE 754 little-endian 8 byte, mengembalikan byte yang ditulis |
+| `decodeDouble(payload)` | membaca `*const [8]u8`, mengembalikan `f64` |
 | `MessageReader.init(buf)` | membungkus buffer pesan yang telah diserialisasi |
 | `MessageReader.next()` | mengembalikan `?ProtoField` dengan `field_number`, `wire_type`, `payload` |
 

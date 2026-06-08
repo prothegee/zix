@@ -13,8 +13,8 @@ Implemented. See ADR-024 for design rationale.
 ## Goals
 
 - Explicit over implicit: same config and dispatch-model pattern as `zix.Tcp`.
-- SOH-delimited framing: no length prefix; delimiter-based message boundary detection.
-- Session layer built in: Logon / Logout / Heartbeat / TestRequest handled automatically; all other messages are echoed.
+- SOH-delimited framing: no length prefix, delimiter-based message boundary detection.
+- Session layer built in: Logon / Logout / Heartbeat / TestRequest handled automatically, all other messages are echoed.
 - No heap allocation in `serveConn`: stack buffers throughout.
 - POOL, ASYNC, MIXED, and EPOLL dispatch. Default: ASYNC (FIX sessions are long-lived). EPOLL runs natively on Linux (gRPC pattern: single epoll accept loop, pool workers hold each connection for its full lifetime). Falls back to POOL on non-Linux.
 - `io: std.Io` in config (not passed to `run()`).
@@ -64,7 +64,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `zix.Fix.VERSION` | []const u8 | `"FIX.4.2"` |
 | `zix.Fix.MAX_FIELDS` | usize | 64 — max fields parsed per message |
 | `zix.Fix.MAX_MSG_SIZE` | usize | 8192 — max message bytes |
-| `zix.Fix.findMessageEnd` | fn | Scans buf for end of first complete FIX message; returns index past final SOH or null |
+| `zix.Fix.findMessageEnd` | fn | Scans buf for end of first complete FIX message, returns index past final SOH or null |
 | `zix.Fix.parseFields` | fn | Parses raw bytes into `[]Field` (zero-copy slices into buf) |
 | `zix.Fix.getField` | fn | Returns value of first field with given `Tag`, or null |
 | `zix.Fix.computeChecksum` | fn | Sum of all bytes mod 256 |
@@ -78,7 +78,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Field | Default | Description |
 | :- | :- | :- |
-| `io` | required | Io backend. Caller-provided; must outlive the server |
+| `io` | required | Io backend. Caller-provided, must outlive the server |
 | `ip` | required | Bind address |
 | `port` | required | Bind port. Must be non-zero |
 | `comp_id` | required | Server SenderCompID (tag 49) |
@@ -87,7 +87,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `workers` | 0 (cpu_count) | Accept thread count. Ignored by ASYNC |
 | `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
 | `logger` | null | Optional logger for lifecycle and per-message session events |
-| `heartbeat_timeout_ms` | 0 | Heartbeat timeout in ms. 0 = disabled. When non-zero: after this interval with no incoming message, TestRequest (35=1) is sent. If no response arrives within another interval, Logout (35=5) is sent and the connection closes. Only applies after Logon; before Logon, timeout closes silently. |
+| `heartbeat_timeout_ms` | 0 | Heartbeat timeout in ms. 0 = disabled. When non-zero: after this interval with no incoming message, TestRequest (35=1) is sent. If no response arrives within another interval, Logout (35=5) is sent and the connection closes. Only applies after Logon, before Logon, timeout closes silently. |
 | `connection_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. When non-zero: if no message arrives within this interval (even with heartbeat disabled), the connection is closed. Distinct from `heartbeat_timeout_ms` — no TestRequest dance, just close. |
 | `handler_timeout_ms` | 0 | Server-wide default max handler processing time in ms. 0 = no cap. Tightened per-route by `Route.timeout_ms`. Sets `Context.deadline_ns` before dispatch. |
 
@@ -351,7 +351,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Dispatch Models
 
-Same four models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-lived; POOL can exhaust threads under sustained load):
+Same four models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-lived. POOL can exhaust threads under sustained load):
 
 | Model | Accept threads | Notes |
 | :- | :- | :- |

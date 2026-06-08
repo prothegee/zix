@@ -205,7 +205,7 @@ pub const HPACK_STATIC: [62]HpackEntry = blk: {
 
 const HuffSym = struct { code: u32, bits: u5 };
 
-// Only the 256 printable/control ASCII codes are stored; EOS (256) is used
+// Only the 256 printable/control ASCII codes are stored, EOS (256) is used
 // only for padding and is handled separately.
 pub const HUFF: [256]HuffSym = .{
     .{ .code = 0x1ff8, .bits = 13 }, // 0
@@ -1067,7 +1067,7 @@ fn serveH2cUpgrade(fd: std.posix.fd_t, handler: HandlerFn, prefix: *const [3]u8)
         return error.BadPreface;
     }
 
-    // Initialize HPACK; apply client's HTTP2-Settings header if present.
+    // Initialize HPACK, apply client's HTTP2-Settings header if present.
     var hpack = HpackDecoder.init();
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
         const trimmed = std.mem.trim(u8, b64, " ");
@@ -1104,7 +1104,7 @@ fn serveH2cUpgrade(fd: std.posix.fd_t, handler: HandlerFn, prefix: *const [3]u8)
     };
     handler(method, path, &s1_hdrs, &.{}, fd, 1);
 
-    // Continue frame loop; stream IDs now start from 3.
+    // Continue frame loop, stream IDs now start from 3.
     try serveH2cLoop(fd, &hpack, handler, 1);
 }
 

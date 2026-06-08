@@ -36,7 +36,7 @@ var server = try zix.Http.Server.init(.{
 
 Perkiraan jumlah header berdasarkan deployment:
 
-- Layanan polos: 2-6 (`Content-Type`, `Content-Length`, `Connection`, `Date` dikirim otomatis; header kustom seperti `X-Request-ID` berasal dari `addHeader()`)
+- Layanan polos: 2-6 (`Content-Type`, `Content-Length`, `Connection`, `Date` dikirim otomatis, header kustom seperti `X-Request-ID` berasal dari `addHeader()`)
 - Dengan CORS: +4-6 (`Access-Control-*`, `Vary`, `Access-Control-Max-Age`)
 - Dengan caching: +3-4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
 - Di balik k8s ingress: +5-10 (forwarding, tracing, `X-Forwarded-*`, `X-Envoy-*`)

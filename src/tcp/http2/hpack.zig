@@ -414,7 +414,7 @@ pub const HpackDecoder = struct {
     dyn_size: usize = 0,
     max_size: usize = 4096,
     // dyn[] entries always slice into here, never into per-call scratch.
-    // Scratch buffers are zeroed on stream-slot reuse; dyn_buf persists for the connection lifetime.
+    // Scratch buffers are zeroed on stream-slot reuse, dyn_buf persists for the connection lifetime.
     dyn_buf: [8192]u8 = undefined,
     dyn_buf_pos: usize = 0,
 

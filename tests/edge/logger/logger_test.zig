@@ -8,7 +8,7 @@ const zix = @import("zix");
 test "zix edge: statusLevel 2xx boundary (200 -> INFO)" {
     const Logger = zix.Logger;
     _ = Logger;
-    // statusLevel is internal; verify via access() with each status class.
+    // statusLevel is internal, verify via access() with each status class.
     // Test that access() does not crash for every boundary status.
     var logger = try zix.Logger.init(std.testing.allocator, .{ .save_min_level = .DEBUG });
     defer logger.deinit();
