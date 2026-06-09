@@ -3,13 +3,20 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9105;
-const WORKERS: usize = 0;
-const POOL_SIZE: usize = 0;
+const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
+const KERNEL_BACKLOG: u31 = 1024;
+const MAX_RECV_BUF: usize = 16 * 1024;
+const MAX_GZIP_OUT: usize = 256 * 1024;
+const MAX_HEADERS: u8 = 16;
+const WORKERS: usize = 0; // 0 = cpu_count accept threads
+const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
 const MAX_PATH_SEGMENTS: usize = 9;
 
-// Http1 Router is exact-match only. Path param and prefix routing is done manually
-// in the dispatcher below using startsWith and splitScalar.
+// This example routes manually in the dispatcher below using startsWith and
+// splitScalar, to show custom matching beyond the built-in kinds. The Http1
+// Router also supports .PREFIX and .PARAM directly (with zix.Http1.pathParam),
+// see examples/http1_static.zig and the Routing section of the README.
 
 // --------------------------------------------------------- //
 
@@ -155,15 +162,19 @@ fn dispatch(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.f
 }
 
 pub fn main(process: std.process.Init) !void {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
-        .dispatch_model = .POOL,
+        .dispatch_model = DISPATCH_MODEL,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
+        .max_gzip_out = MAX_GZIP_OUT,
+        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
-    try server.run(dispatch);
+    try server.run();
 }
