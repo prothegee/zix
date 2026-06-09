@@ -1,4 +1,4 @@
-//! zix fix namespace — FIX 4.x session protocol (SOH-delimited tag=value framing).
+//! zix fix namespace: FIX 4.x session protocol (SOH-delimited tag=value framing).
 
 const core = @import("core.zig");
 
