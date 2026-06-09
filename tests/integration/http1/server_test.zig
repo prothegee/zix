@@ -5,8 +5,10 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
+fn noopHandler(_: *const zix.Http1.ParsedHead, _: []const u8, _: std.posix.fd_t) void {}
+
 test "zix integration: Http1 Server.init valid config, deinit is safe" {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(noopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
@@ -15,7 +17,7 @@ test "zix integration: Http1 Server.init valid config, deinit is safe" {
 }
 
 test "zix integration: Http1 Server.init POOL dispatch model" {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(noopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
@@ -25,7 +27,7 @@ test "zix integration: Http1 Server.init POOL dispatch model" {
 }
 
 test "zix integration: Http1 Server.init MIXED dispatch model" {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(noopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
@@ -35,7 +37,7 @@ test "zix integration: Http1 Server.init MIXED dispatch model" {
 }
 
 test "zix integration: Http1 Server.init EPOLL dispatch model" {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(noopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
