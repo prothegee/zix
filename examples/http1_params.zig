@@ -3,8 +3,13 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9104;
-const WORKERS: usize = 0;
-const POOL_SIZE: usize = 0;
+const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
+const KERNEL_BACKLOG: u31 = 1024;
+const MAX_RECV_BUF: usize = 16 * 1024;
+const MAX_GZIP_OUT: usize = 256 * 1024;
+const MAX_HEADERS: u8 = 16;
+const WORKERS: usize = 0; // 0 = cpu_count accept threads
+const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
 // --------------------------------------------------------- //
 
@@ -113,15 +118,19 @@ const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
 });
 
 pub fn main(process: std.process.Init) !void {
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(Routes.dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
-        .dispatch_model = .POOL,
+        .dispatch_model = DISPATCH_MODEL,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
+        .max_gzip_out = MAX_GZIP_OUT,
+        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
-    try server.run(Routes.dispatch);
+    try server.run();
 }
