@@ -26,7 +26,7 @@ pub fn UdpServer(comptime Packet: type) type {
     return struct {
         const Self = @This();
 
-        // Note: index is a monotonic connection counter — transient identity, not stable across reconnects.
+        // Note: index is a monotonic connection counter, transient identity, not stable across reconnects.
         // Note: client identity structure and validation are the application's responsibility,
         //       the server only assigns an index for internal tracking and log output.
         const ClientRecord = struct {
@@ -35,7 +35,7 @@ pub fn UdpServer(comptime Packet: type) type {
             index: usize,
         };
 
-        // PERF: peers is heap-allocated per packet — no fixed cap.
+        // PERF: peers is heap-allocated per packet, no fixed cap.
         //       Allocated before io.concurrent() dispatc, freed inside processPacket after broadcast.
         // Note: socket is shared across concurrent tasks, UDP send is kernel-atomic per datagram.
         const Task = struct {
@@ -53,7 +53,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
         // --------------------------------------------------------- //
 
-        /// Initialize in REQUIRED mode — port must be set non-zero in config.
+        /// Initialize in REQUIRED mode: port must be set non-zero in config.
         ///
         /// Return:
         /// - error.PortNotConfigured if config.port is zero
@@ -62,7 +62,7 @@ pub fn UdpServer(comptime Packet: type) type {
             return .{ .config = config };
         }
 
-        /// Initialize in CONFIGURABLE mode — reads --port from CLI args, falls back to config.port.
+        /// Initialize in CONFIGURABLE mode: reads --port from CLI args, falls back to config.port.
         /// Never fails for a missing arg, config.port is the default.
         pub fn initArgs(config: UdpServerConfig, args: anytype) !Self {
             var cfg = config;
@@ -93,7 +93,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
             if (self.config.logger) |lg| lg.system(.INFO, "udp", "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
-            // Note: config.allocator must be a general-purpose allocator — not an ArenaAllocator.
+            // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
             //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
             //       so snapshots would accumulate unboundedly until the server stops.
@@ -122,7 +122,7 @@ pub fn UdpServer(comptime Packet: type) type {
                     continue;
                 };
 
-                // overflow / size guard — drop datagrams that are not exactly Packet size
+                // overflow / size guard, drop datagrams that are not exactly Packet size
                 if (msg.flags.trunc or msg.data.len != @sizeOf(Packet)) {
                     if (self.config.error_report) socket.send(io, &msg.from, &[_]u8{0x15}) catch {};
                     if (self.config.logger) |lg| lg.system(.WARN, "udp", "drop: expected {d} bytes, got {d} trunc={}", .{ @sizeOf(Packet), msg.data.len, msg.flags.trunc });
@@ -160,7 +160,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
                 // Heap-allocate peer snapshot for broadcast, freed inside processPacket after all sends.
                 // PERF: allocation only occurs when broadcast is enabled and clients list is non-empty.
-                // Note: must use a general-purpose allocator — the free() below is real, not a no-op.
+                // Note: must use a general-purpose allocator, the free() below is real, not a no-op.
                 var peers: []std.Io.net.IpAddress = &.{};
                 if (self.config.broadcast and clients.items.len > 0) {
                     if (self.config.allocator.alloc(std.Io.net.IpAddress, clients.items.len)) |p| {
@@ -191,7 +191,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
         fn processPacket(task: Task) void {
             // Free peer snapshot allocated in run() before io.concurrent() dispatch.
-            // Note: this free() is real — config.allocator must not be an ArenaAllocator.
+            // Note: this free() is real, config.allocator must not be an ArenaAllocator.
             defer if (task.peers.len > 0) task.config.allocator.free(task.peers);
 
             var addr_buf: [64]u8 = undefined;
@@ -211,7 +211,7 @@ pub fn UdpServer(comptime Packet: type) type {
             }
 
             if (task.config.broadcast) {
-                // SECURITY: no sender validation — spoofed IPs can trigger broadcast to all peers
+                // SECURITY: no sender validation, spoofed IPs can trigger broadcast to all peers
                 // PERF: N sequential send() syscalls per packet, consider sendmmsg batching for large client counts
                 for (task.peers) |*peer_addr| {
                     task.socket.send(task.io, peer_addr, &task.buf) catch |err| {
@@ -258,7 +258,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
 // RFC 768: port 0 is reserved, binding to it is undefined behavior.
 // init() rejects port 0 with error.PortNotConfigured before any socket is opened.
-// run() and socket I/O are excluded from unit tests — those require live I/O.
+// run() and socket I/O are excluded from unit tests, those require live I/O.
 
 const TestPkt = extern struct { value: u32 };
 

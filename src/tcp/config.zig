@@ -16,7 +16,7 @@ pub const DispatchModel = enum(u8) {
     /// M pool threads handle each connection synchronously.
     /// Best for throughput under high connection counts.
     POOL = 1,
-    /// N accept threads each dispatch via io.async() directly — no ConnQueue.
+    /// N accept threads each dispatch via io.async() directly, no ConnQueue.
     /// pool_size is ignored.
     /// Balanced throughput and latency.
     MIXED = 2,
@@ -39,7 +39,7 @@ pub const TcpServerConfig = struct {
     port: u16,
     /// Connection dispatch model. Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
-    /// TCP listen backlog — pending connections queued by the kernel before accept().
+    /// TCP listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 4096,
     /// Maximum payload bytes per frame. Frames exceeding this close the connection.
     max_msg_len: usize = 4096,

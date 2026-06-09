@@ -1,5 +1,5 @@
 //! zix http websocket
-//! RFC 6455 — frame parsing, handshake, room-based broadcast.
+//! RFC 6455: frame parsing, handshake, room-based broadcast.
 
 const std = @import("std");
 
@@ -16,7 +16,7 @@ const ws_max_frame_header: usize = 10;
 
 // --------------------------------------------------------- //
 
-/// RFC 6455 5.2 — WebSocket opcodes.
+/// RFC 6455 5.2: WebSocket opcodes.
 pub const Opcode = enum(u8) {
     continuation = 0x0,
     text = 0x1,
@@ -49,11 +49,11 @@ pub const ParseResult = struct {
 /// - null if buf does not yet contain a complete frame.
 ///
 /// Param:
-/// buf         - []const u8 (raw bytes from the TCP connection)
-/// payload_buf - []u8       (caller-provided buffer for unmasked payload)
+/// buf - []const u8 (raw bytes from the TCP connection)
+/// payload_buf - []u8 (caller-provided buffer for unmasked payload)
 ///
 /// Return:
-/// ?ParseResult
+/// - ?ParseResult
 pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     if (buf.len < 2) return null;
 
@@ -110,7 +110,7 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
 /// payload - []const u8
 ///
 /// Return:
-/// usize (bytes written into buf)
+/// - usize (bytes written into buf)
 pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
     var byte_offset: usize = 0;
     buf[byte_offset] = 0x80 | @intFromEnum(opcode);
@@ -144,9 +144,9 @@ pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
 /// out - *[64]u8    (caller-provided output buffer, result is a sub-slice of it)
 ///
 /// Return:
-/// ![]const u8
+/// - ![]const u8
 pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
-    // RFC 6455 1.3 — this exact GUID is mandated by the WebSocket spec, do not change it.
+    // RFC 6455 1.3: this exact GUID is mandated by the WebSocket spec, do not change it.
     const rfc6455_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var hash_input: [128]u8 = undefined;
     if (key.len + rfc6455_guid.len > hash_input.len) return error.KeyTooLong;
@@ -168,7 +168,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
 /// accept  - []const u8 (value returned by acceptKey)
 ///
 /// Return:
-/// !void
+/// - !void
 pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void {
     var hdr_buf: [256]u8 = undefined;
     const response = try std.fmt.bufPrint(
@@ -216,7 +216,7 @@ pub const RoomMap = struct {
     /// allocator - std.mem.Allocator (process-lifetime allocator, e.g. smp_allocator)
     ///
     /// Return:
-    /// RoomMap
+    /// - RoomMap
     pub fn init(allocator: std.mem.Allocator) RoomMap {
         return .{
             .rooms = std.StringHashMap(Room).init(allocator),

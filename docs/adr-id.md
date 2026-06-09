@@ -1,0 +1,668 @@
+# Catatan Keputusan Arsitektur: zix
+
+Setiap ADR mencatat satu keputusan desain yang signifikan: konteks yang membuatnya diperlukan, keputusan yang diambil, dan konsekuensinya. ADR yang Diterima bersifat mengikat. Yang Diusulkan masih dalam pembahasan.
+
+---
+
+## ADR-001: `std.Io` sebagai abstraksi I/O
+
+**Status:** Diterima
+
+**Konteks:** Server harus menangani banyak koneksi konkuren tanpa memblokir pada I/O. Zig 0.16 menyediakan `std.Io` sebagai abstraksi event loop opaque di atas fasilitas OS (epoll, kqueue, io_uring, dll). Alternatifnya adalah thread OS mentah dengan sinkronisasi eksplisit.
+
+**Keputusan:** Terima `std.Io` sebagai parameter di `zix.Http.Server` dan `zix.Udp.Server`. Pemanggil memiliki dan menyediakan backend (`process.io` untuk yang dikelola runtime atau `std.Io.Threaded` untuk cap eksplisit). Server memakai `io.concurrent()` pada model 1. Pada model 2, thread pool memanggil `handleConnection` langsung dengan `std.Io` yang diturunkan dari `std.Io.Threaded`.
+
+**Konsekuensi:**
+- Pemanggil mengendalikan model konkurensi. zix tidak memiliki atau melakukan deinit backend.
+- `zix.Http.Server.run()` dan `zix.Udp.Server.run()` memblokir hingga terjadi error.
+- `io.concurrent()` dipakai pada model 1 (satu accept, satu task per koneksi). Model 2 melewati `io.concurrent()` sepenuhnya: thread pool menangani koneksi dengan I/O sinkron yang memblokir.
+- Kode yang butuh paralelisme sejati (misalnya UDP broadcast) dapat memanggil `io.concurrent()` dari dalam sebuah task.
+
+---
+
+## ADR-002: API Namespace (zix.Http.*, zix.Udp.*)
+
+**Status:** Diterima
+
+**Konteks:** API awal mengekspos export datar dari root zix (`zix.HttpServer`, `zix.Request`, dll). Ketika UDP ditambahkan, permukaan API menjadi tidak konsisten: tipe HTTP datar sementara tipe UDP sudah berada di bawah `zix.Udp.*`. Nama HTTP datar juga membawa prefiks redundan (`HttpServer`, `HttpHeader`) yang menjadi jelas begitu dinested.
+
+**Keputusan:** Perkenalkan `zix.Http` dan `zix.Udp` sebagai agregator namespace yang didukung oleh `Http.zig` dan `Udp.zig`. Hapus semua export HTTP datar. Path kanonik:
+- `zix.Http.Server`, `zix.Http.Request`, `zix.Http.WebSocket`, ...
+- `zix.Udp.Server(Packet)`, `zix.Udp.Client(Packet)`, `zix.Udp.ServerConfig`, ...
+
+`zix.Tcp.Http.*` tetap dapat diakses (Tcp.zig me-reekspor Http.zig) tetapi bukan path kanonik.
+`zix.utils` tetap datar (tidak spesifik protokol).
+
+**Konsekuensi:**
+- Perubahan breaking: semua kode yang mereferensikan export datar harus diperbarui.
+- Namespace membuat afiliasi protokol terlihat sendirinya di call site.
+- Menambah protokol mendatang (UDS, QUIC) mengikuti pola yang sama tanpa dampak ke namespace yang ada.
+
+---
+
+## ADR-003: Allocator arena per koneksi, di-reset per request
+
+**Status:** Diterima
+
+**Konteks:** Kode handler butuh alokasi sementara (parsing body, segmen path, JSON, dll) yang hanya valid selama satu request. Allocator umum akan menuntut pemanggilan `free` eksplisit di setiap handler dan setiap jalur error.
+
+**Keputusan:** Alokasikan satu `ArenaAllocator` per koneksi (didukung oleh `smp_allocator`). Reset di antara request dengan `.retain_capacity`. Ekspos allocator arena sebagai `ctx.allocator`. Deinit arena saat koneksi tertutup.
+
+**Konsekuensi:**
+- Handler tidak pernah memanggil `free`. Seluruh memori per request direklamasi otomatis di akhir request.
+- Alokasi `ctx.allocator` tidak boleh lolos keluar request (misalnya disimpan di global). Nama `ctx.allocator` sengaja dibuat singkat, batasan masa hidup arena didokumentasikan alih-alih disandikan dalam nama. (Penggantian nama menjadi `ctx.request_arena` dipertimbangkan lalu ditolak: batasan masa hidup ditegakkan oleh dokumentasi dan konvensi.)
+- Reset retain-capacity mengamortisasi pertumbuhan blok backing arena sepanjang masa hidup koneksi.
+
+---
+
+## ADR-004: Dispatch router 3 lintasan (exact > param > prefix)
+
+**Status:** Diterima
+
+**Konteks:** Router butuh aturan prioritas yang konsisten ketika beberapa pola dapat mencocokkan request yang sama. Opsinya: first-match-wins (urutan registrasi), longest-match, atau tier prioritas eksplisit.
+
+**Keputusan:** Tiga lintasan dalam urutan prioritas tetap: route exact lebih dulu, lalu route param (first-registered wins di dalam lintasan 2), lalu route prefix (longest wins di dalam lintasan 3). Urutan registrasi tidak relevan untuk lintasan 1 dan 3.
+
+**Konsekuensi:**
+- Route exact dan prefix bersifat deterministik tanpa peduli urutan. Ini mencakup kasus umum (kebanyakan route adalah exact atau prefix).
+- Route param butuh kehati-hatian: pola yang lebih literal harus diregistrasi sebelum pola serba-param dengan kedalaman yang sama. Ini didokumentasikan dan didemonstrasikan dalam contoh.
+- Desain 3 lintasan sempat dipertimbangkan untuk diganti dengan first-match-wins. Ditangguhkan: perubahannya breaking dan manfaatnya marginal untuk jumlah route tipikal.
+
+---
+
+## ADR-005: Tipe paket UDP generik comptime
+
+**Status:** Diterima
+
+**Konteks:** UDP membawa struct biner yang didefinisikan aplikasi. Tipe paket bawaan yang tetap akan membatasi interoperabilitas. Slice `[]u8` runtime akan kehilangan keamanan tipe dan menuntut pengguna menangani serialisasi secara manual.
+
+**Keputusan:** `UdpServer` dan `UdpClient` generik atas comptime `Packet: type`. Pengguna mendefinisikan `extern struct` sendiri dan memberikannya di titik instansiasi (`zix.Udp.Server(MyPacket)`). zix menangani endianness, validasi ukuran, dan framing. Aplikasi memiliki definisi paket dan logika identitasnya.
+
+**Konsekuensi:**
+- Server tidak menstempel atau memodifikasi field paket apa pun. Field `id` (jika ada) adalah tanggung jawab pengirim.
+- Helper endianness (`toEndian`, `fromEndian`) sepenuhnya generik: bekerja pada `extern struct` mana pun.
+- `@sizeOf(Packet)` diketahui saat comptime, memungkinkan assert ukuran RFC 768 dan buffer terima tetap `[@sizeOf(Packet)]u8`.
+
+---
+
+## ADR-006: Endianness LITTLE sebagai default untuk UDP
+
+**Status:** Diterima
+
+**Konteks:** Paket UDP yang ditransmisikan lintas mesin atau bahasa harus sepakat soal byte order. Dua pilihan umum: LITTLE (native x86/ARM, mayoritas perangkat keras modern) dan BIG (network byte order, konvensi RFC 791).
+
+**Keputusan:** `Endianness.LITTLE` adalah default di `UdpServerConfig` maupun `UdpClientConfig`. BIG tersedia untuk interop dengan protokol legacy atau internet.
+
+**Konsekuensi:**
+- Pada x86 dan ARM (mayoritas target deployment), LITTLE adalah no-op (tidak ada swapping dilakukan).
+- Klien lintas bahasa (Go, C++, Rust) pada keluarga perangkat keras yang sama juga default little-endian, sehingga tidak ada konversi yang diperlukan dalam kasus umum.
+- Pengguna yang menarget network byte order (BIG) harus menyetel `endianness: .BIG` secara eksplisit di kedua sisi.
+
+---
+
+## ADR-007: Deteksi diskoneksi berbasis timeout untuk UDP
+
+**Status:** Diterima
+
+**Konteks:** UDP tidak punya state koneksi. Tidak ada padanan FIN TCP di tingkat OS. Satu-satunya cara andal mendeteksi bahwa klien berhenti mengirim adalah ketiadaan trafik selama periode yang dapat dikonfigurasi.
+
+**Keputusan:** Lacak klien berdasarkan alamat remote dalam list `Managed(ClientRecord)`. Perbarui `last_seen` pada setiap paket. Saat `receiveTimeout` berakhir (interval poll) dan setelah tiap burst paket (cek dengan rate-limit), pindai klien yang `last_seen`-nya lebih tua dari `disconnect_timeout_ms` lalu hapus.
+
+**Konsekuensi:**
+- Penundaan deteksi kasus terburuk adalah `disconnect_timeout_ms + poll_timeout_ms`. Ini didokumentasikan dan dapat dikonfigurasi.
+- Klien yang crash lalu restart dari port baru diperlakukan sebagai klien baru.
+- Klien yang restart dari port yang sama diregistrasi ulang pada paket berikutnya.
+- Positif palsu (klien yang sebentar diam) dibatasi oleh `disconnect_timeout_ms`.
+
+---
+
+## ADR-008: Snapshot peer dialokasikan di heap untuk broadcast UDP
+
+**Status:** Diterima
+
+**Konteks:** Broadcast menuntut pengiriman paket yang diterima ke semua klien yang sedang terhubung. List klien bersifat mutable (klien baru dapat bergabung di antara paket). Mewariskan pointer ke list mutable ke dalam task konkuren akan menciptakan data race.
+
+**Keputusan:** Sebelum `io.concurrent(processPacket)`, snapshot alamat klien saat ini ke `[]IpAddress` yang dialokasikan di heap (`smp_allocator.alloc`). Task menerima snapshot by value dalam struct `Task`-nya. Task membebaskan snapshot via `defer` setelah semua send selesai.
+
+**Konsekuensi:**
+- Tidak ada state mutable bersama antara loop terima dan task konkuren.
+- Alokasi hanya terjadi ketika `broadcast = true` dan list klien tidak kosong.
+- Klien yang diskoneksi antara snapshot dan send broadcast akan menerima error send yang diabaikan diam-diam (perilaku yang benar).
+
+---
+
+## ADR-009: extra_buf sebagai []HttpHeader yang dialokasikan arena
+
+**Status:** Diterima
+
+**Konteks:** Desain awal menyimpan header respons kustom dalam buffer tetap `[32]HttpHeader`. Ini menyebabkan penulisan out-of-bounds ketika `max_response_headers = .LARGE` (64 slot) dan lebih dari 32 header ditambahkan. Cap saat compile-time tidak cukup karena cap dapat dikonfigurasi runtime per instansi server.
+
+**Keputusan:** Di `Response.init()`, alokasikan `extra_buf = arena.alloc(HttpHeader, max_headers)` dari arena per request. `max_headers` berasal dari `ServerConfig.max_response_headers.value()`. Field `max_headers` pada `Response` dihapus, `extra_buf.len` adalah cap-nya.
+
+**Konsekuensi:**
+- Cap-nya tepat: tidak ada clamp `@min(..., 128)`, tidak ada slot terbuang.
+- `Response.init()` kini fallible (`!Response`) karena `arena.alloc` dapat gagal.
+- Masa hidup arena menjamin buffer valid selama request dan direklamasi otomatis.
+
+---
+
+## ADR-010: UDS (Unix Domain Socket)
+
+**Status:** Diterima, Diimplementasikan (2026-05-13)
+
+**Konteks:** Unix Domain Socket adalah mekanisme IPC standar di Linux dan macOS untuk komunikasi sesama host. Namespace `zix.Uds` yang mengikuti pola sama dengan `zix.Udp` akan melengkapi trilogi protokol transport.
+
+**Keputusan:** Diimplementasikan di `src/uds/`. Agregator namespace di `src/uds/Uds.zig`, diekspos sebagai `pub const Uds = @import("uds/Uds.zig")` di `zix.zig`. Mode stream saja (datagram butuh `std.posix` mentah, tidak diekspos via `std.Io.net.UnixAddress`, dan ditangguhkan). Format frame: header panjang `u32` 4 byte (little-endian native) diikuti byte payload. `UdsClient.sendMsg`/`recvMsg` dan `echoHandler` semua memakai kontrak frame ini.
+
+**API `std.Io.net` yang dipakai:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` di WASI: baik `Server.init()` maupun `Client.connect()` memunculkan `@compileError` di platform yang tidak didukung.
+
+**Konsekuensi:**
+- `zix.Uds.Server`, `zix.Uds.Client`, `zix.Uds.ServerConfig`, `zix.Uds.ClientConfig`, `zix.Uds.HandlerFn`, dan `zix.Uds.echoHandler` semua publik.
+- Server memakai Model 1 (`io.concurrent()`): satu thread accept, satu task per koneksi.
+- Path socket di-unlink sebelum bind (restart bersih) dan lagi saat `runWith()` kembali.
+- `error.PathEmpty` dikembalikan oleh `Server.init()` ketika `config.path` kosong.
+- Field `allocator` di `UdsServerConfig` dicadangkan untuk ekstensi mendatang. Implementasi saat ini bebas alokasi (buffer stack saja).
+
+---
+
+## ADR-011: Pola wrapper middleware comptime
+
+**Status:** Diterima
+
+**Konteks:** Handler HTTP butuh concern lintas-potong (auth, rate limiting, CORS, logging) yang berlaku pada sebagian route. Opsinya: runner rantai runtime (list fungsi middleware dialokasikan heap yang dipanggil berurutan), pola dekorator (fungsi wrapper), atau komposisi handler manual.
+
+**Keputusan:** Fungsi wrapper comptime yang mengembalikan `HandlerFn`. Tiap wrapper menerima `comptime next: HandlerFn` dan mengembalikan `HandlerFn` baru. Pemanggilan `next` adalah pemanggilan fungsi langsung tanpa dispatch runtime, tanpa alokasi. Komposisi kiri-ke-kanan: wrapper terluar berjalan lebih dulu.
+
+```zig
+fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
+    return struct {
+        fn handle(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
+            // guard ...
+            return next(req, res, ctx);
+        }
+    }.handle;
+}
+
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
+}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
+```
+
+**Konsekuensi:**
+- Overhead runtime nol. Tiap nilai `next` unik menghasilkan fungsi berbeda saat comptime.
+- Tidak ada alokasi heap. Tidak ada runner rantai middleware yang perlu di-deinit.
+- Komposisi bersifat eksplisit di call site registrasi: pembaca melihat rantai penuh tanpa mengintip ke dalam fungsi mana pun.
+- Tiap komposisi unik menghasilkan fungsi comptime baru, kombinasi berlebihan menambah ukuran biner.
+
+---
+
+## ADR-012: Field config perilaku server HTTP eksplisit
+
+**Status:** Diusulkan
+
+**Konteks:** Beberapa perilaku server HTTP tertanam di internal `server.zig` dan tidak terlihat di `HttpServerConfig`: auto-respons 404 saat tidak ada route cocok, loop keep-alive, dan perilaku fallback file statik. Pengguna tidak dapat menimpa ini tanpa memodifikasi sumber.
+
+**Keputusan:** Tambahkan field bernama ke `HttpServerConfig` untuk setiap perilaku yang dapat dikonfigurasi. `null` menonaktifkan perilaku, nilai fungsi mengaktifkan timpaan pengguna. Tambahan yang diusulkan:
+
+```zig
+pub const HttpServerConfig = struct {
+    // existing fields ...
+    not_found:  ?HandlerFn = null,    // null = built-in 404 plain text
+    keep_alive: bool       = true,    // false = close after each response
+};
+```
+
+Field `public_dir` sudah ada tetapi perannya sebagai fitur opt-in (bukan fallback ajaib) sebaiknya dieksplisitkan dalam dokumentasi.
+
+**Konsekuensi:**
+- Struct config adalah kontrak lengkap: jika tidak ada di struct, ia tidak terjadi.
+- Perubahan breaking bagi kode mana pun yang bergantung pada perilaku 404 implisit saat ini (dampak minimal dalam praktik).
+- `not_found = null` mempertahankan perilaku default saat ini, tidak ada migrasi yang diperlukan kecuali pengguna ingin 404 kustom.
+- Sihir fallback statik dihapus: `public_dir = ""` (sudah jadi default) menonaktifkannya, seperti sekarang.
+
+---
+
+## ADR-013: Allocator eksplisit di UdpServerConfig
+
+**Status:** Diterima
+
+**Konteks:** `UdpServer` memakai heap untuk dua keperluan: list klien `Managed(ClientRecord)` (masa hidup proses) dan snapshot broadcast `[]IpAddress` per paket (dibebaskan di dalam `processPacket`). Keduanya sebelumnya memakai `std.heap.smp_allocator` secara internal, tak terlihat oleh pemanggil. Prinsip "eksplisit lebih utama dari implisit" pada proyek berlaku setara untuk kepemilikan memori: menyembunyikan allocator membuat mustahil mensubstitusi allocator pendeteksi kebocoran dalam pengujian.
+
+**Keputusan:** Tambahkan `allocator: std.mem.Allocator` sebagai field wajib (tanpa default) ke `UdpServerConfig`. Server memakai allocator ini untuk list klien dan snapshot peer broadcast. `UdpClientConfig` tidak menerima field allocator karena `UdpClient` tidak melakukan alokasi heap, semua buffer dialokasikan di stack (`[@sizeOf(Packet)]u8`).
+
+**Mengapa `ArenaAllocator` ditolak secara eksplisit untuk UDP:** Tidak seperti HTTP (di mana allocator router bersifat append-only), server UDP mengalokasikan dan membebaskan snapshot peer pada setiap paket ketika `broadcast = true`. `ArenaAllocator.free()` adalah no-op: memori tidak direklamasi hingga `arena.deinit()`. Pada server broadcast yang sibuk ini menyebabkan pertumbuhan tak terbatas:
+
+```
+// PoC: what goes wrong with ArenaAllocator
+var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+var server = try MyServer.init(.{
+    .allocator = arena.allocator(), // WRONG for UDP
+    .broadcast = true,
+    ...
+});
+// Each received packet when broadcast = true:
+//   alloc(IpAddress, N)  ->  real allocation, grows arena
+//   free(peers)          ->  NO-OP, memory not reclaimed
+// After M packets with N clients: M * N * @sizeOf(IpAddress) bytes permanently held
+// arena.deinit() is never called while the server runs -> unbounded memory growth
+```
+
+`ArenaAllocator` benar untuk `HttpServerConfig.allocator` karena router bersifat append-only: route diregistrasi sekali saat startup dan dibebaskan bersama via `arena.deinit()` saat server dimatikan.
+
+**Konsekuensi:**
+- Perubahan breaking: semua inisialisasi `UdpServerConfig` yang ada harus menambahkan `.allocator = ...`
+- Kode pengujian kini dapat memberikan `std.testing.allocator` untuk deteksi kebocoran, kode produksi memberikan `std.heap.smp_allocator`.
+- `UdpServerConfig` dan `HttpServerConfig` kini konsisten: keduanya mengekspos field allocator eksplisit yang wajib.
+- `UdpClient` tetap lebih sederhana secara desain: tanpa alokasi heap, tanpa field allocator yang diperlukan.
+
+---
+
+## ADR-014: `Server.init(comptime stack_threshold, config)`, ambang buffer stack eksplisit
+
+**Status:** Diterima
+
+**Konteks:** API awal memakai fungsi generik comptime sebagai entry point: `zix.Http.Server(4096).init(config)`. Ini memaksa pemanggil memperlakukan `HttpServer` sebagai fungsi pabrik alih-alih struct, yang tidak intuitif dan tidak konsisten dengan sisa API. Ambang stack mengendalikan apakah buffer I/O per koneksi (`read_buf`, `write_buf`) tinggal di stack atau heap: jika `max_recv_buf` dan `max_client_response` keduanya muat dalam `stack_threshold`, buffer dialokasikan di stack, jika tidak ia jatuh kembali ke `smp_allocator`.
+
+**Keputusan:** Ekspos struct `pub const Server` dengan satu `pub fn init(comptime stack_threshold: usize, comptime routes: []const Route, config: Config) !HttpServerImpl(stack_threshold, routes)`. Generik `HttpServerImpl` tetap privat. Call site menjadi `zix.Http.Server.init(4096, &[_]zix.Http.Route{...}, .{...})`: `Server` terbaca sebagai tipe, `init` terbaca sebagai konstruktor.
+
+**Konsekuensi:**
+- Call site satu tingkat lebih sederhana: `Server.init(N, routes, config)` alih-alih `Server(N).init(config)`.
+- Baik `stack_threshold` maupun `routes` harus tetap `comptime`: Zig menuntut ukuran yang diketahui comptime untuk array stack, dan tabel route berukuran nol saat runtime ketika comptime.
+- `HttpServerImpl(stack_threshold, routes)` adalah tipe konkret yang dikembalikan, pemanggil memakai `var server = try ...` tanpa menamai tipe generik.
+- Perubahan breaking: semua call site yang ada diperbarui.
+
+---
+
+## ADR-015: Arsitektur work-queue Model 2 (ConnQueue)
+
+**Status:** Diterima
+
+**Konteks:** Model 2 awal memakai `io.concurrent()` untuk mendispatch koneksi dari tiap thread worker. Ini menambah overhead scheduler (wakeup condvar per koneksi) yang menyebabkan latensi ~4x lebih tinggi daripada server HTTP berbasis blocking-thread yang sebanding (334 us vs ~88 us) meski throughput setara (~145K req/s). Arsitektur blocking-thread (thread accept khusus + thread pool OS + I/O sinkron) menghapus scheduler fiber dari hot path sepenuhnya.
+
+**Keputusan:** Ganti dispatch `io.concurrent()` per worker dengan `ConnQueue` bersama (mutex + condvar + `ArrayListUnmanaged`). Thread accept (`worker_count`, default 2) hanya memanggil `accept()` dan `queue.push()` (tidak pernah menangani I/O). Thread pool (`pool_size`, default `max(10, cpu_count * 2)`) memanggil `queue.pop()` lalu menangani tiap koneksi secara sinkron dengan I/O memblokir. `std.Io.Mutex` dan `std.Io.Condition` dipakai (primitif sinkronisasi Zig 0.14. `std.Thread.Mutex` tidak ada di versi ini).
+
+**Konsekuensi:**
+- Thread pool menangani koneksi dengan I/O memblokir murni: tanpa overhead dispatch condvar per request, tanpa latensi wakeup fiber.
+- Throughput ~143-144K req/s, latensi ~92 us rata-rata. Gap ~3-5K req/s dan gap latensi ~4 us vs server blocking-thread yang sebanding tetap ada, dikaitkan dengan overhead parsing `std.http.Server` dan arena per koneksi vs allocator POSIX langsung.
+- `pool_size` kini field yang dapat dikonfigurasi di `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
+- Thread accept cukup cepat sehingga 2 sudah memadai untuk menjenuhkan antrian accept kernel, `workers = N` memungkinkan timpaan eksplisit.
+- `io.concurrent()` masih dipakai di Model 1 (`workers = 1`) (tidak terpengaruh).
+
+---
+
+## ADR-017: Channel, Penyampaian Pesan Bertipe Dalam-Proses
+
+**Status:** Diterima, Diimplementasikan (2026-05-13)
+
+**Konteks:** Model server (Model 1 / Model 2) menangani konkurensi request. Tidak ada primitif untuk penyampaian pesan bertipe antar task konkuren dalam satu proses. Channel Go dan pipe POSIX menjawab pola ini, zix butuh padanan native-Zig sendiri yang bekerja berdampingan dengan task `io.concurrent()`.
+
+**Keputusan:** Diimplementasikan sebagai `zix.Channel(comptime T: type)`. Buffered saja (kapasitas > 0, rendezvous unbuffered ditangguhkan). `send(io, value)` dan `recv(io)` memblokir. Diekspos sebagai `pub const Channel = @import("channel/Channel.zig").Channel` di `zix.zig`. Pertanyaan terbuka yang diselesaikan:
+
+- **Locking:** `std.Io.Mutex` + `std.Io.Condition` (sadar-fiber, bekerja baik di task handler `io.concurrent()` maupun thread OS). `std.Thread.Mutex` ditolak karena memblokir thread OS.
+- **Storage:** ring buffer dialokasikan heap (`allocator.alloc(T, capacity)`), kapasitas runtime, allocator wajib di `init()`.
+- **Penamaan:** `Channel` (bukan `Chan`), dikunci pada contoh pertama.
+- **Unbuffered:** belum diimplementasikan. `init()` mengassert `capacity > 0`.
+- **`select`/multiplex:** ditangguhkan. Desain ring tidak menghalanginya.
+
+**Konsekuensi:**
+- `zix.Channel(T)` adalah generik yang mengembalikan struct. Pemakaian: `const MyChan = zix.Channel(u32)`.
+- `init(allocator, capacity)` mengalokasikan ring buffer. `deinit()` membebaskannya.
+- `close(io)` membuka blokir semua pemanggilan `recv()` yang menunggu: receiver menguras item tersisa lalu mendapat `error.Closed`.
+- `send()` dan `recv()` butuh `io` yang valid pada thread pemanggil: tiap thread OS butuh `std.Io` sendiri (misalnya dari `std.Io.Threaded`).
+- `trySend`/`tryRecv` non-blocking ditangguhkan. Semua contoh saat ini memakai varian memblokir.
+
+---
+
+## ADR-016: SSE via `res.stream()` + `SseWriter`, `.ASYNC` lebih dipilih
+
+**Status:** Diterima (model dispatch diperbarui oleh ADR-021)
+
+**Konteks:** SSE (Server-Sent Events) menuntut respons HTTP streaming: header dikirim sekali tanpa `Content-Length`, dan koneksi tetap terbuka sementara handler mendorong event. `Response.send()` yang ada mengasumsikan body lengkap dan selalu mengemisi `Content-Length`. Jalur kode baru diperlukan tanpa memecah API respons yang ada.
+
+Koneksi SSE berumur panjang (detik hingga menit per stream). Thread pool memblokir `.POOL` menetapkan satu thread OS per koneksi terbuka selama durasi penuh stream. Dengan pool default `max(10, cpu_count * 2)`, segelintir klien SSE akan menghabiskan semua thread pool dan membuat request HTTP biasa kelaparan. `.ASYNC` (`dispatch_model = .ASYNC`) mendispatch tiap koneksi sebagai fiber konkuren via `io.async()`, memungkinkan ribuan stream SSE terbuka tanpa kehabisan thread.
+
+**Keputusan:**
+
+1. Tambahkan `res.stream() !SseWriter` ke `Response`. Ia mengirim `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, dan `Date` (tanpa `Content-Length`), lalu menyetel `res.streaming = true` dan mengembalikan `SseWriter`.
+
+2. `SseWriter` memegang `*std.Io.Writer` (writer buffered koneksi). Tiap metode menulis format wire SSE dan mem-flush segera:
+   - `writeEvent(data)` -> `data: <data>\n\n`
+   - `writeNamedEvent(event, data)` -> `event: <event>\ndata: <data>\n\n`
+   - `comment(text)` -> `: <text>\n`
+
+3. `handleConnection` memeriksa `if (res.streaming) break` setelah tiap dispatch. Ketika handler kembali, loop keep-alive keluar dan koneksi TCP tertutup. `EventSource` browser otomatis menyambung ulang setelah retry default 3 detik.
+
+4. Contoh SSE harus memakai `dispatch_model = .ASYNC` (lihat ADR-021). Ini didokumentasikan dalam contoh, README, dan HLD.
+
+**Konsekuensi:**
+- Tidak ada perubahan pada `Response.send()`, handler yang ada tidak terpengaruh.
+- `res.streaming` default `false`, hanya handler SSE yang menyetelnya `true`.
+- Preferensi `.ASYNC` adalah batasan pemakaian, tidak ditegakkan saat compile time. Handler yang memanggil `res.stream()` di server `.POOL` akan bekerja tetapi memblokir thread pool selama durasi stream.
+- `SseWriter` diekspos dari `zix.Http.SseWriter` bagi penulis handler yang ingin menganotasi tipe writer.
+
+---
+
+## ADR-018: Strategi timeout, B+D (ctx.timedOut + eviksi ConnRegistry)
+
+**Status:** Diterima
+
+**Konteks:** Field `HttpServerConfig.response_timeout_ms` awal tidak pernah dikaitkan ke `server.zig`. Ia ada sebagai placeholder. Dua kelas timeout diperlukan: guard tingkat jaringan untuk klien yang macet sebelum atau selama pengiriman header (menahan thread pool tanpa batas), dan budget tingkat handler untuk logika aplikasi yang lambat.
+
+`SO_RCVTIMEO` diselidiki lalu ditolak: di Linux, `SO_RCVTIMEO` memicu `EAGAIN`, yang dipetakan `std.Io.Threaded.netReadPosix` ke `errnoBug` (panic di mode debug dan `error.Unexpected` di release). Ia tidak dapat dipakai pada socket memblokir di stack ini. `stream.shutdown(.both)` adalah mekanisme interupsi yang benar: di Linux ia menyebabkan `readv()` yang terblokir mengembalikan 0 (EOF), yang menyebar sebagai `error.HttpConnectionClosing` atau `error.ReadFailed` lewat `std.http.Server.receiveHead()`.
+
+Empat opsi diprototipekan dan diuji.
+
+**Opsi A: Max-age koneksi (ditolak):**
+Deadline disetel sekali saat waktu accept dan diperiksa di puncak tiap iterasi loop keep-alive. Ini adalah cap masa hidup koneksi, bukan timeout per-celah-idle. Cek hanya memicu ketika `receiveHead()` kembali, sehingga tidak dapat menginterupsi klien yang menjadi idle permanen. Thread ditahan tanpa batas di dalam `receiveHead()` begitu klien berhenti mengirim. Opsi A tidak dikaitkan ke server.
+
+**Opsi C: Thread watchdog per koneksi (ditolak):**
+Menelurkan satu thread OS per koneksi yang diterima menghapus masalah idle permanen. Tiap watchdog tidur selama `timeout_ms` dan memanggil `stream.shutdown(.both)` jika koneksi belum selesai. Diuji dan bekerja: memicu tepat pada 5.006s. Ditolak karena menambah satu thread OS per koneksi aktif (masing-masing dengan stack virtual 64KB), yang melipatgandakan tekanan memori di bawah beban. Opsi D mencapai cakupan sama tanpa thread ekstra.
+
+**Keputusan:** Adopsi B + D sebagai dua lapisan ortogonal yang independen. Hapus `response_timeout_ms` dan ganti dengan dua field config:
+
+- `conn_timeout_ms: u32 = 0` (**Lapisan D**): `ConnRegistry` tertanam di `HttpServerImpl`. Pada tiap tick timer 500ms, `registry.evict()` memindai koneksi aktif dan memanggil `stream.shutdown(.both)` pada yang deadline-nya lewat. `handleConnection` meregistrasi `ConnEntry` saat accept dan menderegistrasi (via `defer`) saat tutup. Efektif hanya di model 2 (thread timer sudah ada). Presisi eviksi: `[deadline, deadline + 500ms]`.
+
+- `handler_timeout_ms: u32 = 0` (**Lapisan B**): `ctx.deadline` disetel dari config sebelum tiap dispatch handler. Handler opt-in dengan memanggil `ctx.timedOut()` di antara langkah mahal dan merespons 408 lebih awal. Overhead nol saat dinonaktifkan (cek null pada deadline). Bekerja di model 1 maupun model 2.
+
+Dua lapisan ini ortogonal: D memicu jika klien macet sebelum handler bahkan mulai, B memicu jika handler terlalu lama setelah mulai. Keduanya default 0 (nonaktif) sehingga kode yang ada tidak terpengaruh.
+
+**Konsekuensi:**
+- `response_timeout_ms` dihapus: pemanggil yang menyetelnya harus bermigrasi ke `conn_timeout_ms` dan/atau `handler_timeout_ms`.
+- Lapisan D memicu `shutdown(.both)` yang menyebabkan `receiveHead()` mengembalikan `error.ReadFailed`. Kasus error ini kini ditangani di `handleConnection`.
+- Lapisan B bersifat kooperatif: handler yang tidak memanggil `ctx.timedOut()` tidak pernah diinterupsi. Ini disengaja (pembatalan paksa di seberang kode Zig sembarang tidak aman).
+- `conn_timeout_ms` sebaiknya >= `handler_timeout_ms`. Jika D memicu saat handler di tengah respons, koneksi tertutup mendadak alih-alih mengirim 408 bersih.
+- Opsi C adalah pilihan yang benar untuk deployment di mana jitter per koneksi harus dibatasi ke milidetik tepat alih-alih `[deadline, deadline + 500ms]`.
+
+---
+
+## ADR-019: Route router, tata letak MultiArrayList (SoA)
+
+**Status:** Diterima
+
+**Konteks:** `Router.routes` adalah `ArrayList(Route)` di mana `Route = {path, handler, kind}`. Dispatch Lintasan 2 (PARAM) dan Lintasan 3 (PREFIX) mengiterasi list memfilter berdasarkan `kind` sebelum mengakses `path` atau `handler`. AoS menyelang-nyeling ketiga field di memori, sehingga mengiterasi `kind` menarik `path` dan `handler` ke cache bahkan ketika belum diperlukan.
+
+**Keputusan:** Ganti `ArrayList(Route)` dengan `MultiArrayList(Route)`. Tiap field (`kind`, `path`, `handler`) disimpan dalam array kontigu sendiri. Lintasan 2 hanya mengiterasi `items(.kind)` dengan indeks, menyentuh `items(.path)[i]` dan `items(.handler)[i]` hanya saat ada match PARAM. Lintasan 3 menzip `items(.kind)` dan `items(.path)` tanpa memuat `items(.handler)` hingga kandidat prefix terkonfirmasi.
+
+**Konsekuensi:**
+- `routes.items.len` menjadi `routes.len`, akses field menjadi `routes.items(.field)[i]`
+- `init()` disederhanakan: `routes` default-init ke `.{}`, tidak perlu `.empty` eksplisit
+- Tanda tangan `append()` dan `deinit()` tidak berubah
+- Unit test di `router.zig` diperbarui, test integrasi dan contoh tidak berubah (API publik tidak terpengaruh)
+- Keuntungan praktis sebanding dengan jumlah route PARAM dan PREFIX, kebanyakan deployment produksi memilih route exact (O(1) via `exact_map`) sehingga perbaikannya adalah koherensi cache alih-alih algoritmik
+
+---
+
+## ADR-020: Http.Client, membungkus std.http.Client dengan respons bertipe dan error bernama
+
+**Status:** Diterima
+
+**Konteks:** zix punya server tetapi tidak punya client. Pemanggil yang menulis harness test integrasi, panggilan layanan-ke-layanan, atau pengirim webhook butuh menjangkau endpoint HTTP. Stdlib menyediakan `std.http.Client` tetapi API-nya tingkat rendah: pemanggil mengelola buffer redirect, reader body, invalidasi head, dan connection pooling sendiri. Tidak ada konsep respons ber-cap-ukuran, objek respons bertipe yang dimiliki pemanggil, atau set error bernama.
+
+**Keputusan:** Implementasikan `zix.Http.Client` sebagai wrapper tipis di atas `std.http.Client` yang menambah:
+
+1. **Config bertipe (`HttpClientConfig`)**: allocator, io, timeout connect/response/read, cap body, kebijakan redirect, user-agent. Semua field wajib dinamai. Semua field opsional punya default.
+
+2. **Timeout connect**: diteruskan ke `std.http.Client.connectTcpOptions(.{ .timeout = Io.Timeout })`. Ini satu-satunya timeout yang ditegakkan di v1 karena `connectTcpOptions` mengekspos parameter timeout. Timeout response dan read butuh perkabelan tingkat-IO dan ditangguhkan.
+
+3. **Cap ukuran body**: `body_reader.allocRemaining(gpa, .limited(max_response_body))` mengembalikan `error.StreamTooLong`, yang dipetakan ulang ke `error.BodyTooLarge`. Ini mencegah OOM diam-diam pada respons besar atau jahat.
+
+4. **Salin byte head**: `std.http.Client.Response.head.bytes` menunjuk ke read buffer koneksi. Ia diinvalidasi oleh `response.reader()` dan menjadi dangling setelah `req.deinit()`. Client menyalin `head.bytes` via `gpa.dupe` sebelum memanggil `response.reader()`. Ini membuat `ClientResponse.header()` dan `iterateHeaders()` aman setelah request selesai.
+
+5. **`ClientResponse` milik pemanggil**: memegang `status_code: u16`, `head_bytes: []u8`, `body_data: []u8`, semua dimiliki `config.allocator`. Pemanggil memanggil `deinit()` untuk membebaskan. Tidak ada kopling masa hidup tersembunyi ke instansi `HttpClient`.
+
+6. **Error bernama**: `error.InvalidUrl` (gagal parse, skema tidak didukung, host hilang) dan `error.BodyTooLarge` muncul sebelum pemanggil perlu memeriksa set error stdlib. `error.Timeout` dari `std.Io` menyebar tanpa perubahan untuk timeout connect.
+
+**Alternatif yang dipertimbangkan:**
+
+- *Membangun di atas stream TCP mentah (seperti client UDS)*: akan menuntut reimplementasi framing HTTP/1.1, transfer chunked, parsing header, pengikutan redirect, dan connection pooling. Terlalu luas untuk v1. `std.http.Client` menyediakan semua ini dengan benar.
+
+- *Mengembalikan `std.http.Client.Response` langsung*: pemanggil akan mewarisi semua batasan invalidasi head dan masa hidup buffer, plus perlu mengelola state connection pool. Mengalahkan tujuan "eksplisit lebih utama dari implisit".
+
+- *Jalur panggilan `fetch()` tunggal*: `std.http.Client.fetch()` menyembunyikan detail tingkat koneksi. Ia tidak mengekspos cara menyuntikkan timeout connect per panggilan, membuat `connect_timeout_ms` tidak dapat diimplementasikan. Jalur `connectTcpOptions` + `request()` + `receiveHead()` tingkat lebih rendah dipilih sebagai gantinya.
+
+**Konsekuensi:**
+- Satu alokasi heap ekstra per request (salin byte head via `gpa.dupe`). Ukurannya adalah head mentah (status line + header), tipikal beberapa ratus byte.
+- `ClientResponse` tidak aman dipakai setelah `deinit()`.
+- TLS (HTTPS) di luar lingkup zix. Library ini adalah backend jaringan: terminasi TLS didelegasikan ke proxy hulu (nginx, HAProxy, Envoy). `std.http.Client` mendukung TLS secara internal, tetapi zix tidak mengekspos, mengonfigurasi, atau mengujinya. HTTP polos pada jaringan internal adalah pemakaian yang dituju.
+- `response_timeout_ms` dan `read_timeout_ms` disimpan di config dan didokumentasikan sebagai "v1: belum ditegakkan" sehingga pemanggil dapat menyetelnya sekarang dan mendapat penegakan di rilis mendatang tanpa perubahan API.
+
+---
+
+## ADR-021: Enum DispatchModel (POOL / ASYNC / MIXED)
+
+**Status:** Diterima
+
+**Konteks:** `HttpServerConfig` awal memakai `workers: usize` untuk memilih antara dua mode konkurensi: `workers = 1` untuk dispatch `io.async()` single-accept dan `workers = 0` / `workers = N` untuk thread pool work-queue. Mode ketiga (N thread accept yang masing-masing mendispatch via `io.async()` tanpa ConnQueue) ada sebagai jalan tengah alami. Field `workers` kelebihan beban: nilai `1` mengubah strategi dispatch sepenuhnya alih-alih menyetel jumlah thread accept. Ini tidak jelas dan tidak swa-dokumentasi di call site.
+
+**Keputusan:** Perkenalkan `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` sebagai field bernama `dispatch_model: DispatchModel = .POOL` di `HttpServerConfig`. Tiga model:
+
+- `.POOL` (default): N thread accept mendorong ke `ConnQueue` bersama. M thread pool mengambil dan menangani koneksi dengan I/O sinkron memblokir. Throughput terbaik di bawah jumlah koneksi tinggi. `workers` mengendalikan jumlah thread accept, `pool_size` mengendalikan jumlah thread pool.
+- `.ASYNC`: Satu thread accept mendispatch tiap koneksi via `io.async()`. Dipilih untuk SSE dan WebSocket, koneksi berumur panjang tidak menahan thread pool. `workers` dan `pool_size` diabaikan.
+- `.MIXED`: N thread accept masing-masing mendispatch via `io.async()` langsung, tanpa `ConnQueue`. Throughput dan latensi seimbang. `pool_size` diabaikan.
+
+Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yang menginginkan perilaku itu menyetel `dispatch_model = .ASYNC`.
+
+`workers = 0` kini berarti thread accept sejumlah cpu_count untuk `.POOL` dan `.MIXED`. Default lama yaitu 2 adalah hitungan kurang pada mesin dengan banyak core.
+
+**Konsekuensi:**
+- Perubahan breaking: pemanggil yang memakai `workers = 1` harus bermigrasi ke `dispatch_model = .ASYNC`.
+- `dispatch_model` swa-dokumentasi di call site. Tiga strategi adalah varian enum eksplisit, bukan nilai `usize` ajaib.
+- `pool_size` diabaikan diam-diam untuk `.ASYNC` dan `.MIXED`, tanpa error, didokumentasikan di `HttpServerConfig`.
+- Tipe backing enum `u8` mengikuti konvensi proyek untuk semua enum bernama.
+
+---
+
+## ADR-022: Server dan client stream mentah zix.Tcp
+
+**Status:** Diterima
+
+**Konteks:** Setelah engine HTTP rampung, lapisan protokol berikutnya adalah server stream TCP mentah generik, tanpa framing HTTP, tanpa router, handler yang didefinisikan pengguna memiliki stream. PoC HTTP di `rnd/` membuktikan ketiga model dispatch (POOL, ASYNC, MIXED) bekerja untuk TCP. Pertanyaannya adalah bagaimana mengeksposnya sebagai API library tanpa menggandakan internal HTTP.
+
+**Keputusan:**
+
+- `zix.Tcp.Server` dan `zix.Tcp.Client` adalah tipe mandiri di `src/tcp/server.zig` dan `src/tcp/client.zig`. Tidak ada basis bersama dengan `zix.Http.Server`, prinsip mandiri-per-protokol yang sama dengan `zix.Uds.Server`.
+- `HandlerFn = *const fn(stream: std.Io.net.Stream, io: std.Io) void`, tanda tangan identik dengan `zix.Uds.HandlerFn`. Handler memiliki stream dan harus menutupnya sebelum kembali.
+- `TcpServer.run(io)` / `runWith(io, handler)`, io diteruskan sebagai parameter (tidak disimpan di config). Pemanggil mengendalikan masa hidup backend `std.Io`.
+- Ketiga model dispatch (POOL, ASYNC, MIXED) berlaku dengan pola `ConnQueue` + spawn thread yang sama dari `zix.Http.Server`. `DispatchModel` didefinisikan sekali di `src/tcp/config.zig` dan diimpor oleh `src/tcp/http/config.zig`, satu sumber kebenaran untuk semua protokol berbasis TCP.
+- Format frame: `[u32 big-endian payload_len][payload bytes]`. Big-endian (network byte order) dipilih untuk TCP karena itu konvensi jaringan dan cocok dengan ekspektasi library protokol lain. `zix.Uds` memakai little-endian sebagai kontras (lokal saja, tanpa kebutuhan interop).
+- `initArgs()` pada server dan `connectArgs()` pada client mem-parse `--ip` dan `--port` dari arg CLI, mengikuti pola `zix.Udp.Server.initArgs()`.
+
+**Konsekuensi:**
+- `zix.Tcp.Http.*` dan `zix.Tcp.Server`/`Client` berdampingan di bawah namespace `zix.Tcp` yang sama, HTTP adalah protokol tingkat tinggi, TCP mentah adalah lapisan stream tingkat rendah.
+- `zix.Tcp.Server` tidak mengalokasikan dari allocator yang disediakan pengguna. `ConnQueue` memakai `smp_allocator` langsung, pendekatan yang sama dengan server HTTP.
+- `echoHandler` bawaan memakai `takeVarInt(u32, .big, 4)` dan `readSliceAll` (vs loop `readSliceShort` di `zix.Uds.echoHandler`), konsisten dengan pola PoC yang dikonfirmasi selama fase RnD TCP.
+- Protokol Fix mendatang (`zix.Tcp.Fix.*`) mengikuti pola mandiri-per-protokol yang sama dan tidak akan dibangun di atas `zix.Tcp.Server`.
+
+---
+
+## ADR-023: zix.Logger, logger event terstruktur yang aman-thread
+
+**Status:** Diterima, Diimplementasikan (2026-05-23)
+
+**Konteks:** Tiap implementasi server (HTTP, TCP, UDP, UDS, FIX, gRPC) butuh lapisan logging. `std.debug.print` tidak aman pada thread OS latar belakang karena ia melewati `std.Options.debug_io`, singleton `Io.Threaded` global, memanggilnya dari thread spawn mana pun balapan dengan channel IPC test runner dan menyebabkan panic. Primitif logging yang aman pada thread OS latar belakang tanpa dependensi `std.Io` diperlukan.
+
+**Keputusan:** Implementasikan `zix.Logger` sebagai struct dengan spinlock per instansi (CAS atomik) yang melindungi write buffer 64 KB dan file descriptor. Semua I/O memakai `std.posix.write` mentah, tanpa `std.Io`, tanpa `std.debug.print`. Metode log spesifik protokol menyediakan baris yang dapat di-parse mesin tanpa pasca-pemrosesan: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Tiap config server menerima `logger: ?*Logger = null`, logger bersifat opsional dan server senyap saat null.
+
+**Konsekuensi:**
+- Semua metode log aman dipanggil bersamaan dari thread OS mana pun termasuk worker thread-pool, thread accept, dan handler koneksi.
+- Tidak ada alokasi `std.Io` per panggilan log. Write buffer di-flush pada pergantian tanggal, rotasi sekuens, `logger.flush()` eksplisit, atau `logger.deinit()`.
+- Rotasi file harian (subdirektori `YYYY-MM-DD/`) dengan penomoran sekuens per file. `save_path` harus ada sebelum `Logger.init`, logger tidak membuatnya.
+- Output konsol dikendalikan oleh `ConsoleMode` (`.OFF`, `.DEBUG_ONLY`, `.ALWAYS`). Jalur file maupun konsol dijaga oleh `save_min_level` / `console_min_level`.
+- `access()` menurunkan level log dari status HTTP: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR. `rpc()` menurunkan dari kode grpc-status.
+
+---
+
+## ADR-024: zix.Fix, lapisan sesi FIX 4.x sebagai server mandiri
+
+**Status:** Diterima, Diimplementasikan (2026-05-23)
+
+**Konteks:** Protokol FIX (Financial Information eXchange) adalah standar pesan dominan untuk sistem trading finansial. Ia memakai SOH (0x01) sebagai delimiter field, bukan prefiks panjang, yang membuatnya tidak kompatibel dengan pola recv `readSliceShort` yang dipakai HTTP. Server mandiri yang mengikuti pola config dan model-dispatch yang sama dengan `zix.Tcp` diperlukan, dengan lapisan sesi (penanganan Logon/Logout/Heartbeat) terbangun di dalam sehingga pemanggil tidak mengimplementasikannya sendiri.
+
+**Keputusan:** Implementasikan `zix.Fix` di `src/tcp/fix/`. `serveConn` adalah loop inti: ia mengakumulasi byte via `takeByte` hingga `findMessageEnd` mendeteksi pesan lengkap, lalu mendispatch secara internal berdasarkan MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest ditangani otomatis, semua pesan lain di-echo. Tidak ada callback handler yang dibutuhkan. State sesi (comp_id, seq_num) bersifat stack-lokal terhadap `serveConn`, tanpa alokasi heap dalam loop pesan. Keempat model dispatch berlaku. `.ASYNC` adalah default karena sesi FIX berumur panjang. `.EPOLL` berjalan native di Linux (loop accept epoll tunggal, ring buffer `FdQueue`, worker pool menahan tiap koneksi selama masa hidup penuhnya, pola sama dengan `zix.Grpc`). Non-Linux jatuh kembali ke `.POOL`.
+
+**Konsekuensi:**
+- `takeByte` dalam loop menghindari deadlock `readSliceShort`: buffer internal reader menyerap segmen TCP penuh, panggilan `takeByte` berikutnya mengurasnya tanpa syscall ekstra.
+- `serveConn` hanya memakai buffer stack (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). Tanpa alokasi per request.
+- `buildMessage` menghitung dan menyematkan checksum. `verifyChecksum` memvalidasi pesan masuk. Checksum buruk menutup koneksi tanpa balasan.
+- `std.debug.print` absen dari semua fungsi entry thread, dipelajari dari panic IPC test runner `std.Options.debug_io` yang dijelaskan di CLAUDE.md.
+- `FixClient` menyediakan client bertipe (`logon`, `logout`, `sendMessage`, `recvMessage`) untuk test dan contoh.
+
+---
+
+## ADR-025: `reuse_address = true` pada semua model dispatch (SO_REUSEADDR + SO_REUSEPORT)
+
+**Status:** Diterima
+
+**Konteks:** Tiap server di zix (Http, Http2, Grpc, Tcp, Fix) memanggil `addr.listen(io, .{ .reuse_address = true })`. Di `std.Io.Threaded` Zig, `reuse_address = true` menyetel `SO_REUSEADDR` sekaligus `SO_REUSEPORT` pada POSIX. `SO_REUSEPORT` mutlak diperlukan oleh model dispatch POOL: tiap thread accept memanggil `addr.listen()` pada port yang sama secara independen, tanpa itu bind kedua gagal dengan `EADDRINUSE`. Pilihannya adalah menyetelnya secara kondisional (POOL saja) atau tanpa syarat (semua model).
+
+**Keputusan:** Terapkan `reuse_address = true` tanpa syarat pada tiap pemanggilan `addr.listen()` tanpa peduli model dispatch. Semua model berbagi jalur setup socket yang sama, tanpa percabangan pada `dispatch_model` di tingkat socket. Ini perilaku tingkat socket, didokumentasikan di sini dan inline dalam sumber, tidak diekspos sebagai field config.
+
+**Konsekuensi:**
+- POOL bekerja benar: semua thread accept bind ke port yang sama dan kernel menyeimbangkan beban koneksi masuk di antara mereka.
+- ASYNC, MIXED, dan EPOLL juga menerima `SO_REUSEPORT` sebagai efek samping. Banyak instansi server pada port yang sama tidak crash, kernel diam-diam mendistribusikan koneksi di antara mereka.
+- Ini disengaja. Berbagi port antar proses adalah pola deployment yang valid (restart bergulir, peluncuran bertahap). Contoh yang berbagi nomor port berdampingan tanpa error saat dijalankan bersamaan karena alasan yang sama.
+- Tidak ada field `ServerConfig` ditambahkan untuk mengekspos atau menyetel perilaku ini.
+
+---
+
+## ADR-026: zix.Http1 writeSimple, buffer gabungan mengalahkan writev untuk body kecil
+
+**Status:** Diterima
+
+**Konteks:** `zix.Http1.writeSimple` (hot path EPOLL) mengirim status line, header, dan body. Dua strategi diprofil dalam ReleaseFast. Strategi A (`writev` dengan dua entri `iovec`) bersifat zero-copy: buffer header dan slice body diteruskan sebagai segmen terpisah, tanpa konkatenasi. Strategi B menyalin header dan body ke satu buffer stack kontigu, lalu mengeluarkan satu `write()`. Teori mengunggulkan A (tanpa salin), pengukuran tidak.
+
+**Keputusan:** Pakai buffer kontigu plus satu `write()` untuk body hingga 3840 byte (buffer header adalah array stack 256 byte, total muat buffer stack 4096 byte). Untuk body di atas 3840 byte, jatuh kembali ke `writev` inline untuk menghindari penyalinan payload besar. Header Date diisi oleh `cachedDate()`, yang memanggil `clock_gettime` hanya setiap 256 request via penghitung tick thread-lokal. Header respons itu sendiri dibangun oleh `buildSimpleHeader`, encoder byte langsung (`appendStatusCode` / `appendDec` / `appendBytes`) yang menggantikan `std.fmt.bufPrint`.
+
+**Konsekuensi:**
+- Throughput body kecil naik dari ~450k ke ~612k req/s di c128 pada mesin acuan. Satu `write()` kontigu mengungguli `writev` dengan dua segmen kecil karena setup `iovec` per-syscall dan biaya gather kernel melebihi biaya menyalin ~100 byte di stack.
+- Body besar (di atas 3840 byte) mempertahankan semantik zero-copy lewat fallback `writev`, sehingga respons besar tidak membayar penalti salin-stack 4KB.
+- Catatan benchmark: `wrk` loopback pada konkurensi tinggi kira-kira 85 persen kernel-bound dan sangat rawan varians. Perbandingan harus dijalankan beruntun dalam satu skrip pada kondisi identik, jangan pernah dari tangkapan terpisah. Lihat komentar docs dan catatan memori proyek.
+
+---
+
+## ADR-027: Default header respons diturunkan ke `.MINIMAL` (16)
+
+**Status:** Diterima
+
+**Konteks:** `HttpServerConfig.max_response_headers` mengendalikan jumlah slot arena per request untuk header respons kustom (ADR-009). Default-nya `.COMMON` (32). Kebanyakan handler dalam praktik mengemisi jauh lebih sedikit dari 16 header kustom (layanan polos menambah 2 hingga 6), sehingga default 32 slot over-provisioning arena per request untuk kasus umum. Engine `zix.Http1` melakukan langkah sama di tingkat compile-time (`MAX_HEADERS` 32 ke 16, plus `Http1ServerConfig.max_headers: u8 = 16` runtime).
+
+**Keputusan:** Turunkan default ke `.MINIMAL` (16) untuk `zix.Http` (`max_response_headers`) maupun `zix.Http1` (`max_headers` dan cap `MAX_HEADERS`). Pemanggil yang butuh lebih menaikkan tier secara eksplisit (`.COMMON`, `.LARGE`, `.EXTRA_LARGE`, atau `.{ .CUSTOM = N }`).
+
+**Konsekuensi:**
+- Footprint arena header per respons kasus terburuk turun dari ~1 KB (32 slot) ke ~512 byte (16 slot), mengetatkan batas DoS untuk handler yang melooping `addHeader()`.
+- Perubahan perilaku bagi deployment mana pun yang mengandalkan cap 32 slot implisit dan menambah 17 hingga 32 header kustom. Handler semacam itu kini terkena `error.TooManyHeaders` hingga tier dinaikkan. Didokumentasikan di `docs/headers-en.md` dan `docs/headers-id.md`.
+- Strategi alokasi pertumbuhan dinamis (ADR-009) tidak berubah. Hanya nilai cap default yang bergeser.
+
+---
+
+## ADR-028: Pemilih versi pada `zix.Http.Client` bersama
+
+**Status:** Diterima
+
+**Konteks:** Engine `zix.Http1` butuh contoh client (`examples/http1_client.zig`). `zix.Http1.Client` mentah terpisah akan menggandakan parsing URL, TLS, penanganan redirect, dan connection pooling yang sudah disediakan `zix.Http.Client` dengan membungkus `std.http.Client`. Roadmap std Zig menambah HTTP/2 ke `std.http.Client` yang sama, sehingga satu client adalah jalur alami menuju dukungan multi-versi. Pertanyaan terbukanya adalah bagaimana menyatakan versi protokol tanpa client terpisah per versi.
+
+**Keputusan:** Tambahkan field `version` ke `HttpClientConfig`, bertipe `Version` (`HTTP_1`, `HTTP_2`, `HTTP_3`, varian KAPITAL, tanpa `auto`, default `.HTTP_1`), diekspos sebagai `zix.Http.ClientVersion`. `request()` menjaganya: `HTTP_1` berlanjut (HTTP/1.1 di atas `std.http.Client`), `HTTP_2` dan `HTTP_3` mengembalikan `error.UnsupportedVersion`. Jangan bangun `zix.Http1.Client` terpisah.
+
+**Konsekuensi:**
+- Satu permukaan client berbicara HTTP/1.1 hari ini dan bekerja terhadap server HTTP/1.1 mana pun, termasuk server `zix.Http1` mentah. Contoh `http1_client` memakainya dengan `.version = .HTTP_1`.
+- API berbentuk maju: ketika backend h2 (atau h3) mendarat, ia masuk di belakang nilai enum yang ada tanpa perubahan tanda tangan yang menghadap pemanggil.
+- Pemanggil yang memilih `HTTP_2` atau `HTTP_3` gagal cepat dan eksplisit alih-alih menurunkan diam-diam.
+
+---
+
+## ADR-029: Deadline per-handler `zix.Http1` via thread-local, bukan objek ctx
+
+**Status:** Diterima
+
+**Konteks:** `zix.Http` menegakkan budget per-handler lewat `ctx.isExpired()`, di mana server menyetel `ctx.deadline` sebelum dispatch (ADR-018). Tanda tangan handler `zix.Http1` adalah `fn(head, body, fd) void` tanpa parameter konteks, sengaja dijaga ramping untuk hot path zero-alloc. Menambah parameter `ctx` akan merembet melalui `Router`, tiap contoh, dan loop dispatch, dan akan melebarkan pemanggilan hot-path.
+
+**Keputusan:** Tambahkan `Http1ServerConfig.handler_timeout_ms`. Simpan deadline dalam `threadlocal` di `core.zig`, diarmkan oleh server (`setTimeout(config.handler_timeout_ms)`) sebelum tiap dispatch di keempat model (`serveConn` via `ServeOpts`, `serveEpollConn` via parameter). Ekspos `zix.Http1.isExpired()` dan `zix.Http1.setTimeout()` sebagai fungsi bebas sehingga handler mengkueri dan menimpa budget-nya tanpa objek ctx. Tambahkan `408 Request Timeout` ke `statusPhrase`.
+
+**Konsekuensi:**
+- Tanda tangan handler tetap `fn(head, body, fd) void`. Tidak ada perubahan breaking pada `Router` atau contoh yang ada.
+- Deadline bersifat per-worker-thread, yang cocok dengan model dispatch shared-nothing (tiap koneksi dilayani satu thread selama durasi panggilan).
+- `handler_timeout_ms == 0` membiarkan thread-local di 0, sehingga `isExpired()` adalah cek murah yang selalu-false tanpa syscall clock pada jalur nonaktif.
+- `serveConnOne` (helper publik niche) dibiarkan tanpa diarm. Pemanggil yang memakainya langsung mengarm deadline sendiri via `setTimeout()`.
+
+---
+
+## ADR-030: Loop frame WebSocket milik-engine `zix.Http1` dengan koalesensi write per-event
+
+**Status:** Diterima
+
+**Konteks:** Contoh WebSocket `zix.Http1` pertama melakukan handshake di handler lalu menjalankan loop `while (true)` `std.posix.read` memblokir sendiri untuk meng-echo frame. Di bawah `.EPOLL`, engine menerima dengan `accept4(SOCK.NONBLOCK)`, sehingga read itu mengembalikan `EAGAIN` pada poll kosong pertama dan handler langsung kembali: handshake sukses tetapi tidak ada frame yang pernah di-echo (0 frame). Bahkan di tempat loop bekerja (socket `.ASYNC` yang memblokir), ia memarkir satu worker thread pada satu koneksi selama seluruh masa hidup koneksi itu, yang membatasi konkurensi pada jumlah worker. Server echo io_uring acuan menjaga tiap koneksi dalam loop completion sebagai gantinya, sehingga semua koneksi maju bersamaan.
+
+**Keputusan:** Jadikan loop frame WebSocket milik-engine di bawah `.EPOLL`. Handler memanggil `WebSocket.serve(fd, key, on_frame)`, yang melakukan handshake dan mencatat handoff thread-local (`core.requestWebSocket`). Tepat setelah handler kembali, loop epoll membaca handoff (`core.takeWebSocket`), membalik koneksi ke mode WebSocket (`Conn.ws`), dan sejak itu merutekan fd tersebut ke `serveEpollWs`. Tiap event readable membaca sekali (loop bersifat level-triggered, sehingga byte lebih lanjut memicu ulang) dan `WebSocket.pump` mem-parse tiap frame lengkap, memanggil `on_frame` untuk text dan binary, otomatis mem-pong ping, dan otomatis meng-echo close. Callback-nya `fn(fd, opcode: u8, payload) void`: `opcode` adalah nilai RFC 6455 mentah untuk menjaga tipe di `core.zig` dan menghindari siklus impor `core` ke `websocket`. Semua frame yang dihasilkan selama satu event readable distaging dalam `SendSink` per-event dan di-flush dalam satu `write()`, sehingga burst pipelined berbiaya satu syscall alih-alih satu per frame. `buildHeader` dipisah dari `buildFrame` untuk jalur staging. Pada `.ASYNC` dan `.POOL`, handoff dibersihkan dan koneksi berakhir setelah handler kembali: WebSocket milik-engine hanya `.EPOLL`.
+
+**Konsekuensi:**
+- Tanda tangan handler tetap `fn(head, body, fd) void`. Dukungan WebSocket tidak menambah ctx dan tidak mengubah router, handler cukup memanggil `WebSocket.serve` alih-alih melooping.
+- Tidak ada worker yang diparkir per koneksi. Satu worker epoll menggerakkan banyak koneksi WebSocket, meng-echo masing-masing saat siap.
+- Koalesensi write adalah kemenangan pipelined yang dominan. Tanpa itu, burst pipelined sedalam 16 mengeluarkan 16 write per event.
+- Frame yang lebih besar dari read buffer koneksi tidak pernah dapat selesai: `serveEpollWs` menutup koneksi semacam itu alih-alih berputar. Untuk beban kerja echo (frame kecil) ini tidak pernah terpicu.
+- WebSocket loop-memblokir manual masih mungkin di bawah `.ASYNC` atau `.POOL` (socket itu memblokir), tetapi membawa cap satu-worker-per-koneksi lama dan tidak memakai handoff.
+
+---
+
+## ADR-031: Event loop multipleks `.EPOLL` `zix.Grpc`, dispatch inline, dan koalesensi hot-path
+
+**Status:** Diterima
+
+**Konteks:** Model `.EPOLL` `zix.Grpc` pertama tidak multipleks-event. Satu loop accept memberi makan `FdQueue`, dan pool `max(10, cpu*2)` worker thread masing-masing mengambil satu koneksi dan menjalankan masa hidup koneksi h2c penuh dengan read memblokir. Konkurensi karenanya dibatasi pada jumlah worker: di bawah beban 256 atau 1024 koneksi hanya ~24 yang pernah dilayani sekaligus. Biaya per-request juga tinggi: balasan unary mengeluarkan tujuh panggilan `write()` (HEADERS, DATA, trailer, masing-masing write frame-header terpisah plus write payload), plus dua write `WINDOW_UPDATE` per frame DATA masuk, plus read frame-header 9 byte lalu read payload per frame, dengan `TCP_NODELAY` aktif. Tiap koneksi juga mengalokasikan tabel stream 16 slot dengan body inline 64 KB per slot (~1.1 MB per koneksi). Route server-streaming menelurkan satu thread per stream. Diukur terhadap server gRPC ASP.NET Core (Kestrel), throughput unary mendatar di ~110k req/s tanpa peduli jumlah koneksi dan streaming duduk di ~9% Kestrel.
+
+**Keputusan:** Arsitektur ulang model `.EPOLL` menjadi event loop multipleks shared-nothing dan pangkas kerja per-request ke jumlah syscall mendekati-minimum.
+
+- Multiplexing: tiap worker memiliki listener `SO_REUSEPORT` privat, instansi epoll sendiri, dan `GrpcConnTable` ber-indeks-fd privat. Kernel menyeimbangkan beban koneksi baru di seberang listener per-worker. `worker_count = pool_size` (0 memilih jumlah cpu). Loop koneksi h2 menjadi state machine yang dapat dilanjutkan (`GrpcMuxConn`): akumulator read per-koneksi bertahan di seberang event readable dan menahan frame parsial mana pun, mesin fase handshake (`await_preface` / `await_upgrade` / `await_preface2` / `h2`) menggantikan read preface memblokir, dan `muxFrameLoop` memproses tiap frame buffered lengkap lalu kembali ke epoll pada `EAGAIN`.
+- Dispatch inline: dalam model `.EPOLL` tiap route, termasuk server-streaming, didispatch inline pada worker (tanpa thread per-stream, tanpa mutex write koneksi), karena worker memiliki koneksi. Handler streaming berjalan di event loop dan harus tetap terbatas.
+- Koalesensi write per-event: semua frame respons yang dihasilkan saat menangani satu event readable (HEADERS awal, tiap DATA, trailer, dan frame kontrol apa pun) distaging dalam cork `ReplyStage` per-koneksi dan di-flush dalam satu `write()`. Balasan unary adalah satu write alih-alih tujuh.
+- Kontrol aliran: `SETTINGS_INITIAL_WINDOW_SIZE` dinaikkan ke 16 MB dan window terima koneksi dinaikkan sekali setelah handshake, sehingga body request kecil tidak pernah memicu `WINDOW_UPDATE` per-DATA. Window koneksi diisi ulang secara borongan hanya melewati ambang.
+- Read buffered: header frame dan payload dilayani dari read buffer koneksi, sehingga pasangan HEADERS plus DATA berbiaya satu `read()` alih-alih empat.
+- Buffer berukuran tepat: `body` dan `header_scratch` per-stream adalah slice ke buffer backing per-koneksi yang diukur ke `max_body` / `max_header_scratch`, bukan array inline tetap.
+- Blok balasan tercache: header balasan konstan untuk kasus umum di-encode HPACK sekali saat comptime, `:status 200` plus `content-type: application/grpc+proto` untuk HEADERS awal, dan `grpc-status: 0` untuk trailer OK. `buildGrpcHeaders` dan `buildGrpcTrailer` mem-memcpy blok tercache dan menstempel header frame 9 byte alih-alih menjalankan ulang encoder HPACK (dua pindai linear 61 entri plus Huffman per header). Encoder dinamis adalah fallback untuk content-type atau status lain.
+
+`serveGrpcConn` dan `serveGrpcLoop` yang memblokir dipertahankan tanpa perubahan untuk `.ASYNC`, `.POOL`, dan `.MIXED`.
+
+**Konsekuensi:**
+- Throughput unary naik dari ~110k ke ~420k req/s dan kini melampaui Kestrel pada 256 koneksi. Streaming naik dari ~2.6k ke ~28k panggilan/s, setara atau di atas Kestrel. Pada core terisolasi (cpuset terpisah) server jenuh CPU dan menskala mendekati-linear di ~38-39k req/s per core, kira-kira dua kali throughput per-core Kestrel. Kemunculan tertinggal Kestrel di 1024 koneksi sebelumnya adalah artefak pengukuran shared-core di mana generator beban dan server berebut core yang sama.
+- `pool_size` berubah makna untuk `.EPOLL`: kini adalah jumlah worker multiplexing (0 = cpu), bukan ukuran pool memblokir. Nilai besar tidak lagi membantu dan oversubscribe scheduler.
+- `max_streams` yang diiklankan harus minimal sebesar jumlah concurrent-stream klien, atau stream yang dibuka optimistis oleh klien mendapat `REFUSED_STREAM` saat awal koneksi. Entri HttpArena menyetel `max_streams = 128` (h2load memakai `-m 100`).
+- Handler streaming `.EPOLL` harus terbatas: stream berjalan-lama memblokir koneksi lain pada worker itu. Streaming tak-terbatas sebaiknya memakai `.ASYNC`.
+- Write non-blocking memakai flush staging. `EAGAIN` diperlakukan sebagai pipa rusak dan menjatuhkan koneksi. Ini tidak pernah terpicu untuk balasan kecil pada benchmark, tetapi klien lambat dengan balasan besar bisa dijatuhkan: antrian backpressure `EPOLLOUT` mendatang akan menghapus tepi itu.
+- Jalur upgrade h2c di loop multipleks minimal: ia mengembalikan `400` tanpa header `Upgrade: h2c` (jalur probe validate) dan `101` lalu preface koneksi dengan satu, tetapi tidak melayani request awal yang dibawa pada stream 1 dari upgrade. Klien prior-knowledge tidak terpengaruh.
+- Perubahan satu baris di `HpackEncoder.writeString` (menganotasi hasil Huffman sebagai `?usize`) membuat encoder berjalan saat comptime sehingga blok tercache dapat dibangun di sana.
+
+---
+
+## ADR-032: `EPOLL_MAX_EVENTS = 512`, satu konstanta batch epoll bernama lintas semua server
+
+**Status:** Diterima
+
+**Konteks:** Tiap worker epoll native (`zix.Tcp`, `zix.Http`, `zix.Fix`, `zix.Grpc`, `zix.Http1`) memanggil `epoll_wait` dengan array `epoll_event` berukuran tetap. Ukuran itu adalah jumlah maksimum event siap yang diuras worker dalam satu syscall. Nilainya `256` di mana-mana, diekspresikan dalam tiga cara berbeda: `epoll_max_events` bernama tingkat-file di `tcp` dan `http`, dan literal `const max_events` inline di `fix`, `grpc`, dan `http1`. Dengan satu listener `SO_REUSEPORT` dan satu instansi epoll per worker, worker pada box 12-core di 4096 koneksi menahan kira-kira 341 fd, sehingga lebih dari 256 bisa readable dalam satu tick. Cap 256 lalu memaksa `epoll_wait` kedua untuk menguras sisanya, satu syscall ekstra per loop yang muncul hanya begitu set siap melebihi cap.
+
+**Keputusan:** Naikkan batch ke `512` dan ekspresikan sebagai satu konstanta tingkat-file bernama yang didokumentasikan `EPOLL_MAX_EVENTS: usize = 512` di tiap dari lima file server, dipakai untuk ukuran array `[N]epoll_event` maupun argumen count `epoll_wait`. Literal `256` inline dan const `epoll_max_events` huruf-kecil dihapus, dan tipenya diunifikasi ke `usize`. 512 mencakup set ready-fd worker dalam satu syscall pada jumlah koneksi tinggi tempat cap lama mengikat.
+
+**Konsekuensi:**
+- Perf A/B (`EPOLL_MAX_EVENTS` 256 vs 512 pada build release yang sama, handler respons-tetap, diprofil dengan `perf stat` pada counter userspace) menunjukkan perubahan ini netral di c128 dan c1024, di mana set siap per worker jauh di bawah 256 sehingga cap tidak pernah mengikat, dan keuntungan kecil di c4096, di mana throughput naik ~8% dan siklus userspace per request turun. Itu cocok dengan mekanisme yang diprediksi: lebih sedikit syscall `epoll_wait` hanya di tempat set siap melebihi 256.
+- Biayanya adalah satu array `epoll_event` per worker tumbuh dari ~6 KB ke ~12 KB stack. Diabaikan terhadap stack worker 512 KB.
+- Tidak ada perubahan API publik. Konstanta bersifat privat dan tidak dapat dikonfigurasi. Nilainya adalah default tertala, bukan knob.
+- Keruntuhan throughput c2048+ yang terlihat pada box loopback shared-core bersifat lingkungan (generator beban dan server berebut core yang sama). Ia tidak disebabkan maupun ditangani oleh konstanta ini.
+
+---
+
+## ADR-033: Router `zix.Http1` memperoleh `.PREFIX` dan `.PARAM`, param via thread-local
+
+**Status:** Diterima
+
+**Konteks:** Router comptime `zix.Http1` hanya exact-match (`std.mem.eql` atas tabel route), sementara router `zix.Http` tingkat lebih tinggi telah mendukung `.EXACT` / `.PREFIX` / `.PARAM` sejak ADR-004. Routing prefix atau path-param apa pun di server Http1 harus ditulis tangan dalam fungsi dispatch dengan `startsWith` dan `splitScalar` (seperti dilakukan `examples/http1_paths.zig`). Masalah penangkapan adalah alasan gap ini bertahan: matcher `zix.Http` menulis param tertangkap ke `req.path_params`, tetapi handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request` dan tanpa state mutable per-panggilan untuk ditulisi (tanda tangan ramping zero-alloc yang sama yang dibela di ADR-029).
+
+**Keputusan:** Bawa router Http1 ke paritas dengan router Http. Tambahkan `RouteKind { EXACT, PREFIX, PARAM }` dan field `kind` (default `.EXACT`) ke `zix.Http1.Route`, dan partisi tabel route saat comptime menjadi `StaticStringMap` (exact), array PARAM, dan array PREFIX. Dispatch menjaga prioritas ADR-004: exact (hash O(1)) > param (first-registered wins) > prefix (longest wins). Penangkapan param memakai ulang model ADR-029: segmen `:name` yang cocok ditulis ke penyimpanan `threadlocal` per-handler di `router.zig`, dibaca kembali lewat fungsi bebas baru `zix.Http1.pathParam(name)` alih-alih ctx atau `Request`. Penyimpanan adalah array tetap ber-cap `MAX_PATH_PARAMS = 8`, sehingga penangkapan zero-alloc. Lintasan prefix menjaga indeks boundary di belakang `startsWith` (`p[route.path.len]` hanya dibaca begitu `p.len >= route.path.len`), dan guard yang sama diterapkan balik ke router `zix.Http`, yang sebelumnya mengurutkan indeks sebelum cek `startsWith`.
+
+**Konsekuensi:**
+- Tanda tangan handler tidak berubah dan `.kind` default ke `.EXACT`, sehingga tiap tabel route Http1 exact-only yang ada terkompilasi dan berperilaku identik. Tidak ada perubahan breaking.
+- Nilai param bersifat thread-local dan valid hanya untuk panggilan dispatch (mereka meminjam path request), yang cocok dengan model shared-nothing tempat satu worker melayani satu koneksi sekali waktu. Handler yang butuh param melewati kembaliannya sendiri harus menyalinnya.
+- Penangkapan ber-cap 8 param per match. Pola dengan lebih banyak `:segments` dari itu gagal cocok alih-alih meluap.
+- Lintasan prefix `zix.Http` tidak lagi membaca satu byte melewati path request yang pendek. Di ReleaseFast ini adalah read out-of-bounds tak berbahaya yang ditutupi oleh `and`, di Debug atau ReleaseSafe ia adalah panic pada path request mana pun yang lebih pendek dari prefix terdaftar.
+- `examples/http1_paths.zig` masih mendemonstrasikan routing `startsWith` / `splitScalar` manual dengan sengaja (pencocokan kustom di luar tiga jenis). Komentar sebelumnya yang mengklaim router exact-only telah dikoreksi.
+
+---
+
+###### end of adr

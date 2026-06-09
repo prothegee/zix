@@ -17,6 +17,7 @@ pub const ServerConfig = config.HttpServerConfig;
 pub const DispatchModel = config.DispatchModel;
 pub const Client = client.HttpClient;
 pub const ClientConfig = client_config.HttpClientConfig;
+pub const ClientVersion = client_config.Version;
 pub const default_user_agent = client_config.user_agent;
 pub const ClientResponse = client.ClientResponse;
 pub const ClientRequestOpts = client.RequestOpts;

@@ -6,11 +6,11 @@ const std = @import("std");
 
 const Logger = @import("../logger/logger.zig").Logger;
 
-/// Port binding mode — governs how the port is sourced at init time.
+/// Port binding mode: governs how the port is sourced at init time.
 /// Validation happens at init(), not at run(). Enforces "explicit over implicit."
 pub const PortMode = enum(u8) {
     /// Port is read from CLI args (--port / --bind-port / --server-port) at runtime.
-    /// Falls back to config.port default if the arg is absent — never fails for a missing arg.
+    /// Falls back to config.port default if the arg is absent, never fails for a missing arg.
     CONFIGURABLE,
     /// Port must be set explicitly and non-zero in the config struct.
     /// No CLI arg parsing. Fails at init() with error.PortNotConfigured if port is zero.
@@ -20,14 +20,14 @@ pub const PortMode = enum(u8) {
 // --------------------------------------------------------- //
 
 /// Wire endianness applied transparently on every send and receive.
-/// Set once in config — no manual conversion needed in user code.
+/// Set once in config, no manual conversion needed in user code.
 /// Must match across all clients and the server for correct decoding.
 pub const Endianness = enum(u8) {
-    /// Same machine only — unsafe across platforms or languages.
+    /// Same machine only, unsafe across platforms or languages.
     NATIVE,
     /// Recommended for cross-language clients (Go, C++, Rust) on modern hardware.
     LITTLE,
-    /// Network byte order — use when interoperating with legacy or internet protocols.
+    /// Network byte order, use when interoperating with legacy or internet protocols.
     BIG,
 };
 
@@ -38,19 +38,19 @@ pub const UdpServerConfig = struct {
     /// Note:
     /// - must be a general-purpose allocator (e.g. std.heap.smp_allocator).
     ///   ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
-    ///   packet — ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
+    ///   packet, ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
     allocator: std.mem.Allocator,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
     port: u16,
-    /// How the port is sourced — REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
+    /// How the port is sourced: REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
     port_mode: PortMode = .REQUIRED,
     /// Wire endianness applied on every send and receive.
     endianness: Endianness = .LITTLE,
     /// Milliseconds of silence before a client is considered disconnected.
     disconnect_timeout_ms: i64 = 5000,
-    /// Receive poll interval in milliseconds — controls disconnect check frequency.
+    /// Receive poll interval in milliseconds, controls disconnect check frequency.
     poll_timeout_ms: i64 = 2000,
     /// Send 0x06 ACK byte back to sender on successful packet receipt.
     auto_ack: bool = false,
@@ -72,11 +72,11 @@ pub const UdpClientConfig = struct {
     server_ip: []const u8,
     /// Server port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
     server_port: u16,
-    /// Local bind port — server uses this to send responses back.
+    /// Local bind port, server uses this to send responses back.
     bind_port: u16,
-    /// How the ports are sourced — REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
+    /// How the ports are sourced: REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
     port_mode: PortMode = .REQUIRED,
-    /// Wire endianness — must match the server's endianness config.
+    /// Wire endianness, must match the server's endianness config.
     endianness: Endianness = .LITTLE,
     /// If true: send one packet then exit.
     send_once: bool = false,
@@ -88,7 +88,7 @@ pub const UdpClientConfig = struct {
 // --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved and must not be used for binding.
-// init() enforces this — port 0 in config yields error.PortNotConfigured.
+// init() enforces this, port 0 in config yields error.PortNotConfigured.
 // These tests verify that defaults are safe and that enum representations are stable.
 
 test "zix test: UdpServerConfig, default field values" {

@@ -376,7 +376,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Default ukuran buffer | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` semuanya 4096 |
+| Default ukuran buffer | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` semuanya 4096 |
 | Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` default ke `.ASYNC` | default field eksplisit di `HttpServerConfig` |
@@ -384,7 +384,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | `max_request_headers` default ke `.LARGE` | varian enum dan `.value()` == 64 |
 | Nilai tier `RequestHeaderSize` | MINIMAL=16, COMMON=32, LARGE=64 |
 | `RequestHeaderSize.CUSTOM(N)` dibatasi di 64 | nilai di atas 64 diam-diam mengembalikan 64 |
-| `max_response_headers` default ke COMMON (32) | nilai enum dan `.value()` |
+| `max_response_headers` default ke MINIMAL (16) | nilai enum dan `.value()` |
 | Nilai tier `HeaderSize` | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
 | `HeaderSize.CUSTOM(N)` mengembalikan N | 7 dan 100 |
 | Status `Response` default ke OK | invarian `init()` |

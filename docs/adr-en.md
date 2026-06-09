@@ -261,7 +261,7 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_client_request` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated, otherwise they fall back to `smp_allocator`.
+**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_recv_buf` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated, otherwise they fall back to `smp_allocator`.
 
 **Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, comptime routes: []const Route, config: Config) !HttpServerImpl(stack_threshold, routes)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, &[_]zix.Http.Route{...}, .{...})`: `Server` reads as a type, `init` reads as a constructor.
 
@@ -522,6 +522,146 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - ASYNC, MIXED, and EPOLL also receive `SO_REUSEPORT` as a side effect. Multiple server instances on the same port do not crash — the kernel silently distributes connections between them.
 - This is intentional. Port-sharing between processes is a valid deployment pattern (rolling restart, staged rollout). Examples that share a port number coexist without error when run simultaneously for the same reason.
 - No `ServerConfig` field is added to expose or toggle this behavior.
+
+---
+
+## ADR-026: zix.Http1 writeSimple, combined buffer beats writev for small bodies
+
+**Status:** Accepted
+
+**Context:** `zix.Http1.writeSimple` (the EPOLL hot path) sends a status line, headers, and a body. Two strategies were profiled in ReleaseFast. Strategy A (`writev` with two `iovec` entries) is zero-copy: the header buffer and the body slice are passed as separate segments, no concatenation. Strategy B copies the header and body into one contiguous stack buffer, then issues a single `write()`. The theory favored A (no copy), the measurement did not.
+
+**Decision:** Use a contiguous buffer plus a single `write()` for bodies up to 3840 bytes (header buffer is a 256-byte stack array, total fits a 4096-byte stack buffer). For bodies above 3840 bytes, fall back to inline `writev` to avoid copying a large payload. The Date header is filled by `cachedDate()`, which calls `clock_gettime` only every 256 requests via a thread-local tick counter. The response header itself is built by `buildSimpleHeader`, a direct byte encoder (`appendStatusCode` / `appendDec` / `appendBytes`) replacing `std.fmt.bufPrint`.
+
+**Consequences:**
+- Small-body throughput rose from ~450k to ~612k req/s at c128 on the reference machine. A single contiguous `write()` outperforms `writev` with two small segments because the per-syscall `iovec` setup and kernel gather cost exceeds the cost of copying ~100 bytes on the stack.
+- Large bodies (over 3840 bytes) keep zero-copy semantics through the `writev` fallback, so big responses pay no 4KB stack-copy penalty.
+- Benchmark caveat: loopback `wrk` at high concurrency is roughly 85 percent kernel-bound and highly variance-prone. Comparisons must be run back-to-back in one script under identical conditions, never from separate captures. See docs commentary and the project memory note.
+
+---
+
+## ADR-027: Response header default lowered to `.MINIMAL` (16)
+
+**Status:** Accepted
+
+**Context:** `HttpServerConfig.max_response_headers` controls the per-request arena slot count for custom response headers (ADR-009). The default was `.COMMON` (32). Most handlers in practice emit far fewer than 16 custom headers (a bare service adds 2 to 6), so the 32-slot default over-provisioned the per-request arena for the common case. The `zix.Http1` engine made the same move at the compile-time level (`MAX_HEADERS` 32 to 16, plus a runtime `Http1ServerConfig.max_headers: u8 = 16`).
+
+**Decision:** Lower the default to `.MINIMAL` (16) for both `zix.Http` (`max_response_headers`) and `zix.Http1` (`max_headers` and the `MAX_HEADERS` cap). Callers who need more raise the tier explicitly (`.COMMON`, `.LARGE`, `.EXTRA_LARGE`, or `.{ .CUSTOM = N }`).
+
+**Consequences:**
+- Worst-case per-response header arena footprint drops from ~1 KB (32 slots) to ~512 bytes (16 slots), tightening the DoS bound for a handler that loops on `addHeader()`.
+- Behavioral change for any deployment that relied on the implicit 32-slot cap and added 17 to 32 custom headers. Such handlers now hit `error.TooManyHeaders` until the tier is raised. Documented in `docs/headers-en.md` and `docs/headers-id.md`.
+- The dynamic-growth allocation strategy (ADR-009) is unchanged. Only the default cap value moved.
+
+---
+
+## ADR-028: Version selector on the shared `zix.Http.Client`
+
+**Status:** Accepted
+
+**Context:** The `zix.Http1` engine needed a client example (`examples/http1_client.zig`). A separate raw `zix.Http1.Client` would have duplicated URL parsing, TLS, redirect handling, and connection pooling that `zix.Http.Client` already provides by wrapping `std.http.Client`. The Zig std roadmap adds HTTP/2 to that same `std.http.Client`, so a single client is the natural path to multi-version support. The open question was how to express the protocol version without a separate client per version.
+
+**Decision:** Add a `version` field to `HttpClientConfig`, typed `Version` (`HTTP_1`, `HTTP_2`, `HTTP_3`, CAPITAL variants, no `auto`, default `.HTTP_1`), exported as `zix.Http.ClientVersion`. `request()` guards on it: `HTTP_1` proceeds (HTTP/1.1 over `std.http.Client`), `HTTP_2` and `HTTP_3` return `error.UnsupportedVersion`. Do not build a separate `zix.Http1.Client`.
+
+**Consequences:**
+- One client surface speaks HTTP/1.1 today and works against any HTTP/1.1 server, including the raw `zix.Http1` server. The `http1_client` example uses it with `.version = .HTTP_1`.
+- The API is forward-shaped: when an h2 (or h3) backend lands, it slots in behind the existing enum value with no caller-facing signature change.
+- A caller selecting `HTTP_2` or `HTTP_3` fails fast and explicitly rather than silently downgrading.
+
+---
+
+## ADR-029: `zix.Http1` per-handler deadline via thread-local, not a ctx object
+
+**Status:** Accepted
+
+**Context:** `zix.Http` enforces a per-handler budget through `ctx.isExpired()`, where the server sets `ctx.deadline` before dispatch (ADR-018). The `zix.Http1` handler signature is `fn(head, body, fd) void` with no context parameter, kept deliberately lean for the zero-alloc hot path. Adding a `ctx` parameter would have rippled through `Router`, every example, and the dispatch loop, and would have widened the hot-path call.
+
+**Decision:** Add `Http1ServerConfig.handler_timeout_ms`. Store the deadline in a `threadlocal` in `core.zig`, armed by the server (`setTimeout(config.handler_timeout_ms)`) before every dispatch across all four models (`serveConn` via `ServeOpts`, `serveEpollConn` via a parameter). Expose `zix.Http1.isExpired()` and `zix.Http1.setTimeout()` as free functions so handlers query and override their budget without a ctx object. Add `408 Request Timeout` to `statusPhrase`.
+
+**Consequences:**
+- The handler signature stays `fn(head, body, fd) void`. No breaking change to `Router` or existing examples.
+- The deadline is per-worker-thread, which matches the shared-nothing dispatch model (each connection is served by one thread for the call's duration).
+- `handler_timeout_ms == 0` leaves the thread-local at 0, so `isExpired()` is a cheap always-false check with no clock syscall on the disabled path.
+- `serveConnOne` (a niche public helper) is left unarmed. Callers using it directly arm their own deadline via `setTimeout()`.
+
+---
+
+## ADR-030: `zix.Http1` engine-owned WebSocket frame loop with per-event write coalescing
+
+**Status:** Accepted
+
+**Context:** The first `zix.Http1` WebSocket example did the handshake in the handler and then ran its own `while (true)` blocking `std.posix.read` loop to echo frames. Under `.EPOLL` the engine accepts with `accept4(SOCK.NONBLOCK)`, so that read returned `EAGAIN` on the first empty poll and the handler returned at once: the handshake succeeded but no frame was ever echoed (0 frames). Even where the loop did work (the blocking `.ASYNC` sockets), it parked one worker thread on a single connection for that connection's whole lifetime, which caps concurrency at the worker count. A reference io_uring echo server keeps every connection in a completion loop instead, so all connections progress at once.
+
+**Decision:** Make the WebSocket frame loop engine-owned under `.EPOLL`. A handler calls `WebSocket.serve(fd, key, on_frame)`, which performs the handshake and records a thread-local handoff (`core.requestWebSocket`). Right after the handler returns, the epoll loop reads the handoff (`core.takeWebSocket`), flips the connection to WebSocket mode (`Conn.ws`), and from then on routes that fd to `serveEpollWs`. Each readable event reads once (the loop is level-triggered, so more bytes re-fire) and `WebSocket.pump` parses every complete frame, invoking `on_frame` for text and binary, auto-ponging ping, and auto-echoing close. The callback is `fn(fd, opcode: u8, payload) void`: `opcode` is the raw RFC 6455 value to keep the type in `core.zig` and avoid a `core` to `websocket` import cycle. All frames produced during one readable event are staged in a per-event `SendSink` and flushed in a single `write()`, so a pipelined burst costs one syscall instead of one per frame. `buildHeader` was split out of `buildFrame` for the staged path. On `.ASYNC` and `.POOL` the handoff is cleared and the connection ends after the handler returns: engine-owned WebSocket is `.EPOLL` only.
+
+**Consequences:**
+- The handler signature stays `fn(head, body, fd) void`. WebSocket support adds no ctx and no router change, the handler just calls `WebSocket.serve` instead of looping.
+- No worker is parked per connection. One epoll worker drives many WebSocket connections, echoing each on readiness.
+- Write coalescing is the dominant pipelined win. Without it a 16-deep pipelined burst issued 16 writes per event.
+- A frame larger than the connection read buffer can never complete: `serveEpollWs` closes such a connection rather than spin. For the echo workload (small frames) this never triggers.
+- A manual blocking-loop WebSocket is still possible under `.ASYNC` or `.POOL` (those sockets are blocking), but it carries the old one-worker-per-connection cap and does not use the handoff.
+
+---
+
+## ADR-031: `zix.Grpc` `.EPOLL` multiplexed event loop, inline dispatch, and hot-path coalescing
+
+**Status:** Accepted
+
+**Context:** The first `zix.Grpc` `.EPOLL` model was not event-multiplexed. A single accept loop fed a `FdQueue`, and a pool of `max(10, cpu*2)` worker threads each popped one connection and ran the full h2c connection lifetime with blocking reads. Concurrency was therefore capped at the worker count: under a load of 256 or 1024 connections only ~24 were ever served at once. The per-request cost was also high: a unary reply issued seven `write()` calls (HEADERS, DATA, trailer, each a separate frame-header write plus a payload write), plus two `WINDOW_UPDATE` writes per inbound DATA frame, plus a 9-byte frame-header read then a payload read per frame, with `TCP_NODELAY` on. Each connection also allocated a 16-slot stream table with a 64 KB inline body per slot (~1.1 MB per connection). Server-streaming routes spawned one thread per stream. Measured against an ASP.NET Core (Kestrel) gRPC server, unary throughput plateaued at ~110k req/s regardless of connection count and streaming sat at ~9% of Kestrel.
+
+**Decision:** Re-architect the `.EPOLL` model into a shared-nothing multiplexed event loop and cut the per-request work to a near-minimum syscall count.
+
+- Multiplexing: each worker owns a private `SO_REUSEPORT` listener, its own epoll instance, and a private fd-indexed `GrpcConnTable`. The kernel load-balances new connections across the per-worker listeners. `worker_count = pool_size` (0 selects cpu count). The h2 connection loop became a resumable state machine (`GrpcMuxConn`): a per-connection read accumulator persists across readable events and holds any partial frame, a handshake phase machine (`await_preface` / `await_upgrade` / `await_preface2` / `h2`) replaces the blocking preface read, and `muxFrameLoop` processes every complete buffered frame and returns to epoll on `EAGAIN`.
+- Inline dispatch: in the `.EPOLL` model every route, including server-streaming, is dispatched inline on the worker (no per-stream thread, no connection write mutex), because the worker owns the connection. A streaming handler runs on the event loop and must stay bounded.
+- Per-event write coalescing: all response frames produced while handling one readable event (initial HEADERS, every DATA, the trailer, and any control frame) are staged in a per-connection `ReplyStage` cork and flushed in a single `write()`. A unary reply is one write instead of seven.
+- Flow control: `SETTINGS_INITIAL_WINDOW_SIZE` is raised to 16 MB and the connection receive window is bumped once after the handshake, so small request bodies never trigger a per-DATA `WINDOW_UPDATE`. The connection window is replenished in bulk only past a threshold.
+- Buffered reads: frame headers and payloads are served from the connection read buffer, so a HEADERS plus DATA pair costs one `read()` rather than four.
+- Right-sized buffers: per-stream `body` and `header_scratch` are slices into per-connection backing buffers sized to `max_body` / `max_header_scratch`, not fixed inline arrays.
+- Cached reply blocks: the constant reply headers for the common case are HPACK-encoded once at comptime - `:status 200` plus `content-type: application/grpc+proto` for the initial HEADERS, and `grpc-status: 0` for the OK trailer. `buildGrpcHeaders` and `buildGrpcTrailer` memcpy the cached block and stamp the 9-byte frame header instead of re-running the HPACK encoder (two 61-entry linear scans plus Huffman per header). The dynamic encoder is the fallback for other content-types or statuses.
+
+The blocking `serveGrpcConn` and `serveGrpcLoop` are retained unchanged for `.ASYNC`, `.POOL`, and `.MIXED`.
+
+**Consequences:**
+- Unary throughput rose from ~110k to ~420k req/s and now exceeds Kestrel at 256 connections. Streaming rose from ~2.6k to ~28k calls/s, at or above Kestrel. On isolated (separate-cpuset) cores the server is CPU-saturated and scales near-linearly at ~38-39k req/s per core, roughly twice Kestrel's per-core throughput. The earlier appearance of trailing Kestrel at 1024 connections was a shared-core measurement artifact where the load generator and the server contended for the same cores.
+- `pool_size` changed meaning for `.EPOLL`: it is now the multiplexing worker count (0 = cpu), not a blocking pool size. A large value no longer helps and oversubscribes the scheduler.
+- The advertised `max_streams` must be at least the client's concurrent-stream count, or the client's optimistically opened streams get `REFUSED_STREAM` at connection start. The HttpArena entry sets `max_streams = 128` (h2load uses `-m 100`).
+- `.EPOLL` streaming handlers must be bounded: a long-running stream blocks the other connections on that worker. Unbounded streaming should use `.ASYNC`.
+- Non-blocking writes use the staged flush. `EAGAIN` is treated as a broken pipe and drops the connection. This never triggers for the small replies of the benchmark, but a slow client with a large reply could be dropped: a future `EPOLLOUT` backpressure queue would remove that edge.
+- The h2c upgrade path in the multiplexed loop is minimal: it returns `400` without an `Upgrade: h2c` header (the validate probe path) and `101` then the connection preface with one, but it does not serve an initial request carried on stream 1 of the upgrade. Prior-knowledge clients are unaffected.
+- A one-line change in `HpackEncoder.writeString` (annotating the Huffman result as `?usize`) lets the encoder run at comptime so the cached blocks can be built there.
+
+---
+
+## ADR-032: `EPOLL_MAX_EVENTS = 512`, one named epoll batch constant across all servers
+
+**Status:** Accepted
+
+**Context:** Every native epoll worker (`zix.Tcp`, `zix.Http`, `zix.Fix`, `zix.Grpc`, `zix.Http1`) calls `epoll_wait` with a fixed-size `epoll_event` array. That size is the maximum number of ready events the worker drains in one syscall. The value was `256` everywhere, expressed three different ways: a named file-level `epoll_max_events` in `tcp` and `http`, and an inline `const max_events` literal in `fix`, `grpc`, and `http1`. With one `SO_REUSEPORT` listener and one epoll instance per worker, a worker on a 12-core box at 4096 connections holds roughly 341 fds, so more than 256 can be readable in a single tick. A 256 cap then forces a second `epoll_wait` to drain the remainder, an extra syscall per loop that appears only once the ready set exceeds the cap.
+
+**Decision:** Raise the batch to `512` and express it as one named, documented file-level constant `EPOLL_MAX_EVENTS: usize = 512` in each of the five server files, used for both the `[N]epoll_event` array size and the `epoll_wait` count argument. The inline `256` literals and the lowercase `epoll_max_events` consts are removed, and the type is unified to `usize`. 512 covers a worker's ready-fd set in one syscall at the high connection counts where the old cap was binding.
+
+**Consequences:**
+- A/B perf (`EPOLL_MAX_EVENTS` 256 vs 512 on the same release build, fixed-response handler, profiled with `perf stat` on userspace counters) showed the change is neutral at c128 and c1024, where the ready set per worker is well under 256 so the cap never bound, and a small gain at c4096, where throughput rose ~8% and userspace cycles per request fell. That matches the predicted mechanism: fewer `epoll_wait` syscalls only where the ready set exceeded 256.
+- Cost is one `epoll_event` array per worker growing from ~6 KB to ~12 KB of stack. Negligible against the 512 KB worker stacks.
+- No public API change. The constant is private and not configurable. The value is a tuned default, not a knob.
+- The c2048+ throughput collapse seen on a shared-core loopback box is environmental (load generator and server contend for the same cores). It is neither caused nor addressed by this constant.
+
+---
+
+## ADR-033: `zix.Http1` router gains `.PREFIX` and `.PARAM`, params via thread-local
+
+**Status:** Accepted
+
+**Context:** The `zix.Http1` comptime router was exact-match only (`std.mem.eql` over the route table), while the higher-level `zix.Http` router has supported `.EXACT` / `.PREFIX` / `.PARAM` since ADR-004. Any prefix or path-param routing in an Http1 server had to be hand-written in the dispatch function with `startsWith` and `splitScalar` (as `examples/http1_paths.zig` did). The capture problem is the reason the gap persisted: the `zix.Http` matcher writes captured params to `req.path_params`, but the Http1 handler is `fn(head: *const ParsedHead, body, fd) void` with no `Request` and no per-call mutable state to write into (the same lean zero-alloc signature defended in ADR-029).
+
+**Decision:** Bring the Http1 router to parity with the Http router. Add `RouteKind { EXACT, PREFIX, PARAM }` and a `kind` field (default `.EXACT`) to `zix.Http1.Route`, and partition the route table at comptime into a `StaticStringMap` (exact), a PARAM array, and a PREFIX array. Dispatch keeps the ADR-004 priority: exact (O(1) hash) > param (first-registered wins) > prefix (longest wins). Param capture reuses the ADR-029 model: matched `:name` segments are written to a per-handler `threadlocal` store in `router.zig`, read back through a new free function `zix.Http1.pathParam(name)` instead of a ctx or `Request`. The store is a fixed array capped at `MAX_PATH_PARAMS = 8`, so capture is zero-alloc. The prefix pass guards the boundary index behind `startsWith` (`p[route.path.len]` is only read once `p.len >= route.path.len`), and the same guard was applied back to the `zix.Http` router, which had the index ordered before the `startsWith` check.
+
+**Consequences:**
+- The handler signature is unchanged and `.kind` defaults to `.EXACT`, so every existing exact-only Http1 route table compiles and behaves identically. No breaking change.
+- Param values are thread-local and valid only for the dispatch call (they borrow the request path), which matches the shared-nothing model where one worker serves one connection at a time. A handler that needs a param past its own return must copy it.
+- Capture is capped at 8 params per match. A pattern with more `:segments` than that fails to match rather than overflowing.
+- The `zix.Http` prefix pass no longer reads one byte past a short request path. In ReleaseFast this was a harmless out-of-bounds read masked by the `and`, in Debug or ReleaseSafe it was a panic on any request path shorter than a registered prefix.
+- `examples/http1_paths.zig` still demonstrates manual `startsWith` / `splitScalar` routing on purpose (custom matching beyond the three kinds). Its prior comment claiming the router is exact-only was corrected.
 
 ---
 

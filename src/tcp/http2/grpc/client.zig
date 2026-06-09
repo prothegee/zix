@@ -1,4 +1,4 @@
-//! gRPC h2c client — unary and streaming calls.
+//! gRPC h2c client: unary and streaming calls.
 
 const std = @import("std");
 const h2 = @import("../Http2.zig");

@@ -69,6 +69,10 @@ pub const GrpcContext = struct {
     /// Shared connection-level write spinlock. Null when no concurrent writes are possible.
     /// Held for the entire duration of each frame write to prevent interleaving across streams.
     _write_mutex: ?*ConnMutex = null,
+    /// Optional corked output buffer. When set (inline unary path), HEADERS, DATA and the
+    /// trailer are staged here and flushed in a single write() after the handler returns.
+    /// Null on the streaming path, which writes each frame directly under _write_mutex.
+    _out: ?*ReplyStage = null,
 
     /// Read the next gRPC message from the buffered request stream.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
@@ -86,16 +90,27 @@ pub const GrpcContext = struct {
         return message;
     }
 
-    /// Write initial HEADERS if not already sent. No lock acquired — caller must hold _write_mutex.
+    /// Write initial HEADERS if not already sent. No lock acquired, caller must hold _write_mutex.
     fn _flushHeaders(self: *GrpcContext, content_type: []const u8) void {
         if (self._hdr_sent) return;
 
-        frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+        if (self._out) |out| {
+            var buf: [600]u8 = undefined;
+            const n = frame.buildGrpcHeaders(&buf, self.stream_id, content_type);
+            out.append(buf[0..n]);
+        } else {
+            frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+        }
         self._hdr_sent = true;
     }
 
     /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
     pub fn sendHeaders(self: *GrpcContext, content_type: []const u8) void {
+        if (self._out != null) {
+            self._flushHeaders(content_type);
+            return;
+        }
+
         if (self._write_mutex) |mutex| mutex.lock();
         defer {
             if (self._write_mutex) |mutex| mutex.unlock();
@@ -106,8 +121,20 @@ pub const GrpcContext = struct {
 
     /// Send one gRPC response message DATA frame.
     /// Sends initial headers first if not yet sent.
-    /// Headers and data are written under a single lock to prevent frame interleaving.
+    /// On the staged (inline unary) path the frame is appended to the cork buffer.
+    /// On the streaming path headers and data are written under a single lock to prevent interleaving.
     pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
+        if (self._out) |out| {
+            self._flushHeaders(content_type);
+
+            var head: [14]u8 = undefined;
+            _ = frame.buildGrpcDataHeader(&head, self.stream_id, data.len);
+            out.append(&head);
+            out.append(data);
+            self._sent_bytes += data.len;
+            return;
+        }
+
         if (self._write_mutex) |mutex| mutex.lock();
         defer {
             if (self._write_mutex) |mutex| mutex.unlock();
@@ -124,6 +151,16 @@ pub const GrpcContext = struct {
         self._grpc_status = @intFromEnum(stat);
         const status_code = self._grpc_status;
 
+        if (self._out) |out| {
+            var buf: [600]u8 = undefined;
+            const n = if (self._hdr_sent)
+                frame.buildGrpcTrailer(&buf, self.stream_id, status_code, grpc_message)
+            else
+                frame.buildGrpcError(&buf, self.stream_id, status_code, grpc_message);
+            out.append(buf[0..n]);
+            return;
+        }
+
         if (self._write_mutex) |mutex| mutex.lock();
         defer {
             if (self._write_mutex) |mutex| mutex.unlock();
@@ -137,7 +174,7 @@ pub const GrpcContext = struct {
     }
 
     /// Return true when deadline_ns has passed. False when deadline_ns is null.
-    /// Does not cancel or interrupt anything — handler must check explicitly.
+    /// Does not cancel or interrupt anything, handler must check explicitly.
     pub fn isExpired(self: *const GrpcContext) bool {
         const deadline = self.deadline_ns orelse return false;
         return wallClockNs() >= deadline;
@@ -174,7 +211,7 @@ pub const Route = struct {
     /// requires client flow-control window updates while writing). When false (default),
     /// the handler runs synchronously on the connection thread: no task alloc, no 4KB
     /// header copy, no mutex. Synchronous dispatch blocks the read loop for the handler
-    /// duration — only safe for short unary handlers.
+    /// duration, only safe for short unary handlers.
     is_server_streaming: bool = false,
 };
 
@@ -230,21 +267,107 @@ pub const GrpcServeOpts = struct {
 
 // --------------------------------------------------------- //
 
+/// Stream-level receive window advertised in SETTINGS. Large enough that small unary and
+/// streaming request bodies never need a per-DATA WINDOW_UPDATE. Inbound bodies above this
+/// on a single stream would stall (not a benchmark or typical gRPC shape).
+const STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+
+/// One-time connection-level window bump sent after the SETTINGS handshake. Lifts the fixed
+/// 65535 connection receive window so the read loop does not WINDOW_UPDATE per DATA frame.
+const CONN_WINDOW_BUMP: u31 = 1 << 30;
+
+/// Replenish the connection window once cumulative inbound DATA crosses this. Keeps long-lived
+/// connections that move more than CONN_WINDOW_BUMP bytes from stalling, while staying ~0
+/// updates per request for the small-body case.
+const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;
+
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
+/// Per-stream parse state. body and header_scratch are slices into per-connection
+/// backing buffers (sized to opts.max_body / opts.max_header_scratch), not inline arrays,
+/// so a connection's stream table costs O(max_streams * max_body) instead of a fixed
+/// ~70 KB per slot regardless of configured limits.
 const Stream = struct {
     id: u31,
     state: StreamState,
     headers: [h2.MAX_HEADERS]h2.Header,
     header_count: usize,
-    body: [65536]u8,
+    body: []u8,
     body_len: usize,
-    header_scratch: [4096]u8,
+    header_scratch: []u8,
     end_headers: bool,
     end_stream: bool,
 };
 
 // --------------------------------------------------------- //
+
+/// Corked output buffer for one inline (unary) reply. Stages HEADERS + DATA + trailer
+/// and flushes them to the fd in a single write(). Frames larger than the buffer are
+/// passed through directly after flushing the staged prefix, preserving wire order.
+const ReplyStage = struct {
+    fd: std.posix.fd_t,
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+
+    fn append(self: *ReplyStage, bytes: []const u8) void {
+        if (bytes.len > self.buf.len - self.len) {
+            self.flush();
+            if (bytes.len > self.buf.len) {
+                h2.fdWriteAll(self.fd, bytes) catch {};
+                return;
+            }
+        }
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    fn flush(self: *ReplyStage) void {
+        if (self.len == 0) return;
+
+        h2.fdWriteAll(self.fd, self.buf[0..self.len]) catch {};
+        self.len = 0;
+    }
+};
+
+/// Buffered frame reader for one connection. Reads in chunks and serves frame headers and
+/// payloads from the buffer, so a batch of small frames (the common HEADERS + DATA pair of a
+/// unary call) costs one read() instead of two per frame. Payload slices point into buf and
+/// are valid only until the next ensure() call.
+const ConnReader = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    start: usize = 0,
+    end: usize = 0,
+
+    fn fillSome(self: *ConnReader) !void {
+        if (self.start == self.end) {
+            self.start = 0;
+            self.end = 0;
+        } else if (self.end == self.buf.len) {
+            const n = self.end - self.start;
+            std.mem.copyForwards(u8, self.buf[0..n], self.buf[self.start..self.end]);
+            self.start = 0;
+            self.end = n;
+        }
+
+        const got = std.posix.read(self.fd, self.buf[self.end..]) catch return error.Closed;
+        if (got == 0) return error.Closed;
+        self.end += got;
+    }
+
+    /// Block until at least `need` bytes are buffered. `need` must be <= buf.len.
+    fn ensure(self: *ConnReader, need: usize) !void {
+        while (self.end - self.start < need) try self.fillSome();
+    }
+
+    /// Return the next `n` buffered bytes and advance. Caller must ensure(n) first.
+    fn take(self: *ConnReader, n: usize) []u8 {
+        const slice = self.buf[self.start..][0..n];
+        self.start += n;
+        return slice;
+    }
+};
 
 /// Heap-allocated ref-counted write spinlock for one h2 connection.
 /// Shared between the read loop and all per-stream handler threads.
@@ -367,7 +490,12 @@ fn spawnGrpcStream(
     task.stream_id = s.id;
     task.header_count = s.header_count;
     task.headers = s.headers;
-    task.header_scratch = s.header_scratch;
+
+    // s.header_scratch is a slice into the connection backing buffer. Copy its used range
+    // into the task's owned array so header name/value pointers can be rebased below.
+    // Requires opts.max_header_scratch <= task.header_scratch.len (4096).
+    const scratch_n = @min(task.header_scratch.len, s.header_scratch.len);
+    @memcpy(task.header_scratch[0..scratch_n], s.header_scratch[0..scratch_n]);
     task.body_len = s.body_len;
     @memcpy(task.body[0..s.body_len], s.body[0..s.body_len]);
     task.opts = opts;
@@ -439,6 +567,12 @@ fn dispatchGrpcInline(
     var time_start: std.os.linux.timespec = undefined;
     if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
 
+    // The reply (HEADERS + DATA + trailer) is staged and flushed in one write().
+    // Hold the connection write lock across the whole reply only when a streaming
+    // task may be writing concurrently, so frames are not interleaved.
+    const need_mutex = conn_mutex.active_streaming.load(.acquire) > 0;
+    var stage = ReplyStage{ .fd = fd };
+
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = stream.id,
@@ -448,9 +582,14 @@ fn dispatchGrpcInline(
         ._sent_bytes = 0,
         ._grpc_status = 0,
         .deadline_ns = computeDeadline(opts.handler_timeout_ms, stream.headers[0..stream.header_count]),
-        ._write_mutex = if (conn_mutex.active_streaming.load(.acquire) > 0) conn_mutex else null,
+        ._write_mutex = null,
+        ._out = &stage,
     };
+
+    if (need_mutex) conn_mutex.lock();
     Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+    stage.flush();
+    if (need_mutex) conn_mutex.unlock();
 
     if (opts.logger) |logger| {
         var time_end: std.os.linux.timespec = undefined;
@@ -512,7 +651,7 @@ fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: 
         }
         try h2.sendSettings(fd, &.{
             .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
-            .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
+            .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
             .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
             .{ h2.SETTINGS_ENABLE_PUSH, 0 },
         });
@@ -604,7 +743,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
 
     try h2.sendSettings(fd, &.{
         .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
-        .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
+        .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
         .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
         .{ h2.SETTINGS_ENABLE_PUSH, 0 },
     });
@@ -658,8 +797,12 @@ fn serveGrpcLoop(
     initial_last_stream: u31,
 ) !void {
     const max_payload = opts.max_frame_size + 256;
-    const payload_buf = try std.heap.smp_allocator.alloc(u8, max_payload);
-    defer std.heap.smp_allocator.free(payload_buf);
+    // Read buffer holds at least one full frame (header + max payload) and is large enough
+    // to batch several small frames per read().
+    const reader_cap = @max(64 * 1024, max_payload + 9);
+    const reader_buf = try std.heap.smp_allocator.alloc(u8, reader_cap);
+    defer std.heap.smp_allocator.free(reader_buf);
+    var reader = ConnReader{ .fd = fd, .buf = reader_buf };
 
     const streams = try std.heap.smp_allocator.alloc(Stream, opts.max_streams);
     defer std.heap.smp_allocator.free(streams);
@@ -667,14 +810,25 @@ fn serveGrpcLoop(
     defer std.heap.smp_allocator.free(stream_slots);
     @memset(stream_slots, false);
 
+    const bodies = try std.heap.smp_allocator.alloc(u8, opts.max_body * opts.max_streams);
+    defer std.heap.smp_allocator.free(bodies);
+    const scratches = try std.heap.smp_allocator.alloc(u8, opts.max_header_scratch * opts.max_streams);
+    defer std.heap.smp_allocator.free(scratches);
+    for (streams, 0..) |*s, i| {
+        s.body = bodies[i * opts.max_body ..][0..opts.max_body];
+        s.header_scratch = scratches[i * opts.max_header_scratch ..][0..opts.max_header_scratch];
+    }
+
     var last_stream_id: u31 = initial_last_stream;
+    var conn_window_consumed: usize = 0;
 
     const conn_mutex = try std.heap.smp_allocator.create(ConnMutex);
     conn_mutex.* = .{};
     defer conn_mutex.release();
 
     while (true) {
-        const frame_header = try h2.readFrameHeader(fd);
+        try reader.ensure(9);
+        const frame_header = h2.parseFrameHeader(reader.take(9));
 
         if (frame_header.length > max_payload) {
             {
@@ -685,8 +839,8 @@ fn serveGrpcLoop(
             return error.FrameTooLarge;
         }
 
-        const payload = payload_buf[0..frame_header.length];
-        if (frame_header.length > 0) try h2.recvExact(fd, payload);
+        try reader.ensure(frame_header.length);
+        const payload = reader.take(frame_header.length);
 
         switch (frame_header.frame_type) {
             h2.FT_SETTINGS => {
@@ -705,7 +859,7 @@ fn serveGrpcLoop(
                     conn_mutex.lock();
                     defer conn_mutex.unlock();
                     try h2.sendSettingsAck(fd);
-                    try h2.sendWindowUpdate(fd, 0, 65535);
+                    try h2.sendWindowUpdate(fd, 0, CONN_WINDOW_BUMP);
                 }
             },
 
@@ -783,7 +937,7 @@ fn serveGrpcLoop(
                 }
                 block = block[offset .. block.len - pad_len];
 
-                stream.header_count = hpack_dec.decode(block, &stream.headers, &stream.header_scratch) catch {
+                stream.header_count = hpack_dec.decode(block, &stream.headers, stream.header_scratch) catch {
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
@@ -812,7 +966,7 @@ fn serveGrpcLoop(
                     return error.ProtocolError;
                 };
                 const stream = &streams[slot];
-                const count = hpack_dec.decode(payload, stream.headers[stream.header_count..], &stream.header_scratch) catch {
+                const count = hpack_dec.decode(payload, stream.headers[stream.header_count..], stream.header_scratch) catch {
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
@@ -865,11 +1019,17 @@ fn serveGrpcLoop(
                 }
                 data = data[0 .. data.len - pad_len];
 
+                // Stream-level flow control is covered by the large STREAM_WINDOW_SIZE in
+                // SETTINGS, so no per-frame stream WINDOW_UPDATE is needed. The connection
+                // window is bumped once at handshake and only replenished in bulk here.
                 if (data.len > 0) {
-                    conn_mutex.lock();
-                    defer conn_mutex.unlock();
-                    h2.sendWindowUpdate(fd, 0, @intCast(data.len)) catch {};
-                    h2.sendWindowUpdate(fd, stream_id, @intCast(data.len)) catch {};
+                    conn_window_consumed += data.len;
+                    if (conn_window_consumed >= CONN_REPLENISH_THRESHOLD) {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        h2.sendWindowUpdate(fd, 0, @intCast(conn_window_consumed)) catch {};
+                        conn_window_consumed = 0;
+                    }
                 }
 
                 const to_copy = @min(data.len, stream.body.len - stream.body_len);
@@ -891,6 +1051,500 @@ fn serveGrpcLoop(
             h2.FT_GOAWAY => return,
             h2.FT_PRIORITY => {},
             else => {},
+        }
+    }
+}
+
+// --------------------------------------------------------- //
+// Multiplexed EPOLL model: one worker thread drives many non-blocking connections through a
+// resumable h2 state machine. Each connection is owned by a single worker, so dispatch is
+// inline (no per-stream threads, no connection write mutex) and every frame produced in one
+// readable event is coalesced into the connection's ReplyStage and flushed in one write().
+// --------------------------------------------------------- //
+
+pub const GrpcConnOutcome = enum { keep_alive, close };
+
+const MuxPhase = enum { await_preface, await_upgrade, await_preface2, h2 };
+
+/// Per-connection h2/gRPC state for the multiplexed EPOLL model. Heap-owned, one per fd.
+/// rbuf is the read accumulator: it persists across readable events and holds any partial
+/// frame until the rest arrives. The stream table, hpack decoder and reply cork are all
+/// private to the owning worker thread.
+pub const GrpcMuxConn = struct {
+    fd: std.posix.fd_t,
+    opts: GrpcServeOpts,
+
+    rbuf: []u8,
+    rstart: usize,
+    rend: usize,
+
+    hpack_dec: h2.HpackDecoder,
+
+    streams: []Stream,
+    slots: []bool,
+    bodies: []u8,
+    scratches: []u8,
+
+    last_stream_id: u31,
+    conn_window_consumed: usize,
+    phase: MuxPhase,
+
+    stage: ReplyStage,
+
+    /// Allocate and initialize a connection.
+    ///
+    /// Return:
+    /// - null on allocation failure (caller closes fd)
+    pub fn init(fd: std.posix.fd_t, opts: GrpcServeOpts) ?*GrpcMuxConn {
+        const conn = std.heap.smp_allocator.create(GrpcMuxConn) catch return null;
+
+        const max_payload = opts.max_frame_size + 256;
+        const rcap = @max(32 * 1024, max_payload + 9);
+        const rbuf = std.heap.smp_allocator.alloc(u8, rcap) catch {
+            std.heap.smp_allocator.destroy(conn);
+            return null;
+        };
+        const streams = std.heap.smp_allocator.alloc(Stream, opts.max_streams) catch {
+            std.heap.smp_allocator.free(rbuf);
+            std.heap.smp_allocator.destroy(conn);
+            return null;
+        };
+        const slots = std.heap.smp_allocator.alloc(bool, opts.max_streams) catch {
+            std.heap.smp_allocator.free(streams);
+            std.heap.smp_allocator.free(rbuf);
+            std.heap.smp_allocator.destroy(conn);
+            return null;
+        };
+        const bodies = std.heap.smp_allocator.alloc(u8, opts.max_body * opts.max_streams) catch {
+            std.heap.smp_allocator.free(slots);
+            std.heap.smp_allocator.free(streams);
+            std.heap.smp_allocator.free(rbuf);
+            std.heap.smp_allocator.destroy(conn);
+            return null;
+        };
+        const scratches = std.heap.smp_allocator.alloc(u8, opts.max_header_scratch * opts.max_streams) catch {
+            std.heap.smp_allocator.free(bodies);
+            std.heap.smp_allocator.free(slots);
+            std.heap.smp_allocator.free(streams);
+            std.heap.smp_allocator.free(rbuf);
+            std.heap.smp_allocator.destroy(conn);
+            return null;
+        };
+
+        @memset(slots, false);
+        for (streams, 0..) |*s, i| {
+            s.body = bodies[i * opts.max_body ..][0..opts.max_body];
+            s.header_scratch = scratches[i * opts.max_header_scratch ..][0..opts.max_header_scratch];
+        }
+
+        conn.* = .{
+            .fd = fd,
+            .opts = opts,
+            .rbuf = rbuf,
+            .rstart = 0,
+            .rend = 0,
+            .hpack_dec = h2.HpackDecoder.init(),
+            .streams = streams,
+            .slots = slots,
+            .bodies = bodies,
+            .scratches = scratches,
+            .last_stream_id = 0,
+            .conn_window_consumed = 0,
+            .phase = .await_preface,
+            .stage = .{ .fd = fd },
+        };
+
+        return conn;
+    }
+
+    pub fn deinit(self: *GrpcMuxConn) void {
+        std.heap.smp_allocator.free(self.scratches);
+        std.heap.smp_allocator.free(self.bodies);
+        std.heap.smp_allocator.free(self.slots);
+        std.heap.smp_allocator.free(self.streams);
+        std.heap.smp_allocator.free(self.rbuf);
+        std.heap.smp_allocator.destroy(self);
+    }
+};
+
+/// Append a complete frame (9-byte header + payload) to the connection reply cork.
+fn muxStageFrame(conn: *GrpcMuxConn, frame_type: u8, flags: u8, stream_id: u31, payload: []const u8) void {
+    var hdr: [9]u8 = undefined;
+    h2.encodeFrameHeader(&hdr, .{
+        .length = @intCast(payload.len),
+        .frame_type = frame_type,
+        .flags = flags,
+        .stream_id = stream_id,
+    });
+    conn.stage.append(&hdr);
+    if (payload.len > 0) conn.stage.append(payload);
+}
+
+fn muxStageWindowUpdate(conn: *GrpcMuxConn, stream_id: u31, increment: u31) void {
+    var payload: [4]u8 = undefined;
+    std.mem.writeInt(u32, &payload, @as(u32, increment), .big);
+    muxStageFrame(conn, h2.FT_WINDOW_UPDATE, 0, stream_id, &payload);
+}
+
+fn muxStageGoaway(conn: *GrpcMuxConn, last_stream: u31, error_code: u32) void {
+    var payload: [8]u8 = undefined;
+    std.mem.writeInt(u32, payload[0..4], @as(u32, last_stream), .big);
+    std.mem.writeInt(u32, payload[4..8], error_code, .big);
+    muxStageFrame(conn, h2.FT_GOAWAY, 0, 0, &payload);
+}
+
+fn muxStageRst(conn: *GrpcMuxConn, stream_id: u31, error_code: u32) void {
+    var payload: [4]u8 = undefined;
+    std.mem.writeInt(u32, &payload, error_code, .big);
+    muxStageFrame(conn, h2.FT_RST_STREAM, 0, stream_id, &payload);
+}
+
+/// Stage the server SETTINGS frame (same parameters as the blocking handshake).
+fn muxStageServerSettings(conn: *GrpcMuxConn) void {
+    const params = [_][2]u32{
+        .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(conn.opts.max_streams)) },
+        .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
+        .{ h2.SETTINGS_MAX_FRAME_SIZE, conn.opts.max_frame_size },
+        .{ h2.SETTINGS_ENABLE_PUSH, 0 },
+    };
+
+    var payload: [params.len * 6]u8 = undefined;
+    for (params, 0..) |p, i| {
+        std.mem.writeInt(u16, payload[i * 6 ..][0..2], @as(u16, @intCast(p[0])), .big);
+        std.mem.writeInt(u32, payload[i * 6 + 2 ..][0..4], p[1], .big);
+    }
+    muxStageFrame(conn, h2.FT_SETTINGS, 0, 0, &payload);
+}
+
+/// Dispatch one fully-received stream inline, staging the reply into the connection cork.
+/// Unlike the blocking path this never spawns a thread or takes a connection mutex: the worker
+/// owns the connection, so a streaming handler runs on the event loop and must stay bounded.
+fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stream) void {
+    const path = headerPath(stream.headers[0..stream.header_count]);
+
+    var time_start: std.os.linux.timespec = undefined;
+    if (conn.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+
+    var ctx = GrpcContext{
+        .fd = conn.fd,
+        .stream_id = stream.id,
+        ._body = stream.body[0..stream.body_len],
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        .deadline_ns = computeDeadline(conn.opts.handler_timeout_ms, stream.headers[0..stream.header_count]),
+        ._write_mutex = null,
+        ._out = &conn.stage,
+    };
+    Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+
+    if (conn.opts.logger) |logger| {
+        var time_end: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
+        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
+            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
+        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+        var peer_buf: [64]u8 = undefined;
+        const peer = peerStr(conn.fd, &peer_buf);
+        logger.rpc(peer, path, ctx._grpc_status, stream.body_len, ctx._sent_bytes, dur_ms);
+    }
+}
+
+/// Handle the HTTP/1.1 h2c upgrade request for a non-prior-knowledge client.
+/// Minimal by design: any client without "Upgrade: h2c" gets 400 (this is the validate probe
+/// path). A valid h2c upgrade gets 101 and then expects the connection preface, but the initial
+/// request carried on stream 1 by the upgrade is not served (prior-knowledge clients do not use
+/// this path).
+///
+/// Return:
+/// - .close when the request is complete and rejected
+fn muxHandleUpgrade(conn: *GrpcMuxConn) GrpcConnOutcome {
+    const buf = conn.rbuf[conn.rstart..conn.rend];
+    const marker = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse {
+        if (conn.rend == conn.rbuf.len) return .close;
+        return .keep_alive;
+    };
+    const hdr_end = marker + 4;
+
+    const upgrade_val = getHttp1Header(buf[0..hdr_end], "upgrade");
+    const is_h2c = upgrade_val != null and std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_val.?, " "), "h2c");
+    if (!is_h2c) {
+        conn.stage.append("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        return .close;
+    }
+
+    conn.stage.append("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n");
+    conn.rstart += hdr_end;
+    conn.phase = .await_preface2;
+
+    return .keep_alive;
+}
+
+/// Process as many complete frames as are currently buffered.
+///
+/// Return:
+/// - .keep_alive when the buffer is drained or holds only a partial frame (wait for more bytes)
+/// - .close on a protocol error or GOAWAY (a GOAWAY/close reply is staged first)
+fn muxProcess(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+    switch (conn.phase) {
+        .await_preface => {
+            const avail = conn.rend - conn.rstart;
+            if (avail < 3) return .keep_alive;
+
+            if (!std.mem.eql(u8, conn.rbuf[conn.rstart..][0..3], "PRI")) {
+                conn.phase = .await_upgrade;
+                return muxHandleUpgrade(conn);
+            }
+            if (avail < h2.PREFACE.len) return .keep_alive;
+            if (!std.mem.eql(u8, conn.rbuf[conn.rstart..][0..h2.PREFACE.len], h2.PREFACE)) {
+                muxStageGoaway(conn, 0, h2.ERR_PROTOCOL_ERROR);
+                return .close;
+            }
+
+            conn.rstart += h2.PREFACE.len;
+            muxStageServerSettings(conn);
+            conn.phase = .h2;
+        },
+
+        .await_upgrade => return muxHandleUpgrade(conn),
+
+        .await_preface2 => {
+            const avail = conn.rend - conn.rstart;
+            if (avail < h2.PREFACE.len) return .keep_alive;
+            if (!std.mem.eql(u8, conn.rbuf[conn.rstart..][0..h2.PREFACE.len], h2.PREFACE)) {
+                muxStageGoaway(conn, 0, h2.ERR_PROTOCOL_ERROR);
+                return .close;
+            }
+
+            conn.rstart += h2.PREFACE.len;
+            muxStageServerSettings(conn);
+            conn.phase = .h2;
+        },
+
+        .h2 => {},
+    }
+
+    return muxFrameLoop(routes, conn);
+}
+
+/// The h2 frame loop over buffered bytes for a connection in the .h2 phase.
+fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+    const max_payload = conn.opts.max_frame_size + 256;
+
+    while (true) {
+        const avail = conn.rend - conn.rstart;
+        if (avail < 9) return .keep_alive;
+
+        const fh = h2.parseFrameHeader(conn.rbuf[conn.rstart..][0..9]);
+        if (fh.length > max_payload) {
+            muxStageGoaway(conn, conn.last_stream_id, h2.ERR_FRAME_SIZE_ERROR);
+            return .close;
+        }
+        if (avail < 9 + fh.length) return .keep_alive;
+
+        conn.rstart += 9;
+        const payload = conn.rbuf[conn.rstart..][0..fh.length];
+        conn.rstart += fh.length;
+
+        switch (fh.frame_type) {
+            h2.FT_SETTINGS => {
+                if ((fh.flags & h2.FLAG_ACK) != 0) continue;
+                var i: usize = 0;
+                while (i + 6 <= payload.len) : (i += 6) {
+                    const id: u16 = (@as(u16, payload[i]) << 8) | payload[i + 1];
+                    const val: u32 = (@as(u32, payload[i + 2]) << 24) | (@as(u32, payload[i + 3]) << 16) |
+                        (@as(u32, payload[i + 4]) << 8) | payload[i + 5];
+                    if (id == h2.SETTINGS_HEADER_TABLE_SIZE) {
+                        conn.hpack_dec.max_size = val;
+                        conn.hpack_dec.evictTo(val);
+                    }
+                }
+
+                muxStageFrame(conn, h2.FT_SETTINGS, h2.FLAG_ACK, 0, &.{});
+                muxStageWindowUpdate(conn, 0, CONN_WINDOW_BUMP);
+            },
+
+            h2.FT_WINDOW_UPDATE => {},
+
+            h2.FT_PING => {
+                if ((fh.flags & h2.FLAG_ACK) != 0) continue;
+                if (payload.len != 8) {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_FRAME_SIZE_ERROR);
+                    return .close;
+                }
+
+                muxStageFrame(conn, h2.FT_PING, h2.FLAG_ACK, 0, payload);
+            },
+
+            h2.FT_HEADERS => {
+                const stream_id = fh.stream_id;
+                if (stream_id == 0) {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+                    return .close;
+                }
+                if (stream_id <= conn.last_stream_id and stream_id % 2 == 1) {
+                    muxStageRst(conn, stream_id, h2.ERR_STREAM_CLOSED);
+                    continue;
+                }
+                conn.last_stream_id = @max(conn.last_stream_id, stream_id);
+
+                const slot = slotFor(stream_id, conn.streams, conn.slots) orelse {
+                    muxStageRst(conn, stream_id, h2.ERR_REFUSED_STREAM);
+                    continue;
+                };
+                const stream = &conn.streams[slot];
+                stream.id = stream_id;
+                stream.state = .OPEN;
+                stream.body_len = 0;
+
+                var block = payload;
+                var offset: usize = 0;
+                var pad_len: usize = 0;
+                if ((fh.flags & h2.FLAG_PADDED) != 0 and block.len > 0) {
+                    pad_len = block[0];
+                    offset = 1;
+                }
+                if ((fh.flags & h2.FLAG_PRIORITY) != 0 and offset + 5 <= block.len) {
+                    offset += 5;
+                }
+                if (pad_len + offset > block.len) {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+                    return .close;
+                }
+                block = block[offset .. block.len - pad_len];
+
+                stream.header_count = conn.hpack_dec.decode(block, &stream.headers, stream.header_scratch) catch {
+                    muxStageRst(conn, stream_id, h2.ERR_COMPRESSION_ERROR);
+                    conn.slots[slot] = false;
+                    continue;
+                };
+                stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
+                stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
+
+                if (stream.end_headers and stream.end_stream) {
+                    muxDispatch(routes, conn, stream);
+                    conn.slots[slot] = false;
+                }
+            },
+
+            h2.FT_CONTINUATION => {
+                const stream_id = fh.stream_id;
+                const slot = findSlot(stream_id, conn.streams, conn.slots) orelse {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+                    return .close;
+                };
+                const stream = &conn.streams[slot];
+                const count = conn.hpack_dec.decode(payload, stream.headers[stream.header_count..], stream.header_scratch) catch {
+                    muxStageRst(conn, stream_id, h2.ERR_COMPRESSION_ERROR);
+                    conn.slots[slot] = false;
+                    continue;
+                };
+                stream.header_count += count;
+                stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
+                if (stream.end_headers and stream.end_stream) {
+                    muxDispatch(routes, conn, stream);
+                    conn.slots[slot] = false;
+                }
+            },
+
+            h2.FT_DATA => {
+                const stream_id = fh.stream_id;
+                if (stream_id == 0) {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+                    return .close;
+                }
+                const slot = findSlot(stream_id, conn.streams, conn.slots) orelse {
+                    muxStageRst(conn, stream_id, h2.ERR_STREAM_CLOSED);
+                    continue;
+                };
+                const stream = &conn.streams[slot];
+
+                var data = payload;
+                var pad_len: usize = 0;
+                if ((fh.flags & h2.FLAG_PADDED) != 0 and data.len > 0) {
+                    pad_len = data[0];
+                    data = data[1..];
+                }
+                if (pad_len > data.len) {
+                    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+                    return .close;
+                }
+                data = data[0 .. data.len - pad_len];
+
+                if (data.len > 0) {
+                    conn.conn_window_consumed += data.len;
+                    if (conn.conn_window_consumed >= CONN_REPLENISH_THRESHOLD) {
+                        muxStageWindowUpdate(conn, 0, @intCast(conn.conn_window_consumed));
+                        conn.conn_window_consumed = 0;
+                    }
+                }
+
+                const to_copy = @min(data.len, stream.body.len - stream.body_len);
+                @memcpy(stream.body[stream.body_len..][0..to_copy], data[0..to_copy]);
+                stream.body_len += to_copy;
+                stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
+
+                if (stream.end_stream) {
+                    muxDispatch(routes, conn, stream);
+                    conn.slots[slot] = false;
+                }
+            },
+
+            h2.FT_RST_STREAM => {
+                if (findSlot(fh.stream_id, conn.streams, conn.slots)) |slot| conn.slots[slot] = false;
+            },
+
+            h2.FT_GOAWAY => return .close,
+            h2.FT_PRIORITY => {},
+            else => {},
+        }
+    }
+}
+
+/// Drive one readable event for a multiplexed connection: read available bytes (non-blocking),
+/// process complete frames, and flush the staged reply in one write().
+///
+/// Return:
+/// - .close when the peer closed, a protocol error occurred, or the handshake was rejected
+pub fn grpcMuxOnReadable(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+    conn.stage.len = 0;
+
+    while (true) {
+        if (conn.rstart == conn.rend) {
+            conn.rstart = 0;
+            conn.rend = 0;
+        } else if (conn.rend == conn.rbuf.len) {
+            const n = conn.rend - conn.rstart;
+            std.mem.copyForwards(u8, conn.rbuf[0..n], conn.rbuf[conn.rstart..conn.rend]);
+            conn.rstart = 0;
+            conn.rend = n;
+        }
+
+        if (conn.rend == conn.rbuf.len) {
+            conn.stage.flush();
+            return .close;
+        }
+
+        const got = std.posix.read(conn.fd, conn.rbuf[conn.rend..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                conn.stage.flush();
+                return .keep_alive;
+            },
+            else => {
+                conn.stage.flush();
+                return .close;
+            },
+        };
+        if (got == 0) {
+            conn.stage.flush();
+            return .close;
+        }
+        conn.rend += got;
+
+        if (muxProcess(routes, conn) == .close) {
+            conn.stage.flush();
+            return .close;
         }
     }
 }

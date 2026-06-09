@@ -79,7 +79,7 @@ pub const Logger = struct {
         console: ConsoleMode = .OFF,
         /// Minimum level for console output.
         console_min_level: Level = .INFO,
-        /// Directory for log files. Must already exist — caller's responsibility. Empty string disables file logging.
+        /// Directory for log files. Must already exist, caller's responsibility. Empty string disables file logging.
         save_path: []const u8 = "",
         /// Base name for log files (e.g. "log" -> "log-000000.log").
         save_file: []const u8 = "log",

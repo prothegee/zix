@@ -21,10 +21,10 @@ pub const MultipartParser = struct {
     ///
     /// Param:
     /// allocator - std.mem.Allocator
-    /// boundary  - []const u8 (boundary string from the Content-Type header)
+    /// boundary - []const u8 (boundary string from the Content-Type header)
     ///
     /// Return:
-    /// MultipartParser
+    /// - MultipartParser
     pub fn init(allocator: std.mem.Allocator, boundary: []const u8) MultipartParser {
         return .{
             .boundary = boundary,
@@ -53,7 +53,7 @@ pub const MultipartParser = struct {
     /// body - []const u8 (full request body)
     ///
     /// Return:
-    /// !void
+    /// - !void
     pub fn parse(self: *MultipartParser, body: []const u8) !void {
         const boundary_start = try self.allocator.alloc(u8, self.boundary.len + 4);
         defer self.allocator.free(boundary_start);
@@ -141,7 +141,7 @@ pub const MultipartParser = struct {
     /// name - []const u8
     ///
     /// Return:
-    /// ?*MultipartField
+    /// - ?*MultipartField
     pub fn getField(self: *MultipartParser, name: []const u8) ?*MultipartField {
         for (self.fields.items) |*f| {
             if (std.mem.eql(u8, f.name, name)) return f;

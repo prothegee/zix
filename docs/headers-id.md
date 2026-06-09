@@ -12,8 +12,8 @@ Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap
 
 | Varian | Cap | Kapan digunakan |
 | :- | :- | :- |
-| `.MINIMAL` | 16 | API sederhana di lingkungan terkontrol atau terbatas, layanan internal tanpa proxy |
-| `.COMMON` | 32 | **Default.** Sebagian besar aplikasi web di balik satu proxy atau load balancer |
+| `.MINIMAL` | 16 | **Default.** API sederhana, layanan internal, handler polos tanpa proxy. Footprint arena per-respons paling ketat |
+| `.COMMON` | 32 | Sebagian besar aplikasi web di balik satu proxy atau load balancer |
 | `.LARGE` | 64 | Stack CDN + proxy, layanan yang mengemisi banyak header CORS, cache, atau forwarding |
 | `.EXTRA_LARGE` | 128 | Deployment k8s, service mesh (Envoy/Linkerd), rantai header yang padat |
 | `.{ .CUSTOM = N }` | N | Cap non-standar yang ditetapkan secara eksplisit |
@@ -32,7 +32,7 @@ var server = try zix.Http.Server.init(.{
 
 ## Memilih Tier
 
-**Mulai dengan `.COMMON` (32).** Hitung header yang benar-benar ditambahkan handler terberat di produksi, lalu bulatkan ke tier berikutnya. Jangan over-provisioning karena cap yang lebih besar berarti footprint arena per-respons yang lebih besar dan batas yang lebih sulit dianalisis saat diserang.
+**Mulai dengan `.MINIMAL` (16), nilai default.** Hitung header yang benar-benar ditambahkan handler terberat di produksi, lalu bulatkan ke tier berikutnya hanya jika melebihinya. Jangan over-provisioning karena cap yang lebih besar berarti footprint arena per-respons yang lebih besar dan batas yang lebih sulit dianalisis saat diserang.
 
 Perkiraan jumlah header berdasarkan deployment:
 
@@ -41,7 +41,7 @@ Perkiraan jumlah header berdasarkan deployment:
 - Dengan caching: +3-4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
 - Di balik k8s ingress: +5-10 (forwarding, tracing, `X-Forwarded-*`, `X-Envoy-*`)
 
-Jika mencapai 32 header dalam operasi normal, pindah ke `.LARGE`. Jika mencapai 64, pindah ke `.EXTRA_LARGE`. Jangan langsung menggunakan `.CUSTOM` kecuali ada alasan yang sudah dihitung.
+Jika mencapai 16 header dalam operasi normal, pindah ke `.COMMON`. Jika mencapai 32, pindah ke `.LARGE`. Jika mencapai 64, pindah ke `.EXTRA_LARGE`. Jangan langsung menggunakan `.CUSTOM` kecuali ada alasan yang sudah dihitung.
 
 ---
 
@@ -60,10 +60,10 @@ error.InvalidHeaderValue  — CR atau LF ditemukan di nilai header
 
 ### Flooding Header (cap sebagai batas DoS)
 
-Cap bukan sekadar batas kegunaan — ini adalah **langkah pertahanan berlapis**. Handler yang salah konfigurasi atau terkompromi yang terus memanggil `addHeader()` dibatasi oleh `max_response_headers`, bukan oleh memori. Dengan `.COMMON` (32), overhead per-respons dalam kasus terburuk adalah:
+Cap bukan sekadar batas kegunaan — ini adalah **langkah pertahanan berlapis**. Handler yang salah konfigurasi atau terkompromi yang terus memanggil `addHeader()` dibatasi oleh `max_response_headers`, bukan oleh memori. Dengan `.MINIMAL` (16), overhead per-respons dalam kasus terburuk adalah:
 
 ```
-32 headers × (name_ptr + value_ptr) = 32 × 32 bytes = 1 KB (arena)
+16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
 ```
 
 Dengan `.EXTRA_LARGE` (128), naik menjadi sekitar 4 KB. Keduanya terbatas dan dialokasikan via arena. Jangan menetapkan `.{ .CUSTOM = N }` ke angka besar secara spekulatif karena hanya memperlebar footprint tanpa manfaat yang sepadan.

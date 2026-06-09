@@ -1,4 +1,4 @@
-//! zix fix router — comptime route dispatch for FIX application messages.
+//! zix fix router: comptime route dispatch for FIX application messages.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -10,7 +10,7 @@ const wallClockNs = core.wallClockNs;
 // --------------------------------------------------------- //
 
 /// Comptime FIX application message router.
-/// Routes are dispatched via inline for — zero overhead vs hand-written if/else.
+/// Routes are dispatched via inline for, zero overhead vs hand-written if/else.
 /// Session messages (A, 0, 1, 5) are not dispatched. Only application MsgTypes are routed.
 ///
 /// Usage:

@@ -1,0 +1,459 @@
+//! zix http1 websocket
+//! RFC 6455 frame codec and handshake over raw fd I/O (no std.Io stream layer).
+
+const std = @import("std");
+const core = @import("core.zig");
+
+// --------------------------------------------------------- //
+
+const ws_len_max_7bit = 125;
+const ws_len_16bit_marker = 126;
+const ws_len_64bit_marker = 127;
+const ws_len_max_16bit = std.math.maxInt(u16);
+const ws_mask_len: usize = 4;
+const ws_len_64bit_field_size: usize = 8;
+const ws_max_frame_header: usize = 10;
+
+// --------------------------------------------------------- //
+
+/// RFC 6455 5.2 - WebSocket opcodes.
+pub const Opcode = enum(u8) {
+    continuation = 0x0,
+    text = 0x1,
+    binary = 0x2,
+    close = 0x8,
+    ping = 0x9,
+    pong = 0xA,
+    _,
+};
+
+/// Parsed WebSocket frame.
+/// payload is a slice into caller-supplied payload_buf (masked) or into the source buffer (unmasked).
+pub const Frame = struct {
+    fin: bool,
+    opcode: Opcode,
+    payload: []const u8,
+};
+
+/// Return value of parseFrame.
+pub const ParseResult = struct {
+    frame: Frame,
+    consumed: usize,
+};
+
+/// Parse one WebSocket frame from buf.
+///
+/// Note:
+/// - Client to server frames are masked, the unmasked payload is written into payload_buf.
+/// - null when buf does not yet contain a complete frame.
+///
+/// Param:
+/// buf         - []const u8 (raw bytes from the connection)
+/// payload_buf - []u8 (caller-provided buffer for the unmasked payload)
+///
+/// Return:
+/// - ?ParseResult
+pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
+    if (buf.len < 2) return null;
+
+    var byte_offset: usize = 0;
+    const fin = (buf[0] & 0x80) != 0;
+    const opcode: Opcode = @enumFromInt(buf[0] & 0x0F);
+    byte_offset += 1;
+
+    const masked = (buf[1] & 0x80) != 0;
+    var payload_len: u64 = buf[1] & 0x7F;
+    byte_offset += 1;
+
+    if (payload_len == ws_len_16bit_marker) {
+        if (buf.len < byte_offset + 2) return null;
+        payload_len = (@as(u64, buf[byte_offset]) << 8) | buf[byte_offset + 1];
+        byte_offset += 2;
+    } else if (payload_len == ws_len_64bit_marker) {
+        if (buf.len < byte_offset + ws_len_64bit_field_size) return null;
+        payload_len = 0;
+        for (0..ws_len_64bit_field_size) |i| payload_len = (payload_len << 8) | buf[byte_offset + i];
+        byte_offset += ws_len_64bit_field_size;
+    }
+
+    var mask: [ws_mask_len]u8 = .{ 0, 0, 0, 0 };
+    if (masked) {
+        if (buf.len < byte_offset + ws_mask_len) return null;
+        @memcpy(&mask, buf[byte_offset .. byte_offset + ws_mask_len]);
+        byte_offset += ws_mask_len;
+    }
+
+    const capped_len: usize = @intCast(@min(payload_len, payload_buf.len));
+    if (buf.len < byte_offset + capped_len) return null;
+
+    const payload: []const u8 = if (masked) blk: {
+        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % ws_mask_len];
+        break :blk payload_buf[0..capped_len];
+    } else buf[byte_offset .. byte_offset + capped_len];
+
+    return .{
+        .frame = .{ .fin = fin, .opcode = opcode, .payload = payload },
+        .consumed = byte_offset + capped_len,
+    };
+}
+
+/// Build the header of a server to client WebSocket frame (unmasked per
+/// RFC 6455 5.1), without the payload.
+///
+/// Note:
+/// - buf must be at least 10 bytes (the maximum frame header size).
+///
+/// Param:
+/// buf         - []u8 (destination, at least 10 bytes)
+/// opcode      - Opcode
+/// payload_len - usize (length the payload will be)
+///
+/// Return:
+/// - usize (header bytes written into buf)
+pub fn buildHeader(buf: []u8, opcode: Opcode, payload_len: usize) usize {
+    var byte_offset: usize = 0;
+    buf[byte_offset] = 0x80 | @intFromEnum(opcode);
+    byte_offset += 1;
+
+    if (payload_len <= ws_len_max_7bit) {
+        buf[byte_offset] = @intCast(payload_len);
+        byte_offset += 1;
+    } else if (payload_len <= ws_len_max_16bit) {
+        buf[byte_offset] = ws_len_16bit_marker;
+        buf[byte_offset + 1] = @intCast((payload_len >> 8) & 0xFF);
+        buf[byte_offset + 2] = @intCast(payload_len & 0xFF);
+        byte_offset += 3;
+    } else {
+        buf[byte_offset] = ws_len_64bit_marker;
+        for (0..ws_len_64bit_field_size) |i| {
+            const shift: u6 = @intCast((7 - i) * 8);
+            buf[byte_offset + 1 + i] = @intCast((payload_len >> shift) & 0xFF);
+        }
+        byte_offset += 1 + ws_len_64bit_field_size;
+    }
+
+    return byte_offset;
+}
+
+/// Build a server to client WebSocket frame (unmasked per RFC 6455 5.1).
+///
+/// Note:
+/// - buf must be at least payload.len + 10 bytes (header plus payload).
+///
+/// Param:
+/// buf     - []u8 (destination, at least payload.len + 10)
+/// opcode  - Opcode
+/// payload - []const u8
+///
+/// Return:
+/// - usize (bytes written into buf)
+pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
+    const header_len = buildHeader(buf, opcode, payload.len);
+
+    @memcpy(buf[header_len .. header_len + payload.len], payload);
+    return header_len + payload.len;
+}
+
+/// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (RFC 6455 4.2.2).
+///
+/// Param:
+/// key - []const u8 (value of the Sec-WebSocket-Key request header)
+/// out - *[64]u8 (caller-provided output buffer, result is a sub-slice of it)
+///
+/// Return:
+/// - ![]const u8
+pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
+    // RFC 6455 1.3 - this exact GUID is mandated by the WebSocket spec, do not change it.
+    const rfc6455_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    var hash_input: [128]u8 = undefined;
+    if (key.len + rfc6455_guid.len > hash_input.len) return error.KeyTooLong;
+
+    @memcpy(hash_input[0..key.len], key);
+    @memcpy(hash_input[key.len..][0..rfc6455_guid.len], rfc6455_guid);
+
+    var hash: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(hash_input[0 .. key.len + rfc6455_guid.len], &hash, .{});
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(20);
+    return std.base64.standard.Encoder.encode(out[0..encoded_len], &hash);
+}
+
+/// Perform the HTTP to WebSocket upgrade handshake on a raw fd.
+/// Writes the 101 Switching Protocols response directly via core.fdWriteAll.
+///
+/// Param:
+/// fd     - std.posix.fd_t
+/// accept - []const u8 (value returned by acceptKey)
+///
+/// Return:
+/// - !void
+pub fn upgrade(fd: std.posix.fd_t, accept: []const u8) !void {
+    var hdr_buf: [256]u8 = undefined;
+    const response = try std.fmt.bufPrint(
+        &hdr_buf,
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: {s}\r\n\r\n",
+        .{accept},
+    );
+
+    try core.fdWriteAll(fd, response);
+}
+
+// --------------------------------------------------------- //
+
+/// Per-frame callback for an engine-owned WebSocket. Re-exported from core so
+/// the type lives in one place. See core.WsFrameFn.
+pub const WsFrameFn = core.WsFrameFn;
+
+/// Largest frame written with one combined header+payload buffer + single
+/// write. Above this, header and payload are written separately to avoid a
+/// large stack copy. Mirrors the http1 write-path trade-off.
+const ws_send_inline_cap: usize = 4096;
+
+/// Coalesces all frames sent while serving one readable event into a single
+/// write. The engine installs a sink around each pump pass so a pipelined
+/// burst of N echoes flushes in one write() instead of N. Auto-flushes when
+/// the staging buffer would overflow, and writes oversize frames straight
+/// through, so correctness never depends on the buffer being large enough.
+const SendSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    fn append(self: *SendSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            core.fdWriteAll(self.fd, bytes) catch {
+                self.failed = true;
+            };
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    fn flush(self: *SendSink) void {
+        if (self.len == 0) return;
+
+        core.fdWriteAll(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Active send sink for the current thread, set by beginSend during a pump
+/// pass. When present, send stages into it instead of writing immediately.
+threadlocal var tl_send_sink: ?*SendSink = null;
+
+/// Build and write one unmasked server frame to fd. When the engine has a send
+/// sink active (during a pump pass) the frame is staged for a single batched
+/// write, otherwise it is written immediately.
+///
+/// Note:
+/// - Outside a sink, small frames go out as one buffer + one write and large
+///   frames write the header then the payload (two writes) to avoid a big copy.
+///
+/// Param:
+/// fd      - std.posix.fd_t
+/// opcode  - Opcode
+/// payload - []const u8
+///
+/// Return:
+/// - !void (error.BrokenPipe on a dead peer)
+pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
+    if (tl_send_sink) |sink| {
+        var hdr: [ws_max_frame_header]u8 = undefined;
+        const hdr_len = buildHeader(&hdr, opcode, payload.len);
+
+        sink.append(hdr[0..hdr_len]);
+        sink.append(payload);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    if (payload.len + ws_max_frame_header <= ws_send_inline_cap) {
+        var buf: [ws_send_inline_cap]u8 = undefined;
+        const len = buildFrame(&buf, opcode, payload);
+
+        return core.fdWriteAll(fd, buf[0..len]);
+    }
+
+    var hdr: [ws_max_frame_header]u8 = undefined;
+    const hdr_len = buildHeader(&hdr, opcode, payload.len);
+
+    try core.fdWriteAll(fd, hdr[0..hdr_len]);
+    try core.fdWriteAll(fd, payload);
+}
+
+/// Complete the handshake, then hand the connection to the engine's event loop.
+/// Call this from an http1 handler instead of looping on the fd yourself: after
+/// it returns, the EPOLL engine drives the frame loop, invoking on_frame for
+/// each text/binary frame (ping is auto-ponged, close is auto-echoed). The
+/// worker is never parked on a single connection.
+///
+/// Note:
+/// - Honored under dispatch_model .EPOLL only. Under .ASYNC/.POOL the handoff
+///   is cleared and the connection ends after the handler returns.
+///
+/// Param:
+/// fd       - std.posix.fd_t
+/// key      - []const u8 (the Sec-WebSocket-Key request header value)
+/// on_frame - WsFrameFn
+///
+/// Return:
+/// - !void (handshake errors from acceptKey/upgrade)
+pub fn serve(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
+    var accept_buf: [64]u8 = undefined;
+    const accept = try acceptKey(key, &accept_buf);
+
+    try upgrade(fd, accept);
+    core.requestWebSocket(fd, on_frame);
+}
+
+/// Outcome of one pump pass over a connection's read buffer.
+pub const PumpResult = struct {
+    /// Bytes consumed from the front of data (whole frames only).
+    consumed: usize,
+    /// Whether the connection should close (close frame seen or write failed).
+    close: bool,
+};
+
+/// Parse and dispatch every complete frame in data, in order. Text and binary
+/// frames invoke on_frame. Ping is auto-ponged, close is auto-echoed and ends
+/// the connection. A trailing partial frame is left for the next read (its
+/// bytes are not counted in consumed).
+///
+/// Note:
+/// - All frames sent during the pass (echoes, pong, close) are coalesced into
+///   out_buf and flushed in one write, so a pipelined burst costs one write()
+///   rather than one per frame.
+///
+/// Param:
+/// fd          - std.posix.fd_t
+/// data        - []const u8 (raw bytes received so far)
+/// payload_buf - []u8 (scratch for unmasking, must hold the largest payload)
+/// out_buf     - []u8 (staging for the coalesced write)
+/// on_frame    - WsFrameFn
+///
+/// Return:
+/// - PumpResult
+pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []u8, on_frame: WsFrameFn) PumpResult {
+    var sink = SendSink{ .fd = fd, .buf = out_buf };
+    tl_send_sink = &sink;
+    defer tl_send_sink = null;
+
+    var offset: usize = 0;
+    var close = false;
+
+    while (offset < data.len) {
+        const result = parseFrame(data[offset..], payload_buf) orelse break;
+
+        switch (result.frame.opcode) {
+            .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
+            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .close => {
+                send(fd, .close, &.{}) catch {};
+                offset += result.consumed;
+                close = true;
+                break;
+            },
+            .pong, .continuation => {},
+            else => {},
+        }
+
+        offset += result.consumed;
+    }
+
+    sink.flush();
+
+    return .{ .consumed = offset, .close = close or sink.failed };
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix http1 ws: acceptKey RFC 6455 vector" {
+    var out: [64]u8 = undefined;
+    const accept = try acceptKey("dGhlIHNhbXBsZSBub25jZQ==", &out);
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", accept);
+}
+
+test "zix http1 ws: buildFrame then parseFrame round trip" {
+    const payload = "hello";
+    var buf: [128]u8 = undefined;
+    const len = buildFrame(&buf, .text, payload);
+
+    try std.testing.expect(len > payload.len);
+    try std.testing.expectEqual(@as(u8, 0x81), buf[0]); // fin | text
+    try std.testing.expectEqual(@as(u8, 5), buf[1]); // unmasked, len 5
+
+    var payload_buf: [128]u8 = undefined;
+    const result = parseFrame(buf[0..len], &payload_buf).?;
+    try std.testing.expect(result.frame.fin);
+    try std.testing.expectEqual(Opcode.text, result.frame.opcode);
+    try std.testing.expectEqualStrings(payload, result.frame.payload);
+    try std.testing.expectEqual(len, result.consumed);
+}
+
+test "zix http1 ws: parseFrame unmasks a client frame" {
+    // Masked "Hello" from RFC 6455 5.7
+    const raw = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+    var payload_buf: [128]u8 = undefined;
+    const result = parseFrame(&raw, &payload_buf).?;
+    try std.testing.expect(result.frame.fin);
+    try std.testing.expectEqual(Opcode.text, result.frame.opcode);
+    try std.testing.expectEqualStrings("Hello", result.frame.payload);
+}
+
+test "zix http1 ws: buildHeader matches buildFrame prefix" {
+    const payload = "hello";
+    var frame_buf: [128]u8 = undefined;
+    var hdr_buf: [ws_max_frame_header]u8 = undefined;
+
+    const frame_len = buildFrame(&frame_buf, .text, payload);
+    const hdr_len = buildHeader(&hdr_buf, .text, payload.len);
+
+    try std.testing.expectEqual(frame_len - payload.len, hdr_len);
+    try std.testing.expectEqualSlices(u8, frame_buf[0..hdr_len], hdr_buf[0..hdr_len]);
+}
+
+fn testEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    send(fd, @enumFromInt(opcode), payload) catch {};
+}
+
+test "zix http1 ws: pump echoes masked client frames over a socketpair" {
+    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    // Two pipelined masked client text frames: "hi" and "yo".
+    const data = [_]u8{
+        0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02,
+        0x81, 0x82, 0x05, 0x06, 0x07, 0x08, 'y' ^ 0x05, 'o' ^ 0x06,
+    };
+
+    var payload_buf: [128]u8 = undefined;
+    var out_buf: [128]u8 = undefined;
+    const result = pump(fds[1], &data, &payload_buf, &out_buf, testEcho);
+
+    try std.testing.expectEqual(data.len, result.consumed);
+    try std.testing.expect(!result.close);
+
+    // Both echoes arrive coalesced. Read and parse them back as server frames.
+    var recv: [128]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+
+    var scratch: [128]u8 = undefined;
+    const first = parseFrame(recv[0..n], &scratch).?;
+    try std.testing.expectEqualStrings("hi", first.frame.payload);
+
+    const second = parseFrame(recv[first.consumed..n], &scratch).?;
+    try std.testing.expectEqualStrings("yo", second.frame.payload);
+}

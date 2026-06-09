@@ -172,7 +172,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .EPOLL: Single epoll Event Loop (Linux-only)
 
-One event-loop thread calls `epoll_wait` in a loop. When the kernel signals a socket as readable, the socket fd is pushed to an `FdQueue` and a pool worker handles it. No `io.async()` overhead, no condvar wakeup per connection — the kernel tracks readiness.
+One event-loop thread calls `epoll_wait` in a loop. When the kernel signals a socket as readable, the socket fd is pushed to an `FdQueue` and a pool worker handles it. No `io.async()` overhead, no condvar wakeup per connection — the kernel tracks readiness. Each `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call.
 
 **Why it exists:** `.POOL` and `.ASYNC` both pay a condvar wakeup cost on every accepted connection (either via `ConnQueue.pop()` or via the `io.async()` fiber scheduler). Under very high connection counts where most connections are idle at any moment (slow clients, many open sessions), these wakeups accumulate. `epoll` lets the kernel batch readiness signals — the event loop thread only runs when bytes are actually available, with no per-connection thread overhead.
 

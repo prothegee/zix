@@ -8,7 +8,7 @@ const Logger = @import("../../../logger/logger.zig").Logger;
 
 /// Configuration for a gRPC h2c server instance.
 /// Pass to Grpc.Server.init(). Fields without defaults (io, ip, port) are required.
-/// No allocator field — the server uses smp_allocator internally.
+/// No allocator field, the server uses smp_allocator internally.
 pub const GrpcServerConfig = struct {
     /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
