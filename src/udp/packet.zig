@@ -1,6 +1,6 @@
 //! zix udp packet
 //! Endianness helpers for extern struct packets.
-//! No hardcoded packet type — user defines their own extern struct.
+//! No hardcoded packet type, user defines their own extern struct.
 
 const std = @import("std");
 const Endianness = @import("config.zig").Endianness;
@@ -13,9 +13,9 @@ pub fn FeedbackResult(comptime Packet: type) type {
     return union(enum) {
         /// Server acknowledged receipt (0x06).
         ack,
-        /// Server rejected the packet (0x15) — malformed or wrong size.
+        /// Server rejected the packet (0x15), malformed or wrong size.
         nack,
-        /// Server sent back a full packet — echo or broadcast relay.
+        /// Server sent back a full packet, echo or broadcast relay.
         packet: Packet,
     };
 }
@@ -36,7 +36,7 @@ pub fn toEndian(comptime Packet: type, pkt: Packet, endianness: Endianness) Pack
 }
 
 /// Convert received wire bytes back to native endianness after receiving.
-/// Byte swap is its own inverse — identical operation to toEndian().
+/// Byte swap is its own inverse, identical operation to toEndian().
 pub fn fromEndian(comptime Packet: type, pkt: Packet, endianness: Endianness) Packet {
     return toEndian(Packet, pkt, endianness);
 }
@@ -57,7 +57,7 @@ fn swapField(comptime T: type, ptr: *T) void {
             ptr.* = @bitCast(@byteSwap(@as(Int, @bitCast(ptr.*))));
         },
         .array => |arr| {
-            // skip u8 arrays — byte strings (e.g. id fields) do not need swapping
+            // skip u8 arrays, byte strings (e.g. id fields) do not need swapping
             if (@sizeOf(arr.child) > 1) {
                 for (ptr) |*elem| swapField(arr.child, elem);
             }
