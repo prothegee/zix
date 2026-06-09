@@ -17,9 +17,18 @@ pub const ServeOpts = core.ServeOpts;
 pub const ConnOutcome = core.ConnOutcome;
 
 pub const Route = router.Route;
+pub const RouteKind = router.RouteKind;
 pub const Router = router.Router;
+pub const PathParam = router.PathParam;
+pub const pathParam = router.pathParam;
+
+pub const WebSocket = @import("websocket.zig");
+pub const WsFrameFn = core.WsFrameFn;
 
 // --------------------------------------------------------- //
+
+pub const setTimeout = core.setTimeout;
+pub const isExpired = core.isExpired;
 
 pub const parseHead = core.parseHead;
 pub const getHeader = core.getHeader;
