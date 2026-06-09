@@ -8,7 +8,7 @@ const Logger = @import("../../logger/logger.zig").Logger;
 
 /// Configuration for a FIX 4.x session server instance.
 /// Pass to Fix.Server.init(). Fields without defaults (io, ip, port, comp_id) are required.
-/// No allocator field — the server uses stack allocation and smp_allocator internally.
+/// No allocator field, the server uses stack allocation and smp_allocator internally.
 pub const FixServerConfig = struct {
     /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
@@ -21,7 +21,7 @@ pub const FixServerConfig = struct {
     /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
-    /// TCP listen backlog — maximum pending connections queued by the kernel before accept().
+    /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
     /// Number of accept threads.
     /// 0 (default) = cpu_count accept threads.
