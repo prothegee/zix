@@ -3,12 +3,22 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9106;
-const WORKERS: usize = 0;
-const POOL_SIZE: usize = 0;
+const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
+const KERNEL_BACKLOG: u31 = 1024;
+const MAX_RECV_BUF: usize = 16 * 1024;
+const MAX_GZIP_OUT: usize = 256 * 1024;
+const MAX_HEADERS: u8 = 16;
+const WORKERS: usize = 0; // 0 = cpu_count accept threads
+const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
 const PUBLIC_DIR = "./public";
 const UPLOAD_SUBDIR = "u";
 const UPLOAD_DIR = PUBLIC_DIR ++ "/" ++ UPLOAD_SUBDIR;
+const SECRET_SUBDIR = "secret";
+const SECRET_DIR = PUBLIC_DIR ++ "/" ++ SECRET_SUBDIR;
+
+const SEC_KEY = "sec";
+const SEC_VAL = "abc123";
 
 // Handlers use g_io for file I/O since the Http1 handler signature has no io param.
 // Set once in main before the server starts — safe for concurrent reads.
@@ -19,6 +29,7 @@ var g_io: std.Io = undefined;
 fn createInitDirs(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, PUBLIC_DIR) catch {};
     std.Io.Dir.cwd().createDirPath(io, UPLOAD_DIR) catch {};
+    std.Io.Dir.cwd().createDirPath(io, SECRET_DIR) catch {};
 }
 
 fn detectContentType(path: []const u8) []const u8 {
@@ -104,34 +115,40 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     zix.Http1.writeJson(fd, 200, resp) catch {};
 }
 
-// GET /static/*
-// Serves files from PUBLIC_DIR. Path after /static maps directly to PUBLIC_DIR.
+// GET /secret/<file>?sec=abc123
+// Serves files from SECRET_DIR with a mandatory access param.
+//
+// Logic (file existence is checked before the param):
+// 1. File not found in SECRET_DIR        -> 404
+// 2. File found, sec param missing/wrong -> 403
+// 3. File found, sec=abc123              -> 200 with MIME type resolved from extension
 //
 // curl usage:
-// curl -X GET "http://localhost:9106/static/index.html"
-// curl -X GET "http://localhost:9106/static/u/file.txt"
-fn staticHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+// curl -X GET "http://localhost:9106/secret/file.txt?sec=abc123"
+// curl -X GET "http://localhost:9106/secret/file.txt"               (-> 403 if file exists)
+// curl -X GET "http://localhost:9106/secret/missing.txt?sec=abc123" (-> 404)
+fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
-    if (!std.mem.eql(u8, head.method, "GET") and !std.mem.eql(u8, head.method, "HEAD")) {
+    if (!std.mem.eql(u8, head.method, "GET")) {
         zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
-    const prefix = "/static";
-    const sub = if (std.mem.startsWith(u8, head.path, prefix)) head.path[prefix.len..] else "/";
-    const rel = if (std.mem.startsWith(u8, sub, "/")) sub[1..] else sub;
+    const prefix = "/secret";
+    const subpath = if (head.path.len > prefix.len and head.path[prefix.len] == '/') head.path[prefix.len + 1 ..] else "";
 
-    if (std.mem.indexOf(u8, rel, "..") != null) {
-        zix.Http1.writeSimple(fd, 403, "text/plain", "Forbidden") catch {};
+    if (subpath.len == 0 or std.mem.indexOf(u8, subpath, "..") != null) {
+        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
     }
 
     var path_buf: [512]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ PUBLIC_DIR, rel }) catch {
-        zix.Http1.writeSimple(fd, 500, "text/plain", "Internal Server Error") catch {};
+    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ SECRET_DIR, subpath }) catch {
+        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
     };
 
+    // Check file existence first — always 404 before revealing the sec requirement
     const file = std.Io.Dir.cwd().openFile(g_io, file_path, .{}) catch {
         zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
@@ -139,17 +156,27 @@ fn staticHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     defer file.close(g_io);
 
     const stat = file.stat(g_io) catch {
-        zix.Http1.writeSimple(fd, 500, "text/plain", "Internal Server Error") catch {};
+        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
     };
 
-    const range_hdr = zix.Http1.getHeader(head, "range");
-    const content_type = detectContentType(rel);
-
-    if (std.mem.eql(u8, head.method, "HEAD")) {
-        zix.Http1.writeSimpleNoBody(fd, 200, content_type, @intCast(stat.size)) catch {};
+    if (stat.kind != .file) {
+        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
     }
+
+    // File exists — now enforce sec param
+    const sec = zix.Http1.queryParam(head, SEC_KEY) orelse {
+        zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden\"}") catch {};
+        return;
+    };
+
+    if (!std.mem.eql(u8, sec, SEC_VAL)) {
+        zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden\"}") catch {};
+        return;
+    }
+
+    const content_type = detectContentType(subpath);
 
     var file_buf: [8192]u8 = undefined;
     var reader = file.reader(g_io, &file_buf);
@@ -166,40 +193,34 @@ fn staticHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         remaining -= n;
     }
 
-    if (range_hdr) |range_val| {
-        zix.Http1.writeRange(fd, content_type, all.items, range_val) catch {};
-    } else {
-        zix.Http1.writeSimple(fd, 200, content_type, all.items) catch {};
-    }
+    zix.Http1.writeSimple(fd, 200, content_type, all.items) catch {};
 }
 
 // --------------------------------------------------------- //
 
-fn dispatch(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    if (std.mem.eql(u8, head.path, "/")) {
-        homeHandler(head, body, fd);
-    } else if (std.mem.eql(u8, head.path, "/upload")) {
-        uploadHandler(head, body, fd);
-    } else if (std.mem.startsWith(u8, head.path, "/static")) {
-        staticHandler(head, body, fd);
-    } else {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
-    }
-}
+const Router = zix.Http1.Router(&[_]zix.Http1.Route{
+    .{ .path = "/", .handler = homeHandler },
+    .{ .path = "/upload", .handler = uploadHandler },
+    .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
+});
 
 pub fn main(process: std.process.Init) !void {
     g_io = process.io;
     createInitDirs(process.io);
 
-    var server = zix.Http1.Server.init(.{
+    var server = zix.Http1.Server.init(Router.dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
-        .dispatch_model = .POOL,
+        .dispatch_model = DISPATCH_MODEL,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
+        .max_gzip_out = MAX_GZIP_OUT,
+        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
-    try server.run(dispatch);
+    try server.run();
 }
