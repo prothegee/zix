@@ -376,7 +376,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| Buffer size defaults | `max_kernel_backlog`, `max_client_request`, `max_allocator_size`, `max_client_response` all 4096 |
+| Buffer size defaults | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` all 4096 |
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` defaults to `.ASYNC` | explicit field default in `HttpServerConfig` |
@@ -384,7 +384,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
 | `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
 | `RequestHeaderSize.CUSTOM(N)` capped at 64 | values above 64 silently return 64 |
-| `max_response_headers` defaults to COMMON (32) | enum value and `.value()` |
+| `max_response_headers` defaults to MINIMAL (16) | enum value and `.value()` |
 | `HeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
 | `HeaderSize.CUSTOM(N)` returns N | 7 and 100 |
 | `Response` status defaults to OK | `init()` invariant |
