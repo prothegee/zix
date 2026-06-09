@@ -1,4 +1,4 @@
-//! zix http2 namespace — HTTP/2 h2c server (no std.http in frame path).
+//! zix http2 namespace: HTTP/2 h2c server (no std.http in frame path).
 
 const frame_mod = @import("frame.zig");
 const hpack_mod = @import("hpack.zig");
@@ -25,7 +25,9 @@ pub const huffDecode = hpack_mod.huffDecode;
 
 pub const FrameHeader = frame_mod.FrameHeader;
 pub const readFrameHeader = frame_mod.readFrameHeader;
+pub const parseFrameHeader = frame_mod.parseFrameHeader;
 pub const writeFrameHeader = frame_mod.writeFrameHeader;
+pub const encodeFrameHeader = frame_mod.encodeFrameHeader;
 pub const fdWriteAll = frame_mod.fdWriteAll;
 pub const recvExact = frame_mod.recvExact;
 pub const sendResponse = frame_mod.sendResponse;
