@@ -72,7 +72,7 @@ pub const Type = enum(u8) {
     /// self - zix.Tcp.Http.Content.Type
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     fn toString(self: Type) []const u8 {
         return switch (self) {
             .NA => "n/a",
@@ -133,7 +133,7 @@ pub const Type = enum(u8) {
     /// Get self object as a string
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     pub fn asString(self: Self) []const u8 {
         return Self.toString(self);
     }
@@ -148,7 +148,7 @@ pub const Type = enum(u8) {
 /// type_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
-/// zix.Tcp.Http.Content.Type
+/// - zix.Tcp.Http.Content.Type
 pub fn enumFromString(type_string: []const u8) Type {
     var data: [32]u8 = undefined;
     const lower_type = std.ascii.lowerString(&data, type_string);
@@ -314,7 +314,7 @@ pub fn enumFromString(type_string: []const u8) Type {
 /// method_enum - zix.Tcp.Http.Content.Type
 ///
 /// Return:
-/// []const u8
+/// - []const u8
 pub fn stringFromEnum(content_enum: Type) []const u8 {
     return switch (content_enum) {
         .NA => "n/a",
@@ -383,7 +383,7 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
 /// ext - []const u8 (without leading dot, e.g. "html", "png")
 ///
 /// Return:
-/// Type
+/// - Type
 pub fn typeFromExtension(ext: []const u8) Type {
     if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return .TEXT_HTML;
     if (std.ascii.eqlIgnoreCase(ext, "css")) return .TEXT_CSS;
@@ -437,7 +437,7 @@ pub fn typeFromExtension(ext: []const u8) Type {
 /// ext - []const u8 (without leading dot, e.g. "html", "png")
 ///
 /// Return:
-/// []const u8
+/// - []const u8
 pub fn fromExtension(ext: []const u8) []const u8 {
     return typeFromExtension(ext).asString();
 }
