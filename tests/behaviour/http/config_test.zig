@@ -12,8 +12,8 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
         .ip = "127.0.0.1",
         .port = 9000,
     };
-    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_kernel_backlog);
-    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_client_request);
+    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.kernel_backlog);
+    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_allocator_size);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_client_response);
 }
@@ -63,14 +63,14 @@ test "zix behaviour: DispatchModel, integer backing values (ASYNC=0 is zero-valu
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
 }
 
-test "zix behaviour: ServerConfig, max_response_headers defaults to COMMON (32)" {
+test "zix behaviour: ServerConfig, max_response_headers defaults to MINIMAL (16)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
     };
-    try std.testing.expectEqual(zix.Http.HeaderSize.COMMON, cfg.max_response_headers);
-    try std.testing.expectEqual(@as(usize, 32), cfg.max_response_headers.value());
+    try std.testing.expectEqual(zix.Http.HeaderSize.MINIMAL, cfg.max_response_headers);
+    try std.testing.expectEqual(@as(usize, 16), cfg.max_response_headers.value());
 }
 
 // --------------------------------------------------------- //
