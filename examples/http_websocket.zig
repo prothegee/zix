@@ -4,8 +4,8 @@ const zix = @import("zix");
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9008;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
-const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
-const MAX_CLIENT_REQUEST: usize = 1024 * 8; // 8 KB read buffer per connection
+const KERNEL_BACKLOG: usize = 1024 * 4;
+const MAX_RECV_BUF: usize = 1024 * 8; // 8 KB read buffer per connection
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .ASYNC
@@ -85,7 +85,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     defer ws_rooms.leave(room_id, conn, ctx.io);
 
     // WebSocket frame loop
-    var frame_buf: [MAX_CLIENT_REQUEST]u8 = undefined;
+    var frame_buf: [MAX_RECV_BUF]u8 = undefined;
     var buf_used: usize = 0;
     var clean_close = false; // set to true only when the peer sends a .close frame
 
@@ -172,8 +172,8 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
-        .max_kernel_backlog = MAX_KERNEL_BACKLOG,
-        .max_client_request = MAX_CLIENT_REQUEST,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
