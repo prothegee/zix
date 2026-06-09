@@ -3,8 +3,8 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9002;
-const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
-const MAX_CLIENT_REQUEST: usize = 1024 * 4;
+const KERNEL_BACKLOG: usize = 1024 * 4;
+const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 
@@ -76,8 +76,8 @@ pub fn main() !void {
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
-        .max_kernel_backlog = MAX_KERNEL_BACKLOG,
-        .max_client_request = MAX_CLIENT_REQUEST,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
