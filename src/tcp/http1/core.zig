@@ -1,9 +1,9 @@
-//! zix http1 core — zero-alloc HTTP/1.x request parsing and response writing.
+//! zix http1 core: zero-alloc HTTP/1.x request parsing and response writing.
 //! All parsing operates on caller-owned buffers. No std.http dependency.
 
 const std = @import("std");
 
-pub const MAX_HEADERS: usize = 32;
+pub const MAX_HEADERS: usize = 16;
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
 
@@ -37,7 +37,80 @@ pub const HandlerFn = *const fn (
 /// Options for serveConn.
 pub const ServeOpts = struct {
     nodelay: bool = true,
+    /// Per-handler execution budget in milliseconds. 0 = no deadline armed.
+    handler_timeout_ms: u32 = 0,
 };
+
+// --------------------------------------------------------- //
+
+/// Wall-clock nanoseconds since the epoch (CLOCK_REALTIME).
+fn wallClockNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Per-handler deadline, thread-local so each worker tracks its own request.
+/// 0 means no deadline is active.
+threadlocal var tl_deadline_ns: u64 = 0;
+
+/// Arm or clear the per-handler deadline for the current thread.
+/// The server calls this before each dispatch with config.handler_timeout_ms.
+/// Handlers may call it to shorten their own budget. ms = 0 clears the deadline.
+pub fn setTimeout(ms: u32) void {
+    tl_deadline_ns = if (ms == 0)
+        0
+    else
+        wallClockNs() + @as(u64, ms) * std.time.ns_per_ms;
+}
+
+/// Whether the current handler's deadline has passed.
+/// Always false when no deadline is armed.
+pub fn isExpired() bool {
+    if (tl_deadline_ns == 0) return false;
+
+    return wallClockNs() >= tl_deadline_ns;
+}
+
+// --------------------------------------------------------- //
+
+/// Per-frame callback for an engine-owned WebSocket connection.
+/// The engine parses each complete client frame and invokes this for text and
+/// binary opcodes. opcode is the raw RFC 6455 opcode value (use the
+/// WebSocket.Opcode enum to interpret it). Ping is auto-ponged and close is
+/// auto-echoed by the engine, so the callback only ever sees data frames.
+///
+/// Param:
+/// fd      - std.posix.fd_t (the connection, write replies with WebSocket.send)
+/// opcode  - u8 (RFC 6455 opcode, .text or .binary in practice)
+/// payload - []const u8 (unmasked frame payload, valid only for this call)
+pub const WsFrameFn = *const fn (fd: std.posix.fd_t, opcode: u8, payload: []const u8) void;
+
+const WsPending = struct {
+    fd: std.posix.fd_t,
+    on_frame: WsFrameFn,
+};
+
+/// Set by WebSocket.serve during a handler, read by the EPOLL engine right
+/// after the handler returns. Thread-local so each worker hands off only its
+/// own connection. The handoff is honored under .EPOLL dispatch only.
+threadlocal var tl_ws_pending: ?WsPending = null;
+
+/// Request that the connection on fd be promoted to an engine-owned WebSocket
+/// after the current handler returns. WebSocket.serve calls this for you.
+pub fn requestWebSocket(fd: std.posix.fd_t, on_frame: WsFrameFn) void {
+    tl_ws_pending = .{ .fd = fd, .on_frame = on_frame };
+}
+
+/// Take and clear any pending WebSocket promotion for the current thread.
+/// The engine calls this after every dispatch.
+pub fn takeWebSocket() ?WsPending {
+    const pending = tl_ws_pending;
+    tl_ws_pending = null;
+
+    return pending;
+}
 
 // --------------------------------------------------------- //
 
@@ -210,6 +283,7 @@ fn statusPhrase(code: u16) []const u8 {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         416 => "Range Not Satisfiable",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
@@ -248,19 +322,80 @@ const DateCache = struct {
 };
 
 threadlocal var tl_date: DateCache = .{ .secs = 0, .buf = undefined, .len = 0 };
+threadlocal var tl_date_tick: u8 = 0;
 
 fn cachedDate() []const u8 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-    const secs: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
-
-    if (secs != tl_date.secs or tl_date.len == 0) {
-        const d = formatHttpDate(secs, &tl_date.buf);
-        tl_date.secs = secs;
-        tl_date.len = d.len;
+    tl_date_tick +%= 1;
+    if (tl_date_tick == 0 or tl_date.len == 0) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        const secs: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
+        if (secs != tl_date.secs or tl_date.len == 0) {
+            const d = formatHttpDate(secs, &tl_date.buf);
+            tl_date.secs = secs;
+            tl_date.len = d.len;
+        }
     }
 
     return tl_date.buf[0..tl_date.len];
+}
+
+// --------------------------------------------------------- //
+
+fn appendStatusCode(buf: []u8, pos: usize, code: u16) usize {
+    buf[pos] = '0' + @as(u8, @intCast(code / 100));
+    buf[pos + 1] = '0' + @as(u8, @intCast((code / 10) % 10));
+    buf[pos + 2] = '0' + @as(u8, @intCast(code % 10));
+    return pos + 3;
+}
+
+fn appendDec(buf: []u8, pos: usize, val: usize) usize {
+    if (val == 0) {
+        buf[pos] = '0';
+        return pos + 1;
+    }
+    var tmp: [20]u8 = undefined;
+    var tmp_len: usize = 0;
+    var v = val;
+    while (v > 0) {
+        tmp[tmp_len] = '0' + @as(u8, @intCast(v % 10));
+        tmp_len += 1;
+        v /= 10;
+    }
+
+    var i: usize = 0;
+    while (i < tmp_len) : (i += 1) {
+        buf[pos + i] = tmp[tmp_len - 1 - i];
+    }
+
+    return pos + tmp_len;
+}
+
+fn appendBytes(buf: []u8, pos: usize, s: []const u8) usize {
+    @memcpy(buf[pos..][0..s.len], s);
+    return pos + s.len;
+}
+
+fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_len: usize) []u8 {
+    var pos: usize = 0;
+    pos = appendBytes(buf, pos, "HTTP/1.1 ");
+    pos = appendStatusCode(buf, pos, status);
+    buf[pos] = ' ';
+    pos += 1;
+    pos = appendBytes(buf, pos, statusPhrase(status));
+    pos = appendBytes(buf, pos, "\r\n");
+    if (content_type.len > 0) {
+        pos = appendBytes(buf, pos, "Content-Type: ");
+        pos = appendBytes(buf, pos, content_type);
+        pos = appendBytes(buf, pos, "\r\n");
+    }
+    pos = appendBytes(buf, pos, "Content-Length: ");
+    pos = appendDec(buf, pos, body_len);
+    pos = appendBytes(buf, pos, "\r\nDate: ");
+    pos = appendBytes(buf, pos, cachedDate());
+    pos = appendBytes(buf, pos, "\r\n\r\n");
+
+    return buf[0..pos];
 }
 
 // --------------------------------------------------------- //
@@ -288,37 +423,52 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 }
 
 /// Response with Content-Length body.
-/// Fast path: headers + body combined in one write when total fits in 512 bytes.
-/// Slow path: two writes for large bodies.
 pub fn writeSimple(
     fd: std.posix.fd_t,
     status: u16,
     content_type: []const u8,
     body: []const u8,
 ) !void {
-    var buf: [512]u8 = undefined;
+    var hdr_buf: [256]u8 = undefined;
+    const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
 
-    const date = cachedDate();
-    const headers = if (content_type.len > 0)
-        std.fmt.bufPrint(
-            &buf,
-            "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nDate: {s}\r\n\r\n",
-            .{ status, statusPhrase(status), content_type, body.len, date },
-        ) catch return error.BufferTooSmall
-    else
-        std.fmt.bufPrint(
-            &buf,
-            "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nDate: {s}\r\n\r\n",
-            .{ status, statusPhrase(status), body.len, date },
-        ) catch return error.BufferTooSmall;
+    if (body.len <= 3840) {
+        var buf: [4096]u8 = undefined;
+        @memcpy(buf[0..hdr.len], hdr);
+        @memcpy(buf[hdr.len..][0..body.len], body);
 
-    if (headers.len + body.len <= buf.len) {
-        @memcpy(buf[headers.len..][0..body.len], body);
-        return fdWriteAll(fd, buf[0 .. headers.len + body.len]);
+        return fdWriteAll(fd, buf[0 .. hdr.len + body.len]);
     }
 
-    try fdWriteAll(fd, headers);
-    if (body.len > 0) try fdWriteAll(fd, body);
+    var sent: usize = 0;
+    const total = hdr.len + body.len;
+    while (sent < total) {
+        var iovs: [2]std.posix.iovec_const = undefined;
+        var nvec: usize = 0;
+        if (sent < hdr.len) {
+            iovs[0] = .{ .base = hdr[sent..].ptr, .len = hdr.len - sent };
+            iovs[1] = .{ .base = body.ptr, .len = body.len };
+            nvec = 2;
+        } else {
+            const body_sent = sent - hdr.len;
+            iovs[0] = .{ .base = body[body_sent..].ptr, .len = body.len - body_sent };
+            nvec = 1;
+        }
+        const rc = std.os.linux.writev(fd, &iovs, nvec);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.BrokenPipe;
+                sent += n;
+            },
+            .INTR => continue,
+            .AGAIN => {
+                var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+                _ = std.posix.poll(&pfd, -1) catch return error.BrokenPipe;
+            },
+            else => return error.BrokenPipe,
+        }
+    }
 }
 
 /// Headers-only response (no body). Used for HEAD method responses.
@@ -328,23 +478,10 @@ pub fn writeSimpleNoBody(
     content_type: []const u8,
     content_length: usize,
 ) !void {
-    var buf: [512]u8 = undefined;
+    var hdr_buf: [256]u8 = undefined;
+    const hdr = buildSimpleHeader(&hdr_buf, status, content_type, content_length);
 
-    const date = cachedDate();
-    const headers = if (content_type.len > 0)
-        std.fmt.bufPrint(
-            &buf,
-            "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nDate: {s}\r\n\r\n",
-            .{ status, statusPhrase(status), content_type, content_length, date },
-        ) catch return error.BufferTooSmall
-    else
-        std.fmt.bufPrint(
-            &buf,
-            "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nDate: {s}\r\n\r\n",
-            .{ status, statusPhrase(status), content_length, date },
-        ) catch return error.BufferTooSmall;
-
-    try fdWriteAll(fd, headers);
+    return fdWriteAll(fd, hdr);
 }
 
 /// JSON response. Shorthand for writeSimple with "application/json".
@@ -640,6 +777,10 @@ pub fn serveConnOne(
 
     handler(&head, body_buf[0..body_len], fd);
 
+    // Engine-owned WebSocket promotion is honored by the EPOLL loop only.
+    // On this path clear the handoff and end the connection so it never leaks.
+    if (takeWebSocket() != null) return .close;
+
     return if (head.keep_alive) .keep_alive else .close;
 }
 
@@ -698,7 +839,12 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
             }
         }
 
+        setTimeout(opts.handler_timeout_ms);
         handler(&head, body_buf[0..body_len], fd);
+
+        // Engine-owned WebSocket promotion is honored by the EPOLL loop only.
+        // On this path clear the handoff and end the connection so it never leaks.
+        if (takeWebSocket() != null) return;
 
         if (!head.keep_alive) return;
 
