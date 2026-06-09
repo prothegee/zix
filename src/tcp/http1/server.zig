@@ -1,11 +1,29 @@
-//! zix http1 server — ASYNC, POOL, and MIXED dispatch models.
+//! zix http1 server: ASYNC, POOL, and MIXED dispatch models.
 //! EPOLL falls back to POOL (Http1 uses raw fd I/O, not epoll event loop).
 
 const std = @import("std");
 const Config = @import("config.zig").Http1ServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const core = @import("core.zig");
+const ws = @import("websocket.zig");
 const HandlerFn = core.HandlerFn;
+
+/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// ready-fd set in one syscall at high connection counts.
+const EPOLL_MAX_EVENTS: usize = 512;
+
+// --------------------------------------------------------- //
+
+/// Emit a server lifecycle line. Routes through config.logger when present,
+/// otherwise falls back to std.debug.print.
+fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
+    if (config.logger) |lg| {
+        lg.system(.INFO, "http1", fmt, args);
+        return;
+    }
+
+    std.debug.print("zix: " ++ fmt ++ "\n", args);
+}
 
 // --------------------------------------------------------- //
 // Shared connection entry (ASYNC and MIXED)
@@ -14,12 +32,13 @@ const ConnArgs = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
     handler: HandlerFn,
+    handler_timeout_ms: u32 = 0,
 };
 
 fn connEntry(args: ConnArgs) void {
     defer args.stream.close(args.io);
     const fd = args.stream.socket.handle;
-    core.serveConn(fd, args.handler, .{});
+    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms });
 }
 
 // --------------------------------------------------------- //
@@ -35,11 +54,11 @@ fn runAsync(config: Config, handler: HandlerFn) !void {
     });
     defer srv.deinit(io);
 
-    std.debug.print("zix: listening on {s}:{d} (io.async)\n", .{ config.ip, config.port });
+    logSystem(config, "listening on {s}:{d} (io.async)", .{ config.ip, config.port });
 
     while (true) {
         const stream = srv.accept(io) catch continue;
-        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler }});
+        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }});
     }
 }
 
@@ -104,7 +123,7 @@ const ConnQueue = struct {
     }
 };
 
-const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn };
+const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0 };
 
 const AcceptCtx = struct {
     queue: *ConnQueue,
@@ -118,7 +137,7 @@ fn poolEntry(ctx: PoolCtx) void {
     while (ctx.queue.pop(ctx.io)) |stream| {
         defer stream.close(ctx.io);
         const fd = stream.socket.handle;
-        core.serveConn(fd, ctx.handler, .{});
+        core.serveConn(fd, ctx.handler, .{ .handler_timeout_ms = ctx.handler_timeout_ms });
     }
 }
 
@@ -143,7 +162,7 @@ fn runPool(config: Config, handler: HandlerFn) !void {
     const worker_count = if (config.workers == 0) cpu else config.workers;
     const pool_count = if (config.pool_size == 0) @max(10, cpu * 2) else config.pool_size;
 
-    std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ config.ip, config.port, worker_count, pool_count });
+    logSystem(config, "listening on {s}:{d} ({d} accept, {d} pool)", .{ config.ip, config.port, worker_count, pool_count });
 
     var queue = ConnQueue{};
     defer queue.deinit();
@@ -154,7 +173,7 @@ fn runPool(config: Config, handler: HandlerFn) !void {
         t.* = try std.Thread.spawn(
             .{ .stack_size = 512 * 1024 },
             poolEntry,
-            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler }},
+            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }},
         );
     }
 
@@ -182,6 +201,7 @@ const MixedAcceptCtx = struct {
     port: u16,
     kernel_backlog: u31,
     handler: HandlerFn,
+    handler_timeout_ms: u32 = 0,
 };
 
 fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
@@ -195,7 +215,7 @@ fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
 
     while (true) {
         const stream = srv.accept(ctx.io) catch continue;
-        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler }});
+        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler, .handler_timeout_ms = ctx.handler_timeout_ms }});
     }
 }
 
@@ -209,11 +229,19 @@ fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
 // ConnTable is private, so no slot is ever touched by two threads.
 
 /// Per-connection read state. buf accumulates bytes until one or more whole
-/// requests are present. filled is the live byte count held in buf.
+/// requests are present. filled is the live byte count held in buf. ws is set
+/// once the connection upgrades to WebSocket: from then on buf holds raw frame
+/// bytes and the engine echoes via the stored callback instead of parsing HTTP.
+/// drain is the count of request-body bytes still to read and discard for a
+/// body too large to buffer (the response was already sent), drain_close marks
+/// that the connection must close once the drain finishes.
 const Conn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
     filled: usize,
+    ws: ?core.WsFrameFn = null,
+    drain: usize = 0,
+    drain_close: bool = false,
 };
 
 /// Highest fd a worker's table can index. Linux hands out the lowest free fd,
@@ -261,7 +289,7 @@ const ConnTable = struct {
             return null;
         };
 
-        conn.* = .{ .fd = fd, .buf = buf, .filled = 0 };
+        conn.* = .{ .fd = fd, .buf = buf, .filled = 0, .ws = null, .drain = 0, .drain_close = false };
         self.slots[idx] = conn;
 
         return conn;
@@ -371,7 +399,7 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 /// Return:
 /// - .keep_alive when the connection may receive more requests
 /// - .close on peer hangup, parse error, oversize header, or Connection: close
-fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8) core.ConnOutcome {
+fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
 
@@ -415,16 +443,44 @@ fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8) core.ConnOutc
             body = body_buf[0..decoded.len];
             request_len = parsed.body_offset + decoded.consumed;
         } else if (head.content_length > 0) {
-            const need = parsed.body_offset + @as(usize, @intCast(head.content_length));
-            if (need > rem.len) break;
+            const content_length: usize = @intCast(head.content_length);
+            const need = parsed.body_offset + content_length;
 
-            body = rem[parsed.body_offset..need];
-            request_len = need;
+            if (need <= rem.len) {
+                body = rem[parsed.body_offset..need];
+                request_len = need;
+            } else if (need > conn.buf.len) {
+                // Body is larger than the read buffer and can never fit. Respond
+                // now with an empty body (large-body endpoints use content_length,
+                // not the bytes), then drain the rest off the socket over later
+                // events so the connection stays usable for keep-alive.
+                core.setTimeout(handler_timeout_ms);
+                handler(&head, &.{}, fd);
+
+                const present_body = rem.len - parsed.body_offset;
+                conn.drain = content_length - present_body;
+                conn.drain_close = !head.keep_alive;
+                conn.filled = 0;
+
+                return .keep_alive;
+            } else {
+                break;
+            }
         }
 
+        core.setTimeout(handler_timeout_ms);
         handler(&head, body, fd);
 
         consumed += request_len;
+
+        // The handler may have promoted this connection to WebSocket via
+        // WebSocket.serve. From here buf bytes are frames, not requests, so
+        // stop the HTTP parse loop and let the WS path take over below.
+        if (core.takeWebSocket()) |pending| {
+            conn.ws = pending.on_frame;
+            break;
+        }
+
         if (!head.keep_alive) {
             keep_alive = false;
             break;
@@ -438,7 +494,88 @@ fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8) core.ConnOutc
         conn.filled -= consumed;
     }
 
+    // Just upgraded: a client can pipeline its first frame in the same packet
+    // as the handshake request, so pump whatever is already buffered now
+    // rather than waiting for another readable event (which may never come
+    // until the client gets its echo).
+    if (conn.ws) |on_frame| return serveEpollWs(conn, on_frame, body_buf, out_buf);
+
     return if (keep_alive) .keep_alive else .close;
+}
+
+/// Drive an engine-owned WebSocket connection for one readable event. Reads
+/// once (level-triggered, so more bytes re-fire), then echoes every complete
+/// frame buffered. Ping/close are auto-handled by ws.pump. The worker is never
+/// parked here: it returns to the epoll loop after draining what is ready.
+///
+/// Return:
+/// - .keep_alive when the connection may receive more frames
+/// - .close on peer hangup, a close frame, write failure, or an oversize frame
+fn serveEpollWs(conn: *Conn, on_frame: core.WsFrameFn, payload_buf: []u8, out_buf: []u8) core.ConnOutcome {
+    const linux = std.os.linux;
+    const fd = conn.fd;
+
+    if (conn.filled < conn.buf.len) {
+        const rc = linux.read(fd, conn.buf[conn.filled..].ptr, conn.buf.len - conn.filled);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return .close;
+
+                conn.filled += n;
+            },
+            .AGAIN, .INTR => {},
+            else => return .close,
+        }
+    }
+
+    const result = ws.pump(fd, conn.buf[0..conn.filled], payload_buf, out_buf, on_frame);
+
+    if (result.consumed >= conn.filled) {
+        conn.filled = 0;
+    } else if (result.consumed > 0) {
+        std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - result.consumed], conn.buf[result.consumed..conn.filled]);
+        conn.filled -= result.consumed;
+    }
+
+    if (result.close) return .close;
+
+    // A frame wider than the whole buffer can never complete: close rather than
+    // spin on a connection that can make no progress.
+    if (conn.filled >= conn.buf.len) return .close;
+
+    return .keep_alive;
+}
+
+/// Read and discard the remaining body bytes of an over-large request whose
+/// response was already sent. Reads to EAGAIN, never past conn.drain, so the
+/// next request's bytes are left untouched. When the drain finishes, the
+/// connection resumes normal HTTP parsing, or closes if the request asked to.
+///
+/// Return:
+/// - .keep_alive while bytes remain or once a keep-alive body is fully drained
+/// - .close on peer hangup or once a Connection: close body is fully drained
+fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
+    const linux = std.os.linux;
+    const fd = conn.fd;
+
+    while (conn.drain > 0) {
+        const want = @min(conn.drain, conn.buf.len);
+        const rc = linux.read(fd, conn.buf.ptr, want);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return .close;
+
+                conn.drain -= n;
+            },
+            .AGAIN => return .keep_alive,
+            .INTR => {},
+            else => return .close,
+        }
+    }
+
+    return if (conn.drain_close) .close else .keep_alive;
 }
 
 const EpollWorkerCtx = struct { config: Config, handler: HandlerFn };
@@ -476,10 +613,12 @@ fn epollWorker(ctx: EpollWorkerCtx) void {
     const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
     defer std.heap.smp_allocator.free(body_buf);
 
-    const max_events: u32 = 256;
-    var events: [max_events]linux.epoll_event = undefined;
+    const out_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
+    defer std.heap.smp_allocator.free(out_buf);
+
+    var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
     while (true) {
-        const wait_rc = linux.epoll_wait(epfd, &events, max_events, -1);
+        const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
         switch (std.posix.errno(wait_rc)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -496,8 +635,12 @@ fn epollWorker(ctx: EpollWorkerCtx) void {
             const conn = table.get(ev.data.fd) orelse continue;
             const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                 core.ConnOutcome.close
+            else if (conn.drain > 0)
+                serveEpollDrain(conn)
+            else if (conn.ws) |on_frame|
+                serveEpollWs(conn, on_frame, body_buf, out_buf)
             else
-                serveEpollConn(conn, ctx.handler, body_buf);
+                serveEpollConn(conn, ctx.handler, body_buf, out_buf, config.handler_timeout_ms);
 
             if (outcome == .close) {
                 _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
@@ -512,7 +655,7 @@ fn runEpoll(config: Config, handler: HandlerFn) !void {
     const cpu = try std.Thread.getCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
-    std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers, shared-nothing)\n", .{ config.ip, config.port, worker_count });
+    logSystem(config, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{ config.ip, config.port, worker_count });
 
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
@@ -535,18 +678,18 @@ fn runMixed(config: Config, handler: HandlerFn) !void {
     const cpu = try std.Thread.getCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
-    std.debug.print("zix: listening on {s}:{d} ({d} accept, io.async)\n", .{ config.ip, config.port, worker_count });
+    logSystem(config, "listening on {s}:{d} ({d} accept, io.async)", .{ config.ip, config.port, worker_count });
 
     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(acc_threads);
 
     for (acc_threads) |*t| {
-        // Use default stack size (.{}) — serveConn uses ~128KB stack via io.async scheduler.
+        // Use default stack size (.{}), serveConn uses ~128KB stack via io.async scheduler.
         // Explicit 256KB here overflows when io.async falls back to inline dispatch.
         t.* = try std.Thread.spawn(
             .{},
             mixedAcceptEntry,
-            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler }},
+            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }},
         );
     }
 
@@ -555,35 +698,78 @@ fn runMixed(config: Config, handler: HandlerFn) !void {
 
 // --------------------------------------------------------- //
 
+/// Server type specialized over a comptime handler.
+///
+/// Note:
+/// - handler is baked into the type, so run() takes no argument. The server core
+///   stays routing-agnostic: handler can be a Router(routes).dispatch, a bare
+///   HandlerFn, or a middleware chain.
+fn Http1ServerImpl(comptime handler: HandlerFn) type {
+    return struct {
+        config: Config,
+
+        const Self = @This();
+
+        pub fn init(config: Config) Self {
+            return .{ .config = config };
+        }
+
+        pub fn deinit(_: *Self) void {}
+
+        pub fn run(self: *const Self) !void {
+            return switch (self.config.dispatch_model) {
+                .ASYNC => runAsync(self.config, handler),
+                .POOL => runPool(self.config, handler),
+                .MIXED => runMixed(self.config, handler),
+                .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
+                    runEpoll(self.config, handler)
+                else blk: {
+                    logSystem(self.config, "EPOLL is Linux-only. Falling back to POOL.", .{});
+                    break :blk runPool(self.config, handler);
+                },
+            };
+        }
+    };
+}
+
+/// http1 server - initialize with a comptime handler and a runtime config.
+///
+/// Note:
+/// - handler must be comptime: it is baked into the server type, so there is no
+///   dynamic registration after init. Pass a Router(routes).dispatch, a bare
+///   handler, or a middleware chain.
+///
+/// Usage:
+/// ```zig
+/// const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
+///     .{ .path = "/", .handler = home },
+/// });
+///
+/// var server = zix.Http1.Server.init(Routes.dispatch, .{
+///     .ip = "0.0.0.0",
+///     .port = 8080,
+/// });
+/// try server.run();
+/// ```
 pub const Server = struct {
-    config: Config,
-
-    pub fn init(config: Config) Server {
-        return .{ .config = config };
-    }
-
-    pub fn deinit(_: *Server) void {}
-
-    pub fn run(self: *const Server, handler: HandlerFn) !void {
-        return switch (self.config.dispatch_model) {
-            .ASYNC => runAsync(self.config, handler),
-            .POOL => runPool(self.config, handler),
-            .MIXED => runMixed(self.config, handler),
-            .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
-                runEpoll(self.config, handler)
-            else blk: {
-                std.debug.print("zix: EPOLL is Linux-only. Falling back to POOL.\n", .{});
-                break :blk runPool(self.config, handler);
-            },
-        };
+    /// Param:
+    /// handler - comptime HandlerFn (baked into the server type)
+    /// config - Http1ServerConfig
+    ///
+    /// Return:
+    /// - Http1ServerImpl(handler)
+    pub fn init(comptime handler: HandlerFn, config: Config) Http1ServerImpl(handler) {
+        return Http1ServerImpl(handler).init(config);
     }
 };
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+fn testNoopHandler(_: *const core.ParsedHead, _: []const u8, _: std.posix.fd_t) void {}
+
 test "zix http1: Server.init valid config, deinit is safe" {
-    var server = Server.init(.{
+    var server = Server.init(testNoopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
@@ -592,7 +778,7 @@ test "zix http1: Server.init valid config, deinit is safe" {
 }
 
 test "zix http1: Server.init with POOL dispatch model" {
-    var server = Server.init(.{
+    var server = Server.init(testNoopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
@@ -602,7 +788,7 @@ test "zix http1: Server.init with POOL dispatch model" {
 }
 
 test "zix http1: Server.init with EPOLL dispatch model" {
-    var server = Server.init(.{
+    var server = Server.init(testNoopHandler, .{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
