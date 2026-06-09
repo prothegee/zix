@@ -1,4 +1,4 @@
-//! zix fix server — POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch for FIX 4.x.
+//! zix fix server: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch for FIX 4.x.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -6,6 +6,10 @@ const FixServerConfig = @import("config.zig").FixServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const FixServeOpts = core.FixServeOpts;
 const Logger = @import("../../logger/logger.zig").Logger;
+
+/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// ready-fd set in one syscall at high connection counts.
+const EPOLL_MAX_EVENTS: usize = 512;
 
 // --------------------------------------------------------- //
 
@@ -264,7 +268,7 @@ pub const FixServer = struct {
         return .{ .routes = routes, .config = config };
     }
 
-    /// No-op — resources released inside run via defer.
+    /// No-op, resources released inside run via defer.
     pub fn deinit(self: *Self) void {
         _ = self;
     }
@@ -442,10 +446,9 @@ pub const FixServer = struct {
                 .{EpollWorkerCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .opts = conn_opts }},
             );
 
-        const max_events = 256;
-        var events: [max_events]linux.epoll_event = undefined;
+        var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
         while (true) {
-            const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
+            const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
             switch (std.posix.errno(wait_result)) {
                 .SUCCESS => {},
                 .INTR => continue,
