@@ -14,7 +14,7 @@ pub const Request = struct {
     buf: []const u8,
     /// Parsed offsets into buf. No data was copied during parsing.
     head: parser.ParsedHead,
-    /// Raw socket fd — used by body() for any bytes not yet in buf.
+    /// Raw socket fd: used by body() for any bytes not yet in buf.
     fd: std.posix.fd_t,
     /// How many bytes in buf are valid (filled by the recv loop in handleConnection).
     buf_filled: usize,
@@ -94,7 +94,7 @@ pub const Request = struct {
         var raw_total: usize = already_slice.len;
 
         // Read from fd until terminal chunk found or buffer full.
-        // Note: "0\r\n\r\n" pattern match is a heuristic — the dechunker handles correctness.
+        // Note: "0\r\n\r\n" pattern match is a heuristic, the dechunker handles correctness.
         while (raw_total < max_raw) {
             if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
             const n = std.posix.read(self.fd, raw_buf[raw_total..max_raw]) catch break;
