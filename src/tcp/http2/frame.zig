@@ -59,9 +59,8 @@ pub const FrameHeader = struct {
     stream_id: u31,
 };
 
-pub fn readFrameHeader(fd: std.posix.fd_t) !FrameHeader {
-    var buf: [9]u8 = undefined;
-    try recvExact(fd, &buf);
+/// Parse a 9-byte frame header from buf (len >= 9). No I/O. Use with a buffered reader.
+pub fn parseFrameHeader(buf: []const u8) FrameHeader {
     const length: u24 = (@as(u24, buf[0]) << 16) | (@as(u24, buf[1]) << 8) | buf[2];
     const stream_id: u31 = @intCast(
         ((@as(u32, buf[5]) << 24) | (@as(u32, buf[6]) << 16) | (@as(u32, buf[7]) << 8) | buf[8]) & 0x7FFF_FFFF,
@@ -74,8 +73,14 @@ pub fn readFrameHeader(fd: std.posix.fd_t) !FrameHeader {
     };
 }
 
-pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
+pub fn readFrameHeader(fd: std.posix.fd_t) !FrameHeader {
     var buf: [9]u8 = undefined;
+    try recvExact(fd, &buf);
+    return parseFrameHeader(&buf);
+}
+
+/// Encode a 9-byte frame header into buf. No I/O. Use for staged/coalesced writes.
+pub fn encodeFrameHeader(buf: *[9]u8, fh: FrameHeader) void {
     buf[0] = @intCast((fh.length >> 16) & 0xFF);
     buf[1] = @intCast((fh.length >> 8) & 0xFF);
     buf[2] = @intCast(fh.length & 0xFF);
@@ -86,6 +91,11 @@ pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
     buf[6] = @intCast((sid >> 16) & 0xFF);
     buf[7] = @intCast((sid >> 8) & 0xFF);
     buf[8] = @intCast(sid & 0xFF);
+}
+
+pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
+    var buf: [9]u8 = undefined;
+    encodeFrameHeader(&buf, fh);
     try fdWriteAll(fd, &buf);
 }
 
