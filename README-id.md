@@ -1525,7 +1525,7 @@ Dalam kondisi saat ini, zix tidak akan:
 __*HttpArena*__ <br>
 Website: https://www.http-arena.com <br>
 Project repo: https://github.com/MDA2AV/HttpArena <br>
-Last pull-request: https://github.com/MDA2AV/HttpArena/pull/852 <br>
+Pull-request terahir: https://github.com/MDA2AV/HttpArena/pull/852 <br>
 
 Http/1.1 <br>
 | Test | Conn | RPS | CPU | Mem |
