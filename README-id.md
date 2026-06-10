@@ -13,7 +13,7 @@
 </p>
 
 <div align="center">
-    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
+    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
@@ -145,6 +145,7 @@ Setiap dokumen punya variannya sendiri.
 - [Pengujian](./README-id.md#pengujian)
 - [Model Memori](./README-id.md#model-memori)
 - [Catatan Penting](./README-id.md#catatan-penting)
+- [Benchmark](./README-id.md#benchmark)
 
 <br>
 
@@ -1512,10 +1513,48 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 ## Important Notes
 
 Dalam kondisi saat ini, zix tidak akan:
-- Mencapai Implementasi TLS.
-- Membuat driver basis data.
-- Implementasi Http2 (hanya sebagai implementasi gRPC terlebih dahulu).
-- Http3.
+- Implementasi TLS.
+- Implementasi database driver.
+- Implementasi Http2 (hanya sebagai gRPC dependency).
+- Implementasi Http3.
+
+<br>
+
+## Benchmark
+
+__*HttpArena*__ <br>
+Website: https://www.http-arena.com <br>
+Project repo: https://github.com/MDA2AV/HttpArena <br>
+Pull-request terahir: https://github.com/MDA2AV/HttpArena/pull/852 <br>
+
+Http/1.1 <br>
+| Test | Conn | RPS | CPU | Mem |
+| :- | :- | :- | :- | :- |
+| baseline | 512 | 3,717,345 | 6397.5% | 84MiB |
+| baseline | 4096 | 3,720,118 | 6592.6% | 127MiB |
+| pipelined | 512 | 34,397,468 | 6645.7% | 82MiB |
+| pipelined | 4096 | 34,429,158  | 6731.0% | 125MiB |
+| limited-conn | 512 | 2,509,394 | 5408.3% | 104MiB |
+| limited-conn | 4096 | 2,759,549 | 6109.7% | 172MiB |
+| json | 4096 | 2,355,180 | 6153.5% | 146MiB |
+| upload | 32 | 7,889 | 1186.0% | 71MiB |
+| upload | 256 | 6,490 | 1004.0% | 79MiB |
+| static | 1024  | 2,024,603 | 5471.0% | 89MiB |
+| static | 4096 | 1,999,691 | 5292.6% | 138MiB |
+| static | 6800 | 1,922,451  | 5014.4% | 188MiB |
+| echo-ws | 512 | 3,772,118 | 6428.6% | 82MiB |
+| echo-ws | 4096 | 3,818,104 | 6572.2% | 124MiB |
+| echo-ws | 16384 | 3,703,042 | 6476.4% | 278MiB |
+| echo-ws-pipeline | 512 | 58,349,772 | 6566.9% | 81MiB |
+| echo-ws-pipeline | 4096 | 58,360,489 | 6585.4% | 126MiB |
+| echo-ws-pipeline | 16384 | 57,239,628 | 6453.2% | 273MiB |
+
+gRPC <br>
+| Test | Conn | RPS | CPU | Mem |
+| :- | :- | :- | :- | :- |
+| unary-grpc | 256 | 7,145,739 | 3859.3% | 347MiB |
+| unary-grpc | 1024 | 7,046,038 | 4066.4% | 1.1GiB |
+| stream-grpc | 64 | 8,472,000 | 45.8% | 89MiB |
 
 <br>
 
