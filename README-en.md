@@ -56,8 +56,7 @@ __*2. Four selectable dispatch models:*__
 - MIXED (N acceptors each dispatch via io.async(), no queue): balanced.
 - EPOLL (single epoll loop + worker pool, EPOLLONESHOT re-arm so idle keep-alive holds no thread): Linux-only, best for very high or slow/idle connection counts.
 
-> concurrency strategy is a deliberate config choice, not a framework default. Http,
-Grpc, Fix, and Tcp implement all four.
+> concurrency strategy is a deliberate config choice, not a implementation default. Http, Grpc, Fix, and Tcp implement all four.
 
 <br>
 
