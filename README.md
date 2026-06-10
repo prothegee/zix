@@ -9,7 +9,7 @@
 </p>
 
 <div align="center">
-    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
+    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
 <hr>
@@ -34,6 +34,26 @@
 
 [BSD-3-Clause License](LICENSE-BSD)
 
+</div>
+
+<br>
+
+<h4 align="center">
+    <b><i>Benchmark by HttpArena:</i></b>
+</h4>
+
+<div align="center">
+    <a href="https://www.http-arena.com/#mem=1&sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
+    </a>
+    &nbsp;&nbsp;
+    <a href="https://www.http-arena.com/#scope=ws&mem=1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
+    </a>
+    &nbsp;&nbsp;
+    <a href="https://www.http-arena.com/#scope=grpc&mem=1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
+    </a>
 </div>
 
 <br>
