@@ -65,11 +65,25 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 }
 
 // POST /upload
-// Reads raw body and writes it to UPLOAD_DIR/<filename>.
+// Reads the raw request body and writes it to UPLOAD_DIR/<filename>.
 // Filename comes from query param: /upload?name=file.txt
 //
 // curl usage:
 // curl -X POST "http://localhost:9106/upload?name=file.txt" --data-binary @/path/to/file.txt
+//
+// Body-size limit (zix.Http1 has no per-request arena, unlike zix.Http): the body handed to
+// a handler is capped by the dispatch model, NOT by max_recv_buf.
+// - .POOL / .ASYNC / .MIXED (blocking core.serveConn): body is capped at the fixed 8192-byte
+//   body_buf. A larger upload is silently truncated to 8192 bytes.
+// - .EPOLL (serveEpollConn): body must fit in max_recv_buf. A larger body arrives EMPTY (the
+//   rest is drained off the socket), so the handler sees body.len == 0.
+// For multipart or large uploads, use the high-level zix.Http static server instead.
+//
+// Verified 2026-06-10 against this example (.POOL, max_recv_buf = 16 KB):
+//   19-byte body    -> {"size":19}    (ok)
+//   8192-byte body  -> {"size":8192}  (ok, exactly at the body_buf cap)
+//   12000-byte body -> {"size":8192}  (TRUNCATED, even though 12000 < 16 KB max_recv_buf)
+//   40000-byte body -> {"size":8192}  (TRUNCATED)
 fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
         zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
