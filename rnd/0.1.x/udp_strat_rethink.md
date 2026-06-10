@@ -31,7 +31,7 @@ Every `receive()` call must have a mandatory timeout (e.g., 500ms).
 *   **Lifecycle Integration**: The loop catches `error.WouldBlock`, checks if `server.is_running` is still true, and if so, starts the next `receive()` call.
 *   **Benefit**: Guaranteed exit during shutdown within the timeout window.
 
-### B. The "Drip-Feed" Buffer (Framework Level)
+### B. The "Drip-Feed" Buffer (Engine Level)
 Instead of the user calling `receive()` directly, the library manages a background task that pumps packets into a queue.
 *   **Logic**: The `while` loop belongs to `zix`, not the user.
 *   **User API**: `server.onPacket(myHandler)`.
