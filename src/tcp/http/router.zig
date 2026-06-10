@@ -32,7 +32,7 @@ pub const Route = struct {
 /// routes - []const Route (comptime-known route table)
 ///
 /// Return:
-/// type
+/// - type
 pub fn Router(comptime routes: []const Route) type {
     const exact_count = blk: {
         var n: usize = 0;
@@ -109,7 +109,7 @@ pub fn Router(comptime routes: []const Route) type {
         /// ctx - *Context
         ///
         /// Return:
-        /// !bool
+        /// - !bool
         pub fn dispatch(_: @This(), req: *Request, res: *Response, ctx: *Context) !bool {
             const p = req.path();
 
@@ -131,10 +131,12 @@ pub fn Router(comptime routes: []const Route) type {
             var best_len: usize = 0;
             var best_handler: ?HandlerFn = null;
             inline for (prefix_routes) |route| {
-                const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
-                if (std.mem.startsWith(u8, p, route.path) and at_boundary and route.path.len > best_len) {
-                    best_len = route.path.len;
-                    best_handler = route.handler;
+                if (std.mem.startsWith(u8, p, route.path)) {
+                    const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
+                    if (at_boundary and route.path.len > best_len) {
+                        best_len = route.path.len;
+                        best_handler = route.handler;
+                    }
                 }
             }
             if (best_handler) |h| {

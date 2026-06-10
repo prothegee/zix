@@ -13,7 +13,7 @@ const std = @import("std");
 /// file_path - []const u8
 ///
 /// Return:
-/// []const u8
+/// - []const u8
 pub fn extension(file_path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, file_path, '.')) |dot_pos| {
         if (dot_pos + 1 < file_path.len) {
@@ -26,14 +26,14 @@ pub fn extension(file_path: []const u8) []const u8 {
 /// Save file data to a directory, creating it if it does not exist
 ///
 /// Param:
-/// io        - std.Io
+/// io - std.Io
 /// allocator - std.mem.Allocator (used to return an owned copy of the saved path)
-/// dir       - []const u8 (destination directory path)
-/// filename  - []const u8
-/// data      - []const u8 (file content)
+/// dir - []const u8 (destination directory path)
+/// filename - []const u8
+/// data - []const u8 (file content)
 ///
 /// Return:
-/// ![]const u8 (caller-owned full path of the saved file)
+/// - ![]const u8 (caller-owned full path of the saved file)
 pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 

@@ -656,7 +656,9 @@ pub const HpackEncoder = struct {
 
     fn writeString(self: *HpackEncoder, s: []const u8) !void {
         var hbuf: [256]u8 = undefined;
-        const hn = huffEncode(s, &hbuf) catch null;
+        // Explicit ?usize so comptime evaluation (cached gRPC reply blocks) keeps the optional
+        // type even when the error branch is statically unreachable.
+        const hn: ?usize = huffEncode(s, &hbuf) catch null;
         if (hn != null and hn.? < s.len) {
             try self.writeInt(hn.?, 7, 0x80);
             if (self.pos + hn.? > self.buf.len) return error.BufferFull;
@@ -819,7 +821,7 @@ test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
     dec.evictTo(0);
     try std.testing.expectEqual(@as(usize, 0), dec.dyn_count);
 
-    // dyn_buf_pos still at 4000+5=4005. Now add a new entry — needs compaction.
+    // dyn_buf_pos still at 4000+5=4005. Now add a new entry, needs compaction.
     dec.addDynamic("x-new", "world");
     try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
     try std.testing.expectEqualStrings("x-new", dec.dyn[0].name);

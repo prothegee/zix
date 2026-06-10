@@ -29,7 +29,7 @@ pub const Code = enum(u8) {
     /// self - zix.Tcp.Method.Code
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     fn toString(self: Code) []const u8 {
         return switch (self) {
             .GET => "GET",
@@ -46,7 +46,7 @@ pub const Code = enum(u8) {
     /// Get self object as a string
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     pub fn asString(self: Self) []const u8 {
         return Self.toString(self);
     }
@@ -63,7 +63,7 @@ pub const Code = enum(u8) {
 /// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
-/// zix.Tcp.Http.Method.Code
+/// - zix.Tcp.Http.Method.Code
 pub fn enumFromString(method_string: []const u8) Code {
     var data: [8]u8 = undefined;
     const mod = std.ascii.lowerString(&data, method_string);
@@ -109,7 +109,7 @@ pub fn enumFromString(method_string: []const u8) Code {
 /// method_enum - zix.Tcp.Http.Method.Code
 ///
 /// Return:
-/// []const u8
+/// - []const u8
 pub fn stringFromEnum(method_enum: Code) []const u8 {
     return switch (method_enum) {
         .GET => "GET",

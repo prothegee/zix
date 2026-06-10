@@ -130,11 +130,17 @@ pub const HttpClient = struct {
     /// Make an HTTP request and return the parsed response.
     ///
     /// Errors (named):
-    /// error.InvalidUrl    - malformed URL, unsupported scheme, or missing host
-    /// error.BodyTooLarge  - response body exceeded config.max_response_body bytes
+    /// error.InvalidUrl          - malformed URL, unsupported scheme, or missing host
+    /// error.BodyTooLarge        - response body exceeded config.max_response_body bytes
+    /// error.UnsupportedVersion  - config.version is HTTP_2 or HTTP_3 (not yet implemented)
     ///
     /// Other errors propagate from std.http.Client (network failures, protocol errors, OOM).
     pub fn request(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {
+        switch (self.config.version) {
+            .HTTP_1 => {},
+            .HTTP_2, .HTTP_3 => return error.UnsupportedVersion,
+        }
+
         const gpa = self.config.allocator;
 
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;

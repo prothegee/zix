@@ -87,8 +87,8 @@ loop:
       register ConnEntry{ stream, deadline = now + conn_timeout_ms } with self.registry
       defer deregister on return (marks done=true, removes from registry)
 3. stack_read / stack_write [stack_threshold]u8 on stack
-   read_buf  = if max_client_request  <= stack_threshold: stack slice
-               else smp_allocator.alloc(u8, max_client_request)
+   read_buf  = if max_recv_buf  <= stack_threshold: stack slice
+               else smp_allocator.alloc(u8, max_recv_buf)
    write_buf = if max_client_response <= stack_threshold: stack slice
                else smp_allocator.alloc(u8, max_client_response)
 4. defer: heap-free if heap-allocated stream.close()

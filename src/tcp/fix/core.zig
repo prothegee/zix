@@ -1,4 +1,4 @@
-//! zix fix core — parsing, building, checksum, session handler.
+//! zix fix core: parsing, building, checksum, session handler.
 //! All functions are pub for test imports.
 //! No heap allocation. Zero-copy field parsing (slices into caller buffer).
 
@@ -73,10 +73,10 @@ pub const Tag = enum(u16) {
     _,
 };
 
-/// FIX MsgType (tag 35) string constants — FIX 4.0 through 4.4.
+/// FIX MsgType (tag 35) string constants: FIX 4.0 through 4.4.
 /// Use these instead of raw string literals in route tables and sendMessage calls.
 pub const MsgType = struct {
-    // Session (handled internally by serveConn — do not route these)
+    // Session (handled internally by serveConn, do not route these)
     pub const Heartbeat: []const u8 = "0";
     pub const TestRequest: []const u8 = "1";
     pub const ResendRequest: []const u8 = "2";
@@ -87,7 +87,7 @@ pub const MsgType = struct {
 
     // --------------------------------------------------------- //
 
-    // Application — FIX 4.0 / 4.1
+    // Application: FIX 4.0 / 4.1
     pub const IOI: []const u8 = "C";
     pub const NewOrderSingle: []const u8 = "D";
     pub const NewOrderList: []const u8 = "E";
@@ -107,7 +107,7 @@ pub const MsgType = struct {
 
     // --------------------------------------------------------- //
 
-    // Application — FIX 4.2
+    // Application: FIX 4.2
     pub const QuoteRequest: []const u8 = "R";
     pub const SettlementInstructions: []const u8 = "T";
     pub const MarketDataRequest: []const u8 = "V";
@@ -118,7 +118,7 @@ pub const MsgType = struct {
 
     // --------------------------------------------------------- //
 
-    // Application — FIX 4.3
+    // Application: FIX 4.3
     pub const QuoteCancel: []const u8 = "Z";
     pub const QuoteStatusRequest: []const u8 = "a";
     pub const MassQuoteAcknowledgement: []const u8 = "b";
@@ -132,7 +132,7 @@ pub const MsgType = struct {
 
     // --------------------------------------------------------- //
 
-    // Application — FIX 4.4 (two-character types)
+    // Application: FIX 4.4 (two-character types)
     pub const TradeCaptureReport: []const u8 = "AE";
     pub const OrderMassStatusRequest: []const u8 = "AF";
     pub const QuoteRequestReject: []const u8 = "AG";
@@ -212,11 +212,11 @@ pub fn verifyChecksum(raw: []const u8) bool {
     var i: usize = 0;
     while (i + 4 <= raw.len) : (i += 1) {
         if (raw[i] == SOH and raw[i + 1] == '1' and raw[i + 2] == '0' and raw[i + 3] == '=') {
-            const cs = computeChecksum(raw[0 .. i + 1]);
+            const checksum = computeChecksum(raw[0 .. i + 1]);
             const value_start = i + 4;
             const soh = std.mem.indexOfScalarPos(u8, raw, value_start, SOH) orelse return false;
-            const cs_value = std.fmt.parseInt(u8, raw[value_start..soh], 10) catch return false;
-            return cs == cs_value;
+            const checksum_value = std.fmt.parseInt(u8, raw[value_start..soh], 10) catch return false;
+            return checksum == checksum_value;
         }
     }
     return false;
@@ -260,8 +260,8 @@ pub fn buildMessage(
     @memcpy(out[pos..][0..bp], body[0..bp]);
     pos += bp;
 
-    const cs = computeChecksum(out[0..pos]);
-    pos += (try std.fmt.bufPrint(out[pos..], "10={d:0>3}\x01", .{cs})).len;
+    const checksum = computeChecksum(out[0..pos]);
+    pos += (try std.fmt.bufPrint(out[pos..], "10={d:0>3}\x01", .{checksum})).len;
 
     return pos;
 }
@@ -396,9 +396,9 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                             writer.interface.flush() catch {};
                         } else {
                             sent_test_request = true;
-                            var tr_buf: [16]u8 = undefined;
-                            const tr = std.fmt.bufPrint(&tr_buf, "{d}", .{seq_out}) catch "1";
-                            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = tr }};
+                            var test_req_id_buf: [16]u8 = undefined;
+                            const test_req_id = std.fmt.bufPrint(&test_req_id_buf, "{d}", .{seq_out}) catch "1";
+                            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = test_req_id }};
                             const n = buildMessage(&hb_out, comp_id, peer_comp_id[0..peer_len], seq_out, MsgType.TestRequest, &extra) catch break :outer;
                             seq_out += 1;
                             writer.interface.writeAll(hb_out[0..n]) catch {};
@@ -446,8 +446,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
         const raw = recv_buf[0..msg_end];
 
         var fields: [MAX_FIELDS]Field = undefined;
-        const nf = parseFields(raw, &fields) catch return;
-        const fslice = fields[0..nf];
+        const field_count = parseFields(raw, &fields) catch return;
+        const fslice = fields[0..field_count];
 
         if (!verifyChecksum(raw)) return;
 
@@ -487,8 +487,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
         } else if (std.mem.eql(u8, msgtype, MsgType.Heartbeat)) {
             var extra_buf: [1]BuildField = undefined;
             var extra_len: usize = 0;
-            if (getField(fslice, .TestReqID)) |tr| {
-                extra_buf[0] = .{ .tag = .TestReqID, .value = tr };
+            if (getField(fslice, .TestReqID)) |test_req_id| {
+                extra_buf[0] = .{ .tag = .TestReqID, .value = test_req_id };
                 extra_len = 1;
             }
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, MsgType.Heartbeat, extra_buf[0..extra_len]);
@@ -497,8 +497,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
         } else if (std.mem.eql(u8, msgtype, MsgType.TestRequest)) {
-            const tr = getField(fslice, .TestReqID) orelse "0";
-            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = tr }};
+            const test_req_id = getField(fslice, .TestReqID) orelse "0";
+            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = test_req_id }};
             const n = try buildMessage(&out_buf, comp_id, peer_comp_id[0..peer_len], seq_out, MsgType.Heartbeat, &extra);
             seq_out += 1;
             try writer.interface.writeAll(out_buf[0..n]);
@@ -649,8 +649,8 @@ test "zix fix: buildMessage parses back with correct MsgType and CompIDs" {
         .{ .tag = .Symbol, .value = "AAPL" },
     });
     var fields: [MAX_FIELDS]Field = undefined;
-    const nf = try parseFields(out[0..n], &fields);
-    const fslice = fields[0..nf];
+    const field_count = try parseFields(out[0..n], &fields);
+    const fslice = fields[0..field_count];
 
     try std.testing.expectEqualStrings("D", getField(fslice, .MsgType).?);
     try std.testing.expectEqualStrings("SRV", getField(fslice, .SenderCompID).?);
@@ -675,9 +675,9 @@ test "zix fix: bodyLength field equals byte count from tag 35 to last SOH before
     const raw = out[0..n];
 
     var fields: [MAX_FIELDS]Field = undefined;
-    const nf = try parseFields(raw, &fields);
-    const bl_str = getField(fields[0..nf], .BodyLength).?;
-    const bl = try std.fmt.parseInt(usize, bl_str, 10);
+    const field_count = try parseFields(raw, &fields);
+    const body_len_str = getField(fields[0..field_count], .BodyLength).?;
+    const body_len = try std.fmt.parseInt(usize, body_len_str, 10);
 
     const tag35_start = std.mem.indexOf(u8, raw, "35=").?;
 
@@ -690,7 +690,7 @@ test "zix fix: bodyLength field equals byte count from tag 35 to last SOH before
         }
     }
     const measured = tag10_soh - tag35_start;
-    try std.testing.expectEqual(bl, measured);
+    try std.testing.expectEqual(body_len, measured);
 }
 
 test "zix fix: MsgType session constants match FIX 4.x spec" {

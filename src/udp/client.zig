@@ -37,7 +37,7 @@ pub fn UdpClient(comptime Packet: type) type {
 
         // --------------------------------------------------------- //
 
-        /// Initialize in REQUIRED mode — bind_port and server_port must be set non-zero in config.
+        /// Initialize in REQUIRED mode: bind_port and server_port must be set non-zero in config.
         /// Binds the socket and resolves the server address.
         ///
         /// Return:
@@ -51,7 +51,7 @@ pub fn UdpClient(comptime Packet: type) type {
             return .{ .config = config, .socket = socket, .dest = dest, .io = io };
         }
 
-        /// Initialize in CONFIGURABLE mode — reads --bind-port and --server-port from CLI args.
+        /// Initialize in CONFIGURABLE mode: reads --bind-port and --server-port from CLI args.
         /// Falls back to config defaults if args are absent.
         pub fn initArgs(config: UdpClientConfig, io: std.Io, args: anytype) !Self {
             var cfg = config;

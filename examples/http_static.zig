@@ -4,8 +4,8 @@ const zix = @import("zix");
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9006;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
-const MAX_KERNEL_BACKLOG: usize = 1024 * 4;
-const MAX_CLIENT_REQUEST: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
+const KERNEL_BACKLOG: usize = 1024 * 4;
+const MAX_RECV_BUF: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 64;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
@@ -236,8 +236,8 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
-        .max_kernel_backlog = MAX_KERNEL_BACKLOG,
-        .max_client_request = MAX_CLIENT_REQUEST,
+        .kernel_backlog = KERNEL_BACKLOG,
+        .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
         .public_dir = PUBLIC_DIR,
