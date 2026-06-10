@@ -13,7 +13,7 @@
 </p>
 
 <div align="center">
-    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="243px">
+    <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
