@@ -400,7 +400,66 @@ fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_
 
 // --------------------------------------------------------- //
 
+/// Coalescing sink for pipelined responses. While installed (tl_resp_sink),
+/// fdWriteAll appends to buf instead of hitting the socket, so a pipelined
+/// burst of N responses costs one write() instead of N. Same pattern as the
+/// WebSocket SendSink, owned by the EPOLL request loop in server.zig.
+pub const RespSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    pub fn append(self: *RespSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            fdWriteAllDirect(self.fd, bytes) catch {
+                self.failed = true;
+            };
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn flush(self: *RespSink) void {
+        if (self.len == 0) return;
+
+        fdWriteAllDirect(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+pub threadlocal var tl_resp_sink: ?*RespSink = null;
+
+/// Flush any response bytes still staged for fd. Handlers that write to the
+/// fd directly (sendfile, raw send) must call this first so the wire order
+/// matches the request order under pipelining. No-op when nothing is staged.
+pub fn flushPending(fd: std.posix.fd_t) void {
+    if (tl_resp_sink) |sink| {
+        if (sink.fd == fd) sink.flush();
+    }
+}
+
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (tl_resp_sink) |sink| {
+        if (sink.fd == fd) {
+            sink.append(data);
+            if (sink.failed) return error.BrokenPipe;
+
+            return;
+        }
+    }
+
+    return fdWriteAllDirect(fd, data);
+}
+
+fn fdWriteAllDirect(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
@@ -929,4 +988,52 @@ test "zix http1: percentDecode, encoded chars decoded in place" {
     var buf = [_]u8{ 'a', '%', '2', '0', 'b' };
     const decoded = percentDecode(&buf);
     try std.testing.expectEqualStrings("a b", decoded);
+}
+
+test "zix http1: RespSink stages fdWriteAll bytes until flush" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var stage: [64]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    try fdWriteAll(fds[1], "alpha");
+    try fdWriteAll(fds[1], "beta");
+
+    // Both writes are staged, nothing has hit the socket yet.
+    try std.testing.expectEqual(@as(usize, 9), sink.len);
+
+    sink.flush();
+    try std.testing.expect(!sink.failed);
+
+    var recv: [64]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqualStrings("alphabeta", recv[0..n]);
+}
+
+test "zix http1: RespSink oversized payload writes through in order" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    // "abc" stages, the oversized payload flushes it first then writes
+    // through directly, so wire order matches call order.
+    try fdWriteAll(fds[1], "abc");
+    try fdWriteAll(fds[1], "0123456789");
+    sink.flush();
+    try std.testing.expect(!sink.failed);
+
+    var recv: [64]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqualStrings("abc0123456789", recv[0..n]);
 }

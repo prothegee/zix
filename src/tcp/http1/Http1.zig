@@ -37,6 +37,7 @@ pub const percentDecode = core.percentDecode;
 pub const parseRange = core.parseRange;
 
 pub const fdWriteAll = core.fdWriteAll;
+pub const flushPending = core.flushPending;
 pub const writeSimple = core.writeSimple;
 pub const writeSimpleNoBody = core.writeSimpleNoBody;
 pub const writeJson = core.writeJson;
