@@ -12,8 +12,8 @@ The backing buffer is arena-allocated per request to exactly the configured cap 
 
 | Variant | Cap | When to use |
 | :- | :- | :- |
-| `.MINIMAL` | 16 | Simple APIs in a controlled or constrained environment, internal services with no proxy |
-| `.COMMON` | 32 | **Default.** Most web applications behind a single proxy or load balancer |
+| `.MINIMAL` | 16 | **Default.** Simple APIs, internal services, bare handlers with no proxy. Tightest per-response arena footprint |
+| `.COMMON` | 32 | Most web applications behind a single proxy or load balancer |
 | `.LARGE` | 64 | CDN + proxy stacks, services that emit many CORS, cache, or forwarding headers |
 | `.EXTRA_LARGE` | 128 | k8s deployments, service mesh (Envoy/Linkerd), heavy header chains |
 | `.{ .CUSTOM = N }` | N | Explicit non-standard cap |
@@ -32,7 +32,7 @@ var server = try zix.Http.Server.init(.{
 
 ## Choosing a Tier
 
-**Start with `.COMMON` (32).** Count the headers your heaviest handler actually adds in production, then round up to the next tier. Do not over-provision — a larger cap means a larger per-response arena footprint and a harder limit to reason about under attack.
+**Start with `.MINIMAL` (16), the default.** Count the headers your heaviest handler actually adds in production, then round up to the next tier only if you exceed it. Do not over-provision, a larger cap means a larger per-response arena footprint and a harder limit to reason about under attack.
 
 Typical header counts by deployment:
 
@@ -41,7 +41,7 @@ Typical header counts by deployment:
 - With caching: +3–4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
 - Behind k8s ingress: +5–10 (forwarding, tracing, X-Forwarded-*, X-Envoy-*)
 
-If you reach 32 headers in normal operation, move to `.LARGE`. If you reach 64, move to `.EXTRA_LARGE`. Do not reach for `.CUSTOM` unless you have a counted reason.
+If you reach 16 headers in normal operation, move to `.COMMON`. If you reach 32, move to `.LARGE`. If you reach 64, move to `.EXTRA_LARGE`. Do not reach for `.CUSTOM` unless you have a counted reason.
 
 ---
 
@@ -60,10 +60,10 @@ error.InvalidHeaderValue  — CR or LF found in header value
 
 ### Header flooding (cap as a DoS limit)
 
-The cap is not just a usability limit — it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.COMMON` (32), the worst-case per-response overhead is:
+The cap is not just a usability limit — it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.MINIMAL` (16), the worst-case per-response overhead is:
 
 ```
-32 headers × (name_ptr + value_ptr) = 32 × 32 bytes = 1 KB (arena)
+16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
 ```
 
 With `.EXTRA_LARGE` (128), that rises to ~4 KB. Both are bounded and arena-allocated. Do not set `.{ .CUSTOM = N }` to a large number speculatively — it widens the footprint without a corresponding benefit.

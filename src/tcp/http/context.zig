@@ -46,7 +46,7 @@ pub const Context = struct {
     }
 
     /// Return true when the deadline has passed. False when deadline is null.
-    /// Does not cancel or interrupt anything — handler must check explicitly.
+    /// Does not cancel or interrupt anything, handler must check explicitly.
     pub fn isExpired(self: Context) bool {
         return self.timedOut();
     }

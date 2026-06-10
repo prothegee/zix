@@ -219,12 +219,12 @@ pub const HttpServerConfig = struct {
     ip:                   []const u8,
     port:                 u16,
     dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
-    max_kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
-    max_client_request:   usize             = 1024 * 4,  // read buffer per connection
+    kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
+    max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
     max_client_response:  usize             = 1024 * 4,  // write buffer per connection
     max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap, requests exceeding -> 431
-    max_response_headers: HeaderSize        = .COMMON,   // custom response header cap, arena-allocated per request
+    max_response_headers: HeaderSize        = .MINIMAL,  // custom response header cap, arena-allocated per request
     public_dir:           []const u8        = "",         // static file root, "" disables static serving
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
     conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only

@@ -27,11 +27,11 @@ graph LR
 | Berkas | Peran |
 | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | namespace — semua re-export publik |
-| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn`, `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
+| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (model blocking), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplex `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — dispatch ASYNC, POOL, MIXED, EPOLL |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED (pool blocking), EPOLL (multiplex `epollMuxWorker` + `GrpcConnTable`) |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient` — openStream, sendMessage, endStream, recvResponse, unary |
-| `src/tcp/http2/grpc/frame.zig` | struct `GrpcPrefix`, `readGrpcPrefix`, `writeGrpcPrefix`, `sendGrpcHeaders`, `sendGrpcData`, `sendGrpcTrailer`, `sendGrpcError` |
+| `src/tcp/http2/grpc/frame.zig` | struct `GrpcPrefix`, `readGrpcPrefix`, `writeGrpcPrefix`, helper frame `send*`/`build*` (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), blok reply cache comptime |
 | `src/tcp/http2/grpc/proto.zig` | konstanta tipe wire `WT_*`, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
 | `src/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
 | `src/tcp/http2/grpc/timeout.zig` | `parseTimeout` — parser header grpc-timeout |
@@ -77,7 +77,7 @@ graph LR
 | `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, atau `.EPOLL` (hanya Linux, native) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count accept thread (POOL dan MIXED) |
-| `pool_size` | 0 | 0 -> max(10, cpu_count * 2) pool thread (hanya POOL) |
+| `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool thread. EPOLL: 0 -> cpu_count worker multiplex |
 | `max_streams` | 16 | maksimum stream HTTP/2 konkuren per koneksi |
 | `max_frame_size` | 16384 | ukuran frame HTTP/2 maksimum yang diiklankan |
 | `max_header_scratch` | 4096 | buffer scratch decode HPACK per koneksi |
@@ -301,14 +301,25 @@ Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, se
 
 | Model | Accept thread | Dispatch koneksi | Catatan |
 | :- | :- | :- | :- |
-| `.ASYNC` (default) | 1 | `io.async()` per koneksi | direkomendasikan untuk gRPC (stream berumur panjang) |
+| `.ASYNC` (default) | 1 | `io.async()` per koneksi | direkomendasikan untuk stream tak terbatas atau berumur panjang |
 | `.POOL` | cpu_count | `ConnQueue` bersama + pool blocking | workers dan pool_size berlaku |
 | `.MIXED` | cpu_count | `io.async()` per accept thread | tanpa ConnQueue, pool_size diabaikan |
-| `.EPOLL` | 1 | event loop epoll (hanya Linux) | tanpa pool thread, beban kerja Linux throughput tinggi |
+| `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
 
 Accept thread MIXED menggunakan ukuran stack default `.{}` (default sistem ~8MB) untuk mencegah stack overflow saat `io.async()` jatuh kembali ke eksekusi inline.
 
 `.EPOLL` spesifik Linux. Pada platform non-Linux, `.EPOLL` otomatis jatuh kembali ke `.POOL`.
+
+### `.EPOLL` bersifat multiplex dan shared-nothing
+
+`.EPOLL` tidak memarkir satu thread per koneksi. Ia menjalankan `pool_size` thread worker (0 = jumlah cpu), masing-masing memiliki listener `SO_REUSEPORT` privat, instance epoll sendiri, dan tabel koneksi privat ber-indeks fd. Kernel menyeimbangkan koneksi baru ke listener tiap worker, jadi tidak ada accept thread, tidak ada antrian bersama, dan tidak ada handoff fd lintas-thread. Satu worker menjalankan banyak koneksi non-blocking melalui state machine HTTP/2 yang resumable (`GrpcMuxConn`), sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread. `epoll_wait` tiap worker menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan (ADR-032). Desain tingkat rendahnya ada di `lld-grpc-id.md`.
+
+Dua konsekuensi berbeda dari model lain:
+
+- `pool_size` adalah jumlah worker multiplex untuk `.EPOLL` (nilai optimal sekitar jumlah cpu), bukan ukuran pool blocking. Memberi nilai terlalu besar hanya menambah churn scheduler.
+- Setiap route, termasuk server-streaming, di-dispatch inline pada worker (tanpa thread per stream). Handler streaming berjalan di event loop, jadi harus terbatas - stream yang berjalan lama atau tak terbatas memblokir koneksi lain pada worker itu. Gunakan `.ASYNC` untuk streaming tak terbatas. Spawn thread per stream tetap berlaku untuk route server-streaming pada `.ASYNC`, `.POOL`, dan `.MIXED`.
+
+`max_streams` yang diiklankan harus minimal sebanyak jumlah stream konkuren client. Sebuah client (misalnya benchmark dengan 100 stream paralel per koneksi) membuka stream secara optimistis sebelum melihat SETTINGS server, dan yang melebihi `max_streams` dijawab dengan `REFUSED_STREAM`.
 
 ## Siklus Hidup
 
@@ -318,13 +329,15 @@ flowchart TD
     B -->|ASYNC| C[single accept thread\nio.async per conn]
     B -->|POOL| D[N accept threads\nConnQueue\nM pool threads]
     B -->|MIXED| E[N accept threads\nio.async per conn]
-    C --> F[serveGrpcConn]
+    B -->|EPOLL| EP[N workers\nlistener SO_REUSEPORT\n+ epoll masing-masing]
+    C --> F[serveGrpcConn blocking]
     D --> F
     E --> F
+    EP --> MX[grpcMuxOnReadable\nstate per-conn resumable]
     F --> G{h2c preface?}
     G -->|PRI| H[h2c direct]
     G -->|GET/POST| I[h2c upgrade]
-    H --> J[frame loop]
+    H --> J[frame loop blocking]
     I --> J
     J -->|HEADERS stream| K[buffer DATA]
     K -->|END_STREAM| L[dispatchStream]
@@ -332,6 +345,8 @@ flowchart TD
     L -->|is_server_streaming=true| LS[spawn thread]
     LI --> M[HandlerFn dengan GrpcContext]
     LS --> M
+    MX -->|tiap frame lengkap| MI[muxDispatch inline\nreply di-stage ke cork]
+    MI --> M
     M --> N[ctx.finish mengirim trailers]
 ```
 

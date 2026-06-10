@@ -22,10 +22,10 @@ pub const HttpServerConfig = struct {
     /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
-    /// TCP listen backlog — maximum pending connections queued by the kernel before accept().
-    max_kernel_backlog: usize = 1024 * 4,
+    /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
+    kernel_backlog: usize = 1024 * 4,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
-    max_client_request: usize = 1024 * 4,
+    max_recv_buf: usize = 1024 * 4,
     /// Initial arena capacity in bytes per connection. Grows automatically if exceeded.
     max_allocator_size: usize = 1024 * 4,
     /// Write buffer size in bytes per response.
@@ -34,10 +34,10 @@ pub const HttpServerConfig = struct {
     /// CUSTOM values above 64 are silently capped at the parser storage limit (64).
     /// See RequestHeaderSize for tier guidance.
     max_request_headers: RequestHeaderSize = .LARGE,
-    /// Maximum custom response headers per request (default: .COMMON = 32).
+    /// Maximum custom response headers per request (default: .MINIMAL = 16).
     /// The backing buffer is arena-allocated per request to exactly this size.
     /// See docs/headers.md and zix.HeaderSize for tier guidance.
-    max_response_headers: HeaderSize = .COMMON,
+    max_response_headers: HeaderSize = .MINIMAL,
     /// Root directory for static file serving. Empty string disables static serving.
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Receives multipart uploads.
@@ -57,7 +57,7 @@ pub const HttpServerConfig = struct {
     /// Ignored by .ASYNC (always 1 accept thread).
     workers: usize = 0,
     /// Number of pool threads. Only used by .POOL dispatch model.
-    /// 0 (default) = max(10, cpu_count * 2) — minimum 10, scales with core count.
+    /// 0 (default) = max(10, cpu_count * 2), minimum 10, scales with core count.
     /// N           = exactly N pool threads.
     /// Ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,

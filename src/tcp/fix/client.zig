@@ -1,4 +1,4 @@
-//! zix fix client — FIX 4.x session client.
+//! zix fix client: FIX 4.x session client.
 
 const std = @import("std");
 const core = @import("core.zig");

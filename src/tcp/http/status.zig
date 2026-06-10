@@ -93,7 +93,7 @@ pub const Code = enum(u16) {
     /// self - zix.Tcp.Http.Method.Code
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     fn toString(self: Self) []const u8 {
         return switch (self) {
             // 1xx : informational
@@ -172,7 +172,7 @@ pub const Code = enum(u16) {
     /// Get self object as string
     ///
     /// Return:
-    /// []const u8
+    /// - []const u8
     pub fn asString(self: Self) []const u8 {
         return Self.toString(self);
     }
@@ -189,7 +189,7 @@ pub const Code = enum(u16) {
 /// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
-/// zix.Tcp.Http.Status.Code
+/// - zix.Tcp.Http.Status.Code
 pub fn enumFromString(status_string: []const u8) Code {
     var data: [32]u8 = undefined;
     const lower_str = std.ascii.lowerString(&data, status_string);
@@ -403,7 +403,7 @@ pub fn enumFromString(status_string: []const u8) Code {
 /// self - zix.Tcp.Http.Status.Code
 ///
 /// Return:
-/// []const u8
+/// - []const u8
 pub fn stringFromEnum(status_enum: Code) []const u8 {
     return switch (status_enum) {
         // 1xx : informational
@@ -484,7 +484,7 @@ pub fn stringFromEnum(status_enum: Code) []const u8 {
 ///
 /// Note:
 /// - "HTTP/1.1 NNN Reason\r\n" verbatim for common status codes
-/// - "" for uncommon codes — caller falls back to bufPrint
+/// - "" for uncommon codes, caller falls back to bufPrint
 /// - Reason phrases match stringFromEnum() so behavior is unchanged for clients
 pub fn statusLine(c: Code) []const u8 {
     return switch (c) {
@@ -537,7 +537,7 @@ test "zix test: statusLine pre-built lines" {
         try std.testing.expectEqualStrings(expected, line);
     }
 
-    // Uncommon codes fall back to bufPrint — statusLine must return empty.
+    // Uncommon codes fall back to bufPrint, statusLine must return empty.
     try std.testing.expectEqualStrings("", statusLine(.CONTINUE));
     try std.testing.expectEqualStrings("", statusLine(.PROCESSING));
     try std.testing.expectEqualStrings("", statusLine(.LOCKED));

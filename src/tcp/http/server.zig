@@ -19,10 +19,12 @@ const parser = @import("parser.zig");
 
 const timer_interval_ms: u32 = 500;
 const conn_queue_initial_cap: usize = 16;
-const epoll_max_events: usize = 256;
+/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// ready-fd set in one syscall at high connection counts.
+const EPOLL_MAX_EVENTS: usize = 512;
 
-// Global date cache — updated by a background timer thread (model 2) or the accept loop (model 1).
-// Readers do a single atomic load — no lock, no syscall per request.
+// Global date cache: updated by a background timer thread (model 2) or the accept loop (model 1).
+// Readers do a single atomic load, no lock, no syscall per request.
 // Double-buffered so the writer never tears a read in progress.
 var g_date_bufs: [2][40]u8 = undefined;
 var g_date_lens: [2]usize = .{ 0, 0 };
@@ -238,7 +240,7 @@ const FdQueue = struct {
 
 // --------------------------------------------------------- //
 
-// Internal generic implementation — use `Server.init(stack_threshold, routes, config)` publicly.
+// Internal generic implementation: use `Server.init(stack_threshold, routes, config)` publicly.
 fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Route) type {
     return struct {
         config: Config,
@@ -328,7 +330,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const head = parser.parse(buf_read[0..filled], cfg.max_request_headers.value()) catch {
                 fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
                 return .close;
-            } orelse return .close; // incomplete — should not happen since found == true
+            } orelse return .close; // incomplete, should not happen since found == true
 
             var req = Request{
                 .buf = buf_read[0..filled],
@@ -389,10 +391,10 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Note:
         /// - Sets TCP_NODELAY immediately on accepted connection
-        /// - Stack-allocates the read buffer when max_client_request <= stack_threshold,
+        /// - Stack-allocates the read buffer when max_recv_buf <= stack_threshold,
         ///   heap-allocates from smp_allocator otherwise
         /// - Per-connection arena is pre-warmed with max_allocator_size then reset
-        ///   with retain_capacity before the loop — first request pays no heap cost
+        ///   with retain_capacity before the loop, first request pays no heap cost
         /// - Loops calling handleOneRequest until it yields .close
         ///
         /// Param:
@@ -404,7 +406,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             setNoDelay(stream.socket.handle);
 
             const cfg = server.config;
-            // Raw fd — all recv/send on the hot path bypass std.Io dispatch.
+            // Raw fd: all recv/send on the hot path bypass std.Io dispatch.
             const fd = stream.socket.handle;
 
             // Layer D: connection guard via registry eviction.
@@ -421,13 +423,13 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
             defer if (maybe_conn_entry != null) server.registry.deregister(&maybe_conn_entry.?, io);
 
-            // Read buffer: stack when max_client_request <= stack_threshold, heap otherwise.
+            // Read buffer: stack when max_recv_buf <= stack_threshold, heap otherwise.
             var stack_read: [stack_threshold]u8 = undefined;
-            const buf_read = if (cfg.max_client_request <= stack_threshold)
-                stack_read[0..cfg.max_client_request]
+            const buf_read = if (cfg.max_recv_buf <= stack_threshold)
+                stack_read[0..cfg.max_recv_buf]
             else
-                std.heap.smp_allocator.alloc(u8, cfg.max_client_request) catch return;
-            defer if (cfg.max_client_request > stack_threshold) std.heap.smp_allocator.free(buf_read);
+                std.heap.smp_allocator.alloc(u8, cfg.max_recv_buf) catch return;
+            defer if (cfg.max_recv_buf > stack_threshold) std.heap.smp_allocator.free(buf_read);
 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
@@ -441,7 +443,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         // --------------------------------------------------------- //
 
-        /// Accept thread — accepts connections and enqueues them immediately.
+        /// Accept thread: accepts connections and enqueues them immediately.
         /// Stays in the accept loop at all times. Does not handle I/O.
         ///
         /// Note:
@@ -456,7 +458,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             };
             var net_server = addr.listen(io, .{
                 .mode = .stream,
-                .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: worker listen error: {}\n", .{err});
@@ -476,7 +478,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Pool thread — pops connections from the queue and handles each one
+        /// Pool thread: pops connections from the queue and handles each one
         /// synchronously with blocking I/O (no scheduler, no fiber overhead).
         /// Exits when the queue is closed and drained.
         fn poolEntry(self: *Self, queue: *ConnQueue, io: std.Io) void {
@@ -485,7 +487,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// Accept thread for MIXED dispatch — accepts connections and dispatches each via io.async().
+        /// Accept thread for MIXED dispatch: accepts connections and dispatches each via io.async().
         /// No ConnQueue. The shared io Threaded pool handles scheduling.
         fn asyncWorkerEntry(self: *Self, io: std.Io) void {
             const cfg = self.config;
@@ -496,7 +498,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             };
             var net_server = addr.listen(io, .{
                 .mode = .stream,
-                .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: worker listen error: {}\n", .{err});
@@ -516,7 +518,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// EPOLL worker — pops a ready socket, serves one request, then re-arms
+        /// EPOLL worker: pops a ready socket, serves one request, then re-arms
         /// the one-shot interest (keep-alive) or removes and closes the connection
         ///
         /// Note:
@@ -532,7 +534,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const linux = std.os.linux;
             const cfg = self.config;
 
-            const buf_read = std.heap.smp_allocator.alloc(u8, cfg.max_client_request) catch return;
+            const buf_read = std.heap.smp_allocator.alloc(u8, cfg.max_recv_buf) catch return;
             defer std.heap.smp_allocator.free(buf_read);
 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -587,7 +589,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             };
             var net_server = addr.listen(io, .{
                 .mode = .stream,
-                .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
                 std.debug.print("zix: epoll listen error: {}\n", .{err});
@@ -624,10 +626,9 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorkerEntry, .{ self, &queue, epfd, io });
             }
 
-            const max_events = epoll_max_events;
-            var events: [max_events]linux.epoll_event = undefined;
+            var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             while (true) {
-                const wait_result = linux.epoll_wait(epfd, &events, max_events, -1);
+                const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
                 switch (std.posix.errno(wait_result)) {
                     .SUCCESS => {},
                     .INTR => continue,
@@ -673,7 +674,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// config - HttpServerConfig
         ///
         /// Return:
-        /// !Self
+        /// - !Self
         pub fn init(config: Config) !Self {
             return .{ .config = config };
         }
@@ -693,7 +694,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// - Pool threads handle connections synchronously via a shared work queue
         ///
         /// Return:
-        /// !void
+        /// - !void
         pub fn run(self: *Self) !void {
             const cfg = self.config;
             const cpu = try std.Thread.getCpuCount();
@@ -767,7 +768,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     };
                     var net_server = addr.listen(thread_io, .{
                         .mode = .stream,
-                        .kernel_backlog = @intCast(cfg.max_kernel_backlog),
+                        .kernel_backlog = @intCast(cfg.kernel_backlog),
                         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                     }) catch |err| {
                         std.debug.print("zix: listen error: {}\n", .{err});
@@ -811,11 +812,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
 // --------------------------------------------------------- //
 
-/// HTTP server — initialize with a comptime stack buffer threshold and comptime route table
+/// HTTP server: initialize with a comptime stack buffer threshold and comptime route table
 ///
 /// Note:
 /// - stack_threshold sets the cutoff for stack vs heap I/O buffers per connection:
-///   if max_client_request fits within stack_threshold the buffer lives on the
+///   if max_recv_buf fits within stack_threshold the buffer lives on the
 ///   connection thread stack, otherwise heap-allocated
 /// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
 /// - routes must be comptime: the router is baked into the server type at compile time
@@ -841,7 +842,7 @@ pub const Server = struct {
     /// config - HttpServerConfig
     ///
     /// Return:
-    /// !HttpServerImpl(stack_threshold, routes)
+    /// - !HttpServerImpl(stack_threshold, routes)
     pub fn init(
         comptime stack_threshold: usize,
         comptime routes: []const Route,

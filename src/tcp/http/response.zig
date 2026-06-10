@@ -14,15 +14,15 @@ pub const HttpHeader = struct {
 /// Controls how many custom response headers addHeader() will accept per request.
 ///
 /// max_response_headers in HttpServerConfig sets the cap. The backing buffer is
-/// arena-allocated lazily on the first addHeader() call — requests that add no
+/// arena-allocated lazily on the first addHeader() call, requests that add no
 /// custom headers pay zero allocation cost.
 /// Any addHeader() call beyond the cap yields error.TooManyHeaders.
 ///
-/// - MINIMAL     (16)  — simple APIs, constrained environments
-/// - COMMON      (32)  — most web applications, single proxy/load balancer (default)
-/// - LARGE       (64)  — behind load balancers, CDN + proxy
-/// - EXTRA_LARGE (128) — k8s, service mesh, many CORS/caching/forwarding headers
-/// - CUSTOM      (N)   — explicit non-standard cap
+/// - MINIMAL (16): simple APIs, constrained environments
+/// - COMMON (32): most web applications, single proxy/load balancer (default)
+/// - LARGE (64): behind load balancers, CDN + proxy
+/// - EXTRA_LARGE (128): k8s, service mesh, many CORS/caching/forwarding headers
+/// - CUSTOM (N): explicit non-standard cap
 ///
 /// See docs/headers.md for security guidance and tier selection.
 pub const HeaderSize = union(enum) {
@@ -44,7 +44,7 @@ pub const HeaderSize = union(enum) {
 };
 
 /// Writer handle returned by Response.stream() for SSE (Server-Sent Events).
-/// Writes directly to the raw socket fd — no buffering, no flush needed.
+/// Writes directly to the raw socket fd, no buffering, no flush needed.
 pub const SseWriter = struct {
     fd: std.posix.fd_t,
 
@@ -73,7 +73,7 @@ pub const SseWriter = struct {
 };
 
 pub const Response = struct {
-    /// Raw socket fd — all writes go here directly via posix.write().
+    /// Raw socket fd: all writes go here directly via posix.write().
     fd: std.posix.fd_t,
     /// keep_alive from the parsed request head (Connection: close = false).
     req_keep_alive: bool,
@@ -182,7 +182,7 @@ pub const Response = struct {
             offset += s.len;
         }
 
-        // Fast path: no extra headers AND body fits in the remaining buffer — one write().
+        // Fast path: no extra headers AND body fits in the remaining buffer, one write().
         if (self.extra_len == 0 and offset + 2 + body_data.len <= fixed.len) {
             fixed[offset] = '\r';
             fixed[offset + 1] = '\n';
@@ -205,7 +205,7 @@ pub const Response = struct {
         if (self.extra_buf) |extra| {
             for (extra[0..self.extra_len]) |h| {
                 const s = std.fmt.bufPrint(slow[slow_off..], "{s}: {s}\r\n", .{ h.name, h.value }) catch {
-                    // Extra header too large for staging buffer — write what we have and continue.
+                    // Extra header too large for staging buffer, write what we have and continue.
                     fdWriteAll(fd, slow[0..slow_off]) catch return;
                     slow_off = 0;
                     const header_str = std.fmt.bufPrint(&slow, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
@@ -220,7 +220,7 @@ pub const Response = struct {
         slow_off += 2;
 
         if (slow_off + body_data.len <= slow.len) {
-            // Body fits in the staging buffer — one write().
+            // Body fits in the staging buffer, one write().
             @memcpy(slow[slow_off..][0..body_data.len], body_data);
             slow_off += body_data.len;
             fdWriteAll(fd, slow[0..slow_off]) catch return;
@@ -277,7 +277,7 @@ pub const Response = struct {
 // --------------------------------------------------------- //
 
 /// Raw write: loops until all bytes are written or an error occurs.
-/// Uses posix.system.write directly — no std.Io.Writer dispatch on the hot path.
+/// Uses posix.system.write directly, no std.Io.Writer dispatch on the hot path.
 ///
 /// Return:
 /// - error.BrokenPipe on any write failure (caller ignores or propagates)

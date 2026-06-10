@@ -1,4 +1,4 @@
-//! HTTP/2 h2c server — all 3 dispatch models.
+//! HTTP/2 h2c server: all 3 dispatch models.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -165,7 +165,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
         /// Initialize the HTTP/2 server with the given config.
         ///
         /// Return:
-        /// !Self — error.PortNotConfigured if config.port is 0.
+        /// - !Self (error.PortNotConfigured if config.port is 0)
         pub fn init(config: Http2ServerConfig) !Self {
             if (config.port == 0) return error.PortNotConfigured;
             return .{ .config = config };
@@ -179,7 +179,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
         /// Listen and serve. Routes are baked in at compile time via Server.init.
         ///
         /// Return:
-        /// !void
+        /// - !void
         pub fn run(self: *Self) !void {
             const cfg = self.config;
             const io = cfg.io;

@@ -1,11 +1,11 @@
 //! zix
 //! Zero sIX; 06;
-//! A network backend library wirtten in zig
+//! A network backend library written in zig
 
 pub const Tcp = @import("tcp/Tcp.zig");
 pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
-// reserved: Http1
+pub const Http1 = @import("tcp/http1/Http1.zig");
 pub const Http2 = @import("tcp/http2/Http2.zig");
 pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 pub const Fix = @import("tcp/fix/Fix.zig");
@@ -41,6 +41,12 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/websocket.zig"));
     std.testing.refAllDecls(@import("tcp/http/client_config.zig"));
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
+
+    // # zix.Http1
+    std.testing.refAllDecls(@import("tcp/http1/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/config.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/router.zig"));
 
     // # zix.Http2
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));

@@ -1,4 +1,4 @@
-//! zix gRPC namespace — gRPC h2c server and client.
+//! zix gRPC namespace: gRPC h2c server and client.
 //! h2c transport (cleartext). TLS termination via nginx or haproxy reverse proxy.
 
 const core_mod = @import("core.zig");

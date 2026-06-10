@@ -87,7 +87,7 @@ pub fn findHeaderEnd(buf: []const u8, start: usize) ?usize {
 }
 
 /// Parse an HTTP/1.1 request from buf.
-/// On success the returned ParsedHead contains only offsets into buf — no data is copied.
+/// On success the returned ParsedHead contains only offsets into buf, no data is copied.
 ///
 /// Return:
 /// - null when the buffer does not contain a complete header block (\r\n\r\n not found)
@@ -192,7 +192,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
 
 /// Decode HTTP/1.1 chunked transfer encoding.
 /// raw: complete raw chunked body (including chunk framing).
-/// out: destination buffer — must be at least raw.len bytes (decoded is always <= raw).
+/// out: destination buffer, must be at least raw.len bytes (decoded is always <= raw).
 /// Stops at the terminal chunk (size 0) or when raw is exhausted.
 /// Chunk extensions ("; name=value" on the size line) are ignored.
 ///
