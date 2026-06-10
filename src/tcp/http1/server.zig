@@ -399,7 +399,31 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 /// Return:
 /// - .keep_alive when the connection may receive more requests
 /// - .close on peer hangup, parse error, oversize header, or Connection: close
+/// One readable event on an HTTP connection. Installs the response sink so
+/// every response produced by the parse pass coalesces into one write per
+/// event instead of one per request, which is what makes deep pipelining
+/// cheap. An upgraded connection is handed to the WebSocket pump only after
+/// the flush, so the 101 handshake precedes the first echoed frame.
 fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
+    var sink = core.RespSink{ .fd = conn.fd, .buf = out_buf };
+    core.tl_resp_sink = &sink;
+    const outcome = serveEpollConnInner(conn, handler, body_buf, handler_timeout_ms);
+    core.tl_resp_sink = null;
+
+    sink.flush();
+    if (sink.failed) return .close;
+    if (outcome == .close) return .close;
+
+    // Just upgraded: a client can pipeline its first frame in the same packet
+    // as the handshake request, so pump whatever is already buffered now
+    // rather than waiting for another readable event (which may never come
+    // until the client gets its echo).
+    if (conn.ws) |on_frame| return serveEpollWs(conn, on_frame, body_buf, out_buf);
+
+    return outcome;
+}
+
+fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
 
@@ -494,12 +518,6 @@ fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8
         conn.filled -= consumed;
     }
 
-    // Just upgraded: a client can pipeline its first frame in the same packet
-    // as the handshake request, so pump whatever is already buffered now
-    // rather than waiting for another readable event (which may never come
-    // until the client gets its echo).
-    if (conn.ws) |on_frame| return serveEpollWs(conn, on_frame, body_buf, out_buf);
-
     return if (keep_alive) .keep_alive else .close;
 }
 
@@ -548,8 +566,10 @@ fn serveEpollWs(conn: *Conn, on_frame: core.WsFrameFn, payload_buf: []u8, out_bu
 }
 
 /// Read and discard the remaining body bytes of an over-large request whose
-/// response was already sent. Reads to EAGAIN, never past conn.drain, so the
-/// next request's bytes are left untouched. When the drain finishes, the
+/// response was already sent. Discards with MSG_TRUNC, so the kernel drops
+/// the bytes in place: no copy into conn.buf and the per-call chunk is not
+/// capped by the buffer length. Reads to EAGAIN, never past conn.drain, so
+/// the next request's bytes are left untouched. When the drain finishes, the
 /// connection resumes normal HTTP parsing, or closes if the request asked to.
 ///
 /// Return:
@@ -560,8 +580,8 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     const fd = conn.fd;
 
     while (conn.drain > 0) {
-        const want = @min(conn.drain, conn.buf.len);
-        const rc = linux.read(fd, conn.buf.ptr, want);
+        const want = @min(conn.drain, @as(usize, 1 << 30));
+        const rc = linux.recvfrom(fd, conn.buf.ptr, want, linux.MSG.TRUNC, null, null);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
@@ -795,4 +815,39 @@ test "zix http1: Server.init with EPOLL dispatch model" {
         .dispatch_model = .EPOLL,
     });
     server.deinit();
+}
+
+fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
+    core.writeSimple(fd, 200, "text/plain", "ok") catch {};
+}
+
+test "zix http1: serveEpollConn answers a pipelined burst in order" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // 16 pipelined requests arriving as one readable event.
+    const request = "GET /pipeline HTTP/1.1\r\nHost: t\r\n\r\n";
+    const depth = 16;
+    var burst: [depth * request.len]u8 = undefined;
+    for (0..depth) |i| {
+        @memcpy(burst[i * request.len ..][0..request.len], request);
+    }
+    try std.testing.expectEqual(burst.len, std.os.linux.write(fds[0], &burst, burst.len));
+
+    var conn_buf: [8 * 1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0, .ws = null, .drain = 0, .drain_close = false };
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [4 * 1024]u8 = undefined;
+
+    const outcome = serveEpollConn(&conn, testOkHandler, &body_buf, &out_buf, 0);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    // All 16 responses flushed in one coalesced write, parseable in order.
+    var recv: [8 * 1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "\r\n\r\nok"));
 }
