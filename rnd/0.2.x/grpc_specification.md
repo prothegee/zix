@@ -2,7 +2,7 @@
 
 ## Overview
 
-gRPC is an RPC framework built on HTTP/2 (RFC 7540 / RFC 9113). It uses Protocol
+gRPC is an RPC library/engine built on HTTP/2 (RFC 7540 / RFC 9113). It uses Protocol
 Buffers (protobuf) for serialization by default and HTTP/2 for transport.
 
 gRPC requires HTTP/2. It cannot run over HTTP/1.1 except via the gRPC-Web adaptation

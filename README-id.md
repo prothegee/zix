@@ -56,8 +56,7 @@ __*2. Empat model dispatch yang dapat dipilih:*__
 - MIXED (N acceptor masing-masing dispatch via io.async(), tanpa queue): seimbang.
 - EPOLL (satu epoll loop + worker pool, EPOLLONESHOT re-arm sehingga keep-alive idle tidak memegang thread): khusus Linux, terbaik untuk jumlah koneksi sangat tinggi atau client lambat/idle.
 
-> strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default framework. Http,
-Grpc, Fix, dan Tcp mengimplementasikan keempatnya.
+> strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http, Grpc, Fix, dan Tcp mengimplementasikan keempatnya.
 
 <br>
 
