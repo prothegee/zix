@@ -674,7 +674,7 @@ Governance documents for proposing and reviewing FIX standards. Not implementati
 | :- | :- | :- |
 | Gap Analysis Template | v3.3 (2023-02-28) | standardizes documentation of gaps in current standards |
 | Recommended Practices/Guidelines Template | May 2020 | structure for developing implementation guidance |
-| Technical Standard Proposal Template | May 2020 | framework for proposing new technical standards |
+| Technical Standard Proposal Template | May 2020 | library for proposing new technical standards |
 
 **Relevance to zix.Fix:** not applicable. These are governance materials for the FIX standards body.
 
