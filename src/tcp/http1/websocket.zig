@@ -429,9 +429,10 @@ fn testEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 }
 
 test "zix http1 ws: pump echoes masked client frames over a socketpair" {
-    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-    defer std.posix.close(fds[0]);
-    defer std.posix.close(fds[1]);
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
 
     // Two pipelined masked client text frames: "hi" and "yo".
     const data = [_]u8{
