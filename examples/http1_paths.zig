@@ -140,13 +140,13 @@ fn dispatch(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.f
     var segs: [MAX_PATH_SEGMENTS + 2][]const u8 = undefined;
     const count = splitSegments(head.path, &segs);
 
-    // /path/user/<id> — 3 segments, segs[1] == "user"
+    // /path/user/<id>: 3 segments, segs[1] == "user"
     if (count == 3 and std.mem.eql(u8, segs[1], "user")) {
         userHandler(head, body, fd);
         return;
     }
 
-    // /path/<tenant-id>/<tenant-branch> — 3 segments, segs[1] != "user"
+    // /path/<tenant-id>/<tenant-branch>: 3 segments, segs[1] != "user"
     if (count == 3) {
         tenantHandler(head, body, segs[0..count], fd);
         return;
