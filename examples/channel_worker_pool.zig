@@ -18,7 +18,7 @@ const WORKER_COUNT: usize = 4;
 
 const TaskChan = zix.Channel(u32);
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "channel";
 
@@ -70,7 +70,7 @@ fn worker(cap: WorkerCap) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,
