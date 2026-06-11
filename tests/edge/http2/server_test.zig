@@ -1,4 +1,4 @@
-//! Edge tests: Http2 boundary conditions — bad preface, RST_STREAM, GOAWAY, stream 0.
+//! Edge tests: Http2 boundary conditions: bad preface, RST_STREAM, GOAWAY, stream 0.
 
 const std = @import("std");
 const zix = @import("zix");
