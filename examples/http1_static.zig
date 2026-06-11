@@ -21,7 +21,7 @@ const SEC_KEY = "sec";
 const SEC_VAL = "abc123";
 
 // Handlers use g_io for file I/O since the Http1 handler signature has no io param.
-// Set once in main before the server starts — safe for concurrent reads.
+// Set once in main before the server starts, safe for concurrent reads.
 var g_io: std.Io = undefined;
 
 // --------------------------------------------------------- //
@@ -162,7 +162,7 @@ fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         return;
     };
 
-    // Check file existence first — always 404 before revealing the sec requirement
+    // Check file existence first: always 404 before revealing the sec requirement
     const file = std.Io.Dir.cwd().openFile(g_io, file_path, .{}) catch {
         zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
         return;
@@ -179,7 +179,7 @@ fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         return;
     }
 
-    // File exists — now enforce sec param
+    // File exists, now enforce sec param
     const sec = zix.Http1.queryParam(head, SEC_KEY) orelse {
         zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden\"}") catch {};
         return;
