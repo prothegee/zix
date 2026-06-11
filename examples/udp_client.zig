@@ -14,7 +14,7 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-// Must match the server's Packet definition exactly — same field order, same types.
+// Must match the server's Packet definition exactly: same field order, same types.
 // extern struct guarantees a fixed C ABI layout, required for cross-language use.
 const Packet = extern struct {
     id: [16]u8,
@@ -35,10 +35,10 @@ const SEND_INTERVAL_MS: u64 = 1000;
 const MyClient = zix.Udp.Client(Packet);
 
 // Capture struct passed by value to the concurrent receive task.
-// Holds a pointer to client — valid for the process lifetime since main loops forever.
+// Holds a pointer to client, valid for the process lifetime since main loops forever.
 const ReceiveCapture = struct { client: *MyClient };
 
-// Persistent receive task — runs for the client's lifetime alongside the send loop.
+// Persistent receive task, runs for the client's lifetime alongside the send loop.
 // Yields FeedbackResult(Packet): .ack, .nack, or .packet (echo or broadcast relay).
 //
 // Note: this function must run in a concurrent task, not in the same loop as send().
@@ -53,7 +53,7 @@ fn receiveLoop(cap: ReceiveCapture) void {
             .ack => std.debug.print("recv | ACK\n", .{}),
             .nack => std.debug.print("recv | NACK\n", .{}),
             .packet => |p| {
-                // The id field is set by the sender — its meaning is the application's responsibility.
+                // The id field is set by the sender: its meaning is the application's responsibility.
                 // With broadcast enabled on the server, this packet originated from another client.
                 const id_end = std.mem.indexOfScalar(u8, &p.id, 0) orelse p.id.len;
                 std.debug.print(
@@ -70,7 +70,7 @@ fn receiveLoop(cap: ReceiveCapture) void {
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    // CONFIGURABLE mode — reads --bind-port and --server-port from CLI args.
+    // CONFIGURABLE mode: reads --bind-port and --server-port from CLI args.
     // Falls back to CLIENT_BIND_PORT / SERVER_PORT if the args are absent.
     // To use fixed ports instead, replace with:
     // var client = try MyClient.init(.{
@@ -87,7 +87,7 @@ pub fn main(process: std.process.Init) !void {
         .port_mode = .CONFIGURABLE,
 
         // Must match the server's endianness config.
-        // Mismatch causes silent data corruption — field values will be garbage.
+        // Mismatch causes silent data corruption: field values will be garbage.
         .endianness = .LITTLE,
 
         .send_every = SEND_INTERVAL_MS,
@@ -96,12 +96,12 @@ pub fn main(process: std.process.Init) !void {
     defer client.deinit();
 
     // Spawn the receive loop as a concurrent task so it runs alongside the send loop.
-    // receiveFeedback() is blocking — without concurrency it would stall the send loop.
+    // receiveFeedback() is blocking: without concurrency it would stall the send loop.
     _ = io.concurrent(receiveLoop, .{ReceiveCapture{ .client = &client }}) catch |err| {
         std.debug.print("recv task spawn error: {}\n", .{err});
     };
 
-    // PRNG seeded from clock — used here only for example position data.
+    // PRNG seeded from clock, used here only for example position data.
     // In real usage, populate the packet fields from your application's data source.
     const prng_ts = std.Io.Clock.Timestamp.now(io, .awake);
     const prng_seed: u64 = @truncate(@as(u128, @bitCast(@as(i128, prng_ts.raw.nanoseconds))));
@@ -109,7 +109,7 @@ pub fn main(process: std.process.Init) !void {
     const rng = prng.random();
 
     // Build the client's identity in the id field.
-    // The server does not set or modify this field — it is the sender's responsibility.
+    // The server does not set or modify this field: it is the sender's responsibility.
     // Use a stable, unique value per client (user ID, device serial, session token, etc.).
     // Here we embed the bind port so each running instance is distinguishable in logs.
     var my_id: [16]u8 = [_]u8{0} ** 16;
@@ -120,7 +120,7 @@ pub fn main(process: std.process.Init) !void {
             .id = my_id,
             .packet_type = 1,
             .register = 42,
-            // Random position in [-1.0, 1.0) representing movement — example data only.
+            // Random position in [-1.0, 1.0) representing movement (example data only).
             .position = .{
                 rng.float(f64) * 2.0 - 1.0,
                 rng.float(f64) * 2.0 - 1.0,
