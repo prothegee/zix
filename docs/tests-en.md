@@ -34,7 +34,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.ASYNC, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
-| `tcp/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
+| `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
 ### zix.Http
@@ -100,7 +100,7 @@ Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
 | `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model defaults to ASYNC, workers/pool_size default to 0, max_streams=16 and max_frame_size=16384 |
-| `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero → `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+| `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
 
 ### zix.Grpc
 
@@ -277,7 +277,7 @@ Ports: 18082-18085.
 | Http2 GET / returns Hello World over h2c direct | h2c PRI preface + HEADERS + DATA round-trip returns response body |
 | Http2 POST /echo returns request body | POST with body DATA frame, server echoes body back |
 | Http2 two sequential streams on same connection | stream IDs 1 and 3 each receive correct responses |
-| Http2 h2c upgrade GET / returns Hello World | HTTP/1.1 `Upgrade: h2c` → 101 Switching Protocols → h2c response |
+| Http2 h2c upgrade GET / returns Hello World | HTTP/1.1 `Upgrade: h2c` -> 101 Switching Protocols -> h2c response |
 
 ### tests/integration/grpc/
 
@@ -637,7 +637,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 
 | Test | What it verifies |
 | :- | :- |
-| `statusLevel` 2xx boundary | `access()` does not crash for every status class (100–599) |
+| `statusLevel` 2xx boundary | `access()` does not crash for every status class (100-599) |
 | `Level` enum ordering | DEBUG < INFO < WARN < ERROR via `@intFromEnum` |
 | `system()` below `save_min_level` is silent | calls below threshold do not open a file (`file_fd == -1`) |
 | `access()` below `save_min_level` is silent | same: `file_fd == -1` after filtered call |
@@ -645,7 +645,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `system()` with empty format does not panic | `fmt = ""` is safe |
 | `access()` with empty method and path does not panic | empty strings are safe |
 | `init` with empty `save_path`, `file_fd` stays invalid | `file_fd == -1` with `save_path = ""` |
-| Console OFF — no output or panic for any level | all four levels produce no crash with `console = .OFF` |
+| Console OFF (no output or panic for any level) | all four levels produce no crash with `console = .OFF` |
 
 ### tests/edge/fix/
 
@@ -668,8 +668,8 @@ Port: 18100.
 
 | Test | What it verifies |
 | :- | :- |
-| bad PRI preface causes server to close connection | malformed preface bytes → server closes the connection cleanly |
-| client sends GOAWAY and server connection loop exits | GOAWAY frame → server exits the frame loop without error |
+| bad PRI preface causes server to close connection | malformed preface bytes -> server closes the connection cleanly |
+| client sends GOAWAY and server connection loop exits | GOAWAY frame -> server exits the frame loop without error |
 | `Http2Server.init` rejects port zero | returns `error.PortNotConfigured` |
 | `HpackDecoder` decode of empty block returns zero headers | `decode(&.{}, ...)` returns 0 headers without error |
 | `writeFrameHeader` stream_id high bit is cleared on read | `stream_id = 0x7FFF_FFFF` roundtrips correctly via pipe |
