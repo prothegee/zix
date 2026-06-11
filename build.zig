@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
         edge_test_step.dependOn(&t_run.step);
     }
 
-    // All tests — run tiers sequentially so zig build 0.16-dev IPC sends
+    // All tests: run tiers sequentially so zig build 0.16 IPC sends
     // ".exit" to each test binary before the next tier starts.
     behaviour_test_step.dependOn(integration_test_step);
     edge_test_step.dependOn(behaviour_test_step);
