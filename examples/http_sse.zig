@@ -1,8 +1,8 @@
-//! http_sse.zig — Server-Sent Events example
+//! http_sse.zig: Server-Sent Events example
 //!
 //! Two endpoints:
-//! GET /        — HTML page that opens an EventSource (open in browser)
-//! GET /events  — SSE stream: sends a counter every second for 10 ticks then closes
+//! GET /        - HTML page that opens an EventSource (open in browser)
+//! GET /events  - SSE stream: sends a counter every second for 10 ticks then closes
 //!
 //! Uses .ASYNC dispatch: single accept thread, each SSE connection dispatched via io.async().
 //! .ASYNC is preferred for SSE: long-lived connections do not hold pool threads.
@@ -31,7 +31,7 @@ const POOL_SIZE: usize = 0; // ignored by .ASYNC
 // curl -N http://localhost:9010/events
 //
 // Streams "tick N" once per second for 10 ticks.
-// After the loop the handler returns — handleConnection closes the TCP connection
+// After the loop the handler returns, handleConnection closes the TCP connection
 // and the browser EventSource auto-reconnects after the default 3-second retry.
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
