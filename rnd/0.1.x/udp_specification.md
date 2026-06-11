@@ -55,8 +55,8 @@ Notes from PoC (`rnd/`) conversation to address when moving into `src/udp/`.
 
 Port binding must be governed by an explicit mode (`enum(u8)`, all uppercase values):
 
-- `CONFIGURABLE` — config struct holds a default port. `init()` receives an args iterator and reads `--port` if present, falls back to the config default if not. Never fails for a missing arg — the default covers it. The point is the port is runtime-overridable.
-- `REQUIRED` — port must be explicitly set non-zero in the config struct. `init()` takes no args iterator. Fails at `init()` with `error.PortNotConfigured` if port is zero.
+- `CONFIGURABLE`: config struct holds a default port. `init()` receives an args iterator and reads `--port` if present, falls back to the config default if not. Never fails for a missing arg, the default covers it. The point is the port is runtime-overridable.
+- `REQUIRED`: port must be explicitly set non-zero in the config struct. `init()` takes no args iterator. Fails at `init()` with `error.PortNotConfigured` if port is zero.
 
 Fail at `init()`, not at `run()`. Enforces "explicit over implicit."
 
@@ -68,29 +68,29 @@ CLI key format: `--port <value>` (server), `--bind-port <value>` / `--server-por
 
 Enum values use ALL_CAPS:
 
-- `NATIVE` — same machine only, unsafe across platforms or languages
-- `LITTLE` — recommended for most modern hardware (x86, ARM)
-- `BIG` — network byte order, use when interoperating with legacy or internet protocols
+- `NATIVE`: same machine only, unsafe across platforms or languages
+- `LITTLE`: recommended for most modern hardware (x86, ARM)
+- `BIG`: network byte order, use when interoperating with legacy or internet protocols
 
-Conversion is **transparent** — applied inside `send()` and `receive()` based on `config.endianness`. User declares once in config, no manual conversion call needed anywhere else. `packet.zig` exposes the helpers publicly so advanced users can call them directly if needed.
+Conversion is **transparent**: applied inside `send()` and `receive()` based on `config.endianness`. User declares once in config, no manual conversion call needed anywhere else. `packet.zig` exposes the helpers publicly so advanced users can call them directly if needed.
 
 <br>
 
 ### Concurrency Model
 
-Same model as TCP: caller owns the `io` backend — no `ConcurrencyMode` config field. Pass `process.io` for auto-managed threads or `threaded.io()` for an explicit cap. `io.concurrent()` is used internally. A multithreaded UDP example will go in `rnd/` as a separate PoC.
+Same model as TCP: caller owns the `io` backend, no `ConcurrencyMode` config field. Pass `process.io` for auto-managed threads or `threaded.io()` for an explicit cap. `io.concurrent()` is used internally. A multithreaded UDP example will go in `rnd/` as a separate PoC.
 
 <br>
 
 ### Disconnect Detection
 
-UDP has no connection state. Disconnect detection is purely timeout-based. Worst-case detection delay is `DISCONNECT_TIMEOUT_MS + POLL_TIMEOUT_MS`. Both must be configurable fields in `UdpServerConfig`. There is no OS-level signal equivalent to TCP FIN — document this limitation clearly.
+UDP has no connection state. Disconnect detection is purely timeout-based. Worst-case detection delay is `DISCONNECT_TIMEOUT_MS + POLL_TIMEOUT_MS`. Both must be configurable fields in `UdpServerConfig`. There is no OS-level signal equivalent to TCP FIN. Document this limitation clearly.
 
 <br>
 
 ### Feedback Shape
 
-PoC `auto_echo` sends the received packet back as-is. In `src/`, feedback shape should be configurable — either echo the input or respond with a separate result struct. Define the result struct explicitly. Do not leave it as a raw byte echo in production code.
+PoC `auto_echo` sends the received packet back as-is. In `src/`, feedback shape should be configurable: either echo the input or respond with a separate result struct. Define the result struct explicitly. Do not leave it as a raw byte echo in production code.
 
 **Client reception (PoC):** client receives on its bound socket via a persistent `io.concurrent()` task (`receiveFeedback`). Interprets by received length: 1 byte -> ACK (`0x06`) / NACK (`0x15`); `@sizeOf(TestPacket)` bytes -> echo or broadcast packet decoded via `@bitCast`. Raw-byte length-dispatch is PoC-only.
 
@@ -104,9 +104,9 @@ pub fn FeedbackResult(comptime Packet: type) type {
     };
 }
 ```
-The receive loop produces `FeedbackResult(Packet)` values — no raw-byte length interpretation in production code.
+The receive loop produces `FeedbackResult(Packet)` values. No raw-byte length interpretation in production code.
 
-**Broadcast (PoC):** `ServerConfig.broadcast = true` relays each received packet to all currently connected clients (not just the sender). The server snapshots connected client addresses into `PacketTask.peers[MAX_BROADCAST_CLIENTS]` at receive time and passes them by value to the concurrent task — this avoids sharing the mutable `ClientRecord` list across threads. The `MAX_BROADCAST_CLIENTS = 64` cap is a PoC constraint in `src/`, use an arena-allocated slice per packet to remove the hard limit. `auto_echo` and `broadcast` are independent: `auto_echo` sends only to the sender, `broadcast` sends to all.
+**Broadcast (PoC):** `ServerConfig.broadcast = true` relays each received packet to all currently connected clients (not just the sender). The server snapshots connected client addresses into `PacketTask.peers[MAX_BROADCAST_CLIENTS]` at receive time and passes them by value to the concurrent task, this avoids sharing the mutable `ClientRecord` list across threads. The `MAX_BROADCAST_CLIENTS = 64` cap is a PoC constraint in `src/`, use an arena-allocated slice per packet to remove the hard limit. `auto_echo` and `broadcast` are independent: `auto_echo` sends only to the sender, `broadcast` sends to all.
 
 **Position data (PoC):** client generates random `position` values in `[-1.0, 1.0)` per packet via `std.Random.DefaultPrng` seeded from `std.crypto.random`. PRNG is seeded once in `main`; access is sequential because a sleep separates each send, so no concurrent RNG use occurs. In `src/`, if sends become truly concurrent, each worker needs its own PRNG instance.
 
@@ -114,7 +114,7 @@ The receive loop produces `FeedbackResult(Packet)` values — no raw-byte length
 
 ### send_every Precision (Client)
 
-PoC uses milliseconds for `send_every`. If sub-millisecond send intervals are needed (real-time control loops), change the field to nanoseconds — trivial rename + unit change in the sleep call. Not needed for telemetry use cases.
+PoC uses milliseconds for `send_every`. If sub-millisecond send intervals are needed (real-time control loops), change the field to nanoseconds: trivial rename + unit change in the sleep call. Not needed for telemetry use cases.
 
 <br>
 
@@ -122,18 +122,18 @@ PoC uses milliseconds for `send_every`. If sub-millisecond send intervals are ne
 
 ```
 src/udp/
-    packet.zig    — endianness helpers (toEndian, fromEndian); user defines their own extern packet struct
-    config.zig    — PortMode enum(u8), Endianness enum(u8), UdpServerConfig, UdpClientConfig
-    server.zig    — UdpServer(comptime Packet: type)
-    client.zig    — UdpClient(comptime Packet: type)
-    Udp.zig       — namespace aggregator (mirrors Tcp.zig)
+    packet.zig    - endianness helpers (toEndian, fromEndian); user defines their own extern packet struct
+    config.zig    - PortMode enum(u8), Endianness enum(u8), UdpServerConfig, UdpClientConfig
+    server.zig    - UdpServer(comptime Packet: type)
+    client.zig    - UdpClient(comptime Packet: type)
+    Udp.zig       - namespace aggregator (mirrors Tcp.zig)
 ```
 
 Export from `src/zix.zig` as `pub const Udp = @import("udp/Udp.zig");`.
 
-**Packet / Identity:** `packet.zig` provides helpers only — no hardcoded struct. User defines their own `extern struct` and passes it at comptime. Server does not stamp or modify the packet's `id` field (PoC behavior dropped). Client owns its identity. Server tracks clients by address, connection index is internal metadata (logs only). Broadcast relays packet as-is. Identity structure and validation are the application's responsibility.
+**Packet / Identity:** `packet.zig` provides helpers only, no hardcoded struct. User defines their own `extern struct` and passes it at comptime. Server does not stamp or modify the packet's `id` field (PoC behavior dropped). Client owns its identity. Server tracks clients by address, connection index is internal metadata (logs only). Broadcast relays packet as-is. Identity structure and validation are the application's responsibility.
 
-**Comments:** every config field gets one short inline comment. Every public function gets a brief doc block — what it does, what it fails on. Security and performance concerns marked `SECURITY:` / `PERF:`.
+**Comments:** every config field gets one short inline comment. Every public function gets a brief doc block: what it does, what it fails on. Security and performance concerns marked `SECURITY:` / `PERF:`.
 
 <br>
 
@@ -141,10 +141,10 @@ Export from `src/zix.zig` as `pub const Udp = @import("udp/Udp.zig");`.
 
 - UDP socket: `std.Io.net.IpAddress.bind(io, .{ .mode = .dgram, .protocol = .udp })` -> `Socket`
 - Receive: `socket.receive(io, buf)` -> `IncomingMessage` (`from`, `data`, `flags.trunc`)
-- Receive with timeout: `socket.receiveTimeout(io, buf, timeout)` — returns `error.Timeout` on expiry
+- Receive with timeout: `socket.receiveTimeout(io, buf, timeout)`, returns `error.Timeout` on expiry
 - Send: `socket.send(io, &dest, data)`
 - Sleep: `std.Io.sleep(io, std.Io.Duration.fromMilliseconds(n), .awake)`
-- Managed list: `std.array_list.Managed(T)` — `std.ArrayList(T)` is now unmanaged in 0.16.x
+- Managed list: `std.array_list.Managed(T)`, `std.ArrayList(T)` is now unmanaged in 0.16.x
 - Clock: `std.Io.Clock.Timestamp.now(io, .awake)` / `.durationTo(from, to).raw.toMilliseconds()`
 
 <br>

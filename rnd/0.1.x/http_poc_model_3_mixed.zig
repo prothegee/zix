@@ -1,12 +1,12 @@
-//! PoC: Model 3 — multiple accept threads (SO_REUSEPORT) + io.async() dispatch.
+//! PoC: Model 3: multiple accept threads (SO_REUSEPORT) + io.async() dispatch.
 //!
 //! Concurrency: N accept threads each call io.async(handleConnection) directly.
-//! No ConnQueue — Threaded's internal pool is the shared dispatcher.
+//! No ConnQueue. Threaded's internal pool is the shared dispatcher.
 //! Combines the multi-port accept throughput of Model 2 with the adaptive
 //! pool management of Model 1.
 //!
 //! Each accept thread shares the same io. io.async() from N threads is
-//! mutex-protected inside Threaded — safe for concurrent callers. Pool grows
+//! mutex-protected inside Threaded, safe for concurrent callers. Pool grows
 //! up to async_limit then falls back to inline on the stalled accept thread.
 //!
 //! Self-contained: no imports from zix src. Parser, date logic, and I/O
@@ -22,7 +22,7 @@ const PORT: u16 = 9102;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 
 // --------------------------------------------------------- //
-// Parser (zero-copy, offset-based — same design as src/tcp/http/parser.zig)
+// Parser (zero-copy, offset-based, same design as src/tcp/http/parser.zig)
 
 const MAX_HEADERS: usize = 64;
 

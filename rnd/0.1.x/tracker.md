@@ -10,9 +10,9 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 
 **std.Io.net verified (2026-05-09):**
 - `std.Io.net.UnixAddress` exists: `init(path)`, `listen(io, opts) !Server`, `connect(io) !Stream`
-- Stream mode only — datagram not exposed via `std.Io.net.UnixAddress`
+- Stream mode only, datagram not exposed via `std.Io.net.UnixAddress`
 - `has_unix_sockets` = false on WASI. Windows 10 RS4+ supported, true elsewhere
-- Path cleanup (unlink) not handled by `std.Io` — requires `std.posix.unlink(path)` on deinit
+- Path cleanup (unlink) not handled by `std.Io`, requires `std.posix.unlink(path)` on deinit
 - Max path length: 108 bytes (Linux/macOS) abstract namespace via null-byte prefix supported
 
 **Design decisions needed before src:**
@@ -45,10 +45,10 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 Reference: `rnd/channel_specification.md`, `docs/hld-channel.md`, ADR-017 (Proposed)
 
 **Design decisions needed before src:**
-- [ ] Locking primitive: `std.Io.Mutex` + `std.Io.Condition` (fiber-safe) vs `std.Thread.Mutex` (OS threads only) — determines whether Channel works inside `io.concurrent` tasks
+- [ ] Locking primitive: `std.Io.Mutex` + `std.Io.Condition` (fiber-safe) vs `std.Thread.Mutex` (OS threads only), determines whether Channel works inside `io.concurrent` tasks
 - [ ] Unbuffered (capacity = 0) rendezvous semantics: requires two-sided sync, more complex than ring buffer
 - [ ] Internal storage: fixed ring buffer (comptime capacity) vs heap-allocated list (runtime capacity)
-- [ ] Naming: `Channel` vs `Chan` — locked once first example ships
+- [ ] Naming: `Channel` vs `Chan`, locked once first example ships
 - [ ] `select`/multiplex: defer, but internal design must not preclude it
 
 **Implementation checklist:**
@@ -84,7 +84,7 @@ Reference: `rnd/server_lifecycle_proposal.md`
 
 ## src/zix.zig -- Planned Exports
 
-- [ ] `pub const Channel = @import("channel/Channel.zig");` — add when `src/channel/` is implemented
+- [ ] `pub const Channel = @import("channel/Channel.zig");` - add when `src/channel/` is implemented
 
 ---
 
@@ -101,8 +101,8 @@ Reference: `docs/hld-udp.md` Not Yet Implemented table
 
 Reference: `docs/adr.md` ADR-012
 
-- [ ] Add `not_found: ?HandlerFn = null` to `HttpServerConfig` — `null` keeps current built-in 404 plain text behavior
-- [ ] Add `keep_alive: bool = true` to `HttpServerConfig` — `false` closes after each response
+- [ ] Add `not_found: ?HandlerFn = null` to `HttpServerConfig`: `null` keeps current built-in 404 plain text behavior
+- [ ] Add `keep_alive: bool = true` to `HttpServerConfig`: `false` closes after each response
 - [ ] Wire `not_found` into `server.zig` `handleConnection`: call config handler if set, else fall through to current 404
 - [ ] Wire `keep_alive` into `server.zig` keep-alive loop: exit loop and set `Connection: close` when false
 - [ ] Update ADR-012 status from Proposed -> Accepted once implemented

@@ -17,7 +17,7 @@ UDP is connectionless, which creates unique problems for the "infinite loop" pat
 In TCP, if a client disconnects, the kernel sends a `FIN` or `RST` packet. The `accept()` or `read()` call returns 0 or an error, and the loop naturally breaks.
 
 **In UDP, there is no such signal.**
-If you have a `while (true)` loop calling `socket.receive()`, and no packets arrive, the thread is blocked forever. During a server shutdown, this thread becomes a "Zombie"—it won't exit because it's waiting for a packet that may never come.
+If you have a `while (true)` loop calling `socket.receive()`, and no packets arrive, the thread is blocked forever. During a server shutdown, this thread becomes a "Zombie", it won't exit because it's waiting for a packet that may never come.
 
 ---
 

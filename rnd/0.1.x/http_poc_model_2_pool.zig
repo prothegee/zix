@@ -1,8 +1,8 @@
-//! PoC: Model 2 — explicit accept threads + blocking pool via std.Thread.spawn.
+//! PoC: Model 2: explicit accept threads + blocking pool via std.Thread.spawn.
 //!
 //! Concurrency: N accept threads push accepted connections to a shared ConnQueue.
 //! M pool threads block on ConnQueue.pop() and handle each connection synchronously.
-//! Pool is fixed at startup. All threads pre-warmed — first request on each thread
+//! Pool is fixed at startup. All threads pre-warmed, first request on each thread
 //! pays no spawn cost.
 //!
 //! Self-contained: no imports from zix src. Parser, date logic, and I/O
@@ -19,7 +19,7 @@ const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = cpu_count * 2 * 10 pool threads
 
 // --------------------------------------------------------- //
-// Parser (zero-copy, offset-based — same design as src/tcp/http/parser.zig)
+// Parser (zero-copy, offset-based, same design as src/tcp/http/parser.zig)
 
 const MAX_HEADERS: usize = 64;
 

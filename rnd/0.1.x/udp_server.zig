@@ -1,4 +1,4 @@
-//! UDP PoC Server — rnd only, not part of src/
+//! UDP PoC Server: rnd only, not part of src/
 //! Zig 0.16.x
 //!
 //! Usage: zig run rnd/udp_server.zig -- [--port <port>]
@@ -15,7 +15,7 @@ const std = @import("std");
 // --------------------------------------------------------- //
 
 // Note: native-endian layout, must match client and any foreign client (Go, C++, Rust, etc.)
-// Note: 'packet_type' maps to `int type` in spec — 'type' is a Zig keyword
+// Note: 'packet_type' maps to `int type` in spec, 'type' is a Zig keyword
 const TestPacket = extern struct {
     id: [16]u8,
     packet_type: i32,
@@ -28,7 +28,7 @@ const TestPacket = extern struct {
 // NOTE (src/): port must be governed by an explicit mode, represented as enum(u8):
 //   - CONFIGURABLE: port is passed via CLI args, exit with error.PortNotConfigured if args absent
 //   - REQUIRED: port is set manually in the config struct, exit with error.PortNotConfigured if unset (0)
-//   Both modes fail if the port is not provided — the distinction is the source, not the behavior.
+//   Both modes fail if the port is not provided. The distinction is the source, not the behavior.
 //   No silent defaults in either mode. Enforces "explicit over implicit."
 const ServerConfig = struct {
     ip: []const u8 = "127.0.0.1",
@@ -39,32 +39,32 @@ const ServerConfig = struct {
     //       feedback shape (e.g. result struct) should be configurable later
     auto_echo: bool = false,
     // Note: if broadcast is true, relays the received packet to ALL connected clients
-    //       server stamps the sender's connection index into the id field before relaying —
+    //       server stamps the sender's connection index into the id field before relaying,
     //       receivers use the id to distinguish which peer sent the data
     broadcast: bool = true,
 };
 
 // --------------------------------------------------------- //
 
-// Note: UDP has no connection state — the server cannot know a client is gone until silence.
+// Note: UDP has no connection state, the server cannot know a client is gone until silence.
 //       Disconnect detection is purely timeout-based. Worst-case detection delay is
 //       DISCONNECT_TIMEOUT_MS + POLL_TIMEOUT_MS (currently ~7s). Lower DISCONNECT_TIMEOUT_MS
 //       to reduce the window, there is no OS-level signal to hook into (unlike TCP FIN).
 const DISCONNECT_TIMEOUT_MS: i64 = 5000;
 const POLL_TIMEOUT_MS: i64 = 2000;
 
-// Explicit cap for broadcast snapshot — avoids heap allocation in PacketTask.
+// Explicit cap for broadcast snapshot, avoids heap allocation in PacketTask.
 // In src/: use a heap-allocated slice (arena per packet) to remove the hard limit.
 // SECURITY: clients beyond this cap are silently excluded from receiving broadcasts.
 const MAX_BROADCAST_CLIENTS: usize = 64;
 
 // --------------------------------------------------------- //
 
-// Captures all state needed by processPacket — copy semantics, safe across concurrent tasks.
+// Captures all state needed by processPacket, copy semantics, safe across concurrent tasks.
 // Note: socket handle is shared across concurrent tasks, send on UDP is kernel-atomic per datagram
 // Note: peers[] is a snapshot of connected client addresses taken at receive time
 //       avoids sharing the mutable ClientRecord list across concurrent tasks
-// PERF: peers[MAX_BROADCAST_CLIENTS] is copied by value into every PacketTask — grows with
+// PERF: peers[MAX_BROADCAST_CLIENTS] is copied by value into every PacketTask, grows with
 //       IpAddress size * MAX_BROADCAST_CLIENTS, reduce cap or switch to heap slice in src/
 const PacketTask = struct {
     buf: [@sizeOf(TestPacket)]u8,
@@ -78,7 +78,7 @@ const PacketTask = struct {
 };
 
 // Note: index is a monotonic connection counter assigned at first packet from this address.
-//       It is a PoC-only identity — not stable across reconnects, not collision-safe.
+//       It is a PoC-only identity, not stable across reconnects, not collision-safe.
 // Note: when identifying clients, how the id is structured, validated, and scoped is the
 //       application's responsibility. The transport layer only assigns a transient index.
 const ClientRecord = struct {
@@ -141,10 +141,10 @@ fn processPacket(task: PacketTask) void {
         stamped.id = [_]u8{0} ** 16;
         _ = std.fmt.bufPrint(&stamped.id, "client-{d}", .{task.sender_index}) catch {};
 
-        // SECURITY: no sender validation — any client (including spoofed IPs) can trigger
+        // SECURITY: no sender validation, any client (including spoofed IPs) can trigger
         //           a broadcast to all peers, a single bad actor can flood all connected clients
         // PERF: N sequential send() syscalls per packet at high client count + packet rate
-        //       this becomes a bottleneck — in src/ consider batching or a dedicated relay thread
+        //       this becomes a bottleneck. In src/ consider batching or a dedicated relay thread
         for (task.peers[0..task.n_peers]) |*peer| {
             task.socket.send(task.io, peer, std.mem.asBytes(&stamped)) catch |err| {
                 std.debug.print("broadcast error: {}\n", .{err});
@@ -200,7 +200,7 @@ pub fn main(process: std.process.Init) !void {
             continue;
         };
 
-        // overflow / size guard — drop any datagram that isn't exactly TestPacket
+        // overflow / size guard: drop any datagram that isn't exactly TestPacket
         if (msg.flags.trunc or msg.data.len != @sizeOf(TestPacket)) {
             if (config.error_report) socket.send(io, &msg.from, &[_]u8{0x15}) catch {};
             std.debug.print("drop: expected {d} bytes, got {d} trunc={}\n", .{ @sizeOf(TestPacket), msg.data.len, msg.flags.trunc });
@@ -234,7 +234,7 @@ pub fn main(process: std.process.Init) !void {
             last_check = now;
         }
 
-        // snapshot connected client addresses for broadcast — safe to pass by value to concurrent task
+        // snapshot connected client addresses for broadcast, safe to pass by value to concurrent task
         var peers: [MAX_BROADCAST_CLIENTS]std.Io.net.IpAddress = undefined;
         const n_peers = @min(clients.items.len, MAX_BROADCAST_CLIENTS);
         for (0..n_peers) |i| peers[i] = clients.items[i].from;
@@ -252,7 +252,7 @@ pub fn main(process: std.process.Init) !void {
 
         _ = io.concurrent(processPacket, .{task}) catch |err| {
             std.debug.print("concurrent error: {}\n", .{err});
-            processPacket(task); // fallback: inline — blocks receive loop
+            processPacket(task); // fallback: inline, blocks receive loop
         };
     }
 }

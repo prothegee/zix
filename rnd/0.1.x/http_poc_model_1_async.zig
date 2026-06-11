@@ -1,11 +1,11 @@
-//! PoC: Model 1 — single accept loop + io.async() dispatch per connection.
+//! PoC: Model 1: single accept loop + io.async() dispatch per connection.
 //!
 //! Concurrency: each accepted connection is dispatched via io.async().
 //! The caller's io (process.io or a custom std.Io.Threaded) controls the
 //! pool via InitOptions.async_limit and InitOptions.stack_size.
 //!
 //! After async_limit is reached, io.async() falls back to inline execution
-//! on the accept thread — the accept loop stalls for that connection's lifetime.
+//! on the accept thread. The accept loop stalls for that connection's lifetime.
 //!
 //! Self-contained: no imports from zix src. Parser, date logic, and I/O
 //! are all inlined to isolate the dispatch model as the only variable.
@@ -19,7 +19,7 @@ const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9100;
 
 // --------------------------------------------------------- //
-// Parser (zero-copy, offset-based — same design as src/tcp/http/parser.zig)
+// Parser (zero-copy, offset-based, same design as src/tcp/http/parser.zig)
 
 const MAX_HEADERS: usize = 64;
 

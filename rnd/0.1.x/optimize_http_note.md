@@ -23,7 +23,7 @@ are pre-computed once per request in `server.zig` so `path()`, `query()`,
 | 6 | addHeader incremental alloc | `response.zig` | Done |
 | 7 | Fast-path buffer 320 -> 512 | `response.zig` | Done |
 
-## Tier 1 — biggest wins, smallest code
+## Tier 1: biggest wins, smallest code
 
 ### 1. Pre-built status lines for common codes
 
@@ -49,7 +49,7 @@ pub fn statusLine(c: Code) []const u8 {
 }
 ```
 
-In `send()`: `@memcpy` instead of `bufPrint` — cuts format-machinery overhead
+In `send()`: `@memcpy` instead of `bufPrint`, cuts format-machinery overhead
 on the hot path.
 
 ### 2. Skip Content-Length and Content-Type for 204
@@ -60,7 +60,7 @@ Location: `src/tcp/http/response.zig:193`
 `Content-Length: 0` and `Content-Type` if set. Check status first, skip both.
 Saves ~25 bytes + bufPrint per `noContent()` call.
 
-## Tier 2 — scales with workload
+## Tier 2: scales with workload
 
 ### 3. Router exact-match StringHashMap
 
@@ -75,8 +75,8 @@ for (self.routes.items) |route| {
 
 Linear scan over all routes. With 50 routes, that's ~50 string compares
 per request even when an exact match exists. Add a
-`std.StringHashMapUnmanaged(HandlerFn)` alongside `routes` for `.exact` routes
-— O(1) lookup. Param/prefix routes stay in the list (can't be hashed).
+`std.StringHashMapUnmanaged(HandlerFn)` alongside `routes` for `.exact` routes.
+O(1) lookup. Param/prefix routes stay in the list (can't be hashed).
 
 ### 4. Header lookup index per request
 
@@ -102,7 +102,7 @@ Two approaches:
   rest of request. Costs one full pass on first call but every subsequent
   lookup is hash O(1).
 
-## Tier 3 — micro-optimizations (measure first)
+## Tier 3: micro-optimizations (measure first)
 
 ### 5. Hand-rolled usize -> decimal for Content-Length
 
@@ -129,7 +129,7 @@ Bump `fixed[320]` to 512 to keep more responses on the fast path
 (single `writeAll`). Trade: +192 bytes per concurrent request on stack.
 Pool threads have ~stack_threshold budget check before bumping.
 
-## Tier 4 — architectural (much bigger lift)
+## Tier 4: architectural (much bigger lift)
 
 ### 8. Custom HTTP parser
 
@@ -141,7 +141,7 @@ as the remaining ceiling. Major work.
 Location: `src/tcp/http/response.zig:220-228`
 
 When extra headers present, we do N+1 `writeAll` calls. One `writev` syscall
-instead. Needs std.Io.net writev support — check what's available.
+instead. Needs std.Io.net writev support. Check what's available.
 
 ### 10. Per-thread response buffer pool
 
@@ -154,7 +154,7 @@ allocation.
 Start with #1 and #3:
 
 - #1 is ~20 lines, eliminates format work on the most-common per-response path.
-- #3 scales the win as routes grow — important if anyone registers many
+- #3 scales the win as routes grow, important if anyone registers many
   exact routes.
 
 Both are isolated, easy to verify, and no test changes needed.
@@ -167,47 +167,47 @@ Tier 3 is worth chasing. Tier 4 is its own project.
 Tier 4 is deferred as a separate decision. The remaining items (#1-#7) form
 one cohesive batch. Apply order, with rationale for grouping:
 
-1. **#1 status line lookup** — `status.zig` gets `statusLine(Code) []const u8`.
+1. **#1 status line lookup**: `status.zig` gets `statusLine(Code) []const u8`.
    `send()` swaps the status `bufPrint` for a `@memcpy` of the lookup result;
    unknown codes fall back to `bufPrint`.
 
-2. **#2 skip CL/CT for 204** — guard the Content-Length and Content-Type
+2. **#2 skip CL/CT for 204**: guard the Content-Length and Content-Type
    blocks on `self.status != .NO_CONTENT`. Independent change in `send()`.
 
-3. **#3 router exact-match HashMap** — add `exact_map: std.StringHashMapUnmanaged(HandlerFn)`
+3. **#3 router exact-match HashMap**: add `exact_map: std.StringHashMapUnmanaged(HandlerFn)`
    to `Router`. `register()` inserts there too (still appends to `routes` for
    listing/iteration symmetry). `dispatch()` Pass 1 becomes `exact_map.get(p)`.
    `deinit()` frees the map.
 
-4. **#4 header index** — go with the lazy approach:
+4. **#4 header index**: go with the lazy approach:
    - Add `header_index: ?std.StringHashMapUnmanaged([]const u8) = null` to `Request`
      (lowercase-keyed).
    - `header()` builds the map on first call from `iterateHeaders()`,
      lowercases names into the request arena, then uses `get()` for lookups.
    - Skips first-call cost when handler never calls `header()`.
 
-5. **#5 hand-rolled u64 decimal** — small helper in `response.zig`,
+5. **#5 hand-rolled u64 decimal**: small helper in `response.zig`,
    used only for `Content-Length`. Keep `bufPrint` for `Date` (string),
    the integer one is the only hot decimal write.
 
-6. **#6 addHeader incremental alloc** — start with 4, double on growth,
+6. **#6 addHeader incremental alloc**: start with 4, double on growth,
    capped at `self.max_headers`. Replace the single `try alloc(max_headers)`
    with a grow-on-need path. Existing `TooManyHeaders` semantics preserved.
 
-7. **#7 fast-path buffer 320 -> 512** — last because it interacts with
+7. **#7 fast-path buffer 320 -> 512**: last because it interacts with
    stack pressure. Confirm `stack_threshold` headroom before bumping.
 
 ### Why this order works as one batch
 
-- #1, #2, #5, #6, #7 are all in `response.zig` (and one helper in `status.zig`)
-  — same file, can be reviewed together.
-- #3 is in `router.zig` — independent.
-- #4 is in `request.zig` — independent.
+- #1, #2, #5, #6, #7 are all in `response.zig` (and one helper in `status.zig`),
+  same file, can be reviewed together.
+- #3 is in `router.zig`, independent.
+- #4 is in `request.zig`, independent.
 - No test modifications needed for any of them (all changes preserve current
   behavior on the fallback / non-cached paths).
 - All can be benchmarked with the existing perf rig before/after the batch.
 
 ### Out of scope for this batch
 
-- Tier 4 (#8 custom parser, #9 writev, #10 buffer pool) — larger architectural
+- Tier 4 (#8 custom parser, #9 writev, #10 buffer pool): larger architectural
   decisions, separate planning.

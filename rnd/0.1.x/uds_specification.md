@@ -114,7 +114,7 @@ if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platf
 ```
 
 **What is NOT available via `std.Io.net.UnixAddress`:**
-- Datagram mode — `UnixAddress` only exposes `listen()` and `connect()` (stream). Datagram would require raw `std.posix` syscalls.
+- Datagram mode: `UnixAddress` only exposes `listen()` and `connect()` (stream). Datagram would require raw `std.posix` syscalls.
 
 **Path cleanup:** `std.Io` does not unlink the socket file. Server `deinit()` must call `std.posix.unlink(path)` explicitly. Abstract namespace sockets (`\x00name`) are cleaned up by the kernel automatically.
 

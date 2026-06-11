@@ -12,7 +12,7 @@ The goal: remove hidden behavior ("magic") without making the user write boilerp
 
 The tension to resolve:
 
-> Explicit over implicit — but the user should be able to run a hello-world in under 10 lines.
+> Explicit over implicit, but the user should be able to run a hello-world in under 10 lines.
 
 The key distinction: **explicit** means the user can read the code and know exactly what the server does, without reading internal source or docs. It does **not** mean the user must assemble everything from scratch.
 
@@ -35,7 +35,7 @@ None of these are wrong. They become a problem when the user can't override, obs
 
 ---
 
-## Option A — Explicit Defaults (Recommended)
+## Option A: Explicit Defaults (Recommended)
 
 **Philosophy:** keep sensible defaults, but name every behavior in the config struct. Nothing is hidden in server internals. If it exists, it's in the config.
 
@@ -59,7 +59,7 @@ var server = try zix.HttpServer.init(.{
 });
 ```
 
-The user who wants a quick server writes nothing extra — defaults do the right thing. The user who wants control changes one field. Every behavior has a name.
+The user who wants a quick server writes nothing extra. Defaults do the right thing. The user who wants control changes one field. Every behavior has a name.
 
 **Static serving becomes a config field, not a side effect:**
 ```zig
@@ -79,7 +79,7 @@ The user who wants a quick server writes nothing extra — defaults do the right
 
 ---
 
-## Option B — Pipeline Assembly
+## Option B: Pipeline Assembly
 
 **Philosophy:** the server is a blank slate. The user assembles the pipeline from named pieces. Nothing runs unless registered.
 
@@ -99,7 +99,7 @@ try server.run();
 ```
 
 **Routing becomes top-down (first-match-wins):**
-No 3-pass priority system. Order of registration is truth — matches zix's "explicit over implicit" most fully.
+No 3-pass priority system. Order of registration is truth, matches zix's "explicit over implicit" most fully.
 
 ```zig
 server.registerHandler("/api/v2/user", v2Handler); // checked first
@@ -111,12 +111,12 @@ server.registerPrefix("/",             homeHandler); // catch-all
 
 ---
 
-## Option C — Layered API (Simple + Explicit)
+## Option C: Layered API (Simple + Explicit)
 
 **Philosophy:** two tiers. The simple API (Option A) is the default. The explicit API (Option B) is available for users who want full control. Same underlying engine, different entry points.
 
 ```zig
-// Simple — explicit defaults, sensible for most cases
+// Simple: explicit defaults, sensible for most cases
 var server = try zix.HttpServer.init(.{
     .io   = process.io,
     .port = 9000,
@@ -125,7 +125,7 @@ var server = try zix.HttpServer.init(.{
 server.registerHandler("/", homeHandler);
 try server.run();
 
-// Explicit — zero magic, full pipeline control
+// Explicit: zero magic, full pipeline control
 var server = try zix.HttpServer.initExplicit(.{
     .io   = process.io,
     .port = 9000,
@@ -145,7 +145,7 @@ try server.run();
 | | Option A | Option B | Option C |
 | :- | :- | :- | :- |
 | Hello-world verbosity | low | medium | low (simple tier) |
-| Explicit over implicit | partial — config-visible | full | full (explicit tier) |
+| Explicit over implicit | partial (config-visible) | full | full (explicit tier) |
 | Magic eliminated | most | all | all (explicit tier) |
 | Maintenance surface | low | medium | high |
 | Routing model | 3-pass (unchanged) | first-match-wins | depends on tier |
@@ -155,9 +155,9 @@ try server.run();
 
 ## Recommendation
 
-**Start with Option A.** It eliminates the most impactful hidden behaviors (static fallback, not-found, keep-alive) with minimal user disruption. The config struct is the contract — if it's not in the struct, it doesn't happen.
+**Start with Option A.** It eliminates the most impactful hidden behaviors (static fallback, not-found, keep-alive) with minimal user disruption. The config struct is the contract: if it's not in the struct, it doesn't happen.
 
-**Adopt the first-match-wins routing from Option B as a separate change.** It's independent of the config refactor and aligns with zix's "Explicit Over Implicit" most clearly. The 3-pass system is the largest source of non-obvious behavior — a developer reading registration calls cannot predict which handler wins without knowing the priority rules.
+**Adopt the first-match-wins routing from Option B as a separate change.** It's independent of the config refactor and aligns with zix's "Explicit Over Implicit" most clearly. The 3-pass system is the largest source of non-obvious behavior. A developer reading registration calls cannot predict which handler wins without knowing the priority rules.
 
 **Skip Option C for now.** Two API surfaces are harder to document and maintain than one good one.
 
@@ -165,14 +165,14 @@ try server.run();
 
 ## Performance Approach
 
-These are orthogonal to the explicitness changes above — implementation improvements independent of API shape.
+These are orthogonal to the explicitness changes above, implementation improvements independent of API shape.
 
 ### 1. Exact Route Hash Map
 
 Current router does a full linear scan (3 passes) over all routes for every request. Exact routes (`/about`, `/api/v2/user`) can be looked up in O(1) with a hash map.
 
 ```
-current:  O(3N) per request — 3 linear passes over all routes
+current:  O(3N) per request, 3 linear passes over all routes
 proposed: O(1) for exact match (hash map) + O(N) for param/prefix fallback
 ```
 
@@ -204,11 +204,11 @@ Current arena is initialized with `smp_allocator` and grows on demand. If handle
 server.registerHandler("/upload", uploadHandler, .{ .arena_hint = 64 * 1024 });
 ```
 
-Not all handlers need this — only upload, body-parsing, or response-building handlers benefit.
+Not all handlers need this, only upload, body-parsing, or response-building handlers benefit.
 
 ### 5. UDP Broadcast Batching
 
-Current `processPacket` broadcast does N sequential `send()` syscalls — one per connected client. On Linux, `sendmmsg` can send multiple datagrams in a single syscall.
+Current `processPacket` broadcast does N sequential `send()` syscalls, one per connected client. On Linux, `sendmmsg` can send multiple datagrams in a single syscall.
 
 ```
 current:  N syscalls per broadcast packet
@@ -219,7 +219,7 @@ Benefit scales linearly with client count. For ≤4 clients the overhead of buil
 
 ### 6. Zero-Copy Static Serving
 
-Current static serving reads file bytes into a buffer then writes them to the connection. On Linux, `sendfile(2)` transfers file data directly from page cache to socket without a userspace copy — relevant for large files.
+Current static serving reads file bytes into a buffer then writes them to the connection. On Linux, `sendfile(2)` transfers file data directly from page cache to socket without a userspace copy, relevant for large files.
 
 Applicable only when the OS supports it, add as a runtime-detected code path in `static.zig`.
 
