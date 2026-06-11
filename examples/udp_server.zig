@@ -12,7 +12,7 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-// The packet type is defined by the application — not by zix.
+// The packet type is defined by the application, not by zix.
 // Must be an extern struct so the memory layout is fixed (C ABI).
 // All clients and the server must use the exact same definition.
 // 'packet_type' is used instead of 'type' because 'type' is a Zig keyword.
@@ -28,7 +28,7 @@ const Packet = extern struct {
 const SERVER_IP: []const u8 = "127.0.0.1";
 const SERVER_PORT: u16 = 9100;
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "udp";
 
@@ -43,7 +43,7 @@ const MyServer = zix.Udp.Server(Packet);
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,
@@ -60,7 +60,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    // REQUIRED mode — port is taken from SERVER_PORT, no CLI arg parsing.
+    // REQUIRED mode: port is taken from SERVER_PORT, no CLI arg parsing.
     // To accept --port at runtime instead, replace with:
     // var server = try MyServer.initArgs(.{
     //     .ip        = SERVER_IP,
@@ -81,7 +81,7 @@ pub fn main(process: std.process.Init) !void {
 
         // Relay each received packet to all connected clients.
         // Clients use receiveFeedback() to read these relayed packets.
-        // SECURITY: any connected client can trigger a broadcast — no sender validation.
+        // SECURITY: any connected client can trigger a broadcast, no sender validation.
         .broadcast = true,
 
         // Send 0x06 ACK back to sender after each successful receipt.
@@ -89,7 +89,7 @@ pub fn main(process: std.process.Init) !void {
         .auto_ack = false,
 
         // Echo the received packet back to the sender only (not all clients).
-        // Independent from broadcast — both can be true simultaneously.
+        // Independent from broadcast: both can be true simultaneously.
         .auto_echo = false,
 
         // Send 0x15 NACK to sender when a datagram is the wrong size or truncated.
@@ -97,7 +97,7 @@ pub fn main(process: std.process.Init) !void {
 
         // Milliseconds of silence before treating a client as disconnected.
         // Worst-case detection delay: disconnect_timeout_ms + poll_timeout_ms.
-        // There is no OS-level disconnect signal for UDP — silence is the only indicator.
+        // There is no OS-level disconnect signal for UDP: silence is the only indicator.
         .disconnect_timeout_ms = 5000,
 
         // How often the receive loop checks for disconnected clients (milliseconds).
