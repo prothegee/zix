@@ -64,7 +64,7 @@ fn extendedHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) vo
     _ = headers;
 
     // Override: extend to 30s from now regardless of the global 5s cap.
-    // Always check isExpired() first — the deadline may already have passed.
+    // Always check isExpired() first: the deadline may already have passed.
     if (!ctx.isExpired()) {
         ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s;
     }
@@ -85,7 +85,7 @@ pub fn main(process: std.process.Init) !void {
         &[_]zix.Grpc.Route{
             // SayHello: per-route cap of 3s (tightens the 5s global cap).
             .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-            // Echo: per-route cap of 10s (loosens nothing — global 5s cap still wins).
+            // Echo: per-route cap of 10s (loosens nothing, global 5s cap still wins).
             .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
             // Extended: ignores per-route cap. Overrides deadline_ns at runtime.
             .{ .path = "/helloworld.Greeter/Extended", .handler = extendedHandler },
@@ -96,7 +96,7 @@ pub fn main(process: std.process.Init) !void {
             .port = 8084,
             .dispatch_model = .ASYNC,
             // Global fallback cap: 5s. Applies to any route with timeout_ms = 0.
-            // Combined with Route.timeout_ms and the client grpc-timeout header —
+            // Combined with Route.timeout_ms and the client grpc-timeout header,
             // the tightest of the three wins.
             .handler_timeout_ms = 5_000,
         },
