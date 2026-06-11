@@ -20,7 +20,7 @@ pub const TcpServer = struct {
 };
 ```
 
-### runWith() — jalur ASYNC
+### runWith() jalur ASYNC
 
 ```
 1. resolve ip:port -> addr
@@ -34,7 +34,7 @@ pub const TcpServer = struct {
 
 Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept loop tidak pernah memblokir pada penanganan koneksi.
 
-### runWith() — jalur POOL
+### runWith() jalur POOL
 
 ```
 1. worker_count = cfg.workers  (0 -> cpu_count)
@@ -49,7 +49,7 @@ Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept 
 
 Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai nilai; `std.Io.Threaded` bersifat thread-safe).
 
-### runWith() — jalur MIXED
+### runWith() jalur MIXED
 
 ```
 1. worker_count = cfg.workers (0 -> cpu_count)
@@ -75,7 +75,7 @@ const ConnQueue = struct {
 };
 ```
 
-- `push` menggunakan `smp_allocator` secara langsung — tidak ada arena per koneksi.
+- `push` menggunakan `smp_allocator` secara langsung, tidak ada arena per koneksi.
 - Jika OOM terjadi di `push`, stream ditutup dan koneksi dibuang.
 - `pop` mengembalikan `null` hanya setelah `close()` dipanggil dan antrian sudah sepenuhnya terkuras.
 - `orderedRemove(0)` menjaga urutan kedatangan (FIFO).
@@ -145,7 +145,7 @@ loop:
     wtr.interface.flush()
 ```
 
-Hanya menggunakan stack buffer — tidak ada alokasi heap di dalam `echoHandler`. Menggunakan `takeVarInt` (membaca tepat N byte sebagai integer) dan `readSliceAll` (membaca tepat N byte, error jika kurang) alih-alih loop `readSliceShort` yang digunakan di `zix.Uds.echoHandler`.
+Hanya menggunakan stack buffer: tidak ada alokasi heap di dalam `echoHandler`. Menggunakan `takeVarInt` (membaca tepat N byte sebagai integer) dan `readSliceAll` (membaca tepat N byte, error jika kurang) alih-alih loop `readSliceShort` yang digunakan di `zix.Uds.echoHandler`.
 
 ---
 

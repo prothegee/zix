@@ -20,7 +20,7 @@ pub const TcpServer = struct {
 };
 ```
 
-### runWith() — ASYNC path
+### runWith() ASYNC path
 
 ```
 1. resolve ip:port -> addr
@@ -34,7 +34,7 @@ pub const TcpServer = struct {
 
 Single accept thread. Each connection is dispatched as an `io.async()` task. The accept loop never blocks on connection handling.
 
-### runWith() — POOL path
+### runWith() POOL path
 
 ```
 1. worker_count = cfg.workers  (0 -> cpu_count)
@@ -49,7 +49,7 @@ Single accept thread. Each connection is dispatched as an `io.async()` task. The
 
 Accept threads and pool threads share the same `io` handle (passed by value; `std.Io.Threaded` is thread-safe).
 
-### runWith() — MIXED path
+### runWith() MIXED path
 
 ```
 1. worker_count = cfg.workers (0 -> cpu_count)
@@ -75,7 +75,7 @@ const ConnQueue = struct {
 };
 ```
 
-- `push` uses `smp_allocator` directly — no per-connection arena.
+- `push` uses `smp_allocator` directly, no per-connection arena.
 - On OOM in `push`, the stream is closed and the connection dropped.
 - `pop` returns `null` only after `close()` has been called and the queue is fully drained.
 - `orderedRemove(0)` preserves arrival order (FIFO).
@@ -145,7 +145,7 @@ loop:
     wtr.interface.flush()
 ```
 
-Stack buffers only — no heap allocation inside `echoHandler`. Uses `takeVarInt` (reads exactly N bytes as int) and `readSliceAll` (reads exactly N bytes, errors on short read) rather than the `readSliceShort` loop used in `zix.Uds.echoHandler`.
+Stack buffers only: no heap allocation inside `echoHandler`. Uses `takeVarInt` (reads exactly N bytes as int) and `readSliceAll` (reads exactly N bytes, errors on short read) rather than the `readSliceShort` loop used in `zix.Uds.echoHandler`.
 
 ---
 
