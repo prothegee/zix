@@ -1,4 +1,4 @@
-//! http1_sse.zig — Server-Sent Events over zix.Http1
+//! http1_sse.zig: Server-Sent Events over zix.Http1
 //!
 //! Two endpoints:
 //! GET /        - HTML page that opens an EventSource (open in browser)
