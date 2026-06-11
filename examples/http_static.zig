@@ -23,7 +23,7 @@ const SEC_VAL = "abc123";
 // --------------------------------------------------------- //
 
 // Creates all required directories at startup.
-// Silently ignores "already exists" errors — safe to call on every start.
+// Silently ignores "already exists" errors, safe to call on every start.
 fn createInitDirs(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, PUBLIC_DIR) catch {};
     std.Io.Dir.cwd().createDirPath(io, UPLOAD_DIR) catch {};
@@ -167,7 +167,7 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     @memcpy(path_buf[SECRET_DIR.len + 1 ..][0..subpath.len], subpath);
     const full_path = path_buf[0 .. SECRET_DIR.len + 1 + subpath.len];
 
-    // Check file existence first — always 404 before revealing the sec requirement
+    // Check file existence first: always 404 before revealing the sec requirement
     const f = std.Io.Dir.cwd().openFile(ctx.io, full_path, .{}) catch {
         res.setStatus(.NOT_FOUND);
         try res.send("Not Found");
@@ -186,7 +186,7 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
         return;
     }
 
-    // File exists — now enforce sec param
+    // File exists, now enforce sec param
     const sec = req.queryParam(SEC_KEY) orelse {
         res.setStatus(.FORBIDDEN);
         try res.sendJson("{\"error\":\"forbidden\"}");
@@ -210,7 +210,7 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
         total += n;
     }
 
-    // Resolve MIME from extension via Content.fromExtension — displayable types render
+    // Resolve MIME from extension via Content.fromExtension: displayable types render
     // inline in the browser, unknown/binary types fall back to octet-stream and prompt
     // a download.
     const ext = if (std.mem.lastIndexOfScalar(u8, subpath, '.')) |dot| subpath[dot + 1 ..] else "";
