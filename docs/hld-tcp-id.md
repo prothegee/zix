@@ -62,7 +62,7 @@ Baik `echoHandler` bawaan maupun `TcpClient.sendMsg`/`recvMsg` menggunakan frame
 [ payload bytes, payload_len bytes ]
 ```
 
-Big-endian digunakan karena TCP adalah protokol jaringan — network byte order adalah pilihan konvensional dan sesuai dengan cara sebagian besar library protokol mengkodekan integer multi-byte melalui jaringan. (Berbeda dengan `zix.Uds`, yang menggunakan little-endian karena UDS bersifat lokal saja.)
+Big-endian digunakan karena TCP adalah protokol jaringan: network byte order adalah pilihan konvensional dan sesuai dengan cara sebagian besar library protokol mengkodekan integer multi-byte melalui jaringan. (Berbeda dengan `zix.Uds`, yang menggunakan little-endian karena UDS bersifat lokal saja.)
 
 Frame dengan `payload_len == 0` atau `payload_len > max_msg_len` (default 4096) menutup koneksi.
 
@@ -112,7 +112,7 @@ flowchart TD
 
 ### MIXED
 
-N accept thread, masing-masing mendispatch koneksi melalui `io.async()` secara langsung — tanpa `ConnQueue`.
+N accept thread, masing-masing mendispatch koneksi melalui `io.async()` secara langsung, tanpa `ConnQueue`.
 
 ```mermaid
 flowchart TD
@@ -139,7 +139,7 @@ TcpServer.init(config): memvalidasi port != 0
 TcpServer.deinit(): no-op (resource dibebaskan di dalam runWith melalui defer)
 ```
 
-- `init()` hanya memvalidasi konfigurasi — tidak membuka socket.
+- `init()` hanya memvalidasi konfigurasi: tidak membuka socket.
 - `runWith()` membuka socket, menspawn thread (POOL/MIXED), kemudian memblokir.
 - `deinit()` adalah no-op. Semua resource jaringan dibebaskan saat `runWith()` kembali.
 

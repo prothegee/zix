@@ -15,7 +15,7 @@ Implemented. See ADR-022 for design rationale.
 - Explicit over implicit: same config and dispatch-model pattern as `zix.Http`.
 - User owns the handler: `HandlerFn = *const fn(stream, io) void`, identical to `zix.Uds.HandlerFn`.
 - Length-prefixed framing built into the default echo handler and the client API (big-endian, network byte order).
-- POOL, ASYNC, MIXED dispatch models — same semantics as HTTP, proven by the PoC in `rnd/`. EPOLL is accepted but falls back to POOL (no native epoll loop for raw TCP).
+- POOL, ASYNC, MIXED dispatch models: same semantics as HTTP, proven by the PoC in `rnd/`. EPOLL is accepted but falls back to POOL (no native epoll loop for raw TCP).
 - `initArgs()` on both server and client so `--ip` and `--port` are overridable at runtime without rebuilding.
 - No cross-protocol dependencies: `src/tcp/server.zig`, `src/tcp/client.zig`, `src/tcp/config.zig` have no import from `src/tcp/http/`.
 
@@ -62,7 +62,7 @@ Both the built-in `echoHandler` and `TcpClient.sendMsg`/`recvMsg` use a simple l
 [ payload bytes, payload_len bytes ]
 ```
 
-Big-endian is used because TCP is a network protocol — network byte order is the conventional choice and matches how most protocol libraries encode multi-byte integers over the wire. (Contrast with `zix.Uds`, which uses little-endian because UDS is local-only.)
+Big-endian is used because TCP is a network protocol: network byte order is the conventional choice and matches how most protocol libraries encode multi-byte integers over the wire. (Contrast with `zix.Uds`, which uses little-endian because UDS is local-only.)
 
 Frames with `payload_len == 0` or `payload_len > max_msg_len` (default 4096) close the connection.
 
@@ -88,8 +88,8 @@ flowchart TD
     I --> G
 ```
 
-- `workers = 0` → `cpu_count` accept threads.
-- `pool_size = 0` → `max(10, cpu_count * 2)` pool threads.
+- `workers = 0` -> `cpu_count` accept threads.
+- `pool_size = 0` -> `max(10, cpu_count * 2)` pool threads.
 - All accept threads bind the same port via `SO_REUSEPORT` (`.reuse_address = true`).
 
 ### ASYNC
@@ -112,7 +112,7 @@ flowchart TD
 
 ### MIXED
 
-N accept threads, each dispatching connections via `io.async()` directly — no `ConnQueue`.
+N accept threads, each dispatching connections via `io.async()` directly, no `ConnQueue`.
 
 ```mermaid
 flowchart TD
@@ -124,7 +124,7 @@ flowchart TD
     E --> F["handler(stream, io) in async task"]
 ```
 
-- `pool_size` is ignored. `workers = 0` → `cpu_count` accept threads.
+- `pool_size` is ignored. `workers = 0` -> `cpu_count` accept threads.
 - Balanced throughput and latency.
 
 ---
@@ -139,7 +139,7 @@ TcpServer.init(config): validates port != 0
 TcpServer.deinit(): no-op (resources released inside runWith via defer)
 ```
 
-- `init()` only validates configuration — no socket is opened.
+- `init()` only validates configuration: no socket is opened.
 - `runWith()` opens sockets, spawns threads (POOL/MIXED), then blocks.
 - `deinit()` is a no-op. All network resources are released when `runWith()` returns.
 
