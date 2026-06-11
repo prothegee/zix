@@ -171,7 +171,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** HTTP handlers need cross-cutting concerns (auth, rate limiting, CORS, logging) that apply to subsets of routes. Options were: runtime chain runner (heap-allocated list of middleware functions called in order), decorator pattern (wrapper functions), or manual handler composition.
 
-**Decision:** Comptime wrapper functions that return `HandlerFn`. Each wrapper takes `comptime next: HandlerFn` and returns a new `HandlerFn`. The `next` call is a direct function call — no runtime dispatch, no allocation. Composing left-to-right: outermost wrapper runs first.
+**Decision:** Comptime wrapper functions that return `HandlerFn`. Each wrapper takes `comptime next: HandlerFn` and returns a new `HandlerFn`. The `next` call is a direct function call (no runtime dispatch, no allocation). Composing left-to-right: outermost wrapper runs first.
 
 ```zig
 fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
@@ -191,7 +191,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 **Consequences:**
 - Zero runtime overhead. Each unique `next` value generates a distinct function at comptime.
 - No heap allocation. No middleware chain runner to deinit.
-- Composition is explicit at the registration call site — readers see the full chain without looking inside any function.
+- Composition is explicit at the registration call site: readers see the full chain without looking inside any function.
 - Each unique composition generates a new comptime function, excessive combinations increase binary size.
 
 ---
@@ -226,11 +226,11 @@ The `public_dir` field already exists but its role as an opt-in feature (not a m
 
 **Status:** Accepted
 
-**Context:** `UdpServer` uses the heap for two purposes: the `Managed(ClientRecord)` client list (process lifetime) and the per-packet `[]IpAddress` broadcast snapshot (freed inside `processPacket`). Both previously used `std.heap.smp_allocator` internally — invisible to the caller. The project's "explicit over implicit" principle applies equally to memory ownership: hiding the allocator makes it impossible to substitute a leak-detecting allocator in tests.
+**Context:** `UdpServer` uses the heap for two purposes: the `Managed(ClientRecord)` client list (process lifetime) and the per-packet `[]IpAddress` broadcast snapshot (freed inside `processPacket`). Both previously used `std.heap.smp_allocator` internally, invisible to the caller. The project's "explicit over implicit" principle applies equally to memory ownership: hiding the allocator makes it impossible to substitute a leak-detecting allocator in tests.
 
-**Decision:** Add `allocator: std.mem.Allocator` as a required field (no default) to `UdpServerConfig`. The server uses this allocator for the client list and broadcast peer snapshots. `UdpClientConfig` receives no allocator field because `UdpClient` makes no heap allocations — all buffers are stack-allocated (`[@sizeOf(Packet)]u8`).
+**Decision:** Add `allocator: std.mem.Allocator` as a required field (no default) to `UdpServerConfig`. The server uses this allocator for the client list and broadcast peer snapshots. `UdpClientConfig` receives no allocator field because `UdpClient` makes no heap allocations: all buffers are stack-allocated (`[@sizeOf(Packet)]u8`).
 
-**Why `ArenaAllocator` is explicitly rejected for UDP:** Unlike HTTP (where the router allocator is append-only), the UDP server allocates and frees a peer snapshot on every packet when `broadcast = true`. `ArenaAllocator.free()` is a no-op — memory is not reclaimed until `arena.deinit()`. On a busy broadcast server this causes unbounded growth:
+**Why `ArenaAllocator` is explicitly rejected for UDP:** Unlike HTTP (where the router allocator is append-only), the UDP server allocates and frees a peer snapshot on every packet when `broadcast = true`. `ArenaAllocator.free()` is a no-op: memory is not reclaimed until `arena.deinit()`. On a busy broadcast server this causes unbounded growth:
 
 ```
 // PoC: what goes wrong with ArenaAllocator
@@ -253,7 +253,7 @@ var server = try MyServer.init(.{
 - Breaking change: all existing `UdpServerConfig` initialisers must add `.allocator = ...`
 - Test code can now pass `std.testing.allocator` for leak detection, prod code passes `std.heap.smp_allocator`.
 - `UdpServerConfig` and `HttpServerConfig` are now consistent: both expose an explicit, required allocator field.
-- `UdpClient` remains simpler by design — no heap allocation, no allocator field required.
+- `UdpClient` remains simpler by design: no heap allocation, no allocator field required.
 
 ---
 
@@ -277,13 +277,13 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than a comparable blocking-thread HTTP server (334 µs vs ~88 µs) despite matching throughput (~145K req/s). A blocking-thread architecture — dedicated accept thread + OS thread pool + synchronous I/O — eliminates the fiber scheduler from the hot path entirely.
+**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than a comparable blocking-thread HTTP server (334 µs vs ~88 µs) despite matching throughput (~145K req/s). A blocking-thread architecture (dedicated accept thread + OS thread pool + synchronous I/O) eliminates the fiber scheduler from the hot path entirely.
 
 **Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` (they never handle I/O). Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives. `std.Thread.Mutex` does not exist in this version).
 
 **Consequences:**
 - Pool threads handle connections with pure blocking I/O: no condvar dispatch overhead per request, no fiber wakeup latency.
-- Throughput ~143–144K req/s, latency ~92 µs avg. A ~3–5K req/s gap and ~4 µs latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
+- Throughput ~143-144K req/s, latency ~92 µs avg. A ~3-5K req/s gap and ~4 µs latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
 - `pool_size` is now a configurable field in `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
 - Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue, `workers = N` allows explicit override.
 - `io.concurrent()` is still used in Model 1 (`workers = 1`) (unaffected).
@@ -335,7 +335,7 @@ SSE connections are long-lived (seconds to minutes per stream). `.POOL`'s blocki
 4. SSE examples must use `dispatch_model = .ASYNC` (see ADR-021). This is documented in the example, the README, and HLD.
 
 **Consequences:**
-- No change to `Response.send()` — existing handlers are unaffected.
+- No change to `Response.send()`: existing handlers are unaffected.
 - `res.streaming` defaults to `false`; only SSE handlers set it to `true`.
 - The `.ASYNC` preference is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a `.POOL` server will work but will block pool threads for the stream duration.
 - `SseWriter` is exported from `zix.Http.SseWriter` for handler authors who want to type-annotate the writer.
@@ -432,13 +432,13 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 
 **Status:** Accepted
 
-**Context:** The original `HttpServerConfig` used `workers: usize` to select between two concurrency modes: `workers = 1` for single-accept `io.async()` dispatch and `workers = 0` / `workers = N` for the work-queue thread pool. A third mode — N accept threads each dispatching via `io.async()` without a ConnQueue — existed as a natural middle ground. The `workers` field was overloaded: a value of `1` changed the dispatch strategy entirely rather than setting an accept thread count. This was non-obvious and not self-documenting at call sites.
+**Context:** The original `HttpServerConfig` used `workers: usize` to select between two concurrency modes: `workers = 1` for single-accept `io.async()` dispatch and `workers = 0` / `workers = N` for the work-queue thread pool. A third mode (N accept threads each dispatching via `io.async()` without a ConnQueue) existed as a natural middle ground. The `workers` field was overloaded: a value of `1` changed the dispatch strategy entirely rather than setting an accept thread count. This was non-obvious and not self-documenting at call sites.
 
 **Decision:** Introduce `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` as a named field `dispatch_model: DispatchModel = .POOL` in `HttpServerConfig`. The three models are:
 
 - `.POOL` (default): N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count; `pool_size` controls pool thread count.
-- `.ASYNC`: Single accept thread dispatches each connection via `io.async()`. Preferred for SSE and WebSocket — long-lived connections do not hold pool threads. `workers` and `pool_size` are ignored.
-- `.MIXED`: N accept threads each dispatch via `io.async()` directly — no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
+- `.ASYNC`: Single accept thread dispatches each connection via `io.async()`. Preferred for SSE and WebSocket: long-lived connections do not hold pool threads. `workers` and `pool_size` are ignored.
+- `.MIXED`: N accept threads each dispatch via `io.async()` directly, no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
 
 The old `workers = 1` shorthand for single-accept dispatch is removed. Callers wanting that behavior set `dispatch_model = .ASYNC`.
 
@@ -447,7 +447,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 **Consequences:**
 - Breaking change: callers using `workers = 1` must migrate to `dispatch_model = .ASYNC`.
 - `dispatch_model` is self-documenting at the call site. The three strategies are explicit enum variants, not magic `usize` values.
-- `pool_size` is silently ignored for `.ASYNC` and `.MIXED` — no error, documented in `HttpServerConfig`.
+- `pool_size` is silently ignored for `.ASYNC` and `.MIXED` (no error, documented in `HttpServerConfig`).
 - Enum backing type `u8` follows the project convention for all named enums.
 
 ---
@@ -456,21 +456,21 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Status:** Accepted
 
-**Context:** After the HTTP engine was complete, the next protocol layer was a generic raw TCP stream server — no HTTP framing, no router, user-defined handler owns the stream. The HTTP PoC in `rnd/` proved all three dispatch models (POOL, ASYNC, MIXED) work for TCP. The question was how to expose this as a library API without duplicating HTTP internals.
+**Context:** After the HTTP engine was complete, the next protocol layer was a generic raw TCP stream server: no HTTP framing, no router, user-defined handler owns the stream. The HTTP PoC in `rnd/` proved all three dispatch models (POOL, ASYNC, MIXED) work for TCP. The question was how to expose this as a library API without duplicating HTTP internals.
 
 **Decision:**
 
-- `zix.Tcp.Server` and `zix.Tcp.Client` are standalone types in `src/tcp/server.zig` and `src/tcp/client.zig`. No shared base with `zix.Http.Server` — same standalone-per-protocol principle as `zix.Uds.Server`.
-- `HandlerFn = *const fn(stream: std.Io.net.Stream, io: std.Io) void` — identical signature to `zix.Uds.HandlerFn`. The handler owns the stream and must close it before returning.
-- `TcpServer.run(io)` / `runWith(io, handler)` — io is passed as a parameter (not stored in config). The caller controls the `std.Io` backend lifetime.
-- All three dispatch models (POOL, ASYNC, MIXED) apply with the same `ConnQueue` + thread spawn pattern from `zix.Http.Server`. `DispatchModel` is defined once in `src/tcp/config.zig` and imported by `src/tcp/http/config.zig` — single source of truth for all TCP-based protocols.
+- `zix.Tcp.Server` and `zix.Tcp.Client` are standalone types in `src/tcp/server.zig` and `src/tcp/client.zig`. No shared base with `zix.Http.Server`, same standalone-per-protocol principle as `zix.Uds.Server`.
+- `HandlerFn = *const fn(stream: std.Io.net.Stream, io: std.Io) void`: identical signature to `zix.Uds.HandlerFn`. The handler owns the stream and must close it before returning.
+- `TcpServer.run(io)` / `runWith(io, handler)`: io is passed as a parameter (not stored in config). The caller controls the `std.Io` backend lifetime.
+- All three dispatch models (POOL, ASYNC, MIXED) apply with the same `ConnQueue` + thread spawn pattern from `zix.Http.Server`. `DispatchModel` is defined once in `src/tcp/config.zig` and imported by `src/tcp/http/config.zig` (single source of truth for all TCP-based protocols).
 - Frame format: `[u32 big-endian payload_len][payload bytes]`. Big-endian (network byte order) is chosen for TCP because it is the network convention and matches what other protocol libraries expect. `zix.Uds` uses little-endian by contrast (local only, no interop requirement).
 - `initArgs()` on the server and `connectArgs()` on the client parse `--ip` and `--port` from CLI args, following the `zix.Udp.Server.initArgs()` pattern.
 
 **Consequences:**
-- `zix.Tcp.Http.*` and `zix.Tcp.Server`/`Client` coexist under the same `zix.Tcp` namespace — HTTP is the high-level protocol, raw TCP is the low-level stream layer.
-- `zix.Tcp.Server` does not allocate from a user-provided allocator. The `ConnQueue` uses `smp_allocator` directly — same approach as the HTTP server.
-- The built-in `echoHandler` uses `takeVarInt(u32, .big, 4)` and `readSliceAll` (vs. the `readSliceShort` loop in `zix.Uds.echoHandler`) — consistent with the PoC pattern confirmed during the TCP RnD phase.
+- `zix.Tcp.Http.*` and `zix.Tcp.Server`/`Client` coexist under the same `zix.Tcp` namespace: HTTP is the high-level protocol, raw TCP is the low-level stream layer.
+- `zix.Tcp.Server` does not allocate from a user-provided allocator. The `ConnQueue` uses `smp_allocator` directly, same approach as the HTTP server.
+- The built-in `echoHandler` uses `takeVarInt(u32, .big, 4)` and `readSliceAll` (vs. the `readSliceShort` loop in `zix.Uds.echoHandler`), consistent with the PoC pattern confirmed during the TCP RnD phase.
 - Future Fix protocol (`zix.Tcp.Fix.*`) follows the same standalone-per-protocol pattern and will not be built on top of `zix.Tcp.Server`.
 
 ---
@@ -479,14 +479,14 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Status:** Accepted, Implemented (2026-05-23)
 
-**Context:** Every server implementation (HTTP, TCP, UDP, UDS, FIX, gRPC) needs a logging layer. `std.debug.print` is unsafe on background OS threads because it routes through `std.Options.debug_io`, a global `Io.Threaded` singleton — calling it from any spawned thread races with the test runner's IPC channel and causes a panic. A logging primitive that is safe on background OS threads without a `std.Io` dependency is required.
+**Context:** Every server implementation (HTTP, TCP, UDP, UDS, FIX, gRPC) needs a logging layer. `std.debug.print` is unsafe on background OS threads because it routes through `std.Options.debug_io`, a global `Io.Threaded` singleton: calling it from any spawned thread races with the test runner's IPC channel and causes a panic. A logging primitive that is safe on background OS threads without a `std.Io` dependency is required.
 
-**Decision:** Implement `zix.Logger` as a struct with a per-instance spinlock (atomic CAS) protecting a 64 KB write buffer and file descriptor. All I/O uses raw `std.posix.write` — no `std.Io`, no `std.debug.print`. Protocol-specific log methods provide machine-parseable lines without post-processing: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Each server config accepts `logger: ?*Logger = null`; the logger is optional and the server is silent when null.
+**Decision:** Implement `zix.Logger` as a struct with a per-instance spinlock (atomic CAS) protecting a 64 KB write buffer and file descriptor. All I/O uses raw `std.posix.write` (no `std.Io`, no `std.debug.print`). Protocol-specific log methods provide machine-parseable lines without post-processing: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Each server config accepts `logger: ?*Logger = null`; the logger is optional and the server is silent when null.
 
 **Consequences:**
 - All log methods are safe to call simultaneously from any OS thread including thread-pool workers, accept threads, and connection handlers.
 - No `std.Io` allocation per log call. The write buffer is flushed on date rollover, sequence rotation, explicit `logger.flush()`, or `logger.deinit()`.
-- File rotation is daily (`YYYY-MM-DD/` subdirectory) with per-file sequence numbering. `save_path` must exist before `Logger.init` — the logger does not create it.
+- File rotation is daily (`YYYY-MM-DD/` subdirectory) with per-file sequence numbering. `save_path` must exist before `Logger.init`: the logger does not create it.
 - Console output is controlled by `ConsoleMode` (`.OFF`, `.DEBUG_ONLY`, `.ALWAYS`). Both file and console paths are guarded by `save_min_level` / `console_min_level`.
 - `access()` derives log level from HTTP status: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR. `rpc()` derives from grpc-status code.
 
@@ -496,15 +496,15 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Status:** Accepted, Implemented (2026-05-23)
 
-**Context:** FIX (Financial Information eXchange) protocol is the dominant messaging standard for financial trading systems. It uses SOH (0x01) as a field delimiter — not a length prefix — which makes it incompatible with the `readSliceShort` recv pattern used by HTTP. A standalone server following the same config and dispatch-model pattern as `zix.Tcp` is required, with the session layer (Logon/Logout/Heartbeat handling) built in so callers do not implement it themselves.
+**Context:** FIX (Financial Information eXchange) protocol is the dominant messaging standard for financial trading systems. It uses SOH (0x01) as a field delimiter (not a length prefix), which makes it incompatible with the `readSliceShort` recv pattern used by HTTP. A standalone server following the same config and dispatch-model pattern as `zix.Tcp` is required, with the session layer (Logon/Logout/Heartbeat handling) built in so callers do not implement it themselves.
 
-**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically, all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn` — no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` is the default because FIX sessions are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime — same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
+**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically, all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn`, no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` is the default because FIX sessions are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime, same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
 
 **Consequences:**
 - `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment, subsequent `takeByte` calls drain it with no extra syscalls.
 - `serveConn` uses only stack buffers (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). No per-request allocation.
 - `buildMessage` computes and embeds the checksum. `verifyChecksum` validates incoming messages. Bad checksum closes the connection without a reply.
-- `std.debug.print` is absent from all thread entry functions — learned from the `std.Options.debug_io` test runner IPC panic described in CLAUDE.md.
+- `std.debug.print` is absent from all thread entry functions, learned from the `std.Options.debug_io` test runner IPC panic described in CLAUDE.md.
 - `FixClient` provides a typed client (`logon`, `logout`, `sendMessage`, `recvMessage`) for tests and examples.
 
 ---
@@ -513,13 +513,13 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Status:** Accepted
 
-**Context:** Every server in zix (Http, Http2, Grpc, Tcp, Fix) calls `addr.listen(io, .{ .reuse_address = true })`. In Zig's `std.Io.Threaded`, `reuse_address = true` sets both `SO_REUSEADDR` and `SO_REUSEPORT` on POSIX. `SO_REUSEPORT` is strictly required by the POOL dispatch model: each accept thread calls `addr.listen()` on the same port independently — without it, the second bind fails with `EADDRINUSE`. The choice was whether to set it conditionally (POOL only) or unconditionally (all models).
+**Context:** Every server in zix (Http, Http2, Grpc, Tcp, Fix) calls `addr.listen(io, .{ .reuse_address = true })`. In Zig's `std.Io.Threaded`, `reuse_address = true` sets both `SO_REUSEADDR` and `SO_REUSEPORT` on POSIX. `SO_REUSEPORT` is strictly required by the POOL dispatch model: each accept thread calls `addr.listen()` on the same port independently, without it the second bind fails with `EADDRINUSE`. The choice was whether to set it conditionally (POOL only) or unconditionally (all models).
 
-**Decision:** Apply `reuse_address = true` unconditionally on every `addr.listen()` call regardless of dispatch model. All models share the same socket setup path — no branching on `dispatch_model` at the socket level. This is socket-level behavior, it is documented here and inline in source, not exposed as a config field.
+**Decision:** Apply `reuse_address = true` unconditionally on every `addr.listen()` call regardless of dispatch model. All models share the same socket setup path: no branching on `dispatch_model` at the socket level. This is socket-level behavior, it is documented here and inline in source, not exposed as a config field.
 
 **Consequences:**
 - POOL works correctly: all accept threads bind to the same port and the kernel load-balances incoming connections across them.
-- ASYNC, MIXED, and EPOLL also receive `SO_REUSEPORT` as a side effect. Multiple server instances on the same port do not crash — the kernel silently distributes connections between them.
+- ASYNC, MIXED, and EPOLL also receive `SO_REUSEPORT` as a side effect. Multiple server instances on the same port do not crash: the kernel silently distributes connections between them.
 - This is intentional. Port-sharing between processes is a valid deployment pattern (rolling restart, staged rollout). Examples that share a port number coexist without error when run simultaneously for the same reason.
 - No `ServerConfig` field is added to expose or toggle this behavior.
 
