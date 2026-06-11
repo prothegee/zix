@@ -121,7 +121,7 @@ pub fn main(process: std.process.Init) !void {
         const nf = try zix.Fix.parseFields(raw, &fields);
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logout)) return error.ExpectedLogout;
-        std.debug.print("client: recv Logout — session complete\n", .{});
+        std.debug.print("client: recv Logout, session complete\n", .{});
     }
 }
 
