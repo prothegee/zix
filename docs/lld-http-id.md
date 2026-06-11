@@ -10,7 +10,7 @@ Detail implementasi internal untuk lapisan HTTP. Untuk dasar pertimbangan desain
 
 `Server` adalah namespace struct dengan satu `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` adalah generik privat. Pemanggil menggunakan `var server = try zix.Http.Server.init(4096, .{...})` tanpa menyebutkan tipe generiknya.
 
-`HttpServerImpl.init(config)` menyimpan config dan mengalokasi `Router` dari `config.allocator`. Tidak membuka socket apa pun — socket dibuka di `run()`.
+`HttpServerImpl.init(config)` menyimpan config dan mengalokasi `Router` dari `config.allocator`. Tidak membuka socket apa pun: socket dibuka di `run()`.
 
 ### ConnQueue
 

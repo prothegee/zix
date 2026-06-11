@@ -10,7 +10,7 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 `Server` is a namespace struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` is the private generic. Callers use `var server = try zix.Http.Server.init(4096, .{...})` without naming the generic type.
 
-`HttpServerImpl.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket — socket is opened in `run()`.
+`HttpServerImpl.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket: socket is opened in `run()`.
 
 ### ConnQueue
 
