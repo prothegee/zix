@@ -30,14 +30,14 @@ pub const Logger = struct {
 All log methods follow the same pattern:
 
 1. Derive level (caller-supplied for `system()`, computed for all others).
-2. Check `consoleActive(level)` and `fileActive(level)` — early exit if both inactive.
+2. Check `consoleActive(level)` and `fileActive(level)`: early exit if both inactive.
 3. Format `line` into a 4096-byte stack buffer via `std.fmt.bufPrint`.
 4. `spinLock()`.
 5. If console active: `rawWrite(STDERR_FILENO, line + "\n")`.
 6. If file active: `ensureFileLocked(&ts.date)` then `writeLineLocked(line)`.
 7. `spinUnlock()`.
 
-All formatting happens before the lock is acquired. Lock hold time is proportional to `memcpy` into the write buffer — typically a few hundred nanoseconds.
+All formatting happens before the lock is acquired. Lock hold time is proportional to `memcpy` into the write buffer, typically a few hundred nanoseconds.
 
 ---
 
@@ -58,14 +58,14 @@ fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
 }
 ```
 
-No `std.Io` — safe from any OS thread including threads spawned via `std.Thread.spawn`. This is intentional: `std.debug.print` routes through `std.Options.debug_io` (a global singleton) and races with the test runner IPC on background threads. `rawWrite` to STDERR_FILENO has no such global state.
+No `std.Io`: safe from any OS thread including threads spawned via `std.Thread.spawn`. This is intentional: `std.debug.print` routes through `std.Options.debug_io` (a global singleton) and races with the test runner IPC on background threads. `rawWrite` to STDERR_FILENO has no such global state.
 
 ---
 
 ## Spinlock
 
 CAS loop on `locked: std.atomic.Value(bool)`:
-- Lock: `cmpxchgWeak(false, true, .acquire, .monotonic)` — retries with `spinLoopHint()` on failure.
+- Lock: `cmpxchgWeak(false, true, .acquire, .monotonic)`, retries with `spinLoopHint()` on failure.
 - Unlock: `store(false, .release)`.
 - `spinLoopHint()` maps to `pause`/`yield` on x86/ARM.
 
@@ -83,7 +83,7 @@ Allocated by `init()` only when `save_path != ""` (`WRITE_BUF_SIZE = 64 KB`).
 3. Append `'\n'` at `buf[buf_pos + line.len]`.
 4. `buf_pos += line.len + 1`.
 5. `line_count += 1`.
-6. `flushLocked()` — always flush after every line.
+6. `flushLocked()`: always flush after every line.
 
 `flushLocked()`: `rawWrite(file_fd, buf[0..buf_pos])` then `buf_pos = 0`.
 
@@ -125,7 +125,7 @@ if line_count >= max_lines:
 
 File path: `<save_path>/<YYYY-MM-DD>/<save_file>-<NNNNNN>.log` (6-digit zero-padded sequence).
 
-The date directory is created with `mkdirat` at each open. `mkdirat` is idempotent — "already exists" is not an error at the system call level.
+The date directory is created with `mkdirat` at each open. `mkdirat` is idempotent: "already exists" is not an error at the system call level.
 
 ---
 

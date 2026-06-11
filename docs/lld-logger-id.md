@@ -30,14 +30,14 @@ pub const Logger = struct {
 Semua metode log mengikuti pola yang sama:
 
 1. Turunkan level (disediakan pemanggil untuk `system()`, dihitung untuk yang lain).
-2. Periksa `consoleActive(level)` dan `fileActive(level)` — keluar lebih awal jika keduanya tidak aktif.
+2. Periksa `consoleActive(level)` dan `fileActive(level)`: keluar lebih awal jika keduanya tidak aktif.
 3. Format `line` ke dalam stack buffer 4096 byte melalui `std.fmt.bufPrint`.
 4. `spinLock()`.
 5. Jika console aktif: `rawWrite(STDERR_FILENO, line + "\n")`.
 6. Jika file aktif: `ensureFileLocked(&ts.date)` lalu `writeLineLocked(line)`.
 7. `spinUnlock()`.
 
-Semua pemformatan terjadi sebelum lock diperoleh. Waktu tahan lock sebanding dengan `memcpy` ke dalam write buffer — biasanya beberapa ratus nanodetik.
+Semua pemformatan terjadi sebelum lock diperoleh. Waktu tahan lock sebanding dengan `memcpy` ke dalam write buffer, biasanya beberapa ratus nanodetik.
 
 ---
 
@@ -58,14 +58,14 @@ fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
 }
 ```
 
-Tidak ada `std.Io` — aman dari OS thread manapun termasuk thread yang di-spawn melalui `std.Thread.spawn`. Ini disengaja: `std.debug.print` melewati `std.Options.debug_io` (sebuah global singleton) dan bersaing dengan IPC test runner di background thread. `rawWrite` ke STDERR_FILENO tidak memiliki global state semacam itu.
+Tidak ada `std.Io`: aman dari OS thread manapun termasuk thread yang di-spawn melalui `std.Thread.spawn`. Ini disengaja: `std.debug.print` melewati `std.Options.debug_io` (sebuah global singleton) dan bersaing dengan IPC test runner di background thread. `rawWrite` ke STDERR_FILENO tidak memiliki global state semacam itu.
 
 ---
 
 ## Spinlock
 
 CAS loop pada `locked: std.atomic.Value(bool)`:
-- Lock: `cmpxchgWeak(false, true, .acquire, .monotonic)` — mencoba ulang dengan `spinLoopHint()` saat gagal.
+- Lock: `cmpxchgWeak(false, true, .acquire, .monotonic)`, mencoba ulang dengan `spinLoopHint()` saat gagal.
 - Unlock: `store(false, .release)`.
 - `spinLoopHint()` dipetakan ke `pause`/`yield` pada x86/ARM.
 
@@ -83,7 +83,7 @@ Dialokasikan oleh `init()` hanya saat `save_path != ""` (`WRITE_BUF_SIZE = 64 KB
 3. Tambahkan `'\n'` di `buf[buf_pos + line.len]`.
 4. `buf_pos += line.len + 1`.
 5. `line_count += 1`.
-6. `flushLocked()` — selalu flush setelah setiap baris.
+6. `flushLocked()`: selalu flush setelah setiap baris.
 
 `flushLocked()`: `rawWrite(file_fd, buf[0..buf_pos])` lalu `buf_pos = 0`.
 
@@ -125,7 +125,7 @@ if line_count >= max_lines:
 
 Path berkas: `<save_path>/<YYYY-MM-DD>/<save_file>-<NNNNNN>.log` (nomor urut 6 digit dengan zero-padding).
 
-Direktori tanggal dibuat dengan `mkdirat` di setiap pembukaan berkas. `mkdirat` bersifat idempoten — "sudah ada" bukan error di level system call.
+Direktori tanggal dibuat dengan `mkdirat` di setiap pembukaan berkas. `mkdirat` bersifat idempoten: "sudah ada" bukan error di level system call.
 
 ---
 
