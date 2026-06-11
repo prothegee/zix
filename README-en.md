@@ -36,92 +36,16 @@
 
 <br>
 
-# Key Features
-
-__*1. Full protocol stack under one roof:*__
-
-Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (hot-path-optimized
-variant), Http2 (h2c), Grpc (gRPC over h2c), Fix (FIX 4.x), plus Channel and Logger.
-
-> One coherent memory/threading model across monolith, micro-service, and
-modular-micro-service backends, instead of stitching together separate libraries with
-different conventions.
-
-<br>
-
-__*2. Four selectable dispatch models:*__
-
-- ASYNC (single accept thread, io.async() per conn): lowest latency at moderate load.
-- POOL (N acceptors push to a shared queue, M workers handle synchronously): best raw throughput at high connection counts.
-- MIXED (N acceptors each dispatch via io.async(), no queue): balanced.
-- EPOLL (single epoll loop + worker pool, EPOLLONESHOT re-arm so idle keep-alive holds no thread): Linux-only, best for very high or slow/idle connection counts.
-
-> concurrency strategy is a deliberate config choice, not a implementation default. Http, Grpc, Fix, and Tcp implement all four.
-
-<br>
-
-__*3. Explicit, flat configuration:*__
-
-No nested sub-configs: every field (e.g. dispatch_model, max_response_headers: .MINIMAL, pool_size) is top-level and explicit.
-
-> predictability by principle. You sees exactly what the server does without
-chasing inherited defaults.
-
-<br>
-
-__*4. Hot-path-optimized HTTP/1 zix.Http1:*__
-
-- Removed HeadParser, thread-local cached Date header, consolidated writeSimple, serveConn(fd, handler, opts).
-- Engine-owned WebSocket with per-event write coalescing under EPOLL, plus SSE and configurable response-header capacity.
-
-> Squeeze the common request path without sacrificing the explicit API.
-
-<br>
-
-__*5. Production-grade gRPC:*__
-
-Multiplexed async epoll with a resumable HTTP/2 state machine, comptime-cached HPACK reply blocks, big initial window, buffered reads, max_streams=128 to avoid REFUSED_STREAM bursts. Context timeouts (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
-
-> All four RPC types (unary, server streaming, client streaming, bidirectional)
-multiplexed over one h2c connection without a thread per stream, with client
-deadlines honored end-to-end. Internal services speak gRPC directly, no TLS
-terminator or sidecar required.
-
-<br>
-
-__*6. FIX 4.x:*__
-
-FixContext, a MsgType struct (47 constants), session-oriented routing, trading examples.
-
-> Domain-specific financial messaging as a first-class citizen, not bolted onto raw
-TCP.
-
-<br>
-
-__*7. Protocol-aware logger:*__
-
-Log types per protocol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() is HTTP-only, Channel is system-only.
-
-> The log vocabulary matches the actual unit of work on each protocol.
-
-<br>
-
-__*8. Bilingual multi-documentation:*__
-
-Every doc has it own variants.
-
-> Support: en - English, id - Bahasa
-
-<br>
-
 # Table of Contents
 
 - [Reason & Motivation](./README-en.md#a-reason-a-motivation)
+- [Key Features](./README-en.md#key-features)
 - [Requirements](./README-en.md#requirements)
 - [Repositories](./README-en.md#repositories)
 - [Important Contribution Notes](./README-en.md#important-contribution-notes)
 - [Documentation](./README-en.md#documentation)
 - [Getting Started](./README-en.md#getting-started)
+- [HTTP/1](./README-en.md#http1)
 - [Examples](./README-en.md#examples)
 - [Minimal](./README-en.md#minimal-examples)
 - [Routing](./README-en.md#routing)
@@ -213,6 +137,84 @@ __*6. Predictable, Transparent Memory Management.*__
 
 <br>
 
+# Key Features
+
+__*1. Full protocol stack under one roof:*__
+
+Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (hot-path-optimized
+variant), Http2 (h2c), Grpc (gRPC over h2c), Fix (FIX 4.x), plus Channel and Logger.
+
+> One coherent memory/threading model across monolith, micro-service, and
+modular-micro-service backends, instead of stitching together separate libraries with
+different conventions.
+
+<br>
+
+__*2. Four selectable dispatch models:*__
+
+- ASYNC (single accept thread, io.async() per conn): lowest latency at moderate load.
+- POOL (N acceptors push to a shared queue, M workers handle synchronously): best raw throughput at high connection counts.
+- MIXED (N acceptors each dispatch via io.async(), no queue): balanced.
+- EPOLL (single epoll loop + worker pool, EPOLLONESHOT re-arm so idle keep-alive holds no thread): Linux-only, best for very high or slow/idle connection counts.
+
+> concurrency strategy is a deliberate config choice, not a implementation default. Http, Grpc, Fix, and Tcp implement all four.
+
+<br>
+
+__*3. Explicit, flat configuration:*__
+
+No nested sub-configs: every field (e.g. dispatch_model, max_response_headers: .MINIMAL, pool_size) is top-level and explicit.
+
+> predictability by principle. You sees exactly what the server does without
+chasing inherited defaults.
+
+<br>
+
+__*4. Hot-path-optimized HTTP/1 zix.Http1:*__
+
+- Removed HeadParser, thread-local cached Date header, consolidated writeSimple, serveConn(fd, handler, opts).
+- Engine-owned WebSocket with per-event write coalescing under EPOLL, plus SSE and configurable response-header capacity.
+
+> Squeeze the common request path without sacrificing the explicit API.
+
+<br>
+
+__*5. Production-grade gRPC:*__
+
+Multiplexed async epoll with a resumable HTTP/2 state machine, comptime-cached HPACK reply blocks, big initial window, buffered reads, max_streams=128 to avoid REFUSED_STREAM bursts. Context timeouts (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
+
+> All four RPC types (unary, server streaming, client streaming, bidirectional)
+multiplexed over one h2c connection without a thread per stream, with client
+deadlines honored end-to-end. Internal services speak gRPC directly, no TLS
+terminator or sidecar required.
+
+<br>
+
+__*6. FIX 4.x:*__
+
+FixContext, a MsgType struct (47 constants), session-oriented routing, trading examples.
+
+> Domain-specific financial messaging as a first-class citizen, not bolted onto raw
+TCP.
+
+<br>
+
+__*7. Protocol-aware logger:*__
+
+Log types per protocol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() is HTTP-only, Channel is system-only.
+
+> The log vocabulary matches the actual unit of work on each protocol.
+
+<br>
+
+__*8. Bilingual multi-documentation:*__
+
+Every doc has it own variants.
+
+> Support: en - English, id - Bahasa
+
+<br>
+
 ## Requirements
 
 - Zig >= 0.16.x
@@ -255,6 +257,7 @@ __*6. Predictable, Transparent Memory Management.*__
 | Document | Description |
 | :- | :- |
 | [`docs/hld-http-en.md`](docs/hld-http-en.md) | HTTP: goals, runtime model, API, router, WebSocket, SSE, memory model |
+| [`docs/hld-http1-en.md`](docs/hld-http1-en.md) | HTTP/1: lean engine goals, dispatch models, handler model, router, WebSocket, memory model |
 | [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) | TCP raw stream: goals, API, frame format, dispatch models |
 | [`docs/hld-udp-en.md`](docs/hld-udp-en.md) | UDP: goals, runtime model, API, packet model, endianness, disconnect |
 | [`docs/hld-uds-en.md`](docs/hld-uds-en.md) | UDS: goals, API, frame format, server/client lifecycle |
@@ -264,6 +267,7 @@ __*6. Predictable, Transparent Memory Management.*__
 | [`docs/hld-grpc-proxy-en.md`](docs/hld-grpc-proxy-en.md) | gRPC TLS termination via nginx and haproxy |
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
+| [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
 | [`docs/lld-tcp-en.md`](docs/lld-tcp-en.md) | TCP: internal data structures and algorithms |
 | [`docs/lld-udp-en.md`](docs/lld-udp-en.md) | UDP: internal data structures and algorithms |
 | [`docs/lld-uds-en.md`](docs/lld-uds-en.md) | UDS: internal server/client structure and frame handling |
@@ -329,6 +333,14 @@ const zix = b.dependency("zix", .{
 
 exe.root_module.addImport("zix", zix.module("zix"));
 ```
+
+<br>
+
+## HTTP/1
+
+Zix has two models API for HTTP/1, `zix.Http` and `zix.Http1`.
+
+`zix.Http` relied on zig `std.http` and work as convenient apporach, while `zix.Http1` is not.
 
 <br>
 

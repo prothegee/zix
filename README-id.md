@@ -36,92 +36,16 @@
 
 <br>
 
-# Fitur Utama
-
-__*1. Stack protokol lengkap dalam satu tempat:*__
-
-Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (varian
-hot-path-optimized), Http2 (h2c), Grpc (gRPC melalui h2c), Fix (FIX 4.x), plus Channel dan Logger.
-
-> Satu model memori/threading yang koheren untuk backend monolith, micro-service, dan
-modular-micro-service, alih-alih menggabungkan banyak library terpisah dengan
-konvensi yang berbeda.
-
-<br>
-
-__*2. Empat model dispatch yang dapat dipilih:*__
-
-- ASYNC (satu accept thread, io.async() per koneksi): latensi terendah pada beban moderat.
-- POOL (N acceptor mendorong ke shared queue, M worker menangani secara sinkron): throughput mentah terbaik pada jumlah koneksi tinggi.
-- MIXED (N acceptor masing-masing dispatch via io.async(), tanpa queue): seimbang.
-- EPOLL (satu epoll loop + worker pool, EPOLLONESHOT re-arm sehingga keep-alive idle tidak memegang thread): khusus Linux, terbaik untuk jumlah koneksi sangat tinggi atau client lambat/idle.
-
-> strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http, Grpc, Fix, dan Tcp mengimplementasikan keempatnya.
-
-<br>
-
-__*3. Konfigurasi eksplisit dan flat:*__
-
-Tanpa sub-config bertingkat: setiap field (mis. dispatch_model, max_response_headers: .MINIMAL, pool_size) berada di level teratas dan eksplisit.
-
-> dapat diprediksi sebagai prinsip. Kamu melihat persis apa yang server lakukan tanpa
-menelusuri default yang diwariskan.
-
-<br>
-
-__*4. HTTP/1 zix.Http1 yang dioptimasi pada hot-path:*__
-
-- Menghapus HeadParser, header Date yang di-cache secara thread-local, writeSimple yang dikonsolidasi, serveConn(fd, handler, opts).
-- WebSocket yang dikelola engine dengan write coalescing per-event di EPOLL, plus SSE dan kapasitas response-header yang dapat dikonfigurasi.
-
-> Memangkas jalur request umum tanpa mengorbankan API yang eksplisit.
-
-<br>
-
-__*5. gRPC kelas produksi:*__
-
-Multiplexed async epoll dengan resumable HTTP/2 state machine, blok reply HPACK yang di-cache saat comptime, initial window besar, buffered reads, max_streams=128 untuk menghindari REFUSED_STREAM burst. Context timeout (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
-
-> Keempat tipe RPC (unary, server streaming, client streaming, bidirectional)
-dimultipleks melalui satu koneksi h2c tanpa thread per stream, dengan deadline client
-dihormati end-to-end. Service internal berbicara gRPC secara langsung, tanpa TLS
-terminator atau sidecar.
-
-<br>
-
-__*6. FIX 4.x:*__
-
-FixContext, sebuah struct MsgType (47 konstanta), routing berbasis session, contoh trading.
-
-> Pesan finansial domain-specific sebagai warga kelas satu, bukan ditempelkan ke raw
-TCP.
-
-<br>
-
-__*7. Logger yang sadar protokol:*__
-
-Tipe log per protokol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() khusus HTTP, Channel khusus system.
-
-> Kosakata log cocok dengan unit kerja aktual pada setiap protokol.
-
-<br>
-
-__*8. Dokumentasi multi-bahasa:*__
-
-Setiap dokumen punya variannya sendiri.
-
-> Dukungan: en - English, id - Bahasa
-
-<br>
-
 # Daftar Isi
 
 - [Alasan & Motivasi](./README-id.md#alasan--motivasi)
+- [Fitur Utama](./README-id.md#fitur-utama)
 - [Persyaratan](./README-id.md#persyaratan)
 - [Repositori](./README-id.md#repositori)
 - [Catatan Kontribusi Penting](./README-id.md#catatan-kontribusi-penting)
 - [Dokumentasi](./README-id.md#dokumentasi)
 - [Memulai](./README-id.md#memulai)
+- [HTTP/1](./README-en.md#http1)
 - [Contoh](./README-id.md#contoh)
 - [Minimal](./README-id.md#contoh-minimal)
 - [Routing](./README-id.md#routing)
@@ -213,6 +137,84 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 
 <br>
 
+# Fitur Utama
+
+__*1. Stack protokol lengkap dalam satu tempat:*__
+
+Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (varian
+hot-path-optimized), Http2 (h2c), Grpc (gRPC melalui h2c), Fix (FIX 4.x), plus Channel dan Logger.
+
+> Satu model memori/threading yang koheren untuk backend monolith, micro-service, dan
+modular-micro-service, alih-alih menggabungkan banyak library terpisah dengan
+konvensi yang berbeda.
+
+<br>
+
+__*2. Empat model dispatch yang dapat dipilih:*__
+
+- ASYNC (satu accept thread, io.async() per koneksi): latensi terendah pada beban moderat.
+- POOL (N acceptor mendorong ke shared queue, M worker menangani secara sinkron): throughput mentah terbaik pada jumlah koneksi tinggi.
+- MIXED (N acceptor masing-masing dispatch via io.async(), tanpa queue): seimbang.
+- EPOLL (satu epoll loop + worker pool, EPOLLONESHOT re-arm sehingga keep-alive idle tidak memegang thread): khusus Linux, terbaik untuk jumlah koneksi sangat tinggi atau client lambat/idle.
+
+> strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http, Grpc, Fix, dan Tcp mengimplementasikan keempatnya.
+
+<br>
+
+__*3. Konfigurasi eksplisit dan flat:*__
+
+Tanpa sub-config bertingkat: setiap field (mis. dispatch_model, max_response_headers: .MINIMAL, pool_size) berada di level teratas dan eksplisit.
+
+> dapat diprediksi sebagai prinsip. Kamu melihat persis apa yang server lakukan tanpa
+menelusuri default yang diwariskan.
+
+<br>
+
+__*4. HTTP/1 zix.Http1 yang dioptimasi pada hot-path:*__
+
+- Menghapus HeadParser, header Date yang di-cache secara thread-local, writeSimple yang dikonsolidasi, serveConn(fd, handler, opts).
+- WebSocket yang dikelola engine dengan write coalescing per-event di EPOLL, plus SSE dan kapasitas response-header yang dapat dikonfigurasi.
+
+> Memangkas jalur request umum tanpa mengorbankan API yang eksplisit.
+
+<br>
+
+__*5. gRPC kelas produksi:*__
+
+Multiplexed async epoll dengan resumable HTTP/2 state machine, blok reply HPACK yang di-cache saat comptime, initial window besar, buffered reads, max_streams=128 untuk menghindari REFUSED_STREAM burst. Context timeout (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
+
+> Keempat tipe RPC (unary, server streaming, client streaming, bidirectional)
+dimultipleks melalui satu koneksi h2c tanpa thread per stream, dengan deadline client
+dihormati end-to-end. Service internal berbicara gRPC secara langsung, tanpa TLS
+terminator atau sidecar.
+
+<br>
+
+__*6. FIX 4.x:*__
+
+FixContext, sebuah struct MsgType (47 konstanta), routing berbasis session, contoh trading.
+
+> Pesan finansial domain-specific sebagai warga kelas satu, bukan ditempelkan ke raw
+TCP.
+
+<br>
+
+__*7. Logger yang sadar protokol:*__
+
+Tipe log per protokol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() khusus HTTP, Channel khusus system.
+
+> Kosakata log cocok dengan unit kerja aktual pada setiap protokol.
+
+<br>
+
+__*8. Dokumentasi multi-bahasa:*__
+
+Setiap dokumen punya variannya sendiri.
+
+> Dukungan: en - English, id - Bahasa
+
+<br>
+
 ## Persyaratan
 
 - Zig >= 0.16.x
@@ -255,6 +257,7 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 | Dokumen | Keterangan |
 | :- | :- |
 | [`docs/hld-http-id.md`](docs/hld-http-id.md) | HTTP: tujuan, model runtime, API, router, WebSocket, SSE, model memori |
+| [`docs/hld-http1-id.md`](docs/hld-http1-id.md) | HTTP/1: tujuan engine ramping, model dispatch, model handler, router, WebSocket, model memori |
 | [`docs/hld-tcp-id.md`](docs/hld-tcp-id.md) | TCP stream mentah: tujuan, API, format frame, model dispatch |
 | [`docs/hld-udp-id.md`](docs/hld-udp-id.md) | UDP: tujuan, model runtime, API, model paket, endianness, disconnect |
 | [`docs/hld-uds-id.md`](docs/hld-uds-id.md) | UDS: tujuan, API, format frame, siklus hidup server/client |
@@ -264,6 +267,7 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 | [`docs/hld-grpc-proxy-id.md`](docs/hld-grpc-proxy-id.md) | gRPC terminasi TLS via nginx dan haproxy |
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
+| [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
 | [`docs/lld-tcp-id.md`](docs/lld-tcp-id.md) | TCP: struktur data internal dan algoritma |
 | [`docs/lld-udp-id.md`](docs/lld-udp-id.md) | UDP: struktur data internal dan algoritma |
 | [`docs/lld-uds-id.md`](docs/lld-uds-id.md) | UDS: struktur server/client internal dan penanganan frame |
@@ -329,6 +333,14 @@ const zix = b.dependency("zix", .{
 
 exe.root_module.addImport("zix", zix.module("zix"));
 ```
+
+<br>
+
+## HTTP/1
+
+Zix memiliki dua model API untuk HTTP/1, `zix.Http` dan `zix.Http1`.
+
+`zix.Http` bergantung pada `std.http` Zix dan berfungsi sebagai pendekatan yang mudah, sedangkan `zix.Http1` tidak.
 
 <br>
 
