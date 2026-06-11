@@ -138,7 +138,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .MIXED: N Accept Threads, io.async() Dispatch
 
-N accept threads each dispatch connections via `io.async()` directly — no `ConnQueue`. Balanced
+N accept threads each dispatch connections via `io.async()` directly, no `ConnQueue`. Balanced
 throughput and latency, higher jitter than `.POOL` under saturation due to `io.async()` fallback
 to inline execution.
 
@@ -172,9 +172,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .EPOLL: Single epoll Event Loop (Linux-only)
 
-One event-loop thread calls `epoll_wait` in a loop. When the kernel signals a socket as readable, the socket fd is pushed to an `FdQueue` and a pool worker handles it. No `io.async()` overhead, no condvar wakeup per connection — the kernel tracks readiness. Each `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call.
+One event-loop thread calls `epoll_wait` in a loop. When the kernel signals a socket as readable, the socket fd is pushed to an `FdQueue` and a pool worker handles it. No `io.async()` overhead, no condvar wakeup per connection: the kernel tracks readiness. Each `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call.
 
-**Why it exists:** `.POOL` and `.ASYNC` both pay a condvar wakeup cost on every accepted connection (either via `ConnQueue.pop()` or via the `io.async()` fiber scheduler). Under very high connection counts where most connections are idle at any moment (slow clients, many open sessions), these wakeups accumulate. `epoll` lets the kernel batch readiness signals — the event loop thread only runs when bytes are actually available, with no per-connection thread overhead.
+**Why it exists:** `.POOL` and `.ASYNC` both pay a condvar wakeup cost on every accepted connection (either via `ConnQueue.pop()` or via the `io.async()` fiber scheduler). Under very high connection counts where most connections are idle at any moment (slow clients, many open sessions), these wakeups accumulate. `epoll` lets the kernel batch readiness signals: the event loop thread only runs when bytes are actually available, with no per-connection thread overhead.
 
 ```
 Event loop thread (1):
@@ -191,7 +191,7 @@ Pool workers (pool_size, default max(10, cpu_count * 2)):
     (or epoll_ctl(DEL) + close if connection ended)
 ```
 
-`EPOLLONESHOT` means each readable event fires exactly once. After a request is served, the worker explicitly re-arms the socket. Idle keep-alive connections hold no thread — they sit in the epoll set until the client sends the next request.
+`EPOLLONESHOT` means each readable event fires exactly once. After a request is served, the worker explicitly re-arms the socket. Idle keep-alive connections hold no thread: they sit in the epoll set until the client sends the next request.
 
 **When to use:**
 - Linux production deployments of `zix.Http` (HTTP/1) or `zix.Grpc` under high connection counts with many idle connections.
@@ -232,14 +232,14 @@ try server.run();
 | :- | :- |
 | Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux falls back to `.POOL` automatically (with a debug print) |
 | Availability | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux. `zix.Http2` falls back to `.POOL` |
-| Accept model | Single-threaded accept inside the event loop (no `SO_REUSEPORT`). High accept rates can become a bottleneck — prefer `.MIXED` if connection churn (not connection count) is the bottleneck |
+| Accept model | Single-threaded accept inside the event loop (no `SO_REUSEPORT`). High accept rates can become a bottleneck, prefer `.MIXED` if connection churn (not connection count) is the bottleneck |
 | gRPC, FIX, and TCP difference | gRPC, FIX, and TCP EPOLL assign each connection to a pool worker for its full lifetime (all are long-lived stream protocols). `EPOLLONESHOT` is not used. The benefit is single-threaded accept vs N accept threads in `.POOL` |
 | `pool_size` | Controls the number of request-handling worker threads. `workers` is ignored |
 | Keep-alive idle cost | Near-zero: idle sockets sit in the epoll set without holding any thread |
-| Debugging | `strace` or `perf` will show `epoll_wait` dominating idle time — this is expected and correct |
+| Debugging | `strace` or `perf` will show `epoll_wait` dominating idle time, this is expected and correct |
 
 **When NOT to use:**
-- SSE or WebSocket: connections stay active and data flows continuously — `EPOLLONESHOT` re-arm overhead adds up with no benefit. Prefer `.ASYNC`.
+- SSE or WebSocket: connections stay active and data flows continuously: `EPOLLONESHOT` re-arm overhead adds up with no benefit. Prefer `.ASYNC`.
 - Non-Linux targets: use `.POOL` or `.ASYNC` explicitly to avoid the debug-print fallback.
 - When connection count is low (< a few hundred): the simpler `.POOL` or `.ASYNC` models will perform the same or better with less complexity.
 

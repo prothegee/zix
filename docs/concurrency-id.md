@@ -134,7 +134,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .MIXED: N Accept Thread, Dispatch io.async()
 
-N accept thread masing-masing mendispatch koneksi melalui `io.async()` secara langsung — tanpa `ConnQueue`. Throughput dan latensi yang seimbang, jitter lebih tinggi dibanding `.POOL` saat saturasi karena fallback `io.async()` ke eksekusi inline.
+N accept thread masing-masing mendispatch koneksi melalui `io.async()` secara langsung, tanpa `ConnQueue`. Throughput dan latensi yang seimbang, jitter lebih tinggi dibanding `.POOL` saat saturasi karena fallback `io.async()` ke eksekusi inline.
 
 ```
 Main thread:
@@ -166,9 +166,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ## .EPOLL: Single epoll Event Loop (Linux-only)
 
-Satu thread event loop memanggil `epoll_wait` dalam sebuah loop. Ketika kernel menandai socket sebagai readable, fd socket didorong ke `FdQueue` dan pool worker menanganinya. Tidak ada overhead `io.async()`, tidak ada condvar wakeup per koneksi — kernel yang melacak kesiapan. Setiap `epoll_wait` menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan.
+Satu thread event loop memanggil `epoll_wait` dalam sebuah loop. Ketika kernel menandai socket sebagai readable, fd socket didorong ke `FdQueue` dan pool worker menanganinya. Tidak ada overhead `io.async()`, tidak ada condvar wakeup per koneksi: kernel yang melacak kesiapan. Setiap `epoll_wait` menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan.
 
-**Mengapa ini ada:** `.POOL` dan `.ASYNC` keduanya membayar biaya condvar wakeup pada setiap koneksi yang diterima (baik melalui `ConnQueue.pop()` maupun melalui fiber scheduler `io.async()`). Pada jumlah koneksi yang sangat tinggi di mana sebagian besar koneksi idle pada saat tertentu (client lambat, banyak sesi terbuka), wakeup ini menumpuk. `epoll` memungkinkan kernel membatch sinyal kesiapan — thread event loop hanya berjalan ketika byte benar-benar tersedia, tanpa overhead thread per-koneksi.
+**Mengapa ini ada:** `.POOL` dan `.ASYNC` keduanya membayar biaya condvar wakeup pada setiap koneksi yang diterima (baik melalui `ConnQueue.pop()` maupun melalui fiber scheduler `io.async()`). Pada jumlah koneksi yang sangat tinggi di mana sebagian besar koneksi idle pada saat tertentu (client lambat, banyak sesi terbuka), wakeup ini menumpuk. `epoll` memungkinkan kernel membatch sinyal kesiapan: thread event loop hanya berjalan ketika byte benar-benar tersedia, tanpa overhead thread per-koneksi.
 
 ```
 Event loop thread (1):
@@ -185,7 +185,7 @@ Pool workers (pool_size, default max(10, cpu_count * 2)):
     (or epoll_ctl(DEL) + close if connection ended)
 ```
 
-`EPOLLONESHOT` berarti setiap readable event hanya muncul sekali. Setelah request dilayani, worker secara eksplisit melakukan re-arm pada socket. Koneksi keep-alive yang idle tidak menahan thread manapun — koneksi tersebut duduk di epoll set sampai client mengirimkan request berikutnya.
+`EPOLLONESHOT` berarti setiap readable event hanya muncul sekali. Setelah request dilayani, worker secara eksplisit melakukan re-arm pada socket. Koneksi keep-alive yang idle tidak menahan thread manapun: koneksi tersebut duduk di epoll set sampai client mengirimkan request berikutnya.
 
 **Kapan menggunakan:**
 - Deployment produksi Linux untuk `zix.Http` (HTTP/1) atau `zix.Grpc` dengan jumlah koneksi tinggi dan banyak koneksi idle.
@@ -226,14 +226,14 @@ try server.run();
 | :- | :- |
 | Platform | Hanya Linux (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux fallback ke `.POOL` secara otomatis (dengan debug print) |
 | Ketersediaan | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` diimplementasikan secara native di Linux. `zix.Http2` fallback ke `.POOL` |
-| Model accept | Accept single-threaded di dalam event loop (tanpa `SO_REUSEPORT`). Accept rate yang tinggi dapat menjadi bottleneck — gunakan `.MIXED` jika connection churn (bukan jumlah koneksi) yang menjadi bottleneck |
+| Model accept | Accept single-threaded di dalam event loop (tanpa `SO_REUSEPORT`). Accept rate yang tinggi dapat menjadi bottleneck, gunakan `.MIXED` jika connection churn (bukan jumlah koneksi) yang menjadi bottleneck |
 | Perbedaan gRPC, FIX, dan TCP | gRPC, FIX, dan TCP EPOLL memberikan setiap koneksi ke pool worker untuk keseluruhan masa hidupnya (ketiganya adalah protokol stream berumur panjang). `EPOLLONESHOT` tidak digunakan. Keuntungannya adalah accept single-threaded vs N accept thread di `.POOL` |
 | Field `pool_size` | Mengontrol jumlah worker thread yang menangani request. `workers` diabaikan |
 | Biaya idle keep-alive | Hampir nol: socket idle duduk di epoll set tanpa menahan thread apapun |
-| Debugging | `strace` atau `perf` akan menampilkan `epoll_wait` mendominasi waktu idle — ini adalah perilaku yang diharapkan dan benar |
+| Debugging | `strace` atau `perf` akan menampilkan `epoll_wait` mendominasi waktu idle, ini adalah perilaku yang diharapkan dan benar |
 
 **Kapan TIDAK menggunakan:**
-- SSE atau WebSocket: koneksi tetap aktif dan data mengalir terus-menerus — overhead re-arm `EPOLLONESHOT` menumpuk tanpa manfaat. Gunakan `.ASYNC`.
+- SSE atau WebSocket: koneksi tetap aktif dan data mengalir terus-menerus: overhead re-arm `EPOLLONESHOT` menumpuk tanpa manfaat. Gunakan `.ASYNC`.
 - Target non-Linux: gunakan `.POOL` atau `.ASYNC` secara eksplisit untuk menghindari fallback dengan debug print.
 - Ketika jumlah koneksi rendah (< beberapa ratus): model `.POOL` atau `.ASYNC` yang lebih sederhana akan memiliki performa yang sama atau lebih baik dengan kompleksitas yang lebih rendah.
 
