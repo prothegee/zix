@@ -1520,6 +1520,8 @@ Dalam kondisi saat ini, zix tidak akan:
 - Implementasi Http2 (hanya sebagai gRPC dependency).
 - Implementasi Http3.
 
+Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk TLS, HTTP/2, HTTP/3 untuk pendekatan lengkap terkait topik tersebut.
+
 <br>
 
 ## Benchmark
