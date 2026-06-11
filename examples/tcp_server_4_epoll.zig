@@ -7,7 +7,7 @@ const DISPATCH_MODEL: zix.Tcp.DispatchModel = .EPOLL;
 const WORKERS: usize = 0; // ignored by .EPOLL (single event loop thread handles accept)
 const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "tcp";
 
@@ -20,7 +20,7 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 // Note:
 // On Linux, .EPOLL runs natively: a single epoll accept loop pushes accepted
 // fds to an FdQueue. Pool workers pop and hold each connection for its full
-// lifetime. TCP connections are stream-based — the handler loops until EOF,
+// lifetime. TCP connections are stream-based: the handler loops until EOF,
 // so one-thread-per-connection maps naturally to this model.
 // On non-Linux targets, .EPOLL falls back to .POOL automatically (with a
 // debug print). Use tcp_server_2_pool.zig to set POOL explicitly instead.
@@ -62,7 +62,7 @@ pub fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,

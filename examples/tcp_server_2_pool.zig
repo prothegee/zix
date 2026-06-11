@@ -7,7 +7,7 @@ const DISPATCH_MODEL: zix.Tcp.DispatchModel = .POOL;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "tcp";
 
@@ -18,7 +18,7 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 // --------------------------------------------------------- //
 
 // Pool threads call this handler synchronously for each accepted connection.
-// No scheduler overhead per connection — best for short-lived high-volume workloads.
+// No scheduler overhead per connection, best for short-lived high-volume workloads.
 //
 // Frame format (matches zix.Tcp.Client): [u32 big-endian len][payload]
 //
@@ -52,7 +52,7 @@ pub fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,
