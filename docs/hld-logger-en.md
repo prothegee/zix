@@ -45,7 +45,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 | `zix.Logger.Config` | struct | Configuration fields (nested type on the struct) |
 | `zix.Logger.Level` | enum(u8) | `DEBUG=0` `INFO=1` `WARN=2` `ERROR=3` |
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF=0` `DEBUG_ONLY=1` `ALWAYS=2` |
-| `zix.Logger.Dir` | enum(u8) | `RECV=0` `SEND=1` — direction for `packet()` and `frame()` |
+| `zix.Logger.Dir` | enum(u8) | `RECV=0` `SEND=1`: direction for `packet()` and `frame()` |
 
 ---
 
@@ -106,7 +106,7 @@ Files are written to `<save_path>/YYYY-MM-DD/<save_file>-NNNNNN.log`:
 - A new date directory is created automatically on the first write of a new calendar day.
 - When `line_count` reaches `max_lines`, the sequence number increments and a new file opens.
 - Maximum sequence number is 999,999. On exhaustion, file logging suspends and a message is written to stderr.
-- `save_path` itself must already exist — the logger does not create it. Use a `createLogDir` helper before `Logger.init`.
+- `save_path` itself must already exist: the logger does not create it. Use a `createLogDir` helper before `Logger.init`.
 
 ---
 
@@ -114,7 +114,7 @@ Files are written to `<save_path>/YYYY-MM-DD/<save_file>-NNNNNN.log`:
 
 All log methods are safe to call simultaneously from any OS thread:
 - A spinlock (atomic CAS) serializes all writes to the shared file buffer and file descriptor.
-- `rawWrite` uses the raw POSIX `write` syscall — no `std.Io` dependency, safe on background OS threads.
+- `rawWrite` uses the raw POSIX `write` syscall: no `std.Io` dependency, safe on background OS threads.
 - No `std.debug.print` or any path through `std.Options.debug_io`. Safe during `zig build test-all`.
 
 ---

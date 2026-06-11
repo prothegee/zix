@@ -45,7 +45,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 | `zix.Logger.Config` | struct | Field konfigurasi (tipe nested pada struct) |
 | `zix.Logger.Level` | enum(u8) | `DEBUG=0` `INFO=1` `WARN=2` `ERROR=3` |
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF=0` `DEBUG_ONLY=1` `ALWAYS=2` |
-| `zix.Logger.Dir` | enum(u8) | `RECV=0` `SEND=1` — arah untuk `packet()` dan `frame()` |
+| `zix.Logger.Dir` | enum(u8) | `RECV=0` `SEND=1`: arah untuk `packet()` dan `frame()` |
 
 ---
 
@@ -106,7 +106,7 @@ Berkas ditulis ke `<save_path>/YYYY-MM-DD/<save_file>-NNNNNN.log`:
 - Direktori tanggal baru dibuat otomatis pada penulisan pertama di hari kalender yang baru.
 - Saat `line_count` mencapai `max_lines`, nomor urut dinaikkan dan berkas baru dibuka.
 - Nomor urut maksimum adalah 999.999. Setelah habis, logging ke berkas ditangguhkan dan pesan ditulis ke stderr.
-- `save_path` itu sendiri harus sudah ada — logger tidak membuatnya. Gunakan helper `createLogDir` sebelum `Logger.init`.
+- `save_path` itu sendiri harus sudah ada: logger tidak membuatnya. Gunakan helper `createLogDir` sebelum `Logger.init`.
 
 ---
 
@@ -114,7 +114,7 @@ Berkas ditulis ke `<save_path>/YYYY-MM-DD/<save_file>-NNNNNN.log`:
 
 Semua metode log aman dipanggil secara bersamaan dari OS thread manapun:
 - Spinlock (atomic CAS) menserialisasi semua penulisan ke shared file buffer dan file descriptor.
-- `rawWrite` menggunakan syscall POSIX `write` langsung — tidak ada dependensi pada `std.Io`, aman di background OS thread.
+- `rawWrite` menggunakan syscall POSIX `write` langsung: tidak ada dependensi pada `std.Io`, aman di background OS thread.
 - Tidak ada `std.debug.print` atau path apapun melalui `std.Options.debug_io`. Aman selama `zig build test-all`.
 
 ---
