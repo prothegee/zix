@@ -22,7 +22,7 @@ Zero-copy: `value` slices directly into the caller-supplied receive buffer. The 
 `serveConn` maintains two stack buffers:
 
 ```
-recv_buf: [MAX_MSG_SIZE * 2]u8    // 16 KB — accumulates bytes from takeByte loop
+recv_buf: [MAX_MSG_SIZE * 2]u8    // 16 KB, accumulates bytes from takeByte loop
 recv_len: usize                   // bytes currently in recv_buf
 ```
 
@@ -110,7 +110,7 @@ serveConn(stream, io, comp_id, opts):
 Tags are written in standard FIX order:
 
 1. `8=FIX.4.2\x01` (BeginString)
-2. `9=` + placeholder (BodyLength — patched after body is known)
+2. `9=` + placeholder (BodyLength, patched after body is known)
 3. Body: `35=T\x01 49=sender\x01 56=target\x01 34=seq\x01 <extra fields>\x01`
 4. Compute BodyLength (all bytes from start of tag-35 to end of last body field SOH)
 5. Patch the `9=` placeholder in the output buffer

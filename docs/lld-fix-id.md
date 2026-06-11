@@ -22,7 +22,7 @@ Zero-copy: `value` merupakan slice langsung ke dalam buffer penerimaan yang dise
 `serveConn` mempertahankan dua stack buffer:
 
 ```
-recv_buf: [MAX_MSG_SIZE * 2]u8    // 16 KB — mengakumulasi byte dari loop takeByte
+recv_buf: [MAX_MSG_SIZE * 2]u8    // 16 KB, mengakumulasi byte dari loop takeByte
 recv_len: usize                   // jumlah byte yang saat ini ada di recv_buf
 ```
 
@@ -110,7 +110,7 @@ serveConn(stream, io, comp_id, opts):
 Tag ditulis dalam urutan standar FIX:
 
 1. `8=FIX.4.2\x01` (BeginString)
-2. `9=` + placeholder (BodyLength — ditambal setelah body diketahui)
+2. `9=` + placeholder (BodyLength, ditambal setelah body diketahui)
 3. Body: `35=T\x01 49=sender\x01 56=target\x01 34=seq\x01 <extra fields>\x01`
 4. Hitung BodyLength (semua byte mulai dari awal tag-35 hingga akhir SOH field body terakhir)
 5. Tambal placeholder `9=` di output buffer
