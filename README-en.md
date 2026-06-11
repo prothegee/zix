@@ -242,6 +242,8 @@ __*6. Predictable, Transparent Memory Management.*__
 
 <br>
 
+[Milestones.](https://codeberg.org/prothegee/zix/milestones)
+
 [Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
 
 [Open a discussion.](https://github.com/prothegee/zix/discussions)

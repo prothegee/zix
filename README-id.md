@@ -242,6 +242,8 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 
 <br>
 
+[Milestones.](https://codeberg.org/prothegee/zix/milestones)
+
 [Buka isu.](https://codeberg.org/prothegee/zix/issues/new)
 
 [Buka diskusi.](https://github.com/prothegee/zix/discussions)
