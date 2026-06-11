@@ -36,7 +36,7 @@ pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 
     const all_segments = try req.pathSegments(ctx.allocator);
 
-    // Skip the leading "path" segment — it is always present because we are
+    // Skip the leading "path" segment: it is always present because we are
     // registered under the /path prefix.
     const subpath = if (all_segments.len > 0) all_segments[1..] else all_segments;
 
@@ -66,7 +66,7 @@ pub fn pathsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 }
 
 // GET /path/user/:id
-// Demonstrates registerParamHandler — :id is captured and returned in the response.
+// Demonstrates registerParamHandler, :id is captured and returned in the response.
 // Priority: param beats prefix, so this wins over pathsHandler for /path/user/<anything>.
 //
 // curl usage: curl -X GET "http://localhost:9005/path/user/alice"
@@ -96,7 +96,7 @@ pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 
 // GET /path/:tenant-id/:tenant-branch
 // Demonstrates hyphenated param names.
-// Hyphens are valid in param names — the name is everything after ':' until the next '/'.
+// Hyphens are valid in param names: the name is everything after ':' until the next '/'.
 //
 // IMPORTANT registration order: within param routes, first-registered wins when two
 // patterns have the same segment count. Register more-literal patterns first so they
