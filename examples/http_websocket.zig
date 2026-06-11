@@ -11,7 +11,7 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .ASYNC
 const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
-// Global room registry — lives for the process lifetime.
+// Global room registry, lives for the process lifetime.
 // join() and leave() are called by each WebSocket handler task.
 var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 
@@ -21,7 +21,7 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 // WebSocket upgrade handler.
 //
 // Query params MUST be read before zix.Http.WebSocket.upgrade() is called.
-// After the 101 handshake the HTTP request context is gone — the connection
+// After the 101 handshake the HTTP request context is gone: the connection
 // becomes a raw WebSocket stream. Capture anything you need from the request
 // (path params, query params, headers) before calling upgrade().
 //
@@ -52,7 +52,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
         return;
     };
 
-    // Read query params NOW — they are unavailable after upgrade().
+    // Read query params NOW: they are unavailable after upgrade().
     const display_name = req.queryParam("name") orelse "anonymous";
 
     // Validate WebSocket upgrade headers via req.header() (case-insensitive).
@@ -90,7 +90,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
     var clean_close = false; // set to true only when the peer sends a .close frame
 
     outer: while (true) {
-        // One syscall — returns whatever bytes arrived without blocking for more.
+        // One syscall: returns whatever bytes arrived without blocking for more.
         const n = std.posix.read(req.fd, frame_buf[buf_used..]) catch break;
         if (n == 0) break;
         buf_used += n;
@@ -121,7 +121,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
                     frame_writer.interface.flush() catch break :outer;
                 },
                 .close => {
-                    // Echo close frame back then exit — RFC 6455 5.5.1
+                    // Echo close frame back then exit (RFC 6455 5.5.1)
                     var close_frame: [16]u8 = undefined;
                     const clen = zix.Http.WebSocket.buildFrame(&close_frame, .close, &.{});
                     var write_buf: [16]u8 = undefined;
@@ -136,7 +136,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
             offset += result.consumed;
         }
 
-        // Compact the buffer — discard processed bytes, keep remainder
+        // Compact the buffer: discard processed bytes, keep remainder
         if (offset > 0 and offset < buf_used) {
             @memmove(frame_buf[0 .. buf_used - offset], frame_buf[offset..buf_used]);
             buf_used -= offset;
