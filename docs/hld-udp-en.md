@@ -140,7 +140,7 @@ pub const UdpServerConfig = struct {
 };
 ```
 
-`allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent — both can be true simultaneously (ACK then echo). `broadcast` sends to all clients, `auto_echo` sends only to the sender.
+`allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent: both can be true simultaneously (ACK then echo). `broadcast` sends to all clients, `auto_echo` sends only to the sender.
 
 ---
 
@@ -158,7 +158,7 @@ pub const UdpClientConfig = struct {
 };
 ```
 
-`server_ip`, `server_port`, and `bind_port` are required (no defaults). `UdpClient` makes no heap allocations — all buffers are stack-allocated — so no `allocator` field is needed.
+`server_ip`, `server_port`, and `bind_port` are required (no defaults). `UdpClient` makes no heap allocations (all buffers are stack-allocated), so no `allocator` field is needed.
 
 ---
 
@@ -275,16 +275,16 @@ graph TD
 
 ### Why ArenaAllocator is not suitable
 
-`ArenaAllocator.free()` is a no-op — memory is only reclaimed when the entire arena is deinited. The broadcast peer snapshot is allocated and freed on every packet. Using an arena silently converts each `free(peers)` into a no-op, causing unbounded memory growth for the lifetime of the server:
+`ArenaAllocator.free()` is a no-op: memory is only reclaimed when the entire arena is deinited. The broadcast peer snapshot is allocated and freed on every packet. Using an arena silently converts each `free(peers)` into a no-op, causing unbounded memory growth for the lifetime of the server:
 
 ```zig
 // Each packet received when broadcast = true:
-allocator.alloc(IpAddress, N)  // real allocation — arena grows
-allocator.free(peers)          // no-op on ArenaAllocator — memory never reclaimed
+allocator.alloc(IpAddress, N)  // real allocation, arena grows
+allocator.free(peers)          // no-op on ArenaAllocator, memory never reclaimed
 // After M packets: M * N * @sizeOf(IpAddress) bytes held permanently
 ```
 
-Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()` is real. `std.testing.allocator` (backed by `GeneralPurposeAllocator`) is the correct choice in tests — it will catch any leak if the `free` path is ever broken.
+Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()` is real. `std.testing.allocator` (backed by `GeneralPurposeAllocator`) is the correct choice in tests: it will catch any leak if the `free` path is ever broken.
 
 ---
 

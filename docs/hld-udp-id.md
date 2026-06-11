@@ -140,7 +140,7 @@ pub const UdpServerConfig = struct {
 };
 ```
 
-`allocator`, `ip`, dan `port` wajib diisi (tidak ada nilai default). `auto_ack` dan `auto_echo` bersifat independen — keduanya dapat bernilai true secara bersamaan (ACK lalu echo). `broadcast` mengirim ke semua client, `auto_echo` hanya mengirim ke pengirim.
+`allocator`, `ip`, dan `port` wajib diisi (tidak ada nilai default). `auto_ack` dan `auto_echo` bersifat independen: keduanya dapat bernilai true secara bersamaan (ACK lalu echo). `broadcast` mengirim ke semua client, `auto_echo` hanya mengirim ke pengirim.
 
 ---
 
@@ -158,7 +158,7 @@ pub const UdpClientConfig = struct {
 };
 ```
 
-`server_ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `UdpClient` tidak melakukan heap allocation — semua buffer dialokasikan di stack — sehingga tidak dibutuhkan field `allocator`.
+`server_ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `UdpClient` tidak melakukan heap allocation (semua buffer dialokasikan di stack), sehingga tidak dibutuhkan field `allocator`.
 
 ---
 
@@ -275,16 +275,16 @@ graph TD
 
 ### Mengapa ArenaAllocator tidak cocok
 
-`ArenaAllocator.free()` adalah no-op — memori hanya diklaim kembali ketika seluruh arena di-deinit. Broadcast peer snapshot dialokasikan dan dibebaskan pada setiap packet. Menggunakan arena secara diam-diam mengubah setiap `free(peers)` menjadi no-op, menyebabkan pertumbuhan memori tanpa batas selama masa hidup server:
+`ArenaAllocator.free()` adalah no-op: memori hanya diklaim kembali ketika seluruh arena di-deinit. Broadcast peer snapshot dialokasikan dan dibebaskan pada setiap packet. Menggunakan arena secara diam-diam mengubah setiap `free(peers)` menjadi no-op, menyebabkan pertumbuhan memori tanpa batas selama masa hidup server:
 
 ```zig
 // Each packet received when broadcast = true:
-allocator.alloc(IpAddress, N)  // real allocation — arena grows
-allocator.free(peers)          // no-op on ArenaAllocator — memory never reclaimed
+allocator.alloc(IpAddress, N)  // real allocation, arena grows
+allocator.free(peers)          // no-op on ArenaAllocator, memory never reclaimed
 // After M packets: M * N * @sizeOf(IpAddress) bytes held permanently
 ```
 
-Gunakan `std.heap.smp_allocator` (atau general-purpose allocator apapun) agar `free()` benar-benar berfungsi. `std.testing.allocator` (didukung oleh `GeneralPurposeAllocator`) adalah pilihan yang tepat dalam pengujian — allocator ini akan mendeteksi kebocoran apapun jika jalur `free` rusak.
+Gunakan `std.heap.smp_allocator` (atau general-purpose allocator apapun) agar `free()` benar-benar berfungsi. `std.testing.allocator` (didukung oleh `GeneralPurposeAllocator`) adalah pilihan yang tepat dalam pengujian: allocator ini akan mendeteksi kebocoran apapun jika jalur `free` rusak.
 
 ---
 
