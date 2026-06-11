@@ -1,5 +1,5 @@
-//! zix http1 server: ASYNC, POOL, and MIXED dispatch models.
-//! EPOLL falls back to POOL (Http1 uses raw fd I/O, not epoll event loop).
+//! zix http1 server: ASYNC, POOL, MIXED, and EPOLL dispatch models.
+//! EPOLL is native on Linux (shared-nothing event loop), non-Linux falls back to POOL.
 
 const std = @import("std");
 const Config = @import("config.zig").Http1ServerConfig;
