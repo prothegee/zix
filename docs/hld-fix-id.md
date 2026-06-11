@@ -1,6 +1,6 @@
 # HLD: zix.Fix
 
-Server protokol sesi FIX 4.x. Framing tag=value dengan delimiter SOH (0x01). Dibangun seluruhnya dalam Zig — tanpa C FFI, tanpa library eksternal.
+Server protokol sesi FIX 4.x. Framing tag=value dengan delimiter SOH (0x01). Dibangun seluruhnya dalam Zig: tanpa C FFI, tanpa library eksternal.
 
 ---
 
@@ -28,7 +28,7 @@ src/tcp/fix/
     Fix.zig      // namespace aggregator
     core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
-    server.zig   // FixServer — POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
+    server.zig   // FixServer: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
     router.zig   // comptime FixRouter
     client.zig   // FixClient
 ```
@@ -45,32 +45,32 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` — routes bertipe `[]const zix.Fix.Route` |
+| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes bertipe `[]const zix.Fix.Route`) |
 | `zix.Fix.ServerConfig` | struct | Lihat Field Konfigurasi Server di bawah |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }` — opsi untuk `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }`: opsi untuk `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | Lihat Field Konfigurasi Client di bawah |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export dari `zix.Tcp.DispatchModel` |
 | `zix.Fix.Tag` | enum(u16) | Enum nonexhaustive dari nomor tag FIX 4.x standar. Gunakan `@enumFromInt` untuk tag kustom yang tidak terdaftar |
 | `zix.Fix.MsgType` | struct | Namespace konstanta string compile-time untuk nilai MsgType (tag 35) FIX. Lihat bagian Konstanta MsgType |
-| `zix.Fix.HandlerFn` | tipe | `*const fn (fields: []const Field, ctx: *Context) void` — handler pesan aplikasi |
-| `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }` — satu rute pesan aplikasi |
+| `zix.Fix.HandlerFn` | tipe | `*const fn (fields: []const Field, ctx: *Context) void`: handler pesan aplikasi |
+| `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }`: satu rute pesan aplikasi |
 | `zix.Fix.Context` | struct | Konteks per-koneksi yang diteruskan ke setiap handler. Field: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Method: `sendMessage`, `isExpired` |
 | `zix.Fix.Router(routes)` | comptime fn | Menghasilkan tipe dispatch comptime dengan `dispatch(fields, ctx, server_timeout_ms)` |
 | `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` menghasilkan u64 nanosecond (sama dengan `zix.Grpc.wallClockNs`) |
-| `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }` — zero-copy slice ke receive buffer |
-| `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }` — input untuk `buildMessage` |
-| `zix.Fix.SOH` | u8 | `0x01` — delimiter field |
+| `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }`: zero-copy slice ke receive buffer |
+| `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }`: input untuk `buildMessage` |
+| `zix.Fix.SOH` | u8 | `0x01`: delimiter field |
 | `zix.Fix.VERSION` | []const u8 | `"FIX.4.2"` |
-| `zix.Fix.MAX_FIELDS` | usize | 64 — jumlah field maksimum yang diparse per pesan |
-| `zix.Fix.MAX_MSG_SIZE` | usize | 8192 — byte pesan maksimum |
+| `zix.Fix.MAX_FIELDS` | usize | 64: jumlah field maksimum yang diparse per pesan |
+| `zix.Fix.MAX_MSG_SIZE` | usize | 8192: byte pesan maksimum |
 | `zix.Fix.findMessageEnd` | fn | Memindai buf untuk akhir pesan FIX pertama yang lengkap, mengembalikan indeks setelah SOH terakhir atau null |
 | `zix.Fix.parseFields` | fn | Mengurai byte mentah menjadi `[]Field` (zero-copy slice ke buf) |
 | `zix.Fix.getField` | fn | Mengembalikan value field pertama dengan `Tag` yang diberikan, atau null |
 | `zix.Fix.computeChecksum` | fn | Jumlah semua byte mod 256 |
 | `zix.Fix.verifyChecksum` | fn | Mengembalikan true jika checksum tag-10 sesuai dengan nilai yang dihitung |
 | `zix.Fix.buildMessage` | fn | Membangun pesan FIX lengkap ke dalam output buffer yang disediakan pemanggil |
-| `zix.Fix.serveConn` | fn | Handler sesi: `serveConn(stream, io, comp_id, opts)` — membaca pesan, mendispatch Logon/Logout/Heartbeat, merutekan pesan aplikasi |
+| `zix.Fix.serveConn` | fn | Handler sesi: `serveConn(stream, io, comp_id, opts)` (membaca pesan, mendispatch Logon/Logout/Heartbeat, merutekan pesan aplikasi) |
 
 ---
 
@@ -88,7 +88,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `pool_size` | 0 (otomatis) | Pool thread (`max(10, cpu_count * 2)`). Hanya digunakan oleh POOL |
 | `logger` | null | Logger opsional untuk event siklus hidup dan sesi per-pesan |
 | `heartbeat_timeout_ms` | 0 | Heartbeat timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: setelah interval ini tanpa pesan masuk, TestRequest (35=1) dikirim. Jika tidak ada respons yang datang dalam interval berikutnya, Logout (35=5) dikirim dan koneksi ditutup. Hanya berlaku setelah Logon, sebelum Logon, timeout menutup koneksi secara diam-diam. |
-| `connection_timeout_ms` | 0 | Idle connection timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: jika tidak ada pesan yang datang dalam interval ini (meski heartbeat dinonaktifkan), koneksi ditutup. Berbeda dari `heartbeat_timeout_ms` — tidak ada TestRequest dance, langsung tutup. |
+| `connection_timeout_ms` | 0 | Idle connection timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: jika tidak ada pesan yang datang dalam interval ini (meski heartbeat dinonaktifkan), koneksi ditutup. Berbeda dari `heartbeat_timeout_ms`: tidak ada TestRequest dance, langsung tutup. |
 | `handler_timeout_ms` | 0 | Batas waktu pemrosesan handler server-wide dalam ms. 0 = tanpa batas. Diperketat per-rute oleh `Route.timeout_ms`. Mengatur `Context.deadline_ns` sebelum dispatch. |
 
 ---
@@ -97,10 +97,10 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Field | Deskripsi |
 | :- | :- |
-| `ip` | wajib — alamat server |
-| `port` | wajib — port server. Harus bukan nol |
-| `comp_id` | wajib — SenderCompID client ini (tag 49) |
-| `target_comp_id` | wajib — TargetCompID server (tag 56) |
+| `ip` | wajib, alamat server |
+| `port` | wajib, port server. Harus bukan nol |
+| `comp_id` | wajib, SenderCompID client ini (tag 49) |
+| `target_comp_id` | wajib, TargetCompID server (tag 56) |
 
 ---
 
@@ -128,7 +128,7 @@ Tag standar utama:
 
 ## Enum Tag
 
-Nomor tag FIX dikirimkan sebagai integer ASCII di jaringan (misalnya `35`, `49`, `108`). Membaca literal numerik dalam kode mengharuskan menghafal spesifikasi FIX. `zix.Fix.Tag` adalah `enum(u16)` nonexhaustive yang memetakan nomor tag standar ke konstanta bernama — format jaringan tidak berubah.
+Nomor tag FIX dikirimkan sebagai integer ASCII di jaringan (misalnya `35`, `49`, `108`). Membaca literal numerik dalam kode mengharuskan menghafal spesifikasi FIX. `zix.Fix.Tag` adalah `enum(u16)` nonexhaustive yang memetakan nomor tag standar ke konstanta bernama, format jaringan tidak berubah.
 
 ```zig
 pub const Tag = enum(u16) {
@@ -177,7 +177,7 @@ try client.sendMessage(io, "D", &[_]zix.Fix.BuildField{
 
 ### Tag kustom dan ekstensi
 
-Enum bersifat nonexhaustive (`_`). Semua `u16` adalah nilai `Tag` yang valid — gunakan `@enumFromInt` untuk tag yang tidak terdaftar:
+Enum bersifat nonexhaustive (`_`). Semua `u16` adalah nilai `Tag` yang valid: gunakan `@enumFromInt` untuk tag yang tidak terdaftar:
 
 ```zig
 const my_tag: zix.Fix.Tag = @enumFromInt(9999);
@@ -186,20 +186,20 @@ const extra = [_]zix.Fix.BuildField{
 };
 ```
 
-`parseFields` mengonversi integer jaringan ke `Tag` melalui `@enumFromInt` secara otomatis — tidak diperlukan konversi saat membaca field yang diterima.
+`parseFields` mengonversi integer jaringan ke `Tag` melalui `@enumFromInt` secara otomatis, tidak diperlukan konversi saat membaca field yang diterima.
 
 ### Pertimbangan
 
 - Tipe backing adalah `u16`, sesuai dengan field `Field.tag` dan `BuildField.tag`. Tidak ada biaya runtime dibanding menyimpan `u16` mentah.
-- Tag yang tidak dikenal yang diterima dari jaringan (`parseFields`) menjadi nilai enum nonexhaustive — keduanya dibandingkan dengan benar menggunakan `==` dan dicetak sebagai nilai integernya.
+- Tag yang tidak dikenal yang diterima dari jaringan (`parseFields`) menjadi nilai enum nonexhaustive: keduanya dibandingkan dengan benar menggunakan `==` dan dicetak sebagai nilai integernya.
 - Enum tidak memvalidasi nilai tag atau memberlakukan pembatasan versi FIX. Semua validasi semantik tetap menjadi tanggung jawab aplikasi.
-- `getField` menerima `Tag` — meneruskan literal integer mentah secara langsung tidak lagi dapat dikompilasi. Gunakan konstanta bernama atau `@enumFromInt(n)`.
+- `getField` menerima `Tag`: meneruskan literal integer mentah secara langsung tidak lagi dapat dikompilasi. Gunakan konstanta bernama atau `@enumFromInt(n)`.
 
 ---
 
 ## Lapisan Sesi
 
-`serveConn` mengimplementasikan lapisan sesi FIX secara otomatis. Tidak ada handler callback — semua logika sesi ada di dalam `serveConn`:
+`serveConn` mengimplementasikan lapisan sesi FIX secara otomatis. Tidak ada handler callback: semua logika sesi ada di dalam `serveConn`:
 
 | MsgType (tag 35) | Tindakan server |
 | :- | :- |
@@ -216,7 +216,7 @@ Checksum yang salah menutup koneksi tanpa memberikan respons.
 
 ## Konstanta MsgType
 
-Nilai MsgType FIX (tag 35) adalah string ASCII, bukan integer. `zix.Fix.MsgType` adalah namespace struct berisi 47 konstanta string compile-time yang mencakup FIX 4.0–4.4. Gunakan konstanta ini sebagai pengganti string literal mentah untuk menghindari kesalahan ketik.
+Nilai MsgType FIX (tag 35) adalah string ASCII, bukan integer. `zix.Fix.MsgType` adalah namespace struct berisi 47 konstanta string compile-time yang mencakup FIX 4.0-4.4. Gunakan konstanta ini sebagai pengganti string literal mentah untuk menghindari kesalahan ketik.
 
 ```zig
 // Sesi
@@ -326,7 +326,7 @@ ctx.deadline_ns = null;                                            // nonaktifka
 
 `FixRouter(routes)` menghasilkan fungsi `dispatch` comptime yang di-unroll menggunakan `inline for` saat kompilasi, tanpa overhead runtime.
 
-Routes kosong (`&.{}`) melewati router sepenuhnya — semua pesan aplikasi di-echo.
+Routes kosong (`&.{}`) melewati router sepenuhnya: semua pesan aplikasi di-echo.
 
 ---
 

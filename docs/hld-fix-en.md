@@ -1,6 +1,6 @@
 # HLD: zix.Fix
 
-FIX 4.x session protocol server. SOH-delimited (0x01) tag=value framing. Built entirely in Zig — no C FFI, no external libraries.
+FIX 4.x session protocol server. SOH-delimited (0x01) tag=value framing. Built entirely in Zig: no C FFI, no external libraries.
 
 ---
 
@@ -28,7 +28,7 @@ src/tcp/fix/
     Fix.zig      // namespace aggregator
     core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
-    server.zig   // FixServer — POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
+    server.zig   // FixServer: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
     router.zig   // comptime FixRouter
     client.zig   // FixClient
 ```
@@ -45,32 +45,32 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` — routes is `[]const zix.Fix.Route` |
+| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes is `[]const zix.Fix.Route`) |
 | `zix.Fix.ServerConfig` | struct | See Server Config Fields below |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }` — options for `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }`: options for `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | See Client Config Fields below |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export of `zix.Tcp.DispatchModel` |
 | `zix.Fix.Tag` | enum(u16) | Nonexhaustive enum of standard FIX 4.x tag numbers. Use `@enumFromInt` for custom tags not listed |
 | `zix.Fix.MsgType` | struct | Namespace of compile-time string constants for FIX MsgType (tag 35) values. See MsgType Constants section |
-| `zix.Fix.HandlerFn` | type | `*const fn (fields: []const Field, ctx: *Context) void` — application message handler |
-| `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }` — one application message route |
+| `zix.Fix.HandlerFn` | type | `*const fn (fields: []const Field, ctx: *Context) void`: application message handler |
+| `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }`: one application message route |
 | `zix.Fix.Context` | struct | Per-connection context passed to each handler. Fields: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Methods: `sendMessage`, `isExpired` |
 | `zix.Fix.Router(routes)` | comptime fn | Returns a comptime dispatch type with `dispatch(fields, ctx, server_timeout_ms)` |
-| `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` → u64 nanoseconds (same as `zix.Grpc.wallClockNs`) |
-| `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }` — zero-copy slice into receive buffer |
-| `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }` — input to `buildMessage` |
-| `zix.Fix.SOH` | u8 | `0x01` — field delimiter |
+| `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` -> u64 nanoseconds (same as `zix.Grpc.wallClockNs`) |
+| `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }`: zero-copy slice into receive buffer |
+| `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }`: input to `buildMessage` |
+| `zix.Fix.SOH` | u8 | `0x01`: field delimiter |
 | `zix.Fix.VERSION` | []const u8 | `"FIX.4.2"` |
-| `zix.Fix.MAX_FIELDS` | usize | 64 — max fields parsed per message |
-| `zix.Fix.MAX_MSG_SIZE` | usize | 8192 — max message bytes |
+| `zix.Fix.MAX_FIELDS` | usize | 64: max fields parsed per message |
+| `zix.Fix.MAX_MSG_SIZE` | usize | 8192: max message bytes |
 | `zix.Fix.findMessageEnd` | fn | Scans buf for end of first complete FIX message, returns index past final SOH or null |
 | `zix.Fix.parseFields` | fn | Parses raw bytes into `[]Field` (zero-copy slices into buf) |
 | `zix.Fix.getField` | fn | Returns value of first field with given `Tag`, or null |
 | `zix.Fix.computeChecksum` | fn | Sum of all bytes mod 256 |
 | `zix.Fix.verifyChecksum` | fn | Returns true if tag-10 checksum matches computed value |
 | `zix.Fix.buildMessage` | fn | Builds a complete FIX message into caller-supplied output buffer |
-| `zix.Fix.serveConn` | fn | Session handler: `serveConn(stream, io, comp_id, opts)` — reads messages, dispatches Logon/Logout/Heartbeat, routes application messages |
+| `zix.Fix.serveConn` | fn | Session handler: `serveConn(stream, io, comp_id, opts)` (reads messages, dispatches Logon/Logout/Heartbeat, routes application messages) |
 
 ---
 
@@ -88,7 +88,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
 | `logger` | null | Optional logger for lifecycle and per-message session events |
 | `heartbeat_timeout_ms` | 0 | Heartbeat timeout in ms. 0 = disabled. When non-zero: after this interval with no incoming message, TestRequest (35=1) is sent. If no response arrives within another interval, Logout (35=5) is sent and the connection closes. Only applies after Logon, before Logon, timeout closes silently. |
-| `connection_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. When non-zero: if no message arrives within this interval (even with heartbeat disabled), the connection is closed. Distinct from `heartbeat_timeout_ms` — no TestRequest dance, just close. |
+| `connection_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. When non-zero: if no message arrives within this interval (even with heartbeat disabled), the connection is closed. Distinct from `heartbeat_timeout_ms`: no TestRequest dance, just close. |
 | `handler_timeout_ms` | 0 | Server-wide default max handler processing time in ms. 0 = no cap. Tightened per-route by `Route.timeout_ms`. Sets `Context.deadline_ns` before dispatch. |
 
 ---
@@ -97,10 +97,10 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Field | Description |
 | :- | :- |
-| `ip` | required — server address |
-| `port` | required — server port. Must be non-zero |
-| `comp_id` | required — this client's SenderCompID (tag 49) |
-| `target_comp_id` | required — server's TargetCompID (tag 56) |
+| `ip` | required, server address |
+| `port` | required, server port. Must be non-zero |
+| `comp_id` | required, this client's SenderCompID (tag 49) |
+| `target_comp_id` | required, server's TargetCompID (tag 56) |
 
 ---
 
@@ -128,7 +128,7 @@ Key standard tags:
 
 ## Tag Enum
 
-FIX tag numbers are transmitted as ASCII integers on the wire (e.g. `35`, `49`, `108`). Reading numeric literals in code requires knowing the FIX spec by memory. `zix.Fix.Tag` is a nonexhaustive `enum(u16)` that maps standard tag numbers to named constants — the wire format is unchanged.
+FIX tag numbers are transmitted as ASCII integers on the wire (e.g. `35`, `49`, `108`). Reading numeric literals in code requires knowing the FIX spec by memory. `zix.Fix.Tag` is a nonexhaustive `enum(u16)` that maps standard tag numbers to named constants, the wire format is unchanged.
 
 ```zig
 pub const Tag = enum(u16) {
@@ -177,7 +177,7 @@ try client.sendMessage(io, "D", &[_]zix.Fix.BuildField{
 
 ### Custom and extension tags
 
-The enum is nonexhaustive (`_`). Any `u16` is a valid `Tag` value — use `@enumFromInt` for tags not listed:
+The enum is nonexhaustive (`_`). Any `u16` is a valid `Tag` value: use `@enumFromInt` for tags not listed:
 
 ```zig
 const my_tag: zix.Fix.Tag = @enumFromInt(9999);
@@ -186,20 +186,20 @@ const extra = [_]zix.Fix.BuildField{
 };
 ```
 
-`parseFields` converts wire integers to `Tag` via `@enumFromInt` automatically — no conversion needed when reading received fields.
+`parseFields` converts wire integers to `Tag` via `@enumFromInt` automatically, no conversion needed when reading received fields.
 
 ### Considerations
 
 - The backing type is `u16`, matching the `Field.tag` and `BuildField.tag` fields. No runtime cost vs storing a raw `u16`.
-- Unknown tags received from the wire (`parseFields`) become nonexhaustive enum values — they compare correctly with `==` and print as their integer value.
+- Unknown tags received from the wire (`parseFields`) become nonexhaustive enum values: they compare correctly with `==` and print as their integer value.
 - The enum does not validate tag values or enforce FIX version restrictions. All semantic validation remains the application's responsibility.
-- `getField` accepts `Tag` — passing a raw integer literal directly no longer compiles. Use the named constant or `@enumFromInt(n)`.
+- `getField` accepts `Tag`: passing a raw integer literal directly no longer compiles. Use the named constant or `@enumFromInt(n)`.
 
 ---
 
 ## Session Layer
 
-`serveConn` implements the FIX session layer automatically. No handler callback — all session logic is inside `serveConn`:
+`serveConn` implements the FIX session layer automatically. No handler callback: all session logic is inside `serveConn`:
 
 | MsgType (tag 35) | Server action |
 | :- | :- |
@@ -216,7 +216,7 @@ Bad checksum closes the connection without a response.
 
 ## MsgType Constants
 
-FIX MsgType values (tag 35) are ASCII strings, not integers. `zix.Fix.MsgType` is a namespace struct of 47 compile-time string constants covering FIX 4.0–4.4. Use these instead of raw string literals to avoid typos and aid readability.
+FIX MsgType values (tag 35) are ASCII strings, not integers. `zix.Fix.MsgType` is a namespace struct of 47 compile-time string constants covering FIX 4.0-4.4. Use these instead of raw string literals to avoid typos and aid readability.
 
 ```zig
 // Session
@@ -324,7 +324,7 @@ ctx.deadline_ns = null;                                            // disable
 
 ### FixRouter (comptime)
 
-`FixRouter(routes)` generates a comptime `dispatch` function — `inline for` unrolled at comptime, zero runtime cost.
+`FixRouter(routes)` generates a comptime `dispatch` function: `inline for` unrolled at comptime, zero runtime cost.
 
 ```zig
 const r = zix.Fix.Router(&[_]zix.Fix.Route{
