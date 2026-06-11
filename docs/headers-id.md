@@ -1,10 +1,10 @@
-# Header Respons — Konfigurasi & Keamanan
+# Header Respons: Konfigurasi & Keamanan
 
 ## Tujuan
 
 Setiap respons HTTP di zix dapat membawa header kustom yang ditambahkan melalui `res.addHeader(name, value)`. Jumlah header yang diizinkan dalam satu respons dikendalikan oleh `HttpServerConfig.max_response_headers`, yang menerima nilai `zix.Http.HeaderSize`.
 
-Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap yang dikonfigurasi — tidak ada memori yang terbuang, tidak ada batas palsu. `addHeader()` mengembalikan `error.TooManyHeaders` begitu cap tercapai.
+Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap yang dikonfigurasi: tidak ada memori yang terbuang, tidak ada batas palsu. `addHeader()` mengembalikan `error.TooManyHeaders` begitu cap tercapai.
 
 ---
 
@@ -52,15 +52,15 @@ Jika mencapai 16 header dalam operasi normal, pindah ke `.COMMON`. Jika mencapai
 `addHeader()` menolak `name` atau `value` yang mengandung `\r` (CR) atau `\n` (LF):
 
 ```
-error.InvalidHeaderName   — CR atau LF ditemukan di nama header
-error.InvalidHeaderValue  — CR atau LF ditemukan di nilai header
+error.InvalidHeaderName   (CR atau LF ditemukan di nama header)
+error.InvalidHeaderValue  (CR atau LF ditemukan di nilai header)
 ```
 
 **Jangan pernah meneruskan data yang dikontrol pengguna langsung ke `addHeader()` tanpa sanitasi.** Meski sudah ada penjaga CR/LF, nilai header yang mengandung `:` atau menyerupai header lain dapat membingungkan proxy upstream. Jika nilai berasal dari request body, query param, atau path segment, validasi terlebih dahulu sebelum digunakan.
 
 ### Flooding Header (cap sebagai batas DoS)
 
-Cap bukan sekadar batas kegunaan — ini adalah **langkah pertahanan berlapis**. Handler yang salah konfigurasi atau terkompromi yang terus memanggil `addHeader()` dibatasi oleh `max_response_headers`, bukan oleh memori. Dengan `.MINIMAL` (16), overhead per-respons dalam kasus terburuk adalah:
+Cap bukan sekadar batas kegunaan: ini adalah **langkah pertahanan berlapis**. Handler yang salah konfigurasi atau terkompromi yang terus memanggil `addHeader()` dibatasi oleh `max_response_headers`, bukan oleh memori. Dengan `.MINIMAL` (16), overhead per-respons dalam kasus terburuk adalah:
 
 ```
 16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
@@ -94,10 +94,10 @@ Memodifikasi atau menambahkan header selama fase respons dikendalikan ketat untu
 `addHeader()` mengembalikan `!void`. Propagasikan atau tangani secara eksplisit:
 
 ```zig
-// Propagasi — muncul sebagai 500 jika server menangkapnya
+// Propagasi: muncul sebagai 500 jika server menangkapnya
 try res.addHeader("X-Foo", "bar");
 
-// Tangani secara eksplisit — beri client error yang bermakna
+// Tangani secara eksplisit: beri client error yang bermakna
 res.addHeader("X-Foo", "bar") catch |err| switch (err) {
     error.TooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
     error.InvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
@@ -112,7 +112,7 @@ Lihat `examples/server_xtra_headers.zig` untuk demonstrasi cap, jalur overflow, 
 
 ## Nilai Custom > 128
 
-`.{ .CUSTOM = N }` dengan N > 128 didukung penuh — backing buffer dialokasikan via arena tepat sebesar N slot per request. Meski demikian, jika benar-benar membutuhkan lebih dari 128 header kustom per respons, pertimbangkan ulang desainnya. Respons HTTP tipikal membawa 5-20 header, dan 128 sudah merupakan batas atas yang ekstrem.
+`.{ .CUSTOM = N }` dengan N > 128 didukung penuh: backing buffer dialokasikan via arena tepat sebesar N slot per request. Meski demikian, jika benar-benar membutuhkan lebih dari 128 header kustom per respons, pertimbangkan ulang desainnya. Respons HTTP tipikal membawa 5-20 header, dan 128 sudah merupakan batas atas yang ekstrem.
 
 ---
 

@@ -1,10 +1,10 @@
-# Response Headers — Configuration & Security
+# Response Headers: Configuration & Security
 
 ## Overview
 
 Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `HttpServerConfig.max_response_headers`, which accepts a `zix.Http.HeaderSize` value.
 
-The backing buffer is arena-allocated per request to exactly the configured cap — no wasted memory, no false ceiling. `addHeader()` returns `error.TooManyHeaders` once the cap is reached.
+The backing buffer is arena-allocated per request to exactly the configured cap: no wasted memory, no false ceiling. `addHeader()` returns `error.TooManyHeaders` once the cap is reached.
 
 ---
 
@@ -36,10 +36,10 @@ var server = try zix.Http.Server.init(.{
 
 Typical header counts by deployment:
 
-- Bare service: 2–6 (`Content-Type`, `Content-Length`, `Connection`, `Date` are emitted automatically custom headers like `X-Request-ID` come from `addHeader()`)
-- With CORS: +4–6 (`Access-Control-*`, `Vary`, `Access-Control-Max-Age`)
-- With caching: +3–4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
-- Behind k8s ingress: +5–10 (forwarding, tracing, X-Forwarded-*, X-Envoy-*)
+- Bare service: 2-6 (`Content-Type`, `Content-Length`, `Connection`, `Date` are emitted automatically custom headers like `X-Request-ID` come from `addHeader()`)
+- With CORS: +4-6 (`Access-Control-*`, `Vary`, `Access-Control-Max-Age`)
+- With caching: +3-4 (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`)
+- Behind k8s ingress: +5-10 (forwarding, tracing, X-Forwarded-*, X-Envoy-*)
 
 If you reach 16 headers in normal operation, move to `.COMMON`. If you reach 32, move to `.LARGE`. If you reach 64, move to `.EXTRA_LARGE`. Do not reach for `.CUSTOM` unless you have a counted reason.
 
@@ -52,21 +52,21 @@ If you reach 16 headers in normal operation, move to `.COMMON`. If you reach 32,
 `addHeader()` rejects any `name` or `value` that contains `\r` (CR) or `\n` (LF):
 
 ```
-error.InvalidHeaderName   — CR or LF found in header name
-error.InvalidHeaderValue  — CR or LF found in header value
+error.InvalidHeaderName   (CR or LF found in header name)
+error.InvalidHeaderValue  (CR or LF found in header value)
 ```
 
 **Never pass user-controlled data directly into `addHeader()` without sanitization.** Even with the CR/LF guard, header values that include `:` or resemble other headers can confuse upstream proxies. If a value comes from a request body, query param, or path segment, validate it before use.
 
 ### Header flooding (cap as a DoS limit)
 
-The cap is not just a usability limit — it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.MINIMAL` (16), the worst-case per-response overhead is:
+The cap is not just a usability limit: it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.MINIMAL` (16), the worst-case per-response overhead is:
 
 ```
 16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
 ```
 
-With `.EXTRA_LARGE` (128), that rises to ~4 KB. Both are bounded and arena-allocated. Do not set `.{ .CUSTOM = N }` to a large number speculatively — it widens the footprint without a corresponding benefit.
+With `.EXTRA_LARGE` (128), that rises to ~4 KB. Both are bounded and arena-allocated. Do not set `.{ .CUSTOM = N }` to a large number speculatively: it widens the footprint without a corresponding benefit.
 
 ### Headers visible to clients
 
@@ -94,10 +94,10 @@ Modifying or adding headers during the response phase is strictly controlled to 
 `addHeader()` returns `!void`. Propagate or handle explicitly:
 
 ```zig
-// Propagate — surfaces as a 500 if the server catches it
+// Propagate: surfaces as a 500 if the server catches it
 try res.addHeader("X-Foo", "bar");
 
-// Handle explicitly — give the client a meaningful error
+// Handle explicitly: give the client a meaningful error
 res.addHeader("X-Foo", "bar") catch |err| switch (err) {
     error.TooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
     error.InvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
@@ -112,7 +112,7 @@ See `examples/server_xtra_headers.zig` for a working demonstration of the cap, t
 
 ## Custom Values > 128
 
-`.{ .CUSTOM = N }` where N > 128 is fully supported — the backing buffer is arena-allocated to exactly N slots per request. That said, if you genuinely need more than 128 custom headers per response, reconsider the design — typical HTTP responses carry 5–20 headers, 128 is already an extreme upper bound.
+`.{ .CUSTOM = N }` where N > 128 is fully supported: the backing buffer is arena-allocated to exactly N slots per request. That said, if you genuinely need more than 128 custom headers per response, reconsider the design. Typical HTTP responses carry 5-20 headers, 128 is already an extreme upper bound.
 
 ---
 
