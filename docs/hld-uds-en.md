@@ -154,7 +154,7 @@ Both limitations are stdlib-imposed, not zix design decisions. They will be revi
 `UdsServerConfig.logger: ?*Logger = null`. When non-null:
 - `system(.INFO, "uds", ...)` on bind, accepted connection, and shutdown.
 
-The server does not call `frame()` automatically — `frame()` is available for manual use inside `HandlerFn` implementations that want per-frame logging:
+The server does not call `frame()` automatically: `frame()` is available for manual use inside `HandlerFn` implementations that want per-frame logging:
 
 ```zig
 fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
