@@ -36,7 +36,7 @@ pub fn main(process: std.process.Init) !void {
 
     // Server streaming (send 3 messages, expect 3 echoes)
     {
-        const sid = try client.openStream("/svc.EchoService/Echo", "application/grpc+proto");
+        const sid = try client.openStream("/helloworld.Greeter/Echo", "application/grpc+proto");
         try client.sendMessage(sid, "alpha");
         try client.sendMessage(sid, "beta");
         try client.sendMessage(sid, "gamma");
@@ -44,15 +44,19 @@ pub fn main(process: std.process.Init) !void {
 
         std.debug.print("streaming echoes:\n", .{});
         var buf: [256]u8 = undefined;
+        var final_status: ?zix.Grpc.Status = null;
         while (true) {
             const r = client.recvResponse(sid, &buf) catch break;
             switch (r) {
                 .data => |d| std.debug.print("  recv: {s}\n", .{d}),
-                .status => |s| {
-                    std.debug.print("  status: {d}\n", .{@intFromEnum(s)});
+                .status => |stream_status| {
+                    std.debug.print("  status: {d} ({s})\n", .{ @intFromEnum(stream_status), @tagName(stream_status) });
+                    final_status = stream_status;
                     break;
                 },
             }
         }
+
+        if (final_status != .OK) return error.StreamFailed;
     }
 }
