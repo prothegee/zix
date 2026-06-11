@@ -18,8 +18,8 @@ const POOL_SIZE: usize = 0; // ignored by .ASYNC
 // --------------------------------------------------------- //
 
 // Creates the log directory at startup.
-// The logger does not create save_path automatically — that is the caller's responsibility.
-// Silently ignores "already exists" — safe to call on every start.
+// The logger does not create save_path automatically, that is the caller's responsibility.
+// Silently ignores "already exists", safe to call on every start.
 // Similar pattern to createInitDirs in http_static.zig.
 //
 // fn createLogDir(io: std.Io) void {
@@ -62,7 +62,7 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(arena.allocator(), .{
     //     .console        = .ALWAYS,
     //     .console_min_level = .INFO,

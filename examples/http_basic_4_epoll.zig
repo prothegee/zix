@@ -11,7 +11,7 @@ const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .EPOLL (single epoll event loop accepts)
 const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) worker threads)
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "app";
 
@@ -22,7 +22,7 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) worker threads)
 // each readable socket to a worker pool. Each worker serves one request then
 // re-arms the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
 // Best for very high connection counts and slow/idle clients. On other platforms
-// the server returns error.EpollUnsupported — use .POOL there.
+// the server returns error.EpollUnsupported, use .POOL there.
 
 // --------------------------------------------------------- //
 

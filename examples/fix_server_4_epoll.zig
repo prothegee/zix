@@ -8,7 +8,7 @@ const DISPATCH_MODEL: zix.Fix.DispatchModel = .EPOLL;
 const WORKERS: usize = 0; // ignored by EPOLL (single event loop thread handles accept)
 const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "fix";
 
@@ -22,14 +22,14 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 // On Linux, .EPOLL runs natively: a single epoll accept loop pushes accepted
 // fds to an FdQueue. Pool workers pop and hold each connection for its full
 // lifetime (same pattern as zix.Grpc EPOLL). FIX sessions are long-lived and
-// stateful — one-thread-per-connection maps naturally to this model.
+// stateful: one-thread-per-connection maps naturally to this model.
 // On non-Linux targets, .EPOLL falls back to .POOL automatically (with a
 // debug print). Use fix_server_2_pool.zig to set POOL explicitly instead.
 
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,

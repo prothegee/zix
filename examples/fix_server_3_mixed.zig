@@ -8,7 +8,7 @@ const DISPATCH_MODEL: zix.Fix.DispatchModel = .MIXED;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // ignored by .MIXED
 
-// Logger config — uncomment this section to add logger
+// Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
 // const LOG_FILE: []const u8 = "fix";
 
@@ -19,7 +19,7 @@ const POOL_SIZE: usize = 0; // ignored by .MIXED
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    // Uncomment this to add logger (console only — no save_path means no file output):
+    // Uncomment this to add logger (console only, no save_path means no file output):
     // var logger = try zix.Logger.init(std.heap.smp_allocator, .{
     //     .console           = .ALWAYS,
     //     .console_min_level = .INFO,
