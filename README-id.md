@@ -334,6 +334,8 @@ exe.root_module.addImport("zix", zix.module("zix"));
 
 Untuk contoh lebih lengkap lihat direktori `examples`.
 
+Jalankan `zig build examples` untuk membangun semua contoh (baca `build.zig` untuk detail lebih lanjut).
+
 ### Contoh Minimal
 
 Auto I/O (work-queue thread pool, default):
@@ -392,17 +394,17 @@ Rute didaftarkan pada waktu kompilasi via tabel rute yang diteruskan ke `Server.
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
-    // exact (default) — hanya cocok dengan /about
+    // exact (default): hanya cocok dengan /about
 
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
-    // prefix — cocok dengan /api, /api/foo, /api/foo/bar, TIDAK /apiv2
+    // prefix: cocok dengan /api, /api/foo, /api/foo/bar, TIDAK /apiv2
 
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
-    // param — cocok dengan /users/alice, menangkap id="alice"
+    // param: cocok dengan /users/alice, menangkap id="alice"
     // baca di dalam handler: req.pathParam("id")
 
     .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
-    // multi-param — req.pathParam("tenant"), req.pathParam("branch")
+    // multi-param: req.pathParam("tenant"), req.pathParam("branch")
 }, .{ .ip = "127.0.0.1", .port = 9000 });
 ```
 
@@ -412,11 +414,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 exact  >  param  >  prefix (prefix lebih panjang mengalahkan yang lebih pendek)
 ```
 
-Prioritas exact dan prefix tidak bergantung pada urutan pendaftaran. **Rute param adalah pengecualian** — ketika dua pola memiliki jumlah segmen yang sama dan keduanya cocok, entri pertama dalam tabel rute yang menang. Daftarkan pola yang lebih literal sebelum pola all-param dengan kedalaman yang sama:
+Prioritas exact dan prefix tidak bergantung pada urutan pendaftaran. **Rute param adalah pengecualian**: ketika dua pola memiliki jumlah segmen yang sama dan keduanya cocok, entri pertama dalam tabel rute yang menang. Daftarkan pola yang lebih literal sebelum pola all-param dengan kedalaman yang sama:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-    // Urutan yang benar — /path/user/:id menang untuk /path/user/alice
+    // Urutan yang benar: /path/user/:id menang untuk /path/user/alice
     .{ .path = "/path/user/:id",        .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/path/:tenant/:branch", .handler = tenantHandler, .kind = .PARAM },
 }, .{ ... });
@@ -429,20 +431,20 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 | `/api/v2` + `/api` (keduanya prefix) | `/api/v2/foo` | `/api/v2` | prefix lebih panjang menang |
 | `/path/user/:id` (ke-1) + `/path/:a/:b` (ke-2) | `/path/user/alice` | `/path/user/:id` | literal lebih banyak didaftarkan pertama |
 
-**Pencocokan seperti Regex** — zix tidak memiliki mesin regex. Rute prefix (`.kind = .PREFIX`) mencakup path yang terdaftar dan sub-path di bawahnya. Pemfilteran tambahan dilakukan di dalam handler dengan operasi string biasa pada `req.path()`:
+**Pencocokan seperti Regex**: zix tidak memiliki mesin regex. Rute prefix (`.kind = .PREFIX`) mencakup path yang terdaftar dan sub-path di bawahnya. Pemfilteran tambahan dilakukan di dalam handler dengan operasi string biasa pada `req.path()`:
 
 ```zig
 // Dalam tabel rute:
 .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
 
-// Di dalam secretHandler — ekstrak sub-path dan terapkan logika kustom
+// Di dalam secretHandler: ekstrak sub-path dan terapkan logika kustom
 const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 // cek ekstensi, kedalaman, query params, header, dll.
 ```
 
 Lihat `examples/http_params.zig` untuk penanganan parameter query dan form. Lihat `examples/http_paths.zig` untuk pola routing parameter path. Lihat `examples/http_json.zig` untuk penanganan respons JSON.
 
-**Mesin `zix.Http1` mentah** — mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik dan prioritas `exact > param > prefix` yang sama. Satu perbedaannya adalah penangkapan param: handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request`, jadi param yang ditangkap dibaca dengan fungsi bebas `zix.Http1.pathParam("id")` (sebuah thread-local per-handler, model yang sama dengan `zix.Http1.setTimeout`, lihat ADR-029) alih-alih `req.pathParam("id")`:
+**Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik dan prioritas `exact > param > prefix` yang sama. Satu perbedaannya adalah penangkapan param: handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request`, jadi param yang ditangkap dibaca dengan fungsi bebas `zix.Http1.pathParam("id")` (sebuah thread-local per-handler, model yang sama dengan `zix.Http1.setTimeout`, lihat ADR-029) alih-alih `req.pathParam("id")`:
 
 ```zig
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
@@ -465,9 +467,9 @@ Lihat `examples/http1_static.zig` untuk rute prefix yang digunakan. Penangkapan 
 
 Empat model dispatch, dipilih via `config.dispatch_model` (enum `DispatchModel`, default `.ASYNC`):
 
-**`.POOL` — work-queue thread pool:**
+**`.POOL` (work-queue thread pool):**
 
-N accept thread mendorong koneksi ke `ConnQueue` bersama. M pool thread mengambil dan menangani setiap koneksi secara sinkron dengan blocking I/O — tanpa overhead scheduler. Throughput terbaik di bawah jumlah koneksi tinggi. `SO_REUSEPORT` memungkinkan semua accept thread mendengarkan di port yang sama.
+N accept thread mendorong koneksi ke `ConnQueue` bersama. M pool thread mengambil dan menangani setiap koneksi secara sinkron dengan blocking I/O, tanpa overhead scheduler. Throughput terbaik di bawah jumlah koneksi tinggi. `SO_REUSEPORT` memungkinkan semua accept thread mendengarkan di port yang sama.
 
 ```zig
 pub fn main(process: std.process.Init) !void {
@@ -481,7 +483,7 @@ pub fn main(process: std.process.Init) !void {
     });
 ```
 
-**`.ASYNC` — accept tunggal, dispatch `io.async()`:**
+**`.ASYNC` (accept tunggal, dispatch `io.async()`):**
 
 Satu accept thread mendispatch setiap koneksi via `io.async()`. `workers` dan `pool_size` diabaikan. Diutamakan untuk SSE dan WebSocket (koneksi long-lived tidak menahan pool thread). Cocok juga untuk `concurrent_limit` eksplisit.
 
@@ -494,9 +496,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.MIXED` — N accept thread, dispatch `io.async()`:**
+**`.MIXED` (N accept thread, dispatch `io.async()`):**
 
-N accept thread masing-masing mendispatch koneksi via `io.async()` secara langsung — tanpa `ConnQueue`. Throughput dan latensi seimbang. `pool_size` diabaikan.
+N accept thread masing-masing mendispatch koneksi via `io.async()` secara langsung, tanpa `ConnQueue`. Throughput dan latensi seimbang. `pool_size` diabaikan.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -507,7 +509,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.EPOLL` — epoll event loop tunggal + worker pool (khusus Linux):**
+**`.EPOLL` (epoll event loop tunggal + worker pool, khusus Linux):**
 
 Satu thread event-loop menggunakan `epoll_wait` untuk mendeteksi socket yang siap dibaca. Worker mengambil fd siap dari antrian dan melayani satu permintaan, lalu me-rearm socket (`EPOLLONESHOT`). Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk jumlah koneksi tinggi dengan banyak klien yang idle atau lambat. Setiap pemanggilan `epoll_wait` menguras hingga 512 event siap sekaligus. Build non-Linux otomatis fallback ke `.POOL`.
 
@@ -584,7 +586,7 @@ ctx.setTimeout(2_000); // timpa ke 2 detik dari sekarang terlepas dari cap globa
 
 ### Middleware
 
-Middleware disusun pada waktu kompilasi menggunakan fungsi wrapper. Setiap wrapper menerima `comptime next: zix.Http.HandlerFn` dan mengembalikan `HandlerFn` baru — tanpa alokasi heap, tanpa chain runner runtime.
+Middleware disusun pada waktu kompilasi menggunakan fungsi wrapper. Setiap wrapper menerima `comptime next: zix.Http.HandlerFn` dan mengembalikan `HandlerFn` baru (tanpa alokasi heap, tanpa chain runner runtime).
 
 ```zig
 fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
@@ -612,7 +614,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 }
 ```
 
-Susun dari kiri ke kanan — wrapper paling luar dijalankan pertama:
+Susun dari kiri ke kanan, wrapper paling luar dijalankan pertama:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -639,7 +641,7 @@ Untuk contoh lengkap yang berfungsi lihat `examples/http_middleware.zig`.
 
 ### WebSocket
 
-Broadcast berbasis ruang melalui RFC 6455. Handler param mengupgrade koneksi dan memasuki loop frame per-task — tidak perlu thread terpisah.
+Broadcast berbasis ruang melalui RFC 6455. Handler param mengupgrade koneksi dan memasuki loop frame per-task, tidak perlu thread terpisah.
 
 ```zig
 var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
@@ -647,7 +649,7 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
 
-    // Baca query param SEBELUM upgrade() — tidak tersedia setelah handshake 101.
+    // Baca query param SEBELUM upgrade() (tidak tersedia setelah handshake 101).
     const display_name = req.queryParam("name") orelse "anonymous";
 
     // ekstrak Sec-WebSocket-Key dari header, lalu handshake
@@ -687,15 +689,15 @@ pub fn main(process: std.process.Init) !void {
 wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
 websocat    "ws://localhost:9008/ws/lobby?name=alice"
 
-# ?name opsional — hilangkan untuk "anonymous"
+# ?name opsional, hilangkan untuk "anonymous"
 wscat    -c "ws://localhost:9008/ws/lobby"
 ```
 
-**Prioritas:** exact > param > prefix — `/ws/:room-id` adalah rute param, jadi `/ws/lobby` menangkap `room-id = "lobby"`.
+**Prioritas:** exact > param > prefix. `/ws/:room-id` adalah rute param, jadi `/ws/lobby` menangkap `room-id = "lobby"`.
 
-`ctx.stream` adalah TCP stream mentah yang diekspos via `Context`. Server menetapkannya untuk **setiap** koneksi sebelum memanggil handler mana pun — handler HTTP mengabaikannya, handler WebSocket menggunakannya setelah upgrade 101.
+`ctx.stream` adalah TCP stream mentah yang diekspos via `Context`. Server menetapkannya untuk **setiap** koneksi sebelum memanggil handler mana pun: handler HTTP mengabaikannya, handler WebSocket menggunakannya setelah upgrade 101.
 
-**Menggabungkan HTTP, static, dan WebSocket dalam satu server** — daftarkan semua tipe handler bersamaan, routing menangani dispatch. Rute yang tidak cocok diteruskan ke static serving:
+**Menggabungkan HTTP, static, dan WebSocket dalam satu server**: daftarkan semua tipe handler bersamaan, routing menangani dispatch. Rute yang tidak cocok diteruskan ke static serving:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -716,10 +718,10 @@ Lihat `examples/http_websocket.zig` untuk contoh lengkap yang berfungsi. Untuk e
 
 ### SSE (Server-Sent Events)
 
-Push satu arah dari server melalui HTTP/1.1 — tanpa handshake WebSocket, reconnect `EventSource` native browser.
+Push satu arah dari server melalui HTTP/1.1: tanpa handshake WebSocket, reconnect `EventSource` native browser.
 
 ```zig
-// GET /events — streaming "tick N" sekali per detik
+// GET /events: streaming "tick N" sekali per detik
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     const sse = try res.stream(); // mengirim header SSE, mengembalikan SseWriter
@@ -740,7 +742,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 | `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
 | `comment(text)` | `: <text>\n` (keepalive) |
 
-**Model dispatch:** gunakan `.ASYNC`. Koneksi SSE bersifat long-lived — mereka akan menghabiskan blocking pool (`.POOL`) satu thread per stream yang terbuka. `.ASYNC` mendispatch setiap koneksi via `io.async()`, menjaga pool thread tetap bebas.
+**Model dispatch:** gunakan `.ASYNC`. Koneksi SSE bersifat long-lived: mereka akan menghabiskan blocking pool (`.POOL`) satu thread per stream yang terbuka. `.ASYNC` mendispatch setiap koneksi via `io.async()`, menjaga pool thread tetap bebas.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -832,7 +834,7 @@ fn createInitDirs(io: std.Io) void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    createInitDirs(process.io); // idempoten — aman dipanggil setiap start
+    createInitDirs(process.io); // idempoten, aman dipanggil setiap start
 
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/upload", .handler = uploadHandler },
@@ -849,7 +851,7 @@ pub fn main(process: std.process.Init) !void {
 - Range request (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233).
 - Directory traversal (`..`) ditolak.
 
-**Unggah** — parse body multipart di dalam handler, opsional ganti nama sebelum menyimpan:
+**Unggah**: parse body multipart di dalam handler, opsional ganti nama sebelum menyimpan:
 
 ```zig
 var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
@@ -903,7 +905,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 `addHeader()` mengembalikan `error.TooManyHeaders` ketika cap tercapai dan `error.InvalidHeaderName` / `error.InvalidHeaderValue` jika nama atau nilai mengandung CR atau LF (penjaga injeksi header).
 
-`.{ .CUSTOM = N }` mengalokasikan tepat N slot dari arena per-permintaan — tanpa ceiling, tanpa clamping.
+`.{ .CUSTOM = N }` mengalokasikan tepat N slot dari arena per-permintaan (tanpa ceiling, tanpa clamping).
 
 Untuk panduan keamanan dan pemilihan tingkatan lihat [`docs/headers-id.md`](docs/headers-id.md). Untuk demonstrasi yang berfungsi lihat `examples/http_xtra_headers.zig`. Untuk engine `zix.Http1` mentah lihat `examples/http1_xtra_headers.zig`, yang membangun header secara manual dengan penjaga injeksi CR/LF.
 
@@ -929,7 +931,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-Batas penyimpanan parser adalah 64 — nilai `CUSTOM` di atas 64 secara diam-diam dibatasi. Lihat `zix.Http.RequestHeaderSize`.
+Batas penyimpanan parser adalah 64: nilai `CUSTOM` di atas 64 secara diam-diam dibatasi. Lihat `zix.Http.RequestHeaderSize`.
 
 <br>
 
@@ -1022,7 +1024,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // kirim out[0..pos] sebagai payload pesan gRPC
 ```
 
-**Model dispatch:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux). Model gRPC EPOLL menggunakan satu epoll event loop untuk accept dan menugaskan setiap koneksi ke pool worker untuk seluruh hidupnya (gRPC bersifat streaming — `EPOLLONESHOT` tidak berlaku). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
+**Model dispatch:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux). Model gRPC EPOLL menggunakan satu epoll event loop untuk accept dan menugaskan setiap koneksi ke pool worker untuk seluruh hidupnya (gRPC bersifat streaming, `EPOLLONESHOT` tidak berlaku). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
 
 **Timeout context:** Tiga input, yang paling ketat menang:
 
@@ -1212,9 +1214,9 @@ try client.logout(io);
 | lainnya (routes non-kosong) | Dispatch ke handler rute yang sesuai |
 | lainnya (routes kosong) | Echo tanpa perubahan |
 
-**`zix.Fix.MsgType`** — namespace struct berisi 47 konstanta string compile-time untuk nilai MsgType FIX (FIX 4.0–4.4). Gunakan konstanta bernama daripada string mentah: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), dll.
+**`zix.Fix.MsgType`**: namespace struct berisi 47 konstanta string compile-time untuk nilai MsgType FIX (FIX 4.0-4.4). Gunakan konstanta bernama daripada string mentah: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), dll.
 
-**Model dispatch:** `.ASYNC` (default — sesi FIX bersifat long-lived), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux: satu epoll accept loop, pool worker menahan setiap koneksi untuk seluruh hidupnya). Non-Linux otomatis fallback ke `.POOL`.
+**Model dispatch:** `.ASYNC` (default, sesi FIX bersifat long-lived), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux: satu epoll accept loop, pool worker menahan setiap koneksi untuk seluruh hidupnya). Non-Linux otomatis fallback ke `.POOL`.
 
 Lihat `examples/fix_server_1_async.zig`, `examples/fix_server_2_pool.zig`, `examples/fix_server_3_mixed.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_server_trading.zig`, `examples/fix_client.zig`, `examples/fix_client_raw.zig`, `examples/fix_client_trading.zig`, dan [`docs/hld-fix-id.md`](docs/hld-fix-id.md) untuk detail.
 
@@ -1377,14 +1379,14 @@ Lihat `examples/udp_server.zig` dan `examples/udp_client.zig` untuk contoh lengk
 
 ## Logger
 
-Logger file terstruktur dengan logging event per-protokol otomatis. Thread-safe — aman dipanggil dari OS thread latar belakang.
+Logger file terstruktur dengan logging event per-protokol otomatis. Thread-safe: aman dipanggil dari OS thread latar belakang.
 
 ```zig
 const std = @import("std");
 const zix = @import("zix");
 
-// Logger tidak membuat save_path secara otomatis — tanggung jawab pemanggil.
-// Mengabaikan "already exists" secara diam-diam — aman dipanggil setiap start.
+// Logger tidak membuat save_path secara otomatis, tanggung jawab pemanggil.
+// Mengabaikan "already exists" secara diam-diam, aman dipanggil setiap start.
 fn createLogDir(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./logs") catch {};
 }
@@ -1490,7 +1492,7 @@ zig build test-all         # semua di atas
 
 Handler menerima `ctx.allocator`, sebuah arena yang direset di antara permintaan. Alokasi apa pun yang dibuat di dalam handler secara otomatis direklamasi di akhir permintaan tanpa panggilan `free`.
 
-Rute dibuat dalam tipe server pada waktu kompilasi — tidak diperlukan allocator untuk penyimpanan rute.
+Rute dibuat dalam tipe server pada waktu kompilasi: tidak diperlukan allocator untuk penyimpanan rute.
 
 ### UDP
 
@@ -1500,11 +1502,11 @@ Rute dibuat dalam tipe server pada waktu kompilasi — tidak diperlukan allocato
 | Snapshot peer (broadcast) | `config.allocator` | Dispatch satu paket |
 | Buffer terima | Stack | Satu iterasi loop terima |
 
-`config.allocator` harus berupa general-purpose allocator (misalnya `std.heap.smp_allocator`). `ArenaAllocator` tidak cocok: snapshot peer broadcast dialokasikan dan dibebaskan per paket — `ArenaAllocator.free()` adalah no-op, sehingga snapshot menumpuk tanpa batas hingga server berhenti. Lihat [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk penjelasan lengkap dan PoC.
+`config.allocator` harus berupa general-purpose allocator (misalnya `std.heap.smp_allocator`). `ArenaAllocator` tidak cocok: snapshot peer broadcast dialokasikan dan dibebaskan per paket: `ArenaAllocator.free()` adalah no-op, sehingga snapshot menumpuk tanpa batas hingga server berhenti. Lihat [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk penjelasan lengkap dan PoC.
 
 ### HTTP/2 dan gRPC
 
-Keduanya menggunakan array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos — handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
+Keduanya menggunakan array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos: handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
 
 Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) dan [`docs/hld-udp-id.md`](docs/hld-udp-id.md). Untuk model threading lihat [`docs/concurrency-id.md`](docs/concurrency-id.md).
 

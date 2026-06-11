@@ -334,6 +334,8 @@ exe.root_module.addImport("zix", zix.module("zix"));
 
 For more examples see the `examples` directory.
 
+Run `zig build examples` to build all examples (read `build.zig` for more detail).
+
 ### Minimal Examples
 
 Auto I/O (work-queue thread pool, default):
@@ -392,17 +394,17 @@ Routes are registered at compile time via the route table passed to `Server.init
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
-    // exact (default) — matches only /about
+    // exact (default): matches only /about
 
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
-    // prefix — matches /api, /api/foo, /api/foo/bar, NOT /apiv2
+    // prefix: matches /api, /api/foo, /api/foo/bar, NOT /apiv2
 
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
-    // param — matches /users/alice, captures id="alice"
+    // param: matches /users/alice, captures id="alice"
     // read inside handler: req.pathParam("id")
 
     .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
-    // multi-param — req.pathParam("tenant"), req.pathParam("branch")
+    // multi-param: req.pathParam("tenant"), req.pathParam("branch")
 }, .{ .ip = "127.0.0.1", .port = 9000 });
 ```
 
@@ -412,11 +414,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 exact  >  param  >  prefix (longer prefix beats shorter)
 ```
 
-Exact and prefix priority is independent of registration order. **Param routes are the exception** — when two patterns have the same segment count and both match, the first entry in the route table wins. Register more-literal patterns before all-param patterns of the same depth:
+Exact and prefix priority is independent of registration order. **Param routes are the exception**: when two patterns have the same segment count and both match, the first entry in the route table wins. Register more-literal patterns before all-param patterns of the same depth:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-    // Correct order — /path/user/:id wins for /path/user/alice
+    // Correct order: /path/user/:id wins for /path/user/alice
     .{ .path = "/path/user/:id",        .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/path/:tenant/:branch", .handler = tenantHandler, .kind = .PARAM },
 }, .{ ... });
@@ -429,20 +431,20 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 | `/api/v2` + `/api` (both prefix) | `/api/v2/foo` | `/api/v2` | longer prefix wins |
 | `/path/user/:id` (1st) + `/path/:a/:b` (2nd) | `/path/user/alice` | `/path/user/:id` | more literals registered first |
 
-**Regex-like matching** — zix has no regex engine. A prefix route (`.kind = .PREFIX`) covers the registered path and any sub-path below it. Additional filtering is done inside the handler with plain string operations on `req.path()`:
+**Regex-like matching**: zix has no regex engine. A prefix route (`.kind = .PREFIX`) covers the registered path and any sub-path below it. Additional filtering is done inside the handler with plain string operations on `req.path()`:
 
 ```zig
 // In the route table:
 .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
 
-// Inside secretHandler — extract sub-path and apply custom logic
+// Inside secretHandler: extract sub-path and apply custom logic
 const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 // check extension, depth, query params, headers, etc.
 ```
 
 See `examples/http_params.zig` for query and form parameter handling. See `examples/http_paths.zig` for path parameter routing patterns. See `examples/http_json.zig` for JSON response handling.
 
-**Raw `zix.Http1` engine** — the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds and the same `exact > param > prefix` priority. The one difference is param capture: the Http1 handler is `fn(head: *const ParsedHead, body, fd) void` with no `Request`, so captured params are read with the free function `zix.Http1.pathParam("id")` (a per-handler thread-local, the same model as `zix.Http1.setTimeout`, see ADR-029) rather than `req.pathParam("id")`:
+**Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds and the same `exact > param > prefix` priority. The one difference is param capture: the Http1 handler is `fn(head: *const ParsedHead, body, fd) void` with no `Request`, so captured params are read with the free function `zix.Http1.pathParam("id")` (a per-handler thread-local, the same model as `zix.Http1.setTimeout`, see ADR-029) rather than `req.pathParam("id")`:
 
 ```zig
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
@@ -465,9 +467,9 @@ See `examples/http1_static.zig` for a prefix route in use. Per-route param captu
 
 Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.ASYNC`):
 
-**`.POOL` — work-queue thread pool:**
+**`.POOL` (work-queue thread pool):**
 
-N accept threads push connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O — no scheduler overhead. Best throughput under high connection counts. `SO_REUSEPORT` lets all accept threads listen on the same port.
+N accept threads push connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O, no scheduler overhead. Best throughput under high connection counts. `SO_REUSEPORT` lets all accept threads listen on the same port.
 
 ```zig
 pub fn main(process: std.process.Init) !void {
@@ -481,7 +483,7 @@ pub fn main(process: std.process.Init) !void {
     });
 ```
 
-**`.ASYNC` — single accept, `io.async()` dispatch:**
+**`.ASYNC` (single accept, `io.async()` dispatch):**
 
 One accept thread dispatches each connection via `io.async()`. `workers` and `pool_size` are ignored. Preferred for SSE and WebSocket (long-lived connections do not hold pool threads). Also suitable for explicit `concurrent_limit`.
 
@@ -494,9 +496,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.MIXED` — N accept threads, `io.async()` dispatch:**
+**`.MIXED` (N accept threads, `io.async()` dispatch):**
 
-N accept threads each dispatch connections via `io.async()` directly — no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
+N accept threads each dispatch connections via `io.async()` directly, no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -507,7 +509,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.EPOLL` — single epoll event loop + worker pool (Linux-only):**
+**`.EPOLL` (single epoll event loop + worker pool, Linux-only):**
 
 One event-loop thread uses `epoll_wait` to detect readable sockets. Workers pop ready fds from a queue and serve one request each, then re-arm the socket (`EPOLLONESHOT`). Idle keep-alive connections hold no thread. Best for high connection counts with many idle or slow clients. Each `epoll_wait` call drains up to 512 ready events at a time. Non-Linux builds fall back to `.POOL` automatically.
 
@@ -584,7 +586,7 @@ ctx.setTimeout(2_000); // override to 2s from now regardless of global cap
 
 ### Middleware
 
-Middleware is composed at comptime using wrapper functions. Each wrapper takes a `comptime next: zix.Http.HandlerFn` and returns a new `HandlerFn` — no heap allocation, no runtime chain runner.
+Middleware is composed at comptime using wrapper functions. Each wrapper takes a `comptime next: zix.Http.HandlerFn` and returns a new `HandlerFn` (no heap allocation, no runtime chain runner).
 
 ```zig
 fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
@@ -612,7 +614,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 }
 ```
 
-Compose left-to-right — the outermost wrapper runs first:
+Compose left-to-right, the outermost wrapper runs first:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -639,7 +641,7 @@ For a full working example see `examples/http_middleware.zig`.
 
 ### WebSocket
 
-Room-based broadcast over RFC 6455. A param handler upgrades the connection and enters a per-task frame loop — no separate thread needed.
+Room-based broadcast over RFC 6455. A param handler upgrades the connection and enters a per-task frame loop, no separate thread needed.
 
 ```zig
 var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
@@ -647,7 +649,7 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
 
-    // Read query params BEFORE upgrade() — unavailable after the 101 handshake.
+    // Read query params BEFORE upgrade() (unavailable after the 101 handshake).
     const display_name = req.queryParam("name") orelse "anonymous";
 
     // extract Sec-WebSocket-Key from headers, then handshake
@@ -687,15 +689,15 @@ pub fn main(process: std.process.Init) !void {
 wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
 websocat    "ws://localhost:9008/ws/lobby?name=alice"
 
-# ?name is optional — omit for "anonymous"
+# ?name is optional, omit for "anonymous"
 wscat    -c "ws://localhost:9008/ws/lobby"
 ```
 
-**Priority:** exact > param > prefix — `/ws/:room-id` is a param route, so `/ws/lobby` captures `room-id = "lobby"`.
+**Priority:** exact > param > prefix. `/ws/:room-id` is a param route, so `/ws/lobby` captures `room-id = "lobby"`.
 
-`ctx.stream` is the raw TCP stream exposed via `Context`. The server sets it for **every** connection before calling any handler — HTTP handlers ignore it, WebSocket handlers use it after the 101 upgrade.
+`ctx.stream` is the raw TCP stream exposed via `Context`. The server sets it for **every** connection before calling any handler: HTTP handlers ignore it, WebSocket handlers use it after the 101 upgrade.
 
-**Combining HTTP, static, and WebSocket in one server** — register all handler types together, routing handles dispatch. Unmatched routes fall through to static serving:
+**Combining HTTP, static, and WebSocket in one server**: register all handler types together, routing handles dispatch. Unmatched routes fall through to static serving:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -716,10 +718,10 @@ See `examples/http_websocket.zig` for a full working example. For the raw `zix.H
 
 ### SSE (Server-Sent Events)
 
-One-way server push over HTTP/1.1 — no WebSocket handshake, browser-native `EventSource` reconnect.
+One-way server push over HTTP/1.1: no WebSocket handshake, browser-native `EventSource` reconnect.
 
 ```zig
-// GET /events — streams "tick N" once per second
+// GET /events: streams "tick N" once per second
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     const sse = try res.stream(); // sends SSE headers, returns SseWriter
@@ -740,7 +742,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 | `writeNamedEvent(event, data)` | `event: <event>\ndata: <data>\n\n` |
 | `comment(text)` | `: <text>\n` (keepalive) |
 
-**Dispatch model:** use `.ASYNC`. SSE connections are long-lived — they would exhaust a blocking pool (`.POOL`) one thread per open stream. `.ASYNC` dispatches each connection via `io.async()`, keeping pool threads free.
+**Dispatch model:** use `.ASYNC`. SSE connections are long-lived: they would exhaust a blocking pool (`.POOL`) one thread per open stream. `.ASYNC` dispatches each connection via `io.async()`, keeping pool threads free.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -832,7 +834,7 @@ fn createInitDirs(io: std.Io) void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    createInitDirs(process.io); // idempotent — safe on every start
+    createInitDirs(process.io); // idempotent, safe on every start
 
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/upload", .handler = uploadHandler },
@@ -849,7 +851,7 @@ pub fn main(process: std.process.Init) !void {
 - Range requests (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233).
 - Directory traversal (`..`) is rejected.
 
-**Upload** — parse the multipart body in a handler, optionally rename before saving:
+**Upload**: parse the multipart body in a handler, optionally rename before saving:
 
 ```zig
 var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
@@ -903,7 +905,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 `addHeader()` returns `error.TooManyHeaders` when the cap is reached and `error.InvalidHeaderName` / `error.InvalidHeaderValue` if the name or value contains CR or LF (header injection guard).
 
-`.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena — no ceiling, no clamping.
+`.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena (no ceiling, no clamping).
 
 For security guidance and tier selection see [`docs/headers-en.md`](docs/headers-en.md). For a working demonstration see `examples/http_xtra_headers.zig`. For the raw `zix.Http1` engine see `examples/http1_xtra_headers.zig`, which hand-builds headers with a CR/LF injection guard.
 
@@ -929,7 +931,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-The parser storage limit is 64 — `CUSTOM` values above 64 are silently capped. See `zix.Http.RequestHeaderSize`.
+The parser storage limit is 64: `CUSTOM` values above 64 are silently capped. See `zix.Http.RequestHeaderSize`.
 
 <br>
 
@@ -1022,7 +1024,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming — `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
+**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming, `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -1212,9 +1214,9 @@ try client.logout(io);
 | any other (routes non-empty) | Dispatch to matching route handler |
 | any other (routes empty) | Echo unchanged |
 
-**`zix.Fix.MsgType`** — namespace struct of 47 compile-time string constants for FIX MsgType values (FIX 4.0–4.4). Use named constants instead of raw strings: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), etc.
+**`zix.Fix.MsgType`**: namespace struct of 47 compile-time string constants for FIX MsgType values (FIX 4.0-4.4). Use named constants instead of raw strings: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), etc.
 
-**Dispatch models:** `.ASYNC` (default — FIX sessions are long-lived), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only: single epoll accept loop, pool workers hold each connection for its full lifetime). Non-Linux falls back to `.POOL` automatically.
+**Dispatch models:** `.ASYNC` (default, FIX sessions are long-lived), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only: single epoll accept loop, pool workers hold each connection for its full lifetime). Non-Linux falls back to `.POOL` automatically.
 
 See `examples/fix_server_1_async.zig`, `examples/fix_server_2_pool.zig`, `examples/fix_server_3_mixed.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_server_trading.zig`, `examples/fix_client.zig`, `examples/fix_client_raw.zig`, `examples/fix_client_trading.zig`, and [`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
 
@@ -1377,14 +1379,14 @@ See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working e
 
 ## Logger
 
-Structured file logger with automatic per-protocol event logging. Thread-safe — safe to call from background OS threads.
+Structured file logger with automatic per-protocol event logging. Thread-safe: safe to call from background OS threads.
 
 ```zig
 const std = @import("std");
 const zix = @import("zix");
 
-// Logger does not create save_path automatically — caller's responsibility.
-// Silently ignores "already exists" — safe to call on every start.
+// Logger does not create save_path automatically, caller's responsibility.
+// Silently ignores "already exists", safe to call on every start.
 fn createLogDir(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./logs") catch {};
 }
@@ -1490,7 +1492,7 @@ zig build test-all         # all of the above
 
 Handlers receive `ctx.allocator`, an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
 
-Routes are baked into the server type at compile time — no allocator is needed for route storage.
+Routes are baked into the server type at compile time: no allocator is needed for route storage.
 
 ### UDP
 
@@ -1500,11 +1502,11 @@ Routes are baked into the server type at compile time — no allocator is needed
 | Peer snapshot (broadcast) | `config.allocator` | Single packet dispatch |
 | Receive buffer | Stack | Single receive loop iteration |
 
-`config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet — `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for the full explanation and PoC.
+`config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet: `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for the full explanation and PoC.
 
 ### HTTP/2 and gRPC
 
-Both use heap-allocated per-connection stream arrays (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed — handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
+Both use heap-allocated per-connection stream arrays (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed: handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
 
 For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`docs/hld-udp-en.md`](docs/hld-udp-en.md). For threading models see [`docs/concurrency-en.md`](docs/concurrency-en.md).
 
