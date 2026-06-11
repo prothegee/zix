@@ -379,7 +379,7 @@ fn sendHeadersIncrementalHpack(fd: std.posix.fd_t, stream_id: u31, path: []const
     var payload: [256]u8 = undefined;
     var pos: usize = 0;
 
-    // :method POST — indexed (static idx 3 = 0x83)
+    // :method POST: indexed (static idx 3 = 0x83)
     payload[pos] = 0x83;
     pos += 1;
 
@@ -391,7 +391,7 @@ fn sendHeadersIncrementalHpack(fd: std.posix.fd_t, stream_id: u31, path: []const
     @memcpy(payload[pos..][0..path.len], path);
     pos += path.len;
 
-    // :scheme http — indexed (static idx 6 = 0x86)
+    // :scheme http: indexed (static idx 6 = 0x86)
     payload[pos] = 0x86;
     pos += 1;
 
@@ -403,7 +403,7 @@ fn sendHeadersIncrementalHpack(fd: std.posix.fd_t, stream_id: u31, path: []const
     @memcpy(payload[pos..][0..content_type.len], content_type);
     pos += content_type.len;
 
-    // te: trailers — literal without indexing (name and value literal)
+    // te: trailers: literal without indexing (name and value literal)
     payload[pos] = 0x00;
     pos += 1;
     const te_name = "te";
@@ -432,16 +432,16 @@ fn sendHeadersIndexedHpack(fd: std.posix.fd_t, stream_id: u31) !void {
     var payload: [8]u8 = undefined;
     var pos: usize = 0;
 
-    // :method POST — static idx 3
+    // :method POST: static idx 3
     payload[pos] = 0x83;
     pos += 1;
-    // content-type — dynamic slot 1 (most recent) -> overall idx 62 -> 0x80|62 = 0xBE
+    // content-type: dynamic slot 1 (most recent) -> overall idx 62 -> 0x80|62 = 0xBE
     payload[pos] = 0xBE;
     pos += 1;
-    // :scheme http — static idx 6
+    // :scheme http: static idx 6
     payload[pos] = 0x86;
     pos += 1;
-    // :path — dynamic slot 2 (older) -> overall idx 63 -> 0x80|63 = 0xBF
+    // :path: dynamic slot 2 (older) -> overall idx 63 -> 0x80|63 = 0xBF
     payload[pos] = 0xBF;
     pos += 1;
 
@@ -468,7 +468,7 @@ fn recvFramesUntilStatus(fd: std.posix.fd_t, stream_id: u31) !zix.Grpc.Status {
         const payload = payload_buf[0..length];
 
         // Trailers HEADERS have both END_HEADERS (0x04) and END_STREAM (0x01).
-        // Response HEADERS (status 200) have END_HEADERS but NOT END_STREAM — skip those.
+        // Response HEADERS (status 200) have END_HEADERS but NOT END_STREAM, skip those.
         if (frame_type == 0x1 and recv_sid == stream_id and
             (flags & 0x04) != 0 and (flags & 0x01) != 0)
         {
@@ -540,7 +540,7 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
     if (settings_len > 0) try zix.Http2.recvExact(fd, settings_payload[0..settings_len]);
     try sendRawFrame(fd, 0x4, 0x01, 0, &.{});
 
-    // Request 1: HEADERS with incremental indexing (0x40) — populates server dyn table.
+    // Request 1: HEADERS with incremental indexing (0x40), populates server dyn table.
     // Sends :path "/svc.Svc/Greet" as literal-with-incremental-indexing.
     try sendHeadersIncrementalHpack(fd, 1, "/svc.Svc/Greet", "application/grpc+proto");
 
