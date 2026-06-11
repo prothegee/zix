@@ -1,4 +1,4 @@
-//! gRPC PoC core — framing, status codes, path routing, content-type detection,
+//! gRPC PoC core: framing, status codes, path routing, content-type detection,
 //! protobuf minimal codec (VARINT and LEN wire types), gRPC send functions.
 //! All pub for test imports. Builds on http2_poc_core.zig (h2c direct, no TLS).
 //! Run: zig run rnd/grpc_poc_server.zig
@@ -97,7 +97,7 @@ pub fn detectContentType(headers: []const Header) GrpcContentType {
 // gRPC send functions (3-step gRPC wire protocol)                    //
 // ------------------------------------------------------------------ //
 
-// Step 1: initial HEADERS — :status 200, content-type. No END_STREAM.
+// Step 1: initial HEADERS: :status 200, content-type. No END_STREAM.
 pub fn sendGrpcHeaders(fd: std.posix.fd_t, sid: u31, content_type: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var enc = h2.HpackEncoder.init(&hdr_buf);
@@ -113,7 +113,7 @@ pub fn sendGrpcHeaders(fd: std.posix.fd_t, sid: u31, content_type: []const u8) !
     try h2.fdWriteAll(fd, hblock);
 }
 
-// Step 2: DATA frame — 5-byte gRPC prefix + message bytes. No END_STREAM.
+// Step 2: DATA frame: 5-byte gRPC prefix + message bytes. No END_STREAM.
 pub fn sendGrpcData(fd: std.posix.fd_t, sid: u31, msg: []const u8) !void {
     var prefix: [5]u8 = undefined;
     writeGrpcPrefix(&prefix, false, @intCast(msg.len));
@@ -127,7 +127,7 @@ pub fn sendGrpcData(fd: std.posix.fd_t, sid: u31, msg: []const u8) !void {
     try h2.fdWriteAll(fd, msg);
 }
 
-// Step 3: trailer HEADERS — grpc-status, optional grpc-message. FLAG_END_STREAM.
+// Step 3: trailer HEADERS: grpc-status, optional grpc-message. FLAG_END_STREAM.
 pub fn sendGrpcTrailer(fd: std.posix.fd_t, sid: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var hdr_buf: [512]u8 = undefined;
     var enc = h2.HpackEncoder.init(&hdr_buf);
@@ -212,7 +212,7 @@ pub fn encodeString(field_number: u32, s: []const u8, buf: []u8) usize {
     return pos + s.len;
 }
 
-// Encode VARINT field (int32 — sign-extended to u64 for negative values). Returns bytes written.
+// Encode VARINT field (int32, sign-extended to u64 for negative values). Returns bytes written.
 pub fn encodeInt32(field_number: u32, val: i32, buf: []u8) usize {
     const tag: u64 = (@as(u64, field_number) << 3) | WT_VARINT;
     var pos = encodeVarint(buf, tag);

@@ -1,4 +1,4 @@
-//! HTTP/2 PoC server — h2c direct (PRI preface), ASYNC model.
+//! HTTP/2 PoC server: h2c direct (PRI preface), ASYNC model.
 //!
 //! Run:
 //!   zig run rnd/http2_poc_server.zig

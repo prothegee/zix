@@ -1,4 +1,4 @@
-//! gRPC PoC server — SayHello (proto + JSON), EchoJSON (JSON echo).
+//! gRPC PoC server: SayHello (proto + JSON), EchoJSON (JSON echo).
 //! Routes: /helloworld.Greeter/SayHello, /echo.EchoService/Echo.
 //!
 //! Run:

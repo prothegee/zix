@@ -1,4 +1,4 @@
-//! HTTP/2 PoC core — h2c direct, frame codec, HPACK (static table + Huffman).
+//! HTTP/2 PoC core: h2c direct, frame codec, HPACK (static table + Huffman).
 //! No dynamic table in initial PoC (literals only on encode side).
 //! All pub for test imports.
 //! Run: zig run rnd/http2_poc_server.zig
@@ -548,7 +548,7 @@ pub const Header = struct {
 
 pub const HpackDecoder = struct {
     // Dynamic table: stored as ring of (name, value) pairs in a scratch buffer.
-    // For the PoC: no dynamic table eviction tracking — just a flat list.
+    // For the PoC: no dynamic table eviction tracking, just a flat list.
     dyn: [128]HpackEntry = undefined,
     dyn_count: usize = 0,
     dyn_size: usize = 0, // current byte size (name.len + value.len + 32 per RFC)
@@ -585,7 +585,7 @@ pub const HpackDecoder = struct {
     fn addDynamic(self: *HpackDecoder, name: []const u8, value: []const u8) void {
         const entry_size = name.len + value.len + 32;
         if (entry_size > self.max_size) {
-            self.evictTo(0); // entry too large — evict all, don't add
+            self.evictTo(0); // entry too large: evict all, don't add
             return;
         }
         self.evictTo(self.max_size - entry_size);
@@ -684,7 +684,7 @@ pub const HpackDecoder = struct {
                 self.evictTo(new_max);
             } else {
                 // Literal without indexing or never-indexed (4-bit name index).
-                _ = (first & 0x10) != 0; // never-indexed flag — ignored for PoC
+                _ = (first & 0x10) != 0; // never-indexed flag, ignored for PoC
                 const idx: usize = @intCast(try decodeInt(block, &pos, 4));
                 const name = if (idx == 0) blk: {
                     break :blk try decodeString(block, &pos, scratch, &scratch_pos);
@@ -1096,7 +1096,7 @@ fn serveH2cUpgrade(fd: std.posix.fd_t, handler: HandlerFn, prefix: *const [3]u8)
         .{ SETTINGS_ENABLE_PUSH, 0 },
     });
 
-    // Dispatch stream 1 (the upgrade request — half-closed remote, no body).
+    // Dispatch stream 1 (the upgrade request, half-closed remote, no body).
     var s1_hdrs = [3]Header{
         .{ .name = ":method", .value = method },
         .{ .name = ":path", .value = path },
@@ -1111,7 +1111,7 @@ fn serveH2cUpgrade(fd: std.posix.fd_t, handler: HandlerFn, prefix: *const [3]u8)
 fn serveH2cLoop(fd: std.posix.fd_t, hpack: *HpackDecoder, handler: HandlerFn, initial_last_stream: u31) !void {
     var payload_buf: [MAX_PAYLOAD + 256]u8 = undefined;
 
-    // Heap-allocate the stream table — each Stream is ~70 KB (64 KB body buffer).
+    // Heap-allocate the stream table. Each Stream is ~70 KB (64 KB body buffer).
     const streams = try std.heap.smp_allocator.alloc(Stream, 16);
     defer std.heap.smp_allocator.free(streams);
     var stream_slots: [16]bool = .{false} ** 16;

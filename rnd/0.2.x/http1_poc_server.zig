@@ -1,4 +1,4 @@
-//! HTTP/1 PoC server binary — all 3 dispatch models.
+//! HTTP/1 PoC server binary: all 3 dispatch models.
 //!
 //! Run:
 //!   zig run rnd/http1_poc_server.zig                        (ASYNC, port 8080)

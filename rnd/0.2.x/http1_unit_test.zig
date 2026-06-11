@@ -1,4 +1,4 @@
-//! Unit tests: parseHead, percentDecode, parseRange, readChunkedBody — no live I/O.
+//! Unit tests: parseHead, percentDecode, parseRange, readChunkedBody, no live I/O.
 //! Run: zig test rnd/http1_unit_test.zig
 
 const std = @import("std");

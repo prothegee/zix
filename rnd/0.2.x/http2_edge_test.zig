@@ -107,7 +107,7 @@ test "edge: wrong connection preface causes server to close" {
     const fd = try clientConnect(io, TEST_PORT);
     defer _ = std.posix.system.close(fd);
 
-    // Send an HTTP/1.1 request without Upgrade: h2c — not a valid h2c connection.
+    // Send an HTTP/1.1 request without Upgrade: h2c, not a valid h2c connection.
     try core.fdWriteAll(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     // Server must reject: GOAWAY (h2c direct path), HTTP/1.1 4xx (upgrade path), or EOF.
@@ -156,7 +156,7 @@ test "edge: peer closes without handshake causes silent server exit" {
 
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 2);
     const stream = try addr.connect(io, .{ .mode = .stream });
-    stream.close(io); // immediate close — server recvExact returns error.Closed
+    stream.close(io); // immediate close, server recvExact returns error.Closed
 
     t.join();
     ctx.listener.deinit(io);

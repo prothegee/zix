@@ -1,10 +1,10 @@
-//! PoC: TCP Model 2 — POOL — N accept threads + ConnQueue + M pool threads.
+//! PoC: TCP Model 2: POOL: N accept threads + ConnQueue + M pool threads.
 //!
 //! Concurrency: N accept threads (SO_REUSEPORT) push accepted connections to a
 //! shared ConnQueue. M pool threads block on ConnQueue.pop() and handle each
-//! connection synchronously. Pool is fixed at startup — all threads pre-warmed.
+//! connection synchronously. Pool is fixed at startup, all threads pre-warmed.
 //!
-//! Protocol: length-prefix framing — [4 bytes u32 big-endian][N bytes payload].
+//! Protocol: length-prefix framing, [4 bytes u32 big-endian][N bytes payload].
 //! Server echoes each message back verbatim.
 //!
 //! Self-contained: no imports from zix src.

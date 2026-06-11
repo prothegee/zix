@@ -1,4 +1,4 @@
-//! gRPC PoC integration tests — full round-trip over real TCP using serveConn.
+//! gRPC PoC integration tests: full round-trip over real TCP using serveConn.
 //! Run: zig test rnd/grpc_integ_test.zig
 
 const std = @import("std");

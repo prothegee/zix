@@ -1,4 +1,4 @@
-# FIX Protocol Specification — zix.Fix
+# FIX Protocol Specification: zix.Fix
 
 ## Overview
 
@@ -28,15 +28,15 @@ See also: rnd/tcp_server_specification.md for the underlying raw TCP primitives.
 - [x] Session state: Logon handshake, application message echo, Logout close
 - [x] All 3 dispatch models: POOL, ASYNC, MIXED
 - [x] FIX client: connect, Logon, send application messages, recv echo, Logout
-- [x] All 4 test tiers pass (unit 15, integration 2, behaviour 3, edge 6 — 26 total)
+- [x] All 4 test tiers pass (unit 15, integration 2, behaviour 3, edge 6: 26 total)
 
 PoC go/no-go passed (2026-05-20).
 
 ### src/ (src/tcp/fix/)
 
 - [x] `zix.Fix` public namespace
-- [x] `FixServer.run()` — ASYNC, POOL, MIXED dispatch (no handler param: session logic is internal)
-- [x] `FixClient` — connect, logon, send, recv, logout
+- [x] `FixServer.run()`: ASYNC, POOL, MIXED dispatch (no handler param: session logic is internal)
+- [x] `FixClient`: connect, logon, send, recv, logout
 - [x] `FixServerConfig` and `FixClientConfig` with logger field
 - [x] Zero-copy field helpers: `parseFields`, `buildMessage`, `getField`, `findMessageEnd`, `verifyChecksum`
 - [x] Logger wiring: `system()` on server lifecycle, `session()` per message in `serveConn`
@@ -80,7 +80,7 @@ Key structural rules:
 - Tag 8 (BeginString) must be first
 - Tag 9 (BodyLength) must be second: byte count from tag 35 up to and including the SOH before tag 10
 - Tag 10 (CheckSum) must be last: sum of all bytes in the message (including all SOH) mod 256, formatted as 3 zero-padded decimal digits
-- SOH (0x01) is the field delimiter, not a record separator — it appears after every value including the last field before tag 10
+- SOH (0x01) is the field delimiter, not a record separator. It appears after every value including the last field before tag 10
 
 ---
 
@@ -241,7 +241,7 @@ The user handler receives a FixMessage with zero-copy field access.
 
 ## User-Facing API
 
-Server — session logic is entirely internal to `serveConn`. No handler registration needed:
+Server (session logic is entirely internal to `serveConn`, no handler registration needed):
 
 ```zig
 var server = try zix.Fix.Server.init(.{
@@ -256,7 +256,7 @@ defer server.deinit();
 try server.run();
 ```
 
-Client — connect, logon, exchange messages, logout:
+Client (connect, logon, exchange messages, logout):
 
 ```zig
 var client = try zix.Fix.Client.init(io, .{
@@ -297,8 +297,8 @@ Note: user handler registration per MsgType (tag 35) is not yet implemented. The
 | :- | :- | :- |
 | src/tcp/fix/Fix.zig | public namespace, all re-exports | done |
 | src/tcp/fix/core.zig | parseFields, buildMessage, checksum, serveConn, inline unit tests | done |
-| src/tcp/fix/server.zig | FixServer — ASYNC, POOL, MIXED dispatch | done |
-| src/tcp/fix/client.zig | FixClient — connect, logon, send, recv, logout | done |
+| src/tcp/fix/server.zig | FixServer: ASYNC, POOL, MIXED dispatch | done |
+| src/tcp/fix/client.zig | FixClient: connect, logon, send, recv, logout | done |
 | src/tcp/fix/config.zig | FixServerConfig, FixClientConfig (includes logger field) | done |
 | src/tcp/fix/session.zig | full session state machine, sequence numbers, heartbeat timer | not started |
 | src/tcp/fix/message.zig | FixMessage with user-registered MsgType handlers | not started |
@@ -391,9 +391,9 @@ Current gap. zix.Fix implements the subset needed for PoC go/no-go. Completing I
 
 ### Layer 2: Transport Security (FIXS)
 
-FIXS is FIX over TLS. Standard practice at most brokers. Blocked on TLS src/ implementation. No session layer changes required — the existing FIX session layer is wired on top of the TLS stream once TLS lands.
+FIXS is FIX over TLS. Standard practice at most brokers. Blocked on TLS src/ implementation. No session layer changes required. The existing FIX session layer is wired on top of the TLS stream once TLS lands.
 
-Until TLS lands in zix itself, TLS termination at a reverse proxy (nginx stream or haproxy mode tcp) is the standard interim path. In this configuration, zix.Fix sees the proxy IP instead of the real client IP. PROXY protocol v1/v2 header parsing on accepted connections recovers the original client IP for accurate session logging. Not started — depends on the proxy deployment scenario being confirmed first.
+Until TLS lands in zix itself, TLS termination at a reverse proxy (nginx stream or haproxy mode tcp) is the standard interim path. In this configuration, zix.Fix sees the proxy IP instead of the real client IP. PROXY protocol v1/v2 header parsing on accepted connections recovers the original client IP for accurate session logging. Not started, depends on the proxy deployment scenario being confirmed first.
 
 ### Layer 3: Encoding Formats
 
@@ -448,34 +448,34 @@ Go/no-go passed 2026-05-20. All 4 test tiers complete.
 | File | Tests | Contents |
 | :- | :- | :- |
 | `rnd/fix_poc_core.zig` | (library) | parseFields, buildMessage, computeChecksum, verifyChecksum, serveConn |
-| `rnd/fix_poc_server.zig` | (binary) | echo server — `--model async\|pool\|mixed`, `--ip`, `--port` |
+| `rnd/fix_poc_server.zig` | (binary) | echo server: `--model async\|pool\|mixed`, `--ip`, `--port` |
 | `rnd/fix_poc_client.zig` | (binary) | Logon, NewOrderSingle, recv echo, Logout |
 | `rnd/fix_unit_test.zig` | 15 pass | checksum, framing, parseFields, buildMessage, getField |
 | `rnd/fix_integ_test.zig` | 2 pass | Logon handshake + echo round-trip, Logout |
 | `rnd/fix_behav_test.zig` | 3 pass | session state transitions, Heartbeat response |
 | `rnd/fix_edge_test.zig` | 6 pass | malformed message, bad checksum, truncated SOH, overflow |
 
-All test files live in `rnd/` alongside `fix_poc_core.zig`. `zig test file.zig` treats the file's directory as the module root — `@import("fix_poc_core.zig")` only resolves locally.
+All test files live in `rnd/` alongside `fix_poc_core.zig`. `zig test file.zig` treats the file's directory as the module root, `@import("fix_poc_core.zig")` only resolves locally.
 
 ### Go/no-go verification (two terminals)
 
-Terminal 1 — start the echo server (ASYNC by default, port 9400):
+Terminal 1: start the echo server (ASYNC by default, port 9400):
 
 ```sh
 zig run rnd/fix_poc_server.zig
 ```
 
-Terminal 2 — connect with the client:
+Terminal 2: connect with the client:
 
 ```sh
 zig run rnd/fix_poc_client.zig
 ```
 
-Expected client output: `sent Logon`, `recv Logon from server`, `sent NewOrderSingle`, `recv echo 35=D symbol=AAPL qty=100`, `sent Logout`, `recv Logout — session complete`.
+Expected client output: `sent Logon`, `recv Logon from server`, `sent NewOrderSingle`, `recv echo 35=D symbol=AAPL qty=100`, `sent Logout`, `recv Logout, session complete`.
 
 ### Key pitfall: readSliceShort blocks with a large buffer on live TCP
 
-`std.Io.Reader.readSliceShort(buf)` loops internally calling `netRead` until the buffer is full or EOF. With a 16 KB buffer and a 200-byte FIX message, it reads the 200 bytes then calls `netRead` again — which blocks because the socket buffer is empty. Both sides end up waiting: deadlock.
+`std.Io.Reader.readSliceShort(buf)` loops internally calling `netRead` until the buffer is full or EOF. With a 16 KB buffer and a 200-byte FIX message, it reads the 200 bytes then calls `netRead` again, which blocks because the socket buffer is empty. Both sides end up waiting: deadlock.
 
 Fix: use `takeByte` in a loop for delimiter-based framing. The reader's internal buffer absorbs the full TCP segment on the first syscall, subsequent `takeByte` calls drain from it with no additional syscalls.
 
@@ -487,7 +487,7 @@ while (true) {
 }
 ```
 
-This applies to any delimiter-based protocol on raw `std.Io.Reader`. `readSliceShort` is not "return after first available bytes" — it returns only after the provided buffer is full, or on EOF. Use `takeByte` (or `readSliceAll` with exact lengths) for framing.
+This applies to any delimiter-based protocol on raw `std.Io.Reader`. `readSliceShort` is not "return after first available bytes", it returns only after the provided buffer is full, or on EOF. Use `takeByte` (or `readSliceAll` with exact lengths) for framing.
 
 ### Session scope in PoC vs src/
 

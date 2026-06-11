@@ -1,4 +1,4 @@
-//! FIX 4.x PoC core — parsing, building, checksum, session handler.
+//! FIX 4.x PoC core: parsing, building, checksum, session handler.
 //! All functions are pub for test imports.
 //! No heap allocation. Zero-copy field parsing (slices into caller buffer).
 //! Self-contained: no imports from zix src.
@@ -185,7 +185,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8) !vo
         const fslice = fields[0..nf];
 
         if (!verifyChecksum(raw)) {
-            std.debug.print("fix: bad checksum — closing\n", .{});
+            std.debug.print("fix: bad checksum, closing\n", .{});
             return;
         }
 

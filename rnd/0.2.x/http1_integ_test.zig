@@ -167,14 +167,14 @@ test "integ: two sequential requests on keep-alive connection both succeed" {
     var rd = stream.reader(io, &rd_buf);
     var wr = stream.writer(io, &wr_buf);
 
-    // Request 1 — keep-alive.
+    // Request 1: keep-alive.
     try wr.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     try wr.interface.flush();
     var resp1: [2048]u8 = undefined;
     const n1 = try recvFull(&rd.interface, &resp1);
     try std.testing.expect(std.mem.startsWith(u8, resp1[0..n1], "HTTP/1.1 200 OK"));
 
-    // Request 2 — close.
+    // Request 2: close.
     try wr.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     try wr.interface.flush();
     var resp2: [2048]u8 = undefined;

@@ -198,7 +198,7 @@ test "edge: peer closes without sending a request causes silent server exit" {
 
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 3);
     const stream = try addr.connect(io, .{ .mode = .stream });
-    // Close immediately — server recvHead returns error.Closed, serveConn returns silently.
+    // Close immediately. Server recvHead returns error.Closed, serveConn returns silently.
     stream.close(io);
 
     t.join();

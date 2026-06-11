@@ -1,4 +1,4 @@
-//! gRPC PoC behaviour tests — observable API contracts over real TCP.
+//! gRPC PoC behaviour tests: observable API contracts over real TCP.
 //! Run: zig test rnd/grpc_behav_test.zig
 
 const std = @import("std");

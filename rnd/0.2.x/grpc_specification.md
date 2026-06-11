@@ -1,4 +1,4 @@
-# gRPC Specification — zix.Grpc
+# gRPC Specification: zix.Grpc
 
 ## Overview
 
@@ -13,7 +13,7 @@ gRPC can run over h2c (cleartext HTTP/2). zix.Grpc must support both.
 
 HTTP/2 PoC prerequisite is complete (2026-05-22): h2c direct, HPACK+Huffman, all frame types, 29 tests pass. HPACK dynamic table eviction closed 2026-05-22.
 `zix.Http2` src/ implemented (2026-05-24): standalone public API at `src/tcp/http2/`. gRPC src/ imports it for h2c transport.
-gRPC PoC can proceed now — h2c only, TLS src/ not required for PoC.
+gRPC PoC can proceed now, h2c only, TLS src/ not required for PoC.
 
 ---
 
@@ -29,7 +29,7 @@ PoC scope (covered by `rnd/grpc_poc_*.zig`):
 - [x] Protobuf minimal codec: varint encode/decode, string and int32 field encode/decode
 - [x] JSON-over-gRPC via std.json
 - [x] Error path: trailers-only response (grpc-status != 0, no DATA frame)
-- [x] All 4 test tiers pass (unit 22, integration 3, behaviour 3, edge 5 — 33 total)
+- [x] All 4 test tiers pass (unit 22, integration 3, behaviour 3, edge 5: 33 total)
 
 src/ implementation scope (`src/tcp/http2/grpc/`, done 2026-05-25):
 
@@ -68,7 +68,7 @@ gRPC does not mandate TLS. The choice depends on where clients are relative to t
 
 | Scenario | Transport | Notes |
 | :- | :- | :- |
-| Internet-facing API (mobile, external partners) | `grpcs://` (TLS) | Mandatory — network is untrusted |
+| Internet-facing API (mobile, external partners) | `grpcs://` (TLS) | Mandatory, network is untrusted |
 | Internal microservices (same cluster, same DC) | `grpc://` h2c | Standard in Kubernetes + service mesh |
 | Local development / testing | `grpc://` h2c | Simplest, no cert management |
 | Public port with no proxy in front | `grpcs://` (TLS) | Requires TLS src/ implementation |
@@ -384,16 +384,16 @@ Planned file structure:
 
 | File | Contents | Status |
 | :- | :- | :- |
-| `src/tcp/http2/grpc/Grpc.zig` | public namespace — re-exports all public types | done (2026-05-25) |
+| `src/tcp/http2/grpc/Grpc.zig` | public namespace, re-exports all public types | done (2026-05-25) |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` | done (2026-05-25) |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED dispatch, standalone serveGrpcConn loop | done (2026-05-25) |
-| `src/tcp/http2/grpc/client.zig` | `GrpcClient` — openStream, sendMessage, endStream, recvResponse, unary | done (2026-05-25) |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: ASYNC, POOL, MIXED dispatch, standalone serveGrpcConn loop | done (2026-05-25) |
+| `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary | done (2026-05-25) |
 | `src/tcp/http2/grpc/frame.zig` | 5-byte prefix read/write, sendGrpcHeaders/Data/Trailer/Error | done (2026-05-25) |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn`, `parsePath`, `detectContentType` | done (2026-05-25) |
 | `src/tcp/http2/grpc/proto.zig` | varint encode/decode, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` | done (2026-05-25) |
 | `src/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (OK=0 to UNAUTHENTICATED=16) | done (2026-05-25) |
-| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout` — grpc-timeout header parser | done (2026-05-25) |
-| `src/tcp/http2/grpc/h2/` | h2 TLS internals — blocked on tls_specification, do not start | blocked |
+| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser | done (2026-05-25) |
+| `src/tcp/http2/grpc/h2/` | h2 TLS internals, blocked on tls_specification, do not start | blocked |
 | `src/proto/` | full protobuf generated-code encoder and decoder (separate module) | not started |
 
 ---
@@ -438,7 +438,7 @@ All 33 tests pass.
 
 ### Key pitfall: sendResponse is NOT usable for gRPC
 
-`sendResponse` sends `content-length` and sets `FLAG_END_STREAM` on the DATA frame — which closes the stream immediately. gRPC requires three separate steps:
+`sendResponse` sends `content-length` and sets `FLAG_END_STREAM` on the DATA frame, which closes the stream immediately. gRPC requires three separate steps:
 
 1. HEADERS frame (no END_STREAM): `:status 200`, `content-type: application/grpc+proto`
 2. DATA frame (no END_STREAM): 5-byte gRPC prefix + message body
@@ -450,7 +450,7 @@ The gRPC PoC provides its own `sendGrpcHeaders`, `sendGrpcData`, `sendGrpcTraile
 
 `shift: u6` overflows at runtime when doing `shift += 7` while shift = 63 (63 + 7 = 70 > 63 max), before the overflow guard fires.
 
-Fix — check before incrementing:
+Fix: check before incrementing:
 ```zig
 if (shift > 56) return error.VarintOverflow;
 shift += 7;
@@ -488,14 +488,14 @@ Use `std.heap.smp_allocator` for one-off allocations (e.g. `std.json.parseFromSl
 
 ### Go/no-go verification
 
-Terminal 1 — start the server (any model):
+Terminal 1: start the server (any model):
 ```sh
 zig run rnd/grpc_poc_server.zig                   # ASYNC (default)
 zig run rnd/grpc_poc_server.zig -- --model pool   # POOL
 zig run rnd/grpc_poc_server.zig -- --model mixed  # MIXED
 ```
 
-Terminal 2 — integration tests double as go/no-go:
+Terminal 2: integration tests double as go/no-go:
 ```sh
 zig test rnd/grpc_integ_test.zig
 ```
@@ -509,7 +509,7 @@ printf '\x00\x00\x00\x00\x0f{"name":"world"}' | \
     http://127.0.0.1:8083/helloworld.Greeter/SayHello | xxd
 ```
 
-grpcurl requires server reflection or a .proto file — not supported in this PoC.
+grpcurl requires server reflection or a .proto file, not supported in this PoC.
 
 ---
 

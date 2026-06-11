@@ -1,10 +1,10 @@
-//! PoC: TCP Model 3 — MIXED — N accept threads (SO_REUSEPORT) + io.async() per connection.
+//! PoC: TCP Model 3: MIXED: N accept threads (SO_REUSEPORT) + io.async() per connection.
 //!
-//! Concurrency: N accept threads each dispatch via io.async() directly — no ConnQueue.
+//! Concurrency: N accept threads each dispatch via io.async() directly, no ConnQueue.
 //! io.async() from N threads is safe (mutex-protected inside Threaded).
 //! Falls back to inline on the stalled accept thread when async_limit is reached.
 //!
-//! Protocol: length-prefix framing — [4 bytes u32 big-endian][N bytes payload].
+//! Protocol: length-prefix framing, [4 bytes u32 big-endian][N bytes payload].
 //! Server echoes each message back verbatim.
 //!
 //! Self-contained: no imports from zix src.

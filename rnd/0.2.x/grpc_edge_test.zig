@@ -1,4 +1,4 @@
-//! gRPC PoC edge tests — boundary conditions and error paths over real TCP.
+//! gRPC PoC edge tests: boundary conditions and error paths over real TCP.
 //! Run: zig test rnd/grpc_edge_test.zig
 
 const std = @import("std");
@@ -236,7 +236,7 @@ test "edge: body shorter than 5-byte prefix returns INVALID_ARGUMENT" {
     defer _ = std.posix.system.close(fd);
 
     try sendPreface(fd);
-    // Only 3 bytes of body — not enough for the 5-byte gRPC prefix
+    // Only 3 bytes of body, not enough for the 5-byte gRPC prefix
     try sendRawRequest(fd, 1, "/helloworld.Greeter/SayHello", "application/grpc+proto", &.{ 0, 0, 0 });
 
     const status = try recvGrpcStatus(fd, 1);

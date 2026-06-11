@@ -1,4 +1,4 @@
-//! Unit tests: frame codec, HPACK static table, Huffman, HPACK decode/encode, dynamic table eviction — no I/O.
+//! Unit tests: frame codec, HPACK static table, Huffman, HPACK decode/encode, dynamic table eviction, no I/O.
 //! Run: zig test rnd/http2_unit_test.zig
 
 const std = @import("std");
@@ -177,13 +177,13 @@ test "unit: hpack dynamic table evicts oldest entry when table is full" {
     var hdrs: [8]core.Header = undefined;
     var scratch: [512]u8 = undefined;
 
-    // Entry 1: name="x", value="y" — literal with incremental indexing (0x40), new name.
+    // Entry 1: name="x", value="y": literal with incremental indexing (0x40), new name.
     const block1 = [_]u8{ 0x40, 0x01, 'x', 0x01, 'y' };
     _ = try dec.decode(&block1, &hdrs, &scratch);
     try std.testing.expectEqual(1, dec.dyn_count);
     try std.testing.expectEqual(34, dec.dyn_size);
 
-    // Entry 2: name="a", value="b" — must evict entry 1 before adding.
+    // Entry 2: name="a", value="b": must evict entry 1 before adding.
     const block2 = [_]u8{ 0x40, 0x01, 'a', 0x01, 'b' };
     _ = try dec.decode(&block2, &hdrs, &scratch);
     try std.testing.expectEqual(1, dec.dyn_count); // entry 1 evicted

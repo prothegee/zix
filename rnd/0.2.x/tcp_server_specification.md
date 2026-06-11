@@ -8,7 +8,7 @@ This document covers the PoC phase only. Architectural decisions will move to `d
 ## Scope
 
 Raw `zix.Tcp.Server` and `zix.Tcp.Client`.
-No framing, no protocol awareness — the caller owns all bytes on the stream.
+No framing, no protocol awareness. The caller owns all bytes on the stream.
 
 FIX protocol (`zix.Tcp.Fix`) builds on top of this layer and is tracked separately.
 
@@ -229,7 +229,7 @@ Design decisions confirmed from PoC design session (2026-05-18).
 ### Echo Protocol (PoC framing)
 
 All 3 PoC files use the same length-prefix framing to verify the std API surface.
-This is not the production API — production callers define their own framing.
+This is not the production API. Production callers define their own framing.
 
 ```
 client -> server:   [4 bytes u32 big-endian: payload length][N bytes: payload]
@@ -326,13 +326,13 @@ fn acceptEntry(io: std.Io) void {
 
 ### ConnQueue (POOL only)
 
-Copy of `ConnQueue` from `rnd/archieve-0.1.x/http_poc_model_2_pool.zig` — model-independent,
+Copy of `ConnQueue` from `rnd/archieve-0.1.x/http_poc_model_2_pool.zig`, model-independent,
 no changes needed. Uses `std.Io.Mutex` + `std.Io.Condition` + `std.ArrayListUnmanaged`.
 
 ### Client (shared across all 3 models)
 
 One client file covers all 3 server models. The dispatch model (ASYNC/POOL/MIXED) is a
-server-side concern only — once the TCP connection is established the stream is identical
+server-side concern only. Once the TCP connection is established the stream is identical
 to the client regardless of which model answered it.
 
 Target model is selected by changing the `PORT` constant:
@@ -385,7 +385,7 @@ what the payload means. Content semantics are the application's responsibility.
 | Framing | `[u32 len][payload]` | where each message starts and ends |
 | Content | application | what the payload bytes mean |
 
-Without a content contract the client receives bytes it cannot interpret — it can
+Without a content contract the client receives bytes it cannot interpret, it can
 only print them as a string. This is sufficient for the echo PoC but not for a real protocol.
 
 #### Adding a message type byte
@@ -437,14 +437,14 @@ Server -> Client:   [len][TYPE=ERROR ][reason]
 
 Same connection, multiple message types, both directions.
 
-#### TCP vs UDP feedback — not the same
+#### TCP vs UDP feedback: not the same
 
 | | UDP (zix) | TCP raw |
 | :- | :- | :- |
 | Packet shape | one fixed `extern struct` | variable, defined per message type |
-| Client sends different types | no — always the same struct | yes — type byte determines shape |
+| Client sends different types | no, always the same struct | yes, type byte determines shape |
 | Server response types | fixed: ack / nack / packet | anything the application defines |
-| Connection state | none — each datagram independent | yes — session persists across messages |
+| Connection state | none (each datagram independent) | yes, session persists across messages |
 | Protocol definition | zix (partially) | entirely the application |
 
 UDP is suitable when all messages have the same shape (telemetry, position, sensor).
@@ -474,15 +474,15 @@ The framing is the protocol. Any language that implements the same byte layout i
 #### Path-style endpoints (`ip:port/foo`) do not apply to raw TCP
 
 Paths are an HTTP (Layer 7) concept. Raw TCP's endpoint is `ip:port` only.
-The connection has no concept of routes, methods, or paths — the handler owns the
+The connection has no concept of routes, methods, or paths. The handler owns the
 entire stream. For path-based routing use `zix.Http.Server`.
 
-#### `rd_buf` size — why `MAX_MSG + 4`
+#### `rd_buf` size: why `MAX_MSG + 4`
 
 `rd_buf` is the internal staging area the reader fills from the socket in one syscall.
 When `takeVarInt` triggers a socket read, the OS may deliver the header AND payload
 together. If `rd_buf` is only `[MAX_MSG]u8`, a max-sized message (4 + MAX_MSG bytes)
-overflows by 4 — the last 4 bytes remain in the socket buffer and require a second
+overflows by 4, the last 4 bytes remain in the socket buffer and require a second
 syscall during `readSliceAll`. Sizing to `MAX_MSG + 4` fits one complete framed message
 in one fill, avoiding that extra syscall for the worst case.
 
@@ -505,7 +505,7 @@ Step 3 -- readSliceAll(body[0..21]) drains rd_buf -> no extra syscall
 
 #### Header validation in the PoC
 
-The PoC performs minimal validation — only the length field is checked:
+The PoC performs minimal validation: only the length field is checked:
 
 ```zig
 const len = rd.interface.takeVarInt(u32, .big, 4) catch break;
@@ -515,7 +515,7 @@ if (len == 0 or len > MAX_MSG) break;
 No magic number, no version check, no checksum. This is sufficient for a local echo
 but not for a production protocol exposed to untrusted clients.
 
-#### Length prefix size — not always 4 bytes
+#### Length prefix size: not always 4 bytes
 
 The prefix size is a protocol design decision based on the maximum expected payload:
 
@@ -525,7 +525,7 @@ The prefix size is a protocol design decision based on the maximum expected payl
 | 2 bytes | `u16` | 65,535 bytes | game state, moderate payloads |
 | 4 bytes | `u32` | ~4 GB | most general-purpose protocols (PoC default) |
 | 8 bytes | `u64` | ~18 EB | large binary streams, file transfer |
-| varint (LEB128) | variable | unlimited | protobuf, gRPC — compact for small messages |
+| varint (LEB128) | variable | unlimited | protobuf, gRPC, compact for small messages |
 
 4 bytes is the most common default: covers virtually all practical sizes, naturally aligned.
 
@@ -542,7 +542,7 @@ A production header validates more than just length:
 = 12 bytes total header
 ```
 
-Server validates each field in order — reject early on any mismatch:
+Server validates each field in order: reject early on any mismatch:
 
 ```zig
 const magic   = rd.interface.takeVarInt(u16, .big, 2) catch break;
@@ -564,7 +564,7 @@ const crc_actual = std.hash.Crc32.hash(body[0..len]);
 if (crc_actual != crc_expected) break;
 ```
 
-#### Delimiter-based framing — no length prefix
+#### Delimiter-based framing: no length prefix
 
 Some protocols skip the length prefix and scan for a sentinel byte instead:
 
@@ -575,7 +575,7 @@ Some protocols skip the length prefix and scan for a sentinel byte instead:
 | Redis (RESP) | `\r\n` terminates each line | text-based |
 | SMTP | `.` on its own line ends body | text-based |
 
-Delimiter scanning requires reading byte-by-byte or buffering until the sentinel appears —
+Delimiter scanning requires reading byte-by-byte or buffering until the sentinel appears,
 slower than length-prefix for large payloads. Suitable for text protocols where
 human-readability matters more than throughput.
 
@@ -607,12 +607,12 @@ MIXED server (port 9202):
 zig run rnd/tcp_poc_model_3_mixed.zig
 ```
 
-Client — default connects to port 9200:
+Client (default connects to port 9200):
 ```sh
 zig run rnd/tcp_poc_client.zig
 ```
 
-Client — target a specific model:
+Client (target a specific model):
 ```sh
 zig run rnd/tcp_poc_client.zig -- --port 9201
 zig run rnd/tcp_poc_client.zig -- --ip 127.0.0.1 --port 9202

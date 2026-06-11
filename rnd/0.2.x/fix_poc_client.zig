@@ -1,4 +1,4 @@
-//! FIX 4.x PoC client — Logon, send a NewOrderSingle, receive echo, Logout.
+//! FIX 4.x PoC client: Logon, send a NewOrderSingle, receive echo, Logout.
 //!
 //! Self-contained: no imports from zix src.
 //!
@@ -116,7 +116,7 @@ pub fn main(process: std.process.Init) !void {
         const nf = try core.parseFields(raw, &fields);
         const msgtype = core.getField(fields[0..nf], 35) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msgtype, "5")) return error.ExpectedLogout;
-        std.debug.print("client: recv Logout — session complete\n", .{});
+        std.debug.print("client: recv Logout, session complete\n", .{});
     }
 }
 

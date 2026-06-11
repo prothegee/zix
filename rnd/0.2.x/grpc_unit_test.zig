@@ -1,4 +1,4 @@
-//! gRPC PoC unit tests — varint codec, proto fields, 5-byte prefix, path parser,
+//! gRPC PoC unit tests: varint codec, proto fields, 5-byte prefix, path parser,
 //! content-type detection. No I/O.
 //! Run: zig test rnd/grpc_unit_test.zig
 

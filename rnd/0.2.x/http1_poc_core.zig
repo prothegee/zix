@@ -41,7 +41,7 @@ pub const HandlerFn = *const fn (
 
 /// Parse a complete HTTP/1.x request from buf using std.http.HeadParser.
 /// buf must contain the full header block ending with \r\n\r\n.
-/// All slices in ParsedHead point into buf — zero copy.
+/// All slices in ParsedHead point into buf (zero copy).
 ///
 /// Return:
 /// - !struct{ head: ParsedHead, body_offset: usize } (body_offset: index of first body byte)
@@ -270,7 +270,7 @@ pub fn writeSimple(
     if (body.len > 0) try fdWriteAll(fd, body);
 }
 
-/// Headers-only response (no body) — for HEAD method responses.
+/// Headers-only response (no body, for HEAD method responses).
 pub fn writeSimpleNoBody(
     fd: std.posix.fd_t,
     status: u16,
@@ -603,7 +603,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, handler: HandlerFn) void
 
         if (!head.keep_alive) return;
 
-        // Chunked bodies are fully consumed by readChunkedBody — no leftover tracking needed.
+        // Chunked bodies are fully consumed by readChunkedBody, no leftover tracking needed.
         if (head.chunked_request) {
             leftover = 0;
         } else {

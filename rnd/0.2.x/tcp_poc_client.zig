@@ -1,4 +1,4 @@
-//! TCP PoC client — shared across all 3 server models.
+//! TCP PoC client: shared across all 3 server models.
 //!
 //! Connects, sends one framed message, reads the echo, prints result.
 //! IP and PORT are runtime-overridable via CLI args. Constants are the fallback.

@@ -1,11 +1,11 @@
-//! PoC: TCP Model 1 — ASYNC — single accept loop + io.async() per connection.
+//! PoC: TCP Model 1: ASYNC: single accept loop + io.async() per connection.
 //!
 //! Concurrency: each accepted connection is dispatched via io.async().
-//! workers and pool_size are ignored — always 1 accept thread.
+//! workers and pool_size are ignored, always 1 accept thread.
 //! After async_limit is reached, io.async() falls back to inline on the accept
-//! thread — the accept loop stalls for that connection's lifetime.
+//! thread. The accept loop stalls for that connection's lifetime.
 //!
-//! Protocol: length-prefix framing — [4 bytes u32 big-endian][N bytes payload].
+//! Protocol: length-prefix framing, [4 bytes u32 big-endian][N bytes payload].
 //! Server echoes each message back verbatim.
 //!
 //! Self-contained: no imports from zix src.

@@ -1,4 +1,4 @@
-//! Unit tests: FIX parsing, building, and checksum — no I/O.
+//! Unit tests: FIX parsing, building, and checksum, no I/O.
 //! Run: zig test rnd/fix_unit_test.zig
 
 const std = @import("std");

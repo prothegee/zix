@@ -1,6 +1,6 @@
-//! FIX 4.x PoC server — echo server for all 3 dispatch models.
+//! FIX 4.x PoC server: echo server for all 3 dispatch models.
 //!
-//! Session: Logon → application message echo → Logout.
+//! Session: Logon -> application message echo -> Logout.
 //! All session logic is in fix_poc_core.zig.
 //!
 //! Self-contained: no imports from zix src.

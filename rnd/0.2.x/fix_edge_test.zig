@@ -179,12 +179,12 @@ test "edge: bad checksum causes server to close without server-side error propag
     try wr.interface.writeAll(out_buf[0..n]);
     try wr.interface.flush();
 
-    // Server closes the connection — next read should return EOF or error.
+    // Server closes the connection. Next read should return EOF or error.
     _ = rd.interface.takeByte() catch {}; // EOF or error is expected
 
     t.join();
     ctx.listener.deinit(io);
     // Server error may be set (it returned early), but it must not be a crash.
-    // verifyChecksum failure causes a plain `return` — ctx.err stays null.
+    // verifyChecksum failure causes a plain `return`, ctx.err stays null.
     try std.testing.expect(ctx.err == null);
 }
