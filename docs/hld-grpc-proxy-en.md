@@ -1,4 +1,4 @@
-# gRPC h2c — TLS termination via nginx and haproxy
+# gRPC h2c TLS termination via nginx and haproxy
 
 `zix.Grpc` speaks h2c (HTTP/2 cleartext). TLS termination is delegated to a reverse proxy in front of the Zig server. External gRPC clients connect over TLS (h2 / gRPC+TLS); the proxy forwards as h2c to the Zig backend.
 
