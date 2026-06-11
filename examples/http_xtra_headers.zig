@@ -20,11 +20,11 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 //
 // Available tiers (see docs/headers.md for selection guidance):
 //
-//   .MINIMAL     — 16   simple APIs, constrained environments
-//   .COMMON      — 32   default, most web apps, single proxy
-//   .LARGE       — 64   CDN + proxy, load balancers
-//   .EXTRA_LARGE — 128  k8s, service mesh, heavy CORS/forwarding stacks
-//   .CUSTOM(N)   — N    explicit non-standard cap
+//   .MINIMAL     - 16   simple APIs, constrained environments
+//   .COMMON      - 32   default, most web apps, single proxy
+//   .LARGE       - 64   CDN + proxy, load balancers
+//   .EXTRA_LARGE - 128  k8s, service mesh, heavy CORS/forwarding stacks
+//   .CUSTOM(N)   - N    explicit non-standard cap
 //
 // This server runs with .LARGE (64) so handlers can add up to 64 headers.
 // --------------------------------------------------------- //
@@ -67,7 +67,7 @@ pub fn corsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // Here we use a small local cap to demonstrate the error path clearly.
 //
 // In practice, addHeader() returns error.TooManyHeaders when the cap is
-// reached. Handlers should propagate or handle it — returning the error
+// reached. Handlers should propagate or handle it, returning the error
 // here surfaces it as a 500 to the client.
 pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
@@ -85,7 +85,7 @@ pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zi
         try res.addHeader(name, val);
     }
 
-    // 65th call — returns error.TooManyHeaders
+    // 65th call: returns error.TooManyHeaders
     res.addHeader("X-One-Too-Many", "overflow") catch |err| {
         res.setStatus(.INTERNAL_SERVER_ERROR);
         const msg = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\",\"note\":\"cap is 64\"}}", .{@errorName(err)});
@@ -98,13 +98,13 @@ pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zi
 }
 
 // GET /inject-guard
-// Demonstrates the header injection guard — CR or LF in name or value
+// Demonstrates the header injection guard: CR or LF in name or value
 // is rejected by addHeader() before writing to the wire.
 pub fn injectGuardHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     // _ = ctx;
 
-    // Attempt to inject via value — rejected by the \r\n guard
+    // Attempt to inject via value, rejected by the \r\n guard
     res.addHeader("X-Safe", "legit\r\nX-Injected: attack") catch |err| {
         const msg = try std.fmt.allocPrint(
             ctx.allocator,
