@@ -1,4 +1,4 @@
-# gRPC h2c — Desain Tingkat Tinggi: zix.Grpc
+# gRPC h2c Desain Tingkat Tinggi: zix.Grpc
 
 ## Tujuan
 
@@ -20,21 +20,21 @@ graph LR
     Z --> TO[timeout.zig]
 ```
 
-`zix.Grpc` dibangun di atas `zix.Http2`. Frame loop gRPC (`serveGrpcConn`) mereplikasi h2c stream loop dari `zix.Http2.serveConn` dengan tanda tangan handler yang berbeda — `GrpcContext` bukan byte body mentah — untuk mendukung streaming tanpa antrian antar thread.
+`zix.Grpc` dibangun di atas `zix.Http2`. Frame loop gRPC (`serveGrpcConn`) mereplikasi h2c stream loop dari `zix.Http2.serveConn` dengan tanda tangan handler yang berbeda (`GrpcContext` bukan byte body mentah) untuk mendukung streaming tanpa antrian antar thread.
 
 ## Struktur Berkas
 
 | Berkas | Peran |
 | :- | :- |
-| `src/tcp/http2/grpc/Grpc.zig` | namespace — semua re-export publik |
+| `src/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (model blocking), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplex `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED (pool blocking), EPOLL (multiplex `epollMuxWorker` + `GrpcConnTable`) |
-| `src/tcp/http2/grpc/client.zig` | `GrpcClient` — openStream, sendMessage, endStream, recvResponse, unary |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: ASYNC, POOL, MIXED (pool blocking), EPOLL (multiplex `epollMuxWorker` + `GrpcConnTable`) |
+| `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | struct `GrpcPrefix`, `readGrpcPrefix`, `writeGrpcPrefix`, helper frame `send*`/`build*` (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), blok reply cache comptime |
 | `src/tcp/http2/grpc/proto.zig` | konstanta tipe wire `WT_*`, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
 | `src/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
-| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout` — parser header grpc-timeout |
+| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: parser header grpc-timeout |
 
 ## API Publik
 
@@ -45,27 +45,27 @@ graph LR
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
-| `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` — mengirim UNIMPLEMENTED jika tidak ada route yang cocok |
+| `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok) |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
 | `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
-| `zix.Grpc.ServeOpts` | `GrpcServeOpts` — opsi per koneksi yang diteruskan ke `serveConn` |
+| `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |
 | `zix.Grpc.Path` | `package_service: []const u8`, `method: []const u8` |
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
 | `zix.Grpc.readPrefix` | `fn(body: []const u8) error{TooShort}!Prefix` |
 | `zix.Grpc.writePrefix` | `fn(buf: *[5]u8, compress: bool, msg_len: u32) void` |
-| `zix.Grpc.sendHeaders` | `fn(fd, sid, content_type) !void` — kirim HEADERS awal (tanpa END_STREAM) |
-| `zix.Grpc.sendData` | `fn(fd, sid, msg) !void` — kirim DATA dengan prefix gRPC 5 byte |
-| `zix.Grpc.sendTrailer` | `fn(fd, sid, grpc_status, grpc_message) !void` — kirim HEADERS trailer (END_STREAM) |
-| `zix.Grpc.sendError` | `fn(fd, sid, grpc_status, grpc_message) !void` — error trailers-only, tanpa frame DATA |
+| `zix.Grpc.sendHeaders` | `fn(fd, sid, content_type) !void`: kirim HEADERS awal (tanpa END_STREAM) |
+| `zix.Grpc.sendData` | `fn(fd, sid, msg) !void`: kirim DATA dengan prefix gRPC 5 byte |
+| `zix.Grpc.sendTrailer` | `fn(fd, sid, grpc_status, grpc_message) !void`: kirim HEADERS trailer (END_STREAM) |
+| `zix.Grpc.sendError` | `fn(fd, sid, grpc_status, grpc_message) !void`: error trailers-only, tanpa frame DATA |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanodetik) |
-| `zix.Grpc.serveConn` | `fn(comptime routes, fd, opts) void` — titik masuk koneksi langsung |
+| `zix.Grpc.serveConn` | `fn(comptime routes, fd, opts) void`: titik masuk koneksi langsung |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
-| `zix.Grpc.wallClockNs` | `fn() u64` — waktu wall-clock saat ini dalam nanodetik (CLOCK_REALTIME). Digunakan untuk menimpa `ctx.deadline_ns` saat runtime. |
+| `zix.Grpc.wallClockNs` | `fn() u64`: waktu wall-clock saat ini dalam nanodetik (CLOCK_REALTIME). Digunakan untuk menimpa `ctx.deadline_ns` saat runtime. |
 
 ## Field GrpcServerConfig
 
@@ -87,7 +87,7 @@ graph LR
 
 ## Pola Handler
 
-Route didaftarkan saat kompilasi melalui `Server.init`. Handler menerima header request dan `GrpcContext` — path sudah diselesaikan oleh tabel route.
+Route didaftarkan saat kompilasi melalui `Server.init`. Handler menerima header request dan `GrpcContext`, path sudah diselesaikan oleh tabel route.
 
 ```zig
 fn echoHandler(
@@ -117,7 +117,7 @@ Aturan penting:
 - `ctx.recvMessage()` mengembalikan `null` saat semua pesan client telah dikonsumsi (client mengirim END_STREAM).
 - Route unary (`is_server_streaming = false`, default) di-dispatch secara sinkron pada connection thread. Route server-streaming (`is_server_streaming = true`) masing-masing berjalan pada thread tersendiri yang berbagi write mutex tingkat koneksi.
 - Server mem-buffer semua DATA client sebelum melakukan dispatch handler.
-- `parsePath` dan dispatch berbasis path di dalam handler tidak diperlukan — tabel route menangani hal tersebut.
+- `parsePath` dan dispatch berbasis path di dalam handler tidak diperlukan: tabel route menangani hal tersebut.
 
 ## Deadline Konteks
 
@@ -129,7 +129,7 @@ Tiga input menentukan `ctx.deadline_ns` saat dispatch:
 | `Route.timeout_ms` | tabel route comptime | default per route; 0 = gunakan batas global |
 | header `grpc-timeout` | request client | di-parse oleh `parseTimeout`; berlaku jika lebih ketat |
 
-`ctx.deadline_ns: ?u64` adalah yang paling ketat dari ketiganya (nanodetik CLOCK_REALTIME). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur — sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
+`ctx.deadline_ns: ?u64` adalah yang paling ketat dari ketiganya (nanodetik CLOCK_REALTIME). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur, sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
 
 Handler memeriksa deadline secara eksplisit:
 
@@ -398,7 +398,7 @@ Lihat [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) untuk contoh konfigurasi ngi
 | `examples/grpc_location_server_1_async.zig` | ASYNC, location.Location/SendLocationAndSave, port 10101, logger terhubung |
 | `examples/grpc_location_server_2_pool.zig` | POOL, port 10101 |
 | `examples/grpc_location_server_3_mixed.zig` | MIXED, port 10101 |
-| `examples/grpc_location_client.zig` | client layanan lokasi — encode field double, decode respons bool |
+| `examples/grpc_location_client.zig` | client layanan lokasi: encode field double, decode respons bool |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location pada satu port (10102), logger terhubung |
 | `examples/grpc_multi_client.zig` | memanggil kedua layanan pada satu koneksi, port 10102 |
 | `examples/protobuf/helloworld.proto` | skema proto3 untuk helloworld.Greeter/SayHello |

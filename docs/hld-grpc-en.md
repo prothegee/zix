@@ -1,4 +1,4 @@
-# gRPC h2c — High-Level Design: zix.Grpc
+# gRPC h2c High-Level Design: zix.Grpc
 
 ## Goals
 
@@ -20,21 +20,21 @@ graph LR
     Z --> TO[timeout.zig]
 ```
 
-`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveGrpcConn`) replicates the h2c stream loop from `zix.Http2.serveConn` with a different handler signature — `GrpcContext` instead of raw body bytes — to support streaming without inter-thread queues.
+`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveGrpcConn`) replicates the h2c stream loop from `zix.Http2.serveConn` with a different handler signature (`GrpcContext` instead of raw body bytes) to support streaming without inter-thread queues.
 
 ## Source Layout
 
 | File | Role |
 | :- | :- |
-| `src/tcp/http2/grpc/Grpc.zig` | namespace — all public re-exports |
+| `src/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (blocking models), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplexed `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer` — ASYNC, POOL, MIXED (blocking pool), EPOLL (multiplexed `epollMuxWorker` + `GrpcConnTable`) |
-| `src/tcp/http2/grpc/client.zig` | `GrpcClient` — openStream, sendMessage, endStream, recvResponse, unary |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: ASYNC, POOL, MIXED (blocking pool), EPOLL (multiplexed `epollMuxWorker` + `GrpcConnTable`) |
+| `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | `GrpcPrefix` struct, `readGrpcPrefix`, `writeGrpcPrefix`, `send*`/`build*` frame helpers (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), comptime cached reply blocks |
 | `src/tcp/http2/grpc/proto.zig` | `WT_*` wire type constants, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
 | `src/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
-| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout` — grpc-timeout header parser |
+| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser |
 
 ## Public API
 
@@ -45,27 +45,27 @@ graph LR
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
-| `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` — sends UNIMPLEMENTED if no route matches |
+| `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` (sends UNIMPLEMENTED if no route matches) |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
 | `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (Linux-only) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
-| `zix.Grpc.ServeOpts` | `GrpcServeOpts` — per-connection options passed to `serveConn` |
+| `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
 | `zix.Grpc.Path` | `package_service: []const u8`, `method: []const u8` |
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
 | `zix.Grpc.readPrefix` | `fn(body: []const u8) error{TooShort}!Prefix` |
 | `zix.Grpc.writePrefix` | `fn(buf: *[5]u8, compress: bool, msg_len: u32) void` |
-| `zix.Grpc.sendHeaders` | `fn(fd, sid, content_type) !void` — send initial HEADERS (no END_STREAM) |
-| `zix.Grpc.sendData` | `fn(fd, sid, msg) !void` — send DATA with 5-byte gRPC prefix |
-| `zix.Grpc.sendTrailer` | `fn(fd, sid, grpc_status, grpc_message) !void` — send trailer HEADERS (END_STREAM) |
-| `zix.Grpc.sendError` | `fn(fd, sid, grpc_status, grpc_message) !void` — trailers-only error, no DATA frame |
+| `zix.Grpc.sendHeaders` | `fn(fd, sid, content_type) !void`: send initial HEADERS (no END_STREAM) |
+| `zix.Grpc.sendData` | `fn(fd, sid, msg) !void`: send DATA with 5-byte gRPC prefix |
+| `zix.Grpc.sendTrailer` | `fn(fd, sid, grpc_status, grpc_message) !void`: send trailer HEADERS (END_STREAM) |
+| `zix.Grpc.sendError` | `fn(fd, sid, grpc_status, grpc_message) !void`: trailers-only error, no DATA frame |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanoseconds) |
-| `zix.Grpc.serveConn` | `fn(comptime routes, fd, opts) void` — direct connection entry point |
+| `zix.Grpc.serveConn` | `fn(comptime routes, fd, opts) void`: direct connection entry point |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
-| `zix.Grpc.wallClockNs` | `fn() u64` — current wall-clock time in nanoseconds (CLOCK_REALTIME). Used to override `ctx.deadline_ns` at runtime. |
+| `zix.Grpc.wallClockNs` | `fn() u64`: current wall-clock time in nanoseconds (CLOCK_REALTIME). Used to override `ctx.deadline_ns` at runtime. |
 
 ## GrpcServerConfig Fields
 
@@ -87,7 +87,7 @@ graph LR
 
 ## Handler Pattern
 
-Routes are registered at compile time via `Server.init`. The handler receives request headers and a `GrpcContext` — the path is already resolved by the route table.
+Routes are registered at compile time via `Server.init`. The handler receives request headers and a `GrpcContext`, the path is already resolved by the route table.
 
 ```zig
 fn echoHandler(
@@ -117,7 +117,7 @@ Key rules:
 - `ctx.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
 - Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes (`is_server_streaming = true`) each run on a dedicated thread sharing a connection-level write mutex.
 - The server buffers all client DATA before dispatching the handler.
-- `parsePath` and path-based dispatch inside the handler are not needed — the route table handles that.
+- `parsePath` and path-based dispatch inside the handler are not needed: the route table handles that.
 
 ## Context Timeout
 
@@ -129,7 +129,7 @@ Three inputs determine `ctx.deadline_ns` at dispatch time:
 | `Route.timeout_ms` | comptime route table | per-route default; 0 = use global cap |
 | `grpc-timeout` header | client request | parsed by `parseTimeout`; takes effect if tighter |
 
-`ctx.deadline_ns: ?u64` is the tightest of all three (CLOCK_REALTIME nanoseconds). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set — so per-route timeout only tightens, never loosens.
+`ctx.deadline_ns: ?u64` is the tightest of all three (CLOCK_REALTIME nanoseconds). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set, so per-route timeout only tightens, never loosens.
 
 Handlers check the deadline explicitly:
 
@@ -398,7 +398,7 @@ See [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) for nginx and haproxy configur
 | `examples/grpc_location_server_1_async.zig` | ASYNC, location.Location/SendLocationAndSave, port 10101, logger wired |
 | `examples/grpc_location_server_2_pool.zig` | POOL, port 10101 |
 | `examples/grpc_location_server_3_mixed.zig` | MIXED, port 10101 |
-| `examples/grpc_location_client.zig` | location service client — encodes double fields, decodes bool response |
+| `examples/grpc_location_client.zig` | location service client: encodes double fields, decodes bool response |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location on one port (10102), logger wired |
 | `examples/grpc_multi_client.zig` | calls both services on one connection, port 10102 |
 | `examples/protobuf/helloworld.proto` | proto3 schema for helloworld.Greeter/SayHello |
