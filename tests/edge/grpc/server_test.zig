@@ -1,4 +1,4 @@
-//! Edge tests: gRPC boundary conditions — malformed prefix, empty body, truncated message,
+//! Edge tests: gRPC boundary conditions: malformed prefix, empty body, truncated message,
 //! path parse failures, content-type detection edge cases, and finish-only handler behavior.
 
 const std = @import("std");
