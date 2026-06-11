@@ -1,7 +1,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// Runs alongside http_basic.zig server on port 9000.
+// Runs against any of the http basic servers on port 9100
+// (e.g. example-http_basic_1_async with routes / /echo /about).
 // Usage: zig build example-http_client && ./zig-out/bin/example-http_client
 
 pub fn main(process: std.process.Init) !void {
@@ -18,7 +19,7 @@ pub fn main(process: std.process.Init) !void {
 
     // GET /
     {
-        var resp = try client.get("http://127.0.0.1:9000/", .{});
+        var resp = try client.get("http://127.0.0.1:9100/", .{});
         defer resp.deinit();
         std.debug.print("GET /  status={d}  body={s}\n", .{ resp.status(), resp.body() });
         if (resp.header("content-type")) |ct| {
@@ -28,7 +29,7 @@ pub fn main(process: std.process.Init) !void {
 
     // GET /about
     {
-        var resp = try client.get("http://127.0.0.1:9000/about", .{});
+        var resp = try client.get("http://127.0.0.1:9100/about", .{});
         defer resp.deinit();
         std.debug.print("GET /about  status={d}  body={s}\n", .{ resp.status(), resp.body() });
     }
@@ -38,7 +39,7 @@ pub fn main(process: std.process.Init) !void {
         const extra = [_]std.http.Header{
             .{ .name = "X-Trace-Id", .value = "demo-001" },
         };
-        var resp = try client.post("http://127.0.0.1:9000/echo", .{
+        var resp = try client.post("http://127.0.0.1:9100/echo", .{
             .headers = &extra,
             .body = "hello from zix client",
         });
