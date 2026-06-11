@@ -1,4 +1,4 @@
-# gRPC Benchmark Results — origin-0.2.x
+# gRPC Benchmark Results: origin-0.2.x
 
 See `grpc_stream_bug.md` for full root cause analysis.
 
@@ -39,7 +39,7 @@ Benchmarks run against `origin-0.2.x` after the second-pass fixes
 - Build: debug (no -Doptimize)
 - Profiling: `perf record -F 99` on each server process
 
-Note: h2load does not validate protobuf bodies — it measures raw HTTP/2 throughput.
+Note: h2load does not validate protobuf bodies, it measures raw HTTP/2 throughput.
 The `example-grpc_server_4_epoll` handler returns a raw string, not valid protobuf,
 so only h2load (not ghz) was used against it. The location server returns valid protobuf.
 
@@ -71,9 +71,9 @@ production builds.
 
 | Symbol | c512 | c1024 | ghz c64 | Notes |
 | :- | :- | :- | :- | :- |
-| `mem.zeroes` (Stream slot) | 28.44% | 29.39% | 33.54% | `stream.* = std.mem.zeroes(Stream)` — resets the 4KB `header_scratch` on every slot reuse |
-| `huffDecode` | 19.13% | 19.06% | — | HPACK Huffman decode on every request headers frame |
-| `mem.zeroes` (DispatchTask) | 12.87% | 12.03% | 9.77% | `task.header_scratch = s.header_scratch` deep copy — 4KB copy added in 0.2.x that 0.2.0 never had |
+| `mem.zeroes` (Stream slot) | 28.44% | 29.39% | 33.54% | `stream.* = std.mem.zeroes(Stream)`: resets the 4KB `header_scratch` on every slot reuse |
+| `huffDecode` | 19.13% | 19.06% | n/a | HPACK Huffman decode on every request headers frame |
+| `mem.zeroes` (DispatchTask) | 12.87% | 12.03% | 9.77% | `task.header_scratch = s.header_scratch` deep copy, 4KB copy added in 0.2.x that 0.2.0 never had |
 | `serveGrpcLoop` | 3.80% | 4.70% | 2.94% | Frame read and dispatch loop |
 | `ConnMutex.lock` | 2.57% | 1.56% | **13.79%** | Spinlock per write. Jumps sharply with real protobuf I/O (ghz). For stream-grpc at count=5000 this becomes dominant |
 | `spawnGrpcStream` | 1.07% | 0.80% | 0.72% | Task alloc + io.async enqueue |
@@ -83,7 +83,7 @@ Key findings:
 
 - `mem.zeroes` (Stream + Task) accounts for ~41% of all cycles. The Stream zeroing
   clears `header_scratch[4096]` on every slot reuse. The Task zeroing is the 4KB
-  copy that `spawnGrpcStream` adds in 0.2.x — 0.2.0 dispatched synchronously and
+  copy that `spawnGrpcStream` adds in 0.2.x, 0.2.0 dispatched synchronously and
   never copied the scratch buffer.
 
 - `ConnMutex.lock` at 13.79% (ghz) vs 1.56-2.57% (h2load unary) shows the mutex
@@ -95,7 +95,7 @@ Key findings:
 
 - `ConnMutex.lock` drop from 2.57% (c512) to 1.56% (c1024) at higher concurrency:
   the connection thread spends proportionally more time in `serveGrpcLoop` managing
-  more connections, diluting the mutex sample share — not an improvement.
+  more connections, diluting the mutex sample share, not an improvement.
 
 ---
 
@@ -110,7 +110,7 @@ Key findings:
 - Profiles: `unary-grpc` (h2load, 256c + 1024c, 5s × 3 runs) and `stream-grpc` (ghz, 64c, 5s × 3 runs)
 - Handlers: `GetSum` (unary, add two i32s), `StreamSum` (server-streaming, send count=5000 replies)
 
-### Results — unary-grpc
+### Results: unary-grpc
 
 | Connections | Run | req/s | Failed | p50 | p99 |
 | :- | :- | :- | :- | :- | :- |
@@ -123,11 +123,11 @@ Key findings:
 | 1024c | 3 | 41,508 | 6,845 (3.2%) | 56ms | 95ms |
 | 1024c | **best** | **41,213** | | | |
 
-Failures are h2load 5s per-request timeouts — requests queueing too long under
+Failures are h2load 5s per-request timeouts, requests queueing too long under
 high concurrency. TTFB p95/p99 hits 5s at 1024c. 0.2.0 baseline was ~87k req/s
 at 0% error rate.
 
-### Results — stream-grpc
+### Results: stream-grpc
 
 ghz sends `count=5000` per call. The script reports
 `rps = ok_count × 5000 / duration` (normalised messages/sec).

@@ -27,7 +27,7 @@
 //! < :status: 200
 //! < grpc-status: 3
 //! < grpc-message: trigger
-//! (no content-type header present — this is the bug)
+//! (no content-type header present, this is the bug)
 //!
 //! After fix, the response must also include:
 //! < content-type: application/grpc+proto
@@ -40,7 +40,7 @@ const zix = @import("zix");
 fn triggerHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
     _ = headers;
 
-    // Never calls sendMessage — forces the sendGrpcError path (_hdr_sent = false).
+    // Never calls sendMessage, forces the sendGrpcError path (_hdr_sent = false).
     ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "trigger");
 }
 

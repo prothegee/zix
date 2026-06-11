@@ -1,4 +1,4 @@
-# gRPC Stream Bug Report — zix 0.2.0
+# gRPC Stream Bug Report: zix 0.2.0
 
 ## Bug 1: `sendGrpcError` missing `content-type` header
 
@@ -22,11 +22,11 @@ rpc error: code = Unknown desc = malformed header: missing HTTP content-type
 (the error path) does not:
 
 ```zig
-// sendGrpcHeaders — correct
+// sendGrpcHeaders: correct
 try hpack_enc.writeHeader(":status", "200");
 try hpack_enc.writeHeader("content-type", content_type);
 
-// sendGrpcError — missing content-type
+// sendGrpcError: missing content-type
 try hpack_enc.writeHeader(":status", "200");
 try hpack_enc.writeHeader("grpc-status", status_s);
 ```
@@ -54,7 +54,7 @@ curl -v --http2-prior-knowledge \
   http://127.0.0.1:9091/bug.BugService/Trigger
 ```
 
-**Expected output (unpatched) — `content-type` absent from response headers:**
+**Expected output (unpatched): `content-type` absent from response headers:**
 
 ```
 < HTTP/2 200 
@@ -62,7 +62,7 @@ curl -v --http2-prior-knowledge \
 < grpc-message: trigger
 ```
 
-**Expected output (after fix) — `content-type` present:**
+**Expected output (after fix): `content-type` present:**
 
 ```
 < HTTP/2 200 
@@ -71,7 +71,7 @@ curl -v --http2-prior-knowledge \
 < grpc-message: trigger
 ```
 
-**Resolved:** 0.2.1 — `sendGrpcError` now includes `content-type: application/grpc+proto`.
+**Resolved:** 0.2.1: `sendGrpcError` now includes `content-type: application/grpc+proto`.
 
 ---
 
@@ -89,7 +89,7 @@ connection.
 Under concurrent load on the same connection, concurrent workers send HEADERS and
 DATA frames that accumulate in the TCP receive buffer. The server's TCP send buffer
 fills (flow control backpressure), writes stall, and neither side can make
-progress — full deadlock.
+progress, full deadlock.
 
 When the connection degrades, subsequent streams are dispatched with `body_len = 0`
 because their DATA frame either never arrived or the stream slot was in an
@@ -99,7 +99,7 @@ handler calls `ctx.finish(.INVALID_ARGUMENT)`, which then triggers Bug 1.
 **Root cause:**
 
 ```zig
-// core.zig:541 — dispatch is synchronous, freezes the read loop
+// core.zig:541: dispatch is synchronous, freezes the read loop
 if (s.end_stream) {
     dispatchGrpcStream(routes, s, fd, opts);
     stream_slots[slot] = false;
@@ -177,16 +177,16 @@ Status code distribution:
   [~100%]   OK
 ```
 
-**Resolved:** 0.2.1 — each stream is now dispatched on a dedicated thread with a shared connection-level write mutex (`ConnMutex`), unblocking the h2 read loop.
+**Resolved:** 0.2.1: each stream is now dispatched on a dedicated thread with a shared connection-level write mutex (`ConnMutex`), unblocking the h2 read loop.
 
 ---
 
 ## Post-0.2.1 benchmark findings
 
-The document marks both bugs as "Resolved: 0.2.1" — but ghz benchmarks run against 0.2.1
+The document marks both bugs as "Resolved: 0.2.1", but ghz benchmarks run against 0.2.1
 show the failure rate only changed error text, not failure rate.
 
-### Streaming (Bug 2) — ghz 64c, 5s, StreamSum
+### Streaming (Bug 2): ghz 64c, 5s, StreamSum
 
 | Version | OK rate | Dominant error |
 | :- | :- | :- |
@@ -195,11 +195,11 @@ show the failure rate only changed error text, not failure rate.
 
 Only ~24 OK responses per 5s run regardless of connection count. The route is
 registered and unary passes. `Unimplemented` on streaming indicates an empty `:path`
-after HPACK cross-request indexed encoding — root cause: `HpackDecoder.addDynamic()`
+after HPACK cross-request indexed encoding, root cause: `HpackDecoder.addDynamic()`
 stored slices into per-stream `header_scratch`, which is zeroed on slot reuse. Fixed
 by `dyn_buf[8192]` owned storage in `HpackDecoder` (second pass, 2026-06-05).
 
-### Unary regression — ghz c256 and c1024
+### Unary regression: ghz c256 and c1024
 
 SIGNIFICANT REGRESSION: unary throughput dropped ~10x in 0.2.1.
 
@@ -213,7 +213,7 @@ failure rate that was 0% in 0.2.0. Root cause: `ConnMutex` (introduced for Bug 2
 fix) serializes ALL writes on a connection, including unary responses that have no
 concurrent stream to protect against. Each unary RPC waits for the shared lock even
 when no other stream is active. Fixed by `io.async` dispatch in `GrpcServeOpts.io`
-(second pass, 2026-06-05) — work-stealing pool replaces per-request
+(second pass, 2026-06-05): work-stealing pool replaces per-request
 `std.Thread.spawn`, removing the per-request lock contention hot path.
 
 Both second-pass fixes need ghz benchmark verification on the current branch to

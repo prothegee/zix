@@ -9,7 +9,7 @@
 //! streaming handler writes thousands of DATA frames, the entire read loop is
 //! frozen. Concurrent streams sent by other workers on the same connection pile
 //! up in the TCP receive buffer. Once the TCP send buffer fills (flow control),
-//! writes stall and no reads happen either — full deadlock. Subsequent streams
+//! writes stall and no reads happen either, full deadlock. Subsequent streams
 //! arrive with body_len = 0, recvMessage() returns null, the handler calls
 //! finish(.INVALID_ARGUMENT), which triggers Bug 1 (missing content-type).
 //!
