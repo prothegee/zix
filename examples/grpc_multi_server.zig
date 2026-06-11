@@ -1,5 +1,5 @@
 //! gRPC h2c multi-service server example: ASYNC dispatch model.
-//! One server, one port, two services — each method has its own handler.
+//! One server, one port, two services: each method has its own handler.
 //! Port: 10102
 //!
 //! Services:
