@@ -89,7 +89,7 @@ flowchart TD
 
 ### .MIXED: N Accept Threads, io.async() Dispatch
 
-- N accept threads (default cpu_count, `SO_REUSEPORT`); each dispatches connections via `io.async()` directly — no `ConnQueue`.
+- N accept threads (default cpu_count, `SO_REUSEPORT`); each dispatches connections via `io.async()` directly, no `ConnQueue`.
 - `pool_size` is ignored. `workers` controls accept thread count.
 - Balanced throughput and latency, higher jitter than `.POOL` under saturation.
 
@@ -183,7 +183,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget), logger (optional logger pointer) |
 | `zix.Logger` | struct | File and console logger: `init` / `deinit` / `flush` / `system` / `access` |
-| `zix.Logger.Config` | struct | Logger configuration: console, save_path (must exist — caller creates it), save_file, min levels, max_lines |
+| `zix.Logger.Config` | struct | Logger configuration: console, save_path (must exist, caller creates it), save_file, min levels, max_lines |
 | `zix.Logger.Level` | enum(u8) | `DEBUG`(0) `INFO`(1) `WARN`(2) `ERROR`(3) |
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
@@ -235,7 +235,7 @@ pub const HttpServerConfig = struct {
 };
 ```
 
-The caller owns `io`: `zix.Http.Server` does not call `deinit` on it. The route table is passed as a comptime argument to `Server.init` — no runtime allocation for routing.
+The caller owns `io`: `zix.Http.Server` does not call `deinit` on it. The route table is passed as a comptime argument to `Server.init`: no runtime allocation for routing.
 
 For header cap selection and security guidance see [`docs/headers.md`](headers.md).
 
@@ -337,15 +337,15 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 | `Connection` | `keep-alive` or `close` | only if `setKeepAlive()` was called |
 | `Date` | RFC 7231 UTC timestamp | always |
 
-**`Connection` logic** — emitted only when the handler calls `setKeepAlive()`:
+**`Connection` logic** (emitted only when the handler calls `setKeepAlive()`):
 - Omitted entirely if `setKeepAlive()` was never called.
 - `keep-alive` when `setKeepAlive(true)` was called **and** `req.head.keep_alive` (parsed from the client's `Connection` request header) is true.
 - `close` if the handler called `setKeepAlive(false)` **or** the client sent `Connection: close`.
 
-**`Date` logic** — cross-platform, proxy-aware:
+**`Date` logic** (cross-platform, proxy-aware):
 1. `server.zig` scans request headers once before dispatch for a proxy-forwarded `Date` value. If found, stores it in `res.date_cache`.
-2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a timer thread every 500 ms in `.POOL`, or by the accept loop in `.ASYNC`) — one atomic load per request, no clock syscall.
-3. `send()` reads `res.date_cache` directly — no header scan at send time.
+2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a timer thread every 500 ms in `.POOL`, or by the accept loop in `.ASYNC`): one atomic load per request, no clock syscall.
+3. `send()` reads `res.date_cache` directly, no header scan at send time.
 4. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
 ---
@@ -706,10 +706,10 @@ graph TD
 
 | Scope | Allocator | Lifetime | Arena suitable? |
 | :- | :- | :- | :- |
-| Route table | comptime (zero heap cost) | Process | n/a — comptime constant, no allocation |
-| Read/write I/O buffers | `smp_allocator` | Connection | No — individually freed on connection close |
-| Per-request allocations | Per-connection `ArenaAllocator` reset each request | Request | Yes — by design |
-| WebSocket `Conn` + room entries | `smp_allocator` | WS session | No — individually freed on session end |
+| Route table | comptime (zero heap cost) | Process | n/a (comptime constant, no allocation) |
+| Read/write I/O buffers | `smp_allocator` | Connection | No (individually freed on connection close) |
+| Per-request allocations | Per-connection `ArenaAllocator` reset each request | Request | Yes (by design) |
+| WebSocket `Conn` + room entries | `smp_allocator` | WS session | No (individually freed on session end) |
 
 ---
 

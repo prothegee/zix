@@ -337,12 +337,12 @@ Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membat
 | `Connection` | `keep-alive` atau `close` | hanya bila `setKeepAlive()` dipanggil |
 | `Date` | timestamp UTC RFC 7231 | selalu |
 
-**Logika `Connection`** — dikirim hanya bila handler memanggil `setKeepAlive()`:
+**Logika `Connection`** (dikirim hanya bila handler memanggil `setKeepAlive()`):
 - Tidak dikirim sama sekali bila `setKeepAlive()` tidak pernah dipanggil.
 - `keep-alive` bila `setKeepAlive(true)` dipanggil **dan** `req.head.keep_alive` (di-parse dari header request `Connection` client) bernilai true.
 - `close` bila handler memanggil `setKeepAlive(false)` **atau** client mengirim `Connection: close`.
 
-**Logika `Date`** — lintas platform, sadar proxy:
+**Logika `Date`** (lintas platform, sadar proxy):
 1. `server.zig` memindai header request satu kali sebelum dispatch untuk nilai `Date` yang diteruskan proxy. Bila ditemukan, disimpan di `res.date_cache`.
 2. Bila tidak ada, `res.date_cache` diisi dari cache date atomik global (diperbarui oleh timer thread setiap 500 ms pada `.POOL`, atau oleh accept loop pada `.ASYNC`). Satu atomic load per request, tanpa syscall clock.
 3. `send()` membaca `res.date_cache` langsung tanpa pemindaian header saat pengiriman.
