@@ -67,7 +67,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 // Usage (standalone):
 // server.registerHandler("/path", withBasicAuth(myHandler));
 //
-// Usage (composed — origin check runs first):
+// Usage (composed, origin check runs first):
 // server.registerHandler("/path", withOriginCheck(withBasicAuth(myHandler)));
 fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     return struct {
@@ -139,7 +139,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
-    try res.sendJson("{\"message\":\"public resource — origin verified\"}");
+    try res.sendJson("{\"message\":\"public resource, origin verified\"}");
 }
 
 // GET /private
@@ -152,16 +152,16 @@ pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
-    try res.sendJson("{\"message\":\"private resource — origin and credentials verified\"}");
+    try res.sendJson("{\"message\":\"private resource, origin and credentials verified\"}");
 }
 
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        // /public — origin check only
+        // /public: origin check only
         .{ .path = "/public", .handler = withOriginCheck(publicHandler) },
-        // /private — origin check + basic auth (composed: left = outermost = runs first)
+        // /private: origin check + basic auth (composed: left = outermost = runs first)
         .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
     }, .{
         .io = process.io,
