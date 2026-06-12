@@ -73,6 +73,10 @@ pub const GrpcContext = struct {
     /// trailer are staged here and flushed in a single write() after the handler returns.
     /// Null on the streaming path, which writes each frame directly under _write_mutex.
     _out: ?*ReplyStage = null,
+    /// When true, sendMessage compresses DATA payloads with gzip and emits grpc-encoding: gzip
+    /// in the initial HEADERS frame. Set at dispatch when opts.compress_gzip is enabled and
+    /// the client advertised grpc-accept-encoding: gzip.
+    _resp_gzip: bool = false,
 
     /// Read the next gRPC message from the buffered request stream.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
@@ -96,10 +100,19 @@ pub const GrpcContext = struct {
 
         if (self._out) |out| {
             var buf: [600]u8 = undefined;
-            const n = frame.buildGrpcHeaders(&buf, self.stream_id, content_type);
+            const n = if (self._resp_gzip)
+                frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type)
+            else
+                frame.buildGrpcHeaders(&buf, self.stream_id, content_type);
             out.append(buf[0..n]);
         } else {
-            frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+            if (self._resp_gzip) {
+                var buf: [600]u8 = undefined;
+                const n = frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type);
+                h2.fdWriteAll(self.fd, buf[0..n]) catch {};
+            } else {
+                frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+            }
         }
         self._hdr_sent = true;
     }
@@ -121,17 +134,36 @@ pub const GrpcContext = struct {
 
     /// Send one gRPC response message DATA frame.
     /// Sends initial headers first if not yet sent.
+    /// When _resp_gzip is true, the payload is gzip-compressed before sending and the
+    /// compress flag in the 5-byte gRPC prefix is set to 1.
+    /// Falls back to uncompressed on allocation or compression failure.
     /// On the staged (inline unary) path the frame is appended to the cork buffer.
     /// On the streaming path headers and data are written under a single lock to prevent interleaving.
     pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
+        if (self._resp_gzip and data.len > 0) {
+            const max_comp = data.len + 128;
+            if (std.heap.smp_allocator.alloc(u8, max_comp)) |comp_buf| {
+                if (frame.compressGrpcMessage(data, comp_buf)) |comp_len| {
+                    self._sendDataFrame(content_type, comp_buf[0..comp_len], true);
+                    std.heap.smp_allocator.free(comp_buf);
+                    return;
+                } else |_| {}
+                std.heap.smp_allocator.free(comp_buf);
+            } else |_| {}
+        }
+
+        self._sendDataFrame(content_type, data, false);
+    }
+
+    fn _sendDataFrame(self: *GrpcContext, content_type: []const u8, payload: []const u8, compress: bool) void {
         if (self._out) |out| {
             self._flushHeaders(content_type);
 
             var head: [14]u8 = undefined;
-            _ = frame.buildGrpcDataHeader(&head, self.stream_id, data.len);
+            _ = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
             out.append(&head);
-            out.append(data);
-            self._sent_bytes += data.len;
+            out.append(payload);
+            self._sent_bytes += payload.len;
             return;
         }
 
@@ -141,8 +173,12 @@ pub const GrpcContext = struct {
         }
 
         self._flushHeaders(content_type);
-        frame.sendGrpcData(self.fd, self.stream_id, data) catch {};
-        self._sent_bytes += data.len;
+
+        var head: [14]u8 = undefined;
+        _ = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
+        h2.fdWriteAll(self.fd, &head) catch {};
+        h2.fdWriteAll(self.fd, payload) catch {};
+        self._sent_bytes += payload.len;
     }
 
     /// Close the stream with a gRPC status. Must be called exactly once per handler.
@@ -263,6 +299,9 @@ pub const GrpcServeOpts = struct {
     /// Avoids per-request clone() syscall cost (~20-50µs per stream) under concurrent load.
     /// Null falls back to std.Thread.spawn for compatibility with standalone serveConn callers.
     io: ?std.Io = null,
+    /// Enable gzip response compression. When true, compresses DATA frames for clients
+    /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress_gzip.
+    compress_gzip: bool = false,
 };
 
 // --------------------------------------------------------- //
@@ -442,6 +481,7 @@ fn DispatchTask(comptime routes: []const Route) type {
                 ._grpc_status = 0,
                 .deadline_ns = computeDeadline(self.opts.handler_timeout_ms, self.headers[0..self.header_count]),
                 ._write_mutex = conn_mutex_ptr,
+                ._resp_gzip = self.opts.compress_gzip and headersAcceptGzip(self.headers[0..self.header_count]),
             };
             Router(routes).dispatch(path, self.headers[0..self.header_count], &ctx);
 
@@ -496,8 +536,18 @@ fn spawnGrpcStream(
     // Requires opts.max_header_scratch <= task.header_scratch.len (4096).
     const scratch_n = @min(task.header_scratch.len, s.header_scratch.len);
     @memcpy(task.header_scratch[0..scratch_n], s.header_scratch[0..scratch_n]);
-    task.body_len = s.body_len;
-    @memcpy(task.body[0..s.body_len], s.body[0..s.body_len]);
+
+    if (headersHaveGzipEncoding(s.headers[0..s.header_count])) {
+        var decomp_buf: ?[]u8 = null;
+        const eff = maybeDecompressBody(s.body[0..s.body_len], s.headers[0..s.header_count], opts.max_body, &decomp_buf);
+        defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
+        task.body_len = @min(eff.len, task.body.len);
+        @memcpy(task.body[0..task.body_len], eff[0..task.body_len]);
+    } else {
+        task.body_len = s.body_len;
+        @memcpy(task.body[0..s.body_len], s.body[0..s.body_len]);
+    }
+
     task.opts = opts;
 
     const old_base = @intFromPtr(&s.header_scratch[0]);
@@ -567,6 +617,17 @@ fn dispatchGrpcInline(
     var time_start: std.os.linux.timespec = undefined;
     if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
 
+    var decomp_buf: ?[]u8 = null;
+    defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
+    const effective_body = maybeDecompressBody(
+        stream.body[0..stream.body_len],
+        stream.headers[0..stream.header_count],
+        opts.max_body,
+        &decomp_buf,
+    );
+
+    const resp_gzip = opts.compress_gzip and headersAcceptGzip(stream.headers[0..stream.header_count]);
+
     // The reply (HEADERS + DATA + trailer) is staged and flushed in one write().
     // Hold the connection write lock across the whole reply only when a streaming
     // task may be writing concurrently, so frames are not interleaved.
@@ -576,7 +637,7 @@ fn dispatchGrpcInline(
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = stream.id,
-        ._body = stream.body[0..stream.body_len],
+        ._body = effective_body,
         ._pos = 0,
         ._hdr_sent = false,
         ._sent_bytes = 0,
@@ -584,6 +645,7 @@ fn dispatchGrpcInline(
         .deadline_ns = computeDeadline(opts.handler_timeout_ms, stream.headers[0..stream.header_count]),
         ._write_mutex = null,
         ._out = &stage,
+        ._resp_gzip = resp_gzip,
     };
 
     if (need_mutex) conn_mutex.lock();
@@ -1225,10 +1287,21 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
     var time_start: std.os.linux.timespec = undefined;
     if (conn.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
 
+    var decomp_buf: ?[]u8 = null;
+    defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
+    const effective_body = maybeDecompressBody(
+        stream.body[0..stream.body_len],
+        stream.headers[0..stream.header_count],
+        conn.opts.max_body,
+        &decomp_buf,
+    );
+
+    const resp_gzip = conn.opts.compress_gzip and headersAcceptGzip(stream.headers[0..stream.header_count]);
+
     var ctx = GrpcContext{
         .fd = conn.fd,
         .stream_id = stream.id,
-        ._body = stream.body[0..stream.body_len],
+        ._body = effective_body,
         ._pos = 0,
         ._hdr_sent = false,
         ._sent_bytes = 0,
@@ -1236,6 +1309,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
         .deadline_ns = computeDeadline(conn.opts.handler_timeout_ms, stream.headers[0..stream.header_count]),
         ._write_mutex = null,
         ._out = &conn.stage,
+        ._resp_gzip = resp_gzip,
     };
     Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
 
@@ -1578,6 +1652,47 @@ fn findSlot(stream_id: u31, streams: []Stream, used: []bool) ?usize {
         if (slot_in_use and streams[i].id == stream_id) return i;
     }
     return null;
+}
+
+/// Return true when the client sent grpc-encoding: gzip (inbound messages are compressed).
+fn headersHaveGzipEncoding(headers: []const h2.Header) bool {
+    for (headers) |hdr| {
+        if (!std.ascii.eqlIgnoreCase(hdr.name, "grpc-encoding")) continue;
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, hdr.value, " "), "gzip")) return true;
+    }
+    return false;
+}
+
+/// Return true when the client advertised grpc-accept-encoding containing "gzip".
+fn headersAcceptGzip(headers: []const h2.Header) bool {
+    for (headers) |hdr| {
+        if (!std.ascii.eqlIgnoreCase(hdr.name, "grpc-accept-encoding")) continue;
+        var it = std.mem.splitScalar(u8, hdr.value, ',');
+        while (it.next()) |part| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, part, " "), "gzip")) return true;
+        }
+    }
+    return false;
+}
+
+/// Decompress body via smp_allocator if grpc-encoding: gzip is present.
+/// Returns the effective body slice and sets decomp_out to the allocated buffer (caller frees).
+fn maybeDecompressBody(
+    body: []const u8,
+    headers: []const h2.Header,
+    max_body: usize,
+    decomp_out: *?[]u8,
+) []const u8 {
+    decomp_out.* = null;
+    if (!headersHaveGzipEncoding(headers)) return body;
+
+    const buf = std.heap.smp_allocator.alloc(u8, max_body) catch return body;
+    const n = frame.decompressGrpcBody(body, buf) catch {
+        std.heap.smp_allocator.free(buf);
+        return body;
+    };
+    decomp_out.* = buf;
+    return buf[0..n];
 }
 
 fn computeDeadline(handler_timeout_ms: u32, headers: []const h2.Header) ?u64 {
