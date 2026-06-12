@@ -19,7 +19,7 @@ pub const Http1ServerConfig = struct {
     max_recv_buf: usize = 16 * 1024,
     /// Max output size for gzip-compressed responses.
     max_gzip_out: usize = 256 * 1024,
-    /// Max request headers accepted per connection (compile-time cap is core.MAX_HEADERS).
+    /// No-op with the lazy engine. Kept for source compatibility.
     max_headers: u8 = 16,
     /// Accept thread count (0 = cpu_count). Ignored by .ASYNC.
     workers: usize = 0,
