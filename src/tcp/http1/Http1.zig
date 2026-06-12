@@ -11,7 +11,7 @@ pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 pub const HandlerFn = core.HandlerFn;
 pub const ParsedHead = core.ParsedHead;
-pub const Header = core.Header;
+pub const ParseResult = core.ParseResult;
 pub const Range = core.Range;
 pub const ServeOpts = core.ServeOpts;
 pub const ConnOutcome = core.ConnOutcome;
