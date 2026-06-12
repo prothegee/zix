@@ -118,7 +118,7 @@ const ConnQueue = struct {
     closed: bool = false,
 
     // Push a new connection. Grows the ring buffer on overflow.
-    // On OOM the stream is closed and the connection dropped.
+    // On OOM (Out Of Memory) the stream is closed and the connection dropped.
     fn push(self: *ConnQueue, stream: std.Io.net.Stream, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
@@ -174,69 +174,6 @@ const ConnQueue = struct {
 
 // --------------------------------------------------------- //
 
-// Work queue of ready connection fds for the EPOLL worker pool (Linux only).
-// The single epoll loop (producer) pushes readable sockets, workers (consumers) pop them.
-// Heap-backed ring buffer: push and pop are both O(1), doubling on overflow (initial 64).
-const FdQueue = struct {
-    mutex: std.Io.Mutex = .init,
-    ready: std.Io.Condition = .init,
-    buf: []std.posix.fd_t = &.{},
-    head: usize = 0,
-    len: usize = 0,
-    closed: bool = false,
-
-    // Push a ready fd. Grows the ring buffer on overflow. On OOM the fd is closed.
-    fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 64 else self.buf.len * 2;
-            const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
-                self.mutex.unlock(io);
-                _ = std.os.linux.close(fd);
-                return;
-            };
-            if (self.buf.len > 0) {
-                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
-                std.heap.smp_allocator.free(self.buf);
-            }
-            self.buf = new_buf;
-            self.head = 0;
-        }
-        self.buf[(self.head + self.len) % self.buf.len] = fd;
-        self.len += 1;
-        self.mutex.unlock(io);
-        self.ready.signal(io);
-    }
-
-    // Pop the next ready fd, blocking until one arrives.
-    // Returns null only after close() has been called and the queue is empty.
-    fn pop(self: *FdQueue, io: std.Io) ?std.posix.fd_t {
-        self.mutex.lockUncancelable(io);
-        while (self.len == 0) {
-            if (self.closed) {
-                self.mutex.unlock(io);
-                return null;
-            }
-            self.ready.waitUncancelable(io, &self.mutex);
-        }
-        const fd = self.buf[self.head];
-        self.head = (self.head + 1) % self.buf.len;
-        self.len -= 1;
-        self.mutex.unlock(io);
-        return fd;
-    }
-
-    fn close(self: *FdQueue, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        self.closed = true;
-        self.mutex.unlock(io);
-        self.ready.broadcast(io);
-    }
-
-    fn deinit(self: *FdQueue) void {
-        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
-    }
-};
 
 // --------------------------------------------------------- //
 
@@ -518,21 +455,55 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
         }
 
-        /// EPOLL worker: pops a ready socket, serves one request, then re-arms
-        /// the one-shot interest (keep-alive) or removes and closes the connection
+        /// EPOLL worker: owns one SO_REUSEPORT listener and one epoll instance.
+        /// The kernel load-balances new connections across all per-worker listeners so
+        /// there is no shared queue and no cross-thread fd handoff.
         ///
         /// Note:
-        /// - Read buffer and arena are allocated once per worker thread and reused
-        ///   across requests and connections (each request is self-contained)
+        /// - Read buffer and arena are allocated once per worker and reused across all
+        ///   connections and requests handled by this worker.
+        /// - Connections are level-triggered: the fd stays registered after each request
+        ///   and re-fires when new data arrives (keep-alive without re-arm syscalls).
+        /// - Accepted fds are blocking: the worker returns to epoll_wait after each response
+        ///   without parking on the socket.
         ///
         /// Param:
         /// self - *Self
-        /// queue - *FdQueue
-        /// epfd - std.posix.fd_t (epoll instance to re-arm or remove against)
         /// io - std.Io
-        fn epollWorkerEntry(self: *Self, queue: *FdQueue, epfd: std.posix.fd_t, io: std.Io) void {
+        fn epollWorker(self: *Self, io: std.Io) void {
             const linux = std.os.linux;
             const cfg = self.config;
+
+            const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
+                std.debug.print("zix: epoll worker resolve error: {}\n", .{err});
+                return;
+            };
+            var net_server = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = @intCast(cfg.kernel_backlog),
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: each worker binds the same port
+            }) catch |err| {
+                std.debug.print("zix: epoll worker listen error: {}\n", .{err});
+                return;
+            };
+            defer net_server.deinit(io);
+            const listener_fd = net_server.socket.handle;
+
+            // Non-blocking listener so accept drains to EAGAIN without blocking.
+            const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
+            const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+            _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+            if (std.posix.errno(epfd_rc) != .SUCCESS) return;
+            const epfd: std.posix.fd_t = @intCast(epfd_rc);
+            defer _ = linux.close(epfd);
+
+            var listener_event = linux.epoll_event{
+                .events = linux.EPOLL.IN,
+                .data = .{ .fd = listener_fd },
+            };
+            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS) return;
 
             const buf_read = std.heap.smp_allocator.alloc(u8, cfg.max_recv_buf) catch return;
             defer std.heap.smp_allocator.free(buf_read);
@@ -542,102 +513,19 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
             _ = arena.reset(.retain_capacity);
 
-            while (queue.pop(io)) |fd| {
-                const stream = std.Io.net.Stream{ .socket = .{ .handle = fd, .address = undefined } };
-                if (handleOneRequest(self, stream, fd, io, buf_read, &arena) == .keep_alive) {
-                    // Re-arm the one-shot interest so the next request wakes the loop.
-                    var conn_event = linux.epoll_event{
-                        .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
-                        .data = .{ .fd = fd },
-                    };
-                    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &conn_event)) != .SUCCESS) {
-                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
-                        _ = linux.close(fd);
-                    }
-                } else {
-                    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
-                    _ = linux.close(fd);
-                }
-            }
-        }
-
-        /// EPOLL dispatch: a single epoll event loop accepts connections and hands
-        /// readable sockets to a worker pool. Linux-only.
-        ///
-        /// Note:
-        /// - Listener is non-blocking and edge-triggered: accept is drained until EAGAIN
-        /// - Connections register EPOLLIN | EPOLLONESHOT | EPOLLRDHUP, so each readable
-        ///   socket is reported exactly once and one worker owns it until it re-arms
-        ///   (keep-alive) or closes it. Idle keep-alive connections hold no thread
-        /// - pool_size sets the worker count (0 = max(10, cpu * 2))
-        ///
-        /// Param:
-        /// self - *Self
-        /// io - std.Io
-        ///
-        /// Return:
-        /// - !void (exits only on setup failure, otherwise the event loop runs forever)
-        fn runEpoll(self: *Self, io: std.Io) !void {
-            const linux = std.os.linux;
-            const cfg = self.config;
-            const cpu = try std.Thread.getCpuCount();
-            const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
-
-            const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-                std.debug.print("zix: epoll resolve error: {}\n", .{err});
-                return err;
-            };
-            var net_server = addr.listen(io, .{
-                .mode = .stream,
-                .kernel_backlog = @intCast(cfg.kernel_backlog),
-                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-            }) catch |err| {
-                std.debug.print("zix: epoll listen error: {}\n", .{err});
-                return err;
-            };
-            defer net_server.deinit(io);
-            const listener_fd = net_server.socket.handle;
-
-            // Make the listener non-blocking so edge-triggered accept can drain to EAGAIN.
-            const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
-            const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-            _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
-
-            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-            if (std.posix.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
-            const epfd: std.posix.fd_t = @intCast(epfd_rc);
-            defer _ = linux.close(epfd);
-
-            var listener_event = linux.epoll_event{
-                .events = linux.EPOLL.IN | linux.EPOLL.ET,
-                .data = .{ .fd = listener_fd },
-            };
-            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
-                return error.EpollCtlFailed;
-
-            std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers)\n", .{ cfg.ip, cfg.port, pool_size });
-
-            var queue = FdQueue{};
-            defer queue.deinit();
-
-            const workers = try std.heap.smp_allocator.alloc(std.Thread, pool_size);
-            defer std.heap.smp_allocator.free(workers);
-            for (workers) |*t| {
-                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorkerEntry, .{ self, &queue, epfd, io });
-            }
-
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             while (true) {
                 const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
                 switch (std.posix.errno(wait_result)) {
                     .SUCCESS => {},
                     .INTR => continue,
-                    else => break,
+                    else => return,
                 }
-                const n: usize = @intCast(wait_result);
-                for (events[0..n]) |ev| {
+
+                const event_count: usize = @intCast(wait_result);
+                for (events[0..event_count]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        // Edge-triggered: drain the accept queue until it would block.
+                        // Drain all pending connections (level-triggered, no EAGAIN spin needed).
                         while (true) {
                             const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
                             switch (std.posix.errno(accept_result)) {
@@ -649,7 +537,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                             const conn_fd: std.posix.fd_t = @intCast(accept_result);
                             setNoDelay(conn_fd);
                             var conn_event = linux.epoll_event{
-                                .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT | linux.EPOLL.RDHUP,
+                                .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
                                 .data = .{ .fd = conn_fd },
                             };
                             if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &conn_event)) != .SUCCESS) {
@@ -657,13 +545,57 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                             }
                         }
                     } else {
-                        queue.push(ev.data.fd, io);
+                        const conn_fd = ev.data.fd;
+
+                        if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR | linux.EPOLL.RDHUP)) != 0) {
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                            continue;
+                        }
+
+                        const stream = std.Io.net.Stream{ .socket = .{ .handle = conn_fd, .address = undefined } };
+
+                        if (handleOneRequest(self, stream, conn_fd, io, buf_read, &arena) != .keep_alive) {
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                        }
+                        // .keep_alive: fd stays registered, fires again on next request.
                     }
                 }
             }
+        }
 
-            queue.close(io);
-            for (workers) |t| t.join();
+        /// EPOLL dispatch: spawns shared-nothing event loop workers, each with its own
+        /// SO_REUSEPORT listener and epoll instance. Linux-only.
+        ///
+        /// Note:
+        /// - The kernel distributes connections across per-worker listeners with no shared
+        ///   accept queue and no cross-thread fd handoffs.
+        /// - workers = 0 (default): cpu_count workers.
+        /// - workers = N: exactly N workers.
+        ///
+        /// Param:
+        /// self - *Self
+        /// io - std.Io
+        ///
+        /// Return:
+        /// - !void (exits only on setup failure, otherwise runs forever)
+        fn runEpoll(self: *Self, io: std.Io) !void {
+            const cpu = try std.Thread.getCpuCount();
+            const worker_count = if (self.config.workers == 0) cpu else self.config.workers;
+
+            std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers, shared-nothing)\n", .{
+                self.config.ip, self.config.port, worker_count,
+            });
+
+            const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+            defer std.heap.smp_allocator.free(threads);
+
+            for (threads) |*t| {
+                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorker, .{ self, io });
+            }
+
+            for (threads) |t| t.join();
         }
 
         // --------------------------------------------------------- //
