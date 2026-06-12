@@ -3,21 +3,22 @@
 
 const std = @import("std");
 
-pub const MAX_HEADERS: usize = 16;
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
+pub const ParseResult = struct {
+    head: ParsedHead,
+    body_offset: usize,
 };
 
 pub const ParsedHead = struct {
     method: []const u8,
     path: []const u8,
     query: []const u8,
-    headers: [MAX_HEADERS]Header,
-    header_count: usize,
+    /// Raw header block from the byte after the request line CRLF up to and
+    /// including the final header CRLF. Empty when the request has no headers.
+    /// Use getHeader to look up individual headers on demand.
+    raw_headers: []const u8,
     version_minor: u8,
     keep_alive: bool,
     content_length: u64,
@@ -114,20 +115,25 @@ pub fn takeWebSocket() ?WsPending {
 
 // --------------------------------------------------------- //
 
-/// Parse a complete HTTP/1.x request from buf.
-/// buf must contain the full header block ending with \r\n\r\n.
-/// All slices in ParsedHead point into buf (zero copy).
+/// Parse a complete HTTP/1.x request from buf where header_end (the index of
+/// \r\n\r\n in buf) is already known. Avoids the redundant indexOf scan when
+/// the caller has already located the terminator. buf may extend beyond
+/// header_end + 4 (body bytes are ignored).
+///
+/// Note:
+/// - Framing pass: a header line is tokenized only when its first letter is
+///   c, t, or e (the only letters that start a framing-relevant header:
+///   content-length, connection, transfer-encoding, expect). All other lines
+///   skip with one indexOfPos plus one masked compare.
 ///
 /// Return:
 /// - !struct{ head: ParsedHead, body_offset: usize }
-pub fn parseHead(buf: []const u8) !struct { head: ParsedHead, body_offset: usize } {
-    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.IncompleteHeader;
+/// - error.InvalidRequest on a malformed request line
+pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
     const body_offset = header_end + 4;
 
-    const head_buf = buf[0..body_offset];
-
-    const first_crlf = std.mem.indexOf(u8, head_buf, "\r\n") orelse head_buf.len;
-    const req_line = head_buf[0..first_crlf];
+    const first_crlf = std.mem.indexOf(u8, buf[0..header_end], "\r\n") orelse header_end;
+    const req_line = buf[0..first_crlf];
 
     const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
     if (sp1 == 0) return error.InvalidRequest;
@@ -147,36 +153,36 @@ pub fn parseHead(buf: []const u8) !struct { head: ParsedHead, body_offset: usize
 
     var path = target;
     var query: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, target, '?')) |q| {
-        path = target[0..q];
-        query = target[q + 1 ..];
+    if (std.mem.indexOfScalar(u8, target, '?')) |question_mark| {
+        path = target[0..question_mark];
+        query = target[question_mark + 1 ..];
     }
 
-    var headers: [MAX_HEADERS]Header = undefined;
-    var header_count: usize = 0;
+    const raw_headers: []const u8 = if (first_crlf >= header_end)
+        buf[0..0]
+    else
+        buf[first_crlf + 2 .. header_end + 2];
+
     var keep_alive = (version_minor == 1);
     var content_length: u64 = 0;
     var chunked_request = false;
     var expect_continue = false;
 
-    var pos: usize = first_crlf + 2;
-    while (pos < head_buf.len) {
-        const line_end = std.mem.indexOfPos(u8, head_buf, pos, "\r\n") orelse head_buf.len;
-        const line = head_buf[pos..line_end];
+    var pos: usize = 0;
+    while (pos < raw_headers.len) {
+        const line_end = std.mem.indexOfPos(u8, raw_headers, pos, "\r\n") orelse raw_headers.len;
+        const line = raw_headers[pos..line_end];
+        pos = line_end + 2;
         if (line.len == 0) break;
 
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
-            pos = line_end + 2;
-            continue;
-        };
-        var val_off: usize = colon + 1;
-        while (val_off < line.len and line[val_off] == ' ') val_off += 1;
+        const first_lower = line[0] | 0x20;
+        if (first_lower != 'c' and first_lower != 't' and first_lower != 'e') continue;
 
-        if (header_count >= MAX_HEADERS) return error.TooManyHeaders;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = line[0..colon];
-        const value = line[val_off..];
-        headers[header_count] = .{ .name = name, .value = value };
-        header_count += 1;
+        var value_off: usize = colon + 1;
+        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
+        const value = line[value_off..];
 
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             content_length = std.fmt.parseInt(u64, value, 10) catch 0;
@@ -188,16 +194,13 @@ pub fn parseHead(buf: []const u8) !struct { head: ParsedHead, body_offset: usize
         } else if (std.ascii.eqlIgnoreCase(name, "expect")) {
             if (std.ascii.eqlIgnoreCase(value, "100-continue")) expect_continue = true;
         }
-
-        pos = line_end + 2;
     }
 
     return .{ .head = .{
         .method = method,
         .path = path,
         .query = query,
-        .headers = headers,
-        .header_count = header_count,
+        .raw_headers = raw_headers,
         .version_minor = version_minor,
         .keep_alive = keep_alive,
         .content_length = content_length,
@@ -206,11 +209,38 @@ pub fn parseHead(buf: []const u8) !struct { head: ParsedHead, body_offset: usize
     }, .body_offset = body_offset };
 }
 
-/// Case-insensitive header lookup.
+/// Parse a complete HTTP/1.x request from buf.
+/// buf must contain the full header block ending with \r\n\r\n.
+/// All slices in ParsedHead point into buf (zero copy).
+///
+/// Return:
+/// - !struct{ head: ParsedHead, body_offset: usize }
+/// - error.IncompleteHeader when \r\n\r\n has not arrived yet
+/// - error.InvalidRequest on a malformed request line
+pub fn parseHead(buf: []const u8) !ParseResult {
+    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.IncompleteHeader;
+    return parseHeadAt(buf, header_end);
+}
+
+/// Case-insensitive header lookup, scanning raw_headers on demand.
+/// Cost is paid only by handlers that actually read a header.
 pub fn getHeader(head: *const ParsedHead, name: []const u8) ?[]const u8 {
-    for (head.headers[0..head.header_count]) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    var pos: usize = 0;
+    while (pos < head.raw_headers.len) {
+        const line_end = std.mem.indexOfPos(u8, head.raw_headers, pos, "\r\n") orelse head.raw_headers.len;
+        const line = head.raw_headers[pos..line_end];
+        pos = line_end + 2;
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+
+        var value_off: usize = colon + 1;
+        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
+
+        return line[value_off..];
     }
+
     return null;
 }
 
@@ -444,6 +474,27 @@ pub fn flushPending(fd: std.posix.fd_t) void {
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) sink.flush();
     }
+}
+
+/// Write as much of data to fd as possible without blocking.
+/// On EAGAIN returns the byte count written so far (caller stages the rest).
+/// On a permanent error returns null.
+pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
+    var written: usize = 0;
+    while (written < data.len) {
+        const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return null;
+                written += n;
+            },
+            .INTR => continue,
+            .AGAIN => return written,
+            else => return null,
+        }
+    }
+    return written;
 }
 
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
