@@ -4,8 +4,8 @@ const zix = @import("zix");
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9303;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .EPOLL;
-const WORKERS: usize = 0; // ignored by .EPOLL (single event loop thread handles accept)
-const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
+const WORKERS: usize = 0; // 0 = cpu_count workers (each owns its own listener + epfd)
+const POOL_SIZE: usize = 0; // ignored by .EPOLL
 
 // Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -18,10 +18,11 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 // --------------------------------------------------------- //
 
 // Note:
-// On Linux, .EPOLL runs natively: a single epoll accept loop pushes accepted
-// fds to an FdQueue. Pool workers pop and hold each connection for its full
-// lifetime. TCP connections are stream-based: the handler loops until EOF,
-// so one-thread-per-connection maps naturally to this model.
+// On Linux, .EPOLL runs natively in shared-nothing mode: each worker thread
+// owns one SO_REUSEPORT listener socket and one epoll instance. The kernel
+// load-balances connections across workers with no shared queue and no
+// cross-thread fd handoff. Each accepted connection is dispatched via
+// io.async so the worker returns to epoll_wait immediately.
 // On non-Linux targets, .EPOLL falls back to .POOL automatically (with a
 // debug print). Use tcp_server_2_pool.zig to set POOL explicitly instead.
 
