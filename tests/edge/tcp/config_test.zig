@@ -25,3 +25,14 @@ test "zix edge: TCP frame, max u32 length encodes and decodes correctly" {
     const decoded = std.mem.readInt(u32, &hdr, .big);
     try std.testing.expectEqual(max_len, decoded);
 }
+
+test "zix edge: TcpServer EPOLL with workers = 1, minimum explicit count initializes correctly" {
+    var server = try zix.Tcp.Server.init(.{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .EPOLL,
+        .workers = 1,
+    });
+    server.deinit();
+    try std.testing.expectEqual(@as(usize, 1), server.config.workers);
+}
