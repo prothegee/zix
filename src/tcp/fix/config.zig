@@ -23,13 +23,14 @@ pub const FixServerConfig = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
-    /// Number of accept threads.
-    /// 0 (default) = cpu_count accept threads.
+    /// Number of accept/event-loop workers.
+    /// 0 (default) = cpu_count workers.
     /// Ignored by .ASYNC (always 1 accept thread).
+    /// For .EPOLL: controls how many shared-nothing listener workers are spawned.
     workers: usize = 0,
     /// Number of pool threads. Only used by .POOL dispatch model.
     /// 0 (default) = max(10, cpu_count * 2).
-    /// Ignored by .ASYNC and .MIXED.
+    /// Ignored by .ASYNC, .MIXED, and .EPOLL.
     pool_size: usize = 0,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.session() for each FIX message processed. Caller owns. Must outlive the server.
