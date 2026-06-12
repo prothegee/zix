@@ -8,8 +8,8 @@ const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
-const WORKERS: usize = 0; // ignored by .EPOLL (single epoll event loop accepts)
-const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) worker threads)
+const WORKERS: usize = 0; // 0 = auto (cpu_count workers). Used by .EPOLL as the worker count.
+const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) workers). Not used by .EPOLL.
 
 // Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -18,11 +18,11 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) worker threads)
 // --------------------------------------------------------- //
 
 // Note:
-// .EPOLL is Linux-only. A single epoll event loop accepts connections and hands
-// each readable socket to a worker pool. Each worker serves one request then
-// re-arms the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
-// Best for very high connection counts and slow/idle clients. On other platforms
-// the server returns error.EpollUnsupported, use .POOL there.
+// .EPOLL is Linux-only. Uses a shared-nothing architecture: each worker owns one
+// SO_REUSEPORT listener and one epoll instance. The kernel distributes new connections
+// across workers with no shared queue. Connections are level-triggered and blocking:
+// the worker handles one request then returns to epoll_wait. Best for high connection
+// counts. On other platforms the server falls back to .POOL.
 
 // --------------------------------------------------------- //
 
