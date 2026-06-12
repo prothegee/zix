@@ -235,6 +235,11 @@ fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
 /// drain is the count of request-body bytes still to read and discard for a
 /// body too large to buffer (the response was already sent), drain_close marks
 /// that the connection must close once the drain finishes.
+/// write_pending is a heap-owned slice of response bytes staged when a write
+/// hits EAGAIN (send buffer full). The EPOLL loop arms EPOLLOUT and drains it
+/// on the next writable event rather than blocking the worker. write_pending_off
+/// tracks how many bytes have been flushed so far. write_pending_close marks
+/// that the connection must close once the staged write drains.
 const Conn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
@@ -242,6 +247,9 @@ const Conn = struct {
     ws: ?core.WsFrameFn = null,
     drain: usize = 0,
     drain_close: bool = false,
+    write_pending: []u8 = &.{},
+    write_pending_off: usize = 0,
+    write_pending_close: bool = false,
 };
 
 /// Highest fd a worker's table can index. Linux hands out the lowest free fd,
@@ -300,6 +308,7 @@ const ConnTable = struct {
         if (idx >= self.slots.len) return;
 
         if (self.slots[idx]) |conn| {
+            if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
             std.heap.smp_allocator.free(conn.buf);
             std.heap.smp_allocator.destroy(conn);
             self.slots[idx] = null;
@@ -392,26 +401,43 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
     }
 }
 
-/// Drain readable bytes into conn.buf, then dispatch every complete request it
-/// holds. Pipelined requests are all served in this one pass. Trailing partial
-/// bytes are kept for the next readable event.
-///
-/// Return:
-/// - .keep_alive when the connection may receive more requests
-/// - .close on peer hangup, parse error, oversize header, or Connection: close
 /// One readable event on an HTTP connection. Installs the response sink so
 /// every response produced by the parse pass coalesces into one write per
-/// event instead of one per request, which is what makes deep pipelining
-/// cheap. An upgraded connection is handed to the WebSocket pump only after
-/// the flush, so the 101 handshake precedes the first echoed frame.
-fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
+/// event. The flush is non-blocking: if the send buffer is full (EAGAIN) the
+/// remaining bytes are staged in conn.write_pending and EPOLLOUT is armed so
+/// the worker is never parked waiting for a slow client. An upgraded connection
+/// is handed to the WebSocket pump only after the flush.
+fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t) core.ConnOutcome {
+    const linux = std.os.linux;
+
     var sink = core.RespSink{ .fd = conn.fd, .buf = out_buf };
     core.tl_resp_sink = &sink;
     const outcome = serveEpollConnInner(conn, handler, body_buf, handler_timeout_ms);
     core.tl_resp_sink = null;
 
-    sink.flush();
     if (sink.failed) return .close;
+
+    if (sink.len > 0) {
+        const written = core.fdWriteNonBlock(conn.fd, sink.buf[0..sink.len]) orelse return .close;
+
+        if (written < sink.len) {
+            const remaining = sink.buf[written..sink.len];
+            const staged = std.heap.smp_allocator.alloc(u8, remaining.len) catch return .close;
+            @memcpy(staged, remaining);
+            conn.write_pending = staged;
+            conn.write_pending_off = 0;
+            conn.write_pending_close = (outcome == .close);
+
+            var arm_ev = linux.epoll_event{
+                .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP,
+                .data = .{ .fd = conn.fd },
+            };
+            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn.fd, &arm_ev);
+
+            return .keep_alive;
+        }
+    }
+
     if (outcome == .close) return .close;
 
     // Just upgraded: a client can pipeline its first frame in the same packet
@@ -421,6 +447,34 @@ fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8
     if (conn.ws) |on_frame| return serveEpollWs(conn, on_frame, body_buf, out_buf);
 
     return outcome;
+}
+
+/// Flush staged response bytes (conn.write_pending) for connections where a
+/// prior write hit EAGAIN. Returns .keep_alive while bytes remain and
+/// .close when the write completes and write_pending_close is set (or on
+/// a permanent write error). Disarms EPOLLOUT once the buffer is drained.
+fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
+    const linux = std.os.linux;
+
+    const pending = conn.write_pending[conn.write_pending_off..];
+    const written = core.fdWriteNonBlock(conn.fd, pending) orelse return .close;
+    conn.write_pending_off += written;
+
+    if (conn.write_pending_off < conn.write_pending.len) return .keep_alive;
+
+    std.heap.smp_allocator.free(conn.write_pending);
+    conn.write_pending = &.{};
+    conn.write_pending_off = 0;
+    const should_close = conn.write_pending_close;
+    conn.write_pending_close = false;
+
+    var disarm_ev = linux.epoll_event{
+        .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
+        .data = .{ .fd = conn.fd },
+    };
+    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn.fd, &disarm_ev);
+
+    return if (should_close) .close else .keep_alive;
 }
 
 fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
@@ -454,7 +508,7 @@ fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_
         const rem = conn.buf[consumed..conn.filled];
         const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse break;
 
-        const parsed = core.parseHead(rem[0 .. header_end + 4]) catch {
+        const parsed = core.parseHeadAt(rem, header_end) catch {
             core.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
             return .close;
         };
@@ -655,12 +709,14 @@ fn epollWorker(ctx: EpollWorkerCtx) void {
             const conn = table.get(ev.data.fd) orelse continue;
             const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                 core.ConnOutcome.close
+            else if (conn.write_pending.len > conn.write_pending_off)
+                serveEpollWrite(conn, epfd)
             else if (conn.drain > 0)
                 serveEpollDrain(conn)
             else if (conn.ws) |on_frame|
                 serveEpollWs(conn, on_frame, body_buf, out_buf)
             else
-                serveEpollConn(conn, ctx.handler, body_buf, out_buf, config.handler_timeout_ms);
+                serveEpollConn(conn, ctx.handler, body_buf, out_buf, config.handler_timeout_ms, epfd);
 
             if (outcome == .close) {
                 _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
@@ -837,11 +893,13 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
     try std.testing.expectEqual(burst.len, std.os.linux.write(fds[0], &burst, burst.len));
 
     var conn_buf: [8 * 1024]u8 = undefined;
-    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0, .ws = null, .drain = 0, .drain_close = false };
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
     var body_buf: [1024]u8 = undefined;
     var out_buf: [4 * 1024]u8 = undefined;
 
-    const outcome = serveEpollConn(&conn, testOkHandler, &body_buf, &out_buf, 0);
+    // epfd = -1: EPOLLOUT staging won't trigger for this burst (socketpair
+    // buffer fits all 16 responses), so no epoll_ctl calls are made.
+    const outcome = serveEpollConn(&conn, testOkHandler, &body_buf, &out_buf, 0, -1);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
 
