@@ -1,4 +1,4 @@
-//! gRPC 5-byte message prefix codec and gRPC frame send functions.
+//! gRPC 5-byte message prefix codec, gRPC frame send functions, and gzip codec.
 
 const std = @import("std");
 const h2 = @import("../Http2.zig");
@@ -102,9 +102,13 @@ pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) usi
 
 /// Encode the 9-byte DATA frame header plus the 5-byte gRPC prefix into out (14 bytes).
 /// The caller appends the message payload after these 14 bytes.
+///
+/// Param:
+/// compress - bool (true sets compress flag 1 in the gRPC prefix)
+///
 /// Return:
 /// - bytes written into out (always 14).
-pub fn buildGrpcDataHeader(out: []u8, stream_id: u31, msg_len: usize) usize {
+pub fn buildGrpcDataHeader(out: []u8, stream_id: u31, msg_len: usize, compress: bool) usize {
     var fh: [9]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(5 + msg_len),
@@ -113,8 +117,106 @@ pub fn buildGrpcDataHeader(out: []u8, stream_id: u31, msg_len: usize) usize {
         .stream_id = stream_id,
     });
     @memcpy(out[0..9], &fh);
-    writeGrpcPrefix(out[9..14], false, @intCast(msg_len));
+    writeGrpcPrefix(out[9..14], compress, @intCast(msg_len));
     return 14;
+}
+
+/// Encode initial response HEADERS (:status 200, content-type, grpc-encoding: gzip) into out.
+/// No END_STREAM. Use when the server will send gzip-compressed DATA frames.
+///
+/// Return:
+/// - bytes written into out.
+pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8) usize {
+    var hdr_buf: [512]u8 = undefined;
+    var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
+    hpack_enc.writeHeader(":status", "200") catch return 0;
+    hpack_enc.writeHeader("content-type", content_type) catch return 0;
+    hpack_enc.writeHeader("grpc-encoding", "gzip") catch return 0;
+    const hblock = hpack_enc.encoded();
+
+    var fh: [9]u8 = undefined;
+    h2.encodeFrameHeader(&fh, .{
+        .length = @intCast(hblock.len),
+        .frame_type = h2.FT_HEADERS,
+        .flags = h2.FLAG_END_HEADERS,
+        .stream_id = stream_id,
+    });
+    @memcpy(out[0..9], &fh);
+    @memcpy(out[9..][0..hblock.len], hblock);
+    return 9 + hblock.len;
+}
+
+// --------------------------------------------------------- //
+
+/// Decompress a gzip-encoded gRPC body in-place.
+/// Walks all 5+N messages, decompresses each message with compress flag 1.
+/// Messages with compress flag 0 are copied as-is.
+/// All output messages have compress=0 in their 5-byte prefix.
+///
+/// Return:
+/// - byte count written into out_buf
+/// - error.TruncatedBody if the body is malformed
+/// - error.DecompressFailed if gzip decompression fails
+/// - error.BufferTooSmall if out_buf cannot hold the decompressed result
+pub fn decompressGrpcBody(body: []const u8, out_buf: []u8) !usize {
+    const flate = std.compress.flate;
+
+    var in_pos: usize = 0;
+    var out_pos: usize = 0;
+
+    while (in_pos + grpc_prefix_len <= body.len) {
+        const compress_flag = body[in_pos] != 0;
+        const msg_len = std.mem.readInt(u32, body[in_pos + 1 ..][0..4], .big);
+        const total = grpc_prefix_len + @as(usize, msg_len);
+
+        if (in_pos + total > body.len) return error.TruncatedBody;
+
+        if (compress_flag) {
+            if (out_pos + grpc_prefix_len > out_buf.len) return error.BufferTooSmall;
+
+            const compressed = body[in_pos + grpc_prefix_len ..][0..msg_len];
+            var in_reader = std.Io.Reader.fixed(compressed);
+            var decomp = flate.Decompress.init(&in_reader, .gzip, &.{});
+            var out_writer = std.Io.Writer.fixed(out_buf[out_pos + grpc_prefix_len ..]);
+            const decomp_len = decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
+
+            out_buf[out_pos] = 0;
+            std.mem.writeInt(u32, out_buf[out_pos + 1 ..][0..4], @intCast(decomp_len), .big);
+            out_pos += grpc_prefix_len + decomp_len;
+        } else {
+            if (out_pos + total > out_buf.len) return error.BufferTooSmall;
+            @memcpy(out_buf[out_pos..][0..total], body[in_pos..][0..total]);
+            out_pos += total;
+        }
+
+        in_pos += total;
+    }
+
+    return out_pos;
+}
+
+/// Compress data using gzip and write the result into out_buf.
+/// out_buf must be at least data.len + 128 bytes to guarantee no overflow.
+/// Uses level_1 (fastest) compression for low-latency response paths.
+///
+/// Return:
+/// - compressed byte count
+/// - error.CompressFailed if gzip compression fails or out_buf is too small
+pub fn compressGrpcMessage(data: []const u8, out_buf: []u8) !usize {
+    const flate = std.compress.flate;
+
+    const work_buf = try std.heap.smp_allocator.alloc(u8, flate.max_window_len);
+    defer std.heap.smp_allocator.free(work_buf);
+
+    const comp = try std.heap.smp_allocator.create(flate.Compress);
+    defer std.heap.smp_allocator.destroy(comp);
+
+    var out_writer = std.Io.Writer.fixed(out_buf);
+    comp.* = flate.Compress.init(&out_writer, work_buf, .gzip, flate.Compress.Options.level_1) catch return error.CompressFailed;
+    comp.writer.writeAll(data) catch return error.CompressFailed;
+    comp.finish() catch return error.CompressFailed;
+
+    return out_writer.end;
 }
 
 /// Encode trailer HEADERS (grpc-status, grpc-message) into out. FLAG_END_STREAM.
@@ -182,7 +284,7 @@ pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const
 /// Send one DATA frame with 5-byte gRPC prefix. No END_STREAM.
 pub fn sendGrpcData(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !void {
     var head: [14]u8 = undefined;
-    _ = buildGrpcDataHeader(&head, stream_id, message.len);
+    _ = buildGrpcDataHeader(&head, stream_id, message.len, false);
 
     try h2.fdWriteAll(fd, &head);
     try h2.fdWriteAll(fd, message);
@@ -243,6 +345,78 @@ test "zix grpc: cached buildGrpcTrailer OK decodes to grpc-status 0 with END_STR
         if (std.mem.eql(u8, h.name, "grpc-status") and std.mem.eql(u8, h.value, "0")) saw_status = true;
     }
     try std.testing.expect(saw_status);
+}
+
+test "zix grpc: buildGrpcHeadersGzip includes grpc-encoding header" {
+    var buf: [256]u8 = undefined;
+    const n = buildGrpcHeadersGzip(&buf, 1, GRPC_CONTENT_TYPE);
+    const fh = h2.parseFrameHeader(buf[0..9]);
+    try std.testing.expectEqual(h2.FT_HEADERS, fh.frame_type);
+    try std.testing.expectEqual(h2.FLAG_END_HEADERS, fh.flags);
+
+    var decoder = h2.HpackDecoder.init();
+    var headers: [8]h2.Header = undefined;
+    var scratch: [256]u8 = undefined;
+    const count = try decoder.decode(buf[9..n], &headers, &scratch);
+
+    var saw_encoding = false;
+    for (headers[0..count]) |h| {
+        if (std.mem.eql(u8, h.name, "grpc-encoding") and std.mem.eql(u8, h.value, "gzip")) saw_encoding = true;
+    }
+    try std.testing.expect(saw_encoding);
+}
+
+test "zix grpc: buildGrpcDataHeader compress flag false" {
+    var buf: [14]u8 = undefined;
+    _ = buildGrpcDataHeader(&buf, 1, 10, false);
+    try std.testing.expectEqual(@as(u8, 0), buf[9]);
+}
+
+test "zix grpc: buildGrpcDataHeader compress flag true" {
+    var buf: [14]u8 = undefined;
+    _ = buildGrpcDataHeader(&buf, 1, 10, true);
+    try std.testing.expectEqual(@as(u8, 1), buf[9]);
+}
+
+test "zix grpc: compressGrpcMessage and decompressGrpcBody roundtrip" {
+    const original = "hello grpc compression";
+
+    var comp_buf: [256]u8 = undefined;
+    const comp_len = try compressGrpcMessage(original, &comp_buf);
+    try std.testing.expect(comp_len > 0);
+    try std.testing.expect(comp_len < comp_buf.len);
+
+    var body: [256]u8 = undefined;
+    body[0] = 1;
+    std.mem.writeInt(u32, body[1..5], @intCast(comp_len), .big);
+    @memcpy(body[5..][0..comp_len], comp_buf[0..comp_len]);
+
+    var out_buf: [256]u8 = undefined;
+    const out_len = try decompressGrpcBody(body[0 .. 5 + comp_len], &out_buf);
+
+    try std.testing.expect(out_len == 5 + original.len);
+    try std.testing.expectEqual(@as(u8, 0), out_buf[0]);
+    const msg_len = std.mem.readInt(u32, out_buf[1..5], .big);
+    try std.testing.expectEqual(@as(u32, original.len), msg_len);
+    try std.testing.expectEqualStrings(original, out_buf[5..][0..original.len]);
+}
+
+test "zix grpc: decompressGrpcBody passes through uncompressed messages" {
+    var body: [12]u8 = undefined;
+    writeGrpcPrefix(body[0..5], false, 7);
+    @memcpy(body[5..], "abcdefg");
+
+    var out_buf: [32]u8 = undefined;
+    const n = try decompressGrpcBody(&body, &out_buf);
+    try std.testing.expectEqual(@as(usize, 12), n);
+    try std.testing.expectEqualSlices(u8, &body, out_buf[0..n]);
+}
+
+test "zix grpc: decompressGrpcBody truncated body returns error" {
+    var body: [5]u8 = undefined;
+    writeGrpcPrefix(&body, false, 100);
+    var out_buf: [256]u8 = undefined;
+    try std.testing.expectError(error.TruncatedBody, decompressGrpcBody(&body, &out_buf));
 }
 
 test "zix grpc: readGrpcPrefix too short" {
