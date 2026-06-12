@@ -87,6 +87,23 @@ test "zix integration: FixServer init and deinit do not error" {
     server.deinit();
 }
 
+test "zix integration: FixServer EPOLL dispatch model init succeeds and deinit is safe" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try zix.Fix.Server.init(&.{}, .{
+        .io = io,
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "SERVER",
+        .dispatch_model = .EPOLL,
+        .workers = 2,
+    });
+    server.deinit();
+    try std.testing.expectEqual(@as(usize, 2), server.config.workers);
+}
+
 test "zix integration: FixServer init, port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
