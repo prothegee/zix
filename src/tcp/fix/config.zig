@@ -60,6 +60,10 @@ pub const FixClientConfig = struct {
     comp_id: []const u8,
     /// Server TargetCompID (tag 56).
     target_comp_id: []const u8,
+    /// Socket receive timeout after connect in milliseconds (SO_RCVTIMEO). 0 = disabled.
+    recv_timeout_ms: u32 = 0,
+    /// Socket send timeout after connect in milliseconds (SO_SNDTIMEO). 0 = disabled.
+    send_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -142,4 +146,6 @@ test "zix fix: FixClientConfig fields" {
     try std.testing.expectEqual(@as(u16, 9500), cfg.port);
     try std.testing.expectEqualStrings("CLIENT", cfg.comp_id);
     try std.testing.expectEqualStrings("SERVER", cfg.target_comp_id);
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }

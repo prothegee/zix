@@ -74,6 +74,26 @@ fn sendMsg(
 
 // --------------------------------------------------------- //
 
+test "zix behaviour: FixClientConfig, recv_timeout_ms default is 0" {
+    const cfg = zix.Fix.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+    };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix behaviour: FixClientConfig, send_timeout_ms default is 0" {
+    const cfg = zix.Fix.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+    };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
 test "zix behaviour: Logon response has MsgType=A and CompIDs swapped" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });

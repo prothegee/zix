@@ -169,3 +169,22 @@ test "zix edge: gRPC finish-only handler delivers error status to client" {
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
+
+test "zix edge: GrpcClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Grpc.ClientConfig{ .ip = "127.0.0.1", .port = 8083 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix edge: GrpcClientConfig, send_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Grpc.ClientConfig{ .ip = "127.0.0.1", .port = 8083 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
+test "zix edge: GrpcClientConfig, large recv_timeout_ms value is stored without overflow" {
+    const cfg = zix.Grpc.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 8083,
+        .recv_timeout_ms = std.math.maxInt(u32),
+    };
+    try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
+}

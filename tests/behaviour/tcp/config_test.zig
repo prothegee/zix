@@ -36,6 +36,16 @@ test "zix behaviour: TcpClientConfig, max_msg_len defaults to 4096" {
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
 }
 
+test "zix behaviour: TcpClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
+    const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix behaviour: TcpClientConfig, send_timeout_ms defaults to 0 (disabled)" {
+    const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
 test "zix behaviour: TCP frame, length header is 4-byte big-endian u32" {
     const payload_len: u32 = 1234;
     var hdr: [4]u8 = undefined;

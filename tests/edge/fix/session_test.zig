@@ -57,6 +57,31 @@ fn recvMsg(
 }
 
 // --------------------------------------------------------- //
+// Config edge cases
+// --------------------------------------------------------- //
+
+test "zix edge: FixClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Fix.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+    };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix edge: FixClientConfig, large recv_timeout_ms value is stored without overflow" {
+    const cfg = zix.Fix.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .recv_timeout_ms = std.math.maxInt(u32),
+    };
+    try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
+}
+
+// --------------------------------------------------------- //
 // Pure-computation edge cases (no I/O)
 // --------------------------------------------------------- //
 

@@ -36,3 +36,22 @@ test "zix edge: TcpServer EPOLL with workers = 1, minimum explicit count initial
     server.deinit();
     try std.testing.expectEqual(@as(usize, 1), server.config.workers);
 }
+
+test "zix edge: TcpClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix edge: TcpClientConfig, send_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
+test "zix edge: TcpClientConfig, large recv_timeout_ms value is stored without overflow" {
+    const cfg = zix.Tcp.ClientConfig{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .recv_timeout_ms = std.math.maxInt(u32),
+    };
+    try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
+}

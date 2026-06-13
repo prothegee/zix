@@ -14,6 +14,24 @@ test "zix edge: UdsServer.init, empty path returns error.PathEmpty" {
     try std.testing.expectError(error.PathEmpty, result);
 }
 
+test "zix edge: UdsClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix.sock" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix edge: UdsClientConfig, send_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix.sock" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
+test "zix edge: UdsClientConfig, large recv_timeout_ms value is stored without overflow" {
+    const cfg = zix.Uds.ClientConfig{
+        .path = "/tmp/zix.sock",
+        .recv_timeout_ms = std.math.maxInt(u32),
+    };
+    try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
+}
+
 test "zix edge: HttpClient.requestUds, path too long returns error.InvalidPath" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
