@@ -1,0 +1,49 @@
+name: Optimization
+description: Performance improvement or optimization suggestion.
+labels: ["optimization"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Optimization Proposal
+        Please provide details about the performance issue or optimization opportunity.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of zix needs optimization?
+      options:
+        - http
+        - http1
+        - grpc
+        - udp
+        - uds
+        - tcp
+        - channel
+        - logger
+        - server
+        - client
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Performance Problem
+      description: "Describe the performance issue or bottleneck"
+    validations:
+      required: true
+  - type: textarea
+    id: benchmark
+    attributes:
+      label: Benchmark/Profiling Data
+      description: "If available, share benchmark results or profiling data"
+    validations:
+      required: false
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Optimization Proposal
+      description: "What optimization do you suggest?"
+    validations:
+      required: true
