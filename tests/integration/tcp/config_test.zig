@@ -55,3 +55,28 @@ test "zix integration: TcpClient.connect, port zero returns PortNotConfigured" {
     }, io);
     try std.testing.expectError(error.PortNotConfigured, result);
 }
+
+test "zix integration: TcpClient, recv_timeout_ms fires when server sends no data" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9341);
+    var stall_listener = try addr.listen(io, .{
+        .mode = .stream,
+        .reuse_address = true,
+        .kernel_backlog = 4,
+    });
+    defer stall_listener.deinit(io);
+
+    var client = try zix.Tcp.Client.connect(.{
+        .ip = "127.0.0.1",
+        .port = 9341,
+        .recv_timeout_ms = 200,
+    }, io);
+    defer client.deinit(io);
+
+    var buf: [4096]u8 = undefined;
+    const result = client.recvMsg(io, &buf);
+    if (result) |_| return error.ExpectedRecvTimeout else |_| {}
+}
