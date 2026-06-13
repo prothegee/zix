@@ -27,6 +27,16 @@ test "zix behaviour: UdsClientConfig, stores path as provided" {
     try std.testing.expectEqualStrings("/tmp/zix_client_test.sock", cfg.path);
 }
 
+test "zix behaviour: UdsClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
+    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix_client_test.sock" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix behaviour: UdsClientConfig, send_timeout_ms defaults to 0 (disabled)" {
+    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix_client_test.sock" };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
 test "zix behaviour: UDS frame, length header is 4-byte little-endian u32" {
     const payload_len: u32 = 1234;
     var hdr: [4]u8 = undefined;
