@@ -124,21 +124,11 @@ pub const FixClient = struct {
     /// Return:
     /// - slice into the internal buffer (valid until the next recvMessage call)
     /// - error.RecvTimeout if recv_timeout_ms is set and no data arrives in time
+    /// - error.ConnectionClosed if the peer closes the connection before a full message arrives
     pub fn recvMessage(self: *Self, io: std.Io) ![]const u8 {
-        if (self.recv_timeout_ms > 0) {
-            // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
-            var pfd = [1]std.posix.pollfd{.{
-                .fd = self.stream.socket.handle,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            const ms: i32 = @intCast(@min(self.recv_timeout_ms, @as(u32, std.math.maxInt(i32))));
-            const ready = try std.posix.poll(&pfd, ms);
-            if (ready == 0) return error.RecvTimeout;
-        }
+        _ = io;
+        const fd = self.stream.socket.handle;
 
-        var rd_buf: [core.MAX_MSG_SIZE]u8 = undefined;
-        var reader = self.stream.reader(io, &rd_buf);
         while (true) {
             if (core.findMessageEnd(self.recv_buf[0..self.recv_len])) |end| {
                 const msg = self.recv_buf[0..end];
@@ -149,10 +139,23 @@ pub const FixClient = struct {
                 self.recv_len = remaining;
                 return msg;
             }
+
             if (self.recv_len >= self.recv_buf.len) return error.MessageTooLarge;
-            const b = try reader.interface.takeByte();
-            self.recv_buf[self.recv_len] = b;
-            self.recv_len += 1;
+
+            if (self.recv_timeout_ms > 0) {
+                var pfd = [1]std.posix.pollfd{.{
+                    .fd = fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                const ms: i32 = @intCast(@min(self.recv_timeout_ms, @as(u32, std.math.maxInt(i32))));
+                const ready = try std.posix.poll(&pfd, ms);
+                if (ready == 0) return error.RecvTimeout;
+            }
+
+            const n = try std.posix.read(fd, self.recv_buf[self.recv_len..]);
+            if (n == 0) return error.ConnectionClosed;
+            self.recv_len += n;
         }
     }
 };
@@ -204,6 +207,54 @@ test "zix test: applySocketTimeout fix, sets SO_RCVTIMEO on real socket" {
     _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
     try std.testing.expectEqual(@as(isize, 1), recv_tv.sec);
     try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
+}
+
+test "zix fix: FixClient.recvMessage reassembles message split across two reads" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds),
+    );
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var out_buf: [core.MAX_MSG_SIZE]u8 = undefined;
+    const extra = [_]core.BuildField{
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
+    };
+    const msg_len = try core.buildMessage(&out_buf, "SERVER", "CLIENT", 1, core.MsgType.Logon, &extra);
+    const full_msg = out_buf[0..msg_len];
+
+    const half = msg_len / 2;
+
+    var client = FixClient{
+        .stream = .{ .socket = .{
+            .handle = fds[0],
+            .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+        } },
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .seq_out = 1,
+        .recv_buf = undefined,
+        .recv_len = 0,
+        .recv_timeout_ms = 0,
+    };
+    @memcpy(client.recv_buf[0..half], full_msg[0..half]);
+    client.recv_len = half;
+
+    _ = std.os.linux.write(fds[1], full_msg[half..].ptr, msg_len - half);
+
+    const msg = try client.recvMessage(io);
+
+    try std.testing.expectEqualSlices(u8, full_msg, msg);
 }
 
 test "zix test: applySocketTimeout fix, short timeout does not fire when data arrives immediately" {

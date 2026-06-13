@@ -12,6 +12,36 @@ const ServerCtx = struct {
     err: ?anyerror = null,
 };
 
+fn runSegmentedResponseServer(ctx: *ServerCtx, io: std.Io) void {
+    const stream = ctx.listener.accept(io) catch |e| {
+        ctx.err = e;
+        return;
+    };
+    defer stream.close(io);
+
+    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var rd = stream.reader(io, &rd_buf);
+    var wr = stream.writer(io, &wr_buf);
+    var recv_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
+    var recv_len: usize = 0;
+    var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
+
+    _ = recvMsg(&rd.interface, &recv_buf, &recv_len, &fields) catch return;
+
+    var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    const n = zix.Fix.buildMessage(&out_buf, "SERVER", "CLIENT", 1, zix.Fix.MsgType.Logon, &.{
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
+    }) catch return;
+
+    const half = n / 2;
+    wr.interface.writeAll(out_buf[0..half]) catch return;
+    wr.interface.flush() catch return;
+    wr.interface.writeAll(out_buf[half..n]) catch return;
+    wr.interface.flush() catch return;
+}
+
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
     const stream = ctx.listener.accept(io) catch |e| {
         ctx.err = e;
@@ -162,6 +192,45 @@ test "zix edge: message arriving in two TCP segments is reassembled correctly" {
     _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
 
     t.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
+}
+
+test "zix edge: FixClient.recvMessage reassembles server response split across two TCP segments" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx: ServerCtx = undefined;
+    ctx.err = null;
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 2);
+    ctx.listener = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 4 });
+    const thread = try std.Thread.spawn(
+        .{ .stack_size = 512 * 1024 },
+        runSegmentedResponseServer,
+        .{ &ctx, io },
+    );
+
+    var client = try zix.Fix.Client.connect(.{
+        .ip = "127.0.0.1",
+        .port = TEST_PORT + 2,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+    }, io);
+    defer client.deinit(io);
+
+    try client.sendMessage(io, zix.Fix.MsgType.Logon, &.{
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
+    });
+
+    const raw = try client.recvMessage(io);
+    var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
+    const nf = try zix.Fix.parseFields(raw, &fields);
+    try std.testing.expectEqualStrings(zix.Fix.MsgType.Logon, zix.Fix.getField(fields[0..nf], .MsgType).?);
+
+    thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
