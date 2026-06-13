@@ -266,3 +266,30 @@ test "zix integration: multiple sequential messages are all echoed" {
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
+
+test "zix integration: FixClient, recv_timeout_ms fires when server sends no data" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9541);
+    var stall_listener = try addr.listen(io, .{
+        .mode = .stream,
+        .reuse_address = true,
+        .kernel_backlog = 4,
+    });
+    defer stall_listener.deinit(io);
+
+    var client = try zix.Fix.Client.connect(.{
+        .ip = "127.0.0.1",
+        .port = 9541,
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .recv_timeout_ms = 200,
+    }, io);
+    defer client.deinit(io);
+
+    const result = client.recvMessage(io);
+    if (result) |_| return error.ExpectedRecvTimeout else |_| {}
+}
