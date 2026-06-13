@@ -81,7 +81,7 @@ pub fn main(process: std.process.Init) !void {
     //     ...
     // }, io);
     var client = try MyClient.initArgs(.{
-        .server_ip = SERVER_IP,
+        .ip = SERVER_IP,
         .server_port = SERVER_PORT,
         .bind_port = CLIENT_BIND_PORT,
         .port_mode = .CONFIGURABLE,
