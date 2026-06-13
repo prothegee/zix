@@ -39,7 +39,7 @@ pub fn main(process: std.process.Init) void {
     };
 
     run(process.io, server_path, port) catch |err| {
-        std.debug.print("FAIL {s}: {}\n", .{label, err});
+        std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
     std.debug.print("PASS {s}\n", .{label});
