@@ -10,6 +10,22 @@ pub const GrpcStatus = status_mod.GrpcStatus;
 
 // --------------------------------------------------------- //
 
+fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    if (recv_ms == 0 and send_ms == 0) return;
+
+    if (recv_ms > 0) {
+        const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
+    }
+
+    if (send_ms > 0) {
+        const send_tv = std.posix.timeval{ .sec = @intCast(send_ms / 1000), .usec = @intCast((send_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&send_tv)) catch {};
+    }
+}
+
+// --------------------------------------------------------- //
+
 /// Response event returned by recvResponse().
 pub const GrpcClientResponse = union(enum) {
     data: []const u8,
@@ -46,6 +62,7 @@ pub const GrpcClient = struct {
     /// - error.PortNotConfigured if config.port is 0
     pub fn connect(config: GrpcClientConfig, io: std.Io) !Self {
         if (config.port == 0) return error.PortNotConfigured;
+
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
         const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
         const fd = stream.socket.handle;
@@ -58,6 +75,8 @@ pub const GrpcClient = struct {
                 std.mem.asBytes(&@as(c_int, 1)),
             ) catch {};
         }
+
+        applySocketTimeout(fd, config.recv_timeout_ms, config.send_timeout_ms);
 
         try h2.fdWriteAll(fd, h2.PREFACE);
         try h2.sendSettings(fd, &.{
@@ -254,4 +273,53 @@ test "zix grpc: GrpcClient.connect port zero returns PortNotConfigured" {
         error.PortNotConfigured,
         GrpcClient.connect(.{ .ip = "127.0.0.1", .port = 0 }, io),
     );
+}
+
+test "zix test: applySocketTimeout grpc, zero ms is a no-op on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applySocketTimeout(sock_fd, 0, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
+}
+
+test "zix test: applySocketTimeout grpc, sets SO_RCVTIMEO on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applySocketTimeout(sock_fd, 2500, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 2), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
+}
+
+test "zix test: applySocketTimeout grpc, short timeout does not fire when data arrives immediately" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    applySocketTimeout(fds[0], 50, 0);
+
+    const written: usize = @intCast(std.os.linux.write(fds[1], "data".ptr, 4));
+    try std.testing.expectEqual(@as(usize, 4), written);
+
+    var buf: [8]u8 = undefined;
+    const n: usize = @intCast(std.os.linux.read(fds[0], &buf, buf.len));
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqualSlices(u8, "data", buf[0..n]);
 }
