@@ -273,13 +273,15 @@ pub const Logger = struct {
 
     /// Log an HTTP access entry.
     /// Derives log level from status: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR, other=DEBUG.
-    /// Absent ua or origin should be passed as empty string. They log as "-".
+    /// Absent client_ip, ua, or origin should be passed as empty string. They log as "-".
+    /// client_ip: real client address. Pass X-Forwarded-For or X-Real-IP value when behind a proxy.
     pub fn access(
         self: *Self,
         method: []const u8,
         path: []const u8,
         status: u16,
         bytes: usize,
+        client_ip: []const u8,
         ua: []const u8,
         origin: []const u8,
     ) void {
@@ -287,14 +289,15 @@ pub const Logger = struct {
         if (!self.consoleActive(level) and !self.fileActive(level)) return;
 
         const timestamp = getTimestamp();
+        const client_ip_out = if (client_ip.len > 0) client_ip else "-";
         const ua_out = if (ua.len > 0) ua else "-";
         const origin_out = if (origin.len > 0) origin else "-";
 
         var line_buf: [4096]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
-            "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\"",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), method, path, status, bytes, ua_out, origin_out },
+            "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\" \"{s}\"",
+            .{ &timestamp.date, &timestamp.time, levelLabel(level), method, path, status, bytes, client_ip_out, ua_out, origin_out },
         ) catch return;
 
         self.spinLock();
@@ -588,7 +591,21 @@ test "zix test: Logger access call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
-    logger.access("GET", "/", 200, 0, "", "");
+    logger.access("GET", "/", 200, 0, "", "", "");
+}
+
+test "zix test: Logger access does not panic with empty client_ip" {
+    const allocator = std.testing.allocator;
+    var logger = try Logger.init(allocator, .{});
+    defer logger.deinit();
+    logger.access("GET", "/", 200, 0, "", "", "");
+}
+
+test "zix test: Logger access does not panic with non-empty client_ip" {
+    const allocator = std.testing.allocator;
+    var logger = try Logger.init(allocator, .{});
+    defer logger.deinit();
+    logger.access("GET", "/", 200, 0, "10.0.0.1", "Mozilla/5.0", "https://example.com");
 }
 
 test "zix test: Logger rpc call below min_level is silent" {

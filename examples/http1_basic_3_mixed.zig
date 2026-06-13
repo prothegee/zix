@@ -43,9 +43,11 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 
     // Handler-side access logging (uncomment with g_logger above):
     // if (g_logger) |lg| {
-    //     const ua = zix.Http1.getHeader(head, "user-agent") orelse "";
+    //     const forwarded_for = zix.Http1.getHeader(head, "x-forwarded-for") orelse "";
+    //     const client_ip = if (forwarded_for.len > 0) forwarded_for else zix.Http1.getHeader(head, "x-real-ip") orelse "";
+    //     const user_agent = zix.Http1.getHeader(head, "user-agent") orelse "";
     //     const origin = zix.Http1.getHeader(head, "origin") orelse "";
-    //     lg.access(head.method, head.path, 200, 0, ua, origin);
+    //     lg.access(head.method, head.path, 200, 0, client_ip, user_agent, origin);
     // }
 }
 

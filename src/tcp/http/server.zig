@@ -306,6 +306,12 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             }
 
             if (cfg.logger) |lg| {
+                const forwarded_for = req.header("x-forwarded-for") orelse "";
+                const real_ip = req.header("x-real-ip") orelse "";
+                const client_ip = if (forwarded_for.len > 0) blk: {
+                    const comma = std.mem.indexOf(u8, forwarded_for, ",") orelse forwarded_for.len;
+                    break :blk std.mem.trim(u8, forwarded_for[0..comma], " ");
+                } else real_ip;
                 const user_agent = req.header("user-agent") orelse "";
                 const origin = req.header("origin") orelse "";
                 lg.access(
@@ -313,6 +319,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     req.path(),
                     @intFromEnum(res.status),
                     res.bytes_written,
+                    client_ip,
                     user_agent,
                     origin,
                 );
