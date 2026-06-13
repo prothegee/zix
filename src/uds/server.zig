@@ -5,6 +5,20 @@ const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
 
+fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    if (recv_ms == 0 and send_ms == 0) return;
+
+    if (recv_ms > 0) {
+        const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
+    }
+
+    if (send_ms > 0) {
+        const send_tv = std.posix.timeval{ .sec = @intCast(send_ms / 1000), .usec = @intCast((send_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&send_tv)) catch {};
+    }
+}
+
 // --------------------------------------------------------- //
 
 /// UDS stream server. Accepts connections and dispatches each via io.concurrent.
@@ -76,6 +90,7 @@ pub const UdsServer = struct {
                 if (self.config.logger) |lg| lg.system(.WARN, "uds", "accept error: {}", .{err});
                 continue;
             };
+            applyConnTimeout(stream.socket.handle, self.config.recv_timeout_ms, self.config.send_timeout_ms);
 
             const task = ConnTask{ .stream = stream, .io = io, .logger = self.config.logger };
             if (io.concurrent(dispatch, .{task})) |_| {} else |_| {
@@ -141,4 +156,66 @@ test "zix test: UdsServer init, empty path returns PathEmpty" {
 test "zix test: UdsServer init, valid path succeeds" {
     var server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
     server.deinit();
+}
+
+test "zix test: UdsServer init, timeout fields default to zero" {
+    const server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
+}
+
+test "zix test: UdsServer init, timeout fields stored from config" {
+    const server = try UdsServer.init(.{
+        .path = "/tmp/zix_test.sock",
+        .allocator = std.testing.allocator,
+        .recv_timeout_ms = 5000,
+        .send_timeout_ms = 3000,
+    });
+    try std.testing.expectEqual(@as(u32, 5000), server.config.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 3000), server.config.send_timeout_ms);
+}
+
+test "zix test: applyConnTimeout uds, zero ms is no-op on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 0, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
+}
+
+test "zix test: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 2500, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 2), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
+}
+
+test "zix test: applyConnTimeout uds, sets SO_SNDTIMEO on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 0, 1000);
+
+    var send_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&send_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 1), send_tv.sec);
+    try std.testing.expectEqual(@as(i64, 0), send_tv.usec);
 }
