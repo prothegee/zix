@@ -174,7 +174,6 @@ const ConnQueue = struct {
 
 // --------------------------------------------------------- //
 
-
 // --------------------------------------------------------- //
 
 // Internal generic implementation: use `Server.init(stack_threshold, routes, config)` publicly.

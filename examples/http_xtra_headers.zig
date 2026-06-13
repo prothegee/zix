@@ -12,7 +12,7 @@ const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
 const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
 // --------------------------------------------------------- //
-// This example demonstrates zix.Http.HeaderSize -- the configurable
+// This example demonstrates zix.Http.HeaderSize: the configurable
 // cap on how many custom response headers addHeader() will accept.
 //
 // The cap is set once at HttpServer.init() via max_response_headers.

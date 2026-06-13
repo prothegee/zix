@@ -50,8 +50,6 @@ pub const TcpClient = struct {
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
         const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
 
-        std.debug.print("zix tcp client: connected to {s}:{d}\n", .{ config.ip, config.port });
-
         return .{ .stream = stream, .config = config };
     }
 
