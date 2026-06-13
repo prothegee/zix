@@ -226,6 +226,164 @@ pub const HttpClient = struct {
 
     // --------------------------------------------------------- //
 
+    /// Make an HTTP/1.1 GET over a Unix domain socket.
+    ///
+    /// Param:
+    /// socket_path - []const u8 (path to the Unix socket file)
+    /// http_path   - []const u8 (HTTP path, e.g. "/api/v1/info")
+    /// opts        - RequestOpts
+    ///
+    /// Return:
+    /// - ClientResponse
+    /// - error.UdsNotSupported (non-Unix platform)
+    /// - error.InvalidPath (path rejected by the OS)
+    pub fn getUds(self: *Self, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
+        return self.requestUds(.GET, socket_path, http_path, opts);
+    }
+
+    /// Make an HTTP/1.1 POST over a Unix domain socket.
+    ///
+    /// Param:
+    /// socket_path - []const u8 (path to the Unix socket file)
+    /// http_path   - []const u8 (HTTP path)
+    /// opts        - RequestOpts
+    ///
+    /// Return:
+    /// - ClientResponse
+    pub fn postUds(self: *Self, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
+        return self.requestUds(.POST, socket_path, http_path, opts);
+    }
+
+    /// Make an HTTP/1.1 request over a Unix domain socket.
+    ///
+    /// Note:
+    /// - Sends Connection: close so the server closes after the response.
+    ///   Content-Length is read when present; otherwise body is read until EOF.
+    /// - wss:// and TLS are not supported. Use the TCP-based request() for those.
+    ///
+    /// Param:
+    /// method      - Method.Code
+    /// socket_path - []const u8 (path to the Unix socket file)
+    /// http_path   - []const u8 (HTTP path, e.g. "/v1/info")
+    /// opts        - RequestOpts
+    ///
+    /// Return:
+    /// - ClientResponse
+    /// - error.UdsNotSupported (non-Unix platform)
+    /// - error.InvalidPath (socket path rejected by OS, e.g. too long)
+    /// - error.BodyTooLarge (response body exceeded config.max_response_body)
+    pub fn requestUds(self: *Self, method: Method.Code, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
+        if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
+
+        const gpa = self.config.allocator;
+
+        const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return error.InvalidPath;
+        const uds_stream = try unix_addr.connect(self.config.io);
+        defer uds_stream.close(self.config.io);
+        const fd = uds_stream.socket.handle;
+
+        const method_name = udsMethodStr(method);
+
+        var req_buf: [4096]u8 = undefined;
+        var req_len: usize = 0;
+
+        const status_line = std.fmt.bufPrint(
+            req_buf[req_len..],
+            "{s} {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n",
+            .{ method_name, http_path },
+        ) catch return error.InvalidPath;
+        req_len += status_line.len;
+
+        for (opts.headers) |hdr| {
+            const h = std.fmt.bufPrint(req_buf[req_len..], "{s}: {s}\r\n", .{ hdr.name, hdr.value }) catch break;
+            req_len += h.len;
+        }
+
+        if (opts.body) |body| {
+            const cl_line = std.fmt.bufPrint(req_buf[req_len..], "Content-Length: {d}\r\n\r\n", .{body.len}) catch return error.InvalidPath;
+            req_len += cl_line.len;
+            try udsWriteAll(fd, req_buf[0..req_len]);
+            try udsWriteAll(fd, body);
+        } else {
+            const end = std.fmt.bufPrint(req_buf[req_len..], "\r\n", .{}) catch return error.InvalidPath;
+            req_len += end.len;
+            try udsWriteAll(fd, req_buf[0..req_len]);
+        }
+
+        var head_scan_buf: [8192]u8 = undefined;
+        var head_scan_len: usize = 0;
+        var header_end: usize = 0;
+
+        while (head_scan_len < head_scan_buf.len) {
+            const n = std.posix.read(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
+            if (n == 0) return error.ConnectionClosed;
+            head_scan_len += n;
+            if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
+                header_end = pos + 4;
+                break;
+            }
+        }
+
+        if (header_end == 0) return error.InvalidResponse;
+
+        const head_raw = head_scan_buf[0..header_end];
+
+        const status_code: u16 = blk: {
+            const first_line_end = std.mem.indexOfScalar(u8, head_raw, '\r') orelse break :blk 0;
+            const first_line = head_raw[0..first_line_end];
+            const space1 = std.mem.indexOfScalar(u8, first_line, ' ') orelse break :blk 0;
+            const after_sp = first_line[space1 + 1 ..];
+            const space2 = std.mem.indexOfScalar(u8, after_sp, ' ') orelse after_sp.len;
+            break :blk std.fmt.parseInt(u16, after_sp[0..space2], 10) catch 0;
+        };
+
+        const head_copy = try gpa.dupe(u8, head_raw);
+        errdefer gpa.free(head_copy);
+
+        const content_length: ?usize = blk: {
+            const cl_val = udsResponseHeader(head_raw, "content-length") orelse break :blk null;
+            break :blk std.fmt.parseInt(usize, std.mem.trim(u8, cl_val, " \t"), 10) catch null;
+        };
+
+        const already_read = head_scan_len - header_end;
+
+        var body_list: std.ArrayList(u8) = .empty;
+        errdefer body_list.deinit(gpa);
+
+        if (content_length) |cl| {
+            if (cl > self.config.max_response_body) return error.BodyTooLarge;
+            try body_list.resize(gpa, cl);
+            const initial = @min(already_read, cl);
+            @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
+            var body_received = initial;
+            while (body_received < cl) {
+                const n = std.posix.read(fd, body_list.items[body_received..]) catch break;
+                if (n == 0) break;
+                body_received += n;
+            }
+        } else {
+            if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
+            var read_chunk: [4096]u8 = undefined;
+            while (true) {
+                const n = std.posix.read(fd, &read_chunk) catch break;
+                if (n == 0) break;
+                if (body_list.items.len + n > self.config.max_response_body) return error.BodyTooLarge;
+                try body_list.appendSlice(gpa, read_chunk[0..n]);
+            }
+        }
+
+        const body_bytes = try body_list.toOwnedSlice(gpa);
+
+        return ClientResponse{
+            .status_code = status_code,
+            .body_data = body_bytes,
+            .head_bytes = head_copy,
+            .allocator = gpa,
+        };
+    }
+
+    // --------------------------------------------------------- //
+
     fn methodToStd(m: Method.Code) std.http.Method {
         return switch (m) {
             .GET => .GET,
@@ -240,3 +398,48 @@ pub const HttpClient = struct {
         };
     }
 };
+
+// --------------------------------------------------------- //
+
+fn udsMethodStr(m: Method.Code) []const u8 {
+    return switch (m) {
+        .GET => "GET",
+        .HEAD => "HEAD",
+        .POST => "POST",
+        .PUT => "PUT",
+        .DELETE => "DELETE",
+        .PATCH => "PATCH",
+        .OPTIONS => "OPTIONS",
+        .TRACE => "TRACE",
+        .CONNECT => "CONNECT",
+    };
+}
+
+fn udsWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.BrokenPipe;
+                written += n;
+            },
+            .INTR => continue,
+            else => return error.BrokenPipe,
+        }
+    }
+}
+
+fn udsResponseHeader(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.splitSequence(u8, head, "\r\n");
+    _ = it.next();
+    while (it.next()) |line| {
+        const colon_pos = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const header_name = std.mem.trim(u8, line[0..colon_pos], " \t");
+        if (std.ascii.eqlIgnoreCase(header_name, name)) {
+            return std.mem.trim(u8, line[colon_pos + 1 ..], " \t");
+        }
+    }
+    return null;
+}
