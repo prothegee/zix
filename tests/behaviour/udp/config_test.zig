@@ -62,7 +62,7 @@ test "zix behaviour: UdpServerConfig, port_mode defaults to REQUIRED" {
 
 test "zix behaviour: UdpClientConfig, send_once defaults to false" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9100,
         .bind_port = 9101,
     };
@@ -71,7 +71,7 @@ test "zix behaviour: UdpClientConfig, send_once defaults to false" {
 
 test "zix behaviour: UdpClientConfig, send_every defaults to 99" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9100,
         .bind_port = 9101,
     };
@@ -80,7 +80,7 @@ test "zix behaviour: UdpClientConfig, send_every defaults to 99" {
 
 test "zix behaviour: UdpClientConfig, endianness defaults to LITTLE" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9100,
         .bind_port = 9101,
     };
@@ -89,7 +89,7 @@ test "zix behaviour: UdpClientConfig, endianness defaults to LITTLE" {
 
 test "zix behaviour: UdpClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9100,
         .bind_port = 9101,
     };
