@@ -253,6 +253,7 @@ pub fn build(b: *std.Build) void {
         .{ "example-udp_server", "examples/udp_server.zig", "udp" },
         .{ "example-udp_client", "examples/udp_client.zig", "udp" },
         .{ "example-uds_server", "examples/uds_server.zig", "uds" },
+        .{ "example-uds_client", "examples/uds_client.zig", "uds" },
         .{ "example-uds_http", "examples/uds_http.zig", "uds" },
         .{ "example-channel_basic", "examples/channel_basic.zig", "channel" },
         .{ "example-channel_worker_pool", "examples/channel_worker_pool.zig", "channel" },
