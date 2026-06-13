@@ -2,7 +2,7 @@
 // Spawns the server, sends one packet, asserts broadcast echo received, kills server.
 //
 // Invoked by `zig build test-runner-udp`.
-// The server binary path is passed as argv[1] by build.zig.
+// argv[1]: server binary path, argv[2]: label, argv[3]: port (unused).
 //
 // Note:
 // - The udp_server example has broadcast=true, auto_ack=false, auto_echo=false.
@@ -30,20 +30,25 @@ const MyClient = zix.Udp.Client(Packet);
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    run(process) catch |err| {
-        std.debug.print("FAIL udp: {}\n", .{err});
-        std.process.exit(1);
-    };
-    std.debug.print("PASS udp\n", .{});
-}
-
-fn run(process: std.process.Init) !void {
-    const io = process.io;
-
     var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
     _ = arg_iter.skip();
-    const server_path = arg_iter.next() orelse return error.MissingServerPath;
+    const server_path = arg_iter.next() orelse {
+        std.debug.print("FAIL udp: missing server path\n", .{});
+        std.process.exit(1);
+    };
+    const label = arg_iter.next() orelse {
+        std.debug.print("FAIL udp: missing label\n", .{});
+        std.process.exit(1);
+    };
 
+    run(process.io, server_path) catch |err| {
+        std.debug.print("FAIL {s}: {}\n", .{label, err});
+        std.process.exit(1);
+    };
+    std.debug.print("PASS {s}\n", .{label});
+}
+
+fn run(io: std.Io, server_path: []const u8) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
