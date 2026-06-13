@@ -47,8 +47,6 @@ pub const UdsClient = struct {
         const unix_addr = try std.Io.net.UnixAddress.init(config.path);
         const stream = try unix_addr.connect(io);
 
-        std.debug.print("zix uds client: connected to {s}\n", .{config.path});
-
         return .{ .stream = stream, .config = config };
     }
 
@@ -58,13 +56,13 @@ pub const UdsClient = struct {
     }
 
     /// Send a message as a length-prefixed frame.
-    /// Frame format: [u32 payload_len, 4 bytes, native LE] [payload bytes]
+    /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         var write_buf: [4096]u8 = undefined;
         var writer = self.stream.writer(io, &write_buf);
 
         var hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &hdr, @intCast(msg.len), .little);
+        std.mem.writeInt(u32, &hdr, @intCast(msg.len), .big);
         try writer.interface.writeAll(&hdr);
         try writer.interface.writeAll(msg);
         try writer.interface.flush();
@@ -101,7 +99,7 @@ pub const UdsClient = struct {
             n += got;
         }
 
-        const len = std.mem.readInt(u32, &hdr, .little);
+        const len = std.mem.readInt(u32, &hdr, .big);
         if (len > buf.len) return error.MessageTooLarge;
 
         n = 0;
@@ -161,6 +159,60 @@ test "zix test: applySocketTimeout uds, sets SO_SNDTIMEO on real socket" {
     _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&send_tv), &opt_len);
     try std.testing.expectEqual(@as(isize, 1), send_tv.sec);
     try std.testing.expectEqual(@as(i64, 0), send_tv.usec);
+}
+
+test "zix test: UdsClient.sendMsg writes big-endian length header" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[1]);
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = UdsClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .path = "/dev/null" },
+    };
+    defer _ = std.os.linux.close(fds[0]);
+
+    try client.sendMsg(io, "hello");
+
+    var wire: [9]u8 = undefined;
+    const n: usize = @intCast(std.os.linux.read(fds[1], &wire, wire.len));
+
+    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqual(@as(u8, 0), wire[0]);
+    try std.testing.expectEqual(@as(u8, 0), wire[1]);
+    try std.testing.expectEqual(@as(u8, 0), wire[2]);
+    try std.testing.expectEqual(@as(u8, 5), wire[3]);
+    try std.testing.expectEqualSlices(u8, "hello", wire[4..9]);
+}
+
+test "zix test: UdsClient.recvMsg parses big-endian length header" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const frame = [_]u8{ 0, 0, 0, 5, 'w', 'o', 'r', 'l', 'd' };
+    _ = std.os.linux.write(fds[1], &frame, frame.len);
+
+    var client = UdsClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .path = "/dev/null" },
+    };
+
+    var buf: [32]u8 = undefined;
+    const reply = try client.recvMsg(io, &buf);
+
+    try std.testing.expectEqualSlices(u8, "world", reply);
 }
 
 test "zix test: applySocketTimeout uds, short timeout does not fire when data arrives immediately" {
