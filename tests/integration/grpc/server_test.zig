@@ -565,3 +565,33 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
     server_ctx.listener.deinit(io);
     try std.testing.expect(server_ctx.err == null);
 }
+
+test "zix integration: GrpcClient, recv_timeout_ms fires when server sends no data" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 18100);
+    var stall_listener = try addr.listen(io, .{
+        .mode = .stream,
+        .reuse_address = true,
+        .kernel_backlog = 4,
+    });
+    defer stall_listener.deinit(io);
+
+    var client = try zix.Grpc.Client.connect(.{
+        .ip = "127.0.0.1",
+        .port = 18100,
+        .recv_timeout_ms = 200,
+    }, io);
+    defer client.deinit();
+
+    const sid = try client.openStream("/svc.Svc/Test", "application/grpc+proto");
+    try client.sendMessage(sid, "test");
+    try client.endStream(sid);
+
+    var buf: [256]u8 = undefined;
+    const result = client.recvResponse(sid, &buf);
+    if (result) |_| return error.ExpectedRecvTimeout else |_| {}
+}
