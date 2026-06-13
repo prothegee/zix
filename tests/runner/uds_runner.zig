@@ -2,7 +2,7 @@
 // Spawns the server, sends "get", asserts a counter string is received, kills server.
 //
 // Invoked by `zig build test-runner-uds`.
-// The server binary path is passed as argv[1] by build.zig.
+// argv[1]: server binary path, argv[2]: label, argv[3]: port (unused).
 
 const std = @import("std");
 const zix = @import("zix");
@@ -14,20 +14,25 @@ const WAIT_MS: u64 = 5000;
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    run(process) catch |err| {
-        std.debug.print("FAIL uds: {}\n", .{err});
-        std.process.exit(1);
-    };
-    std.debug.print("PASS uds\n", .{});
-}
-
-fn run(process: std.process.Init) !void {
-    const io = process.io;
-
     var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
     _ = arg_iter.skip();
-    const server_path = arg_iter.next() orelse return error.MissingServerPath;
+    const server_path = arg_iter.next() orelse {
+        std.debug.print("FAIL uds: missing server path\n", .{});
+        std.process.exit(1);
+    };
+    const label = arg_iter.next() orelse {
+        std.debug.print("FAIL uds: missing label\n", .{});
+        std.process.exit(1);
+    };
 
+    run(process.io, server_path) catch |err| {
+        std.debug.print("FAIL {s}: {}\n", .{label, err});
+        std.process.exit(1);
+    };
+    std.debug.print("PASS {s}\n", .{label});
+}
+
+fn run(io: std.Io, server_path: []const u8) !void {
     // Remove stale socket from a previous run before spawning.
     std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
 
