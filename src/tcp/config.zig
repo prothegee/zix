@@ -43,7 +43,7 @@ pub const TcpServerConfig = struct {
     /// TCP listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 4096,
     /// Maximum payload bytes per frame. Frames exceeding this close the connection.
-    max_msg_len: usize = 4096,
+    max_recv_buf: usize = 4096,
     /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC.
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
@@ -66,7 +66,7 @@ pub const TcpClientConfig = struct {
     /// Server port. Must be non-zero.
     port: u16,
     /// Maximum payload bytes per frame.
-    max_msg_len: usize = 4096,
+    max_recv_buf: usize = 4096,
     /// Socket receive timeout after connect in milliseconds (SO_RCVTIMEO). 0 = disabled.
     recv_timeout_ms: u32 = 0,
     /// Socket send timeout after connect in milliseconds (SO_SNDTIMEO). 0 = disabled.
@@ -82,7 +82,7 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
@@ -93,7 +93,7 @@ test "zix test: TcpClientConfig, default field values" {
     const cfg = TcpClientConfig{ .ip = "127.0.0.1", .port = 9300 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
