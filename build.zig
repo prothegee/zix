@@ -377,25 +377,57 @@ pub fn build(b: *std.Build) void {
     // the protocol through the zix client. Steps are independent of each other and
     // are not part of test-all.
     //
-    // zig build test-runner-http
-    // zig build test-runner-http1
-    // zig build test-runner-grpc
-    // zig build test-runner-tcp
-    // zig build test-runner-fix
+    // zig build test-runner-http-async
+    // zig build test-runner-http-pool
+    // zig build test-runner-http-mixed
+    // zig build test-runner-http-epoll
+    // zig build test-runner-http1-async
+    // zig build test-runner-http1-pool
+    // zig build test-runner-http1-mixed
+    // zig build test-runner-http1-epoll
+    // zig build test-runner-grpc-async
+    // zig build test-runner-grpc-pool
+    // zig build test-runner-grpc-mixed
+    // zig build test-runner-grpc-epoll
+    // zig build test-runner-tcp-async
+    // zig build test-runner-tcp-pool
+    // zig build test-runner-tcp-mixed
+    // zig build test-runner-tcp-epoll
+    // zig build test-runner-fix-async
+    // zig build test-runner-fix-pool
+    // zig build test-runner-fix-mixed
+    // zig build test-runner-fix-epoll
     // zig build test-runner-udp
     // zig build test-runner-uds
     // zig build test-runner-all
 
     // Helper: build a server exe for use by a runner (not installed to zig-out/bin/).
     // Named with "tr-" prefix to avoid step-name collisions with the examples loop.
+    // Columns: step-name, runner-src, server-exe-name, server-src, port.
+    // port is passed as argv[3] to the runner; only tcp_runner uses it.
     const runner_table = .{
-        .{ "test-runner-http",  "tests/runner/http_runner.zig",  "tr-server-http",  "examples/http_basic_1_async.zig"  },
-        .{ "test-runner-http1", "tests/runner/http1_runner.zig", "tr-server-http1", "examples/http1_basic_1_async.zig" },
-        .{ "test-runner-grpc",  "tests/runner/grpc_runner.zig",  "tr-server-grpc",  "examples/grpc_server_1_async.zig" },
-        .{ "test-runner-tcp",   "tests/runner/tcp_runner.zig",   "tr-server-tcp",   "examples/tcp_server_1_async.zig"  },
-        .{ "test-runner-fix",   "tests/runner/fix_runner.zig",   "tr-server-fix",   "examples/fix_server_1_async.zig"  },
-        .{ "test-runner-udp",   "tests/runner/udp_runner.zig",   "tr-server-udp",   "examples/udp_server.zig"          },
-        .{ "test-runner-uds",   "tests/runner/uds_runner.zig",   "tr-server-uds",   "examples/uds_server.zig"          },
+        .{ "test-runner-http-async",  "tests/runner/http_runner.zig",  "tr-server-http-async",  "examples/http_basic_1_async.zig",  "9100" },
+        .{ "test-runner-http-pool",   "tests/runner/http_runner.zig",  "tr-server-http-pool",   "examples/http_basic_2_pool.zig",   "9100" },
+        .{ "test-runner-http-mixed",  "tests/runner/http_runner.zig",  "tr-server-http-mixed",  "examples/http_basic_3_mixed.zig",  "9100" },
+        .{ "test-runner-http-epoll",  "tests/runner/http_runner.zig",  "tr-server-http-epoll",  "examples/http_basic_4_epoll.zig",  "9100" },
+        .{ "test-runner-http1-async", "tests/runner/http1_runner.zig", "tr-server-http1-async", "examples/http1_basic_1_async.zig", "9100" },
+        .{ "test-runner-http1-pool",  "tests/runner/http1_runner.zig", "tr-server-http1-pool",  "examples/http1_basic_2_pool.zig",  "9100" },
+        .{ "test-runner-http1-mixed", "tests/runner/http1_runner.zig", "tr-server-http1-mixed", "examples/http1_basic_3_mixed.zig", "9100" },
+        .{ "test-runner-http1-epoll", "tests/runner/http1_runner.zig", "tr-server-http1-epoll", "examples/http1_basic_4_epoll.zig", "9100" },
+        .{ "test-runner-grpc-async",  "tests/runner/grpc_runner.zig",  "tr-server-grpc-async",  "examples/grpc_server_1_async.zig", "8083" },
+        .{ "test-runner-grpc-pool",   "tests/runner/grpc_runner.zig",  "tr-server-grpc-pool",   "examples/grpc_server_2_pool.zig",  "8083" },
+        .{ "test-runner-grpc-mixed",  "tests/runner/grpc_runner.zig",  "tr-server-grpc-mixed",  "examples/grpc_server_3_mixed.zig", "8083" },
+        .{ "test-runner-grpc-epoll",  "tests/runner/grpc_runner.zig",  "tr-server-grpc-epoll",  "examples/grpc_server_4_epoll.zig", "8083" },
+        .{ "test-runner-tcp-async",   "tests/runner/tcp_runner.zig",   "tr-server-tcp-async",   "examples/tcp_server_1_async.zig",  "9300" },
+        .{ "test-runner-tcp-pool",    "tests/runner/tcp_runner.zig",   "tr-server-tcp-pool",    "examples/tcp_server_2_pool.zig",   "9301" },
+        .{ "test-runner-tcp-mixed",   "tests/runner/tcp_runner.zig",   "tr-server-tcp-mixed",   "examples/tcp_server_3_mixed.zig",  "9302" },
+        .{ "test-runner-tcp-epoll",   "tests/runner/tcp_runner.zig",   "tr-server-tcp-epoll",   "examples/tcp_server_4_epoll.zig",  "9303" },
+        .{ "test-runner-fix-async",   "tests/runner/fix_runner.zig",   "tr-server-fix-async",   "examples/fix_server_1_async.zig",  "9500" },
+        .{ "test-runner-fix-pool",    "tests/runner/fix_runner.zig",   "tr-server-fix-pool",    "examples/fix_server_2_pool.zig",   "9500" },
+        .{ "test-runner-fix-mixed",   "tests/runner/fix_runner.zig",   "tr-server-fix-mixed",   "examples/fix_server_3_mixed.zig",  "9500" },
+        .{ "test-runner-fix-epoll",   "tests/runner/fix_runner.zig",   "tr-server-fix-epoll",   "examples/fix_server_4_epoll.zig",  "9500" },
+        .{ "test-runner-udp",         "tests/runner/udp_runner.zig",   "tr-server-udp",         "examples/udp_server.zig",          "9100" },
+        .{ "test-runner-uds",         "tests/runner/uds_runner.zig",   "tr-server-uds",         "examples/uds_server.zig",          "0"    },
     };
 
     inline for (runner_table) |row| {
@@ -422,23 +454,40 @@ pub fn build(b: *std.Build) void {
         });
 
         const run_runner = b.addRunArtifact(runner_exe);
-        run_runner.addFileArg(server_exe.getEmittedBin());
+        run_runner.addFileArg(server_exe.getEmittedBin()); // argv[1]: server path
+        run_runner.addArg(row[0][comptime "test-runner-".len..]);  // argv[2]: label
+        run_runner.addArg(row[4]);                                  // argv[3]: port
 
         const runner_step = b.step(row[0], "Run " ++ row[0]);
         runner_step.dependOn(&run_runner.step);
     }
 
-    // test-runner-all: one binary, all 7 server paths as argv.
+    // test-runner-all: one binary, all 22 server paths as argv.
     // Independent of the individual test-runner-* steps above.
     {
         const all_server_srcs = .{
-            .{ "tr-all-server-http",  "examples/http_basic_1_async.zig"  },
-            .{ "tr-all-server-http1", "examples/http1_basic_1_async.zig" },
-            .{ "tr-all-server-grpc",  "examples/grpc_server_1_async.zig" },
-            .{ "tr-all-server-tcp",   "examples/tcp_server_1_async.zig"  },
-            .{ "tr-all-server-fix",   "examples/fix_server_1_async.zig"  },
-            .{ "tr-all-server-udp",   "examples/udp_server.zig"          },
-            .{ "tr-all-server-uds",   "examples/uds_server.zig"          },
+            .{ "tr-all-server-http-async",  "examples/http_basic_1_async.zig"  },
+            .{ "tr-all-server-http-pool",   "examples/http_basic_2_pool.zig"   },
+            .{ "tr-all-server-http-mixed",  "examples/http_basic_3_mixed.zig"  },
+            .{ "tr-all-server-http-epoll",  "examples/http_basic_4_epoll.zig"  },
+            .{ "tr-all-server-http1-async", "examples/http1_basic_1_async.zig" },
+            .{ "tr-all-server-http1-pool",  "examples/http1_basic_2_pool.zig"  },
+            .{ "tr-all-server-http1-mixed", "examples/http1_basic_3_mixed.zig" },
+            .{ "tr-all-server-http1-epoll", "examples/http1_basic_4_epoll.zig" },
+            .{ "tr-all-server-grpc-async",  "examples/grpc_server_1_async.zig" },
+            .{ "tr-all-server-grpc-pool",   "examples/grpc_server_2_pool.zig"  },
+            .{ "tr-all-server-grpc-mixed",  "examples/grpc_server_3_mixed.zig" },
+            .{ "tr-all-server-grpc-epoll",  "examples/grpc_server_4_epoll.zig" },
+            .{ "tr-all-server-tcp-async",   "examples/tcp_server_1_async.zig"  },
+            .{ "tr-all-server-tcp-pool",    "examples/tcp_server_2_pool.zig"   },
+            .{ "tr-all-server-tcp-mixed",   "examples/tcp_server_3_mixed.zig"  },
+            .{ "tr-all-server-tcp-epoll",   "examples/tcp_server_4_epoll.zig"  },
+            .{ "tr-all-server-fix-async",   "examples/fix_server_1_async.zig"  },
+            .{ "tr-all-server-fix-pool",    "examples/fix_server_2_pool.zig"   },
+            .{ "tr-all-server-fix-mixed",   "examples/fix_server_3_mixed.zig"  },
+            .{ "tr-all-server-fix-epoll",   "examples/fix_server_4_epoll.zig"  },
+            .{ "tr-all-server-udp",         "examples/udp_server.zig"          },
+            .{ "tr-all-server-uds",         "examples/uds_server.zig"          },
         };
 
         const all_runner_mod = b.createModule(.{
