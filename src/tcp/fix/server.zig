@@ -289,7 +289,7 @@ pub const FixServer = struct {
         const conn_opts = FixServeOpts{
             .logger = cfg.logger,
             .heartbeat_timeout_ms = cfg.heartbeat_timeout_ms,
-            .connection_timeout_ms = cfg.connection_timeout_ms,
+            .conn_timeout_ms = cfg.conn_timeout_ms,
             .handler_timeout_ms = cfg.handler_timeout_ms,
             .routes = self.routes,
         };
