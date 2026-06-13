@@ -78,9 +78,9 @@ pub const TcpClient = struct {
     /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
     ///
     /// Return:
-    /// - error.MessageTooLarge if msg.len exceeds config.max_msg_len
+    /// - error.MessageTooLarge if msg.len exceeds config.max_recv_buf
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
-        if (msg.len > self.config.max_msg_len) return error.MessageTooLarge;
+        if (msg.len > self.config.max_recv_buf) return error.MessageTooLarge;
         var write_buf: [4096 + 4]u8 = undefined;
         var writer = self.stream.writer(io, &write_buf);
         var hdr: [4]u8 = undefined;
