@@ -370,4 +370,104 @@ pub fn build(b: *std.Build) void {
         bug_step.dependOn(&b.addInstallArtifact(bug_exe, .{}).step);
         bug_0_2_x_step.dependOn(bug_step);
     }
+
+    // --------------------------------------------------------- //
+
+    // Test runners. Each spawns a server example as a child process and exercises
+    // the protocol through the zix client. Steps are independent of each other and
+    // are not part of test-all.
+    //
+    // zig build test-runner-http
+    // zig build test-runner-http1
+    // zig build test-runner-grpc
+    // zig build test-runner-tcp
+    // zig build test-runner-fix
+    // zig build test-runner-udp
+    // zig build test-runner-uds
+    // zig build test-runner-all
+
+    // Helper: build a server exe for use by a runner (not installed to zig-out/bin/).
+    // Named with "tr-" prefix to avoid step-name collisions with the examples loop.
+    const runner_table = .{
+        .{ "test-runner-http",  "tests/runner/http_runner.zig",  "tr-server-http",  "examples/http_basic_1_async.zig"  },
+        .{ "test-runner-http1", "tests/runner/http1_runner.zig", "tr-server-http1", "examples/http1_basic_1_async.zig" },
+        .{ "test-runner-grpc",  "tests/runner/grpc_runner.zig",  "tr-server-grpc",  "examples/grpc_server_1_async.zig" },
+        .{ "test-runner-tcp",   "tests/runner/tcp_runner.zig",   "tr-server-tcp",   "examples/tcp_server_1_async.zig"  },
+        .{ "test-runner-fix",   "tests/runner/fix_runner.zig",   "tr-server-fix",   "examples/fix_server_1_async.zig"  },
+        .{ "test-runner-udp",   "tests/runner/udp_runner.zig",   "tr-server-udp",   "examples/udp_server.zig"          },
+        .{ "test-runner-uds",   "tests/runner/uds_runner.zig",   "tr-server-uds",   "examples/uds_server.zig"          },
+    };
+
+    inline for (runner_table) |row| {
+        const server_mod = b.createModule(.{
+            .root_source_file = b.path(row[3]),
+            .target = target,
+            .optimize = optimize,
+        });
+        server_mod.addImport("zix", zix);
+        const server_exe = b.addExecutable(.{
+            .name = row[2],
+            .root_module = server_mod,
+        });
+
+        const runner_mod = b.createModule(.{
+            .root_source_file = b.path(row[1]),
+            .target = target,
+            .optimize = optimize,
+        });
+        runner_mod.addImport("zix", zix);
+        const runner_exe = b.addExecutable(.{
+            .name = row[0],
+            .root_module = runner_mod,
+        });
+
+        const run_runner = b.addRunArtifact(runner_exe);
+        run_runner.addFileArg(server_exe.getEmittedBin());
+
+        const runner_step = b.step(row[0], "Run " ++ row[0]);
+        runner_step.dependOn(&run_runner.step);
+    }
+
+    // test-runner-all: one binary, all 7 server paths as argv.
+    // Independent of the individual test-runner-* steps above.
+    {
+        const all_server_srcs = .{
+            .{ "tr-all-server-http",  "examples/http_basic_1_async.zig"  },
+            .{ "tr-all-server-http1", "examples/http1_basic_1_async.zig" },
+            .{ "tr-all-server-grpc",  "examples/grpc_server_1_async.zig" },
+            .{ "tr-all-server-tcp",   "examples/tcp_server_1_async.zig"  },
+            .{ "tr-all-server-fix",   "examples/fix_server_1_async.zig"  },
+            .{ "tr-all-server-udp",   "examples/udp_server.zig"          },
+            .{ "tr-all-server-uds",   "examples/uds_server.zig"          },
+        };
+
+        const all_runner_mod = b.createModule(.{
+            .root_source_file = b.path("tests/runner/all_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        all_runner_mod.addImport("zix", zix);
+        const all_runner_exe = b.addExecutable(.{
+            .name = "test-runner-all",
+            .root_module = all_runner_mod,
+        });
+
+        const run_all = b.addRunArtifact(all_runner_exe);
+        inline for (all_server_srcs) |srv| {
+            const srv_mod = b.createModule(.{
+                .root_source_file = b.path(srv[1]),
+                .target = target,
+                .optimize = optimize,
+            });
+            srv_mod.addImport("zix", zix);
+            const srv_exe = b.addExecutable(.{
+                .name = srv[0],
+                .root_module = srv_mod,
+            });
+            run_all.addFileArg(srv_exe.getEmittedBin());
+        }
+
+        const all_step = b.step("test-runner-all", "Run test-runner-all");
+        all_step.dependOn(&run_all.step);
+    }
 }
