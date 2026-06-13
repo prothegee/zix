@@ -72,6 +72,8 @@ pub const UdpClientConfig = struct {
     server_ip: []const u8,
     /// Server port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
     server_port: u16,
+    /// Local bind address. Defaults to loopback. Set to "0.0.0.0" to accept responses on all interfaces.
+    bind_ip: []const u8 = "127.0.0.1",
     /// Local bind port, server uses this to send responses back.
     bind_port: u16,
     /// How the ports are sourced: REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
@@ -82,6 +84,8 @@ pub const UdpClientConfig = struct {
     send_once: bool = false,
     /// Milliseconds between sends in the run loop.
     send_every: u64 = 99,
+    /// Socket receive timeout in milliseconds (SO_RCVTIMEO). 0 = disabled.
+    recv_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -114,11 +118,13 @@ test "zix test: UdpClientConfig, default field values" {
     const cfg = UdpClientConfig{ .server_ip = "127.0.0.1", .server_port = 9100, .bind_port = 9101 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.server_ip);
     try std.testing.expectEqual(@as(u16, 9100), cfg.server_port);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.bind_ip);
     try std.testing.expectEqual(@as(u16, 9101), cfg.bind_port);
     try std.testing.expectEqual(PortMode.REQUIRED, cfg.port_mode);
     try std.testing.expectEqual(Endianness.LITTLE, cfg.endianness);
     try std.testing.expect(!cfg.send_once);
     try std.testing.expectEqual(@as(u64, 99), cfg.send_every);
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
 }
 
 test "zix test: PortMode, enum backing values are stable" {
