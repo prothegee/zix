@@ -103,7 +103,7 @@ pub const UdsServer = struct {
 // --------------------------------------------------------- //
 
 // Default handler: reads length-prefixed frames and echoes each back unchanged.
-// Frame format: [u32 payload_len, 4 bytes, native LE] [payload bytes]
+// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
 // Payloads larger than 4096 bytes close the connection.
 pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
@@ -125,7 +125,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
             n += got;
         }
 
-        const len = std.mem.readInt(u32, &hdr, .little);
+        const len = std.mem.readInt(u32, &hdr, .big);
         if (len > payload_buf.len) return;
 
         // Read payload
@@ -162,6 +162,43 @@ test "zix test: UdsServer init, timeout fields default to zero" {
     const server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
+}
+
+test "zix test: echoHandler echoes big-endian frame" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server_stream = std.Io.net.Stream{
+        .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } },
+    };
+
+    const handler_thread = try std.Thread.spawn(.{}, echoHandler, .{ server_stream, io });
+
+    const frame = [_]u8{ 0, 0, 0, 4, 't', 'e', 's', 't' };
+    _ = std.os.linux.write(fds[1], &frame, frame.len);
+
+    var reply: [8]u8 = undefined;
+    var n: usize = 0;
+    while (n < 8) {
+        const got = std.os.linux.read(fds[1], reply[n..].ptr, 8 - n);
+        if (got == 0 or std.posix.errno(got) != .SUCCESS) break;
+        n += got;
+    }
+
+    _ = std.os.linux.close(fds[1]);
+    handler_thread.join();
+
+    try std.testing.expectEqual(@as(usize, 8), n);
+    try std.testing.expectEqual(@as(u8, 0), reply[0]);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+    try std.testing.expectEqual(@as(u8, 0), reply[2]);
+    try std.testing.expectEqual(@as(u8, 4), reply[3]);
+    try std.testing.expectEqualSlices(u8, "test", reply[4..8]);
 }
 
 test "zix test: UdsServer init, timeout fields stored from config" {

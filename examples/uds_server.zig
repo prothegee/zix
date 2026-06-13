@@ -4,7 +4,7 @@
 // with an incrementing counter so the HTTP frontend sees real data changes.
 //
 // Frame format (both directions):
-//   [u32 payload_len, 4 bytes, native LE] [payload bytes]
+//   [u32 payload_len, 4 bytes, big-endian] [payload bytes]
 //
 // Run Process A first:
 // zig build example-uds_server && ./zig-out/bin/example-uds_server
@@ -55,7 +55,7 @@ fn dataHandler(stream: std.Io.net.Stream, io: std.Io) void {
             n += got;
         }
 
-        const len = std.mem.readInt(u32, &hdr, .little);
+        const len = std.mem.readInt(u32, &hdr, .big);
         if (len > payload_buf.len) return;
 
         // Read and discard payload (any request content accepted)
@@ -72,7 +72,7 @@ fn dataHandler(stream: std.Io.net.Stream, io: std.Io) void {
         const resp = std.fmt.bufPrint(&resp_buf, "{d}", .{count}) catch return;
 
         var resp_hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &resp_hdr, @intCast(resp.len), .little);
+        std.mem.writeInt(u32, &resp_hdr, @intCast(resp.len), .big);
         wtr.interface.writeAll(&resp_hdr) catch return;
         wtr.interface.writeAll(resp) catch return;
         wtr.interface.flush() catch return;
