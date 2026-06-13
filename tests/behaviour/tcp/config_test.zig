@@ -16,9 +16,9 @@ test "zix behaviour: TcpServerConfig, kernel_backlog defaults to 4096" {
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
 }
 
-test "zix behaviour: TcpServerConfig, max_msg_len defaults to 4096" {
+test "zix behaviour: TcpServerConfig, max_recv_buf defaults to 4096" {
     const cfg = zix.Tcp.ServerConfig{ .ip = "127.0.0.1", .port = 9300 };
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
 }
 
 test "zix behaviour: TcpServerConfig, workers defaults to 0 (auto)" {
@@ -31,9 +31,9 @@ test "zix behaviour: TcpServerConfig, pool_size defaults to 0 (auto)" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
-test "zix behaviour: TcpClientConfig, max_msg_len defaults to 4096" {
+test "zix behaviour: TcpClientConfig, max_recv_buf defaults to 4096" {
     const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
 }
 
 test "zix behaviour: TcpClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
