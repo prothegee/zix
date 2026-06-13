@@ -41,6 +41,22 @@ fn getMonotonicMs() u64 {
     return s * 1000 + millis;
 }
 
+fn applyConnTimeout(fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    if (recv_ms == 0 and send_ms == 0) return;
+
+    const linux = std.os.linux;
+
+    if (recv_ms > 0) {
+        const tv = linux.timeval{ .tv_sec = @intCast(recv_ms / 1000), .tv_usec = @intCast((recv_ms % 1000) * 1000) };
+        _ = linux.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(linux.timeval));
+    }
+
+    if (send_ms > 0) {
+        const tv = linux.timeval{ .tv_sec = @intCast(send_ms / 1000), .tv_usec = @intCast((send_ms % 1000) * 1000) };
+        _ = linux.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&tv), @sizeOf(linux.timeval));
+    }
+}
+
 // --------------------------------------------------------- //
 
 // Work queue shared between accept threads (producers) and pool threads (consumers).
@@ -131,6 +147,8 @@ fn workerEntry(cfg: TcpServerConfig, queue: *ConnQueue, io: std.Io) void {
             }
             continue;
         };
+        applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
         queue.push(stream, io);
     }
 }
@@ -171,6 +189,8 @@ fn asyncWorkerEntry(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) void {
             }
             continue;
         };
+        applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
         _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
     }
 }
@@ -180,6 +200,8 @@ const EpollWorkerCtx = struct {
     ip: []const u8,
     port: u16,
     kernel_backlog: u31,
+    recv_timeout_ms: u32,
+    send_timeout_ms: u32,
     handler: HandlerFn,
     logger: ?*Logger,
 };
@@ -246,6 +268,7 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
                 }
 
                 const conn_fd: std.posix.fd_t = @intCast(accept_result);
+                applyConnTimeout(conn_fd, ctx.recv_timeout_ms, ctx.send_timeout_ms);
                 const stream: std.Io.net.Stream = .{ .socket = .{
                     .handle = conn_fd,
                     .address = .{ .ip4 = .unspecified(0) },
@@ -344,6 +367,8 @@ pub const TcpServer = struct {
                         }
                         continue;
                     };
+                    applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
                     _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
                 }
             },
@@ -429,6 +454,8 @@ pub const TcpServer = struct {
                     .ip = cfg.ip,
                     .port = cfg.port,
                     .kernel_backlog = cfg.kernel_backlog,
+                    .recv_timeout_ms = cfg.recv_timeout_ms,
+                    .send_timeout_ms = cfg.send_timeout_ms,
                     .handler = handler,
                     .logger = cfg.logger,
                 }},
