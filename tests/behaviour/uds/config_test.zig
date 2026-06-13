@@ -6,20 +6,20 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix behaviour: UdsServerConfig, backlog defaults to 128" {
+test "zix behaviour: UdsServerConfig, kernel_backlog defaults to 128" {
     const cfg = zix.Uds.ServerConfig{
         .path = "/tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(@as(u31, 128), cfg.backlog);
+    try std.testing.expectEqual(@as(u31, 128), cfg.kernel_backlog);
 }
 
-test "zix behaviour: UdsServerConfig, max_msg_len defaults to 4096" {
+test "zix behaviour: UdsServerConfig, max_recv_buf defaults to 4096" {
     const cfg = zix.Uds.ServerConfig{
         .path = "/tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
 }
 
 test "zix behaviour: UdsClientConfig, stores path as provided" {
