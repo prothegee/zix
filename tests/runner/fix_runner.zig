@@ -1,8 +1,8 @@
-// Test runner for zix.Fix.Server (fix_server_1_async, port 9500).
+// Test runner for zix.Fix.Server (fix_server_*, port 9500).
 // Spawns the server, performs Logon -> send order -> recv echo -> Logout, kills server.
 //
-// Invoked by `zig build test-runner-fix`.
-// The server binary path is passed as argv[1] by build.zig.
+// Invoked by `zig build test-runner-fix-<model>`.
+// argv[1]: server binary path, argv[2]: label, argv[3]: port (unused).
 
 const std = @import("std");
 const zix = @import("zix");
@@ -16,20 +16,25 @@ const TARGET_ID: []const u8 = "ZIX";
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    run(process) catch |err| {
-        std.debug.print("FAIL fix: {}\n", .{err});
-        std.process.exit(1);
-    };
-    std.debug.print("PASS fix\n", .{});
-}
-
-fn run(process: std.process.Init) !void {
-    const io = process.io;
-
     var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
     _ = arg_iter.skip();
-    const server_path = arg_iter.next() orelse return error.MissingServerPath;
+    const server_path = arg_iter.next() orelse {
+        std.debug.print("FAIL fix: missing server path\n", .{});
+        std.process.exit(1);
+    };
+    const label = arg_iter.next() orelse {
+        std.debug.print("FAIL fix: missing label\n", .{});
+        std.process.exit(1);
+    };
 
+    run(process.io, server_path) catch |err| {
+        std.debug.print("FAIL {s}: {}\n", .{label, err});
+        std.process.exit(1);
+    };
+    std.debug.print("PASS {s}\n", .{label});
+}
+
+fn run(io: std.Io, server_path: []const u8) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
