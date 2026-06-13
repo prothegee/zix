@@ -1,7 +1,7 @@
 //! http_timeout_model_c.zig
 //! Zig 0.16.1-dev.12+e2d0ed235
 //!
-//! Option C -- Watchdog Thread per Connection
+//! Option C: Watchdog Thread per Connection
 //!
 //! Strategy: for each accepted connection, spawn one OS thread (the watchdog).
 //! The watchdog sleeps for timeout_ms. If the connection has not finished by
@@ -51,9 +51,9 @@ const std = @import("std");
 //     v
 //   handleConnection loop
 //     |
-//     +-- receiveHead() -- may be unblocked by shutdown
+//     +-- receiveHead() (may be unblocked by shutdown)
 //     +-- dispatch()
-//     +-- send()        -- may fail if client slow and shutdown fired
+//     +-- send()        (may fail if client slow and shutdown fired)
 //     |
 //   loop exit
 //     |
@@ -131,7 +131,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io) void {
         inner_req.respond("ok", .{}) catch {};
     }
 
-    // wdog.done = true (set in defer) before join -- watchdog exits without
+    // wdog.done = true (set in defer) before join. Watchdog exits without
     // calling shutdown() if the connection completed before the timeout.
 }
 
@@ -176,9 +176,9 @@ pub fn main(process: std.process.Init) !void {
 }
 
 //
-// How to test Model C -- Watchdog Thread per Connection
+// How to test Model C: Watchdog Thread per Connection
 //
-// Note: this main() loop is single-threaded -- it handles one connection at a
+// Note: this main() loop is single-threaded, it handles one connection at a
 // time. While one client is connected, the next queues in the kernel and is
 // not accepted until the current connection closes. This is a PoC limitation,
 // the real server uses a pool of threads so connections run concurrently.
@@ -187,18 +187,18 @@ pub fn main(process: std.process.Init) !void {
 // Step 1: run the server.
 //   zig run rnd/http_timeout_model_c.zig
 //
-// Test A -- slow client (never sends headers):
+// Test A: slow client (never sends headers):
 //   nc localhost 9007
 //   (just wait, do not type anything)
 //   Expected: nc exits after ~5s when the watchdog fires shutdown(.both)
-//   Pressing Enter in nc sends \n which is not a complete HTTP request --
-//   the server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
+//   Pressing Enter in nc sends \n which is not a complete HTTP request.
+//   The server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
 //
 //   Confirm timing:
 //   time nc localhost 9007
 //   Expected: real 0m5.0s
 //
-// Test B -- normal connection (completes before timeout):
+// Test B: normal connection (completes before timeout):
 //   curl http://localhost:9007/
 //   Expected: responds immediately, watchdog exits cleanly without calling shutdown()
 //

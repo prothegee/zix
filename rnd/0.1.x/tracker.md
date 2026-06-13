@@ -4,7 +4,7 @@ Open items that need follow-up. Check off when resolved.
 
 ---
 
-## UDS -- Implementation
+## UDS: Implementation
 
 Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 
@@ -20,27 +20,27 @@ Reference: `rnd/uds_specification.md`, `docs/hld-uds.md`, ADR-010
 - [ ] Compile-time guard strategy: `if (!std.Io.net.has_unix_sockets) @compileError(...)` or runtime error?
 
 **Implementation checklist:**
-- [ ] `src/uds/config.zig` -- `UdsServerConfig`, `UdsClientConfig`, `SocketMode` enum
-- [ ] `src/uds/server.zig` -- `UdsServer` stream mode path unlink on deinit
-- [ ] `src/uds/client.zig` -- `UdsClient`
-- [ ] `src/uds/Uds.zig` -- namespace aggregator
-- [ ] `src/zix.zig` -- `pub const Uds = @import("uds/Uds.zig")`
-- [ ] `src/zix.zig` unit test -- `refAllDecls` for all `uds/*.zig`
+- [ ] `src/uds/config.zig`: `UdsServerConfig`, `UdsClientConfig`, `SocketMode` enum
+- [ ] `src/uds/server.zig`: `UdsServer` stream mode path unlink on deinit
+- [ ] `src/uds/client.zig`: `UdsClient`
+- [ ] `src/uds/Uds.zig`: namespace aggregator
+- [ ] `src/zix.zig`: `pub const Uds = @import("uds/Uds.zig")`
+- [ ] `src/zix.zig` unit test: `refAllDecls` for all `uds/*.zig`
 - [ ] `examples/uds_server.zig`
 - [ ] `examples/uds_client.zig`
-- [ ] `build.zig` -- example entries for both
+- [ ] `build.zig`: example entries for both
 - [ ] `tests/integration/uds_config_test.zig`
-- [ ] `build.zig` -- integration test entry
-- [ ] `docs/hld-uds.md` -- fill in actual design (currently empty stub)
-- [ ] `docs/lld-uds.md` -- fill in implementation details (currently empty stub)
-- [ ] `docs/adr.md` -- ADR-010 status: Proposed -> Accepted once implemented
-- [ ] `docs/concurrency.md` -- UDS rows: update from "planned" to actual model
-- [ ] `README.md` -- add `zix.Uds` section
-- [ ] `rnd/uds_specification.md` -- close open question: Zig 0.16 API verified
+- [ ] `build.zig`: integration test entry
+- [ ] `docs/hld-uds.md`: fill in actual design (currently empty stub)
+- [ ] `docs/lld-uds.md`: fill in implementation details (currently empty stub)
+- [ ] `docs/adr.md`: ADR-010 status: Proposed -> Accepted once implemented
+- [ ] `docs/concurrency.md`: UDS rows: update from "planned" to actual model
+- [ ] `README.md`: add `zix.Uds` section
+- [ ] `rnd/uds_specification.md`: close open question: Zig 0.16 API verified
 
 ---
 
-## Channel -- Implementation
+## Channel: Implementation
 
 Reference: `rnd/channel_specification.md`, `docs/hld-channel.md`, ADR-017 (Proposed)
 
@@ -52,18 +52,18 @@ Reference: `rnd/channel_specification.md`, `docs/hld-channel.md`, ADR-017 (Propo
 - [ ] `select`/multiplex: defer, but internal design must not preclude it
 
 **Implementation checklist:**
-- [ ] `src/channel/channel.zig` -- `Channel(comptime T: type)` generic
-- [ ] `src/channel/Channel.zig` -- namespace aggregator
-- [ ] `src/zix.zig` -- `pub const Channel = @import("channel/Channel.zig")`
-- [ ] `src/zix.zig` unit test -- `refAllDecls` for `channel/channel.zig`
-- [ ] `examples/channel_basic.zig` -- producer + consumer tasks via `io.concurrent`
-- [ ] `build.zig` -- example entry
+- [ ] `src/channel/channel.zig`: `Channel(comptime T: type)` generic
+- [ ] `src/channel/Channel.zig`: namespace aggregator
+- [ ] `src/zix.zig`: `pub const Channel = @import("channel/Channel.zig")`
+- [ ] `src/zix.zig` unit test: `refAllDecls` for `channel/channel.zig`
+- [ ] `examples/channel_basic.zig`: producer + consumer tasks via `io.concurrent`
+- [ ] `build.zig`: example entry
 - [ ] `tests/integration/channel_test.zig`
-- [ ] `build.zig` -- integration test entry
-- [ ] `docs/hld-channel.md` -- fill in actual design (stub created)
-- [ ] `docs/lld-channel.md` -- fill in implementation details (stub created)
-- [ ] `docs/adr.md` -- ADR-017 status: Proposed -> Accepted once implemented
-- [ ] `README.md` -- add `zix.Channel` section
+- [ ] `build.zig`: integration test entry
+- [ ] `docs/hld-channel.md`: fill in actual design (stub created)
+- [ ] `docs/lld-channel.md`: fill in implementation details (stub created)
+- [ ] `docs/adr.md`: ADR-017 status: Proposed -> Accepted once implemented
+- [ ] `README.md`: add `zix.Channel` section
 
 ---
 
@@ -82,13 +82,13 @@ Reference: `rnd/server_lifecycle_proposal.md`
 
 ---
 
-## src/zix.zig -- Planned Exports
+## src/zix.zig: Planned Exports
 
 - [ ] `pub const Channel = @import("channel/Channel.zig");` - add when `src/channel/` is implemented
 
 ---
 
-## UDP -- Not Yet Implemented
+## UDP: Not Yet Implemented
 
 Reference: `docs/hld-udp.md` Not Yet Implemented table
 
@@ -97,7 +97,7 @@ Reference: `docs/hld-udp.md` Not Yet Implemented table
 
 ---
 
-## HTTP -- ADR-012 Implementation (Proposed)
+## HTTP: ADR-012 Implementation (Proposed)
 
 Reference: `docs/adr.md` ADR-012
 

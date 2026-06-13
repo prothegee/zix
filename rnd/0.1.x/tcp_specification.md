@@ -1,4 +1,4 @@
-# TCP Specification -- zix.Tcp
+# TCP Specification: zix.Tcp
 
 TCP as a transport base. Currently used by `zix.Http`.
 Planned for FIX (Financial Information eXchange) protocol as a second protocol on TCP.
@@ -36,8 +36,8 @@ Both models apply to any TCP-based protocol (HTTP, FiX, or other).
 Full specification in [`docs/concurrency.md`](../docs/concurrency.md).
 
 Reference PoC:
-- Model 1: `rnd/server_model_1.zig` -- single accept loop, `std.Thread.spawn` per connection
-- Model 2: `rnd/server_model_2.zig` -- N workers, each with own listen+accept, shared `io.concurrent` pool
+- Model 1: `rnd/server_model_1.zig`: single accept loop, `std.Thread.spawn` per connection
+- Model 2: `rnd/server_model_2.zig`: N workers, each with own listen+accept, shared `io.concurrent` pool
 
 Benchmarks (wrk, 100 connections, 2 threads, 10 s):
 - Model 1: ~254,072 req/s
@@ -59,7 +59,7 @@ Key FIX characteristics relevant to `zix.Tcp.Fix`:
 | Message framing | Tag=Value pairs delimited by SOH (0x01); fixed header BeginString, BodyLength, MsgType |
 | Session management | FIX session: Logon, Heartbeat, Logout, server tracks session state per TCP stream |
 | Sequence numbers | Each message has MsgSeqNum, gap detection requires ResendRequest |
-| Endianness | FIX is ASCII-based -- no binary endianness concern (unlike UDP binary structs) |
+| Endianness | FIX is ASCII-based. No binary endianness concern (unlike UDP binary structs). |
 | Error handling | Reject (MsgType=3) for bad messages, session-level Logout on fatal errors |
 | Planned namespace | `src/tcp/fix/` mirroring `src/tcp/http/` |
 

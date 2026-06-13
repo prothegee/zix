@@ -91,7 +91,7 @@ const UdpServer = struct {
     }
 };
 
-// -- Usage Example --
+// Usage Example
 
 fn echoHandler(ctx: *Context, pkt: *const Packet) !void {
     // Explicit use of packet_arena.

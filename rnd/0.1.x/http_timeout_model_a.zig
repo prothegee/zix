@@ -1,7 +1,7 @@
 //! http_timeout_model_a.zig
 //! Zig 0.16.1-dev.12+e2d0ed235
 //!
-//! Option A -- Connection Max-Age Timeout (server-enforced, zero threads)
+//! Option A: Connection Max-Age Timeout (server-enforced, zero threads)
 //!
 //! Strategy: record a deadline once when the connection is accepted. At the
 //! top of each keep-alive iteration, check the clock. If the deadline has
@@ -9,7 +9,7 @@
 //!
 //! This is a CONNECTION MAX-AGE check, not a per-idle-gap timeout.
 //! The deadline is fixed at accept time and never reset. It fires at the
-//! first loop iteration boundary AFTER the lifetime has elapsed -- meaning
+//! first loop iteration boundary AFTER the lifetime has elapsed, meaning
 //! the connection closes after the next request completes, not mid-request.
 //!
 //! Why not a true idle-gap timeout:
@@ -17,14 +17,14 @@
 //!   client goes idle, the server is blocked inside receiveHead() and the check
 //!   cannot fire until the next request arrives. Resetting the deadline after
 //!   each response (as a per-gap approach would) makes the check permanently
-//!   false -- the 6-second gap passes inside receiveHead(), not between checks.
+//!   false. The 6-second gap passes inside receiveHead(), not between checks.
 //!   To interrupt a blocking read from outside the thread, use model C or D.
 //!
 //! Covers:
 //!   - High-frequency clients that exceed the max connection age and then send
 //!     another request (detected at that request's loop boundary)
 //!   - Connections where no request ever arrives within the deadline (deadline
-//!     fires before the first receiveHead() blocks -- but see model C for this)
+//!     fires before the first receiveHead() blocks (see model C for this)
 //!
 //! Does NOT cover:
 //!   - A client that goes idle mid-keep-alive (deadline passes inside the
@@ -76,7 +76,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io) void {
 
     const timeout_dur = std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(IDLE_TIMEOUT_MS), .clock = .real };
 
-    // Deadline is fixed at accept time -- never reset.
+    // Deadline is fixed at accept time, never reset.
     // This is a connection max-age check, not a per-idle-gap check.
     const deadline = std.Io.Clock.Timestamp.fromNow(io, timeout_dur);
 
@@ -127,7 +127,7 @@ pub fn main(process: std.process.Init) !void {
 }
 
 //
-// How to test Model A -- Connection Max-Age Timeout
+// How to test Model A: Connection Max-Age Timeout
 //
 // Step 1: run the server.
 //   zig run rnd/http_timeout_model_a.zig
@@ -139,11 +139,11 @@ pub fn main(process: std.process.Init) !void {
 //   Expected: first request returns "ok". The 6s gap passes inside receiveHead().
 //   When the second request arrives, receiveHead() returns, respond() runs, then
 //   the loop checks the deadline (now > T+5s) and breaks. Connection closes after
-//   the second response -- not before.
+//   the second response, not before.
 //
 // What is being verified:
 //   The deadline is a connection max-age, not a per-idle-gap timer.
 //   It fires at the first loop iteration boundary after the lifetime elapsed,
 //   which means the connection closes after the next completed request.
 //   A client that goes permanently idle holds the thread in receiveHead()
-//   indefinitely -- use model C or D to handle that case.
+//   indefinitely. Use model C or D to handle that case.

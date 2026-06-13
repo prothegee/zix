@@ -5,22 +5,22 @@ Combined recommendation: `rnd/http_timeout_model_bd.zig`
 
 ---
 
-## Background -- Why SO_RCVTIMEO Cannot Be Used
+## Background: Why SO_RCVTIMEO Cannot Be Used
 
 `std.Io.Threaded.netReadPosix` maps `.AGAIN -> errnoBug` (panic in debug, `error.Unexpected`
-in release). On Linux, `SO_RCVTIMEO` on a blocking socket returns `EAGAIN` when it fires --
+in release). On Linux, `SO_RCVTIMEO` on a blocking socket returns `EAGAIN` when it fires,
 not `ETIMEDOUT`. Setting `SO_RCVTIMEO` via `setsockopt` would therefore panic the pool thread.
 All four options below work around this constraint.
 
 ---
 
-## Option A -- Connection Max-Age (server-enforced, zero threads)
+## Option A: Connection Max-Age (server-enforced, zero threads)
 
 Record a deadline once at accept time. Check it at the top of each keep-alive iteration. Break
 when the connection lifetime exceeds the deadline.
 
 This is a **connection max-age** check, not a per-idle-gap timeout. The deadline is never reset.
-It fires at the first loop iteration boundary after the lifetime has elapsed -- meaning the
+It fires at the first loop iteration boundary after the lifetime has elapsed, meaning the
 connection closes after the next request completes, not mid-request.
 
 ```zig
@@ -31,13 +31,13 @@ while (true) {
     if (std.Io.Clock.Timestamp.now(io, .real).compare(.gte, deadline)) break;
     var inner_req = http_server.receiveHead() catch |err| { ... };
     inner_req.respond(...) catch {};
-    // no deadline reset -- it is fixed at accept time
+    // no deadline reset. it is fixed at accept time
 }
 ```
 
 **Verified behavior (tested):**
 Two requests sent with a 6s gap (timeout = 5s). Both requests received a response. After the
-second response, `nc` exited -- the server broke the loop at the next deadline check. The 6s
+second response, `nc` exited. The server broke the loop at the next deadline check. The 6s
 gap passed inside `receiveHead()` undetected, the deadline fired only after `receiveHead()`
 returned with the second request.
 
@@ -45,7 +45,7 @@ returned with the second request.
 - Connections that exceed the max age and then send another request (detected at next boundary)
 
 **Does NOT cover:**
-- A client that goes permanently idle -- the deadline passes inside `receiveHead()` and the
+- A client that goes permanently idle. The deadline passes inside `receiveHead()` and the
   check never runs again. The thread is held indefinitely. Use C or D for that.
 - Handler execution time or slow response drain.
 
@@ -53,7 +53,7 @@ returned with the second request.
 
 ---
 
-## Option B -- Context Deadline (cooperative, handler-level)
+## Option B: Context Deadline (cooperative, handler-level)
 
 Add a `deadline` field to `Context`. The server optionally sets a global deadline before
 dispatch. Handlers opt in by calling `ctx.withTimeout()` and checking `ctx.timedOut()`.
@@ -109,7 +109,7 @@ Server responded with HTTP 408. Stderr: `model-b: timed out after step 2`.
 - Handler execution time when the handler explicitly checks `ctx.timedOut()` between steps.
 
 **Does NOT cover:**
-- Blocking I/O inside the handler (`std.Io.sleep`, DB calls, file reads) -- the handler is
+- Blocking I/O inside the handler (`std.Io.sleep`, DB calls, file reads): the handler is
   not interrupted. It only notices on the next explicit `timedOut()` call.
 - `receiveHead()` stalling (handler has not started yet).
 - Keep-alive idle gaps.
@@ -118,7 +118,7 @@ Server responded with HTTP 408. Stderr: `model-b: timed out after step 2`.
 
 ---
 
-## Option C -- Watchdog Thread per Connection
+## Option C: Watchdog Thread per Connection
 
 Spawn one OS thread per accepted connection. The watchdog sleeps for `timeout_ms`. If the
 connection has not finished, it calls `stream.shutdown(.both)`, which signals the peer and
@@ -166,7 +166,7 @@ Curl on a normal request responded in **8ms**; watchdog exited cleanly via `done
 
 ---
 
-## Option D -- Shared Timer Thread + Connection Registry
+## Option D: Shared Timer Thread + Connection Registry
 
 The server maintains a registry of active connections and their deadlines. The existing timer
 thread calls `registry.evict()` each tick. `evict()` scans the list and calls
@@ -211,12 +211,12 @@ Eviction precision: `[deadline, deadline + TIMER_INTERVAL_MS]`.
 
 ---
 
-## Option BD -- Recommended Strategy (B + D combined)
+## Option BD: Recommended Strategy (B + D combined)
 
 B and D are orthogonal and complement each other without overlap:
 
-- **D** fires if the client stalls before or during header send -- the handler never starts.
-- **B** fires if the handler takes too long after it starts -- the network is healthy.
+- **D** fires if the client stalls before or during header send. The handler never starts.
+- **B** fires if the handler takes too long after it starts. The network is healthy.
 
 Neither depends on the other. Both can fire independently on the same connection.
 
@@ -240,8 +240,8 @@ accept()
 
 **Config fields (replacing the dead `response_timeout_ms`):**
 ```zig
-conn_timeout_ms:    u32 = 30_000,  // D -- network-level connection guard
-handler_timeout_ms: u32 = 10_000,  // B -- per-handler execution budget
+conn_timeout_ms:    u32 = 30_000,  // D: network-level connection guard
+handler_timeout_ms: u32 = 10_000,  // B: per-handler execution budget
 ```
 
 **Constraint:** `conn_timeout_ms` should be >= `handler_timeout_ms`. If D fires mid-handler,
@@ -256,11 +256,11 @@ Reference: `rnd/http_timeout_model_bd.zig`
 
 | Option | Covers | Read hang | Handler exec | Idle keep-alive | Extra threads |
 | :- | :- | :- | :- | :- | :- |
-| A -- max-age | Lifetime exceeded, at next request boundary | no | no | no* | 0 |
-| B -- ctx.deadline | Handler steps that call timedOut() | no | yes (cooperative) | no | 0 |
-| C -- watchdog thread | Slow connect, idle keep-alive, slow drain | yes | no | yes | 1 per conn |
-| D -- shared registry | Same as C, lower thread count | yes | no | yes | 1 total (shared) |
-| **BD -- recommended** | **Full lifecycle: network + handler** | **yes** | **yes** | **yes** | **1 total (shared)** |
+| A: max-age | Lifetime exceeded, at next request boundary | no | no | no* | 0 |
+| B: ctx.deadline | Handler steps that call timedOut() | no | yes (cooperative) | no | 0 |
+| C: watchdog thread | Slow connect, idle keep-alive, slow drain | yes | no | yes | 1 per conn |
+| D: shared registry | Same as C, lower thread count | yes | no | yes | 1 total (shared) |
+| **BD: recommended** | **Full lifecycle: network + handler** | **yes** | **yes** | **yes** | **1 total (shared)** |
 
 \* Option A does not cover permanent idle: if the client stops sending, the thread is held in
 `receiveHead()` indefinitely regardless of the deadline.
@@ -271,13 +271,13 @@ Reference: `rnd/http_timeout_model_bd.zig`
 
 The following `std.Io` API mistakes were found and corrected in the model files:
 
-- `std.Io.Clock.Duration.fromMilliseconds(x)` -- does not exist.
+- `std.Io.Clock.Duration.fromMilliseconds(x)`: does not exist.
   Correct: `std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(x), .clock = .real }`
 
-- `std.Io.Clock.real.now(io)` -- returns `Io.Timestamp` (no `compare` method).
+- `std.Io.Clock.real.now(io)`: returns `Io.Timestamp` (no `compare` method).
   Correct: `std.Io.Clock.Timestamp.now(io, .real)` returns `Clock.Timestamp` (has `compare`).
 
-- `std.Io.sleep(io, Timeout{ .duration = ... })` -- wrong signature.
+- `std.Io.sleep(io, Timeout{ .duration = ... })`: wrong signature.
   Correct: `std.Io.sleep(io, Io.Duration, Io.Clock)` e.g. `std.Io.sleep(io, dur, .real)`.
 
 ---
