@@ -49,6 +49,8 @@ pub fn build(b: *std.Build) void {
         "tests/integration/http/header_index_test.zig",
         "tests/integration/http/sse_test.zig",
         "tests/integration/http/client_test.zig",
+        "tests/integration/http/ws_client_test.zig",
+        "tests/integration/http/sse_client_test.zig",
         // http2
         "tests/integration/http2/server_test.zig",
         // grpc
@@ -149,6 +151,8 @@ pub fn build(b: *std.Build) void {
         "tests/edge/http/response_test.zig",
         "tests/edge/http/content_test.zig",
         "tests/edge/http/client_test.zig",
+        "tests/edge/http/ws_client_test.zig",
+        "tests/edge/http/sse_client_test.zig",
         // http2
         "tests/edge/http2/server_test.zig",
         // grpc
@@ -233,7 +237,10 @@ pub fn build(b: *std.Build) void {
         .{ "example-http_static", "examples/http_static.zig", "http" },
         .{ "example-http_timeout_resp", "examples/http_timeout_resp.zig", "http" },
         .{ "example-http_sse", "examples/http_sse.zig", "http" },
+        .{ "example-http_sse_client", "examples/http_sse_client.zig", "http" },
         .{ "example-http_websocket", "examples/http_websocket.zig", "http" },
+        .{ "example-http_ws_client", "examples/http_ws_client.zig", "http" },
+        .{ "example-http_uds_client", "examples/http_uds_client.zig", "http" },
         .{ "example-http_xtra_headers", "examples/http_xtra_headers.zig", "http" },
         .{ "example-fix_server_1_async", "examples/fix_server_1_async.zig", "fix" },
         .{ "example-fix_server_2_pool", "examples/fix_server_2_pool.zig", "fix" },
