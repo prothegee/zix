@@ -1,9 +1,14 @@
-// Test runner for all protocols. Runs each protocol test sequentially.
-// Exits 0 only when every protocol passes.
+// Test runner for all protocols and all dispatch models.
+// Runs each protocol test sequentially. Exits 0 only when every test passes.
 //
 // Invoked by `zig build test-runner-all`.
-// Server binary paths are passed as argv[1..7] by build.zig (order: http, http1,
-// grpc, tcp, fix, udp, uds).
+// Server binary paths are passed as argv[1..22] by build.zig in this order:
+//   http-async, http-pool, http-mixed, http-epoll,
+//   http1-async, http1-pool, http1-mixed, http1-epoll,
+//   grpc-async, grpc-pool, grpc-mixed, grpc-epoll,
+//   tcp-async, tcp-pool, tcp-mixed, tcp-epoll,
+//   fix-async, fix-pool, fix-mixed, fix-epoll,
+//   udp, uds
 
 const std = @import("std");
 const zix = @import("zix");
@@ -22,6 +27,22 @@ const MyUdpClient = zix.Udp.Client(Packet);
 
 // --------------------------------------------------------- //
 
+fn exitMissing(name: []const u8) noreturn {
+    std.debug.print("FAIL: missing {s} server path\n", .{name});
+    std.process.exit(1);
+}
+
+fn report(label: []const u8, result: anyerror!void, failed: *usize) void {
+    if (result) {
+        std.debug.print("PASS {s}\n", .{label});
+    } else |err| {
+        std.debug.print("FAIL {s}: {}\n", .{label, err});
+        failed.* += 1;
+    }
+}
+
+// --------------------------------------------------------- //
+
 pub fn main(process: std.process.Init) void {
     var failed: usize = 0;
     const io = process.io;
@@ -29,90 +50,68 @@ pub fn main(process: std.process.Init) void {
     var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
     _ = arg_iter.skip();
 
-    const http_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing http server path\n", .{});
-        std.process.exit(1);
-    };
-    const http1_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing http1 server path\n", .{});
-        std.process.exit(1);
-    };
-    const grpc_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing grpc server path\n", .{});
-        std.process.exit(1);
-    };
-    const tcp_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing tcp server path\n", .{});
-        std.process.exit(1);
-    };
-    const fix_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing fix server path\n", .{});
-        std.process.exit(1);
-    };
-    const udp_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing udp server path\n", .{});
-        std.process.exit(1);
-    };
-    const uds_path = arg_iter.next() orelse {
-        std.debug.print("FAIL: missing uds server path\n", .{});
-        std.process.exit(1);
-    };
+    const http_async_path  = arg_iter.next() orelse exitMissing("http-async");
+    const http_pool_path   = arg_iter.next() orelse exitMissing("http-pool");
+    const http_mixed_path  = arg_iter.next() orelse exitMissing("http-mixed");
+    const http_epoll_path  = arg_iter.next() orelse exitMissing("http-epoll");
 
-    if (runHttp(io, http_path)) {
-        std.debug.print("PASS http\n", .{});
-    } else |err| {
-        std.debug.print("FAIL http: {}\n", .{err});
-        failed += 1;
-    }
+    const http1_async_path  = arg_iter.next() orelse exitMissing("http1-async");
+    const http1_pool_path   = arg_iter.next() orelse exitMissing("http1-pool");
+    const http1_mixed_path  = arg_iter.next() orelse exitMissing("http1-mixed");
+    const http1_epoll_path  = arg_iter.next() orelse exitMissing("http1-epoll");
 
-    if (runHttp1(io, http1_path)) {
-        std.debug.print("PASS http1\n", .{});
-    } else |err| {
-        std.debug.print("FAIL http1: {}\n", .{err});
-        failed += 1;
-    }
+    const grpc_async_path  = arg_iter.next() orelse exitMissing("grpc-async");
+    const grpc_pool_path   = arg_iter.next() orelse exitMissing("grpc-pool");
+    const grpc_mixed_path  = arg_iter.next() orelse exitMissing("grpc-mixed");
+    const grpc_epoll_path  = arg_iter.next() orelse exitMissing("grpc-epoll");
 
-    if (runGrpc(io, grpc_path)) {
-        std.debug.print("PASS grpc\n", .{});
-    } else |err| {
-        std.debug.print("FAIL grpc: {}\n", .{err});
-        failed += 1;
-    }
+    const tcp_async_path  = arg_iter.next() orelse exitMissing("tcp-async");
+    const tcp_pool_path   = arg_iter.next() orelse exitMissing("tcp-pool");
+    const tcp_mixed_path  = arg_iter.next() orelse exitMissing("tcp-mixed");
+    const tcp_epoll_path  = arg_iter.next() orelse exitMissing("tcp-epoll");
 
-    if (runTcp(io, tcp_path)) {
-        std.debug.print("PASS tcp\n", .{});
-    } else |err| {
-        std.debug.print("FAIL tcp: {}\n", .{err});
-        failed += 1;
-    }
+    const fix_async_path  = arg_iter.next() orelse exitMissing("fix-async");
+    const fix_pool_path   = arg_iter.next() orelse exitMissing("fix-pool");
+    const fix_mixed_path  = arg_iter.next() orelse exitMissing("fix-mixed");
+    const fix_epoll_path  = arg_iter.next() orelse exitMissing("fix-epoll");
 
-    if (runFix(io, fix_path)) {
-        std.debug.print("PASS fix\n", .{});
-    } else |err| {
-        std.debug.print("FAIL fix: {}\n", .{err});
-        failed += 1;
-    }
+    const udp_path = arg_iter.next() orelse exitMissing("udp");
+    const uds_path = arg_iter.next() orelse exitMissing("uds");
 
-    if (runUdp(io, udp_path)) {
-        std.debug.print("PASS udp\n", .{});
-    } else |err| {
-        std.debug.print("FAIL udp: {}\n", .{err});
-        failed += 1;
-    }
+    report("http-async",  runHttp(io, http_async_path),  &failed);
+    report("http-pool",   runHttp(io, http_pool_path),   &failed);
+    report("http-mixed",  runHttp(io, http_mixed_path),  &failed);
+    report("http-epoll",  runHttp(io, http_epoll_path),  &failed);
 
-    if (runUds(io, uds_path)) {
-        std.debug.print("PASS uds\n", .{});
-    } else |err| {
-        std.debug.print("FAIL uds: {}\n", .{err});
-        failed += 1;
-    }
+    report("http1-async", runHttp1(io, http1_async_path), &failed);
+    report("http1-pool",  runHttp1(io, http1_pool_path),  &failed);
+    report("http1-mixed", runHttp1(io, http1_mixed_path), &failed);
+    report("http1-epoll", runHttp1(io, http1_epoll_path), &failed);
+
+    report("grpc-async",  runGrpc(io, grpc_async_path),  &failed);
+    report("grpc-pool",   runGrpc(io, grpc_pool_path),   &failed);
+    report("grpc-mixed",  runGrpc(io, grpc_mixed_path),  &failed);
+    report("grpc-epoll",  runGrpc(io, grpc_epoll_path),  &failed);
+
+    report("tcp-async",   runTcp(io, tcp_async_path, 9300), &failed);
+    report("tcp-pool",    runTcp(io, tcp_pool_path,  9301), &failed);
+    report("tcp-mixed",   runTcp(io, tcp_mixed_path, 9302), &failed);
+    report("tcp-epoll",   runTcp(io, tcp_epoll_path, 9303), &failed);
+
+    report("fix-async",   runFix(io, fix_async_path),    &failed);
+    report("fix-pool",    runFix(io, fix_pool_path),     &failed);
+    report("fix-mixed",   runFix(io, fix_mixed_path),    &failed);
+    report("fix-epoll",   runFix(io, fix_epoll_path),    &failed);
+
+    report("udp",         runUdp(io, udp_path),          &failed);
+    report("uds",         runUds(io, uds_path),          &failed);
 
     if (failed > 0) {
-        std.debug.print("{d}/7 protocol(s) failed\n", .{failed});
+        std.debug.print("{d}/22 protocol(s) failed\n", .{failed});
         std.process.exit(1);
     }
 
-    std.debug.print("all 7 protocols passed\n", .{});
+    std.debug.print("all 22 protocols passed\n", .{});
 }
 
 // --------------------------------------------------------- //
@@ -185,15 +184,15 @@ fn runGrpc(io: std.Io, server_path: []const u8) !void {
     if (!std.mem.startsWith(u8, resp, "Hello,")) return error.UnexpectedResponse;
 }
 
-fn runTcp(io: std.Io, server_path: []const u8) !void {
+fn runTcp(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 9300, 5000);
+    try common.waitForTcpPort(io, port, 5000);
 
     var client = try zix.Tcp.Client.connect(.{
         .ip = "127.0.0.1",
-        .port = 9300,
+        .port = port,
         .recv_timeout_ms = 3000,
     }, io);
     defer client.deinit(io);
