@@ -20,11 +20,12 @@ pub const DispatchModel = enum(u8) {
     /// pool_size is ignored.
     /// Balanced throughput and latency.
     MIXED = 2,
-    /// Single epoll event loop accepts connections and dispatches readable
-    /// sockets to a worker pool. Each worker handles one request then re-arms
-    /// the socket (EPOLLONESHOT), so idle keep-alive connections hold no thread.
-    /// Best for very high connection counts and slow/idle clients. Linux-only.
-    /// pool_size sets the worker count. Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
+    /// Shared-nothing epoll: each worker owns one SO_REUSEPORT listener and
+    /// one epoll instance. The kernel load-balances accepted connections across
+    /// workers with no shared queue. Each connection is dispatched via io.async.
+    /// Best for very high connection counts. Linux-only.
+    /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
+    /// Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
     EPOLL = 3,
 }; // for all Tcp
 

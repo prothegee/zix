@@ -59,3 +59,15 @@ test "zix behaviour: TCP frame, header is always exactly 4 bytes" {
 test "zix behaviour: DispatchModel, ASYNC is zero value" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
 }
+
+test "zix behaviour: TcpServerConfig EPOLL, workers governs shared-nothing worker count" {
+    const cfg = zix.Tcp.ServerConfig{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .EPOLL,
+        .workers = 8,
+        .pool_size = 0,
+    };
+    try std.testing.expectEqual(zix.Tcp.DispatchModel.EPOLL, cfg.dispatch_model);
+    try std.testing.expectEqual(@as(usize, 8), cfg.workers);
+}

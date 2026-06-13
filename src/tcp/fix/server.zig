@@ -71,66 +71,6 @@ const ConnQueue = struct {
 
 // --------------------------------------------------------- //
 
-const FdQueue = struct {
-    mutex: std.Io.Mutex = .init,
-    ready: std.Io.Condition = .init,
-    buf: []std.posix.fd_t = &.{},
-    head: usize = 0,
-    len: usize = 0,
-    closed: bool = false,
-
-    fn push(self: *FdQueue, fd: std.posix.fd_t, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
-            const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
-                self.mutex.unlock(io);
-                _ = std.os.linux.close(fd);
-                return;
-            };
-            if (self.buf.len > 0) {
-                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
-                std.heap.smp_allocator.free(self.buf);
-            }
-            self.buf = new_buf;
-            self.head = 0;
-        }
-        self.buf[(self.head + self.len) % self.buf.len] = fd;
-        self.len += 1;
-        self.mutex.unlock(io);
-        self.ready.signal(io);
-    }
-
-    fn pop(self: *FdQueue, io: std.Io) ?std.posix.fd_t {
-        self.mutex.lockUncancelable(io);
-        while (self.len == 0) {
-            if (self.closed) {
-                self.mutex.unlock(io);
-                return null;
-            }
-            self.ready.waitUncancelable(io, &self.mutex);
-        }
-        const fd = self.buf[self.head];
-        self.head = (self.head + 1) % self.buf.len;
-        self.len -= 1;
-        self.mutex.unlock(io);
-        return fd;
-    }
-
-    fn close(self: *FdQueue, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        self.closed = true;
-        self.mutex.unlock(io);
-        self.ready.broadcast(io);
-    }
-
-    fn deinit(self: *FdQueue) void {
-        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
-    }
-};
-
-// --------------------------------------------------------- //
-
 const WorkerCtx = struct {
     queue: *ConnQueue,
     io: std.Io,
@@ -211,19 +151,87 @@ fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
 }
 
 const EpollWorkerCtx = struct {
-    queue: *FdQueue,
     io: std.Io,
+    ip: []const u8,
+    port: u16,
+    kernel_backlog: u31,
     comp_id: []const u8,
     opts: FixServeOpts,
 };
 
+/// EPOLL worker: owns one SO_REUSEPORT listener and one epoll instance.
+/// The kernel load-balances connections across per-worker listeners with no
+/// shared queue and no cross-thread fd handoff. Each accepted connection is
+/// dispatched via io.async so the worker returns to epoll_wait immediately
+/// and is not parked on the session lifetime.
 fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
-    while (ctx.queue.pop(ctx.io)) |conn_fd| {
-        const stream: std.Io.net.Stream = .{ .socket = .{
-            .handle = conn_fd,
-            .address = .{ .ip4 = .unspecified(0) },
-        } };
-        core.serveConn(stream, ctx.io, ctx.comp_id, ctx.opts) catch {};
+    const linux = std.os.linux;
+
+    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
+        if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "epoll worker resolve error: {}", .{err});
+        return;
+    };
+    var srv = addr.listen(ctx.io, .{
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX: each worker binds the same port
+        .kernel_backlog = ctx.kernel_backlog,
+    }) catch |err| {
+        if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "epoll worker listen error: {}", .{err});
+        return;
+    };
+    defer srv.deinit(ctx.io);
+    const listener_fd = srv.socket.handle;
+
+    const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+    const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+    if (std.posix.errno(epfd_rc) != .SUCCESS) return;
+    const epfd: std.posix.fd_t = @intCast(epfd_rc);
+    defer _ = linux.close(epfd);
+
+    var listener_event = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .fd = listener_fd },
+    };
+    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS) return;
+
+    var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+    while (true) {
+        const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
+        switch (std.posix.errno(wait_result)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return,
+        }
+
+        const n: usize = @intCast(wait_result);
+        for (events[0..n]) |ev| {
+            if (ev.data.fd != listener_fd) continue;
+
+            while (true) {
+                const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
+                switch (std.posix.errno(accept_result)) {
+                    .SUCCESS => {},
+                    .AGAIN => break,
+                    .INTR, .CONNABORTED => continue,
+                    else => break,
+                }
+
+                const conn_fd: std.posix.fd_t = @intCast(accept_result);
+                const stream: std.Io.net.Stream = .{ .socket = .{
+                    .handle = conn_fd,
+                    .address = .{ .ip4 = .unspecified(0) },
+                } };
+
+                _ = ctx.io.async(dispatchConn, .{ConnTask{
+                    .stream = stream,
+                    .io = ctx.io,
+                    .comp_id = ctx.comp_id,
+                    .opts = ctx.opts,
+                }});
+            }
+        }
     }
 }
 
@@ -387,91 +395,39 @@ pub const FixServer = struct {
         }
     }
 
-    /// EPOLL dispatch: a single epoll event loop accepts connections and hands
-    /// each fd to a worker pool. Each worker runs the full FIX session loop.
-    /// Linux-only.
+    /// EPOLL dispatch: spawns shared-nothing workers, each with its own
+    /// SO_REUSEPORT listener and epoll instance. Linux-only.
     ///
     /// Note:
-    /// - Workers hold each connection for its full lifetime (FIX sessions are
-    ///   stateful: seq_num, Logon state, heartbeat timer all live on the stack
-    ///   inside serveConn). EPOLLONESHOT is not used.
-    /// - The benefit over POOL is single-threaded accept vs N accept threads.
-    /// - pool_size sets the worker count (0 = max(10, cpu * 2)).
+    /// - The kernel distributes connections across per-worker listeners with no
+    ///   shared queue and no cross-thread fd handoff.
+    /// - Each accepted connection is dispatched via io.async: the worker returns
+    ///   to epoll_wait immediately and is not parked on the session lifetime.
+    /// - workers = 0 (default): cpu_count workers.
+    /// - pool_size is ignored for EPOLL (no session-worker pool needed).
     fn runEpoll(self: *Self, io: std.Io, conn_opts: FixServeOpts, cpu: usize) !void {
-        const linux = std.os.linux;
         const cfg = self.config;
-        const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
+        const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-        const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-            if (cfg.logger) |lg| lg.system(.ERROR, "fix", "epoll resolve error: {}", .{err});
-            return err;
-        };
-        var net_server = addr.listen(io, .{
-            .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-            .kernel_backlog = cfg.kernel_backlog,
-        }) catch |err| {
-            if (cfg.logger) |lg| lg.system(.ERROR, "fix", "epoll listen error: {}", .{err});
-            return err;
-        };
-        defer net_server.deinit(io);
-        const listener_fd = net_server.socket.handle;
+        if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
 
-        const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
-        const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-        _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
-
-        const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-        if (std.posix.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
-        const epfd: std.posix.fd_t = @intCast(epfd_rc);
-        defer _ = linux.close(epfd);
-
-        var listener_event = linux.epoll_event{
-            .events = linux.EPOLL.IN | linux.EPOLL.ET,
-            .data = .{ .fd = listener_fd },
-        };
-        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS)
-            return error.EpollCtlFailed;
-
-        if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (epoll/{d})", .{ cfg.ip, cfg.port, pool_count });
-
-        var queue = FdQueue{};
-        defer queue.deinit();
-
-        const workers = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
+        const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
         defer std.heap.smp_allocator.free(workers);
+
         for (workers) |*t|
             t.* = try std.Thread.spawn(
                 .{ .stack_size = 512 * 1024 },
                 epollWorkerEntry,
-                .{EpollWorkerCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .opts = conn_opts }},
+                .{EpollWorkerCtx{
+                    .io = io,
+                    .ip = cfg.ip,
+                    .port = cfg.port,
+                    .kernel_backlog = cfg.kernel_backlog,
+                    .comp_id = cfg.comp_id,
+                    .opts = conn_opts,
+                }},
             );
 
-        var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
-        while (true) {
-            const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
-            switch (std.posix.errno(wait_result)) {
-                .SUCCESS => {},
-                .INTR => continue,
-                else => break,
-            }
-            const n: usize = @intCast(wait_result);
-            for (events[0..n]) |ev| {
-                if (ev.data.fd != listener_fd) continue;
-                while (true) {
-                    const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
-                    switch (std.posix.errno(accept_result)) {
-                        .SUCCESS => {},
-                        .AGAIN => break,
-                        .INTR, .CONNABORTED => continue,
-                        else => break,
-                    }
-                    const conn_fd: std.posix.fd_t = @intCast(accept_result);
-                    queue.push(conn_fd, io);
-                }
-            }
-        }
-
-        queue.close(io);
         for (workers) |t| t.join();
     }
 };
@@ -506,4 +462,22 @@ test "zix fix: FixServer.init with EPOLL dispatch model succeeds" {
     const io = threaded.io();
     var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
     server.deinit();
+}
+
+test "zix fix: FixServer EPOLL uses workers field for worker count, pool_size is ignored" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const server = try FixServer.init(&.{}, .{
+        .io = io,
+        .ip = "127.0.0.1",
+        .port = 9500,
+        .comp_id = "SERVER",
+        .dispatch_model = .EPOLL,
+        .workers = 4,
+        .pool_size = 99,
+    });
+    try std.testing.expectEqual(@as(usize, 4), server.config.workers);
+    try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
 }

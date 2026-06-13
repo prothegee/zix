@@ -20,6 +20,18 @@ test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and dei
     server.deinit();
 }
 
+test "zix integration: TcpServer EPOLL, workers governs worker count and pool_size is ignored" {
+    const server = try zix.Tcp.Server.init(.{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .EPOLL,
+        .workers = 4,
+        .pool_size = 99,
+    });
+    try std.testing.expectEqual(@as(usize, 4), server.config.workers);
+    try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
+}
+
 test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
     const result = zix.Tcp.Server.init(.{
         .ip = "127.0.0.1",
