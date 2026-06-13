@@ -30,7 +30,7 @@ test "zix integration: UdpClient.init, zero bind_port returns error.PortNotConfi
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        C.init(.{ .server_ip = "127.0.0.1", .server_port = 9200, .bind_port = 0 }, io),
+        C.init(.{ .ip = "127.0.0.1", .server_port = 9200, .bind_port = 0 }, io),
     );
 }
 
@@ -41,7 +41,7 @@ test "zix integration: UdpClient, recv_timeout_ms fires when no packet arrives" 
     const io = threaded.io();
 
     var client = try C.init(.{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9200,
         .bind_port = 9141,
         .recv_timeout_ms = 200,
