@@ -26,3 +26,22 @@ test "zix edge: UdpServer.init, non-zero port with REQUIRED mode succeeds" {
     const S = zix.Udp.Server(extern struct { id: u32 });
     _ = try S.init(.{ .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 9199 });
 }
+
+test "zix edge: UdpClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
+    const cfg = zix.Udp.ClientConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 9200,
+        .bind_port = 9141,
+    };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix edge: UdpClientConfig, large recv_timeout_ms value is stored without overflow" {
+    const cfg = zix.Udp.ClientConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 9200,
+        .bind_port = 9141,
+        .recv_timeout_ms = std.math.maxInt(u32),
+    };
+    try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
+}
