@@ -637,15 +637,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const cfg = self.config;
             const cpu = try std.Thread.getCpuCount();
 
-            // Use caller's io if provided. Otherwise create an internal Threaded backend.
-            // Caller-provided io: async_limit and stack_size from InitOptions are respected.
-            // Internal: stack_size=512KB reduces virtual memory and TLB pressure.
-            var internal: ?std.Io.Threaded = if (cfg.io == null)
-                std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 })
-            else
-                null;
-            defer if (internal) |*t| t.deinit();
-            const thread_io: std.Io = cfg.io orelse internal.?.io();
+            const thread_io: std.Io = cfg.io;
 
             if (cfg.public_dir.len > 0) {
                 const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
