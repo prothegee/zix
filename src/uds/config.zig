@@ -31,6 +31,10 @@ pub const UdsServerConfig = struct {
 pub const UdsClientConfig = struct {
     /// Filesystem path of the server socket to connect to.
     path: []const u8,
+    /// Socket receive timeout after connect in milliseconds (SO_RCVTIMEO). 0 = disabled.
+    recv_timeout_ms: u32 = 0,
+    /// Socket send timeout after connect in milliseconds (SO_SNDTIMEO). 0 = disabled.
+    send_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -52,4 +56,6 @@ test "zix test: UdsServerConfig, default field values" {
 test "zix test: UdsClientConfig, default field values" {
     const cfg = UdsClientConfig{ .path = "/tmp/zix.sock" };
     try std.testing.expectEqualStrings("/tmp/zix.sock", cfg.path);
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
