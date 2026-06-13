@@ -9,6 +9,8 @@ const context = @import("context.zig");
 const router = @import("router.zig");
 const content = @import("content.zig");
 const upload = @import("upload.zig");
+const ws_client = @import("ws_client.zig");
+const sse_client = @import("sse_client.zig");
 
 // --------------------------------------------------------- //
 
@@ -37,4 +39,13 @@ pub const Content = content;
 pub const Multipart = upload.MultipartParser;
 pub const MultipartField = upload.MultipartField;
 pub const WebSocket = @import("websocket.zig");
+pub const WsClient = ws_client.WsClient;
+pub const WsClientConfig = ws_client.WsClientConfig;
+pub const WsConn = ws_client.WsConn;
+pub const WsOpcode = ws_client.Opcode;
+pub const WsFrame = ws_client.Frame;
+pub const SseClient = sse_client.SseClient;
+pub const SseClientConfig = sse_client.SseClientConfig;
+pub const SseStream = sse_client.SseStream;
+pub const SseEvent = sse_client.SseEvent;
 pub const Logger = @import("../../logger/logger.zig").Logger;
