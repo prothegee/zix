@@ -58,7 +58,6 @@ pub fn UdpClient(comptime Packet: type) type {
             const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
 
             const dest = try std.Io.net.IpAddress.parse(config.server_ip, config.server_port);
-            std.debug.print("zix udp client: bound {s}:{d} -> {s}:{d}\n", .{ config.bind_ip, config.bind_port, config.server_ip, config.server_port });
 
             return .{ .config = config, .socket = socket, .dest = dest, .io = io };
         }
