@@ -48,6 +48,10 @@ pub const TcpServerConfig = struct {
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
     pool_size: usize = 0,
+    /// Socket receive timeout per accepted connection in milliseconds (SO_RCVTIMEO). 0 = disabled.
+    recv_timeout_ms: u32 = 0,
+    /// Socket send timeout per accepted connection in milliseconds (SO_SNDTIMEO). 0 = disabled.
+    send_timeout_ms: u32 = 0,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.conn() after each connection closes. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
@@ -77,6 +81,8 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
 
 test "zix test: TcpClientConfig, default field values" {

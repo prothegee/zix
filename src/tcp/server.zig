@@ -41,6 +41,20 @@ fn getMonotonicMs() u64 {
     return s * 1000 + millis;
 }
 
+fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    if (recv_ms == 0 and send_ms == 0) return;
+
+    if (recv_ms > 0) {
+        const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
+    }
+
+    if (send_ms > 0) {
+        const send_tv = std.posix.timeval{ .sec = @intCast(send_ms / 1000), .usec = @intCast((send_ms % 1000) * 1000) };
+        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&send_tv)) catch {};
+    }
+}
+
 // --------------------------------------------------------- //
 
 // Work queue shared between accept threads (producers) and pool threads (consumers).
@@ -131,6 +145,8 @@ fn workerEntry(cfg: TcpServerConfig, queue: *ConnQueue, io: std.Io) void {
             }
             continue;
         };
+        applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
         queue.push(stream, io);
     }
 }
@@ -171,6 +187,8 @@ fn asyncWorkerEntry(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) void {
             }
             continue;
         };
+        applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
         _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
     }
 }
@@ -180,6 +198,8 @@ const EpollWorkerCtx = struct {
     ip: []const u8,
     port: u16,
     kernel_backlog: u31,
+    recv_timeout_ms: u32,
+    send_timeout_ms: u32,
     handler: HandlerFn,
     logger: ?*Logger,
 };
@@ -246,6 +266,7 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
                 }
 
                 const conn_fd: std.posix.fd_t = @intCast(accept_result);
+                applyConnTimeout(conn_fd, ctx.recv_timeout_ms, ctx.send_timeout_ms);
                 const stream: std.Io.net.Stream = .{ .socket = .{
                     .handle = conn_fd,
                     .address = .{ .ip4 = .unspecified(0) },
@@ -344,6 +365,8 @@ pub const TcpServer = struct {
                         }
                         continue;
                     };
+                    applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
                     _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
                 }
             },
@@ -429,6 +452,8 @@ pub const TcpServer = struct {
                     .ip = cfg.ip,
                     .port = cfg.port,
                     .kernel_backlog = cfg.kernel_backlog,
+                    .recv_timeout_ms = cfg.recv_timeout_ms,
+                    .send_timeout_ms = cfg.send_timeout_ms,
                     .handler = handler,
                     .logger = cfg.logger,
                 }},
@@ -497,4 +522,66 @@ test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size i
     });
     try std.testing.expectEqual(@as(usize, 4), server.config.workers);
     try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
+}
+
+test "zix test: TcpServer init, timeout fields default to zero" {
+    const server = try TcpServer.init(.{ .ip = "127.0.0.1", .port = 9300 });
+    try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
+}
+
+test "zix test: TcpServer init, timeout fields stored from config" {
+    const server = try TcpServer.init(.{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .recv_timeout_ms = 5000,
+        .send_timeout_ms = 3000,
+    });
+    try std.testing.expectEqual(@as(u32, 5000), server.config.recv_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 3000), server.config.send_timeout_ms);
+}
+
+test "zix test: applyConnTimeout, zero ms is no-op on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 0, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
+}
+
+test "zix test: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 2500, 0);
+
+    var recv_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 2), recv_tv.sec);
+    try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
+}
+
+test "zix test: applyConnTimeout, sets SO_SNDTIMEO on real socket" {
+    const linux = std.os.linux;
+    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
+    try std.testing.expect(sock_fd > 0);
+    defer _ = linux.close(sock_fd);
+
+    applyConnTimeout(sock_fd, 0, 1000);
+
+    var send_tv: std.posix.timeval = undefined;
+    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
+    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&send_tv), &opt_len);
+    try std.testing.expectEqual(@as(isize, 1), send_tv.sec);
+    try std.testing.expectEqual(@as(i64, 0), send_tv.usec);
 }
