@@ -45,6 +45,9 @@ pub const GrpcServerConfig = struct {
     /// now + tighter_of(handler_timeout_ms, Route.timeout_ms, grpc-timeout header).
     /// Handlers opt in by checking ctx.isExpired() between expensive steps.
     handler_timeout_ms: u32 = 0,
+    /// Enable gzip response compression. When true, the server compresses DATA frames
+    /// for clients that advertise grpc-accept-encoding: gzip. Default: false.
+    compress_gzip: bool = false,
 };
 
 /// Configuration for a gRPC h2c client connection.
@@ -106,6 +109,15 @@ test "zix grpc: GrpcServerConfig handler_timeout_ms defaults to zero" {
     const io = threaded.io();
     const cfg = GrpcServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083 };
     try std.testing.expectEqual(@as(u32, 0), cfg.handler_timeout_ms);
+}
+
+test "zix grpc: GrpcServerConfig compress_gzip defaults to false" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = GrpcServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083 };
+    try std.testing.expect(!cfg.compress_gzip);
 }
 
 test "zix grpc: GrpcClientConfig fields" {

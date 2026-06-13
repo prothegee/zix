@@ -84,6 +84,7 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Open a new h2 stream and send the initial gRPC request headers.
+    /// Advertises grpc-accept-encoding: gzip so the server may compress responses.
     ///
     /// Return:
     /// - !u31 (stream ID for subsequent sendMessage / recvResponse calls)
@@ -99,6 +100,7 @@ pub const GrpcClient = struct {
         try enc.writeHeader(":authority", "grpc");
         try enc.writeHeader("content-type", content_type);
         try enc.writeHeader("te", "trailers");
+        try enc.writeHeader("grpc-accept-encoding", "identity,gzip");
         const hblock = enc.encoded();
 
         try h2.writeFrameHeader(self.fd, .{
@@ -156,9 +158,10 @@ pub const GrpcClient = struct {
                 h2.FT_WINDOW_UPDATE => {},
                 h2.FT_PING => {
                     if ((fh.flags & h2.FLAG_ACK) == 0) {
-                        var p8: [8]u8 = undefined;
-                        @memcpy(&p8, payload[0..8]);
-                        try h2.sendPingAck(self.fd, p8);
+                        var ping_payload: [8]u8 = undefined;
+                        @memcpy(&ping_payload, payload[0..8]);
+
+                        try h2.sendPingAck(self.fd, ping_payload);
                     }
                 },
                 h2.FT_HEADERS => {
@@ -180,15 +183,26 @@ pub const GrpcClient = struct {
                 h2.FT_DATA => {
                     if (fh.stream_id != sid) continue;
                     if (payload.len < 5) return error.TooShort;
+                    const compress_flag = payload[0] != 0;
                     const msg_len = std.mem.readInt(u32, payload[1..5], .big);
                     const msg_end = 5 + @as(usize, msg_len);
                     if (msg_end > payload.len) return error.TruncatedMessage;
                     const msg = payload[5..msg_end];
-                    const to_copy = @min(msg.len, buf.len);
-                    @memcpy(buf[0..to_copy], msg[0..to_copy]);
+
+                    var data_len: usize = undefined;
+                    if (compress_flag) {
+                        var in_reader = std.Io.Reader.fixed(msg);
+                        var decomp = std.compress.flate.Decompress.init(&in_reader, .gzip, &.{});
+                        var out_writer = std.Io.Writer.fixed(buf);
+                        data_len = decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
+                    } else {
+                        data_len = @min(msg.len, buf.len);
+                        @memcpy(buf[0..data_len], msg[0..data_len]);
+                    }
+
                     if ((fh.flags & h2.FLAG_END_STREAM) != 0)
                         return .{ .status = GrpcStatus.OK };
-                    return .{ .data = buf[0..to_copy] };
+                    return .{ .data = buf[0..data_len] };
                 },
                 h2.FT_GOAWAY => return error.ServerGoaway,
                 h2.FT_RST_STREAM => return error.StreamReset,

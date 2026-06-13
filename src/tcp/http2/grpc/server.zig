@@ -360,6 +360,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .logger = cfg.logger,
                 .handler_timeout_ms = cfg.handler_timeout_ms,
                 .io = io,
+                .compress_gzip = cfg.compress_gzip,
             };
 
             std.debug.print("zix grpc server (epoll mux): {s}:{d} ({d} workers)\n", .{ cfg.ip, cfg.port, worker_count });
@@ -415,6 +416,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .logger = cfg.logger,
                 .handler_timeout_ms = cfg.handler_timeout_ms,
                 .io = io,
+                .compress_gzip = cfg.compress_gzip,
             };
 
             switch (cfg.dispatch_model) {
