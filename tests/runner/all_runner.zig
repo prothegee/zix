@@ -372,7 +372,7 @@ fn runUdp(io: std.Io, server_path: []const u8) !void {
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(600), .awake);
 
     var client = try MyUdpClient.init(.{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9100,
         .bind_ip = "127.0.0.1",
         .bind_port = 9191,

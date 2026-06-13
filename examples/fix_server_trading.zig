@@ -166,7 +166,7 @@ pub fn main(process: std.process.Init) !void {
             .comp_id = COMP_ID,
             .dispatch_model = .ASYNC,
             .logger = &logger,
-            .connection_timeout_ms = 60_000,
+            .conn_timeout_ms = 60_000,
             .handler_timeout_ms = 200,
         },
     );

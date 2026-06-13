@@ -12,7 +12,7 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
         .ip = "127.0.0.1",
         .port = 9000,
     };
-    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.kernel_backlog);
+    try std.testing.expectEqual(@as(u31, 1024 * 4), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_allocator_size);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_client_response);
@@ -50,6 +50,7 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
 
 test "zix behaviour: ServerConfig, dispatch_model defaults to ASYNC" {
     const cfg = zix.Http.ServerConfig{
+        .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
     };

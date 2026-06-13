@@ -12,10 +12,10 @@ pub const UdsServerConfig = struct {
     path: []const u8,
     /// Backing allocator. Caller owns, must outlive the server.
     allocator: std.mem.Allocator,
-    /// listen() kernel backlog: pending connections before the OS starts refusing.
-    backlog: u31 = 128,
+    /// TCP listen backlog: pending connections queued by the kernel before accept().
+    kernel_backlog: u31 = 128,
     /// Maximum payload bytes accepted per frame. Frames larger than this close the connection.
-    max_msg_len: usize = 4096,
+    max_recv_buf: usize = 4096,
     /// Socket receive timeout per accepted connection in milliseconds (SO_RCVTIMEO). 0 = disabled.
     recv_timeout_ms: u32 = 0,
     /// Socket send timeout per accepted connection in milliseconds (SO_SNDTIMEO). 0 = disabled.
@@ -47,8 +47,8 @@ test "zix test: UdsServerConfig, default field values" {
     };
     try std.testing.expectEqualStrings("/tmp/zix.sock", cfg.path);
     try std.testing.expectEqual(std.testing.allocator.ptr, cfg.allocator.ptr);
-    try std.testing.expectEqual(@as(u31, 128), cfg.backlog);
-    try std.testing.expectEqual(@as(usize, 4096), cfg.max_msg_len);
+    try std.testing.expectEqual(@as(u31, 128), cfg.kernel_backlog);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }

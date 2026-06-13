@@ -56,7 +56,7 @@ fn run(io: std.Io, server_path: []const u8) !void {
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(WAIT_MS), .awake);
 
     var client = try MyClient.init(.{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = SERVER_PORT,
         .bind_ip = "127.0.0.1",
         .bind_port = BIND_PORT,

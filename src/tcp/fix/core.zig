@@ -344,7 +344,7 @@ pub const FixServeOpts = struct {
     /// Idle connection timeout in milliseconds. 0 = disabled.
     /// When non-zero and heartbeat_timeout_ms is 0: connection is closed if no message arrives
     /// within this interval (no TestRequest is sent before closing).
-    connection_timeout_ms: u32 = 0,
+    conn_timeout_ms: u32 = 0,
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Applied to each routed message dispatch. Per-route FixRoute.timeout_ms overrides this.
     handler_timeout_ms: u32 = 0,
@@ -413,8 +413,8 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                 recv_len += n;
             }
             unreachable;
-        } else if (opts.connection_timeout_ms > 0) conn_to: {
-            const timeout_ms: i32 = @intCast(@min(opts.connection_timeout_ms, @as(u32, std.math.maxInt(i32))));
+        } else if (opts.conn_timeout_ms > 0) conn_to: {
+            const timeout_ms: i32 = @intCast(@min(opts.conn_timeout_ms, @as(u32, std.math.maxInt(i32))));
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :conn_to end;
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;

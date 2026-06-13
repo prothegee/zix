@@ -29,7 +29,7 @@ test "zix edge: UdpServer.init, non-zero port with REQUIRED mode succeeds" {
 
 test "zix edge: UdpClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9200,
         .bind_port = 9141,
     };
@@ -38,7 +38,7 @@ test "zix edge: UdpClientConfig, recv_timeout_ms = 0 disables timeout (default)"
 
 test "zix edge: UdpClientConfig, large recv_timeout_ms value is stored without overflow" {
     const cfg = zix.Udp.ClientConfig{
-        .server_ip = "127.0.0.1",
+        .ip = "127.0.0.1",
         .server_port = 9200,
         .bind_port = 9141,
         .recv_timeout_ms = std.math.maxInt(u32),

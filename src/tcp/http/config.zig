@@ -11,10 +11,8 @@ pub const DispatchModel = @import("../config.zig").DispatchModel;
 /// Configuration for an HTTP server instance.
 /// Pass to Http.Server.init(). Fields without defaults (ip, port) are required.
 pub const HttpServerConfig = struct {
-    /// Optional caller-provided io backend. When non-null the server uses it directly
-    /// (async_limit and stack_size in InitOptions are respected). When null the server
-    /// creates an internal std.Io.Threaded with stack_size = 512KB.
-    io: ?std.Io = null,
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero.
@@ -23,7 +21,7 @@ pub const HttpServerConfig = struct {
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
-    kernel_backlog: usize = 1024 * 4,
+    kernel_backlog: u31 = 1024 * 4,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
     max_recv_buf: usize = 1024 * 4,
     /// Initial arena capacity in bytes per connection. Grows automatically if exceeded.

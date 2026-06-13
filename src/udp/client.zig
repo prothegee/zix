@@ -57,7 +57,7 @@ pub fn UdpClient(comptime Packet: type) type {
             const bind_addr = try std.Io.net.IpAddress.parse(config.bind_ip, config.bind_port);
             const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
 
-            const dest = try std.Io.net.IpAddress.parse(config.server_ip, config.server_port);
+            const dest = try std.Io.net.IpAddress.parse(config.ip, config.server_port);
 
             return .{ .config = config, .socket = socket, .dest = dest, .io = io };
         }
