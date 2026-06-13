@@ -27,6 +27,16 @@ test "zix behaviour: GrpcClientConfig basic fields" {
     try std.testing.expectEqual(@as(u16, 8083), cfg.port);
 }
 
+test "zix behaviour: GrpcClientConfig, recv_timeout_ms default is 0" {
+    const cfg = zix.Grpc.ClientConfig{ .ip = "127.0.0.1", .port = 8083 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
+
+test "zix behaviour: GrpcClientConfig, send_timeout_ms default is 0" {
+    const cfg = zix.Grpc.ClientConfig{ .ip = "127.0.0.1", .port = 8083 };
+    try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
 test "zix behaviour: GrpcStatus enum values are correct" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Grpc.Status.OK));
     try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Grpc.Status.CANCELLED));
