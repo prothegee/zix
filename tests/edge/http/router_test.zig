@@ -17,7 +17,7 @@ test "zix edge: dispatch, no registered route returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{}, .{ .ip = "127.0.0.1", .port = 9000 });
+    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{}, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -37,7 +37,7 @@ test "zix edge: dispatch, prefix /api does NOT match /apiv2" {
     const al = arena.allocator();
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerA, .kind = .PREFIX },
-    }, .{ .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /apiv2/resource HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
