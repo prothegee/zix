@@ -64,7 +64,7 @@ pub const UdsServer = struct {
         std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
 
         const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
-        var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.backlog });
+        var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog });
         defer {
             net_server.deinit(io);
             std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
