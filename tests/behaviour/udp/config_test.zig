@@ -86,3 +86,12 @@ test "zix behaviour: UdpClientConfig, endianness defaults to LITTLE" {
     };
     try std.testing.expectEqual(zix.Udp.Endianness.LITTLE, cfg.endianness);
 }
+
+test "zix behaviour: UdpClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
+    const cfg = zix.Udp.ClientConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 9100,
+        .bind_port = 9101,
+    };
+    try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
+}
