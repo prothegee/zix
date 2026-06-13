@@ -69,7 +69,7 @@ pub const UdpServerConfig = struct {
 
 pub const UdpClientConfig = struct {
     /// Server address to send packets to.
-    server_ip: []const u8,
+    ip: []const u8,
     /// Server port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
     server_port: u16,
     /// Local bind address. Defaults to loopback. Set to "0.0.0.0" to accept responses on all interfaces.
@@ -115,8 +115,8 @@ test "zix test: UdpServerConfig, default field values" {
 }
 
 test "zix test: UdpClientConfig, default field values" {
-    const cfg = UdpClientConfig{ .server_ip = "127.0.0.1", .server_port = 9100, .bind_port = 9101 };
-    try std.testing.expectEqualStrings("127.0.0.1", cfg.server_ip);
+    const cfg = UdpClientConfig{ .ip = "127.0.0.1", .server_port = 9100, .bind_port = 9101 };
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9100), cfg.server_port);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.bind_ip);
     try std.testing.expectEqual(@as(u16, 9101), cfg.bind_port);
