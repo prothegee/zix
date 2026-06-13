@@ -101,7 +101,7 @@ test "zix integration: Logger.access() writes line to file" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/api/users", 200, 512, "TestAgent/1.0", "http://example.com");
+    logger.access("GET", "/api/users", 200, 512, "192.168.1.1", "TestAgent/1.0", "http://example.com");
     logger.flush();
 
     const date = currentDateBuf();
@@ -129,7 +129,7 @@ test "zix integration: access() absent UA and origin logged as dash" {
     });
     defer logger.deinit();
 
-    logger.access("POST", "/submit", 200, 0, "", "");
+    logger.access("POST", "/submit", 200, 0, "", "", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -153,7 +153,7 @@ test "zix integration: access() present UA appears in file" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/", 200, 0, "MyBot/2.0", "");
+    logger.access("GET", "/", 200, 0, "", "MyBot/2.0", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -177,7 +177,7 @@ test "zix integration: system() 5xx status maps to ERROR level" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/crash", 500, 0, "", "");
+    logger.access("GET", "/crash", 500, 0, "", "", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -187,6 +187,54 @@ test "zix integration: system() 5xx status maps to ERROR level" {
     try std.testing.expect(n > 0);
     const content = buf[0..n];
     try std.testing.expect(std.mem.indexOf(u8, content, "ERROR") != null);
+}
+
+test "zix integration: access() client_ip appears in log file" {
+    const allocator = std.testing.allocator;
+    const save_path = ".zig-cache/tmp/zix-logger-test/access-ip";
+    ensureDirAll(save_path);
+
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
+        .save_min_level = .DEBUG,
+    });
+    defer logger.deinit();
+
+    logger.access("GET", "/", 200, 0, "10.0.0.42", "", "");
+    logger.flush();
+
+    const date = currentDateBuf();
+    var buf: [4096]u8 = undefined;
+    const n = readLogFile(save_path, &date, "log", &buf);
+
+    try std.testing.expect(n > 0);
+    const content = buf[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, content, "10.0.0.42") != null);
+}
+
+test "zix integration: access() absent client_ip logged as dash" {
+    const allocator = std.testing.allocator;
+    const save_path = ".zig-cache/tmp/zix-logger-test/access-ip-dash";
+    ensureDirAll(save_path);
+
+    var logger = try zix.Logger.init(allocator, .{
+        .save_path = save_path,
+        .save_file = "log",
+        .save_min_level = .DEBUG,
+    });
+    defer logger.deinit();
+
+    logger.access("GET", "/", 200, 0, "", "", "");
+    logger.flush();
+
+    const date = currentDateBuf();
+    var buf: [4096]u8 = undefined;
+    const n = readLogFile(save_path, &date, "log", &buf);
+
+    try std.testing.expect(n > 0);
+    const content = buf[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"-\"") != null);
 }
 
 test "zix integration: system() with anyerror arg formats correctly" {
