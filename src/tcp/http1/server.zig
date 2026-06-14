@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Config = @import("config.zig").Http1ServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const core = @import("core.zig");
+const cache = @import("../../utils/response_cache.zig");
 const ws = @import("websocket.zig");
 const HandlerFn = core.HandlerFn;
 
@@ -786,6 +787,20 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     return if (conn.drain_close) .close else .keep_alive;
 }
 
+/// Effective cache slot count for a worker, honoring cache_max_total_bytes.
+/// When a memory ceiling is set, the entry count is reduced so the slab
+/// (entries * value_bytes) fits. ResponseCache.init then rounds down to a power
+/// of two, so the slab never exceeds the ceiling.
+fn effectiveCacheEntries(config: Config) u32 {
+    if (config.cache_max_total_bytes == 0) return config.cache_max_entries;
+
+    const value_bytes: usize = @max(1, config.cache_max_value_bytes);
+    const fit = config.cache_max_total_bytes / value_bytes;
+    const capped = @min(@as(usize, config.cache_max_entries), fit);
+
+    return @intCast(@max(@as(usize, 1), capped));
+}
+
 const EpollWorkerCtx = struct { config: Config, worker_id: usize };
 
 /// Return a concrete epoll worker function with handler_fn baked in at compile
@@ -833,6 +848,27 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 
             const out_buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch return;
             defer std.heap.smp_allocator.free(out_buf);
+
+            // Per-worker response cache, owned for this worker's lifetime. Lives
+            // on the worker stack so tl_cache stays valid until run() returns.
+            var response_cache: cache.ResponseCache = undefined;
+            var cache_on = false;
+            if (config.response_cache) {
+                if (cache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(config),
+                    .max_value_bytes = config.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    core.setCache(&response_cache, config.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                core.setCache(null, 0);
+                response_cache.deinit();
+            };
 
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             var epoll_timeout: i32 = -1;
@@ -1084,6 +1120,70 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
     const n = try std.posix.read(fds[0], &recv);
     try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
     try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "\r\n\r\nok"));
+}
+
+fn testCacheHandler(head: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
+    if (core.cacheLookup(head)) |bytes| {
+        core.fdWriteAll(fd, bytes) catch {};
+        return;
+    }
+
+    core.writeWithCache(fd, head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl()) catch {};
+}
+
+test "zix http1: effectiveCacheEntries honors the memory ceiling" {
+    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+
+    // no ceiling: entry count unchanged
+    try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(base));
+
+    // ceiling of 256 KiB / 16 KiB = 16 slots, below the configured 1024
+    var capped = base;
+    capped.cache_max_total_bytes = 256 * 1024;
+    try std.testing.expectEqual(@as(u32, 16), effectiveCacheEntries(capped));
+
+    // a tiny ceiling still yields at least one slot
+    var tiny = base;
+    tiny.cache_max_total_bytes = 1;
+    try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
+}
+
+test "zix http1: EPOLL path serves a miss then a hit from the cache" {
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer rc.deinit();
+
+    core.setCache(&rc, 1000);
+    defer core.setCache(null, 0);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // Two pipelined requests in one event: the first misses and stores, the
+    // second hits the cache. Both responses are identical.
+    const request = "GET /cached HTTP/1.1\r\nHost: t\r\n\r\n";
+    var burst: [request.len * 2]u8 = undefined;
+    @memcpy(burst[0..request.len], request);
+    @memcpy(burst[request.len..], request);
+    try std.testing.expectEqual(burst.len, std.os.linux.write(fds[0], &burst, burst.len));
+
+    var conn_buf: [8 * 1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [4 * 1024]u8 = undefined;
+
+    const outcome = serveEpollConn(testCacheHandler, null, &conn, &body_buf, &out_buf, 0, -1);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+
+    var recv: [4 * 1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, recv[0..n], "\r\n\r\nhello"));
+
+    // The entry is present for subsequent requests.
+    const parsed = try core.parseHead(request);
+    try std.testing.expect(core.cacheLookup(&parsed.head) != null);
 }
 
 test "zix http1: ConnTable inline slab alloc and free lifecycle" {
