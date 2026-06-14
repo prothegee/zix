@@ -8,9 +8,9 @@ const core = @import("core.zig");
 const ws = @import("websocket.zig");
 const HandlerFn = core.HandlerFn;
 
-/// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
-/// ready-fd set in one syscall at high connection counts.
-const EPOLL_MAX_EVENTS: usize = 1024;
+/// Max epoll events drained per epoll_wait call. 4096 reduces round-trips at
+/// high connection counts where many fds can be ready simultaneously.
+const EPOLL_MAX_EVENTS: usize = 4096;
 
 /// Per-worker sink buffer for coalescing pipelined responses. 64 KiB matches
 /// the rust-epoll reference and gives enough room for a full pipelined burst
@@ -706,9 +706,10 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
 }
 
 /// Drive an engine-owned WebSocket connection for one readable event. Reads
-/// once (level-triggered, so more bytes re-fire), then echoes every complete
-/// frame buffered. Ping/close are auto-handled by ws.pump. The worker is never
-/// parked here: it returns to the epoll loop after draining what is ready.
+/// to EAGAIN so pipelined frames arriving in one network burst are all drained
+/// in a single epoll dispatch. Pump+compact runs after each read so a partial
+/// frame in conn.buf never blocks the next read. Ping/close are auto-handled
+/// by ws.pump. The worker is never parked here.
 ///
 /// Return:
 /// - .keep_alive when the connection may receive more frames
@@ -717,34 +718,37 @@ fn serveEpollWs(conn: *Conn, on_frame: core.WsFrameFn, payload_buf: []u8, out_bu
     const linux = std.os.linux;
     const fd = conn.fd;
 
-    if (conn.filled < conn.buf.len) {
-        const rc = linux.read(fd, conn.buf[conn.filled..].ptr, conn.buf.len - conn.filled);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {
-                const n: usize = @intCast(rc);
-                if (n == 0) return .close;
+    while (true) {
+        if (conn.filled < conn.buf.len) {
+            const rc = linux.read(fd, conn.buf[conn.filled..].ptr, conn.buf.len - conn.filled);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) return .close;
 
-                conn.filled += n;
-            },
-            .AGAIN, .INTR => {},
-            else => return .close,
+                    conn.filled += n;
+                },
+                .AGAIN => break,
+                .INTR => continue,
+                else => return .close,
+            }
         }
+
+        const result = ws.pump(fd, conn.buf[0..conn.filled], payload_buf, out_buf, on_frame);
+
+        if (result.consumed >= conn.filled) {
+            conn.filled = 0;
+        } else if (result.consumed > 0) {
+            std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - result.consumed], conn.buf[result.consumed..conn.filled]);
+            conn.filled -= result.consumed;
+        }
+
+        if (result.close) return .close;
+
+        // A frame wider than the whole buffer can never complete: close rather
+        // than spin on a connection that can make no progress.
+        if (conn.filled >= conn.buf.len) return .close;
     }
-
-    const result = ws.pump(fd, conn.buf[0..conn.filled], payload_buf, out_buf, on_frame);
-
-    if (result.consumed >= conn.filled) {
-        conn.filled = 0;
-    } else if (result.consumed > 0) {
-        std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - result.consumed], conn.buf[result.consumed..conn.filled]);
-        conn.filled -= result.consumed;
-    }
-
-    if (result.close) return .close;
-
-    // A frame wider than the whole buffer can never complete: close rather than
-    // spin on a connection that can make no progress.
-    if (conn.filled >= conn.buf.len) return .close;
 
     return .keep_alive;
 }
@@ -820,7 +824,8 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             };
             if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
 
-            var table = ConnTable.init(config.max_recv_buf) catch return;
+            const ws_buf_size = if (config.ws_recv_buf > config.max_recv_buf) config.ws_recv_buf else config.max_recv_buf;
+            var table = ConnTable.init(ws_buf_size) catch return;
             defer table.deinit();
 
             const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
@@ -1044,6 +1049,10 @@ fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) v
     core.writeSimple(fd, 200, "text/plain", "ok") catch {};
 }
 
+fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    ws.send(fd, @enumFromInt(opcode), payload) catch {};
+}
+
 test "zix http1: serveEpollConn answers a pipelined burst in order" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1094,6 +1103,52 @@ test "zix http1: ConnTable inline slab alloc and free lifecycle" {
     try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
 
     table.free(5);
+}
+
+test "zix http1: ConnTable buf_size takes ws_recv_buf when larger" {
+    var table = try ConnTable.init(512);
+    defer table.deinit();
+
+    const conn = table.alloc(3).?;
+    try std.testing.expectEqual(@as(usize, 512), conn.buf.len);
+}
+
+test "zix http1: serveEpollWs drains pipelined frames to EAGAIN in one call" {
+    var fds: [2]i32 = undefined;
+    const linux = std.os.linux;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    // Two masked client text frames: "hi" (8 bytes) and "yo" (8 bytes) = 16 bytes total.
+    const data = [_]u8{
+        0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02,
+        0x81, 0x82, 0x05, 0x06, 0x07, 0x08, 'y' ^ 0x05, 'o' ^ 0x06,
+    };
+    try std.testing.expectEqual(data.len, linux.write(fds[0], &data, data.len));
+
+    // conn.buf is 10 bytes: first read fills it (frame1 + 2 bytes of frame2),
+    // pump extracts frame1, compact leaves 2 bytes, second read fetches the
+    // remaining 6 bytes of frame2, pump extracts it. Third read yields EAGAIN.
+    var conn_buf: [10]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var payload_buf: [128]u8 = undefined;
+    var out_buf: [256]u8 = undefined;
+
+    const outcome = serveEpollWs(&conn, testWsEcho, &payload_buf, &out_buf);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    // Both echo frames arrive coalesced on fds[0].
+    var recv: [128]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+
+    var scratch: [128]u8 = undefined;
+    const first = ws.parseFrame(recv[0..n], &scratch).?;
+    try std.testing.expectEqualStrings("hi", first.frame.payload);
+
+    const second = ws.parseFrame(recv[first.consumed..n], &scratch).?;
+    try std.testing.expectEqualStrings("yo", second.frame.payload);
 }
 
 // --------------------------------------------------------- //
