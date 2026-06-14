@@ -245,7 +245,7 @@ Splits pattern and path on `/` in lockstep. `:name` segments capture (empty path
 
 ### logSystem()
 
-Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present, otherwise `std.debug.print` with a `zix: ` prefix.
+Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present. Without a logger they fall back to `std.debug.print` with a `zix: ` prefix only in Debug builds (`builtin.mode == .Debug`), and are silent in release. Every zix server uses this same gated `logSystem` shape (http, http2, grpc, fix, tcp, udp, uds), so a release build with no logger emits no init noise.
 
 ### connEntry() (.ASYNC / .MIXED task body)
 
