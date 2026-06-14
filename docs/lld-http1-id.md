@@ -245,7 +245,7 @@ Memecah pattern dan path pada `/` secara berpasangan. Segmen `:name` menangkap (
 
 ### logSystem()
 
-Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada, selain itu `std.debug.print` dengan prefix `zix: `.
+Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada. Tanpa logger, baris jatuh ke `std.debug.print` dengan prefix `zix: ` hanya pada Debug build (`builtin.mode == .Debug`), dan diam pada release. Setiap server zix memakai bentuk `logSystem` ter-gate yang sama (http, http2, grpc, fix, tcp, udp, uds), jadi release build tanpa logger tidak mengeluarkan init noise.
 
 ### connEntry() (badan task .ASYNC / .MIXED)
 
