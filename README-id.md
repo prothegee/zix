@@ -46,6 +46,7 @@
 - [Dokumentasi](./README-id.md#dokumentasi)
 - [Memulai](./README-id.md#memulai)
 - [Build](./README-id.md#build)
+- [Konsistensi Config Server](./README-id.md#konsistensi-config-server)
 - [HTTP/1](./README-en.md#http1)
 - [Contoh](./README-id.md#contoh)
 - [Minimal](./README-id.md#contoh-minimal)
@@ -364,6 +365,38 @@ kill %1                                 # hentikan
 ```
 
 Tidak ada output library `zig build install` dan tidak ada `-Doptimize` yang diperlukan untuk pengecekan compile biasa. Untuk mengonsumsi zix di proyek lain, ikuti Memulai di atas: ia ditambahkan sebagai dependency `build.zig.zon` dan diimpor dengan `exe.root_module.addImport("zix", zix.module("zix"))`, tidak pernah di-link sebagai system library.
+
+<br>
+
+## Konsistensi Config Server
+
+Setiap config server berbagi satu kosakata: konsep yang sama memakai nama field dan tipe yang sama di `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Grpc`, dan `zix.Fix`. Memindahkan config antar protokol bersifat mekanis, bukan belajar ulang. Field berikut umum untuk semuanya:
+
+| Field | Tipe | Arti |
+| :- | :- | :- |
+| `io` | `std.Io` | Backend I/O, wajib, harus hidup lebih lama dari server |
+| `ip` | `[]const u8` | Alamat bind |
+| `port` | `u16` | Port bind, harus bukan nol |
+| `dispatch_model` | `DispatchModel` | `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` |
+| `kernel_backlog` | `u31` | Backlog listen TCP |
+| `workers` | `usize` | Jumlah worker accept atau EPOLL, `0` memilih cpu_count |
+| `pool_size` | `usize` | Jumlah pool thread untuk `.POOL`, `0` memilih formula |
+| `logger` | `?*Logger` | Logger opsional, milik pemanggil |
+
+Field buffer, timeout, dan cache memakai nama yang sama di mana pun protokol memiliki fitur tersebut:
+
+| Field | Tipe | Ada di |
+| :- | :- | :- |
+| `max_recv_buf` | `usize` | `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Uds` |
+| `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
+| `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
+| `response_cache` dan empat field `cache_*` | lihat [Kesadaran Cache Respons](#kesadaran-cache-respons-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+
+Beberapa perbedaan disengaja, bukan drift:
+
+- `zix.Http1` tidak punya `conn_timeout_ms`: ia tidak menjalankan timer thread connection-registry (lihat catatan Timeout di docs LLD HTTP/1).
+- `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
+- `zix.Udp` (datagram) membawa `ip` / `port` / `logger`, dan `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya, masing-masing hanya subset yang berlaku.
 
 <br>
 
