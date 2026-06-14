@@ -11,7 +11,7 @@ pub const DispatchModel = enum(u8) {
     ASYNC = 0, // single accept, io.async() dispatch
     POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
-    EPOLL = 3, // single epoll event loop, Linux-only
+    EPOLL = 3, // shared-nothing epoll workers, Linux-only
 };
 ```
 
@@ -164,35 +164,54 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ---
 
-## .EPOLL: Single epoll Event Loop (Linux-only)
+## .EPOLL: Shared-Nothing epoll Event Loop (Linux-only)
 
-Satu thread event loop memanggil `epoll_wait` dalam sebuah loop. Ketika kernel menandai socket sebagai readable, fd socket didorong ke `FdQueue` dan pool worker menanganinya. Tidak ada overhead `io.async()`, tidak ada condvar wakeup per koneksi: kernel yang melacak kesiapan. Setiap `epoll_wait` menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan.
+Setiap worker memiliki `SO_REUSEPORT` listener dan `epoll` instance tersendiri. Kernel
+mendistribusikan koneksi baru ke listener per-worker. Tidak ada queue bersama, tidak ada
+handoff fd antar thread. Setiap worker menerima, mendaftarkan, membaca, dan merespons
+koneksinya sendiri tanpa menyentuh state worker lain.
 
-**Mengapa ini ada:** `.POOL` dan `.ASYNC` keduanya membayar biaya condvar wakeup pada setiap koneksi yang diterima (baik melalui `ConnQueue.pop()` maupun melalui fiber scheduler `io.async()`). Pada jumlah koneksi yang sangat tinggi di mana sebagian besar koneksi idle pada saat tertentu (client lambat, banyak sesi terbuka), wakeup ini menumpuk. `epoll` memungkinkan kernel membatch sinyal kesiapan: thread event loop hanya berjalan ketika byte benar-benar tersedia, tanpa overhead thread per-koneksi.
+**Mengapa ini ada:** `.POOL` dan `.ASYNC` keduanya membayar biaya wakeup lintas thread pada
+setiap koneksi yang diterima (baik melalui `ConnQueue.pop()` maupun melalui fiber scheduler
+`io.async()`). Pada jumlah koneksi sangat tinggi di mana koneksi cepat namun banyak yang
+tumpang tindih, contention antrian menumpuk. Dengan shared-nothing, worker menerima langsung
+di listenernya sendiri dan menangani semua I/O secara inline: tanpa mutex, tanpa condvar,
+tanpa handoff fd.
 
 ```
-Event loop thread (1):
+Worker (workers, default cpu_count):
+  resolve + listen pada port yang sama dengan SO_REUSEPORT
   epoll_create1
-  accept4 in a nonblocking loop when EPOLLIN fires on the listener
-  for each new conn_fd:
-    epoll_ctl(ADD, conn_fd, EPOLLIN | EPOLLONESHOT | EPOLLRDHUP)
+  epoll_ctl(ADD, listener_fd, EPOLLIN)        <- pemicu accept loop
 
-Pool workers (pool_size, default max(10, cpu_count * 2)):
-  loop:
-    fd = FdQueue.pop()           <- blocks until epoll signals a readable fd
-    serve one request on fd      <- blocking read/write, no fiber
-    epoll_ctl(MOD, fd, re-arm)   <- re-arm EPOLLONESHOT for next request
-    (or epoll_ctl(DEL) + close if connection ended)
+  event loop:
+    epoll_wait(events, EPOLL_MAX_EVENTS)        <- Http: 1024, Http1: 4096
+    untuk setiap event:
+      if listener_fd:
+        loop: fd = accept4(SOCK_CLOEXEC)
+              setNoDelay(fd)
+              epoll_ctl(ADD, fd, EPOLLIN | EPOLLRDHUP)
+      else:   // fd koneksi
+        if HUP atau ERR atau RDHUP:
+          epoll_ctl(DEL, fd)
+          close(fd)
+        else:
+          handleOneRequest(fd)   <- blocking read/write, tanpa fiber
+          if keep-alive: tetap terdaftar (level-triggered, re-fires saat data baru tiba)
+          if close: epoll_ctl(DEL, fd) + close(fd)
 ```
 
-`EPOLLONESHOT` berarti setiap readable event hanya muncul sekali. Setelah request dilayani, worker secara eksplisit melakukan re-arm pada socket. Koneksi keep-alive yang idle tidak menahan thread manapun: koneksi tersebut duduk di epoll set sampai client mengirimkan request berikutnya.
+Koneksi tetap terdaftar setelah setiap request. Tidak perlu re-arm eksplisit: level-triggered
+`EPOLLIN` re-fires setiap kali data baru tiba. Koneksi keep-alive idle tidak menahan thread
+dan hanya menempati satu entri di epoll set per-worker.
 
 **Kapan menggunakan:**
-- Deployment produksi Linux untuk `zix.Http` (HTTP/1) atau `zix.Grpc` dengan jumlah koneksi tinggi dan banyak koneksi idle.
-- Client yang lambat atau bursty di mana koneksi tetap terbuka di antara request.
+- Deployment produksi Linux untuk `zix.Http` atau `zix.Http1` dengan jumlah koneksi tinggi.
+- Request berumur pendek (REST, API) di mana `handleOneRequest` selesai cepat dan mengembalikan
+  worker ke `epoll_wait`.
 - Ingin menghindari overhead fiber scheduler `io.async()` sepenuhnya.
-- `dispatch_model = .EPOLL` di `HttpServerConfig` atau `GrpcServerConfig`.
-- `pool_size` mengontrol jumlah worker. `workers` diabaikan (satu thread event loop).
+- `dispatch_model = .EPOLL` di `HttpServerConfig` atau `Http1ServerConfig`.
+- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan untuk `zix.Http`.
 
 **Contoh (`zix.Http`):**
 ```zig
@@ -201,7 +220,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker threads; 0 = max(10, cpu_count * 2)
+    .workers        = 0, // 0 = cpu_count worker (default)
 });
 try server.run();
 ```
@@ -226,14 +245,16 @@ try server.run();
 | :- | :- |
 | Platform | Hanya Linux (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux fallback ke `.POOL` secara otomatis (dengan debug print) |
 | Ketersediaan | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` diimplementasikan secara native di Linux. `zix.Http2` fallback ke `.POOL` |
-| Model accept | Accept single-threaded di dalam event loop (tanpa `SO_REUSEPORT`). Accept rate yang tinggi dapat menjadi bottleneck, gunakan `.MIXED` jika connection churn (bukan jumlah koneksi) yang menjadi bottleneck |
-| Perbedaan gRPC, FIX, dan TCP | gRPC, FIX, dan TCP EPOLL memberikan setiap koneksi ke pool worker untuk keseluruhan masa hidupnya (ketiganya adalah protokol stream berumur panjang). `EPOLLONESHOT` tidak digunakan. Keuntungannya adalah accept single-threaded vs N accept thread di `.POOL` |
-| Field `pool_size` | Mengontrol jumlah worker thread yang menangani request. `workers` diabaikan |
+| Model accept (`zix.Http`) | Setiap worker memiliki `SO_REUSEPORT` listener tersendiri. Kernel mendistribusikan koneksi ke worker: tanpa antrian accept bersama |
+| Perbedaan gRPC | `zix.Grpc` menggunakan model multiplexed shared-nothing: satu worker mendrive banyak koneksi h2 non-blocking via resumable state machine. `pool_size` sebagai jumlah worker. Lihat ADR-031 |
+| Perbedaan FIX dan TCP | `zix.Fix` dan `zix.Tcp` EPOLL menggunakan desain terpusat: satu accept loop mendorong fd ke antrian bersama, pool worker pop dan menahan setiap koneksi sepanjang hidupnya. `pool_size` sebagai jumlah worker |
+| Field `workers` (`zix.Http`, `zix.Http1`) | Mengontrol jumlah thread worker shared-nothing (0 = cpu_count). `pool_size` diabaikan |
+| Field `pool_size` (gRPC, FIX, TCP) | Mengontrol jumlah worker multiplexed atau pool. Lihat dokumentasi per-protokol |
 | Biaya idle keep-alive | Hampir nol: socket idle duduk di epoll set tanpa menahan thread apapun |
 | Debugging | `strace` atau `perf` akan menampilkan `epoll_wait` mendominasi waktu idle, ini adalah perilaku yang diharapkan dan benar |
 
 **Kapan TIDAK menggunakan:**
-- SSE atau WebSocket: koneksi tetap aktif dan data mengalir terus-menerus: overhead re-arm `EPOLLONESHOT` menumpuk tanpa manfaat. Gunakan `.ASYNC`.
+- SSE atau WebSocket via `zix.Http`: koneksi tetap aktif dan data mengalir terus-menerus, blocking read akan menahan worker. Gunakan `.ASYNC`.
 - Target non-Linux: gunakan `.POOL` atau `.ASYNC` secara eksplisit untuk menghindari fallback dengan debug print.
 - Ketika jumlah koneksi rendah (< beberapa ratus): model `.POOL` atau `.ASYNC` yang lebih sederhana akan memiliki performa yang sama atau lebih baik dengan kompleksitas yang lebih rendah.
 
@@ -246,10 +267,10 @@ try server.run();
 | `dispatch_model = .POOL` | work-queue thread pool | N accept thread + M pool thread |
 | `dispatch_model = .ASYNC` | single accept, io.async() | 1 accept thread, io.async() per koneksi |
 | `dispatch_model = .MIXED` | N accept, io.async() | N accept thread, masing-masing mendispatch via io.async() |
-| `workers = 0` | cpu_count accept thread | digunakan oleh `.POOL` dan `.MIXED` |
-| `workers = N` | N accept thread | override eksplisit untuk `.POOL` dan `.MIXED` |
-| `pool_size = 0` | `max(10, cpu_count * 2)` | jumlah pool thread untuk `.POOL` saja |
-| `pool_size = N` | N pool thread | ukuran pool eksplisit untuk `.POOL` saja |
+| `workers = 0` | cpu_count thread | digunakan oleh `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
+| `workers = N` | N thread | override eksplisit untuk `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
+| `pool_size = 0` | `max(10, cpu_count * 2)` | jumlah pool thread untuk `.POOL`; jumlah worker EPOLL untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = N` | N pool atau mux worker | ukuran eksplisit untuk `.POOL`; jumlah worker EPOLL eksplisit untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
 
 ---
 
@@ -257,12 +278,13 @@ try server.run();
 
 | | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
 | :- | :- | :- | :- | :- |
-| Accept thread | cpu_count (atau N) | 1 | cpu_count (atau N) | 1 |
-| Dispatch koneksi | `queue.pop()` + sync I/O | task `io.async()` | task `io.async()` | epoll event loop |
+| Accept thread | cpu_count (atau N) | 1 | cpu_count (atau N) | cpu_count (atau N) |
+| Dispatch koneksi | `queue.pop()` + sync I/O | task `io.async()` | task `io.async()` | epoll per-worker, level-triggered |
 | Overhead scheduler | tidak ada (blocking pop, tanpa fiber) | ada (condvar wakeup) | ada (condvar wakeup) | tidak ada (epoll, Linux only) |
 | Pool thread | ada (`pool_size`) | tidak ada | tidak ada | tidak ada |
-| `SO_REUSEPORT` | ya | tidak | ya | tidak |
-| Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (diabaikan) |
+| `SO_REUSEPORT` | ya | tidak | ya | ya (listener per-worker, Http only) |
+| Field `workers` digunakan | ya | tidak (diabaikan) | ya | ya (Http/Http1 only) |
+| Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (Http: diabaikan); ya (gRPC/FIX/TCP) |
 | Terbaik untuk | throughput, jumlah koneksi tinggi | SSE, WebSocket, latensi rendah | balanced, multi-accept async | HTTP/1 atau gRPC throughput tinggi di Linux |
 | Tersedia di | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 fallback ke .POOL) |
 

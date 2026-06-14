@@ -11,7 +11,7 @@ pub const DispatchModel = enum(u8) {
     ASYNC = 0, // single accept, io.async() dispatch
     POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
-    EPOLL = 3, // single epoll event loop, Linux-only
+    EPOLL = 3, // shared-nothing epoll workers, Linux-only
 };
 ```
 
@@ -170,35 +170,53 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 ---
 
-## .EPOLL: Single epoll Event Loop (Linux-only)
+## .EPOLL: Shared-Nothing epoll Event Loop (Linux-only)
 
-One event-loop thread calls `epoll_wait` in a loop. When the kernel signals a socket as readable, the socket fd is pushed to an `FdQueue` and a pool worker handles it. No `io.async()` overhead, no condvar wakeup per connection: the kernel tracks readiness. Each `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call.
+Each worker owns a private `SO_REUSEPORT` listener and its own `epoll` instance. The kernel
+distributes new connections across per-worker listeners. No shared queue, no cross-thread fd
+handoff. Each worker accepts, registers, reads, and responds on its own connections without
+touching any other worker's state.
 
-**Why it exists:** `.POOL` and `.ASYNC` both pay a condvar wakeup cost on every accepted connection (either via `ConnQueue.pop()` or via the `io.async()` fiber scheduler). Under very high connection counts where most connections are idle at any moment (slow clients, many open sessions), these wakeups accumulate. `epoll` lets the kernel batch readiness signals: the event loop thread only runs when bytes are actually available, with no per-connection thread overhead.
+**Why it exists:** `.POOL` and `.ASYNC` both pay a cross-thread wakeup cost on every accepted
+connection (either via `ConnQueue.pop()` or via the `io.async()` fiber scheduler). Under very
+high connection counts where connections are fast but many overlap, queue contention accumulates.
+With shared-nothing, a worker accepts directly on its own listener and handles all I/O inline:
+no mutex, no condvar, no fd handoff.
 
 ```
-Event loop thread (1):
+Workers (workers, default cpu_count):
+  resolve + listen on same port with SO_REUSEPORT
   epoll_create1
-  accept4 in a nonblocking loop when EPOLLIN fires on the listener
-  for each new conn_fd:
-    epoll_ctl(ADD, conn_fd, EPOLLIN | EPOLLONESHOT | EPOLLRDHUP)
+  epoll_ctl(ADD, listener_fd, EPOLLIN)        <- accept loop trigger
 
-Pool workers (pool_size, default max(10, cpu_count * 2)):
-  loop:
-    fd = FdQueue.pop()           <- blocks until epoll signals a readable fd
-    serve one request on fd      <- blocking read/write, no fiber
-    epoll_ctl(MOD, fd, re-arm)   <- re-arm EPOLLONESHOT for next request
-    (or epoll_ctl(DEL) + close if connection ended)
+  event loop:
+    epoll_wait(events, EPOLL_MAX_EVENTS)        <- Http: 1024, Http1: 4096
+    for each event:
+      if listener_fd:
+        loop: fd = accept4(SOCK_CLOEXEC)
+              setNoDelay(fd)
+              epoll_ctl(ADD, fd, EPOLLIN | EPOLLRDHUP)
+      else:   // connection fd
+        if HUP or ERR or RDHUP:
+          epoll_ctl(DEL, fd)
+          close(fd)
+        else:
+          handleOneRequest(fd)   <- blocking read/write, no fiber
+          if keep-alive: stay registered (level-triggered, re-fires on next data)
+          if close: epoll_ctl(DEL, fd) + close(fd)
 ```
 
-`EPOLLONESHOT` means each readable event fires exactly once. After a request is served, the worker explicitly re-arms the socket. Idle keep-alive connections hold no thread: they sit in the epoll set until the client sends the next request.
+Connections stay registered after each request. No explicit re-arm is needed: level-triggered
+`EPOLLIN` re-fires whenever new data arrives. Idle keep-alive connections hold no thread and
+occupy only one entry in the per-worker epoll set.
 
 **When to use:**
-- Linux production deployments of `zix.Http` (HTTP/1) or `zix.Grpc` under high connection counts with many idle connections.
-- Slow or bursty clients where connections stay open between requests.
+- Linux production deployments of `zix.Http` or `zix.Http1` under high connection counts.
+- Short-lived requests (REST, API) where `handleOneRequest` finishes quickly and returns the
+  worker to `epoll_wait`.
 - You want to avoid `io.async()` fiber scheduler overhead entirely.
-- `dispatch_model = .EPOLL` in `HttpServerConfig` or `GrpcServerConfig`.
-- `pool_size` controls worker count. `workers` is ignored (single event loop thread).
+- `dispatch_model = .EPOLL` in `HttpServerConfig` or `Http1ServerConfig`.
+- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored for `zix.Http`.
 
 **Example (`zix.Http`):**
 ```zig
@@ -207,7 +225,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker threads; 0 = max(10, cpu_count * 2)
+    .workers        = 0, // 0 = cpu_count workers (default)
 });
 try server.run();
 ```
@@ -232,14 +250,16 @@ try server.run();
 | :- | :- |
 | Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux falls back to `.POOL` automatically (with a debug print) |
 | Availability | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux. `zix.Http2` falls back to `.POOL` |
-| Accept model | Single-threaded accept inside the event loop (no `SO_REUSEPORT`). High accept rates can become a bottleneck, prefer `.MIXED` if connection churn (not connection count) is the bottleneck |
-| gRPC, FIX, and TCP difference | gRPC, FIX, and TCP EPOLL assign each connection to a pool worker for its full lifetime (all are long-lived stream protocols). `EPOLLONESHOT` is not used. The benefit is single-threaded accept vs N accept threads in `.POOL` |
-| `pool_size` | Controls the number of request-handling worker threads. `workers` is ignored |
+| Accept model (`zix.Http`) | Each worker binds its own `SO_REUSEPORT` listener. The kernel distributes connections across workers: no shared accept queue |
+| gRPC difference | `zix.Grpc` uses a multiplexed shared-nothing model: one worker drives many non-blocking h2 connections via a resumable state machine. `pool_size` is the worker count. See ADR-031 |
+| FIX and TCP difference | `zix.Fix` and `zix.Tcp` EPOLL use a centralized design: one accept loop pushes fds to a shared queue, pool workers pop and hold each connection for its full lifetime. `pool_size` is the worker count |
+| `workers` field (`zix.Http`, `zix.Http1`) | Controls the number of shared-nothing worker threads (0 = cpu_count). `pool_size` is ignored |
+| `pool_size` field (gRPC, FIX, TCP) | Controls the multiplexed or pool worker count. See per-protocol docs |
 | Keep-alive idle cost | Near-zero: idle sockets sit in the epoll set without holding any thread |
 | Debugging | `strace` or `perf` will show `epoll_wait` dominating idle time, this is expected and correct |
 
 **When NOT to use:**
-- SSE or WebSocket: connections stay active and data flows continuously: `EPOLLONESHOT` re-arm overhead adds up with no benefit. Prefer `.ASYNC`.
+- SSE or WebSocket via `zix.Http`: connections stay active and data flows continuously, blocking reads will park the worker. Prefer `.ASYNC`.
 - Non-Linux targets: use `.POOL` or `.ASYNC` explicitly to avoid the debug-print fallback.
 - When connection count is low (< a few hundred): the simpler `.POOL` or `.ASYNC` models will perform the same or better with less complexity.
 
@@ -252,10 +272,10 @@ try server.run();
 | `dispatch_model = .POOL` | work-queue thread pool | N accept threads + M pool threads |
 | `dispatch_model = .ASYNC` | single accept, io.async() | 1 accept thread, io.async() per connection |
 | `dispatch_model = .MIXED` | N accept, io.async() | N accept threads, each dispatching via io.async() |
-| `workers = 0` | cpu_count accept threads | used by `.POOL` and `.MIXED` |
-| `workers = N` | N accept threads | explicit override for `.POOL` and `.MIXED` |
-| `pool_size = 0` | `max(10, cpu_count * 2)` | pool thread count for `.POOL` only |
-| `pool_size = N` | N pool threads | explicit pool size for `.POOL` only |
+| `workers = 0` | cpu_count threads | used by `.POOL`, `.MIXED`, and `.EPOLL` (for `zix.Http` and `zix.Http1`) |
+| `workers = N` | N threads | explicit override for `.POOL`, `.MIXED`, and `.EPOLL` (for `zix.Http` and `zix.Http1`) |
+| `pool_size = 0` | `max(10, cpu_count * 2)` | pool thread count for `.POOL`; worker count for `.EPOLL` in `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = N` | N pool or mux workers | explicit size for `.POOL`; explicit EPOLL worker count for `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
 
 ---
 
@@ -263,12 +283,13 @@ try server.run();
 
 | | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
 | :- | :- | :- | :- | :- |
-| Accept threads | cpu_count (or N) | 1 | cpu_count (or N) | 1 |
-| Connection dispatch | `queue.pop()` + sync I/O | `io.async()` task | `io.async()` task | epoll event loop |
+| Accept threads | cpu_count (or N) | 1 | cpu_count (or N) | cpu_count (or N) |
+| Connection dispatch | `queue.pop()` + sync I/O | `io.async()` task | `io.async()` task | per-worker epoll, level-triggered |
 | Scheduler overhead | no (blocking pop, no fiber) | yes (condvar wakeup) | yes (condvar wakeup) | no (epoll, Linux only) |
 | Pool threads | yes (`pool_size`) | no | no | no |
-| `SO_REUSEPORT` | yes | no | yes | no |
-| `pool_size` field used | yes | no (ignored) | no (ignored) | no (ignored) |
+| `SO_REUSEPORT` | yes | no | yes | yes (per-worker listener, Http only) |
+| `workers` field used | yes | no (ignored) | yes | yes (Http/Http1 only) |
+| `pool_size` field used | yes | no (ignored) | no (ignored) | no (Http: ignored); yes (gRPC/FIX/TCP) |
 | Best for | throughput, high connection counts | SSE, WebSocket, low latency | balanced, multi-accept async | high-throughput HTTP/1 or gRPC on Linux |
 | Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 falls back to .POOL) |
 

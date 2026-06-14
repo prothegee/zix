@@ -15,24 +15,24 @@
 <hr>
 
 <h4 align="center">
-    <b><i>Languages:</i></b>
-</h4>
-
-<div align="center">
-
-[Bahasa - id](README-id.md) | [English - en](README-en.md)
-
-</div>
-
-<br>
-
-<h4 align="center">
     <b><i>License:</i></b>
 </h4>
 
 <div align="center">
 
 [BSD-3-Clause License](LICENSE-BSD)
+
+</div>
+
+<br>
+
+<h4 align="center">
+    <b><i>Languages:</i></b>
+</h4>
+
+<div align="center">
+
+[Bahasa - id](README-id.md) | [English - en](README-en.md)
 
 </div>
 

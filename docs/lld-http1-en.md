@@ -6,7 +6,7 @@ Internal implementation details for the lean HTTP/1.x engine. For design rationa
 
 ## Http1.zig: namespace
 
-Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the core types (`HandlerFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, and the core functions (deadline, parse, write helpers) into one public surface.
+Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the core types (`HandlerFn`, `RawFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, and the core functions (deadline, parse, write helpers) into one public surface.
 
 ---
 
@@ -22,6 +22,8 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `pool_size` | .POOL pool thread count |
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | .EPOLL per-connection buffer size (`ConnTable.alloc`) |
+| `ws_recv_buf` | .EPOLL WebSocket per-connection buffer size, 0 falls back to `max_recv_buf` |
+| `send_date_header` | managed write helpers: include or omit the `Date` header |
 | `logger` | `logSystem` lifecycle lines |
 
 `max_gzip_out` and `max_headers` are not read at runtime: the live caps are the compile-time constants `core.GZIP_OUT_SIZE` (256 KB) and `core.MAX_HEADERS` (16).
@@ -243,7 +245,7 @@ Splits pattern and path on `/` in lockstep. `:name` segments capture (empty path
 
 ### logSystem()
 
-Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present, otherwise `std.debug.print` with a `zix: ` prefix.
+Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present. Without a logger they fall back to `std.debug.print` with a `zix: ` prefix only in Debug builds (`builtin.mode == .Debug`), and are silent in release. Every zix server uses this same gated `logSystem` shape (http, http2, grpc, fix, tcp, udp, uds), so a release build with no logger emits no init noise.
 
 ### connEntry() (.ASYNC / .MIXED task body)
 
@@ -311,7 +313,7 @@ Conn = {
 1. private listener (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
 3. per-worker scratch: body_buf[16 KB] + out_buf[16 KB] (smp_allocator)
-4. event loop, EPOLL_MAX_EVENTS = 512 per epoll_wait:
+4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       listener event       -> acceptAll
       HUP/ERR              -> close
       conn.drain > 0       -> serveEpollDrain
@@ -401,6 +403,8 @@ max server frame header 10 bytes
       unmasked -> zero-copy slice into buf
 6. return { frame, consumed } or null when bytes are still missing
 ```
+
+The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte mask replicated four times, processing 16 bytes per iteration, with a scalar `i % 4` tail for the remaining bytes. This replaces the per-byte loop and matches it bit-for-bit (covered by 32-byte and 17-byte unmask tests).
 
 ### buildHeader() / buildFrame()
 

@@ -1,11 +1,23 @@
 //! zix fix server: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch for FIX 4.x.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const FixServerConfig = @import("config.zig").FixServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const FixServeOpts = core.FixServeOpts;
 const Logger = @import("../../logger/logger.zig").Logger;
+
+/// Emit a server lifecycle line. Routes through cfg.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
+fn logSystem(cfg: FixServerConfig, comptime fmt: []const u8, args: anytype) void {
+    if (cfg.logger) |lg| {
+        lg.system(.INFO, "fix", fmt, args);
+        return;
+    }
+
+    if (comptime builtin.mode == .Debug) std.debug.print("zix fix: " ++ fmt ++ "\n", args);
+}
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
@@ -304,7 +316,7 @@ pub const FixServer = struct {
 
         switch (cfg.dispatch_model) {
             .ASYNC => {
-                if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
+                logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                 const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
                 var listener = try addr.listen(io, .{
@@ -331,7 +343,7 @@ pub const FixServer = struct {
                 const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                 const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
+                logSystem(cfg, "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
 
                 var queue = ConnQueue{};
                 defer queue.deinit();
@@ -369,7 +381,7 @@ pub const FixServer = struct {
             .MIXED => {
                 const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
+                logSystem(cfg, "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
 
                 const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
                 defer std.heap.smp_allocator.free(acc_threads);
@@ -394,7 +406,7 @@ pub const FixServer = struct {
                 if (comptime @import("builtin").target.os.tag == .linux) {
                     try self.runEpoll(io, conn_opts, cpu);
                 } else {
-                    std.debug.print("zix fix server: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                    logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
                     var fallback = self.*;
                     fallback.config.dispatch_model = .POOL;
                     try fallback.run();
@@ -417,7 +429,7 @@ pub const FixServer = struct {
         const cfg = self.config;
         const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-        if (cfg.logger) |lg| lg.system(.INFO, "fix", "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
+        logSystem(cfg, "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
 
         const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
         defer std.heap.smp_allocator.free(workers);

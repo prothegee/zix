@@ -152,7 +152,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** Unix Domain Sockets are the standard IPC mechanism on Linux and macOS for same-host communication. A `zix.Uds` namespace following the same pattern as `zix.Udp` would complete the trilogy of transport protocols.
 
-**Decision:** Implemented in `src/uds/`. Namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `zix.zig`. Stream mode only (datagram requires raw `std.posix`, not exposed via `std.Io.net.UnixAddress`, and is deferred). Frame format: 4-byte `u32` length header (native little-endian) followed by payload bytes. `UdsClient.sendMsg`/`recvMsg` and `echoHandler` all use this frame contract.
+**Decision:** Implemented in `src/uds/`. Namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `lib.zig`. Stream mode only (datagram requires raw `std.posix`, not exposed via `std.Io.net.UnixAddress`, and is deferred). Frame format: 4-byte `u32` length header (native little-endian) followed by payload bytes. `UdsClient.sendMsg`/`recvMsg` and `echoHandler` all use this frame contract.
 
 **`std.Io.net` API used:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` on WASI: both `Server.init()` and `Client.connect()` emit `@compileError` on unsupported platforms.
 
@@ -296,7 +296,7 @@ var server = try MyServer.init(.{
 
 **Context:** The server models (Model 1 / Model 2) handle request concurrency. There is no primitive for typed message passing between concurrent tasks within a single process. Go channels and POSIX pipes address this pattern, zix needs its own Zig-native equivalent that works alongside `io.concurrent()` tasks.
 
-**Decision:** Implemented as `zix.Channel(comptime T: type)`. Buffered only (capacity > 0, unbuffered rendezvous deferred). Blocking `send(io, value)` and `recv(io)`. Exported as `pub const Channel = @import("channel/Channel.zig").Channel` in `zix.zig`. Open questions resolved:
+**Decision:** Implemented as `zix.Channel(comptime T: type)`. Buffered only (capacity > 0, unbuffered rendezvous deferred). Blocking `send(io, value)` and `recv(io)`. Exported as `pub const Channel = @import("channel/Channel.zig").Channel` in `lib.zig`. Open questions resolved:
 
 - **Locking:** `std.Io.Mutex` + `std.Io.Condition` (fiber-aware, works in both `io.concurrent()` handler tasks and OS threads). `std.Thread.Mutex` was rejected because it blocks the OS thread.
 - **Storage:** heap-allocated ring buffer (`allocator.alloc(T, capacity)`), runtime capacity, allocator required in `init()`.
@@ -662,6 +662,48 @@ The blocking `serveGrpcConn` and `serveGrpcLoop` are retained unchanged for `.AS
 - Capture is capped at 8 params per match. A pattern with more `:segments` than that fails to match rather than overflowing.
 - The `zix.Http` prefix pass no longer reads one byte past a short request path. In ReleaseFast this was a harmless out-of-bounds read masked by the `and`, in Debug or ReleaseSafe it was a panic on any request path shorter than a registered prefix.
 - `examples/http1_paths.zig` still demonstrates manual `startsWith` / `splitScalar` routing on purpose (custom matching beyond the three kinds). Its prior comment claiming the router is exact-only was corrected.
+
+---
+
+## ADR-034: `zix.Http` `.EPOLL` shared-nothing architecture
+
+**Status:** Accepted
+
+**Context:** The original `zix.Http` `.EPOLL` model used a centralized design: one accept thread pushed accepted connection streams to a shared `ConnQueue` (mutex + condvar + ring buffer), and a pool of `max(10, cpu_count * 2)` worker threads popped from the queue and called `handleOneRequest`. Under benchmark load at c1000, the `ConnQueue` mutex became the bottleneck. Throughput was 428k req/s vs 480k for `zix.Http1` (same shared-nothing architecture, 11% gap). `pool_size` was the relevant config field.
+
+**Decision:** Replace the centralized model with a shared-nothing architecture matching `zix.Http1`. Each worker binds its own `SO_REUSEPORT` listener, creates its own `epoll` instance, and runs its own level-triggered event loop. The kernel distributes new connections across per-worker listeners. No `ConnQueue`, no mutex, no condvar, no fd handoff between threads.
+
+- `workers` (not `pool_size`) is now the EPOLL worker count for `zix.Http`. `0` selects cpu_count.
+- `pool_size` is ignored for `zix.Http` `.EPOLL` (it still applies to `.POOL`).
+- Level-triggered `EPOLLIN` replaces `EPOLLONESHOT`: connections stay registered after each request and re-fire when new data arrives. No explicit re-arm.
+- Accepted fds are blocking: `handleOneRequest` does a synchronous recv/parse/dispatch/send, then the worker returns to `epoll_wait`.
+- `handleOneRequest` is unchanged: no new non-blocking logic, no per-connection state table.
+
+**Consequences:**
+- Throughput: 428k to 451k req/s at c1000 (`wrk -c1000 -t4 -d10s`), closing the gap vs `zix.Http1` from 11% to 6.8%.
+- Remaining 6.8% gap is structural: `zix.Http` allocates an `ArenaAllocator` per connection and builds a `Request` / `Response` / `ParsedHead` (64-entry header array) per request. `zix.Http1` uses zero-alloc stack-local parsing. This gap is not closeable by architecture alone.
+- The `pool_size` field is silently ignored for `.EPOLL` (same behavior as `.ASYNC` and `.MIXED` already ignored it). Existing callers that set `.pool_size = N` with `.EPOLL` must migrate to `.workers = N`.
+- SSE and WebSocket are still not suitable for `.EPOLL`: blocking reads park the worker for the connection's lifetime. Use `.ASYNC`.
+
+---
+
+## ADR-035: gRPC mux per-connection staging, cached SETTINGS, and TCP_CORK
+
+**Status:** Accepted
+
+**Context:** The multiplexed gRPC EPOLL event loop (ADR-031) stages a reply (HEADERS + DATA + trailer) into a `ReplyStage` buffer and flushes it in one `write()`. The buffer was an inline `[4096]u8` on `GrpcMuxConn`. A streaming handler that emits thousands of messages overflowed 4096 bytes repeatedly, forcing one `write()` per overflow (~85 KB streamed in ~21 flushes). The server SETTINGS frame was re-encoded from a parameter loop on every new connection. Streaming handlers produced many small intermediate flushes, each becoming its own TCP segment.
+
+**Decision:** Make the reply stage backing caller-owned and give the mux connection a larger buffer plus a precomputed handshake, and cork streaming output.
+
+- `ReplyStage.buf` is now a `[]u8` slice supplied by the caller. The blocking inline path (`dispatchGrpcInline`) passes a 4096-byte stack array (unary replies are small). The mux path passes the connection's own buffer.
+- `GrpcMuxConn` owns a 64 KB `stage_buf`. A ~5000-message streaming call (~85 KB peak) flushes in two writes, and ~100 concurrent unary replies (~6 KB) coalesce into a single write.
+- `GrpcMuxConn.init` calls `buildSettingsFrame` once to fill a 33-byte `settings_frame` (9-byte header + 4 params). The handshake appends that blob as-is instead of re-running the encode loop per connection.
+- `muxDispatch` detects a streaming route (`routeIsStreaming`) and wraps the handler in `setTcpCork(fd, true)` / `setTcpCork(fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the intermediate stage flushes into fewer segments. Unary routes are not corked (already single-write). No-op on non-Linux.
+
+**Consequences:**
+- Fewer syscalls per streaming call (writes drop from ~21 to ~2 for a 5000-message reply) and fewer TCP segments on the wire under cork.
+- `GrpcMuxConn` grows by ~64 KB per connection. This is a deliberate per-connection memory cost traded for syscall and segment reduction. The mux model holds one `GrpcMuxConn` per live h2 connection, not per stream.
+- Related stream-write fix: `fdWriteAll` now polls and retries on `EAGAIN` rather than reporting `BrokenPipe`, so a full send buffer on a non-blocking EPOLL socket no longer truncates a staged reply. See the 0.4.0 changelog.
 
 ---
 

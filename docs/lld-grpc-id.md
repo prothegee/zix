@@ -29,7 +29,7 @@ Penulis cork untuk satu koneksi. Dipakai oleh dispatch unary inline (model block
 ```zig
 const ReplyStage = struct {
     fd: std.posix.fd_t,
-    buf: [4096]u8,
+    buf: []u8,                    // backing milik pemanggil, bukan array inline
     len: usize,
 
     fn append(self, bytes) void   // flush dulu jika akan overflow; payload > buf diteruskan langsung
@@ -37,7 +37,7 @@ const ReplyStage = struct {
 };
 ```
 
-Semua frame respons yang dihasilkan saat menangani satu event readable terkumpul di sini dan keluar dalam satu `write()`.
+`buf` adalah slice yang dipasok pemanggil. Jalur inline blocking (`dispatchGrpcInline`) menyokongnya dengan array stack 4096 byte (reply unary kecil). Jalur mux menyokongnya dengan `stage_buf` 64 KB milik koneksi (lihat `GrpcMuxConn`). Semua frame respons yang dihasilkan saat menangani satu event readable terkumpul di sini dan keluar dalam satu `write()`.
 
 ### ConnReader (model blocking)
 
@@ -94,7 +94,9 @@ pub const GrpcMuxConn = struct {
     last_stream_id: u31,
     conn_window_consumed: usize,
     phase: MuxPhase,            // await_preface | await_upgrade | await_preface2 | h2
-    stage: ReplyStage,
+    settings_frame: [33]u8,     // SETTINGS server pra-komputasi, dibangun sekali di init
+    stage_buf: [65536]u8,       // backing 64 KB untuk stage
+    stage: ReplyStage,          // stage.buf = &stage_buf
 
     pub fn init(fd, opts) ?*GrpcMuxConn   // satu alokasi per buffer; null saat OOM
     pub fn deinit(self) void
@@ -102,6 +104,8 @@ pub const GrpcMuxConn = struct {
 ```
 
 `rbuf` berukuran `max(32 KB, max_frame_size + 256 + 9)`.
+
+`init` memanggil `buildSettingsFrame(&settings_frame, opts)` sekali untuk meng-encode blob SETTINGS server 33 byte (header 9 byte + 4 param), dan mengarahkan `stage.buf` ke `stage_buf` 64 KB. Handshake menambahkan `settings_frame` apa adanya (tanpa loop encode per koneksi), dan stage lebih besar membuat reply streaming ~5000 pesan (~85 KB puncak) flush dalam dua write dan ~100 reply unary konkuren (~6 KB) digabung menjadi satu write.
 
 ### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
 
@@ -153,11 +157,13 @@ loop:
         GOAWAY    -> return .close
 ```
 
-Frame kontrol di-stage via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, sehingga keluar dalam write tergabung yang sama dengan reply.
+Frame kontrol di-stage via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, sehingga keluar dalam write tergabung yang sama dengan reply. `muxStageServerSettings` menambahkan `conn.settings_frame` yang pra-komputasi (dibangun sekali di `init` oleh `buildSettingsFrame`), bukan encode parameter baru.
 
 ### muxDispatch(comptime routes, conn, stream)
 
 Membangun `GrpcContext` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), lalu `Router(routes).dispatch`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
+
+Untuk route streaming (dideteksi oleh `routeIsStreaming(routes, path)`), dispatch dibungkus dalam `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP. Route unary tidak di-cork (sudah keluar dalam satu write). `setTcpCork` no-op pada target non-Linux.
 
 ### Jalur blocking (serveGrpcConn / serveGrpcLoop)
 

@@ -6,7 +6,7 @@ Detail implementasi internal untuk engine HTTP/1.x ramping. Untuk alasan desain 
 
 ## Http1.zig: namespace
 
-Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, tipe-tipe core (`HandlerFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, dan fungsi-fungsi core (deadline, parse, write helper) menjadi satu permukaan publik.
+Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, tipe-tipe core (`HandlerFn`, `RawFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, dan fungsi-fungsi core (deadline, parse, write helper) menjadi satu permukaan publik.
 
 ---
 
@@ -22,6 +22,8 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `pool_size` | jumlah pool thread .POOL |
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection .EPOLL (`ConnTable.alloc`) |
+| `ws_recv_buf` | ukuran buffer per-connection WebSocket .EPOLL, 0 jatuh ke `max_recv_buf` |
+| `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
 | `logger` | baris lifecycle `logSystem` |
 
 `max_gzip_out` dan `max_headers` tidak dibaca saat runtime: batas yang berlaku adalah konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB) dan `core.MAX_HEADERS` (16).
@@ -243,7 +245,7 @@ Memecah pattern dan path pada `/` secara berpasangan. Segmen `:name` menangkap (
 
 ### logSystem()
 
-Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada, selain itu `std.debug.print` dengan prefix `zix: `.
+Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada. Tanpa logger, baris jatuh ke `std.debug.print` dengan prefix `zix: ` hanya pada Debug build (`builtin.mode == .Debug`), dan diam pada release. Setiap server zix memakai bentuk `logSystem` ter-gate yang sama (http, http2, grpc, fix, tcp, udp, uds), jadi release build tanpa logger tidak mengeluarkan init noise.
 
 ### connEntry() (badan task .ASYNC / .MIXED)
 
@@ -311,7 +313,7 @@ Conn = {
 1. listener pribadi (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
 3. scratch per-worker: body_buf[16 KB] + out_buf[16 KB] (smp_allocator)
-4. event loop, EPOLL_MAX_EVENTS = 512 per epoll_wait:
+4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       event listener       -> acceptAll
       HUP/ERR              -> close
       conn.drain > 0       -> serveEpollDrain
@@ -401,6 +403,8 @@ header frame server maksimum 10 byte
       unmasked -> slice zero-copy ke buf
 6. mengembalikan { frame, consumed } atau null saat byte masih kurang
 ```
+
+Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap mask 4 byte yang direplikasi empat kali, memproses 16 byte per iterasi, dengan ekor skalar `i % 4` untuk byte sisa. Ini menggantikan loop per-byte dan cocok bit-per-bit dengannya (tercakup oleh tes unmask 32 byte dan 17 byte).
 
 ### buildHeader() / buildFrame()
 

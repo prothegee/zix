@@ -34,6 +34,54 @@ __*Fix:*__
 
 <br>
 
+## 0.4.0 (TBD)
+
+__*Ditambahkan:*__
+- Http epoll shared-nothing:
+    - `zix.Http` `.EPOLL` ditulis ulang dari model terpusat (satu accept thread mendorong ke `ConnQueue` bersama, pool worker pop) menjadi arsitektur shared-nothing yang cocok dengan `zix.Http1`. Setiap worker mengikat `SO_REUSEPORT` listener tersendiri, membuat `epoll` instance tersendiri, dan menjalankan event loop level-triggered tersendiri. Kernel mendistribusikan koneksi baru ke worker tanpa antrian bersama, tanpa mutex, dan tanpa handoff fd.
+    - `workers` (bukan `pool_size`) sekarang adalah jumlah worker EPOLL untuk `zix.Http`. `0` memilih cpu_count. `pool_size` diabaikan secara diam untuk `.EPOLL` (pemanggil yang menggunakan `.pool_size = N` dengan `.EPOLL` harus migrasi ke `.workers = N`).
+    - Level-triggered `EPOLLIN` menggantikan `EPOLLONESHOT`. Tidak perlu re-arm eksplisit setelah setiap request: koneksi tetap terdaftar dan re-fires saat data baru tiba.
+    - Throughput: 428k menjadi 451k req/s di c1000 (`wrk -c1000 -t4 -d10s`), mempersempit gap vs `zix.Http1` dari 11% menjadi 6,8%. Gap yang tersisa bersifat struktural (alokasi arena per request). Lihat ADR-034.
+    ---
+- Http1 EPOLL slab, RawFn, dan kontrol Date:
+    - `zix.Http1` `.EPOLL` kini menyokong setiap koneksi terdaftar dengan slab buffer receive per-koneksi (`ConnTable`), berukuran `max_recv_buf`, sehingga sebuah koneksi mengakumulasi satu request penuh tanpa alokasi ulang per event.
+    - Tipe handler baru `zix.Http1.RawFn` plus `zix.Http1.Server.initRaw`: handler raw menerima fd koneksi dan head yang sudah diparse serta memiliki kendali penuh atas wire, melewati jalur response terkelola (streaming, framing kustom).
+    - Field config baru `send_date_header` (default `true` untuk kepatuhan RFC 7231). Set `false` untuk membuang header `Date` dan menghemat 37 byte per response pada jalur panas di mana klien tidak membutuhkannya.
+    - `buildSimpleHeaderInto` menulis status line dan header ke sink milik pemanggil, jalur cepat untuk penulis slab.
+    ---
+- Optimasi WebSocket:
+    - Unmask SIMD: `parseFrame` pada engine WebSocket `zix.Http1` dan `zix.Http` kini meng-unmask payload klien dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap mask 4 byte yang direplikasi, dengan ekor skalar untuk sisanya. Menggantikan loop per-byte `i % 4`.
+    - Field config baru `ws_recv_buf` pada `Http1ServerConfig` (default `0`, jatuh ke `max_recv_buf`). Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket EPOLL ruang lebih mengakumulasi frame pipelined sebelum compact dan re-read.
+    - Pembacaan WebSocket EPOLL `zix.Http1` kini menguras hingga `EAGAIN` per wakeup (baca semua frame tersedia dalam satu event) dan menggabungkan write, alih-alih satu frame per wakeup.
+    - WebSocket `zix.Http`: `buildHeader` (framing header-only ke buffer pemanggil), jalur broadcast `RoomMap` yang dibersihkan.
+    ---
+- Staging dan corking per-koneksi gRPC mux:
+    - `GrpcMuxConn` kini memiliki `stage_buf` 64 KB (sebelumnya `ReplyStage.buf` inline 4096 byte). Satu panggilan streaming ~5000 pesan (~85 KB puncak) flush dalam dua write, dan ~100 reply unary konkuren (~6 KB) digabung menjadi satu write. `ReplyStage.buf` kini slice milik pemanggil. Jalur inline blocking tetap memakai backing stack 4096 byte.
+    - Frame SETTINGS server dipra-komputasi sekali per koneksi: `buildSettingsFrame` mengisi blob 33 byte di `GrpcMuxConn.init`, dan handshake menambahkannya apa adanya alih-alih meng-encode ulang loop parameter pada setiap koneksi.
+    - `TCP_CORK` membungkus handler streaming di `muxDispatch`: kernel menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP, lalu uncork saat kembali. Reply unary tidak terpengaruh (sudah single-write). No-op pada non-Linux.
+    ---
+- Timeout epoll dinamis (worker gRPC, TCP, FIX):
+    - Loop worker EPOLL kini membalik timeout `epoll_wait` ke `0` setelah satu batch event aktif (busy-poll batch siap berikutnya) dan kembali ke `-1` (blok) saat sebuah wakeup mengembalikan nol event. Menukar spin ketat di bawah beban demi latensi lebih rendah antar batch beruntun tanpa membakar core saat idle.
+    ---
+- Pemecahan build:
+    - `build.zig` dipecah menjadi sub-file terfokus yang diimpor oleh root: `zix-build-examples.zig`, `zix-build-tests.zig`, `zix-build-test_runner.zig`. Root `build.zig` menyusut dari ~682 baris ke wiring modul dan step. Tanpa perubahan perintah build.
+    - File sumber root library diganti nama dari `src/zix.zig` menjadi `src/lib.zig` (mengikuti konvensi `lib.zig` Zig). Modul tetap terdaftar sebagai `b.addModule("zix", ...)`, sehingga API publik tidak berubah: pengguna tetap `@import("zix")` dan memakai `zix.Http`, `zix.Grpc`, dll.
+    ---
+- Init logging server terpadu dan ter-gate Debug:
+    - Setiap server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) kini mengeluarkan baris lifecycle (listening, fallback EPOLL, error accept) melalui satu bentuk `logSystem` ter-gate: rute ke `config.logger` bila diset, selain itu `std.debug.print` hanya pada Debug build, diam pada release. Server release tanpa logger tidak mengeluarkan init noise.
+    - Menghapus print mentah junk dan duplikat: `zix.Grpc` sebelumnya mencetak tiap baris listening mentah sekaligus me-log-nya; `zix.Http2`/`zix.Fix`/`zix.Tcp` mencetak baris lifecycle/fallback mentah tanpa syarat. Baris init `zix.Udp`/`zix.Uds` kini juga muncul pada Debug build tanpa logger (sebelumnya logger-only).
+    - `zix.Channel.init` mendapat notice init khusus Debug (`zix channel: init <T> cap=<N>`), ditekan pada release dan di bawah test runner (`builtin.is_test`) untuk menghindari peracunan IPC test.
+    - Menyusun ulang komentar `src/tcp/http1/server.zig` untuk membuang referensi benchmark eksternal yang usang.
+    ---
+
+<br>
+
+__*Perbaikan:*__
+- Write stream gRPC dan HTTP/2 di bawah EPOLL:
+    - `fdWriteAll` (`src/tcp/http2/frame.zig`) kini menangani `EAGAIN` pada socket EPOLL non-blocking dengan buffer kirim penuh: ia poll fd hingga bisa ditulis lalu mengulang write, alih-alih memperlakukan write parsial sebagai broken pipe. Socket blocking tidak pernah masuk cabang ini. Memperbaiki reply streaming yang terpotong dan stream error semu di bawah konkurensi tinggi.
+
+<br>
+
 ## 0.3.0 (2026-06-10)
 
 __*Ditambahkan:*__

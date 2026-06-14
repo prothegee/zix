@@ -1,12 +1,24 @@
 //! gRPC h2c server: all 3 dispatch models plus EPOLL (Linux-only).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const config_mod = @import("config.zig");
 const GrpcServerConfig = config_mod.GrpcServerConfig;
 const DispatchModel = @import("../../config.zig").DispatchModel;
 
 pub const Route = core.Route;
+
+/// Emit a server lifecycle line. Routes through cfg.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
+fn logSystem(cfg: GrpcServerConfig, comptime fmt: []const u8, args: anytype) void {
+    if (cfg.logger) |lg| {
+        lg.system(.INFO, "grpc", fmt, args);
+        return;
+    }
+
+    if (comptime builtin.mode == .Debug) std.debug.print("zix grpc: " ++ fmt ++ "\n", args);
+}
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
@@ -371,8 +383,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .compress_gzip = cfg.compress_gzip,
             };
 
-            std.debug.print("zix grpc server (epoll mux): {s}:{d} ({d} workers)\n", .{ cfg.ip, cfg.port, worker_count });
-            if (cfg.logger) |lg| lg.system(.INFO, "grpc", "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
+            logSystem(cfg, "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
 
             const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
             defer std.heap.smp_allocator.free(workers);
@@ -429,8 +440,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
             switch (cfg.dispatch_model) {
                 .ASYNC => {
-                    std.debug.print("zix grpc server (async): {s}:{d}\n", .{ cfg.ip, cfg.port });
-                    if (cfg.logger) |lg| lg.system(.INFO, "grpc", "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
+                    logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
                     var listener = try addr.listen(io, .{
@@ -442,7 +452,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     while (true) {
                         const stream = listener.accept(io) catch |err| {
                             if (err != error.ConnectionAborted) {
-                                std.debug.print("zix grpc server: accept error: {}\n", .{err});
+                                logSystem(cfg, "accept error: {}", .{err});
                                 break;
                             }
                             continue;
@@ -458,10 +468,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                     const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                    std.debug.print("zix grpc server (pool): {s}:{d} ({d} accept, {d} pool)\n", .{
-                        cfg.ip, cfg.port, worker_count, pool_count,
-                    });
-                    if (cfg.logger) |lg| lg.system(.INFO, "grpc", "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
+                    logSystem(cfg, "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
 
                     var queue = ConnQueue{};
                     defer queue.deinit();
@@ -498,10 +505,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .MIXED => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                    std.debug.print("zix grpc server (mixed): {s}:{d} ({d} accept)\n", .{
-                        cfg.ip, cfg.port, worker_count,
-                    });
-                    if (cfg.logger) |lg| lg.system(.INFO, "grpc", "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
+                    logSystem(cfg, "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
 
                     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
                     defer std.heap.smp_allocator.free(acc_threads);
@@ -525,7 +529,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     if (comptime @import("builtin").target.os.tag == .linux) {
                         try self.runEpoll(io);
                     } else {
-                        std.debug.print("zix grpc server: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                        logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
                         var fallback = self.*;
                         fallback.config.dispatch_model = .POOL;
                         try fallback.run();

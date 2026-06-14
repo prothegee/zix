@@ -105,7 +105,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    zix["src/zix.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
+    zix["src/lib.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
     Http1 --> server["server.zig\nServer + 4 dispatch models\nEPOLL engine"]
@@ -128,9 +128,11 @@ Diakses melalui `const zix = @import("zix");`
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` |
+| `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: mendaftarkan `RawFn` yang memiliki fd koneksi secara langsung |
 | `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) |
 | `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
+| `zix.Http1.RawFn` | type | Handler raw yang diberi fd dan head hasil parse, memiliki wire langsung (framing kustom, streaming) |
 | `zix.Http1.ParsedHead` | struct | Head request hasil parse zero-copy (method, path, query, headers, flags) |
 | `zix.Http1.Header` | struct | `{ name: []const u8, value: []const u8 }` |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` dari `parseRange` |
@@ -174,16 +176,38 @@ pub const Http1ServerConfig = struct {
     dispatch_model:     DispatchModel = .ASYNC,
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
     max_recv_buf:       usize = 16 * 1024,     // buffer per-connection (.EPOLL saja, lihat catatan)
+    ws_recv_buf:        usize = 0,             // buffer WebSocket .EPOLL, 0 = max_recv_buf
     max_gzip_out:       usize = 256 * 1024,    // informasional: writeGzip memakai core.GZIP_OUT_SIZE
     max_headers:        u8    = 16,            // informasional: batas parse adalah core.MAX_HEADERS
     workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL saja
     handler_timeout_ms: u32   = 0,             // budget per-handler, 0 = nonaktif
+    send_date_header:   bool  = true,          // kirim header Date, false hemat 37 byte/response
     logger:             ?*Logger = null,       // baris lifecycle saja, lihat bagian Logging
 };
 ```
 
 Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. `max_gzip_out` dan `max_headers` saat ini mencerminkan batas compile-time `core.GZIP_OUT_SIZE` dan `core.MAX_HEADERS` dan tidak dibaca saat runtime.
+
+Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection untuk koneksi yang dipromosikan ke WebSocket pada `.EPOLL`. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi frame pipelined sebelum engine compact dan re-read saat fill.
+
+Catatan: `send_date_header` default `true` untuk kepatuhan RFC 7231. Set `false` pada jalur panas di mana klien tidak mengonsumsi `Date` untuk membuang header (37 byte per response). Write helper terkelola menghormati flag ini.
+
+### Timeout
+
+`zix.Http1` mengekspos satu timeout, `handler_timeout_ms`, budget eksekusi per-handler. Saat non-zero, server memasang deadline thread-local sebelum setiap dispatch. Handler ikut serta dengan memanggil `zix.Http1.isExpired()` di antara langkah mahal dan merespons lebih awal, atau memperpendek budget-nya sendiri dengan `zix.Http1.setTimeout()`. Ini budget Layer B yang sama dengan `handler_timeout_ms` milik `zix.Http`.
+
+`zix.Http1` tidak memiliki `conn_timeout_ms`. Ini disengaja, bukan kelalaian.
+
+- Guard masa hidup koneksi pada `zix.Http` (`conn_timeout_ms`, Layer D) ditegakkan oleh `ConnRegistry` plus background timer thread yang menutup koneksi melebihi masa hidup terkonfigurasi. `zix.Http1` adalah engine ramping zero-alloc dan tidak membawa infrastruktur tetap itu: handler-nya `fn(head, body, fd) void` tanpa `Request` / `Response` / registry untuk melacak koneksi, dan tanpa receive timeout level-socket (`setNoDelay` dan `SO_BUSY_POLL` adalah satu-satunya opsi socket yang dipasang).
+- Pada `.EPOLL`, model yang menjadi target tuning `zix.Http1`, koneksi keep-alive idle tidak menahan thread, hanya satu slot epoll dan buffernya. Alasan utama `conn_timeout_ms` ada pada `zix.Http` (mengklaim ulang pool thread yang tertahan pada koneksi lambat atau idle) tidak berlaku untuk loop level-triggered shared-nothing.
+
+| Timeout | `zix.Http` | `zix.Http1` | Mekanisme |
+| :- | :- | :- | :- |
+| `handler_timeout_ms` | ya | ya | deadline thread-local dipasang per dispatch, opt-in handler |
+| `conn_timeout_ms` | ya (`.POOL`) | tidak | `ConnRegistry` + background timer thread (Http saja) |
+
+Jika penegakan masa hidup koneksi pada `.EPOLL` suatu saat dibutuhkan, yang paling cocok adalah sweep idle-deadline atas `ConnTable` per-worker (tanpa thread tambahan), bukan port `ConnRegistry` timer-thread milik Http.
 
 ---
 
@@ -368,7 +392,7 @@ Lihat `examples/http1_websocket.zig`.
 
 ## Logging
 
-`config.logger` hanya menerima baris lifecycle server (notice listening, fallback EPOLL). Saat null, baris lifecycle pergi ke `std.debug.print`.
+`config.logger` hanya menerima baris lifecycle server (notice listening, fallback EPOLL). Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build (server release tanpa logger tidak mengeluarkan output lifecycle).
 
 Access logging per-request adalah tanggung jawab handler: handler Http1 menulis langsung ke fd dan mengembalikan `void`, sehingga engine tidak dapat mengamati status response atau jumlah byte. Panggil `logger.access()` di dalam handler di titik status akhir dan ukurannya diketahui.
 

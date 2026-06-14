@@ -75,7 +75,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    zix["src/zix.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
+    zix["src/lib.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
 
     Udp --> config["config.zig\nPortMode, Endianness\nUdpServerConfig, UdpClientConfig"]
     Udp --> packet["packet.zig\nFeedbackResult\ntoEndian, fromEndian"]

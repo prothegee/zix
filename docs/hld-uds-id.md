@@ -30,7 +30,7 @@ src/uds/
     Uds.zig      // namespace aggregator
 ```
 
-Ekspor dari `src/zix.zig`:
+Ekspor dari `src/lib.zig`:
 ```zig
 pub const Uds = @import("uds/Uds.zig");
 ```

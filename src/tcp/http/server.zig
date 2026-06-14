@@ -48,13 +48,15 @@ fn updateDateCache(io: std.Io) void {
 
 // --------------------------------------------------------- //
 
+/// Emit a server lifecycle line. Routes through config.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
 fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
         lg.system(.INFO, "http", fmt, args);
         return;
     }
 
-    std.debug.print("zix: " ++ fmt ++ "\n", args);
+    if (comptime @import("builtin").mode == .Debug) std.debug.print("zix: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //

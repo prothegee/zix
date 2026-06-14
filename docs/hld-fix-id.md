@@ -33,7 +33,7 @@ src/tcp/fix/
     client.zig   // FixClient
 ```
 
-Ekspor dari `src/zix.zig`:
+Ekspor dari `src/lib.zig`:
 ```zig
 pub const Fix = @import("tcp/fix/Fix.zig");
 // zix.Fix.Server, zix.Fix.ServerConfig, zix.Fix.Client, zix.Fix.ClientConfig, zix.Fix.serveConn, ...

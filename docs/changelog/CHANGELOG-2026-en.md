@@ -34,6 +34,54 @@ __*Fix:*__
 
 <br>
 
+## 0.4.0 (TBD)
+
+__*Update:*__
+- Http epoll shared-nothing:
+    - `zix.Http` `.EPOLL` was rewritten from a centralized model (one accept thread pushing to a shared `ConnQueue`, pool workers popping) into a shared-nothing architecture matching `zix.Http1`. Each worker binds its own `SO_REUSEPORT` listener, creates its own `epoll` instance, and runs its own level-triggered event loop. The kernel distributes new connections across workers with no shared queue, no mutex, and no fd handoff.
+    - `workers` (not `pool_size`) is now the EPOLL worker count for `zix.Http`. `0` selects cpu_count. `pool_size` is silently ignored for `.EPOLL` (callers using `.pool_size = N` with `.EPOLL` must migrate to `.workers = N`).
+    - Level-triggered `EPOLLIN` replaces `EPOLLONESHOT`. No explicit re-arm after each request: connections stay registered and re-fire when new data arrives.
+    - Throughput: 428k to 451k req/s at c1000 (`wrk -c1000 -t4 -d10s`), closing the gap vs `zix.Http1` from 11% to 6.8%. Remaining gap is structural (arena allocation per request). See ADR-034.
+    ---
+- Http1 EPOLL slab, RawFn, and Date control:
+    - `zix.Http1` `.EPOLL` now backs each registered connection with a per-connection receive buffer slab (`ConnTable`), sized by `max_recv_buf`, so a connection accumulates a full request without re-allocating per event.
+    - New `zix.Http1.RawFn` handler type plus `zix.Http1.Server.initRaw`: a raw handler receives the connection fd and the parsed head and owns the wire directly, bypassing the managed response path for full control (streaming, custom framing).
+    - New `send_date_header` config field (default `true` for RFC 7231 compliance). Set `false` to drop the `Date` header and save 37 bytes per response on hot paths where the client does not need it.
+    - `buildSimpleHeaderInto` writes the status line and headers into a caller sink, the fast path for the slab writer.
+    ---
+- WebSocket optimization:
+    - SIMD unmask: `parseFrame` in both `zix.Http1` and `zix.Http` WebSocket engines now unmasks the client payload with a 16-wide `@Vector(16, u8)` XOR against a replicated 4-byte mask, with a scalar tail for the remainder. Replaces the per-byte `i % 4` loop.
+    - New `ws_recv_buf` config field on `Http1ServerConfig` (default `0`, falls back to `max_recv_buf`). Set larger than `max_recv_buf` to give EPOLL WebSocket connections more room to accumulate pipelined frames before a compact and re-read.
+    - `zix.Http1` EPOLL WebSocket reads now drain to `EAGAIN` per wakeup (read all available frames in one event) and coalesce writes, instead of one frame per wakeup.
+    - `zix.Http` WebSocket: `buildHeader` (header-only framing into a caller buffer), cleaned `RoomMap` broadcast path.
+    ---
+- gRPC mux per-connection staging and corking:
+    - `GrpcMuxConn` now owns a 64 KB `stage_buf` (was an inline 4096-byte `ReplyStage.buf`). One streaming call of ~5000 messages (~85 KB peak) flushes in two writes, and ~100 concurrent unary replies (~6 KB) coalesce into one write. `ReplyStage.buf` is now a caller-owned slice. The blocking inline path keeps a 4096-byte stack backing.
+    - Server SETTINGS frame is precomputed once per connection: `buildSettingsFrame` fills a 33-byte blob in `GrpcMuxConn.init`, and the handshake appends it as-is instead of re-encoding the parameter loop on every connection.
+    - `TCP_CORK` wraps streaming handlers in `muxDispatch`: the kernel coalesces the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments, then uncorks on return. Unary replies are unaffected (already single-write). No-op on non-Linux.
+    ---
+- Dynamic epoll timeout (gRPC, TCP, FIX workers):
+    - The EPOLL worker loop now flips `epoll_wait` timeout to `0` after a batch of active events (busy-poll for the next ready batch) and back to `-1` (block) when a wakeup returns zero events. Trades a tight spin under load for lower latency between back-to-back batches without burning a core while idle.
+    ---
+- Build split:
+    - `build.zig` was split into focused sub-files imported by the root: `zix-build-examples.zig`, `zix-build-tests.zig`, `zix-build-test_runner.zig`. The root `build.zig` shrank from ~682 lines to the module and step wiring. No build-command changes.
+    - The library root source file was renamed `src/zix.zig` to `src/lib.zig` (matching Zig's `lib.zig` convention). The module is still registered as `b.addModule("zix", ...)`, so the public API is unchanged: consumers still `@import("zix")` and use `zix.Http`, `zix.Grpc`, etc.
+    ---
+- Unified, Debug-gated server init logging:
+    - Every server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) now emits lifecycle lines (listening, EPOLL fallback, accept errors) through one gated `logSystem` shape: route to `config.logger` when set, otherwise `std.debug.print` only in Debug builds, silent in release. A release server with no logger emits no init noise.
+    - Removed the junk and duplicate raw prints: `zix.Grpc` previously printed each listening line raw and also logged it; `zix.Http2`/`zix.Fix`/`zix.Tcp` printed raw lifecycle/fallback lines unconditionally. `zix.Udp`/`zix.Uds` init lines now also appear in Debug builds without a logger (were logger-only before).
+    - `zix.Channel.init` gained a Debug-only init notice (`zix channel: init <T> cap=<N>`), suppressed in release and under the test runner (`builtin.is_test`) to avoid poisoning the test IPC.
+    - Reworded a `src/tcp/http1/server.zig` comment to drop a stale external benchmark reference.
+    ---
+
+<br>
+
+__*Fix:*__
+- gRPC and HTTP/2 stream write under EPOLL:
+    - `fdWriteAll` (`src/tcp/http2/frame.zig`) now handles `EAGAIN` on a non-blocking EPOLL socket with a full send buffer: it polls the fd for writable then retries, instead of treating the partial write as a broken pipe. Blocking sockets never hit this branch. Fixes truncated streaming replies and spurious stream errors under high concurrency.
+
+<br>
+
 ## 0.3.0 (2026-06-10)
 
 __*Update:*__

@@ -2,6 +2,7 @@
 //! EPOLL is native on Linux (shared-nothing event loop), non-Linux falls back to POOL.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig").Http1ServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const core = @import("core.zig");
@@ -12,22 +13,21 @@ const HandlerFn = core.HandlerFn;
 /// high connection counts where many fds can be ready simultaneously.
 const EPOLL_MAX_EVENTS: usize = 4096;
 
-/// Per-worker sink buffer for coalescing pipelined responses. 64 KiB matches
-/// the rust-epoll reference and gives enough room for a full pipelined burst
-/// without mid-burst flushes.
+/// Per-worker sink buffer for coalescing pipelined responses. 64 KiB gives enough
+/// room for a full pipelined burst without mid-burst flushes.
 const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
 // --------------------------------------------------------- //
 
-/// Emit a server lifecycle line. Routes through config.logger when present,
-/// otherwise falls back to std.debug.print.
+/// Emit a server lifecycle line. Routes through config.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
 fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
         lg.system(.INFO, "http1", fmt, args);
         return;
     }
 
-    std.debug.print("zix: " ++ fmt ++ "\n", args);
+    if (comptime builtin.mode == .Debug) std.debug.print("zix: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //

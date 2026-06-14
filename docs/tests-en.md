@@ -27,7 +27,7 @@ zig build test-all
 
 ## Unit Tests
 
-Source: `src/zix.zig`. Each module is exercised via `std.testing.refAllDecls`, which verifies every public declaration compiles and any inline `test` blocks pass.
+Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, which verifies every public declaration compiles and any inline `test` blocks pass.
 
 ### zix.Tcp (raw)
 
