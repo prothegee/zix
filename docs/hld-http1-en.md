@@ -105,7 +105,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    zix["src/zix.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
+    zix["src/lib.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
     Http1 --> server["server.zig\nServer + 4 dispatch models\nEPOLL engine"]
@@ -128,9 +128,11 @@ Access via `const zix = @import("zix");`
 | Symbol | Type | Description |
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` |
+| `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: register a `RawFn` that owns the connection fd directly |
 | `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) |
 | `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
+| `zix.Http1.RawFn` | type | Raw handler given the fd and parsed head, owns the wire directly (custom framing, streaming) |
 | `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, headers, flags) |
 | `zix.Http1.Header` | struct | `{ name: []const u8, value: []const u8 }` |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` from `parseRange` |
@@ -174,16 +176,38 @@ pub const Http1ServerConfig = struct {
     dispatch_model:     DispatchModel = .ASYNC,
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 16 * 1024,     // per-connection buffer (.EPOLL only, see note)
+    ws_recv_buf:        usize = 0,             // .EPOLL WebSocket buffer, 0 = max_recv_buf
     max_gzip_out:       usize = 256 * 1024,    // informational: writeGzip uses core.GZIP_OUT_SIZE
     max_headers:        u8    = 16,            // informational: parse cap is core.MAX_HEADERS
     workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL only
     handler_timeout_ms: u32   = 0,             // per-handler budget, 0 = disabled
+    send_date_header:   bool  = true,          // emit Date header, false saves 37 bytes/response
     logger:             ?*Logger = null,       // lifecycle lines only, see Logging section
 };
 ```
 
 Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. `max_gzip_out` and `max_headers` currently mirror the compile-time caps `core.GZIP_OUT_SIZE` and `core.MAX_HEADERS` and are not read at runtime.
+
+Note: `ws_recv_buf` sizes the per-connection buffer for a connection promoted to WebSocket under `.EPOLL`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate pipelined frames before the engine compacts and re-reads on a fill.
+
+Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false` on hot paths where the client does not consume `Date` to drop the header (37 bytes per response). The managed write helpers honor the flag.
+
+### Timeouts
+
+`zix.Http1` exposes one timeout, `handler_timeout_ms`, the per-handler execution budget. When non-zero, the server arms a thread-local deadline before each dispatch. The handler opts in by calling `zix.Http1.isExpired()` between expensive steps and responding early, or shortens its own budget with `zix.Http1.setTimeout()`. This is the same Layer B budget as `zix.Http`'s `handler_timeout_ms`.
+
+`zix.Http1` has no `conn_timeout_ms`. This is deliberate, not an omission.
+
+- The connection-lifetime guard in `zix.Http` (`conn_timeout_ms`, Layer D) is enforced by a `ConnRegistry` plus a background timer thread that shuts down connections exceeding the configured lifetime. `zix.Http1` is the lean, zero-alloc engine and carries none of that standing infrastructure: the handler is `fn(head, body, fd) void` with no `Request` / `Response` / registry to track a connection against, and no socket-level receive timeout (`setNoDelay` and `SO_BUSY_POLL` are the only socket options set).
+- Under `.EPOLL`, the model `zix.Http1` is tuned for, an idle keep-alive connection holds no thread, just one epoll slot and its buffer. The main reason `conn_timeout_ms` exists in `zix.Http` (reclaiming pool threads parked on slow or idle connections) does not apply to the shared-nothing level-triggered loop.
+
+| Timeout | `zix.Http` | `zix.Http1` | Mechanism |
+| :- | :- | :- | :- |
+| `handler_timeout_ms` | yes | yes | thread-local deadline armed per dispatch, handler-opt-in |
+| `conn_timeout_ms` | yes (`.POOL`) | no | `ConnRegistry` + background timer thread (Http only) |
+
+If connection-lifetime enforcement under `.EPOLL` is ever needed, the natural fit is an idle-deadline sweep over the per-worker `ConnTable` (no extra thread), not a port of Http's timer-thread `ConnRegistry`.
 
 ---
 
