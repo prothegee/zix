@@ -1,12 +1,21 @@
 //! HTTP/2 h2c server: all 3 dispatch models.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const Config = @import("config.zig");
 const Http2ServerConfig = Config.Http2ServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 
 pub const Route = core.Route;
+
+// --------------------------------------------------------- //
+
+/// Emit a server lifecycle line. Http2ServerConfig has no logger, so this prints
+/// to stderr only in Debug builds (silent in release).
+fn logSystem(comptime fmt: []const u8, args: anytype) void {
+    if (comptime builtin.mode == .Debug) std.debug.print("zix http2: " ++ fmt ++ "\n", args);
+}
 
 // --------------------------------------------------------- //
 
@@ -193,7 +202,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 
             switch (cfg.dispatch_model) {
                 .ASYNC => {
-                    std.debug.print("zix http2 server (async): {s}:{d}\n", .{ cfg.ip, cfg.port });
+                    logSystem("listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
                     var listener = try addr.listen(io, .{
@@ -205,7 +214,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     while (true) {
                         const stream = listener.accept(io) catch |err| {
                             if (err != error.ConnectionAborted) {
-                                std.debug.print("zix http2 server: accept error: {}\n", .{err});
+                                logSystem("accept error: {}", .{err});
                                 break;
                             }
                             continue;
@@ -221,7 +230,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                     const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                    std.debug.print("zix http2 server (pool): {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_count });
+                    logSystem("listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
 
                     var queue = ConnQueue{};
                     defer queue.deinit();
@@ -258,7 +267,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 .MIXED => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                    std.debug.print("zix http2 server (mixed): {s}:{d} ({d} accept)\n", .{ cfg.ip, cfg.port, worker_count });
+                    logSystem("listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
 
                     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
                     defer std.heap.smp_allocator.free(acc_threads);
@@ -279,7 +288,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 },
 
                 .EPOLL => {
-                    std.debug.print("zix http2 server: EPOLL is HTTP-only. Falling back to POOL.\n", .{});
+                    logSystem("EPOLL is HTTP-only. Falling back to POOL.", .{});
                     var fallback = self.*;
                     fallback.config.dispatch_model = .POOL;
                     try fallback.run();
