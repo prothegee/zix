@@ -15,8 +15,14 @@ pub const Http1ServerConfig = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Max bytes to buffer per request header block.
+    /// Max bytes to buffer per request header block and per HTTP connection
+    /// in EPOLL mode.
     max_recv_buf: usize = 16 * 1024,
+    /// Per-connection receive buffer size for WebSocket connections in EPOLL
+    /// mode. 0 falls back to max_recv_buf. Set larger than max_recv_buf to
+    /// give WS connections more room to accumulate pipelined frames without
+    /// forcing a compact+re-read on every fill.
+    ws_recv_buf: usize = 0,
     /// Max output size for gzip-compressed responses.
     max_gzip_out: usize = 256 * 1024,
     /// No-op with the lazy engine. Kept for source compatibility.
