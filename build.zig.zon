@@ -7,6 +7,9 @@
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
+        "zix-build-tests.zig",
+        "zix-build-examples.zig",
+        "zix-build-test_runner.zig",
         "build.zig.zon",
         "src",
         "LICENSE-BSD",
