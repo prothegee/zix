@@ -29,7 +29,7 @@ A corked writer for one connection. Used by inline unary dispatch (blocking mode
 ```zig
 const ReplyStage = struct {
     fd: std.posix.fd_t,
-    buf: [4096]u8,
+    buf: []u8,                    // caller-owned backing, not an inline array
     len: usize,
 
     fn append(self, bytes) void   // flush first if it would overflow; pass a >buf payload straight through
@@ -37,7 +37,7 @@ const ReplyStage = struct {
 };
 ```
 
-All response frames produced while handling one readable event accumulate here and leave in a single `write()`.
+`buf` is a caller-supplied slice. The blocking inline path (`dispatchGrpcInline`) backs it with a 4096-byte stack array (unary replies are small). The mux path backs it with the connection's 64 KB `stage_buf` (see `GrpcMuxConn`). All response frames produced while handling one readable event accumulate here and leave in a single `write()`.
 
 ### ConnReader (blocking models)
 
@@ -94,7 +94,9 @@ pub const GrpcMuxConn = struct {
     last_stream_id: u31,
     conn_window_consumed: usize,
     phase: MuxPhase,            // await_preface | await_upgrade | await_preface2 | h2
-    stage: ReplyStage,
+    settings_frame: [33]u8,     // precomputed server SETTINGS, built once in init
+    stage_buf: [65536]u8,       // 64 KB backing for stage
+    stage: ReplyStage,          // stage.buf = &stage_buf
 
     pub fn init(fd, opts) ?*GrpcMuxConn   // one allocation per buffer; null on OOM
     pub fn deinit(self) void
@@ -102,6 +104,8 @@ pub const GrpcMuxConn = struct {
 ```
 
 `rbuf` is sized `max(32 KB, max_frame_size + 256 + 9)`.
+
+`init` calls `buildSettingsFrame(&settings_frame, opts)` once to encode the 33-byte server SETTINGS blob (9-byte header + 4 params), and points `stage.buf` at the 64 KB `stage_buf`. The handshake appends `settings_frame` as-is (no per-connection encode loop), and the larger stage lets a ~5000-message streaming reply (~85 KB peak) flush in two writes and ~100 concurrent unary replies (~6 KB) coalesce into one write.
 
 ### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
 
@@ -153,11 +157,13 @@ loop:
         GOAWAY    -> return .close
 ```
 
-Control frames are staged via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, so they leave in the same coalesced write as the replies.
+Control frames are staged via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, so they leave in the same coalesced write as the replies. `muxStageServerSettings` appends the precomputed `conn.settings_frame` (built once in `init` by `buildSettingsFrame`), not a fresh parameter encode.
 
 ### muxDispatch(comptime routes, conn, stream)
 
 Builds a `GrpcContext` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), then `Router(routes).dispatch`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
+
+For a streaming route (detected by `routeIsStreaming(routes, path)`), the dispatch is wrapped in `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments. Unary routes are not corked (they already leave in one write). `setTcpCork` is a no-op on non-Linux targets.
 
 ### Blocking path (serveGrpcConn / serveGrpcLoop)
 
