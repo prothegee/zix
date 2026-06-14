@@ -1,6 +1,7 @@
 //! zix channel: typed in-process message passing
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
 
@@ -39,7 +40,14 @@ pub fn Channel(comptime T: type) type {
         /// Allocate a ring buffer of `capacity` slots. capacity must be > 0.
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             std.debug.assert(capacity > 0); // unbuffered (rendezvous) not yet supported
+
             const buf = try allocator.alloc(T, capacity);
+
+            // Debug-build init notice. Suppressed under the test runner: a print here runs
+            // while channel tests drive concurrent send/recv and poisons the stdout IPC.
+            if (comptime builtin.mode == .Debug and !builtin.is_test)
+                std.debug.print("zix channel: init {s} cap={d}\n", .{ @typeName(T), capacity });
+
             return .{ .buf = buf, .allocator = allocator };
         }
 
