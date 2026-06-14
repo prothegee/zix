@@ -707,4 +707,36 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 
 ---
 
+## ADR-036: ResponseCache per-worker yang opt-in (modul bersama `utils`) di `zix.Http1`, `zix.Http`, dan `zix.Grpc`, plus WebSocket build-once broadcast
+
+**Status:** Diterima
+
+**Konteks:** Sebuah handler menjalankan ulang dan men-serialize ulang responsnya pada setiap request. Untuk panggilan idempoten berulang yang responsnya mahal dibangun, kerja itu mendominasi biaya userspace, sementara jalur kernel dibagi oleh setiap pendekatan. Engine sudah membuktikan pola precompute-then-write di tempat lain (blok reply gRPC comptime, frame SETTINGS yang di-cache, Date thread-local yang di-cache). Sebuah PoC mengukur apakah memperluas itu ke handler pengguna, sebagai per-key precomputed response cache, menguntungkan. Loopback, AMD Ryzen 5 5600H (12 core logis), zig 0.16.0, wrk 4.2.0, threads 6, durasi 5s, c512 dan c4096, dua kali masing-masing, rata-rata Requests/sec:
+
+| Respons | c512 nocache -> cache | c4096 nocache -> cache |
+| :- | :- | :- |
+| trivial (13 B) | 614,551 -> 611,758 (-0.5%) | 453,328 -> 449,565 (-0.8%) |
+| built (~32 KiB JSON) | 171,821 -> 230,844 (+34.4%) | 137,516 -> 163,116 (+18.6%) |
+| file-backed (~32 KiB) | 209,590 -> 225,058 (+7.4%) | 158,803 -> 163,997 (+3.3%) |
+
+Sebuah sweep ukuran body (c512) menempatkan crossover dekat 4 KiB: delta tetap di dalam noise antar-run di bawah ~2 KiB (256 B +0.2%, 1 KiB +1.9%, 2 KiB +3.7%), lalu melonjak pada 4 KiB (+12.6%) dan naik ke +37% pada 64 KiB. Kasus file-backed hanya menang tipis karena OS page cache sudah menyajikan file dengan murah.
+
+**Keputusan:** Tambahkan ResponseCache per-worker yang opt-in sebagai modul bersama, mati secara default dan diarahkan ke respons yang berat komputasi, lalu pasang ke `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Pakai prinsip build-once yang sama untuk WebSocket broadcast.
+
+- Struktur bersama di `src/utils/response_cache.zig`: structure-of-arrays slab (`keys: []u64` open addressing dengan 0 sebagai empty sentinel, `meta: []Meta` berisi `insert_tick_ms` / `len` / `ttl_ms`, dan satu payload slab datar). Jumlah slot adalah pangkat dua yang diindeks dengan mask. Sebuah arena mengalokasikan slab sekali saat init dan membebaskannya utuh saat deinit. Cache yang terus berganti memakai ulang slot tetap di tempat, jadi arena tidak pernah tumbuh. Lazy on-access TTL: sebuah entri kedaluwarsa tepat pada `insert_tick_ms + ttl_ms`, sehingga `ttl_ms = 0` tidak pernah fresh. Slot kedaluwarsa dipakai ulang di tempat oleh store berikutnya, tidak pernah di-nol-kan, karena meng-nol-kan akan memotong probe chain open-addressing. Tidak ada timer thread yang diperkenalkan.
+- Satu cache per worker, tidak pernah dibagi, tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya. Di bawah `.EPOLL` shared-nothing setiap worker persis seperti itu, jadi cache dipasang di sana. `.POOL` juga milik zix dan bisa dipasang dengan aman, tetapi setiap pool thread akan memegang cache independen (hit rate lebih rendah, N kali memori), sehingga ditunda. `.ASYNC` dan `.MIXED` menjalankan handler di executor pool `std.Io` yang bukan milik zix, di mana sebuah task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free. Di rilis ini cache dipasang di bawah `.EPOLL` saja, model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
+- HTTP (`zix.Http1`, `zix.Http`): key adalah method, path, dan query, dan nilai yang di-cache adalah respons HTTP yang sudah di-serialize penuh, ditulis verbatim saat hit. `zix.Http1` mengekspos pasangan eksplisit `cacheLookup` / `cacheStore` plus `writeWithCache` yang menyatu. `zix.Http` mengekspos `res.serveCached` (lookup lalu tulis verbatim) dan `res.sendCached` (serialize, tulis, simpan), menghasilkan byte yang identik dengan plain `send`.
+- gRPC (`zix.Grpc`, unary): key adalah path plus body request, dan nilai yang di-cache adalah pesan respons, bukan reply yang sudah di-frame, karena HEADERS bersifat stateful terhadap HPACK dan stream-id. Saat hit pesan di-frame ulang untuk stream saat ini sehingga HPACK dan stream id tetap benar. `ctx.serveCached` memutar ulang pesan tersimpan dan menyelesaikan dengan OK, `ctx.sendCached` mengirim dan menyimpan.
+- WebSocket broadcast memakai prinsip build-once yang sama alih-alih TTL cache: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` men-serialize frame sekali dan menyebarkan byte yang sama ke setiap fd dalam room yang dikelola pemanggil, melewati write yang gagal ke peer mati. Ini adalah bentuk follow-up yang berbentuk WS, bukan keyed cache.
+- Config bersifat flat dan nama field-nya identik di `Http1ServerConfig`, `HttpServerConfig`, dan `GrpcServerConfig`: `response_cache: bool = false`, `cache_max_entries: u32` (dibulatkan turun ke pangkat dua), `cache_max_value_bytes: u32` (respons yang melewatinya di-bypass, default ramping sekitar 16 KiB), `cache_ttl_ms: u32`, dan `cache_max_total_bytes: usize = 0` (ceiling opsional yang divalidasi terhadap `entries * value_bytes`).
+
+**Konsekuensi:**
+- Kemenangan jelas untuk serialization mahal melewati crossover ~4 KiB (+12.6% pada 4 KiB, naik ke +37% pada 64 KiB, c512) dan tanpa regresi di bawahnya, itulah mengapa opt-in wajib alih-alih default.
+- Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker. Terbatas dan dapat diprediksi, trade yang disengaja untuk lock-free per-worker ownership.
+- Sengaja tidak ditujukan untuk respons file-backed atau static: OS page cache sudah menyajikan itu dengan murah, jadi `sendfile` / `splice` adalah tuas yang lebih baik di sana.
+- Kebenaran bertumpu pada opt-in: framework tidak pernah auto-cache output handler. Handler memutuskan cacheability dan TTL. Respons dinamis atau berbasis database menyetel `cache_ttl_ms` yang pendek (menerima staleness sebesar itu) atau tidak mem-cache dan menulis langsung. Key HTTP hanya mencakup method, path, dan query, jadi respons yang bervariasi pada header atau cookie tidak boleh di-cache.
+- Struktur cache bersifat engine-agnostic di `src/utils`, sehingga glue per-engine (cache thread-local plus penurunan key) adalah satu-satunya bagian yang spesifik protokol.
+
+---
+
 ###### end of adr
