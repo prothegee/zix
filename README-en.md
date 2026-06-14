@@ -155,7 +155,7 @@ __*2. Four selectable dispatch models:*__
 - ASYNC (single accept thread, io.async() per conn): lowest latency at moderate load.
 - POOL (N acceptors push to a shared queue, M workers handle synchronously): best raw throughput at high connection counts.
 - MIXED (N acceptors each dispatch via io.async(), no queue): balanced.
-- EPOLL (single epoll loop + worker pool, EPOLLONESHOT re-arm so idle keep-alive holds no thread): Linux-only, best for very high or slow/idle connection counts.
+- EPOLL (shared-nothing: each worker owns a SO_REUSEPORT listener + epoll instance, level-triggered, no shared queue): Linux-only, best for high connection counts on HTTP/1.
 
 > concurrency strategy is a deliberate config choice, not a implementation default. Http, Grpc, Fix, and Tcp implement all four.
 
@@ -492,8 +492,8 @@ pub fn main(process: std.process.Init) !void {
     }, .{
         .io = process.io,
         // dispatch_model = .ASYNC (default, can be omitted)
-        // workers        = 0  -> cpu_count accept threads (auto)
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (auto)
+        // workers        = 0  -> cpu_count (accept threads for .POOL/.MIXED; workers for .EPOLL)
+        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (.POOL only; ignored by .EPOLL)
     });
 ```
 
@@ -523,9 +523,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.EPOLL` (single epoll event loop + worker pool, Linux-only):**
+**`.EPOLL` (shared-nothing epoll workers, Linux-only):**
 
-One event-loop thread uses `epoll_wait` to detect readable sockets. Workers pop ready fds from a queue and serve one request each, then re-arm the socket (`EPOLLONESHOT`). Idle keep-alive connections hold no thread. Best for high connection counts with many idle or slow clients. Each `epoll_wait` call drains up to 512 ready events at a time. Non-Linux builds fall back to `.POOL` automatically.
+Each worker owns a private `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers. No shared queue, no mutex, no fd handoff between threads. Level-triggered `EPOLLIN` keeps connections registered after each request without explicit re-arm. Idle keep-alive connections hold no thread. Best for high-throughput short-lived requests on Linux. Non-Linux builds fall back to `.POOL` automatically.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -533,7 +533,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker threads, workers field is ignored
+    .workers        = 0, // 0 = cpu_count workers (default); pool_size is ignored
 });
 ```
 
@@ -1038,7 +1038,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model uses a single epoll event loop for accept and assigns each connection to a pool worker for its full lifetime (gRPC is streaming, `EPOLLONESHOT` does not apply). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
+**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model is a shared-nothing multiplexed event loop: each worker owns a private `SO_REUSEPORT` listener and one epoll instance, and drives many non-blocking h2 connections through a resumable HTTP/2 state machine. `pool_size` is the worker count (0 = cpu_count). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -1543,9 +1543,13 @@ See [swerver](https://github.com/justinGrosvenor/swerver) for TLS, HTTP/2, HTTP/
 __*HttpArena*__ <br>
 Website: https://www.http-arena.com <br>
 Project repo: https://github.com/MDA2AV/HttpArena <br>
-Last pull-request: https://github.com/MDA2AV/HttpArena/pull/852 <br>
+
+<details open>
+<summary>zix 0.3.x</summary>
 
 Http/1.1 <br>
+[PR](https://github.com/MDA2AV/HttpArena/pull/852) <br>
+[Implementation](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | baseline | 512 | 3,717,345 | 6397.5% | 84MiB |
@@ -1568,11 +1572,15 @@ Http/1.1 <br>
 | echo-ws-pipeline | 16384 | 57,239,628 | 6453.2% | 273MiB |
 
 gRPC <br>
+[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
+[Implementaion](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | unary-grpc | 256 | 7,145,739 | 3859.3% | 347MiB |
 | unary-grpc | 1024 | 7,046,038 | 4066.4% | 1.1GiB |
 | stream-grpc | 64 | 8,472,000 | 45.8% | 89MiB |
+
+<details>
 
 <br>
 
