@@ -19,9 +19,9 @@ const parser = @import("parser.zig");
 
 const timer_interval_ms: u32 = 500;
 const conn_queue_initial_cap: usize = 16;
-/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
-const EPOLL_MAX_EVENTS: usize = 512;
+const EPOLL_MAX_EVENTS: usize = 1024;
 
 // Global date cache: updated by a background timer thread (model 2) or the accept loop (model 1).
 // Readers do a single atomic load, no lock, no syscall per request.
@@ -44,6 +44,17 @@ fn updateDateCache(io: std.Io) void {
         g_date_active.store(next_idx, .release);
         g_date_secs.store(cur_secs, .release);
     }
+}
+
+// --------------------------------------------------------- //
+
+fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
+    if (config.logger) |lg| {
+        lg.system(.INFO, "http", fmt, args);
+        return;
+    }
+
+    std.debug.print("zix: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //
@@ -174,6 +185,177 @@ const ConnQueue = struct {
 
 // --------------------------------------------------------- //
 
+fn setNoDelay(fd: std.posix.fd_t) void {
+    if (comptime @import("builtin").target.os.tag != .windows) {
+        std.posix.setsockopt(
+            fd,
+            std.posix.IPPROTO.TCP,
+            std.posix.TCP.NODELAY,
+            std.mem.asBytes(&@as(c_int, 1)),
+        ) catch {};
+    }
+}
+
+/// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
+/// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
+fn setBusyPoll(fd: std.posix.fd_t) void {
+    const SO_BUSY_POLL: u32 = 46;
+    std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        SO_BUSY_POLL,
+        std.mem.asBytes(&@as(c_int, 50)),
+    ) catch {};
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting
+/// the cgroup-allowed CPU mask so we never select a CPU the container cannot use.
+fn pinToCpu(worker_id: usize) void {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
+
+    var cpu_list: [256]u32 = undefined;
+    var n_cpus: usize = 0;
+    for (cpu_set, 0..) |word, word_idx| {
+        var w = word;
+        while (w != 0) : (w &= w - 1) {
+            if (n_cpus < cpu_list.len) {
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                n_cpus += 1;
+            }
+        }
+    }
+    if (n_cpus == 0) return;
+
+    const target = cpu_list[worker_id % n_cpus];
+    var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const cpu_word = target / @bitSizeOf(usize);
+    const cpu_bit: u6 = @intCast(target % @bitSizeOf(usize));
+    target_set[cpu_word] |= @as(usize, 1) << cpu_bit;
+
+    linux.sched_setaffinity(0, &target_set) catch {};
+}
+
+/// Count CPUs available to this process via sched_getaffinity, respecting cgroup
+/// and taskset restrictions. Falls back to std.Thread.getCpuCount when the syscall
+/// fails.
+fn getAvailableCpuCount() usize {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (cpu_set) |word| count += @popCount(word);
+
+    return if (count == 0) 1 else count;
+}
+
+// --------------------------------------------------------- //
+// EPOLL per-connection recv state
+
+/// Highest fd a worker's table can index. Linux hands out the lowest free fd,
+/// so the table stays sparse. Connections on fds at or above this are refused.
+const MAX_FD: usize = 1 << 16;
+
+/// Per-connection EPOLL recv state. buf is a slab slice (contiguous pre-allocated
+/// region, Linux demand-paged). filled tracks accumulated bytes.
+/// Empty slots are identified by buf.len == 0.
+const EpollConn = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    filled: usize,
+};
+
+/// Private per-worker fd to EpollConn map. The slab (MAX_FD * buf_size virtual
+/// bytes) is pre-allocated once at init; each accept assigns a slice from it with
+/// no heap call. Physical pages are demand-paged, so only active connections
+/// consume RAM.
+const EpollConnTable = struct {
+    slots: []EpollConn,
+    slab: []u8,
+    buf_size: usize,
+
+    fn init(buf_size: usize) !EpollConnTable {
+        const slots = try std.heap.smp_allocator.alloc(EpollConn, MAX_FD);
+        @memset(std.mem.sliceAsBytes(slots), 0);
+
+        // Slab not memset: physical pages committed only on first recv per slot.
+        const slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+
+        return .{ .slots = slots, .slab = slab, .buf_size = buf_size };
+    }
+
+    fn deinit(self: *EpollConnTable) void {
+        std.heap.smp_allocator.free(self.slab);
+        std.heap.smp_allocator.free(self.slots);
+    }
+
+    fn get(self: *EpollConnTable, fd: std.posix.fd_t) ?*EpollConn {
+        const idx: usize = @intCast(fd);
+        if (idx >= self.slots.len) return null;
+
+        const conn = &self.slots[idx];
+
+        return if (conn.buf.len > 0) conn else null;
+    }
+
+    fn alloc(self: *EpollConnTable, fd: std.posix.fd_t) ?*EpollConn {
+        const idx: usize = @intCast(fd);
+        if (idx >= self.slots.len) return null;
+
+        const buf = self.slab[idx * self.buf_size ..][0..self.buf_size];
+        self.slots[idx] = .{ .fd = fd, .buf = buf, .filled = 0 };
+
+        return &self.slots[idx];
+    }
+
+    fn free(self: *EpollConnTable, fd: std.posix.fd_t) void {
+        const idx: usize = @intCast(fd);
+        if (idx >= self.slots.len) return;
+
+        const conn = &self.slots[idx];
+        if (conn.buf.len == 0) return;
+
+        conn.* = std.mem.zeroes(EpollConn);
+    }
+};
+
+/// Accept every pending connection on listener_fd and register each in epfd.
+/// Level-triggered, draining to EAGAIN guarantees no accept is missed.
+fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t) void {
+    const linux = std.os.linux;
+
+    while (true) {
+        const rc = linux.accept4(listener_fd, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .AGAIN => return,
+            .INTR, .CONNABORTED => continue,
+            else => return,
+        }
+
+        const conn_fd: std.posix.fd_t = @intCast(rc);
+        setNoDelay(conn_fd);
+        setBusyPoll(conn_fd);
+        if (table.alloc(conn_fd) == null) {
+            _ = linux.close(conn_fd);
+            continue;
+        }
+
+        var ev = linux.epoll_event{
+            .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
+            .data = .{ .fd = conn_fd },
+        };
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &ev)) != .SUCCESS) {
+            table.free(conn_fd);
+            _ = linux.close(conn_fd);
+        }
+    }
+}
+
 // --------------------------------------------------------- //
 
 // Internal generic implementation: use `Server.init(stack_threshold, routes, config)` publicly.
@@ -190,89 +372,34 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// Outcome of processing one request: whether the connection may be reused.
         const ReqOutcome = enum { keep_alive, close };
 
-        /// Disable Nagle on a socket so each response flushes immediately
-        ///
-        /// Param:
-        /// fd - std.posix.fd_t
-        fn setNoDelay(fd: std.posix.fd_t) void {
-            if (comptime @import("builtin").target.os.tag != .windows) {
-                std.posix.setsockopt(
-                    fd,
-                    std.posix.IPPROTO.TCP,
-                    std.posix.TCP.NODELAY,
-                    std.mem.asBytes(&@as(c_int, 1)),
-                ) catch {};
-            }
-        }
-
-        /// Process exactly one HTTP request on fd using caller-owned buffers
-        ///
-        /// Note:
-        /// - Shared by the POOL keep-alive loop (called repeatedly) and the EPOLL
-        ///   worker (called once per readable event)
-        /// - Incremental recv loop accumulates bytes until the end-of-headers marker
-        /// - Zero-copy parse: all request fields are offsets into buf_read
-        /// - Date header read from the global double-buffered cache (one atomic load)
-        /// - Falls back to static file serving, then 404, when no route matches
-        ///
-        /// Param:
-        /// server - *Self
-        /// stream - std.Io.net.Stream (passed to Context for upgrade handlers)
-        /// fd - std.posix.fd_t (raw socket for recv/send on the hot path)
-        /// io - std.Io
-        /// buf_read - []u8 (read buffer, owned by caller)
-        /// arena - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
+        /// Parse and dispatch one complete HTTP request from buf.
+        /// buf must contain the full header block. arena must be reset by the caller
+        /// before entry; this function does not reset it.
         ///
         /// Return:
         /// - .keep_alive when the connection may serve another request
         /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
-        fn handleOneRequest(
+        fn processRequest(
             server: *Self,
             stream: std.Io.net.Stream,
             fd: std.posix.fd_t,
             io: std.Io,
-            buf_read: []u8,
+            buf: []u8,
             arena: *std.heap.ArenaAllocator,
         ) ReqOutcome {
-            _ = arena.reset(.retain_capacity);
             const allocator = arena.allocator();
             const cfg = server.config;
 
-            // Incremental recv loop: accumulate bytes until \r\n\r\n is found.
-            // Only the new tail is searched each iteration to avoid re-scanning.
-            var filled: usize = 0;
-            var found = false;
-
-            while (filled < buf_read.len) {
-                const n = std.posix.read(fd, buf_read[filled..]) catch break;
-                if (n == 0) break; // peer closed
-                const prev = filled;
-                filled += n;
-                const search_from = if (prev > 3) prev - 3 else 0;
-                if (parser.findHeaderEnd(buf_read[0..filled], search_from)) |_| {
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found) {
-                if (filled >= buf_read.len) {
-                    fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
-                }
-                return .close;
-            }
-
-            // Zero-copy parse: all fields are offsets into buf_read.
-            const head = parser.parse(buf_read[0..filled], cfg.max_request_headers.value()) catch {
+            const head = parser.parse(buf, cfg.max_request_headers.value()) catch {
                 fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
                 return .close;
-            } orelse return .close; // incomplete, should not happen since found == true
+            } orelse return .close;
 
             var req = Request{
-                .buf = buf_read[0..filled],
+                .buf = buf,
                 .head = head,
                 .fd = fd,
-                .buf_filled = filled,
+                .buf_filled = buf.len,
                 .allocator = allocator,
             };
             var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
@@ -283,7 +410,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
             var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
 
-            // Layer B: optional handler deadline. Handlers call ctx.isExpired() between steps.
+            // Layer B: optional handler deadline.
             if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
             const matched = server.router.dispatch(&req, &res, &ctx) catch false;
@@ -327,7 +454,61 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             // Keep-alive: if there is a body and the handler did not consume it,
             // close rather than risk misaligned reads on the next request.
             if (head.content_length > 0 and req.body_cache == null) return .close;
+
             return if (head.keep_alive) .keep_alive else .close;
+        }
+
+        /// Recv loop + dispatch for one HTTP request on a blocking fd (POOL/ASYNC/MIXED).
+        ///
+        /// Note:
+        /// - Incremental recv loop accumulates bytes until \r\n\r\n is found
+        /// - Zero-copy parse: all request fields are offsets into buf_read
+        /// - Date header read from the global double-buffered cache (one atomic load)
+        /// - Falls back to static file serving, then 404, when no route matches
+        ///
+        /// Param:
+        /// server - *Self
+        /// stream - std.Io.net.Stream (passed to Context for upgrade handlers)
+        /// fd - std.posix.fd_t (raw socket for recv/send on the hot path)
+        /// io - std.Io
+        /// buf_read - []u8 (read buffer, owned by caller)
+        /// arena - *std.heap.ArenaAllocator (reset to retain_capacity on entry)
+        ///
+        /// Return:
+        /// - .keep_alive when the connection may serve another request
+        /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
+        fn handleOneRequest(
+            server: *Self,
+            stream: std.Io.net.Stream,
+            fd: std.posix.fd_t,
+            io: std.Io,
+            buf_read: []u8,
+            arena: *std.heap.ArenaAllocator,
+        ) ReqOutcome {
+            _ = arena.reset(.retain_capacity);
+            var filled: usize = 0;
+            var found = false;
+
+            while (filled < buf_read.len) {
+                const n = std.posix.read(fd, buf_read[filled..]) catch break;
+                if (n == 0) break;
+                const prev = filled;
+                filled += n;
+                const search_from = if (prev > 3) prev - 3 else 0;
+                if (parser.findHeaderEnd(buf_read[0..filled], search_from)) |_| {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                if (filled >= buf_read.len) {
+                    fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                }
+                return .close;
+            }
+
+            return processRequest(server, stream, fd, io, buf_read[0..filled], arena);
         }
 
         /// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
@@ -349,7 +530,6 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             setNoDelay(stream.socket.handle);
 
             const cfg = server.config;
-            // Raw fd: all recv/send on the hot path bypass std.Io dispatch.
             const fd = stream.socket.handle;
 
             // Layer D: connection guard via registry eviction.
@@ -396,7 +576,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const cfg = self.config;
 
             const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-                std.debug.print("zix: worker resolve error: {}\n", .{err});
+                logSystem(cfg, "worker resolve error: {}", .{err});
                 return;
             };
             var net_server = addr.listen(io, .{
@@ -404,7 +584,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
-                std.debug.print("zix: worker listen error: {}\n", .{err});
+                logSystem(cfg, "worker listen error: {}", .{err});
                 return;
             };
             defer net_server.deinit(io);
@@ -412,7 +592,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             while (true) {
                 const stream = net_server.accept(io) catch |err| {
                     if (err != error.ConnectionAborted) {
-                        std.debug.print("zix: worker accept error: {}\n", .{err});
+                        logSystem(cfg, "worker accept error: {}", .{err});
                         break;
                     }
                     continue;
@@ -432,11 +612,13 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         /// Accept thread for MIXED dispatch: accepts connections and dispatches each via io.async().
         /// No ConnQueue. The shared io Threaded pool handles scheduling.
-        fn asyncWorkerEntry(self: *Self, io: std.Io) void {
+        fn asyncWorkerEntry(self: *Self, io: std.Io, worker_id: usize) void {
+            pinToCpu(worker_id);
+
             const cfg = self.config;
 
             const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-                std.debug.print("zix: worker resolve error: {}\n", .{err});
+                logSystem(cfg, "worker resolve error: {}", .{err});
                 return;
             };
             var net_server = addr.listen(io, .{
@@ -444,7 +626,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
             }) catch |err| {
-                std.debug.print("zix: worker listen error: {}\n", .{err});
+                logSystem(cfg, "worker listen error: {}", .{err});
                 return;
             };
             defer net_server.deinit(io);
@@ -452,7 +634,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             while (true) {
                 const stream = net_server.accept(io) catch |err| {
                     if (err != error.ConnectionAborted) {
-                        std.debug.print("zix: worker accept error: {}\n", .{err});
+                        logSystem(cfg, "worker accept error: {}", .{err});
                         break;
                     }
                     continue;
@@ -466,22 +648,26 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// there is no shared queue and no cross-thread fd handoff.
         ///
         /// Note:
-        /// - Read buffer and arena are allocated once per worker and reused across all
-        ///   connections and requests handled by this worker.
+        /// - EpollConnTable holds per-connection recv state. Each accept assigns a
+        ///   slab slice with no heap call; filled tracks accumulated bytes across events.
+        /// - Accepted fds are NONBLOCK: the recv loop reads until EAGAIN, allowing
+        ///   headers that arrive in multiple TCP segments without blocking the worker.
         /// - Connections are level-triggered: the fd stays registered after each request
         ///   and re-fires when new data arrives (keep-alive without re-arm syscalls).
-        /// - Accepted fds are blocking: the worker returns to epoll_wait after each response
-        ///   without parking on the socket.
+        /// - Arena and slab are allocated once per worker and reused across all connections.
         ///
         /// Param:
         /// self - *Self
         /// io - std.Io
-        fn epollWorker(self: *Self, io: std.Io) void {
+        /// worker_id - usize (used for pinToCpu)
+        fn epollWorker(self: *Self, io: std.Io, worker_id: usize) void {
             const linux = std.os.linux;
             const cfg = self.config;
 
+            pinToCpu(worker_id);
+
             const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-                std.debug.print("zix: epoll worker resolve error: {}\n", .{err});
+                logSystem(cfg, "epoll worker resolve error: {}", .{err});
                 return;
             };
             var net_server = addr.listen(io, .{
@@ -489,13 +675,13 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 .kernel_backlog = @intCast(cfg.kernel_backlog),
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: each worker binds the same port
             }) catch |err| {
-                std.debug.print("zix: epoll worker listen error: {}\n", .{err});
+                logSystem(cfg, "epoll worker listen error: {}", .{err});
                 return;
             };
             defer net_server.deinit(io);
             const listener_fd = net_server.socket.handle;
 
-            // Non-blocking listener so accept drains to EAGAIN without blocking.
+            // Non-blocking listener so epollAcceptAll drains to EAGAIN without blocking.
             const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
             const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
             _ = linux.fcntl(listener_fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
@@ -511,8 +697,8 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             };
             if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS) return;
 
-            const buf_read = std.heap.smp_allocator.alloc(u8, cfg.max_recv_buf) catch return;
-            defer std.heap.smp_allocator.free(buf_read);
+            var table = EpollConnTable.init(cfg.max_recv_buf) catch return;
+            defer table.deinit();
 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
@@ -520,8 +706,9 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             _ = arena.reset(.retain_capacity);
 
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+            var epoll_timeout: i32 = -1;
             while (true) {
-                const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
+                const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
                 switch (std.posix.errno(wait_result)) {
                     .SUCCESS => {},
                     .INTR => continue,
@@ -529,45 +716,79 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 }
 
                 const event_count: usize = @intCast(wait_result);
+                if (event_count == 0) {
+                    epoll_timeout = -1;
+                    continue;
+                }
+
                 for (events[0..event_count]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        // Drain all pending connections (level-triggered, no EAGAIN spin needed).
-                        while (true) {
-                            const accept_result = linux.accept4(listener_fd, null, null, std.posix.SOCK.CLOEXEC);
-                            switch (std.posix.errno(accept_result)) {
-                                .SUCCESS => {},
-                                .AGAIN => break,
-                                .INTR, .CONNABORTED => continue,
-                                else => break,
-                            }
-                            const conn_fd: std.posix.fd_t = @intCast(accept_result);
-                            setNoDelay(conn_fd);
-                            var conn_event = linux.epoll_event{
-                                .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-                                .data = .{ .fd = conn_fd },
-                            };
-                            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &conn_event)) != .SUCCESS) {
-                                _ = linux.close(conn_fd);
-                            }
+                        epollAcceptAll(&table, epfd, listener_fd);
+                        continue;
+                    }
+
+                    const conn_fd = ev.data.fd;
+
+                    if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR | linux.EPOLL.RDHUP)) != 0) {
+                        if (table.get(conn_fd)) |_| table.free(conn_fd);
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                        _ = linux.close(conn_fd);
+                        continue;
+                    }
+
+                    const conn = table.get(conn_fd) orelse continue;
+
+                    // Recv into conn.buf[conn.filled..]. NONBLOCK fd: read() returns
+                    // EAGAIN when no more data is buffered in the kernel, so we break
+                    // and wait for the next IN event (partial headers across segments).
+                    var should_close = false;
+                    var found_headers = false;
+                    while (conn.filled < conn.buf.len) {
+                        const n = std.posix.read(conn_fd, conn.buf[conn.filled..]) catch |err| {
+                            if (err != error.WouldBlock) should_close = true;
+                            break;
+                        };
+                        if (n == 0) {
+                            should_close = true;
+                            break;
                         }
+                        const prev = conn.filled;
+                        conn.filled += n;
+                        const search_from = if (prev > 3) prev - 3 else 0;
+                        if (parser.findHeaderEnd(conn.buf[0..conn.filled], search_from)) |_| {
+                            found_headers = true;
+                            break;
+                        }
+                    }
+
+                    if (!should_close and !found_headers and conn.filled >= conn.buf.len) {
+                        fdWriteAll(conn_fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                        should_close = true;
+                    }
+
+                    if (should_close) {
+                        table.free(conn_fd);
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                        _ = linux.close(conn_fd);
+                        continue;
+                    }
+
+                    if (!found_headers) continue;
+
+                    const stream = std.Io.net.Stream{ .socket = .{ .handle = conn_fd, .address = undefined } };
+                    _ = arena.reset(.retain_capacity);
+                    const outcome = processRequest(self, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
+
+                    if (outcome != .keep_alive) {
+                        table.free(conn_fd);
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                        _ = linux.close(conn_fd);
                     } else {
-                        const conn_fd = ev.data.fd;
-
-                        if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR | linux.EPOLL.RDHUP)) != 0) {
-                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
-                            _ = linux.close(conn_fd);
-                            continue;
-                        }
-
-                        const stream = std.Io.net.Stream{ .socket = .{ .handle = conn_fd, .address = undefined } };
-
-                        if (handleOneRequest(self, stream, conn_fd, io, buf_read, &arena) != .keep_alive) {
-                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
-                            _ = linux.close(conn_fd);
-                        }
-                        // .keep_alive: fd stays registered, fires again on next request.
+                        conn.filled = 0;
                     }
                 }
+
+                epoll_timeout = 0;
             }
         }
 
@@ -577,7 +798,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// Note:
         /// - The kernel distributes connections across per-worker listeners with no shared
         ///   accept queue and no cross-thread fd handoffs.
-        /// - workers = 0 (default): cpu_count workers.
+        /// - workers = 0 (default): one worker per available CPU (respects cgroup mask).
         /// - workers = N: exactly N workers.
         ///
         /// Param:
@@ -587,18 +808,17 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// Return:
         /// - !void (exits only on setup failure, otherwise runs forever)
         fn runEpoll(self: *Self, io: std.Io) !void {
-            const cpu = try std.Thread.getCpuCount();
-            const worker_count = if (self.config.workers == 0) cpu else self.config.workers;
+            const worker_count = if (self.config.workers == 0) getAvailableCpuCount() else self.config.workers;
 
-            std.debug.print("zix: listening on {s}:{d} (epoll, {d} workers, shared-nothing)\n", .{
+            logSystem(self.config, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{
                 self.config.ip, self.config.port, worker_count,
             });
 
             const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
             defer std.heap.smp_allocator.free(threads);
 
-            for (threads) |*t| {
-                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorker, .{ self, io });
+            for (threads, 0..) |*t, idx| {
+                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorker, .{ self, io, idx });
             }
 
             for (threads) |t| t.join();
@@ -651,7 +871,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             const effective_model: DispatchModel = blk: {
                 if (comptime @import("builtin").target.os.tag != .linux) {
                     if (cfg.dispatch_model == .EPOLL) {
-                        std.debug.print("zix: EPOLL is Linux-only. Falling back to POOL.\n", .{});
+                        logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
                         break :blk .POOL;
                     }
                 }
@@ -663,7 +883,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                     const pool_size = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                    std.debug.print("zix: listening on {s}:{d} ({d} accept, {d} pool)\n", .{ cfg.ip, cfg.port, worker_count, pool_size });
+                    logSystem(cfg, "listening on {s}:{d} ({d} accept, {d} pool)", .{ cfg.ip, cfg.port, worker_count, pool_size });
 
                     var queue = ConnQueue{};
                     defer queue.deinit();
@@ -690,10 +910,10 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 },
 
                 .ASYNC => {
-                    std.debug.print("zix: listening on {s}:{d} (io.async)\n", .{ cfg.ip, cfg.port });
+                    logSystem(cfg, "listening on {s}:{d} (io.async)", .{ cfg.ip, cfg.port });
 
                     const addr = std.Io.net.IpAddress.resolve(thread_io, cfg.ip, cfg.port) catch |err| {
-                        std.debug.print("zix: resolve error: {}\n", .{err});
+                        logSystem(cfg, "resolve error: {}", .{err});
                         return;
                     };
                     var net_server = addr.listen(thread_io, .{
@@ -701,7 +921,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                         .kernel_backlog = @intCast(cfg.kernel_backlog),
                         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
                     }) catch |err| {
-                        std.debug.print("zix: listen error: {}\n", .{err});
+                        logSystem(cfg, "listen error: {}", .{err});
                         return;
                     };
                     defer net_server.deinit(thread_io);
@@ -709,7 +929,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     while (true) {
                         const stream = net_server.accept(thread_io) catch |err| {
                             if (err != error.ConnectionAborted) {
-                                std.debug.print("zix: accept error: {}\n", .{err});
+                                logSystem(cfg, "accept error: {}", .{err});
                                 break;
                             }
                             continue;
@@ -721,12 +941,12 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 .MIXED => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                    std.debug.print("zix: listening on {s}:{d} ({d} accept, io.async)\n", .{ cfg.ip, cfg.port, worker_count });
+                    logSystem(cfg, "listening on {s}:{d} ({d} accept, io.async)", .{ cfg.ip, cfg.port, worker_count });
 
                     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
                     defer std.heap.smp_allocator.free(acc_threads);
-                    for (acc_threads) |*t| {
-                        t.* = try std.Thread.spawn(.{}, asyncWorkerEntry, .{ self, thread_io });
+                    for (acc_threads, 0..) |*t, idx| {
+                        t.* = try std.Thread.spawn(.{}, asyncWorkerEntry, .{ self, thread_io, idx });
                     }
 
                     for (acc_threads) |t| t.join();
@@ -781,3 +1001,51 @@ pub const Server = struct {
         return HttpServerImpl(stack_threshold, routes).init(config);
     }
 };
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix http: EpollConnTable slab alloc and free lifecycle" {
+    var table = try EpollConnTable.init(256);
+    defer table.deinit();
+
+    try std.testing.expectEqual(@as(?*EpollConn, null), table.get(5));
+
+    const conn = table.alloc(5).?;
+    try std.testing.expectEqual(@as(std.posix.fd_t, 5), conn.fd);
+    try std.testing.expectEqual(@as(usize, 256), conn.buf.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    const got = table.get(5).?;
+    try std.testing.expectEqual(conn, got);
+
+    table.free(5);
+    try std.testing.expectEqual(@as(?*EpollConn, null), table.get(5));
+
+    table.free(5);
+}
+
+test "zix http: EpollConnTable filled tracks accumulated bytes" {
+    var table = try EpollConnTable.init(512);
+    defer table.deinit();
+
+    const conn = table.alloc(10).?;
+    conn.filled = 42;
+    try std.testing.expectEqual(@as(usize, 42), table.get(10).?.filled);
+
+    table.free(10);
+    try std.testing.expectEqual(@as(?*EpollConn, null), table.get(10));
+}
+
+test "zix http: EpollConnTable get returns null for out-of-range fd" {
+    var table = try EpollConnTable.init(64);
+    defer table.deinit();
+
+    try std.testing.expectEqual(@as(?*EpollConn, null), table.get(MAX_FD));
+    try std.testing.expectEqual(@as(?*EpollConn, null), table.alloc(MAX_FD));
+}
+
+test "zix http: getAvailableCpuCount returns at least 1" {
+    const count = getAvailableCpuCount();
+    try std.testing.expect(count >= 1);
+}
