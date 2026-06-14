@@ -310,6 +310,54 @@ pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
     try core.fdWriteAll(fd, payload);
 }
 
+/// Build one server frame and fan it out to every fd in conns. The frame is
+/// serialized once and the same bytes are written to each connection, so a room
+/// broadcast costs one serialization no matter how many members it reaches.
+///
+/// Note:
+/// - A failed write (dead peer) is skipped, not propagated. The EPOLL engine
+///   reaps the fd on its next event, so a broadcast never blocks on one member.
+/// - Not staged through the per-event send sink: a broadcast targets many
+///   connections, not the single one being pumped.
+/// - The caller owns the conns list (a handler-maintained room), the engine has
+///   no room registry of its own.
+///
+/// Param:
+/// conns   - []const std.posix.fd_t (target connection fds)
+/// opcode  - Opcode
+/// payload - []const u8
+///
+/// Usage:
+/// ```zig
+/// // in an on_frame callback, fan a chat message out to the room
+/// zix.Http1.WebSocket.broadcast(room.fds(), .text, payload);
+/// ```
+///
+/// Return:
+/// - void
+pub fn broadcast(conns: []const std.posix.fd_t, opcode: Opcode, payload: []const u8) void {
+    if (payload.len + ws_max_frame_header <= ws_send_inline_cap) {
+        var buf: [ws_send_inline_cap]u8 = undefined;
+        const len = buildFrame(&buf, opcode, payload);
+        const frame = buf[0..len];
+
+        for (conns) |fd| core.fdWriteAll(fd, frame) catch continue;
+
+        return;
+    }
+
+    // Oversize payload: build the header once, then write header + payload per
+    // fd so the large payload is never copied into a staging buffer.
+    var hdr: [ws_max_frame_header]u8 = undefined;
+    const hdr_len = buildHeader(&hdr, opcode, payload.len);
+    const header = hdr[0..hdr_len];
+
+    for (conns) |fd| {
+        core.fdWriteAll(fd, header) catch continue;
+        core.fdWriteAll(fd, payload) catch continue;
+    }
+}
+
 /// Complete the handshake, then hand the connection to the engine's event loop.
 /// Call this from an http1 handler instead of looping on the fd yourself: after
 /// it returns, the EPOLL engine drives the frame loop, invoking on_frame for
@@ -509,4 +557,54 @@ test "zix http1 ws: pump echoes masked client frames over a socketpair" {
 
     const second = parseFrame(recv[first.consumed..n], &scratch).?;
     try std.testing.expectEqualStrings("yo", second.frame.payload);
+}
+
+test "zix http1 ws: broadcast fans one built frame out to every member" {
+    // Three members, each the read end of its own socketpair.
+    var pairs: [3][2]i32 = undefined;
+    for (&pairs) |*p| {
+        try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, p));
+    }
+    defer for (pairs) |p| {
+        _ = std.os.linux.close(p[0]);
+        _ = std.os.linux.close(p[1]);
+    };
+
+    const conns = [_]std.posix.fd_t{ pairs[0][1], pairs[1][1], pairs[2][1] };
+    broadcast(&conns, .text, "room-msg");
+
+    // Every member receives the identical, well-formed text frame.
+    for (pairs) |p| {
+        var recv: [128]u8 = undefined;
+        const n = try std.posix.read(p[0], &recv);
+
+        var scratch: [128]u8 = undefined;
+        const parsed = parseFrame(recv[0..n], &scratch).?;
+        try std.testing.expectEqual(Opcode.text, parsed.frame.opcode);
+        try std.testing.expectEqualStrings("room-msg", parsed.frame.payload);
+    }
+}
+
+test "zix http1 ws: broadcast skips a dead fd and still reaches live members" {
+    var live: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &live));
+    defer _ = std.os.linux.close(live[0]);
+    defer _ = std.os.linux.close(live[1]);
+
+    // -1 is never a valid fd, so the write to it fails and is skipped.
+    const conns = [_]std.posix.fd_t{ -1, live[1] };
+    broadcast(&conns, .binary, "payload");
+
+    var recv: [128]u8 = undefined;
+    const n = try std.posix.read(live[0], &recv);
+
+    var scratch: [128]u8 = undefined;
+    const parsed = parseFrame(recv[0..n], &scratch).?;
+    try std.testing.expectEqual(Opcode.binary, parsed.frame.opcode);
+    try std.testing.expectEqualStrings("payload", parsed.frame.payload);
+}
+
+test "zix http1 ws: broadcast to an empty member list is a no-op" {
+    const conns = [_]std.posix.fd_t{};
+    broadcast(&conns, .text, "ignored");
 }
