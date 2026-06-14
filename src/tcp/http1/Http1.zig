@@ -10,6 +10,7 @@ pub const ServerConfig = @import("config.zig").Http1ServerConfig;
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 pub const HandlerFn = core.HandlerFn;
+pub const RawFn = core.RawFn;
 pub const ParsedHead = core.ParsedHead;
 pub const ParseResult = core.ParseResult;
 pub const Range = core.Range;

@@ -8,9 +8,14 @@ const core = @import("core.zig");
 const ws = @import("websocket.zig");
 const HandlerFn = core.HandlerFn;
 
-/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
-const EPOLL_MAX_EVENTS: usize = 512;
+const EPOLL_MAX_EVENTS: usize = 1024;
+
+/// Per-worker sink buffer for coalescing pipelined responses. 64 KiB matches
+/// the rust-epoll reference and gives enough room for a full pipelined burst
+/// without mid-burst flushes.
+const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
 // --------------------------------------------------------- //
 
@@ -33,9 +38,12 @@ const ConnArgs = struct {
     io: std.Io,
     handler: HandlerFn,
     handler_timeout_ms: u32 = 0,
+    send_date_header: bool = true,
 };
 
 fn connEntry(args: ConnArgs) void {
+    core.setDateHeader(args.send_date_header);
+
     defer args.stream.close(args.io);
     const fd = args.stream.socket.handle;
     core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms });
@@ -58,7 +66,7 @@ fn runAsync(config: Config, handler: HandlerFn) !void {
 
     while (true) {
         const stream = srv.accept(io) catch continue;
-        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }});
+        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }});
     }
 }
 
@@ -123,7 +131,7 @@ const ConnQueue = struct {
     }
 };
 
-const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0 };
+const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0, send_date_header: bool = true };
 
 const AcceptCtx = struct {
     queue: *ConnQueue,
@@ -134,6 +142,8 @@ const AcceptCtx = struct {
 };
 
 fn poolEntry(ctx: PoolCtx) void {
+    core.setDateHeader(ctx.send_date_header);
+
     while (ctx.queue.pop(ctx.io)) |stream| {
         defer stream.close(ctx.io);
         const fd = stream.socket.handle;
@@ -173,7 +183,7 @@ fn runPool(config: Config, handler: HandlerFn) !void {
         t.* = try std.Thread.spawn(
             .{ .stack_size = 512 * 1024 },
             poolEntry,
-            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }},
+            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
         );
     }
 
@@ -202,6 +212,7 @@ const MixedAcceptCtx = struct {
     kernel_backlog: u31,
     handler: HandlerFn,
     handler_timeout_ms: u32 = 0,
+    send_date_header: bool = true,
 };
 
 fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
@@ -215,7 +226,7 @@ fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
 
     while (true) {
         const stream = srv.accept(ctx.io) catch continue;
-        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler, .handler_timeout_ms = ctx.handler_timeout_ms }});
+        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler, .handler_timeout_ms = ctx.handler_timeout_ms, .send_date_header = ctx.send_date_header }});
     }
 }
 
@@ -258,25 +269,34 @@ const MAX_FD: usize = 1 << 16;
 
 /// Private per-worker fd to Conn map. Not shared between workers: a connection
 /// fd is accepted and served by a single worker, and freed before its fd can
-/// be reused, so a stale slot is always null by the time it is reused.
+/// be reused, so a stale slot is always zeroed by the time it is reused.
+/// Conn structs are stored inline in slots (no pointer indirection). recv
+/// buffers are pre-allocated as a contiguous slab (MAX_FD * buf_size virtual
+/// bytes, Linux demand-paged). On accept, alloc() assigns conn.buf from the
+/// slab with no heap call. Empty slots are identified by buf.len == 0.
 const ConnTable = struct {
-    slots: []?*Conn,
+    slots: []Conn,
+    slab: []u8,
+    buf_size: usize,
 
-    fn init() !ConnTable {
-        const slots = try std.heap.smp_allocator.alloc(?*Conn, MAX_FD);
-        @memset(slots, null);
+    fn init(buf_size: usize) !ConnTable {
+        const slots = try std.heap.smp_allocator.alloc(Conn, MAX_FD);
+        @memset(std.mem.sliceAsBytes(slots), 0);
 
-        return .{ .slots = slots };
+        // Slab is intentionally not memset: Linux demand-paging means physical
+        // pages are only committed when a connection first recvs into its slot.
+        const slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+
+        return .{ .slots = slots, .slab = slab, .buf_size = buf_size };
     }
 
     fn deinit(self: *ConnTable) void {
-        for (self.slots) |maybe_conn| {
-            if (maybe_conn) |conn| {
-                std.heap.smp_allocator.free(conn.buf);
-                std.heap.smp_allocator.destroy(conn);
-            }
+        for (self.slots) |*conn| {
+            if (conn.buf.len == 0) continue;
+            if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
         }
 
+        std.heap.smp_allocator.free(self.slab);
         std.heap.smp_allocator.free(self.slots);
     }
 
@@ -284,35 +304,30 @@ const ConnTable = struct {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        return self.slots[idx];
+        const conn = &self.slots[idx];
+
+        return if (conn.buf.len > 0) conn else null;
     }
 
-    fn alloc(self: *ConnTable, fd: std.posix.fd_t, buf_size: usize) ?*Conn {
+    fn alloc(self: *ConnTable, fd: std.posix.fd_t) ?*Conn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const conn = std.heap.smp_allocator.create(Conn) catch return null;
-        const buf = std.heap.smp_allocator.alloc(u8, buf_size) catch {
-            std.heap.smp_allocator.destroy(conn);
-            return null;
-        };
+        const buf = self.slab[idx * self.buf_size ..][0..self.buf_size];
+        self.slots[idx] = .{ .fd = fd, .buf = buf, .filled = 0 };
 
-        conn.* = .{ .fd = fd, .buf = buf, .filled = 0, .ws = null, .drain = 0, .drain_close = false };
-        self.slots[idx] = conn;
-
-        return conn;
+        return &self.slots[idx];
     }
 
     fn free(self: *ConnTable, fd: std.posix.fd_t) void {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return;
 
-        if (self.slots[idx]) |conn| {
-            if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
-            std.heap.smp_allocator.free(conn.buf);
-            std.heap.smp_allocator.destroy(conn);
-            self.slots[idx] = null;
-        }
+        const conn = &self.slots[idx];
+        if (conn.buf.len == 0) return;
+
+        if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
+        conn.* = std.mem.zeroes(Conn);
     }
 };
 
@@ -369,9 +384,69 @@ fn setNonBlock(fd: std.posix.fd_t) void {
     _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
 }
 
+/// Spin up to 50 µs before blocking. Reduces wake-up latency on saturated
+/// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
+fn setBusyPoll(fd: std.posix.fd_t) void {
+    const SO_BUSY_POLL: u32 = 46;
+    std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        SO_BUSY_POLL,
+        std.mem.asBytes(&@as(c_int, 50)),
+    ) catch {};
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting
+/// the cgroup-allowed CPU mask so we never select a CPU the container cannot use.
+fn pinToCpu(worker_id: usize) void {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
+
+    var cpu_list: [256]u32 = undefined;
+    var n_cpus: usize = 0;
+    for (cpu_set, 0..) |word, word_idx| {
+        var w = word;
+        while (w != 0) : (w &= w - 1) {
+            if (n_cpus < cpu_list.len) {
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                n_cpus += 1;
+            }
+        }
+    }
+    if (n_cpus == 0) return;
+
+    const target = cpu_list[worker_id % n_cpus];
+    var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const cpu_word = target / @bitSizeOf(usize);
+    const cpu_bit: u6 = @intCast(target % @bitSizeOf(usize));
+    target_set[cpu_word] |= @as(usize, 1) << cpu_bit;
+
+    linux.sched_setaffinity(0, &target_set) catch {};
+}
+
+/// Count CPUs available to this process via sched_getaffinity, respecting cgroup
+/// and taskset restrictions. Falls back to std.Thread.getCpuCount when the syscall
+/// fails. Used by EPOLL to default to one worker per available CPU so that multiple
+/// workers are never pinned to the same core under cgroup-limited bench environments.
+fn getAvailableCpuCount() usize {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (cpu_set) |word| {
+        count += @popCount(word);
+    }
+
+    return if (count == 0) 1 else count;
+}
+
 /// Accept every pending connection on listener_fd and register each in epfd.
 /// Level-triggered, so draining to EAGAIN guarantees no accept is missed.
-fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, buf_size: usize) void {
+fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -385,7 +460,8 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
-        if (table.alloc(conn_fd, buf_size) == null) {
+        setBusyPoll(conn_fd);
+        if (table.alloc(conn_fd) == null) {
             _ = linux.close(conn_fd);
             continue;
         }
@@ -407,12 +483,12 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 /// remaining bytes are staged in conn.write_pending and EPOLLOUT is armed so
 /// the worker is never parked waiting for a slow client. An upgraded connection
 /// is handed to the WebSocket pump only after the flush.
-fn serveEpollConn(conn: *Conn, handler: HandlerFn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t) core.ConnOutcome {
+fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t) core.ConnOutcome {
     const linux = std.os.linux;
 
     var sink = core.RespSink{ .fd = conn.fd, .buf = out_buf };
     core.tl_resp_sink = &sink;
-    const outcome = serveEpollConnInner(conn, handler, body_buf, handler_timeout_ms);
+    const outcome = serveEpollConnInner(handler_fn, raw_fn, conn, body_buf, handler_timeout_ms);
     core.tl_resp_sink = null;
 
     if (sink.failed) return .close;
@@ -477,27 +553,67 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     return if (should_close) .close else .keep_alive;
 }
 
-fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
+/// Fast path for HTTP/1.1 GET requests: extract method and path with direct
+/// arithmetic, bypassing the full header scan loop in parseHeadAt. Only
+/// keep_alive defaults (HTTP/1.1 = true) and content_length=0 are assumed;
+/// raw_headers is still set so handlers can call getHeader() if needed.
+/// Returns null when the request is not a GET or the format is unexpected.
+fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
+    if (rem.len < 16) return null;
+    if (rem[0] != 'G' or rem[1] != 'E' or rem[2] != 'T' or rem[3] != ' ') return null;
+
+    const line_end = std.mem.indexOfScalarPos(u8, rem, 4, '\r') orelse return null;
+
+    // Minimum for "GET / HTTP/1.1": line_end >= 14; last 9 chars = " HTTP/1.1"
+    if (line_end < 14) return null;
+    if (rem[line_end - 9] != ' ') return null;
+    if (!std.mem.eql(u8, rem[line_end - 8 .. line_end], "HTTP/1.1")) return null;
+
+    const full_path = rem[4 .. line_end - 9];
+    var path = full_path;
+    var query: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, full_path, '?')) |q| {
+        path = full_path[0..q];
+        query = full_path[q + 1 ..];
+    }
+
+    const raw_start = line_end + 2;
+    const raw_headers: []const u8 = if (raw_start < header_end + 2) rem[raw_start .. header_end + 2] else &.{};
+
+    // Bail out to parseHeadAt when "close" appears in raw_headers so that
+    // Connection: close is handled correctly. This is the rare case.
+    if (std.mem.indexOf(u8, raw_headers, "close") != null) return null;
+
+    return .{
+        .head = .{
+            .method = rem[0..3],
+            .path = path,
+            .query = query,
+            .raw_headers = raw_headers,
+            .version_minor = 1,
+            .keep_alive = true,
+            .content_length = 0,
+            .chunked_request = false,
+            .expect_continue = false,
+        },
+        .body_offset = header_end + 4,
+    };
+}
+
+fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, conn: *Conn, body_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
 
-    while (true) {
-        if (conn.filled >= conn.buf.len) {
-            core.fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
-            return .close;
-        }
-
+    {
         const rc = linux.read(fd, conn.buf[conn.filled..].ptr, conn.buf.len - conn.filled);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
                 if (n == 0) return .close;
-
                 conn.filled += n;
-                break;
             },
-            .AGAIN => break,
-            .INTR => continue,
+            .AGAIN => {},
+            .INTR => {},
             else => return .close,
         }
     }
@@ -506,9 +622,23 @@ fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_
     var keep_alive = true;
     while (consumed < conn.filled) {
         const rem = conn.buf[consumed..conn.filled];
-        const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse break;
+        const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
+            if (rem.len >= conn.buf.len) {
+                core.fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                return .close;
+            }
+            break;
+        };
 
-        const parsed = core.parseHeadAt(rem, header_end) catch {
+        if (comptime raw_fn != null) {
+            if (raw_fn.?(rem, header_end, fd)) |end| {
+                consumed += end;
+                continue;
+            }
+        }
+
+        const parsed = parseGetFastPath(rem, header_end) orelse
+            core.parseHeadAt(rem, header_end) catch {
             core.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
             return .close;
         };
@@ -532,8 +662,8 @@ fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_
                 // now with an empty body (large-body endpoints use content_length,
                 // not the bytes), then drain the rest off the socket over later
                 // events so the connection stays usable for keep-alive.
-                core.setTimeout(handler_timeout_ms);
-                handler(&head, &.{}, fd);
+                if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
+                handler_fn(&head, &.{}, fd);
 
                 const present_body = rem.len - parsed.body_offset;
                 conn.drain = content_length - present_body;
@@ -546,8 +676,8 @@ fn serveEpollConnInner(conn: *Conn, handler: HandlerFn, body_buf: []u8, handler_
             }
         }
 
-        core.setTimeout(handler_timeout_ms);
-        handler(&head, body, fd);
+        if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
+        handler_fn(&head, body, fd);
 
         consumed += request_len;
 
@@ -652,83 +782,102 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     return if (conn.drain_close) .close else .keep_alive;
 }
 
-const EpollWorkerCtx = struct { config: Config, handler: HandlerFn };
+const EpollWorkerCtx = struct { config: Config, worker_id: usize };
 
-fn epollWorker(ctx: EpollWorkerCtx) void {
-    const linux = std.os.linux;
-    const config = ctx.config;
-    const io = config.io;
+/// Return a concrete epoll worker function with handler_fn baked in at compile
+/// time. Thread.spawn receives the returned function, eliminating the indirect
+/// HandlerFn call on every request in the event loop.
+fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) fn (EpollWorkerCtx) void {
+    return struct {
+        fn run(ctx: EpollWorkerCtx) void {
+            pinToCpu(ctx.worker_id);
 
-    const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
-    var srv = addr.listen(io, .{
-        .mode = .stream,
-        .kernel_backlog = config.kernel_backlog,
-        .reuse_address = true,
-    }) catch return;
-    defer srv.deinit(io);
-    const listener_fd = srv.socket.handle;
+            const linux = std.os.linux;
+            const config = ctx.config;
+            const io = config.io;
 
-    setNonBlock(listener_fd);
+            core.setDateHeader(config.send_date_header);
 
-    const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-    if (std.posix.errno(epfd_rc) != .SUCCESS) return;
-    const epfd: std.posix.fd_t = @intCast(epfd_rc);
-    defer _ = linux.close(epfd);
+            const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
+            var srv = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = config.kernel_backlog,
+                .reuse_address = true,
+            }) catch return;
+            defer srv.deinit(io);
+            const listener_fd = srv.socket.handle;
 
-    var listener_ev = linux.epoll_event{
-        .events = linux.EPOLL.IN,
-        .data = .{ .fd = listener_fd },
-    };
-    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
+            setNonBlock(listener_fd);
 
-    var table = ConnTable.init() catch return;
-    defer table.deinit();
+            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+            if (std.posix.errno(epfd_rc) != .SUCCESS) return;
+            const epfd: std.posix.fd_t = @intCast(epfd_rc);
+            defer _ = linux.close(epfd);
 
-    const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
-    defer std.heap.smp_allocator.free(body_buf);
+            var listener_ev = linux.epoll_event{
+                .events = linux.EPOLL.IN,
+                .data = .{ .fd = listener_fd },
+            };
+            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
 
-    const out_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
-    defer std.heap.smp_allocator.free(out_buf);
+            var table = ConnTable.init(config.max_recv_buf) catch return;
+            defer table.deinit();
 
-    var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
-    while (true) {
-        const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
-        switch (std.posix.errno(wait_rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return,
-        }
+            const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
+            defer std.heap.smp_allocator.free(body_buf);
 
-        const n: usize = @intCast(wait_rc);
-        for (events[0..n]) |ev| {
-            if (ev.data.fd == listener_fd) {
-                acceptAll(&table, epfd, listener_fd, config.max_recv_buf);
-                continue;
+            const out_buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch return;
+            defer std.heap.smp_allocator.free(out_buf);
+
+            var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+            var epoll_timeout: i32 = -1;
+            while (true) {
+                const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
+                switch (std.posix.errno(wait_rc)) {
+                    .SUCCESS => {},
+                    .INTR => continue,
+                    else => return,
+                }
+
+                const event_count: usize = @intCast(wait_rc);
+                if (event_count == 0) {
+                    epoll_timeout = -1;
+                    continue;
+                }
+
+                for (events[0..event_count]) |ev| {
+                    if (ev.data.fd == listener_fd) {
+                        acceptAll(&table, epfd, listener_fd);
+                        continue;
+                    }
+
+                    const conn = table.get(ev.data.fd) orelse continue;
+                    const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
+                        core.ConnOutcome.close
+                    else if (conn.write_pending.len > conn.write_pending_off)
+                        serveEpollWrite(conn, epfd)
+                    else if (conn.drain > 0)
+                        serveEpollDrain(conn)
+                    else if (conn.ws) |on_frame|
+                        serveEpollWs(conn, on_frame, body_buf, out_buf)
+                    else
+                        serveEpollConn(handler_fn, raw_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd);
+
+                    if (outcome == .close) {
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
+                        table.free(ev.data.fd);
+                        _ = linux.close(ev.data.fd);
+                    }
+                }
+
+                epoll_timeout = 0;
             }
-
-            const conn = table.get(ev.data.fd) orelse continue;
-            const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
-                core.ConnOutcome.close
-            else if (conn.write_pending.len > conn.write_pending_off)
-                serveEpollWrite(conn, epfd)
-            else if (conn.drain > 0)
-                serveEpollDrain(conn)
-            else if (conn.ws) |on_frame|
-                serveEpollWs(conn, on_frame, body_buf, out_buf)
-            else
-                serveEpollConn(conn, ctx.handler, body_buf, out_buf, config.handler_timeout_ms, epfd);
-
-            if (outcome == .close) {
-                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
-                table.free(ev.data.fd);
-                _ = linux.close(ev.data.fd);
-            }
         }
-    }
+    }.run;
 }
 
-fn runEpoll(config: Config, handler: HandlerFn) !void {
-    const cpu = try std.Thread.getCpuCount();
+fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) !void {
+    const cpu = getAvailableCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
     logSystem(config, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{ config.ip, config.port, worker_count });
@@ -736,11 +885,12 @@ fn runEpoll(config: Config, handler: HandlerFn) !void {
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
-    for (threads) |*t| {
+    const worker = epollWorkerFn(handler_fn, raw_fn);
+    for (threads, 0..) |*t, worker_id| {
         t.* = try std.Thread.spawn(
             .{ .stack_size = 512 * 1024 },
-            epollWorker,
-            .{EpollWorkerCtx{ .config = config, .handler = handler }},
+            worker,
+            .{EpollWorkerCtx{ .config = config, .worker_id = worker_id }},
         );
     }
 
@@ -765,7 +915,7 @@ fn runMixed(config: Config, handler: HandlerFn) !void {
         t.* = try std.Thread.spawn(
             .{},
             mixedAcceptEntry,
-            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms }},
+            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
         );
     }
 
@@ -774,13 +924,13 @@ fn runMixed(config: Config, handler: HandlerFn) !void {
 
 // --------------------------------------------------------- //
 
-/// Server type specialized over a comptime handler.
+/// Server type specialized over a comptime handler and optional raw interceptor.
 ///
 /// Note:
-/// - handler is baked into the type, so run() takes no argument. The server core
-///   stays routing-agnostic: handler can be a Router(routes).dispatch, a bare
-///   HandlerFn, or a middleware chain.
-fn Http1ServerImpl(comptime handler: HandlerFn) type {
+/// - handler and raw_fn are baked into the type, so run() takes no argument.
+/// - raw_fn is null in the normal path: the if(comptime raw_fn != null) block
+///   compiles away entirely, adding zero overhead to servers that don't use it.
+fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) type {
     return struct {
         config: Config,
 
@@ -798,7 +948,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                 .POOL => runPool(self.config, handler),
                 .MIXED => runMixed(self.config, handler),
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
-                    runEpoll(self.config, handler)
+                    runEpoll(self.config, handler, raw_fn)
                 else blk: {
                     logSystem(self.config, "EPOLL is Linux-only. Falling back to POOL.", .{});
                     break :blk runPool(self.config, handler);
@@ -814,6 +964,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
 /// - handler must be comptime: it is baked into the server type, so there is no
 ///   dynamic registration after init. Pass a Router(routes).dispatch, a bare
 ///   handler, or a middleware chain.
+/// - For raw-bytes interception before parsing, use initRaw.
 ///
 /// Usage:
 /// ```zig
@@ -833,9 +984,25 @@ pub const Server = struct {
     /// config - Http1ServerConfig
     ///
     /// Return:
-    /// - Http1ServerImpl(handler)
-    pub fn init(comptime handler: HandlerFn, config: Config) Http1ServerImpl(handler) {
-        return Http1ServerImpl(handler).init(config);
+    /// - Http1ServerImpl(handler, null)
+    pub fn init(comptime handler: HandlerFn, config: Config) Http1ServerImpl(handler, null) {
+        return Http1ServerImpl(handler, null).init(config);
+    }
+
+    /// Like init, but also installs a raw-request interceptor for the EPOLL
+    /// dispatch model. raw_fn is called before any header parsing on each
+    /// request. Returning a non-null offset skips the full parse-and-dispatch
+    /// path for that request. Only effective under EPOLL; other models ignore it.
+    ///
+    /// Param:
+    /// handler - comptime HandlerFn
+    /// raw_fn - comptime RawFn (called before parsing on every EPOLL request)
+    /// config - Http1ServerConfig
+    ///
+    /// Return:
+    /// - Http1ServerImpl(handler, raw_fn)
+    pub fn initRaw(comptime handler: HandlerFn, comptime raw_fn: core.RawFn, config: Config) Http1ServerImpl(handler, raw_fn) {
+        return Http1ServerImpl(handler, raw_fn).init(config);
     }
 };
 
@@ -899,7 +1066,7 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
 
     // epfd = -1: EPOLLOUT staging won't trigger for this burst (socketpair
     // buffer fits all 16 responses), so no epoll_ctl calls are made.
-    const outcome = serveEpollConn(&conn, testOkHandler, &body_buf, &out_buf, 0, -1);
+    const outcome = serveEpollConn(testOkHandler, null, &conn, &body_buf, &out_buf, 0, -1);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
 
@@ -908,4 +1075,71 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
     const n = try std.posix.read(fds[0], &recv);
     try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
     try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "\r\n\r\nok"));
+}
+
+test "zix http1: ConnTable inline slab alloc and free lifecycle" {
+    var table = try ConnTable.init(256);
+    defer table.deinit();
+
+    try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
+
+    const conn = table.alloc(5).?;
+    try std.testing.expectEqual(@as(std.posix.fd_t, 5), conn.fd);
+    try std.testing.expectEqual(@as(usize, 256), conn.buf.len);
+
+    const got = table.get(5).?;
+    try std.testing.expectEqual(conn, got);
+
+    table.free(5);
+    try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
+
+    table.free(5);
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix http1: parseGetFastPath basic GET with host header" {
+    const req = "GET /pipeline HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    const result = parseGetFastPath(req, header_end).?;
+
+    try std.testing.expectEqualStrings("GET", result.head.method);
+    try std.testing.expectEqualStrings("/pipeline", result.head.path);
+    try std.testing.expectEqualStrings("", result.head.query);
+    try std.testing.expectEqual(true, result.head.keep_alive);
+    try std.testing.expectEqual(@as(u64, 0), result.head.content_length);
+    try std.testing.expectEqual(false, result.head.chunked_request);
+    try std.testing.expectEqual(@as(u8, 1), result.head.version_minor);
+    try std.testing.expectEqual(header_end + 4, result.body_offset);
+}
+
+test "zix http1: parseGetFastPath with query string" {
+    const req = "GET /baseline11?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    const result = parseGetFastPath(req, header_end).?;
+
+    try std.testing.expectEqualStrings("/baseline11", result.head.path);
+    try std.testing.expectEqualStrings("a=1&b=2", result.head.query);
+}
+
+test "zix http1: parseGetFastPath rejects POST" {
+    const req = "POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(req, header_end));
+}
+
+test "zix http1: parseGetFastPath rejects HTTP/1.0" {
+    const req = "GET / HTTP/1.0\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(req, header_end));
+}
+
+test "zix http1: parseGetFastPath raw_headers covers host line" {
+    const req = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    const result = parseGetFastPath(req, header_end).?;
+    const host = core.getHeader(&result.head, "host");
+    try std.testing.expect(host != null);
+    try std.testing.expectEqualStrings("example.com", host.?);
 }
