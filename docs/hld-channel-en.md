@@ -127,7 +127,7 @@ See [`docs/concurrency.md`](concurrency.md) for the Channel entry in the Protoco
 
 ## Logger Integration
 
-`Channel` has no server config struct, so there is no `logger` field. Use `logger.system()` manually for lifecycle events:
+`Channel` has no server config struct, so there is no `logger` field. `Channel.init` prints a one-line init notice (`zix channel: init <T> cap=<N>`) to stderr in Debug builds only, suppressed in release and under the test runner (`builtin.is_test`, a print there would poison the test IPC). For real lifecycle logging use `logger.system()` manually:
 
 ```zig
 // Uncomment to add logger (console only):
