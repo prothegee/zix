@@ -392,7 +392,7 @@ See `examples/http1_websocket.zig`.
 
 ## Logging
 
-`config.logger` receives server lifecycle lines only (listening notices, EPOLL fallback). When null, lifecycle lines go to `std.debug.print`.
+`config.logger` receives server lifecycle lines only (listening notices, EPOLL fallback). When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds (so a release server with no logger emits no lifecycle output).
 
 Per-request access logging is the handler's responsibility: the Http1 handler writes to the fd directly and returns `void`, so the engine cannot observe response status or byte counts. Call `logger.access()` inside the handler where the final status and size are known.
 
