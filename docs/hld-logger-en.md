@@ -29,7 +29,7 @@ src/logger/
     Logger.zig   // namespace aggregator
 ```
 
-Export from `src/zix.zig`:
+Export from `src/lib.zig`:
 ```zig
 pub const Logger = @import("logger/logger.zig").Logger;
 // zix.Logger, zix.Logger.Level, zix.Logger.ConsoleMode, zix.Logger.Dir, zix.Logger.Config
