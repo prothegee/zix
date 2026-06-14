@@ -93,6 +93,30 @@ flowchart TD
 - `pool_size` diabaikan. `workers` mengontrol jumlah accept thread.
 - Throughput dan latency seimbang. Jitter lebih tinggi dibanding `.POOL` saat saturasi.
 
+### .EPOLL: Shared-Nothing epoll Worker (Linux-only)
+
+```mermaid
+flowchart TD
+    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn cpu_count worker\n(atau workers = N)"]
+    SPAWN --> W1["Worker 0\nSO_REUSEPORT listener\nepoll_create1"]
+    SPAWN --> W2["Worker 1\nSO_REUSEPORT listener\nepoll_create1"]
+    SPAWN --> WN["Worker N-1\n..."]
+    W1 --> EL["event loop\nepoll_wait(1024)"]
+    EL -->|listener fd| ACC["drain accept4(SOCK_CLOEXEC)\nsetNoDelay\nepoll_ctl ADD EPOLLIN+RDHUP"]
+    EL -->|conn fd RDHUP/ERR| CLOSE["epoll_ctl DEL\nclose(fd)"]
+    EL -->|conn fd readable| SERVE["handleOneRequest(fd)\nblocking read/write"]
+    SERVE -->|keep-alive| EL
+    SERVE -->|close| CLOSE
+    ACC --> EL
+```
+
+- Setiap worker memiliki satu `SO_REUSEPORT` listener dan satu `epoll` instance. Kernel mendistribusikan koneksi baru ke worker tanpa antrian bersama.
+- Level-triggered `EPOLLIN`: koneksi tetap terdaftar setelah setiap request dan re-fires saat data baru tiba. Tidak perlu re-arm eksplisit.
+- Fd blocking: `handleOneRequest` melakukan recv/parse/send secara sinkron, lalu mengembalikan worker ke `epoll_wait`.
+- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
+- Terbaik untuk request berumur pendek throughput tinggi di Linux. Tidak cocok untuk SSE atau WebSocket (blocking read akan menahan worker).
+- Build non-Linux otomatis fallback ke `.POOL`.
+
 `zix.Http.Server` menerima nilai `std.Io` yang opak dan tidak memiliki atau memanggil deinit pada backend tersebut. Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk detail jumlah thread dan perbandingan model.
 
 ---
@@ -101,7 +125,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    zix["src/zix.zig\npublic API root"]
+    zix["src/lib.zig\npublic API root"]
 
     zix --> Http["tcp/http/Http.zig\nzix.Http"]
     zix --> Tcp["tcp/Tcp.zig\nzix.Tcp"]
@@ -229,8 +253,8 @@ pub const HttpServerConfig = struct {
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
     conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
-    workers:              usize             = 0,          // 0 = cpu_count accept threads, ignored by .ASYNC
-    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2) .POOL only
+    workers:              usize             = 0,          // 0 = cpu_count; accept threads untuk .POOL/.MIXED, workers untuk .EPOLL; diabaikan oleh .ASYNC
+    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (diabaikan oleh .EPOLL, .MIXED, .ASYNC)
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
 };
 ```
