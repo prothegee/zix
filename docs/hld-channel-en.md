@@ -68,7 +68,7 @@ src/channel/
     Channel.zig   // namespace aggregator (pub const Channel = channel.zig.Channel)
 ```
 
-Export from `src/zix.zig`:
+Export from `src/lib.zig`:
 ```zig
 pub const Channel = @import("channel/Channel.zig").Channel;
 ```
