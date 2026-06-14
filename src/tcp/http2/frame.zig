@@ -112,6 +112,12 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
                 rem = rem[n..];
             },
             .INTR => continue,
+            // Non-blocking EPOLL socket with a full send buffer: poll until
+            // writable then retry. Blocking sockets never hit this branch.
+            .AGAIN => {
+                var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+                _ = std.posix.poll(&pfd, -1) catch return error.BrokenPipe;
+            },
             else => return error.BrokenPipe,
         }
     }
@@ -267,6 +273,19 @@ pub fn sendResponse(
 }
 
 // --------------------------------------------------------- //
+
+test "zix test: fdWriteAll delivers data on a blocking fd" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try fdWriteAll(fds[1], "frame");
+    _ = std.posix.system.close(fds[1]);
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    try std.testing.expectEqualStrings("frame", buf[0..n]);
+}
 
 test "zix test: frame constants, FT_HEADERS is 0x01" {
     try std.testing.expectEqual(@as(u8, 0x01), FT_HEADERS);

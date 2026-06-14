@@ -311,8 +311,9 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
             defer table.deinit();
 
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+            var epoll_timeout: i32 = -1;
             while (true) {
-                const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
+                const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
                 switch (std.posix.errno(wait_rc)) {
                     .SUCCESS => {},
                     .INTR => continue,
@@ -320,6 +321,11 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 }
 
                 const n: usize = @intCast(wait_rc);
+                if (n == 0) {
+                    epoll_timeout = -1;
+                    continue;
+                }
+
                 for (events[0..n]) |ev| {
                     if (ev.data.fd == listener_fd) {
                         acceptAll(&table, epfd, listener_fd, ctx.opts);
@@ -338,6 +344,8 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                         _ = linux.close(ev.data.fd);
                     }
                 }
+
+                epoll_timeout = 0;
             }
         }
 
