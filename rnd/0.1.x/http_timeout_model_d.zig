@@ -1,7 +1,7 @@
 //! http_timeout_model_d.zig
 //! Zig 0.16.1-dev.12+e2d0ed235
 //!
-//! Option D -- Shared Timer Thread + Connection Registry
+//! Option D: Shared Timer Thread + Connection Registry
 //!
 //! Strategy: the server maintains a registry of active connections and their
 //! deadlines. The existing timer thread (already running for the date cache)
@@ -22,7 +22,7 @@
 //!
 //! Does NOT cover (same as C):
 //!   - Handler blocking on non-socket I/O
-//!   - Currently blocking readv() -- shutdown() affects the next read,
+//!   - Currently blocking readv(): shutdown() affects the next read,
 //!     not one already in progress
 //!
 //! Cost:
@@ -84,7 +84,7 @@ const ConnEntry = struct {
 
 const ConnRegistry = struct {
     mutex: std.Io.Mutex = .init,
-    // Unordered list -- swapRemove on deregister is O(1).
+    // Unordered list. swapRemove on deregister is O(1).
     // evict() does a full O(n) scan each tick, acceptable for typical
     // connection counts (hundreds, not millions).
     entries: std.ArrayListUnmanaged(*ConnEntry) = .empty,
@@ -92,7 +92,7 @@ const ConnRegistry = struct {
     fn register(self: *ConnRegistry, entry: *ConnEntry, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        // Allocation failure: drop silently -- connection proceeds without
+        // Allocation failure: drop silently. Connection proceeds without
         // timeout protection rather than being rejected.
         self.entries.append(std.heap.smp_allocator, entry) catch {};
     }
@@ -202,7 +202,7 @@ fn handleConnection(stream: std.Io.net.Stream, io: std.Io) void {
 //       ...
 //   }
 //
-// ConnRegistry is embedded in the server struct -- no separate allocation.
+// ConnRegistry is embedded in the server struct. No separate allocation.
 // The timer thread already has a *Self pointer after the refactor, so
 // passing server to timerLoop is the only signature change.
 
@@ -229,9 +229,9 @@ pub fn main(process: std.process.Init) !void {
 }
 
 //
-// How to test Model D -- Shared Timer Thread + Connection Registry
+// How to test Model D: Shared Timer Thread + Connection Registry
 //
-// Note: this main() loop is single-threaded -- it handles one connection at a
+// Note: this main() loop is single-threaded, it handles one connection at a
 // time. While one client is connected, the next queues in the kernel and is
 // not accepted until the current connection closes. This is a PoC limitation,
 // the real server uses a pool of threads so connections run concurrently.
@@ -244,24 +244,24 @@ pub fn main(process: std.process.Init) !void {
 // Step 1: run the server.
 //   zig run rnd/http_timeout_model_d.zig
 //
-// Test A -- slow client (never sends headers):
+// Test A: slow client (never sends headers):
 //   nc localhost 9007
 //   (just wait, do not type anything)
-//   Pressing Enter in nc sends \n which is not a complete HTTP request --
-//   the server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
+//   Pressing Enter in nc sends \n which is not a complete HTTP request.
+//   The server keeps waiting for \r\n\r\n nothing is sent back. This is normal.
 //   Expected: nc exits within ~5.5s (5s deadline + up to 500ms timer granularity)
 //
 //   Confirm timing:
 //   time nc localhost 9007
 //   Expected: real 0m5.0s to 0m5.5s
 //
-// Test B -- multiple concurrent slow clients:
+// Test B: multiple concurrent slow clients:
 //   for i in 1 2 3 4 5; do nc localhost 9007 & done
 //   Expected: all 5 exit within the same ~3.5s window.
 //   This shows the single timer thread evicting all of them in one scan,
 //   unlike model C which would have 5 separate watchdog threads sleeping.
 //
-// Test C -- normal connection (completes before timeout):
+// Test C: normal connection (completes before timeout):
 //   curl http://localhost:9007/
 //   Expected: responds immediately, deregister() removes the entry before
 //   the timer ever sees it as expired.

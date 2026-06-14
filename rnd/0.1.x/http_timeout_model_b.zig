@@ -1,7 +1,7 @@
 //! http_timeout_model_b.zig
 //! Zig 0.16.1-dev.12+e2d0ed235
 //!
-//! Option B -- Context Deadline (cooperative, handler-level)
+//! Option B: Context Deadline (cooperative, handler-level)
 //!
 //! Strategy: add a deadline field to Context. The server optionally sets a
 //! global deadline from config before dispatch. Handlers opt in by calling
@@ -13,7 +13,7 @@
 //!
 //! Does NOT cover:
 //!   - receiveHead() blocking (handler has not started yet)
-//!   - Blocking I/O inside a handler (std.Io.sleep, DB, file) -- the handler
+//!   - Blocking I/O inside a handler (std.Io.sleep, DB, file): the handler
 //!     will not be interrupted, it notices only on the next explicit check
 //!   - Keep-alive idle gaps (use Option A alongside for that)
 //!
@@ -46,7 +46,7 @@ const std = @import("std");
 //
 //   The server can also set ctx.deadline before calling dispatch,
 //   making every handler subject to a global response timeout without
-//   any per-handler code change -- handlers that never call timedOut()
+//   any per-handler code change. Handlers that never call timedOut()
 //   simply ignore the deadline.
 //
 
@@ -67,7 +67,7 @@ pub const Context = struct {
     deadline: ?std.Io.Clock.Timestamp = null,
 
     // Returns a copy of this context with a deadline set ms from now.
-    // Does not modify the original -- caller stores the returned value.
+    // Does not modify the original. Caller stores the returned value.
     pub fn withTimeout(self: Context, ms: u64) Context {
         var c = self;
         const dur = std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)), .clock = .real };
@@ -185,7 +185,7 @@ pub fn main(process: std.process.Init) !void {
 }
 
 //
-// How to test Model B -- Context Deadline (cooperative handler)
+// How to test Model B: Context Deadline (cooperative handler)
 //
 // No changes needed. The handler is already wired and the constants are
 // set so that step 2 crosses the deadline:
@@ -211,6 +211,6 @@ pub fn main(process: std.process.Init) !void {
 //   Expected: "model-b: handler completed within deadline"
 //
 // What is being verified:
-//   The deadline is NOT enforced by the library -- the handler must call
+//   The deadline is NOT enforced by the library. The handler must call
 //   ctx.timedOut() itself. Blocking ops (sleep, DB, file) inside the handler
 //   run to completion regardless the check only fires at explicit poll points.

@@ -1,6 +1,6 @@
-# UDS Specification -- zix.Uds
+# UDS Specification: zix.Uds
 
-Unix Domain Socket server and client. Same-host IPC only -- no network routing.
+Unix Domain Socket server and client. Same-host IPC only. No network routing.
 
 ---
 
@@ -16,7 +16,7 @@ Same-host inter-process communication via filesystem paths. Use cases:
 
 ## Restriction
 
-Same as UDP and TCP: std only. Explicit over implicit. Separation of concern -- no import from
+Same as UDP and TCP: std only. Explicit over implicit. Separation of concern. No import from
 `src/tcp/` or `src/udp/`.
 
 ---
@@ -34,7 +34,7 @@ Stream mode planned first (most common for control sockets).
 
 ## Addressing
 
-No IP or port -- uses a filesystem path.
+No IP or port. Uses a filesystem path.
 
 | Type | Example | Notes |
 | :- | :- | :- |
@@ -49,7 +49,7 @@ Path cleanup on `deinit()`: server must `unlink()` the socket file. Stale socket
 
 ## Port Configuration
 
-No port -- path replaces both IP and port. Equivalent to REQUIRED mode in UDP terms (path must be
+No port. Path replaces both IP and port. Equivalent to REQUIRED mode in UDP terms (path must be
 non-empty in config). Configurable path via CLI arg is planned (`--socket-path`).
 
 ---
@@ -59,7 +59,7 @@ non-empty in config). Configurable path via CLI arg is planned (`--socket-path`)
 For datagram mode with binary structs: same pattern as UDP.
 For stream mode: endianness is a framing concern (fixed in message format, not in config).
 
-Use `NATIVE` by default -- UDS is always same-host, so native byte order is safe.
+Use `NATIVE` by default. UDS is always same-host, so native byte order is safe.
 
 ---
 
@@ -67,7 +67,7 @@ Use `NATIVE` by default -- UDS is always same-host, so native byte order is safe
 
 Same as TCP and UDP: caller owns the `io` backend.
 Model 1 (single accept loop + io.concurrent) is the default.
-Model 2 (multiple workers + SO_REUSEPORT) is planned -- Linux only for UDS abstract sockets.
+Model 2 (multiple workers + SO_REUSEPORT) is planned. Linux only for UDS abstract sockets.
 
 See [`docs/concurrency.md`](../docs/concurrency.md).
 
@@ -77,10 +77,10 @@ See [`docs/concurrency.md`](../docs/concurrency.md).
 
 ```
 src/uds/
-    config.zig   -- UdsServerConfig, UdsClientConfig, SocketMode enum
-    server.zig   -- UdsServer (stream and datagram)
-    client.zig   -- UdsClient
-    Uds.zig      -- namespace aggregator
+    config.zig   : UdsServerConfig, UdsClientConfig, SocketMode enum
+    server.zig   : UdsServer (stream and datagram)
+    client.zig   : UdsClient
+    Uds.zig      : namespace aggregator
 ```
 
 Export from `src/zix.zig` as `pub const Uds = @import("uds/Uds.zig")`.

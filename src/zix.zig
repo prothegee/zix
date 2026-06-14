@@ -41,6 +41,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/websocket.zig"));
     std.testing.refAllDecls(@import("tcp/http/client_config.zig"));
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
+    std.testing.refAllDecls(@import("tcp/http/server.zig"));
 
     // # zix.Http1
     std.testing.refAllDecls(@import("tcp/http1/core.zig"));

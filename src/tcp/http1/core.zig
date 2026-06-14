@@ -35,6 +35,19 @@ pub const HandlerFn = *const fn (
     fd: std.posix.fd_t,
 ) void;
 
+/// Optional raw-request interceptor for the EPOLL dispatch model.
+/// Called after the "\r\n\r\n" header boundary is found, before any parsing.
+/// rem is the full request slice (method line through end of headers + body).
+/// header_end is the byte offset of the "\r\n\r\n" sequence within rem.
+/// fd is the connection file descriptor for writing a response.
+///
+/// Return:
+/// - usize: consumed request length when the interceptor handled the request.
+///   The interceptor must write its response (via fdWriteAll or tl_resp_sink)
+///   before returning. HTTP/1.1 keep-alive is assumed.
+/// - null: fall through to the normal parse-and-dispatch path.
+pub const RawFn = *const fn (rem: []const u8, header_end: usize, fd: std.posix.fd_t) ?usize;
+
 /// Options for serveConn.
 pub const ServeOpts = struct {
     nodelay: bool = true,
@@ -353,6 +366,12 @@ const DateCache = struct {
 
 threadlocal var tl_date: DateCache = .{ .secs = 0, .buf = undefined, .len = 0 };
 threadlocal var tl_date_tick: u8 = 0;
+threadlocal var tl_send_date: bool = true;
+
+/// Set whether responses include the Date header. Called once per worker thread at startup.
+pub fn setDateHeader(enabled: bool) void {
+    tl_send_date = enabled;
+}
 
 fn cachedDate() []const u8 {
     tl_date_tick +%= 1;
@@ -406,7 +425,9 @@ fn appendBytes(buf: []u8, pos: usize, s: []const u8) usize {
     return pos + s.len;
 }
 
-fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_len: usize) []u8 {
+/// Write a simple response header into buf starting at offset 0.
+/// buf must be at least 256 bytes. Returns the number of bytes written.
+fn buildSimpleHeaderInto(buf: []u8, status: u16, content_type: []const u8, body_len: usize) usize {
     var pos: usize = 0;
     pos = appendBytes(buf, pos, "HTTP/1.1 ");
     pos = appendStatusCode(buf, pos, status);
@@ -421,11 +442,19 @@ fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_
     }
     pos = appendBytes(buf, pos, "Content-Length: ");
     pos = appendDec(buf, pos, body_len);
-    pos = appendBytes(buf, pos, "\r\nDate: ");
-    pos = appendBytes(buf, pos, cachedDate());
-    pos = appendBytes(buf, pos, "\r\n\r\n");
+    pos = appendBytes(buf, pos, "\r\n");
+    if (tl_send_date) {
+        pos = appendBytes(buf, pos, "Date: ");
+        pos = appendBytes(buf, pos, cachedDate());
+        pos = appendBytes(buf, pos, "\r\n");
+    }
+    pos = appendBytes(buf, pos, "\r\n");
 
-    return buf[0..pos];
+    return pos;
+}
+
+fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_len: usize) []u8 {
+    return buf[0..buildSimpleHeaderInto(buf, status, content_type, body_len)];
 }
 
 // --------------------------------------------------------- //
@@ -539,6 +568,27 @@ pub fn writeSimple(
     content_type: []const u8,
     body: []const u8,
 ) !void {
+    if (tl_resp_sink) |sink| {
+        if (sink.fd == fd) {
+            // Fast path: build header directly into sink.buf at sink.len, then
+            // append body. Eliminates the hdr_buf[256] stack allocation and the
+            // hdr_buf-to-sink memcpy on the pipelined hot path.
+            if (sink.len + 256 + body.len <= sink.buf.len) {
+                const hdr_len = buildSimpleHeaderInto(sink.buf[sink.len..], status, content_type, body.len);
+                sink.len += hdr_len;
+                @memcpy(sink.buf[sink.len..][0..body.len], body);
+                sink.len += body.len;
+            } else {
+                var hdr_buf: [256]u8 = undefined;
+                const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
+                sink.append(hdr);
+                if (!sink.failed) sink.append(body);
+            }
+
+            return if (sink.failed) error.BrokenPipe else {};
+        }
+    }
+
     var hdr_buf: [256]u8 = undefined;
     const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
 
@@ -547,7 +597,9 @@ pub fn writeSimple(
         @memcpy(buf[0..hdr.len], hdr);
         @memcpy(buf[hdr.len..][0..body.len], body);
 
-        return fdWriteAll(fd, buf[0 .. hdr.len + body.len]);
+        // Skips that sink check entirely instead,
+        // and write straight to the fd since code only reaches this line.
+        return fdWriteAllDirect(fd, buf[0 .. hdr.len + body.len]);
     }
 
     var sent: usize = 0;
@@ -1041,6 +1093,50 @@ test "zix http1: percentDecode, encoded chars decoded in place" {
     try std.testing.expectEqualStrings("a b", decoded);
 }
 
+test "zix http1: buildSimpleHeaderInto writes status, content-type, content-length" {
+    var buf: [256]u8 = undefined;
+    const len = buildSimpleHeaderInto(&buf, 200, "text/plain", 3);
+    const hdr = buf[0..len];
+    try std.testing.expect(std.mem.startsWith(u8, hdr, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Length: 3\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, hdr, "\r\n\r\n"));
+}
+
+test "zix http1: buildSimpleHeaderInto omits Content-Type when empty" {
+    var buf: [256]u8 = undefined;
+    const len = buildSimpleHeaderInto(&buf, 204, "", 0);
+    const hdr = buf[0..len];
+    try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Type") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Length: 0\r\n") != null);
+}
+
+test "zix http1: writeSimple builds header directly into active sink without hdr_buf bounce" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var stage: [4096]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    const before = sink.len;
+    try writeSimple(fds[1], 200, "text/plain", "hi");
+
+    // Header was written directly into the sink: len advanced, nothing flushed yet.
+    try std.testing.expect(sink.len > before);
+    try std.testing.expect(!sink.failed);
+
+    sink.flush();
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    const resp = recv[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nhi"));
+}
+
 test "zix http1: RespSink stages fdWriteAll bytes until flush" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1064,6 +1160,47 @@ test "zix http1: RespSink stages fdWriteAll bytes until flush" {
     var recv: [64]u8 = undefined;
     const n = try std.posix.read(fds[0], &recv);
     try std.testing.expectEqualStrings("alphabeta", recv[0..n]);
+}
+
+test "zix http1: writeSimple writes directly into active sink without buf[4096] bounce" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var stage: [4096]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    try writeSimple(fds[1], 200, "text/plain", "ok");
+
+    // Bytes are staged in the sink, nothing sent to the socket yet.
+    try std.testing.expect(sink.len > 0);
+    try std.testing.expect(!sink.failed);
+
+    sink.flush();
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    const resp = recv[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nok"));
+}
+
+test "zix http1: writeSimple with no active sink writes directly to fd" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    try writeSimple(fds[1], 404, "text/plain", "not found");
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    const resp = recv[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 404 Not Found\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nnot found"));
 }
 
 test "zix http1: RespSink oversized payload writes through in order" {

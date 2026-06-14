@@ -1,4 +1,4 @@
-# HTTP Specification -- zix.Http
+# HTTP Specification: zix.Http
 
 Research notes, confirmed behaviors, and open proposals for the HTTP layer.
 Resolved architectural decisions are in [`docs/adr.md`](../docs/adr.md).
@@ -16,7 +16,7 @@ Supersedes: `rnd/http_explicit_implicit.md`, `rnd/http_explicit_without_burden.m
 Every server behavior is named in `HttpServerConfig`. Nothing is hidden in `server.zig` internals.
 If it is not in the config struct, it does not happen.
 
-Current state -- named fields in config:
+Current state: named fields in config:
 
 | Behavior | Config field | Default | Status |
 | :- | :- | :- | :- |
@@ -30,7 +30,7 @@ Current state -- named fields in config:
 | Connection guard (Layer D) | `conn_timeout_ms` | `0` (disabled) | Named field, model 2 only. ADR-018 |
 | Handler budget (Layer B) | `handler_timeout_ms` | `0` (disabled) | Named field, ctx.timedOut(). ADR-018 |
 
-Pending additions -- proposed in ADR-012:
+Pending additions: proposed in ADR-012:
 
 | Behavior | Proposed field | Proposed default |
 | :- | :- | :- |
@@ -39,7 +39,7 @@ Pending additions -- proposed in ADR-012:
 
 ### Middleware Pattern (Accepted, ADR-011)
 
-Comptime wrapper functions -- confirmed, implemented. See `examples/http_middleware.zig`.
+Comptime wrapper functions: confirmed, implemented. See `examples/http_middleware.zig`.
 
 ```zig
 fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
@@ -57,7 +57,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 }
 ```
 
-Compose left-to-right -- outermost wrapper runs first:
+Compose left-to-right. Outermost wrapper runs first:
 ```zig
 server.registerHandler("/private", withOriginCheck(withBasicAuth(privateHandler)));
 ```
@@ -72,7 +72,7 @@ deferred: the change would be breaking and the benefit is marginal for typical r
 ### Arena Allocator Lifetime (Accepted, ADR-003)
 
 `ctx.allocator` is a per-connection `ArenaAllocator` reset between requests.
-Rename to `ctx.request_arena` was considered and declined -- the arena lifetime is documented, not encoded in the name.
+Rename to `ctx.request_arena` was considered and declined. The arena lifetime is documented, not encoded in the name.
 
 ---
 
@@ -112,7 +112,7 @@ Only upload, body-parsing, or large response handlers benefit.
 ### 5. Zero-Copy Static Serving
 
 Current: file bytes read into buffer -> written to socket (two copies).
-Proposed: `sendfile(2)` on Linux -- page cache -> socket directly, no userspace copy.
+Proposed: `sendfile(2)` on Linux. Page cache -> socket directly, no userspace copy.
 Add as runtime-detected code path in `static.zig`. Relevant for files > 64 KB.
 
 ---
@@ -121,11 +121,11 @@ Add as runtime-detected code path in `static.zig`. Relevant for files > 64 KB.
 
 | Question | Status |
 | :- | :- |
-| ADR-012: explicit not_found / keep_alive fields | Proposed -- not yet implemented |
-| Hash map for exact routes | Implemented -- `exact_map: StringHashMapUnmanaged(HandlerFn)` in router.zig |
+| ADR-012: explicit not_found / keep_alive fields | Proposed. Not yet implemented. |
+| Hash map for exact routes | Implemented: `exact_map: StringHashMapUnmanaged(HandlerFn)` in router.zig |
 | conn_timeout_ms / handler_timeout_ms | Implemented (ADR-018) |
 | First-match-wins routing | Deferred (ADR-004) |
-| Middleware chain runner | Not needed -- comptime wrapper is the pattern |
+| Middleware chain runner | Not needed. Comptime wrapper is the pattern. |
 
 ---
 

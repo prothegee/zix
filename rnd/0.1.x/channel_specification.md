@@ -1,4 +1,4 @@
-# Channel Specification -- zix.Channel
+# Channel Specification: zix.Channel
 
 Typed in-process communication channels. Approaching Go's channel model.
 
@@ -7,7 +7,7 @@ Typed in-process communication channels. Approaching Go's channel model.
 ## Goal
 
 A synchronized message-passing primitive for concurrent Zig tasks within one process.
-Unlike UDP/TCP/UDS, channels do not cross a network or process boundary -- they are in-memory
+Unlike UDP/TCP/UDS, channels do not cross a network or process boundary. They are in-memory
 queues between concurrent tasks sharing the same address space.
 
 Modeled after Go channels and OS pipes (at the conceptual level).
@@ -73,9 +73,9 @@ type level if needed via wrapper types at implementation time.
 | :- | :- | :- | :- |
 | Typed | yes (generic) | no (bytes only) | yes (comptime generic) |
 | Bidirectional | yes | no (one-way) | yes |
-| Cross-process | no | yes | no -- in-process only |
+| Cross-process | no | yes | no (in-process only) |
 | Buffered | yes | limited (pipe buffer) | yes |
-| Select / multiplex | yes (`select`) | `poll`/`epoll` | planned -- defer |
+| Select / multiplex | yes (`select`) | `poll`/`epoll` | planned (defer) |
 
 ---
 
@@ -109,9 +109,9 @@ fn consumerFn(cap: struct { ch: *MyChan }) void {
 NOT YET DESIGNED. Marked as planned.
 
 ```
-src/channel/   -- planned, not yet implemented
-    channel.zig  -- Channel(comptime T: type) generic
-    Channel.zig  -- namespace aggregator
+src/channel/   : planned, not yet implemented
+    channel.zig  : Channel(comptime T: type) generic
+    Channel.zig  : namespace aggregator
 ```
 
 Export from `src/zix.zig` as `pub const Channel = @import("channel/Channel.zig")` when implemented.

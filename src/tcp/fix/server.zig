@@ -197,8 +197,9 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
     if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_event)) != .SUCCESS) return;
 
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+    var epoll_timeout: i32 = -1;
     while (true) {
-        const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
+        const wait_result = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
         switch (std.posix.errno(wait_result)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -206,6 +207,11 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
         }
 
         const n: usize = @intCast(wait_result);
+        if (n == 0) {
+            epoll_timeout = -1;
+            continue;
+        }
+
         for (events[0..n]) |ev| {
             if (ev.data.fd != listener_fd) continue;
 
@@ -232,6 +238,8 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
                 }});
             }
         }
+
+        epoll_timeout = 0;
     }
 }
 

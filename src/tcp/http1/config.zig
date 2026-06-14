@@ -30,6 +30,9 @@ pub const Http1ServerConfig = struct {
     /// Handlers opt in by calling zix.Http1.isExpired() between expensive steps and
     /// responding early. Handlers may shorten their own budget via zix.Http1.setTimeout().
     handler_timeout_ms: u32 = 0,
+    /// Include the Date header in every response. Default true for RFC 7231 compliance.
+    /// Set false to reduce response size by 37 bytes per response.
+    send_date_header: bool = true,
     /// Optional logger. When non-null, the server logs lifecycle lines (listening,
     /// fallback notices) through it instead of std.debug.print.
     ///

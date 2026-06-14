@@ -1,17 +1,17 @@
 //! http_timeout_model_bd.zig
 //! Zig 0.16.1-dev.12+e2d0ed235
 //!
-//! Combined B + D -- the recommended timeout strategy for zix.
+//! Combined B + D: the recommended timeout strategy for zix.
 //!
 //! Two independent layers with distinct responsibilities:
 //!
-//!   D (network layer) -- ConnRegistry + timer thread
+//!   D (network layer): ConnRegistry + timer thread
 //!     Protects pool threads from slow or malicious clients that stall
 //!     before or during header send. Fires shutdown(.both) on expired
-//!     connections unconditionally -- handler does not need to cooperate.
+//!     connections unconditionally. Handler does not need to cooperate.
 //!     Deadline: CONN_TIMEOUT_MS from accept time.
 //!
-//!   B (handler layer) -- ctx.withTimeout / ctx.timedOut
+//!   B (handler layer): ctx.withTimeout / ctx.timedOut
 //!     Gives handlers an opt-in execution budget. Handler checks
 //!     ctx.timedOut() between steps and responds with 408 early.
 //!     Deadline: HANDLER_TIMEOUT_MS, set globally before dispatch.
@@ -34,11 +34,11 @@ const std = @import("std");
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9007;
 
-// D: connection-level guard -- covers slow/stalled clients.
+// D: connection-level guard (covers slow/stalled clients).
 // Fires shutdown(.both) if the full connection lifetime exceeds this.
 const CONN_TIMEOUT_MS: u64 = 10_000;
 
-// B: handler-level budget -- covers slow handler execution.
+// B: handler-level budget (covers slow handler execution).
 // Handler checks ctx.timedOut() between steps.
 const HANDLER_TIMEOUT_MS: u64 = 5_000;
 
@@ -46,8 +46,7 @@ const HANDLER_TIMEOUT_MS: u64 = 5_000;
 const TIMER_INTERVAL_MS: u64 = 500;
 
 // --------------------------------------------------------- //
-// Layer B -- Context with deadline
-// --------------------------------------------------------- //
+// Layer B: Context with deadline
 
 pub const Context = struct {
     io: std.Io,
@@ -83,8 +82,7 @@ pub const Context = struct {
 };
 
 // --------------------------------------------------------- //
-// Layer D -- Connection registry + timer eviction
-// --------------------------------------------------------- //
+// Layer D: Connection registry + timer eviction
 
 const ConnEntry = struct {
     stream: std.Io.net.Stream,
@@ -130,8 +128,7 @@ const ConnRegistry = struct {
 };
 
 // --------------------------------------------------------- //
-// Timer thread -- drives both date cache and D eviction
-// --------------------------------------------------------- //
+// Timer thread: drives both date cache and D eviction
 
 var g_registry = ConnRegistry{};
 
@@ -143,8 +140,7 @@ fn timerLoop(io: std.Io) void {
 }
 
 // --------------------------------------------------------- //
-// Example handler -- uses layer B
-// --------------------------------------------------------- //
+// Example handler: uses layer B
 
 fn slowHandler(req: *std.http.Server.Request, ctx: *Context) !void {
     // Step 1: simulate 3s of work.
@@ -166,8 +162,7 @@ fn slowHandler(req: *std.http.Server.Request, ctx: *Context) !void {
 }
 
 // --------------------------------------------------------- //
-// handleConnection -- wires both layers
-// --------------------------------------------------------- //
+// handleConnection: wires both layers
 
 fn handleConnection(stream: std.Io.net.Stream, io: std.Io, allocator: std.mem.Allocator) void {
     defer stream.close(io);
@@ -235,12 +230,12 @@ pub fn main(process: std.process.Init) !void {
 }
 
 //
-// How to test Model BD -- Combined B + D
+// How to test Model BD: Combined B + D
 //
 // Note: main() is single-threaded (one connection at a time). Run each
 // test independently. Do not connect two clients simultaneously.
 //
-// --- Test 1: Layer D -- slow client, connection-level guard ---
+// Test 1: Layer D (slow client, connection-level guard)
 //
 //   zig run rnd/http_timeout_model_bd.zig
 //
@@ -251,14 +246,14 @@ pub fn main(process: std.process.Init) !void {
 //   time nc localhost 9007
 //   Expected: real ~10.0s to 10.5s
 //
-// --- Test 2: Layer B -- slow handler, execution budget ---
+// Test 2: Layer B (slow handler, execution budget)
 //
 //   zig run rnd/http_timeout_model_bd.zig
 //
 //   printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | nc localhost 9007
 //   Expected: HTTP 408 after ~5s, stderr "model-bd: handler timed out after step 2"
 //
-// --- Test 3: Both layers independent -- D fires before B gets a chance ---
+// Test 3: Both layers independent (D fires before B gets a chance)
 //
 //   Set CONN_TIMEOUT_MS = 2_000 (less than HANDLER_TIMEOUT_MS = 5_000).
 //   Send a valid HTTP request. Layer D shuts down the connection before the
@@ -269,7 +264,7 @@ pub fn main(process: std.process.Init) !void {
 //   printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | nc localhost 9007
 //   Expected: connection closes abruptly before a response is received.
 //
-// --- Test 4: Normal request -- both layers idle ---
+// Test 4: Normal request (both layers idle)
 //
 //   zig run rnd/http_timeout_model_bd.zig
 //
