@@ -88,7 +88,25 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     if (buf.len < byte_offset + capped_len) return null;
 
     const payload: []const u8 = if (masked) blk: {
-        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % ws_mask_len];
+        const src = buf[byte_offset..][0..capped_len];
+        const dst = payload_buf[0..capped_len];
+        const vec_width = 16;
+        const vec_mask: @Vector(vec_width, u8) = .{
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+        };
+        var i: usize = 0;
+
+        while (i + vec_width <= capped_len) : (i += vec_width) {
+            const chunk: @Vector(vec_width, u8) = src[i..][0..vec_width].*;
+            dst[i..][0..vec_width].* = chunk ^ vec_mask;
+        }
+        while (i < capped_len) : (i += 1) {
+            dst[i] = src[i] ^ mask[i % ws_mask_len];
+        }
+
         break :blk payload_buf[0..capped_len];
     } else buf[byte_offset .. byte_offset + capped_len];
 
@@ -98,43 +116,61 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     };
 }
 
-/// Build a server->client WebSocket frame (unmasked per RFC 6455 5.1).
+/// Build the header of a server-to-client WebSocket frame (unmasked per
+/// RFC 6455 5.1), without the payload.
 ///
 /// Note:
-/// - buf must be large enough: payload.len + 10 bytes for the header.
-/// - Payload is capped at payload.len, caller is responsible for sizing buf.
+/// - buf must be at least 10 bytes (the maximum frame header size).
 ///
 /// Param:
-/// buf     - []u8        (destination, must be at least payload.len + 10)
+/// buf         - []u8 (destination, at least 10 bytes)
+/// opcode      - Opcode
+/// payload_len - usize (length the payload will be)
+///
+/// Return:
+/// - usize (header bytes written into buf)
+pub fn buildHeader(buf: []u8, opcode: Opcode, payload_len: usize) usize {
+    var byte_offset: usize = 0;
+    buf[byte_offset] = 0x80 | @intFromEnum(opcode);
+    byte_offset += 1;
+
+    if (payload_len <= ws_len_max_7bit) {
+        buf[byte_offset] = @intCast(payload_len);
+        byte_offset += 1;
+    } else if (payload_len <= ws_len_max_16bit) {
+        buf[byte_offset] = ws_len_16bit_marker;
+        buf[byte_offset + 1] = @intCast((payload_len >> 8) & 0xFF);
+        buf[byte_offset + 2] = @intCast(payload_len & 0xFF);
+        byte_offset += 3;
+    } else {
+        buf[byte_offset] = ws_len_64bit_marker;
+        for (0..ws_len_64bit_field_size) |i| {
+            const shift: u6 = @intCast((7 - i) * 8);
+            buf[byte_offset + 1 + i] = @intCast((payload_len >> shift) & 0xFF);
+        }
+        byte_offset += 1 + ws_len_64bit_field_size;
+    }
+
+    return byte_offset;
+}
+
+/// Build a server-to-client WebSocket frame (unmasked per RFC 6455 5.1).
+///
+/// Note:
+/// - buf must be at least payload.len + 10 bytes (header plus payload).
+///
+/// Param:
+/// buf     - []u8 (destination, at least payload.len + 10)
 /// opcode  - Opcode
 /// payload - []const u8
 ///
 /// Return:
 /// - usize (bytes written into buf)
 pub fn buildFrame(buf: []u8, opcode: Opcode, payload: []const u8) usize {
-    var byte_offset: usize = 0;
-    buf[byte_offset] = 0x80 | @intFromEnum(opcode);
-    byte_offset += 1;
+    const header_len = buildHeader(buf, opcode, payload.len);
 
-    if (payload.len <= ws_len_max_7bit) {
-        buf[byte_offset] = @intCast(payload.len);
-        byte_offset += 1;
-    } else if (payload.len <= ws_len_max_16bit) {
-        buf[byte_offset] = ws_len_16bit_marker;
-        buf[byte_offset + 1] = @intCast((payload.len >> 8) & 0xFF);
-        buf[byte_offset + 2] = @intCast(payload.len & 0xFF);
-        byte_offset += 3;
-    } else {
-        buf[byte_offset] = ws_len_64bit_marker;
-        for (0..ws_len_64bit_field_size) |i| {
-            const shift: u6 = @intCast((7 - i) * 8);
-            buf[byte_offset + 1 + i] = @intCast((payload.len >> shift) & 0xFF);
-        }
-        byte_offset += 1 + ws_len_64bit_field_size;
-    }
-
-    @memcpy(buf[byte_offset .. byte_offset + payload.len], payload);
-    return byte_offset + payload.len;
+    @memcpy(buf[header_len .. header_len + payload.len], payload);
+    return header_len + payload.len;
 }
 
 /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (RFC 6455 4.2.2).
@@ -260,7 +296,6 @@ pub const RoomMap = struct {
             room_entry.value_ptr.* = .{ .conns = .empty };
         }
         room_entry.value_ptr.conns.append(self.allocator, conn) catch return;
-        std.debug.print("ws: join room='{s}' total={d}\n", .{ room, room_entry.value_ptr.conns.items.len });
     }
 
     /// Remove a connection from its room, removes the room if it becomes empty
@@ -288,14 +323,12 @@ pub const RoomMap = struct {
             }
         }
         const count = room_ptr.conns.items.len;
-        std.debug.print("ws: leave room='{s}' total={d}\n", .{ room, count });
 
         if (count == 0) {
             if (self.rooms.fetchRemove(room)) |kv| {
                 var conns = kv.value.conns;
                 conns.deinit(self.allocator);
                 self.allocator.free(kv.key);
-                std.debug.print("ws: room='{s}' removed (empty)\n", .{room});
             }
         }
     }
@@ -334,6 +367,18 @@ pub const RoomMap = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+test "zix test: http websocket buildHeader matches buildFrame prefix" {
+    const payload = "hello";
+    var frame_buf: [128]u8 = undefined;
+    var hdr_buf: [ws_max_frame_header]u8 = undefined;
+
+    const frame_len = buildFrame(&frame_buf, .text, payload);
+    const hdr_len = buildHeader(&hdr_buf, .text, payload.len);
+
+    try std.testing.expectEqual(frame_len - payload.len, hdr_len);
+    try std.testing.expectEqualSlices(u8, frame_buf[0..hdr_len], hdr_buf[0..hdr_len]);
+}
+
 test "zix test: http websocket acceptKey" {
     var out: [64]u8 = undefined;
     const accept = try acceptKey("dGhlIHNhbXBsZSBub25jZQ==", &out);
@@ -366,4 +411,38 @@ test "zix test: http websocket masked frame" {
     try std.testing.expect(result.frame.fin);
     try std.testing.expectEqual(Opcode.text, result.frame.opcode);
     try std.testing.expectEqualStrings("Hello", result.frame.payload);
+}
+
+test "zix test: http websocket SIMD unmask matches scalar for 32-byte payload" {
+    // 32 bytes exercises 2 full vector iterations (16 bytes each).
+    const mask_bytes = [4]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    const plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    var raw: [2 + 4 + 32]u8 = undefined;
+    raw[0] = 0x82; // FIN + binary
+    raw[1] = 0x80 | 32; // masked, 32-byte payload
+    @memcpy(raw[2..6], &mask_bytes);
+    for (plain, 0..) |byte, i| raw[6 + i] = byte ^ mask_bytes[i % 4];
+
+    var payload_buf: [64]u8 = undefined;
+    const result = parseFrame(&raw, &payload_buf).?;
+
+    try std.testing.expectEqualStrings(plain, result.frame.payload);
+    try std.testing.expectEqual(raw.len, result.consumed);
+}
+
+test "zix test: http websocket SIMD unmask handles tail bytes (17-byte payload)" {
+    // 17 bytes = 1 vector iteration + 1 scalar tail byte.
+    const mask_bytes = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const plain = "12345678901234567";
+    var raw: [2 + 4 + 17]u8 = undefined;
+    raw[0] = 0x82; // FIN + binary
+    raw[1] = 0x80 | 17; // masked, 17-byte payload
+    @memcpy(raw[2..6], &mask_bytes);
+    for (plain, 0..) |byte, i| raw[6 + i] = byte ^ mask_bytes[i % 4];
+
+    var payload_buf: [64]u8 = undefined;
+    const result = parseFrame(&raw, &payload_buf).?;
+
+    try std.testing.expectEqualStrings(plain, result.frame.payload);
+    try std.testing.expectEqual(raw.len, result.consumed);
 }
