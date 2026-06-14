@@ -45,6 +45,7 @@
 - [Catatan Kontribusi Penting](./README-id.md#catatan-kontribusi-penting)
 - [Dokumentasi](./README-id.md#dokumentasi)
 - [Memulai](./README-id.md#memulai)
+- [Build](./README-id.md#build)
 - [HTTP/1](./README-en.md#http1)
 - [Contoh](./README-id.md#contoh)
 - [Minimal](./README-id.md#contoh-minimal)
@@ -334,6 +335,35 @@ const zix = b.dependency("zix", .{
 
 exe.root_module.addImport("zix", zix.module("zix"));
 ```
+
+<br>
+
+## Build
+
+zix dikonsumsi sebagai Zig module (source), bukan dikirim sebagai library prebuilt. Repositori mendefinisikan module `zix` dengan `b.addModule`, jadi tidak ada artifact `addStaticLibrary` atau `addSharedLibrary`. Menjalankan `zig build` sendirian menjalankan step `install` default tanpa ada yang diinstal: tidak ada `.a`, tidak ada `.so`, tidak ada apa pun di bawah `zig-out/lib`. Ia meng-compile module graph dan hanya berguna sebagai pengecekan cepat "apakah masih compile".
+
+Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zig build -l`:
+
+| Step | Fungsinya |
+| :- | :- |
+| `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
+| `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
+| `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. |
+| `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
+| `zig build example-<name>` | Membangun dan menjalankan satu example, misalnya `example-http1_websocket`. |
+| `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-epoll`. |
+| `zig build test-runner-all` | Menjalankan setiap runner integrasi server plus client. |
+
+Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua example, lalu menjalankan satu di background dan menghentikannya:
+
+```sh
+zig build examples                      # bangun setiap example ke zig-out/bin/
+zig-out/bin/example-http1_websocket &   # jalankan satu di background
+kill %1                                 # hentikan
+```
+
+Tidak ada output library `zig build install` dan tidak ada `-Doptimize` yang diperlukan untuk pengecekan compile biasa. Untuk mengonsumsi zix di proyek lain, ikuti Memulai di atas: ia ditambahkan sebagai dependency `build.zig.zon` dan diimpor dengan `exe.root_module.addImport("zix", zix.module("zix"))`, tidak pernah di-link sebagai system library.
 
 <br>
 
