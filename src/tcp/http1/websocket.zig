@@ -87,7 +87,25 @@ pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     if (buf.len < byte_offset + capped_len) return null;
 
     const payload: []const u8 = if (masked) blk: {
-        for (0..capped_len) |i| payload_buf[i] = buf[byte_offset + i] ^ mask[i % ws_mask_len];
+        const src = buf[byte_offset..][0..capped_len];
+        const dst = payload_buf[0..capped_len];
+        const vec_width = 16;
+        const vec_mask: @Vector(vec_width, u8) = .{
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+            mask[0], mask[1], mask[2], mask[3],
+        };
+        var i: usize = 0;
+
+        while (i + vec_width <= capped_len) : (i += vec_width) {
+            const chunk: @Vector(vec_width, u8) = src[i..][0..vec_width].*;
+            dst[i..][0..vec_width].* = chunk ^ vec_mask;
+        }
+        while (i < capped_len) : (i += 1) {
+            dst[i] = src[i] ^ mask[i % ws_mask_len];
+        }
+
         break :blk payload_buf[0..capped_len];
     } else buf[byte_offset .. byte_offset + capped_len];
 
@@ -410,6 +428,40 @@ test "zix http1 ws: parseFrame unmasks a client frame" {
     try std.testing.expect(result.frame.fin);
     try std.testing.expectEqual(Opcode.text, result.frame.opcode);
     try std.testing.expectEqualStrings("Hello", result.frame.payload);
+}
+
+test "zix http1 ws: parseFrame SIMD unmask matches scalar for 32-byte payload" {
+    // 32 bytes exercises 2 full vector iterations (16 bytes each).
+    const mask_bytes = [4]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    const plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    var raw: [2 + 4 + 32]u8 = undefined;
+    raw[0] = 0x82; // FIN + binary
+    raw[1] = 0x80 | 32; // masked, 32-byte payload
+    @memcpy(raw[2..6], &mask_bytes);
+    for (plain, 0..) |byte, i| raw[6 + i] = byte ^ mask_bytes[i % 4];
+
+    var payload_buf: [64]u8 = undefined;
+    const result = parseFrame(&raw, &payload_buf).?;
+
+    try std.testing.expectEqualStrings(plain, result.frame.payload);
+    try std.testing.expectEqual(raw.len, result.consumed);
+}
+
+test "zix http1 ws: parseFrame SIMD unmask handles tail bytes (17-byte payload)" {
+    // 17 bytes = 1 vector iteration + 1 scalar tail byte.
+    const mask_bytes = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const plain = "12345678901234567";
+    var raw: [2 + 4 + 17]u8 = undefined;
+    raw[0] = 0x82; // FIN + binary
+    raw[1] = 0x80 | 17; // masked, 17-byte payload
+    @memcpy(raw[2..6], &mask_bytes);
+    for (plain, 0..) |byte, i| raw[6 + i] = byte ^ mask_bytes[i % 4];
+
+    var payload_buf: [64]u8 = undefined;
+    const result = parseFrame(&raw, &payload_buf).?;
+
+    try std.testing.expectEqualStrings(plain, result.frame.payload);
+    try std.testing.expectEqual(raw.len, result.consumed);
 }
 
 test "zix http1 ws: buildHeader matches buildFrame prefix" {
