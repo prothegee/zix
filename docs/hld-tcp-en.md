@@ -31,7 +31,7 @@ src/tcp/
     Tcp.zig       // namespace aggregator (also re-exports Http)
 ```
 
-Export from `src/zix.zig`:
+Export from `src/lib.zig`:
 ```zig
 pub const Tcp = @import("tcp/Tcp.zig");
 // zix.Tcp.Server, zix.Tcp.Client, zix.Tcp.Http.*, ...
