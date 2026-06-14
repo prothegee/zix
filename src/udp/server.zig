@@ -1,11 +1,25 @@
 //! zix udp server
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const PortMode = Config.PortMode;
 const Logger = @import("../logger/logger.zig").Logger;
 const Dir = @import("../logger/logger.zig").Dir;
+
+// --------------------------------------------------------- //
+
+/// Emit a server lifecycle line. Routes through config.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
+fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) void {
+    if (config.logger) |lg| {
+        lg.system(.INFO, "udp", fmt, args);
+        return;
+    }
+
+    if (comptime builtin.mode == .Debug) std.debug.print("zix udp: " ++ fmt ++ "\n", args);
+}
 
 // --------------------------------------------------------- //
 
@@ -91,7 +105,7 @@ pub fn UdpServer(comptime Packet: type) type {
             const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
             defer socket.close(io);
 
-            if (self.config.logger) |lg| lg.system(.INFO, "udp", "listening on {s}:{d}", .{ self.config.ip, self.config.port });
+            logSystem(self.config, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
             // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
