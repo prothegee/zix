@@ -57,7 +57,8 @@
 - [HTTP Client](./README-id.md#http-client)
 - [File Statis & Unggah](./README-id.md#file-statis--unggah)
 - [Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
-- [Kapasitas Header Respons](./README-id.md#kapasitas-header-respons-headersize)
+- [Kapasitas Header Permintaan](./README-id.md#kapasitas-header-permintaan-requestheadersize)
+- [Kesadaran Cache Respons](./README-id.md#kesadaran-cache-respons-response_cache)
 - [HTTP/2](./README-id.md#http2)
 - [gRPC h2c](./README-id.md#grpc-h2c)
 - [Raw TCP](./README-id.md#raw-tcp)
@@ -728,6 +729,8 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 Lihat `examples/http_websocket.zig` untuk contoh lengkap yang berfungsi. Untuk engine `zix.Http1` mentah lihat `examples/http1_websocket.zig` (`zix.Http1.WebSocket`, echo raw-fd).
 
+**Build-once broadcast fanout**: pada jalur `zix.Http1` yang dikelola engine, `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` men-serialize frame satu kali saja dan menulis byte yang sama ke setiap fd dalam room yang dikelola pemanggil, sehingga sebuah broadcast hanya berbiaya satu serialization tidak peduli berapa banyak member yang dijangkau. Write yang gagal ke peer mati dilewati (engine EPOLL memanen fd itu pada event berikutnya), dan jalur payload besar membangun header sekali dan menulis payload tanpa menyalinnya ke staging buffer. `zix.Http.WebSocket.RoomMap.broadcast` tingkat tinggi mengikuti bentuk build-once, fan-out yang sama dengan room registry yang dikelola server.
+
 <br>
 
 ### SSE (Server-Sent Events)
@@ -946,6 +949,106 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 ```
 
 Batas penyimpanan parser adalah 64: nilai `CUSTOM` di atas 64 secara diam-diam dibatasi. Lihat `zix.Http.RequestHeaderSize`.
+
+<br>
+
+## Kesadaran Cache Respons (`response_cache`)
+
+`zix.Http1`, `zix.Http`, dan `zix.Grpc` berbagi response cache per-worker yang opt-in (ADR-036). Handler membangun responnya sekali, engine menyimpannya di bawah sebuah key yang diturunkan dari request, dan request berikutnya yang cocok memutar ulang byte tersimpan tanpa membangun ulang. Sebuah hit melewati pembangunan body handler sekaligus serialization. Cache ini data oriented (structure of arrays plus satu payload slab datar), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dan freshness memakai lazy on-access TTL.
+
+Apa yang menjadi key dan nilai yang di-cache bergantung pada engine:
+
+| Engine | Cache key | Nilai yang di-cache |
+| :- | :- | :- |
+| `zix.Http1`, `zix.Http` | method, path, query | respons HTTP yang sudah di-serialize penuh, ditulis verbatim |
+| `zix.Grpc` (unary) | path, pesan request | pesan respons, di-frame ulang per stream (HPACK dan stream id tetap benar) |
+
+Secara default fitur ini mati. Aktifkan pada dispatch model `.EPOLL`:
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/report", .handler = reportHandler },
+}, .{
+    .ip = "0.0.0.0",
+    .port = 8080,
+    .dispatch_model = .EPOLL,
+    .response_cache = true,                  // aktifkan cache per-worker
+    .cache_max_entries = 256,                // slot, dibulatkan turun ke pangkat dua
+    .cache_max_value_bytes = 16 * 1024,      // batas respons per-slot
+    .cache_ttl_ms = 1000,                    // freshness default
+    // .cache_max_total_bytes = 4 * 1024 * 1024, // batas memori cache per-worker opsional
+});
+```
+
+Sebuah miss membangun dan menyimpan respons, sebuah hit yang fresh disajikan verbatim:
+
+```zig
+fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
+    if (res.serveCached(req)) return;            // hit fresh: byte cache sudah ditulis
+
+    const body = try buildExpensiveReport(req);  // hanya berjalan saat miss
+    res.setContentType(.APPLICATION_JSON);
+    try res.sendCached(req, body, 0);            // ttl 0 memakai cache_ttl_ms
+}
+```
+
+Engine `zix.Http1` mentah mengekspos ide yang sama lewat `cacheLookup` dan `writeWithCache`.
+
+Untuk handler gRPC unary, opt-in berada di call context. `ctx.serveCached` memutar ulang pesan reply tersimpan (di-frame ulang untuk stream saat ini dan diselesaikan dengan OK), dan `ctx.sendCached` mengirim sekaligus menyimpan reply. Aktifkan dengan nama field yang sama pada `GrpcServerConfig` (`response_cache`, `cache_max_entries`, dan seterusnya) di bawah `.EPOLL`:
+
+```zig
+fn sayHello(_: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
+    if (ctx.serveCached("application/grpc")) return; // hit fresh: reply terkirim, stream selesai
+
+    const reply = buildExpensiveReply(ctx.recvMessage()); // hanya berjalan saat miss
+    ctx.sendCached("application/grpc", reply, 0);          // ttl 0 memakai cache_ttl_ms
+    ctx.finish(.OK, "");
+}
+```
+
+### Kapan menguntungkan
+
+Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu biaya didominasi kernel dan cache impas. Di atasnya kerja yang dihemat tumbuh seiring ukuran body.
+
+| Bentuk respons | Efek cache |
+| :- | :- |
+| Serialization yang berat komputasi (JSON besar, output yang dirender) di atas ~4 KiB | Kasus terbaik, gain besar (JSON berat ~32 KiB terukur +34% throughput) |
+| Respons kecil di bawah ~2 KiB | Impas, terikat kernel, tanpa regresi |
+| File statis yang dibaca dari disk | Marginal: OS page cache sudah menyajikan file dengan murah, lebih baik pakai sendfile atau splice |
+| Body unik per-request (tanpa pengulangan key) | Tidak ada manfaat, setiap request miss |
+
+### Aturan dan kondisi
+
+- Opt-in saja. Mati secara default, dan handler harus memanggil `res.serveCached` lalu `res.sendCached` (HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `writeWithCache` milik `zix.Http1`.
+- Hanya `.EPOLL` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
+- Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
+- Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
+- Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
+- Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.
+
+**Mengapa hanya `.EPOLL`:** cache adalah instance thread-local, tidak pernah dibagi dan tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya.
+
+| Model | Menjalankan handler di | Status cache |
+| :- | :- | :- |
+| `.EPOLL` | worker thread shared-nothing milik zix, satu per core | terpasang: lifecycle bersih, satu thread pemilik, jalur yang di-benchmark |
+| `.POOL` | pool thread milik zix | layak dan aman, tetapi setiap thread akan memegang cache-nya sendiri (hit rate lebih rendah, N kali memori), sehingga ditunda, tidak dipasang |
+| `.ASYNC`, `.MIXED` | task `io.async()` di executor pool `std.Io`, bukan milik zix | tidak terpasang: tidak ada hook pasang per-thread, dan task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free |
+
+Di model mana pun perilakunya aman, hanya tidak aktif: saat cache tidak terpasang, `response_cache = true` dan pemanggilan `serveCached` / `sendCached` menurun menjadi plain send (tanpa error, tanpa caching).
+
+```mermaid
+flowchart TD
+    A[Request masuk] --> B{response_cache dan EPOLL?}
+    B -- tidak --> P[Plain send]
+    B -- ya --> C{serveCached hit dan fresh?}
+    C -- ya --> W[Tulis byte cache, tanpa bangun ulang]
+    C -- tidak --> D[Bangun respons]
+    D --> E{body lebih besar dari cache_max_value_bytes?}
+    E -- ya --> P
+    E -- tidak --> S[sendCached: tulis lalu simpan di bawah key]
+```
+
+Lihat ADR-036 untuk rasional desain dan angka terukur.
 
 <br>
 
@@ -1527,6 +1630,8 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 <br>
 
 ## Important Notes
+
+Saat ini Zix berfokus pada Linux.
 
 Dalam kondisi saat ini, zix tidak akan:
 - Implementasi TLS.
