@@ -127,7 +127,7 @@ Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk entri Channel dalam ta
 
 ## Integrasi Logger
 
-`Channel` tidak memiliki struct konfigurasi server, sehingga tidak ada field `logger`. Gunakan `logger.system()` secara manual untuk event lifecycle:
+`Channel` tidak memiliki struct konfigurasi server, sehingga tidak ada field `logger`. `Channel.init` mencetak satu baris notice init (`zix channel: init <T> cap=<N>`) ke stderr hanya pada Debug build, ditekan pada release dan di bawah test runner (`builtin.is_test`, print di sana akan meracuni IPC test). Untuk logging lifecycle sebenarnya gunakan `logger.system()` secara manual:
 
 ```zig
 // Uncomment to add logger (console only):
