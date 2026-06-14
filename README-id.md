@@ -155,7 +155,7 @@ __*2. Empat model dispatch yang dapat dipilih:*__
 - ASYNC (satu accept thread, io.async() per koneksi): latensi terendah pada beban moderat.
 - POOL (N acceptor mendorong ke shared queue, M worker menangani secara sinkron): throughput mentah terbaik pada jumlah koneksi tinggi.
 - MIXED (N acceptor masing-masing dispatch via io.async(), tanpa queue): seimbang.
-- EPOLL (satu epoll loop + worker pool, EPOLLONESHOT re-arm sehingga keep-alive idle tidak memegang thread): khusus Linux, terbaik untuk jumlah koneksi sangat tinggi atau client lambat/idle.
+- EPOLL (shared-nothing: setiap worker memiliki SO_REUSEPORT listener + epoll instance, level-triggered, tanpa antrian bersama): khusus Linux, terbaik untuk jumlah koneksi tinggi di HTTP/1.
 
 > strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http, Grpc, Fix, dan Tcp mengimplementasikan keempatnya.
 
@@ -492,8 +492,8 @@ pub fn main(process: std.process.Init) !void {
     }, .{
         .io = process.io,
         // dispatch_model = .ASYNC (default, bisa dihilangkan)
-        // workers        = 0  -> cpu_count accept thread (otomatis)
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (otomatis)
+        // workers        = 0  -> cpu_count (accept thread untuk .POOL/.MIXED; worker untuk .EPOLL)
+        // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (.POOL only; diabaikan oleh .EPOLL)
     });
 ```
 
@@ -523,9 +523,9 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-**`.EPOLL` (epoll event loop tunggal + worker pool, khusus Linux):**
+**`.EPOLL` (shared-nothing epoll worker, khusus Linux):**
 
-Satu thread event-loop menggunakan `epoll_wait` untuk mendeteksi socket yang siap dibaca. Worker mengambil fd siap dari antrian dan melayani satu permintaan, lalu me-rearm socket (`EPOLLONESHOT`). Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk jumlah koneksi tinggi dengan banyak klien yang idle atau lambat. Setiap pemanggilan `epoll_wait` menguras hingga 512 event siap sekaligus. Build non-Linux otomatis fallback ke `.POOL`.
+Setiap worker memiliki `SO_REUSEPORT` listener dan satu `epoll` instance tersendiri. Kernel mendistribusikan koneksi baru ke worker. Tidak ada antrian bersama, tidak ada mutex, tidak ada handoff fd antar thread. Level-triggered `EPOLLIN` menjaga koneksi tetap terdaftar setelah setiap request tanpa re-arm eksplisit. Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk request berumur pendek throughput tinggi di Linux. Build non-Linux otomatis fallback ke `.POOL`.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -533,7 +533,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 }, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
-    .pool_size      = 32, // worker thread, field workers diabaikan
+    .workers        = 0, // 0 = cpu_count worker (default); pool_size diabaikan
 });
 ```
 
@@ -1038,7 +1038,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // kirim out[0..pos] sebagai payload pesan gRPC
 ```
 
-**Model dispatch:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux). Model gRPC EPOLL menggunakan satu epoll event loop untuk accept dan menugaskan setiap koneksi ke pool worker untuk seluruh hidupnya (gRPC bersifat streaming, `EPOLLONESHOT` tidak berlaku). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
+**Model dispatch:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux). Model gRPC EPOLL adalah multiplexed event loop shared-nothing: setiap worker memiliki `SO_REUSEPORT` listener dan satu epoll instance tersendiri, dan menjalankan banyak koneksi h2 non-blocking melalui resumable HTTP/2 state machine. `pool_size` adalah jumlah worker (0 = cpu_count). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
 
 **Timeout context:** Tiga input, yang paling ketat menang:
 
@@ -1543,9 +1543,13 @@ Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk TLS, HTTP/2, H
 __*HttpArena*__ <br>
 Website: https://www.http-arena.com <br>
 Project repo: https://github.com/MDA2AV/HttpArena <br>
-Pull-request terahir: https://github.com/MDA2AV/HttpArena/pull/852 <br>
+
+<details open>
+<summary>zix 0.3.x</summary>
 
 Http/1.1 <br>
+[PR](https://github.com/MDA2AV/HttpArena/pull/852) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | baseline | 512 | 3,717,345 | 6397.5% | 84MiB |
@@ -1568,11 +1572,15 @@ Http/1.1 <br>
 | echo-ws-pipeline | 16384 | 57,239,628 | 6453.2% | 273MiB |
 
 gRPC <br>
+[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | unary-grpc | 256 | 7,145,739 | 3859.3% | 347MiB |
 | unary-grpc | 1024 | 7,046,038 | 4066.4% | 1.1GiB |
 | stream-grpc | 64 | 8,472,000 | 45.8% | 89MiB |
+
+<details>
 
 <br>
 
