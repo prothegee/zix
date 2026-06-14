@@ -57,7 +57,8 @@
 - [HTTP Client](./README-en.md#http-client)
 - [Static Files & Upload](./README-en.md#static-files--upload)
 - [Response Header Capacity](./README-en.md#response-header-cap-headersize)
-- [Response Header Capacity](./README-en.md#response-header-cap-headersize)
+- [Request Header Capacity](./README-en.md#request-header-cap-requestheadersize)
+- [Response Cache Awareness](./README-en.md#response-cache-awareness-response_cache)
 - [HTTP/2](./README-en.md#http2)
 - [gRPC h2c](./README-en.md#grpc-h2c)
 - [Raw TCP](./README-en.md#raw-tcp)
@@ -728,6 +729,8 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 See `examples/http_websocket.zig` for a full working example. For the raw `zix.Http1` engine see `examples/http1_websocket.zig` (`zix.Http1.WebSocket`, raw-fd echo).
 
+**Build-once broadcast fanout**: on the engine-owned `zix.Http1` path, `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` serializes the frame a single time and writes the same bytes to every fd in a caller-maintained room, so a broadcast costs one serialization no matter how many members it reaches. A failed write to a dead peer is skipped (the EPOLL engine reaps that fd on its next event), and the large-payload path builds the header once and writes the payload without copying it into a staging buffer. The high-level `zix.Http.WebSocket.RoomMap.broadcast` follows the same build-once, fan-out shape with a server-managed room registry.
+
 <br>
 
 ### SSE (Server-Sent Events)
@@ -946,6 +949,106 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 ```
 
 The parser storage limit is 64: `CUSTOM` values above 64 are silently capped. See `zix.Http.RequestHeaderSize`.
+
+<br>
+
+## Response Cache Awareness (`response_cache`)
+
+`zix.Http1`, `zix.Http`, and `zix.Grpc` share an opt-in, per-worker response cache (ADR-036). A handler builds its response once, the engine stores it under a key derived from the request, and a later matching request replays the stored bytes with no rebuild. A hit skips both the handler's body build and the serialization. The cache is data oriented (a structure of arrays plus one flat payload slab), lock-free by ownership (one instance per worker, never shared), and freshness is a lazy on-access TTL.
+
+What the key and the cached value are depends on the engine:
+
+| Engine | Cache key | Cached value |
+| :- | :- | :- |
+| `zix.Http1`, `zix.Http` | method, path, query | the full serialized HTTP response, written verbatim |
+| `zix.Grpc` (unary) | path, request message | the response message, re-framed per stream (HPACK and stream id stay correct) |
+
+It is off by default. Enable it on the `.EPOLL` dispatch model:
+
+```zig
+var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    .{ .path = "/report", .handler = reportHandler },
+}, .{
+    .ip = "0.0.0.0",
+    .port = 8080,
+    .dispatch_model = .EPOLL,
+    .response_cache = true,                  // enable the per-worker cache
+    .cache_max_entries = 256,                // slots, rounded down to a power of two
+    .cache_max_value_bytes = 16 * 1024,      // per-slot response cap
+    .cache_ttl_ms = 1000,                    // default freshness
+    // .cache_max_total_bytes = 4 * 1024 * 1024, // optional per-worker memory ceiling
+});
+```
+
+A miss builds and stores the response, a fresh hit is served verbatim:
+
+```zig
+fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
+    if (res.serveCached(req)) return;            // fresh hit: cached bytes already written
+
+    const body = try buildExpensiveReport(req);  // runs only on a miss
+    res.setContentType(.APPLICATION_JSON);
+    try res.sendCached(req, body, 0);            // ttl 0 uses cache_ttl_ms
+}
+```
+
+The raw `zix.Http1` engine exposes the same idea through `cacheLookup` and `writeWithCache`.
+
+For gRPC unary handlers the opt-in lives on the call context. `ctx.serveCached` replays a stored reply message (re-framed for the current stream and finished with OK), and `ctx.sendCached` sends and stores the reply. Enable it with the same field names on `GrpcServerConfig` (`response_cache`, `cache_max_entries`, and so on) under `.EPOLL`:
+
+```zig
+fn sayHello(_: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
+    if (ctx.serveCached("application/grpc")) return; // fresh hit: reply sent, stream finished
+
+    const reply = buildExpensiveReply(ctx.recvMessage()); // runs only on a miss
+    ctx.sendCached("application/grpc", reply, 0);          // ttl 0 uses cache_ttl_ms
+    ctx.finish(.OK, "");
+}
+```
+
+### When it pays off
+
+The measured crossover on loopback is around 4 KiB of response body. Below that the cost is dominated by the kernel and the cache is a wash. Above it the saved work grows with body size.
+
+| Response shape | Cache effect |
+| :- | :- |
+| Compute-heavy serialization (large JSON, rendered output) above ~4 KiB | Best case, large gain (heavy ~32 KiB JSON measured +34% throughput) |
+| Small responses below ~2 KiB | Wash, kernel-bound, zero regression |
+| Static files read from disk | Marginal: the OS page cache already serves the file cheaply, prefer sendfile or splice |
+| Per-request unique bodies (no key repetition) | No benefit, every request misses |
+
+### Rules and conditions
+
+- Opt-in only. Off by default, and the handler must call `res.serveCached` then `res.sendCached` (HTTP), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the `zix.Http1` `cacheLookup` / `writeWithCache`.
+- `.EPOLL` only in this release. Other dispatch models leave the cache uninstalled and the API degrades to a plain send.
+- For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. For gRPC the key is the path plus the request message, so only an identical request hits.
+- Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
+- Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
+- Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.
+
+**Why `.EPOLL` only:** the cache is a thread-local instance, never shared and never locked (lock-free by ownership). That invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it.
+
+| Model | Runs the handler on | Cache state |
+| :- | :- | :- |
+| `.EPOLL` | a zix-owned shared-nothing worker thread, one per core | installed: clean lifecycle, one owner thread, the benchmarked path |
+| `.POOL` | zix-owned pool threads | feasible and safe, but each thread would hold its own cache (lower hit rate, N times the memory), so it is deferred, not wired |
+| `.ASYNC`, `.MIXED` | `io.async()` tasks on the `std.Io` executor pool, not owned by zix | not installed: no per-thread install hook, and a task is not pinned to one thread, so a shared cache would need locks and break the lock-free design |
+
+Under any model the behavior is safe, just inert: with the cache uninstalled, `response_cache = true` and the `serveCached` / `sendCached` calls degrade to a plain send (no error, no caching).
+
+```mermaid
+flowchart TD
+    A[Incoming request] --> B{response_cache and EPOLL?}
+    B -- no --> P[Plain send]
+    B -- yes --> C{serveCached hit and fresh?}
+    C -- yes --> W[Write cached bytes, no rebuild]
+    C -- no --> D[Build response]
+    D --> E{body larger than cache_max_value_bytes?}
+    E -- yes --> P
+    E -- no --> S[sendCached: write then store under key]
+```
+
+See ADR-036 for the design rationale and measured numbers.
 
 <br>
 
@@ -1527,6 +1630,8 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 <br>
 
 ## Important Notes
+
+Zix currently is linux-centric.
 
 As current state, zix will not:
 - TLS implementation.
