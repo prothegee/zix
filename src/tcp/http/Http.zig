@@ -11,6 +11,7 @@ const content = @import("content.zig");
 const upload = @import("upload.zig");
 const ws_client = @import("ws_client.zig");
 const sse_client = @import("sse_client.zig");
+const rc = @import("../../utils/response_cache.zig");
 
 // --------------------------------------------------------- //
 
@@ -26,7 +27,9 @@ pub const ClientRequestOpts = client.RequestOpts;
 pub const Request = request.Request;
 pub const Response = response.Response;
 pub const SseWriter = response.SseWriter;
-// Do we need WebSocketWriter for some reason?
+pub const ResponseCache = rc.ResponseCache;
+pub const setCache = response.setCache;
+pub const cacheTtl = response.cacheTtl;
 pub const Context = context.Context;
 pub const HandlerFn = router.HandlerFn;
 pub const Route = router.Route;
