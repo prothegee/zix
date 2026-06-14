@@ -39,6 +39,22 @@ pub const Http1ServerConfig = struct {
     /// Include the Date header in every response. Default true for RFC 7231 compliance.
     /// Set false to reduce response size by 37 bytes per response.
     send_date_header: bool = true,
+    /// Enable the per-worker response cache (ADR-036). Default false. When off,
+    /// the handler cache API (cacheLookup / cacheStore / writeWithCache) degrades
+    /// to a no-op. Active under the .EPOLL dispatch model in this release.
+    response_cache: bool = false,
+    /// Response cache slot count, rounded down to a power of two. Per-worker
+    /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
+    cache_max_entries: u32 = 256,
+    /// Per-slot response cap. A response larger than this bypasses the cache.
+    /// Caching pays off above a few KiB, so keep this lean.
+    cache_max_value_bytes: u32 = 16 * 1024,
+    /// Default freshness in milliseconds, exposed to handlers via cacheTtl().
+    /// Handlers may pass their own TTL per store.
+    cache_ttl_ms: u32 = 1000,
+    /// Optional ceiling on per-worker cache memory. 0 disables the ceiling. When
+    /// set, the effective entry count is reduced so entries * value_bytes fits.
+    cache_max_total_bytes: usize = 0,
     /// Optional logger. When non-null, the server logs lifecycle lines (listening,
     /// fallback notices) through it instead of std.debug.print.
     ///
