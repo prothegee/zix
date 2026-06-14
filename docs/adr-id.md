@@ -152,7 +152,7 @@ Setiap ADR mencatat satu keputusan desain yang signifikan: konteks yang membuatn
 
 **Konteks:** Unix Domain Socket adalah mekanisme IPC standar di Linux dan macOS untuk komunikasi sesama host. Namespace `zix.Uds` yang mengikuti pola sama dengan `zix.Udp` akan melengkapi trilogi protokol transport.
 
-**Keputusan:** Diimplementasikan di `src/uds/`. Agregator namespace di `src/uds/Uds.zig`, diekspos sebagai `pub const Uds = @import("uds/Uds.zig")` di `zix.zig`. Mode stream saja (datagram butuh `std.posix` mentah, tidak diekspos via `std.Io.net.UnixAddress`, dan ditangguhkan). Format frame: header panjang `u32` 4 byte (little-endian native) diikuti byte payload. `UdsClient.sendMsg`/`recvMsg` dan `echoHandler` semua memakai kontrak frame ini.
+**Keputusan:** Diimplementasikan di `src/uds/`. Agregator namespace di `src/uds/Uds.zig`, diekspos sebagai `pub const Uds = @import("uds/Uds.zig")` di `lib.zig`. Mode stream saja (datagram butuh `std.posix` mentah, tidak diekspos via `std.Io.net.UnixAddress`, dan ditangguhkan). Format frame: header panjang `u32` 4 byte (little-endian native) diikuti byte payload. `UdsClient.sendMsg`/`recvMsg` dan `echoHandler` semua memakai kontrak frame ini.
 
 **API `std.Io.net` yang dipakai:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` di WASI: baik `Server.init()` maupun `Client.connect()` memunculkan `@compileError` di platform yang tidak didukung.
 
@@ -296,7 +296,7 @@ var server = try MyServer.init(.{
 
 **Konteks:** Model server (Model 1 / Model 2) menangani konkurensi request. Tidak ada primitif untuk penyampaian pesan bertipe antar task konkuren dalam satu proses. Channel Go dan pipe POSIX menjawab pola ini, zix butuh padanan native-Zig sendiri yang bekerja berdampingan dengan task `io.concurrent()`.
 
-**Keputusan:** Diimplementasikan sebagai `zix.Channel(comptime T: type)`. Buffered saja (kapasitas > 0, rendezvous unbuffered ditangguhkan). `send(io, value)` dan `recv(io)` memblokir. Diekspos sebagai `pub const Channel = @import("channel/Channel.zig").Channel` di `zix.zig`. Pertanyaan terbuka yang diselesaikan:
+**Keputusan:** Diimplementasikan sebagai `zix.Channel(comptime T: type)`. Buffered saja (kapasitas > 0, rendezvous unbuffered ditangguhkan). `send(io, value)` dan `recv(io)` memblokir. Diekspos sebagai `pub const Channel = @import("channel/Channel.zig").Channel` di `lib.zig`. Pertanyaan terbuka yang diselesaikan:
 
 - **Locking:** `std.Io.Mutex` + `std.Io.Condition` (sadar-fiber, bekerja baik di task handler `io.concurrent()` maupun thread OS). `std.Thread.Mutex` ditolak karena memblokir thread OS.
 - **Storage:** ring buffer dialokasikan heap (`allocator.alloc(T, capacity)`), kapasitas runtime, allocator wajib di `init()`.
@@ -662,6 +662,48 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - Penangkapan ber-cap 8 param per match. Pola dengan lebih banyak `:segments` dari itu gagal cocok alih-alih meluap.
 - Lintasan prefix `zix.Http` tidak lagi membaca satu byte melewati path request yang pendek. Di ReleaseFast ini adalah read out-of-bounds tak berbahaya yang ditutupi oleh `and`, di Debug atau ReleaseSafe ia adalah panic pada path request mana pun yang lebih pendek dari prefix terdaftar.
 - `examples/http1_paths.zig` masih mendemonstrasikan routing `startsWith` / `splitScalar` manual dengan sengaja (pencocokan kustom di luar tiga jenis). Komentar sebelumnya yang mengklaim router exact-only telah dikoreksi.
+
+---
+
+## ADR-034: Arsitektur shared-nothing `.EPOLL` `zix.Http`
+
+**Status:** Diterima
+
+**Konteks:** Model `.EPOLL` `zix.Http` awal menggunakan desain terpusat: satu accept thread mendorong stream koneksi yang diterima ke `ConnQueue` bersama (mutex + condvar + ring buffer), dan pool berisi `max(10, cpu_count * 2)` worker thread pop dari antrian dan memanggil `handleOneRequest`. Pada beban benchmark di c1000, mutex `ConnQueue` menjadi bottleneck. Throughput 428k req/s vs 480k milik `zix.Http1` (arsitektur shared-nothing yang sama, gap 11%). `pool_size` adalah field config yang relevan.
+
+**Keputusan:** Ganti model terpusat dengan arsitektur shared-nothing yang cocok dengan `zix.Http1`. Setiap worker mengikat `SO_REUSEPORT` listener tersendiri, membuat `epoll` instance tersendiri, dan menjalankan event loop level-triggered tersendiri. Kernel mendistribusikan koneksi baru ke listener per-worker. Tidak ada `ConnQueue`, tidak ada mutex, tidak ada condvar, tidak ada handoff fd antar thread.
+
+- `workers` (bukan `pool_size`) sekarang adalah jumlah worker EPOLL untuk `zix.Http`. `0` memilih cpu_count.
+- `pool_size` diabaikan untuk `.EPOLL` `zix.Http` (masih berlaku untuk `.POOL`).
+- Level-triggered `EPOLLIN` menggantikan `EPOLLONESHOT`: koneksi tetap terdaftar setelah setiap request dan re-fires saat data baru tiba. Tidak perlu re-arm eksplisit.
+- Fd yang diterima bersifat blocking: `handleOneRequest` melakukan recv/parse/dispatch/send secara sinkron, lalu worker kembali ke `epoll_wait`.
+- `handleOneRequest` tidak berubah: tanpa logik non-blocking baru, tanpa tabel state per-koneksi.
+
+**Konsekuensi:**
+- Throughput: 428k menjadi 451k req/s di c1000 (`wrk -c1000 -t4 -d10s`), mempersempit gap vs `zix.Http1` dari 11% menjadi 6,8%.
+- Gap 6,8% yang tersisa bersifat struktural: `zix.Http` mengalokasi `ArenaAllocator` per koneksi dan membangun `Request` / `Response` / `ParsedHead` (array header 64 entri) per request. `zix.Http1` menggunakan parsing stack-local zero-alloc. Gap ini tidak bisa ditutup hanya dengan arsitektur.
+- Field `pool_size` diabaikan secara diam untuk `.EPOLL` (perilaku yang sama seperti `.ASYNC` dan `.MIXED` yang sudah mengabaikannya). Pemanggil yang menetapkan `.pool_size = N` dengan `.EPOLL` harus migrasi ke `.workers = N`.
+- SSE dan WebSocket masih tidak cocok untuk `.EPOLL`: blocking read akan menahan worker selama masa hidup koneksi. Gunakan `.ASYNC`.
+
+---
+
+## ADR-035: Staging per-koneksi gRPC mux, SETTINGS ter-cache, dan TCP_CORK
+
+**Status:** Diterima
+
+**Konteks:** Event loop gRPC EPOLL multiplexed (ADR-031) men-stage reply (HEADERS + DATA + trailer) ke buffer `ReplyStage` dan flush dalam satu `write()`. Buffer berupa `[4096]u8` inline pada `GrpcMuxConn`. Handler streaming yang memancarkan ribuan pesan meluap 4096 byte berulang kali, memaksa satu `write()` per luapan (~85 KB streaming dalam ~21 flush). Frame SETTINGS server di-encode ulang dari loop parameter pada setiap koneksi baru. Handler streaming menghasilkan banyak flush perantara kecil, masing-masing menjadi segmen TCP tersendiri.
+
+**Keputusan:** Jadikan backing stage milik pemanggil dan beri koneksi mux buffer lebih besar plus handshake terkomputasi, serta cork output streaming.
+
+- `ReplyStage.buf` kini slice `[]u8` yang dipasok pemanggil. Jalur inline blocking (`dispatchGrpcInline`) memberi array stack 4096 byte (reply unary kecil). Jalur mux memberi buffer milik koneksi sendiri.
+- `GrpcMuxConn` memiliki `stage_buf` 64 KB. Panggilan streaming ~5000 pesan (~85 KB puncak) flush dalam dua write, dan ~100 reply unary konkuren (~6 KB) digabung menjadi satu write.
+- `GrpcMuxConn.init` memanggil `buildSettingsFrame` sekali untuk mengisi `settings_frame` 33 byte (header 9 byte + 4 param). Handshake menambahkan blob itu apa adanya alih-alih menjalankan ulang loop encode per koneksi.
+- `muxDispatch` mendeteksi route streaming (`routeIsStreaming`) dan membungkus handler dalam `setTcpCork(fd, true)` / `setTcpCork(fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan flush stage perantara menjadi lebih sedikit segmen. Route unary tidak di-cork (sudah single-write). `setTcpCork` no-op pada target non-Linux.
+
+**Konsekuensi:**
+- Lebih sedikit syscall per panggilan streaming (write turun dari ~21 ke ~2 untuk reply 5000 pesan) dan lebih sedikit segmen TCP di wire saat cork.
+- `GrpcMuxConn` membesar ~64 KB per koneksi. Ini biaya memori per-koneksi yang disengaja ditukar demi pengurangan syscall dan segmen. Model mux menahan satu `GrpcMuxConn` per koneksi h2 aktif, bukan per stream.
+- Perbaikan write stream terkait: `fdWriteAll` kini poll dan ulang pada `EAGAIN` alih-alih melaporkan `BrokenPipe`, sehingga buffer kirim penuh pada socket EPOLL non-blocking tidak lagi memotong reply yang ter-stage. Lihat changelog 0.4.0.
 
 ---
 
