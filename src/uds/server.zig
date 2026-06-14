@@ -1,9 +1,21 @@
 //! zix uds server
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
+
+/// Emit a server lifecycle line. Routes through config.logger when present.
+/// Without a logger it prints to stderr only in Debug builds (silent in release).
+fn logSystem(config: UdsServerConfig, comptime fmt: []const u8, args: anytype) void {
+    if (config.logger) |lg| {
+        lg.system(.INFO, "uds", fmt, args);
+        return;
+    }
+
+    if (comptime builtin.mode == .Debug) std.debug.print("zix uds: " ++ fmt ++ "\n", args);
+}
 
 fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
     if (recv_ms == 0 and send_ms == 0) return;
@@ -70,7 +82,7 @@ pub const UdsServer = struct {
             std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
         }
 
-        if (self.config.logger) |lg| lg.system(.INFO, "uds", "listening on {s}", .{self.config.path});
+        logSystem(self.config, "listening on {s}", .{self.config.path});
 
         const ConnTask = struct {
             stream: std.Io.net.Stream,
