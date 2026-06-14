@@ -2,6 +2,7 @@
 //! All parsing operates on caller-owned buffers. No std.http dependency.
 
 const std = @import("std");
+const cache = @import("../../utils/response_cache.zig");
 
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
@@ -124,6 +125,76 @@ pub fn takeWebSocket() ?WsPending {
     tl_ws_pending = null;
 
     return pending;
+}
+
+// --------------------------------------------------------- //
+// Response cache: per-worker, per-key precomputed response (ADR-036).
+// --------------------------------------------------------- //
+
+/// Per-worker response cache. Set once per worker by the EPOLL engine when
+/// config.response_cache is on, null otherwise. When null every cache call below
+/// degrades to a no-op, so a handler that uses the cache API still works on a
+/// server with caching disabled.
+pub threadlocal var tl_cache: ?*cache.ResponseCache = null;
+
+/// Configured default TTL in milliseconds, installed alongside tl_cache. A
+/// handler may pass its own TTL or this default via cacheTtl().
+pub threadlocal var tl_cache_ttl_ms: u32 = 1000;
+
+/// Install or clear the response cache and its default TTL for this worker.
+pub fn setCache(c: ?*cache.ResponseCache, default_ttl_ms: u32) void {
+    tl_cache = c;
+    tl_cache_ttl_ms = default_ttl_ms;
+}
+
+/// The configured default cache TTL for this worker, for handlers that want it.
+pub fn cacheTtl() u32 {
+    return tl_cache_ttl_ms;
+}
+
+/// Look up a full cached response for this request. Returns the cached bytes
+/// when caching is enabled and a fresh entry exists, else null. The key is
+/// hash(method, path, query). Write the returned bytes with fdWriteAll.
+pub fn cacheLookup(head: *const ParsedHead) ?[]const u8 {
+    const c = tl_cache orelse return null;
+    const key = cache.hashKey(head.method, head.path, head.query);
+
+    return c.lookup(key, cache.nowMillis());
+}
+
+/// Store full response bytes as this request's cached response for ttl_ms.
+/// No-op when caching is disabled, the bytes exceed the per-slot cap, or the
+/// table is full. The bytes must be a complete HTTP response.
+pub fn cacheStore(head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) void {
+    const c = tl_cache orelse return;
+    const key = cache.hashKey(head.method, head.path, head.query);
+
+    _ = c.store(key, bytes, ttl_ms, cache.nowMillis());
+}
+
+/// Store bytes under this request's key (when cacheable) then write them to fd.
+///
+/// Note:
+/// - Cache the full response only for idempotent methods (GET, HEAD). Dynamic
+///   per-request bodies either set a short ttl_ms or skip the cache and write
+///   directly.
+///
+/// Usage:
+/// ```zig
+/// fn handler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+///     if (zix.Http1.cacheLookup(head)) |bytes| {
+///         zix.Http1.fdWriteAll(fd, bytes) catch {};
+///         return;
+///     }
+///
+///     const resp = buildResponse(head, body);
+///     zix.Http1.writeWithCache(fd, head, resp, zix.Http1.cacheTtl()) catch {};
+/// }
+/// ```
+pub fn writeWithCache(fd: std.posix.fd_t, head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
+    cacheStore(head, bytes, ttl_ms);
+
+    return fdWriteAll(fd, bytes);
 }
 
 // --------------------------------------------------------- //
@@ -1201,6 +1272,66 @@ test "zix http1: writeSimple with no active sink writes directly to fd" {
     const resp = recv[0..n];
     try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 404 Not Found\r\n"));
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nnot found"));
+}
+
+test "zix http1: cache API is a no-op when no cache is installed" {
+    setCache(null, 0);
+
+    const parsed = try parseHead("GET /x HTTP/1.1\r\n\r\n");
+
+    try std.testing.expect(cacheLookup(&parsed.head) == null);
+
+    // store with no cache installed must not crash
+    cacheStore(&parsed.head, "whatever", 1000);
+    try std.testing.expect(cacheLookup(&parsed.head) == null);
+}
+
+test "zix http1: writeWithCache stores then a later lookup hits with identical bytes" {
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer rc.deinit();
+
+    setCache(&rc, 1000);
+    defer setCache(null, 0);
+
+    const parsed = try parseHead("GET /thing HTTP/1.1\r\nHost: x\r\n\r\n");
+    const head = parsed.head;
+
+    // first request: miss
+    try std.testing.expect(cacheLookup(&head) == null);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+    try writeWithCache(fds[1], &head, resp, cacheTtl());
+
+    var recv: [128]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqualStrings(resp, recv[0..n]);
+
+    // second request: hit returns the identical cached bytes
+    try std.testing.expectEqualStrings(resp, cacheLookup(&head).?);
+}
+
+test "zix http1: cache keys separate distinct paths and queries" {
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 64 });
+    defer rc.deinit();
+
+    setCache(&rc, 1000);
+    defer setCache(null, 0);
+
+    const a = try parseHead("GET /a HTTP/1.1\r\n\r\n");
+    const b = try parseHead("GET /b HTTP/1.1\r\n\r\n");
+    const q = try parseHead("GET /a?v=2 HTTP/1.1\r\n\r\n");
+
+    cacheStore(&a.head, "alpha-resp", 1000);
+
+    // a different path and a different query are both misses
+    try std.testing.expect(cacheLookup(&b.head) == null);
+    try std.testing.expect(cacheLookup(&q.head) == null);
+    try std.testing.expectEqualStrings("alpha-resp", cacheLookup(&a.head).?);
 }
 
 test "zix http1: RespSink oversized payload writes through in order" {

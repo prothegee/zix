@@ -6,6 +6,7 @@ const frame = @import("frame.zig");
 const status = @import("status.zig");
 const Logger = @import("../../../logger/logger.zig").Logger;
 const parseTimeout = @import("timeout.zig").parseTimeout;
+const rc = @import("../../../utils/response_cache.zig");
 
 pub const GrpcStatus = status.GrpcStatus;
 
@@ -57,6 +58,9 @@ pub fn parsePath(path: []const u8) ?GrpcPath {
 pub const GrpcContext = struct {
     fd: std.posix.fd_t,
     stream_id: u31,
+    /// Full gRPC path of this call (e.g. "/pkg.Svc/Method"). Set at dispatch.
+    /// Used as part of the response cache key. Empty when unset.
+    path: []const u8 = "",
     _body: []const u8,
     _pos: usize,
     _hdr_sent: bool,
@@ -215,7 +219,92 @@ pub const GrpcContext = struct {
         const deadline = self.deadline_ns orelse return false;
         return wallClockNs() >= deadline;
     }
+
+    /// Serve a cached unary response when one is present and fresh. The key is
+    /// the path plus the raw request body, so an identical call replays the
+    /// stored response message with no handler work. On a hit the message is
+    /// sent and the stream is finished with OK, and the handler should return.
+    /// The cache stores the logical message, so per-stream framing and optional
+    /// gzip are reapplied by sendMessage on every hit.
+    ///
+    /// Note:
+    /// - A miss, no cache installed on this worker, or an empty path returns
+    ///   false so the handler builds the response as usual.
+    ///
+    /// Usage:
+    /// ```zig
+    /// fn handler(_: []const h2.Header, ctx: *zix.Grpc.Context) void {
+    ///     if (ctx.serveCached("application/grpc")) return;
+    ///     const reply = buildExpensiveReply(ctx.recvMessage());
+    ///     ctx.sendCached("application/grpc", reply, 0);
+    ///     ctx.finish(.OK, "");
+    /// }
+    /// ```
+    ///
+    /// Return:
+    /// - bool (true when served from cache, the handler should return)
+    pub fn serveCached(self: *GrpcContext, content_type: []const u8) bool {
+        const cache = tl_cache orelse return false;
+        if (self.path.len == 0) return false;
+
+        const bytes = cache.lookup(requestKey(self.path, self._body), rc.nowMillis()) orelse return false;
+
+        self.sendMessage(content_type, bytes);
+        self.finish(.OK, "");
+
+        return true;
+    }
+
+    /// Send a unary response message and store it under the call key for later
+    /// serveCached hits. ttl_ms of 0 uses the worker default (cacheTtl). Storing
+    /// is skipped when no cache is installed, the path is empty, or the message
+    /// exceeds the per-slot cap. The handler still calls finish() as usual.
+    ///
+    /// Param:
+    /// content_type - []const u8 (response content type, e.g. "application/grpc")
+    /// data - []const u8 (the uncompressed response message)
+    /// ttl_ms - u32 (freshness in milliseconds, 0 means the worker default)
+    pub fn sendCached(self: *GrpcContext, content_type: []const u8, data: []const u8, ttl_ms: u32) void {
+        self.sendMessage(content_type, data);
+
+        const cache = tl_cache orelse return;
+        if (self.path.len == 0) return;
+
+        const ttl = if (ttl_ms == 0) tl_cache_ttl_ms else ttl_ms;
+        _ = cache.store(requestKey(self.path, self._body), data, ttl, rc.nowMillis());
+    }
 };
+
+// --------------------------------------------------------- //
+
+/// Per-worker response cache installed by the EPOLL mux worker. Null on workers
+/// without a cache, so the GrpcContext cache API degrades to a plain send.
+pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
+
+/// Default cache freshness for this worker, used when a handler passes ttl 0.
+pub threadlocal var tl_cache_ttl_ms: u32 = 1000;
+
+/// Install (or clear) the per-worker response cache and its default TTL.
+pub fn setCache(cache: ?*rc.ResponseCache, default_ttl_ms: u32) void {
+    tl_cache = cache;
+    tl_cache_ttl_ms = default_ttl_ms;
+}
+
+/// Worker default cache freshness in milliseconds.
+pub fn cacheTtl() u32 {
+    return tl_cache_ttl_ms;
+}
+
+/// Cache key for a unary call: the gRPC path and the raw request body. Returns
+/// a non-zero u64 (0 is the cache empty sentinel).
+fn requestKey(path: []const u8, body: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(path);
+    hasher.update(body);
+
+    const digest = hasher.final();
+    return if (digest == 0) 1 else digest;
+}
 
 // --------------------------------------------------------- //
 
@@ -302,6 +391,17 @@ pub const GrpcServeOpts = struct {
     /// Enable gzip response compression. When true, compresses DATA frames for clients
     /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress_gzip.
     compress_gzip: bool = false,
+    /// Enable the per-worker unary response cache (ADR-036). Passed from
+    /// GrpcServerConfig.response_cache. Active under .EPOLL in this release.
+    response_cache: bool = false,
+    /// Response cache slot count, rounded down to a power of two.
+    cache_max_entries: u32 = 256,
+    /// Per-slot response-message cap. A larger message bypasses the cache.
+    cache_max_value_bytes: u32 = 16 * 1024,
+    /// Default cache freshness in milliseconds, exposed to handlers via cacheTtl().
+    cache_ttl_ms: u32 = 1000,
+    /// Optional ceiling on per-worker cache memory. 0 disables the ceiling.
+    cache_max_total_bytes: usize = 0,
 };
 
 // --------------------------------------------------------- //
@@ -1339,6 +1439,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
     var ctx = GrpcContext{
         .fd = conn.fd,
         .stream_id = stream.id,
+        .path = path,
         ._body = effective_body,
         ._pos = 0,
         ._hdr_sent = false,
@@ -1952,4 +2053,97 @@ test "zix grpc: ReplyStage payload larger than buf writes directly" {
     var out: [16]u8 = undefined;
     const n = try std.posix.read(fds[0], &out);
     try std.testing.expectEqualStrings("hello world", out[0..n]);
+}
+
+test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
+    setCache(null, 0);
+
+    var ctx = GrpcContext{
+        .fd = 0,
+        .stream_id = 1,
+        .path = "/svc.Svc/Method",
+        ._body = "req",
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+    };
+    try std.testing.expect(!ctx.serveCached("application/grpc"));
+
+    // even with a cache installed, an empty path is never cached
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 8, .max_value_bytes = 64 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var no_path = ctx;
+    no_path.path = "";
+    try std.testing.expect(!no_path.serveCached("application/grpc"));
+}
+
+test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const path = "/svc.Svc/Method";
+    const body = "request-body";
+    const reply = "unary-reply-payload";
+
+    // first call: miss, handler builds and stores the reply
+    var ctx = GrpcContext{
+        .fd = fds[1],
+        .stream_id = 1,
+        .path = path,
+        ._body = body,
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+    };
+    try std.testing.expect(!ctx.serveCached("application/grpc"));
+    ctx.sendCached("application/grpc", reply, 0);
+    ctx.finish(.OK, "");
+
+    var first: [512]u8 = undefined;
+    const n1 = try std.posix.read(fds[0], &first);
+    try std.testing.expect(std.mem.indexOf(u8, first[0..n1], reply) != null);
+
+    // the message is now stored under the call key
+    try std.testing.expect(cache.lookup(requestKey(path, body), rc.nowMillis()) != null);
+
+    // second call: same path and body, served from cache with no handler
+    var ctx2 = GrpcContext{
+        .fd = fds[1],
+        .stream_id = 3,
+        .path = path,
+        ._body = body,
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+    };
+    try std.testing.expect(ctx2.serveCached("application/grpc"));
+
+    var second: [512]u8 = undefined;
+    const n2 = try std.posix.read(fds[0], &second);
+    try std.testing.expect(std.mem.indexOf(u8, second[0..n2], reply) != null);
+}
+
+test "zix grpc: response cache keys separate distinct paths and bodies" {
+    const key_a = requestKey("/svc.Svc/A", "body");
+    const key_b = requestKey("/svc.Svc/B", "body");
+    const key_c = requestKey("/svc.Svc/A", "other");
+
+    try std.testing.expect(key_a != key_b);
+    try std.testing.expect(key_a != key_c);
+    try std.testing.expect(key_b != key_c);
 }

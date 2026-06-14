@@ -355,8 +355,10 @@ pub const RoomMap = struct {
         const frame_len = buildFrame(&frame_buf, .text, payload);
         const frame_data = frame_buf[0..frame_len];
 
+        // Build once, fan out: the staging buffer is reused across every member
+        // rather than re-created per connection.
+        var write_buf: [broadcast_payload_max + ws_max_frame_header]u8 = undefined;
         for (room_ptr.conns.items) |conn| {
-            var write_buf: [broadcast_payload_max + ws_max_frame_header]u8 = undefined;
             var writer = conn.stream.writer(conn.io, &write_buf);
             writer.interface.writeAll(frame_data) catch continue;
             writer.interface.flush() catch continue;

@@ -59,6 +59,22 @@ pub const HttpServerConfig = struct {
     /// N           = exactly N pool threads.
     /// Ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
+    /// Enable the per-worker response cache (ADR-036). Default false. When off,
+    /// the handler cache API (res.serveCached / res.sendCached) degrades to a
+    /// plain send. Active under the .EPOLL dispatch model in this release.
+    response_cache: bool = false,
+    /// Response cache slot count, rounded down to a power of two. Per-worker
+    /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
+    cache_max_entries: u32 = 256,
+    /// Per-slot response cap. A response larger than this bypasses the cache.
+    /// Caching pays off above a few KiB, so keep this lean.
+    cache_max_value_bytes: u32 = 16 * 1024,
+    /// Default freshness in milliseconds, exposed to handlers via cacheTtl().
+    /// Handlers may pass their own TTL per store.
+    cache_ttl_ms: u32 = 1000,
+    /// Optional ceiling on per-worker cache memory. 0 disables the ceiling. When
+    /// set, the effective entry count is reduced so entries * value_bytes fits.
+    cache_max_total_bytes: usize = 0,
     /// Optional logger. When non-null, the server calls logger.access() after each
     /// response and injects a pointer into ctx.logger for handler use.
     /// Caller owns the Logger and must ensure it outlives the server.

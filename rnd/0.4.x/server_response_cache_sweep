@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# Body-size sweep for server_response_cache.zig: find the crossover point where
+# the cache starts to pay.
+#
+# What:
+#   For each body size, A/B /sized-nocache?bytes=N against /sized-cache?bytes=N
+#   and report the throughput delta. The query is part of the cache key, so each
+#   size is its own entry. Below the crossover the delta sits near zero (kernel
+#   bound), above it the cache pulls ahead.
+#
+# Protocol:
+#   tool        wrk
+#   threads     6
+#   conns       512 (default, override with CONN=4096)
+#   duration    5 seconds
+#   runs        twice per route, averaged
+#   server      waits 2 seconds after start before any bench
+#   output      a .txt file in this directory, machine specs + summary table
+#
+# Usage:
+#   rnd/0.4.x/server_response_cache_sweep.sh
+#   CONN=4096 rnd/0.4.x/server_response_cache_sweep.sh
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+SRC="$HERE/server_response_cache.zig"
+BIN="$HERE/server_response_cache.exec"
+PORT=9100
+HOST=127.0.0.1
+
+THREADS=6
+DURATION=5
+PRE_BENCH_WAIT=2
+RUNS=2
+CONN="${CONN:-512}"
+SIZES=(256 512 1024 2048 4096 8192 16384 32768 65536)
+
+ZIG="${ZIG:-zig}"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="$HERE/server_response_cache_sweep-c${CONN}-$STAMP.txt"
+
+command -v wrk >/dev/null 2>&1 || { echo "wrk not found on PATH" >&2; exit 1; }
+command -v "$ZIG" >/dev/null 2>&1 || { echo "$ZIG not found on PATH" >&2; exit 1; }
+
+# Average Requests/sec over RUNS runs of one url, teeing full output to OUT.
+run_avg() {
+    local url="$1"
+    local total=0 out rps run
+
+    for run in $(seq 1 "$RUNS"); do
+        out="$(wrk -t"$THREADS" -c"$CONN" -d"${DURATION}s" "$url")"
+        { echo; echo "--- $url run $run/$RUNS ---"; echo "$out"; } >> "$OUT"
+        rps="$(echo "$out" | awk '/Requests\/sec/ {print $2}')"
+        total="$(awk -v a="$total" -v b="$rps" 'BEGIN { print a + b }')"
+    done
+
+    awk -v t="$total" -v n="$RUNS" 'BEGIN { printf "%.0f", t / n }'
+}
+
+# --------------------------------------------------------- #
+# Machine specs header.
+# --------------------------------------------------------- #
+
+{
+    echo "server_response_cache size sweep"
+    echo "date            : $(date -Is)"
+    echo "host            : $(uname -n)"
+    echo "kernel          : $(uname -sr)"
+    echo "arch            : $(uname -m)"
+    if command -v lscpu >/dev/null 2>&1; then
+        echo "cpu             : $(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -n1)"
+        echo "cores (logical) : $(nproc)"
+    fi
+    if command -v free >/dev/null 2>&1; then
+        echo "memory          : $(free -h | awk '/^Mem:/ {print $2 " total, " $7 " avail"}')"
+    fi
+    echo "zig             : $($ZIG version)"
+    echo "wrk             : $(wrk --version 2>&1 | head -n1 || true)"
+    echo "params          : threads=$THREADS conns=$CONN duration=${DURATION}s runs=$RUNS sizes=${SIZES[*]}"
+    echo "------------------------------------------------------------"
+} | tee "$OUT"
+
+echo "building $SRC ..." | tee -a "$OUT"
+( cd "$ROOT" && "$ZIG" build-exe "$SRC" -OReleaseFast -femit-bin="$BIN" )
+
+# Run from the repo root so the server creates its static file under rnd/0.4.x.
+( cd "$ROOT" && "$BIN" ) &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+echo "server pid $SERVER_PID, waiting ${PRE_BENCH_WAIT}s before bench ..." | tee -a "$OUT"
+sleep "$PRE_BENCH_WAIT"
+
+# --------------------------------------------------------- #
+# Sweep, building the summary as we go.
+# --------------------------------------------------------- #
+
+summary="$(printf '%-10s %14s %14s %9s\n' 'bytes' 'nocache_rps' 'cache_rps' 'delta')"
+
+for size in "${SIZES[@]}"; do
+    nocache="$(run_avg "http://$HOST:$PORT/sized-nocache?bytes=$size")"
+    cache="$(run_avg "http://$HOST:$PORT/sized-cache?bytes=$size")"
+    delta="$(awk -v n="$nocache" -v c="$cache" 'BEGIN { if (n > 0) printf "%+.1f%%", (c - n) / n * 100; else print "n/a" }')"
+
+    summary="$summary"$'\n'"$(printf '%-10s %14s %14s %9s' "$size" "$nocache" "$cache" "$delta")"
+done
+
+{
+    echo
+    echo "============================ summary (c$CONN) ============================"
+    echo "$summary"
+} | tee -a "$OUT"
+
+echo | tee -a "$OUT"
+echo "saved: $OUT" | tee -a "$OUT"

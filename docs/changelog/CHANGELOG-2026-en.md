@@ -37,6 +37,17 @@ __*Fix:*__
 ## 0.4.0 (TBD)
 
 __*Update:*__
+- Response cache awareness (opt-in, ADR-036):
+    - New shared `src/utils/response_cache.zig`: a per-worker, lock-free precomputed-response cache (structure-of-arrays slab, open addressing, lazy on-access TTL). Off by default, installed under `.EPOLL` only (other dispatch models leave it uninstalled and the API degrades to a plain send).
+    - Five flat config fields with identical names across `Http1ServerConfig`, `HttpServerConfig`, and `GrpcServerConfig`: `response_cache` (`bool`, default `false`), `cache_max_entries` (`u32`), `cache_max_value_bytes` (`u32`), `cache_ttl_ms` (`u32`), and `cache_max_total_bytes` (`usize`).
+    - `zix.Http`: `res.serveCached(req)` and `res.sendCached(req, body, ttl)` cache the full serialized response, keyed on method, path, and query. `zix.Http1` keeps `cacheLookup` / `cacheStore` / `writeWithCache`.
+    - `zix.Grpc` (unary): `ctx.serveCached(content_type)` and `ctx.sendCached(content_type, data, ttl)` cache the response message, keyed on path plus request body, re-framed per stream so HPACK and stream id stay correct.
+    - Measured crossover near 4 KiB: heavy ~32 KiB JSON +34% throughput at c512, zero regression below ~2 KiB. See ADR-036.
+    ---
+- WebSocket build-once broadcast fanout:
+    - New `zix.Http1.WebSocket.broadcast(conns, opcode, payload)`: serializes the frame once and writes the same bytes to every fd in a caller-maintained room, so a broadcast costs one serialization regardless of member count. A failed write to a dead peer is skipped (the EPOLL engine reaps that fd on its next event), and the large-payload path builds the header once and writes the payload without a staging copy.
+    - `zix.Http.WebSocket.RoomMap.broadcast` reuses a single staging buffer across all members instead of re-creating one per connection (build once, fan out).
+    ---
 - Http epoll shared-nothing:
     - `zix.Http` `.EPOLL` was rewritten from a centralized model (one accept thread pushing to a shared `ConnQueue`, pool workers popping) into a shared-nothing architecture matching `zix.Http1`. Each worker binds its own `SO_REUSEPORT` listener, creates its own `epoll` instance, and runs its own level-triggered event loop. The kernel distributes new connections across workers with no shared queue, no mutex, and no fd handoff.
     - `workers` (not `pool_size`) is now the EPOLL worker count for `zix.Http`. `0` selects cpu_count. `pool_size` is silently ignored for `.EPOLL` (callers using `.pool_size = N` with `.EPOLL` must migrate to `.workers = N`).

@@ -14,6 +14,8 @@ const Context = @import("context.zig").Context;
 const method = @import("method.zig");
 const static = @import("static.zig");
 const parser = @import("parser.zig");
+const rcache = @import("../../utils/response_cache.zig");
+const setCache = @import("response.zig").setCache;
 
 // --------------------------------------------------------- //
 
@@ -22,6 +24,20 @@ const conn_queue_initial_cap: usize = 16;
 /// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
 const EPOLL_MAX_EVENTS: usize = 1024;
+
+/// Effective cache slot count for a worker, honoring cache_max_total_bytes.
+/// When a memory ceiling is set, the entry count is reduced so the slab
+/// (entries * value_bytes) fits. ResponseCache.init then rounds down to a power
+/// of two, so the slab never exceeds the ceiling.
+fn effectiveCacheEntries(config: Config) u32 {
+    if (config.cache_max_total_bytes == 0) return config.cache_max_entries;
+
+    const value_bytes: usize = @max(1, config.cache_max_value_bytes);
+    const fit = config.cache_max_total_bytes / value_bytes;
+    const capped = @min(@as(usize, config.cache_max_entries), fit);
+
+    return @intCast(@max(@as(usize, 1), capped));
+}
 
 // Global date cache: updated by a background timer thread (model 2) or the accept loop (model 1).
 // Readers do a single atomic load, no lock, no syscall per request.
@@ -707,6 +723,26 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
             _ = arena.reset(.retain_capacity);
 
+            // Per-worker response cache: lock-free by ownership, never shared.
+            var response_cache: rcache.ResponseCache = undefined;
+            var cache_on = false;
+            if (cfg.response_cache) {
+                if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(cfg),
+                    .max_value_bytes = cfg.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    setCache(&response_cache, cfg.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                setCache(null, 0);
+                response_cache.deinit();
+            };
+
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             var epoll_timeout: i32 = -1;
             while (true) {
@@ -1050,4 +1086,74 @@ test "zix http: EpollConnTable get returns null for out-of-range fd" {
 test "zix http: getAvailableCpuCount returns at least 1" {
     const count = getAvailableCpuCount();
     try std.testing.expect(count >= 1);
+}
+
+test "zix http: effectiveCacheEntries honors the memory ceiling" {
+    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+
+    // no ceiling: the configured entry count passes through unchanged
+    try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(base));
+
+    // ceiling caps the entry count so entries * value_bytes fits
+    var capped = base;
+    capped.cache_max_total_bytes = 256 * 1024;
+    try std.testing.expectEqual(@as(u32, 16), effectiveCacheEntries(capped));
+
+    // a tiny ceiling still yields at least one slot
+    var tiny = base;
+    tiny.cache_max_total_bytes = 1;
+    try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
+}
+
+fn cacheRouteHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    if (res.serveCached(req)) return;
+
+    try res.sendCached(req, "cached-body", 0);
+}
+
+test "zix http: EPOLL processRequest serves a cache miss then a hit" {
+    var cache = try rcache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    const routes = [_]Route{.{ .path = "/cached", .handler = cacheRouteHandler }};
+    const ServerImpl = HttpServerImpl(4096, &routes);
+    var server = try ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .response_cache = true });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "GET /cached HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    // first request: cache miss, handler builds and stores the response
+    var buf1: [128]u8 = undefined;
+    @memcpy(buf1[0..raw.len], raw);
+    _ = arena.reset(.retain_capacity);
+    _ = server.processRequest(stream, fds[1], undefined, buf1[0..raw.len], &arena);
+
+    var first: [256]u8 = undefined;
+    const n1 = try std.posix.read(fds[0], &first);
+    try std.testing.expect(std.mem.endsWith(u8, first[0..n1], "\r\n\r\ncached-body"));
+
+    // second request: cache hit, identical bytes served with no rebuild
+    var buf2: [128]u8 = undefined;
+    @memcpy(buf2[0..raw.len], raw);
+    _ = arena.reset(.retain_capacity);
+    _ = server.processRequest(stream, fds[1], undefined, buf2[0..raw.len], &arena);
+
+    var second: [256]u8 = undefined;
+    const n2 = try std.posix.read(fds[0], &second);
+    try std.testing.expectEqualStrings(first[0..n1], second[0..n2]);
+
+    // the entry is present and fresh
+    try std.testing.expect(cache.lookup(rcache.hashKey("GET", "/cached", ""), rcache.nowMillis()) != null);
 }

@@ -37,6 +37,12 @@ pub const queryParam = core.queryParam;
 pub const percentDecode = core.percentDecode;
 pub const parseRange = core.parseRange;
 
+pub const cacheLookup = core.cacheLookup;
+pub const cacheStore = core.cacheStore;
+pub const writeWithCache = core.writeWithCache;
+pub const cacheTtl = core.cacheTtl;
+pub const ResponseCache = @import("../../utils/response_cache.zig").ResponseCache;
+
 pub const fdWriteAll = core.fdWriteAll;
 pub const flushPending = core.flushPending;
 pub const writeSimple = core.writeSimple;

@@ -1,0 +1,388 @@
+server_response_cache size sweep
+date            : 2026-06-15T01:18:54+07:00
+host            : prothegee
+kernel          : Linux 7.0.11-arch1-1
+arch            : x86_64
+cpu             : AMD Ryzen 5 5600H with Radeon Graphics
+cores (logical) : 12
+memory          : 30Gi total, 26Gi avail
+zig             : 0.16.0
+wrk             : wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer
+params          : threads=6 conns=512 duration=5s runs=2 sizes=256 512 1024 2048 4096 8192 16384 32768 65536
+------------------------------------------------------------
+building /mnt/256a1/repo/zix/rnd/0.4.x/server_response_cache.zig ...
+server pid 115055, waiting 2s before bench ...
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=256 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=256
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   549.30us  463.10us  10.51ms   93.49%
+    Req/Sec   104.01k     4.30k  117.36k    82.33%
+  3104719 requests in 5.04s, 1.08GB read
+Requests/sec: 616023.01
+Transfer/sec:    219.13MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=256 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=256
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   551.40us  443.65us   9.57ms   92.97%
+    Req/Sec   104.17k     3.50k  116.20k    78.33%
+  3109869 requests in 5.04s, 1.08GB read
+Requests/sec: 616815.74
+Transfer/sec:    219.41MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=256 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=256
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   556.56us  501.10us  13.43ms   93.47%
+    Req/Sec   104.69k     4.35k  125.30k    74.67%
+  3124826 requests in 5.05s, 1.09GB read
+Requests/sec: 618507.85
+Transfer/sec:    220.02MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=256 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=256
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   548.57us  448.31us   7.82ms   92.47%
+    Req/Sec   104.32k     4.05k  121.68k    75.33%
+  3113368 requests in 5.05s, 1.08GB read
+Requests/sec: 616519.26
+Transfer/sec:    219.31MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=512 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=512
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   587.61us  510.63us   8.76ms   92.97%
+    Req/Sec   102.07k     3.35k  113.16k    70.67%
+  3045960 requests in 5.06s, 1.77GB read
+Requests/sec: 602465.71
+Transfer/sec:    359.10MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=512 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=512
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   590.83us  502.56us   8.51ms   92.70%
+    Req/Sec   101.71k     3.56k  112.99k    72.00%
+  3036483 requests in 5.05s, 1.77GB read
+Requests/sec: 601628.66
+Transfer/sec:    358.60MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=512 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=512
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   538.79us  417.40us   6.57ms   92.03%
+    Req/Sec   104.08k     3.85k  123.73k    71.33%
+  3106546 requests in 5.06s, 1.81GB read
+Requests/sec: 614282.67
+Transfer/sec:    366.14MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=512 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=512
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   573.82us  482.73us   7.02ms   92.32%
+    Req/Sec   102.92k     3.86k  114.07k    68.67%
+  3071968 requests in 5.05s, 1.79GB read
+Requests/sec: 607756.17
+Transfer/sec:    362.25MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=1024 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=1024
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   658.04us  630.71us  13.53ms   92.32%
+    Req/Sec    98.59k     4.72k  110.62k    80.67%
+  2942266 requests in 5.04s, 3.14GB read
+Requests/sec: 583440.28
+Transfer/sec:    637.65MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=1024 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=1024
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   669.70us  663.48us  11.62ms   92.24%
+    Req/Sec    99.02k     3.98k  106.76k    70.67%
+  2955817 requests in 5.05s, 3.15GB read
+Requests/sec: 585547.07
+Transfer/sec:    639.95MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=1024 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=1024
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   556.79us  446.10us  10.09ms   92.54%
+    Req/Sec   100.94k     4.25k  116.13k    76.67%
+  3012253 requests in 5.06s, 3.21GB read
+Requests/sec: 595642.88
+Transfer/sec:    650.98MB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=1024 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=1024
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   572.29us  454.37us   7.43ms   91.98%
+    Req/Sec   100.46k     3.86k  114.86k    69.00%
+  2997391 requests in 5.03s, 3.20GB read
+Requests/sec: 595767.40
+Transfer/sec:    651.12MB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=2048 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=2048
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.98ms    1.16ms  14.63ms   86.79%
+    Req/Sec    92.53k     6.91k  102.79k    86.33%
+  2761878 requests in 5.06s, 5.49GB read
+Requests/sec: 545981.83
+Transfer/sec:      1.09GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=2048 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=2048
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.06ms    1.29ms  14.23ms   85.75%
+    Req/Sec    92.79k     6.45k  102.01k    86.00%
+  2769539 requests in 5.05s, 5.50GB read
+Requests/sec: 548503.72
+Transfer/sec:      1.09GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=2048 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=2048
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   575.49us  444.17us   7.56ms   92.58%
+    Req/Sec    96.35k     3.10k  108.93k    73.67%
+  2875877 requests in 5.04s, 5.72GB read
+Requests/sec: 570521.88
+Transfer/sec:      1.13GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=2048 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=2048
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   618.95us  515.11us   7.55ms   91.90%
+    Req/Sec    95.21k     4.01k  113.43k    73.67%
+  2842007 requests in 5.03s, 5.65GB read
+Requests/sec: 564821.79
+Transfer/sec:      1.12GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=4096 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=4096
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.16ms    1.32ms  14.51ms   85.08%
+    Req/Sec    82.35k    12.79k  101.09k    77.00%
+  2460576 requests in 5.05s, 9.66GB read
+Requests/sec: 487173.22
+Transfer/sec:      1.91GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=4096 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=4096
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.12ms    1.27ms  16.26ms   85.30%
+    Req/Sec    82.35k    14.58k  102.33k    78.00%
+  2458536 requests in 5.05s, 9.65GB read
+Requests/sec: 486473.23
+Transfer/sec:      1.91GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=4096 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=4096
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   625.25us  503.62us   9.21ms   92.82%
+    Req/Sec    93.68k     3.14k  104.93k    79.33%
+  2797015 requests in 5.04s, 10.98GB read
+Requests/sec: 554816.66
+Transfer/sec:      2.18GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=4096 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=4096
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   649.38us  536.48us   8.72ms   91.81%
+    Req/Sec    91.62k     3.91k  107.51k    73.00%
+  2735392 requests in 5.05s, 10.74GB read
+Requests/sec: 541809.52
+Transfer/sec:      2.13GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=8192 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=8192
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.37ms    1.40ms  14.59ms   84.41%
+    Req/Sec    61.52k    12.08k   76.94k    73.67%
+  1838430 requests in 5.07s, 14.17GB read
+Requests/sec: 362461.05
+Transfer/sec:      2.79GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=8192 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=8192
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.37ms    1.38ms  14.99ms   84.36%
+    Req/Sec    62.03k    10.18k   75.81k    72.00%
+  1854587 requests in 5.06s, 14.30GB read
+Requests/sec: 366879.81
+Transfer/sec:      2.83GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=8192 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=8192
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   675.74us  415.54us   9.72ms   87.51%
+    Req/Sec    75.16k     2.80k   86.48k    80.00%
+  2243018 requests in 5.03s, 17.29GB read
+Requests/sec: 445568.92
+Transfer/sec:      3.44GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=8192 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=8192
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   731.32us  470.10us   8.45ms   87.78%
+    Req/Sec    72.81k     3.49k   84.20k    69.00%
+  2173411 requests in 5.05s, 16.76GB read
+Requests/sec: 430638.68
+Transfer/sec:      3.32GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=16384 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=16384
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.75ms    1.58ms  15.39ms   83.41%
+    Req/Sec    45.00k     8.27k   61.23k    62.67%
+  1345413 requests in 5.06s, 20.66GB read
+Requests/sec: 265686.54
+Transfer/sec:      4.08GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=16384 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=16384
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.74ms    1.56ms  18.42ms   83.49%
+    Req/Sec    44.61k     7.72k   59.19k    63.00%
+  1333430 requests in 5.08s, 20.47GB read
+Requests/sec: 262581.48
+Transfer/sec:      4.03GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=16384 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=16384
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   794.53us  363.89us   8.05ms   85.08%
+    Req/Sec    59.84k     3.39k   75.11k    79.67%
+  1785804 requests in 5.05s, 27.42GB read
+Requests/sec: 353475.53
+Transfer/sec:      5.43GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=16384 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=16384
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.89ms  495.60us   9.30ms   84.52%
+    Req/Sec    56.00k     3.25k   64.00k    67.67%
+  1671622 requests in 5.04s, 25.67GB read
+Requests/sec: 331488.78
+Transfer/sec:      5.09GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=32768 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=32768
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.52ms    1.93ms  16.58ms   73.90%
+    Req/Sec    28.43k     3.72k   39.05k    70.33%
+  852128 requests in 5.06s, 26.07GB read
+Requests/sec: 168517.01
+Transfer/sec:      5.16GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=32768 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=32768
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.50ms    1.88ms  14.41ms   72.87%
+    Req/Sec    28.24k     3.36k   37.33k    67.33%
+  846342 requests in 5.07s, 25.89GB read
+Requests/sec: 166880.93
+Transfer/sec:      5.11GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=32768 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=32768
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.23ms  492.46us  10.32ms   86.67%
+    Req/Sec    37.73k     2.12k   47.48k    71.00%
+  1127435 requests in 5.05s, 34.49GB read
+Requests/sec: 223306.24
+Transfer/sec:      6.83GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=32768 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=32768
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.27ms  573.24us  11.01ms   82.93%
+    Req/Sec    37.82k     1.50k   41.38k    71.67%
+  1129871 requests in 5.05s, 34.57GB read
+Requests/sec: 223765.41
+Transfer/sec:      6.85GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=65536 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=65536
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.42ms    2.76ms  21.35ms   63.69%
+    Req/Sec    15.65k     2.46k   24.20k    67.79%
+  468821 requests in 5.10s, 28.65GB read
+Requests/sec:  91940.83
+Transfer/sec:      5.62GB
+
+--- http://127.0.0.1:9100/sized-nocache?bytes=65536 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-nocache?bytes=65536
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.36ms    2.71ms  22.88ms   63.85%
+    Req/Sec    15.88k     2.19k   24.00k    68.90%
+  476912 requests in 5.10s, 29.14GB read
+Requests/sec:  93519.40
+Transfer/sec:      5.71GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=65536 run 1/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=65536
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.08ms  664.92us   9.05ms   87.48%
+    Req/Sec    21.73k     1.11k   26.56k    77.33%
+  651780 requests in 5.07s, 39.83GB read
+Requests/sec: 128561.87
+Transfer/sec:      7.86GB
+
+--- http://127.0.0.1:9100/sized-cache?bytes=65536 run 2/2 ---
+Running 5s test @ http://127.0.0.1:9100/sized-cache?bytes=65536
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.19ms  804.29us   9.77ms   84.76%
+    Req/Sec    21.08k     1.12k   24.56k    68.33%
+  632661 requests in 5.06s, 38.66GB read
+Requests/sec: 124943.79
+Transfer/sec:      7.64GB
+
+============================ summary (c512) ============================
+bytes         nocache_rps      cache_rps     delta
+256                616420         617515     +0.2%
+512                602045         611020     +1.5%
+1024               584495         595705     +1.9%
+2048               547245         567670     +3.7%
+4096               486823         548315    +12.6%
+8192               364670         438104    +20.1%
+16384              264134         342482    +29.7%
+32768              167699         223536    +33.3%
+65536               92730         126753    +36.7%
+
+saved: /mnt/256a1/repo/zix/rnd/0.4.x/server_response_cache_sweep-c512-20260615-011854.txt

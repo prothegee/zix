@@ -3,6 +3,8 @@
 const std = @import("std");
 const Status = @import("status.zig");
 const Content = @import("content.zig");
+const Request = @import("request.zig").Request;
+const rc = @import("../../utils/response_cache.zig");
 
 // --------------------------------------------------------- //
 
@@ -272,7 +274,160 @@ pub const Response = struct {
         self.status = .NO_CONTENT;
         return self.send("");
     }
+
+    /// Serialize the full HTTP response (status line, headers, body) into out,
+    /// in the same byte order as send(). The result is suitable for both writing
+    /// and caching verbatim.
+    ///
+    /// Return:
+    /// - ?usize (total bytes written into out, null when out is too small)
+    fn buildResponse(self: *Response, body_data: []const u8, out: []u8) ?usize {
+        const date_value = self.date_cache orelse "";
+        var offset: usize = 0;
+
+        const status_line = Status.statusLine(self.status);
+        if (status_line.len > 0) {
+            if (offset + status_line.len > out.len) return null;
+            @memcpy(out[offset..][0..status_line.len], status_line);
+            offset += status_line.len;
+        } else {
+            const status_str = Status.stringFromEnum(self.status);
+            const s = std.fmt.bufPrint(out[offset..], "HTTP/1.1 {d} {s}\r\n", .{ @intFromEnum(self.status), status_str }) catch return null;
+            offset += s.len;
+        }
+
+        const skip_body_headers = self.status == .NO_CONTENT;
+        if (!skip_body_headers) {
+            if (self.content_type) |ct| {
+                const s = std.fmt.bufPrint(out[offset..], "Content-Type: {s}\r\n", .{ct.asString()}) catch return null;
+                offset += s.len;
+            }
+
+            const cl_prefix = "Content-Length: ";
+            if (offset + cl_prefix.len + 22 > out.len) return null;
+            @memcpy(out[offset..][0..cl_prefix.len], cl_prefix);
+            offset += cl_prefix.len;
+            offset += writeDecimal(out[offset..], body_data.len);
+            out[offset] = '\r';
+            out[offset + 1] = '\n';
+            offset += 2;
+        }
+
+        if (self.keep_alive) |keep_alive| {
+            const conn: []const u8 = if (keep_alive and self.req_keep_alive)
+                "Connection: keep-alive\r\n"
+            else
+                "Connection: close\r\n";
+            if (offset + conn.len > out.len) return null;
+            @memcpy(out[offset..][0..conn.len], conn);
+            offset += conn.len;
+        }
+
+        if (date_value.len > 0) {
+            const s = std.fmt.bufPrint(out[offset..], "Date: {s}\r\n", .{date_value}) catch return null;
+            offset += s.len;
+        }
+
+        if (self.extra_buf) |extra| {
+            for (extra[0..self.extra_len]) |h| {
+                const s = std.fmt.bufPrint(out[offset..], "{s}: {s}\r\n", .{ h.name, h.value }) catch return null;
+                offset += s.len;
+            }
+        }
+
+        if (offset + 2 + body_data.len > out.len) return null;
+        out[offset] = '\r';
+        out[offset + 1] = '\n';
+        offset += 2;
+
+        if (body_data.len > 0) {
+            @memcpy(out[offset..][0..body_data.len], body_data);
+            offset += body_data.len;
+        }
+
+        return offset;
+    }
+
+    /// Look up a cached full response for req and, on a fresh hit, write it
+    /// verbatim with no re-serialization. A miss, an expired entry, or no cache
+    /// installed on this worker returns false.
+    ///
+    /// Usage:
+    /// ```zig
+    /// if (res.serveCached(&req)) return;
+    /// const body = buildExpensiveBody(...);
+    /// try res.sendCached(&req, body, 0);
+    /// ```
+    ///
+    /// Return:
+    /// - bool (true when served from cache, the handler should return)
+    pub fn serveCached(self: *Response, req: *const Request) bool {
+        const cache = tl_cache orelse return false;
+        const bytes = cache.lookup(requestKey(req), rc.nowMillis()) orelse return false;
+
+        self.bytes_written = bytes.len;
+        fdWriteAll(self.fd, bytes) catch return true;
+
+        return true;
+    }
+
+    /// Serialize the response once, write it, and store it under the request key
+    /// for later serveCached hits. ttl_ms of 0 uses the worker default (cacheTtl).
+    /// Falls back to a plain send when no cache is installed or the serialized
+    /// response exceeds the per-slot cap.
+    ///
+    /// Param:
+    /// req - *const Request (source of the cache key: method, path, query)
+    /// body_data - []const u8 (response body)
+    /// ttl_ms - u32 (freshness in milliseconds, 0 means the worker default)
+    ///
+    /// Return:
+    /// - !void
+    pub fn sendCached(self: *Response, req: *const Request, body_data: []const u8, ttl_ms: u32) !void {
+        const cache = tl_cache orelse return self.send(body_data);
+
+        var extra_bytes: usize = 0;
+        if (self.extra_buf) |extra| {
+            for (extra[0..self.extra_len]) |h| extra_bytes += h.name.len + h.value.len + 4;
+        }
+
+        const total = 512 + extra_bytes + body_data.len;
+        const buf = self.allocator.alloc(u8, total) catch return self.send(body_data);
+
+        const len = self.buildResponse(body_data, buf) orelse return self.send(body_data);
+        self.bytes_written = body_data.len;
+
+        const ttl = if (ttl_ms == 0) tl_cache_ttl_ms else ttl_ms;
+        _ = cache.store(requestKey(req), buf[0..len], ttl, rc.nowMillis());
+
+        return fdWriteAll(self.fd, buf[0..len]);
+    }
 };
+
+// --------------------------------------------------------- //
+
+/// Per-worker response cache installed by the EPOLL worker. Null on workers
+/// without a cache, so the Response cache API degrades to a plain send.
+pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
+
+/// Default cache freshness for this worker, used when a handler passes ttl 0.
+pub threadlocal var tl_cache_ttl_ms: u32 = 1000;
+
+/// Install (or clear) the per-worker response cache and its default TTL.
+pub fn setCache(cache: ?*rc.ResponseCache, default_ttl_ms: u32) void {
+    tl_cache = cache;
+    tl_cache_ttl_ms = default_ttl_ms;
+}
+
+/// Worker default cache freshness in milliseconds.
+pub fn cacheTtl() u32 {
+    return tl_cache_ttl_ms;
+}
+
+/// Cache key for a request: method name, path, and query string.
+fn requestKey(req: *const Request) u64 {
+    return rc.hashKey(@tagName(req.method()), req.path(), req.query());
+}
 
 // --------------------------------------------------------- //
 
@@ -425,4 +580,145 @@ test "zix test: formatHttpDate known timestamps" {
     try std.testing.expectEqualStrings("Sat, 03 Jan 1970 00:00:00 GMT", formatHttpDate(2 * 86400, &buf));
     try std.testing.expectEqualStrings("Thu, 01 Jan 1970 01:01:01 GMT", formatHttpDate(3661, &buf));
     try std.testing.expectEqualStrings("Mon, 28 Feb 2000 12:30:45 GMT", formatHttpDate(951_741_045, &buf));
+}
+
+test "zix http response cache: serveCached is a no-op when no cache is installed" {
+    setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var req = try Request.fromRaw("GET /x HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+    var res = Response.init(0, true, undefined, arena.allocator(), 16);
+
+    try std.testing.expect(!res.serveCached(&req));
+}
+
+test "zix http response cache: sendCached stores then serveCached writes identical bytes" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var req = try Request.fromRaw("GET /thing HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // first request: miss, then build + store + write
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(!res.serveCached(&req));
+    try res.sendCached(&req, "hello", 0);
+
+    var first: [256]u8 = undefined;
+    const n1 = try std.posix.read(fds[0], &first);
+    try std.testing.expect(std.mem.endsWith(u8, first[0..n1], "\r\n\r\nhello"));
+
+    // second request: hit returns the identical cached bytes
+    var res2 = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(res2.serveCached(&req));
+
+    var second: [256]u8 = undefined;
+    const n2 = try std.posix.read(fds[0], &second);
+    try std.testing.expectEqualStrings(first[0..n1], second[0..n2]);
+}
+
+test "zix http response cache: cached bytes match a plain send" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var req = try Request.fromRaw("GET /thing HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+
+    var pair_a: [2]i32 = undefined;
+    var pair_b: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair_a));
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair_b));
+    defer for ([_]i32{ pair_a[0], pair_a[1], pair_b[0], pair_b[1] }) |fd| {
+        _ = std.os.linux.close(fd);
+    };
+
+    // plain send
+    var res_plain = Response.init(pair_a[1], true, undefined, arena.allocator(), 16);
+    res_plain.setContentType(.APPLICATION_JSON);
+    try res_plain.send("{\"ok\":true}");
+
+    var plain: [256]u8 = undefined;
+    const np = try std.posix.read(pair_a[0], &plain);
+
+    // cached send with the same response shape
+    var res_cached = Response.init(pair_b[1], true, undefined, arena.allocator(), 16);
+    res_cached.setContentType(.APPLICATION_JSON);
+    try res_cached.sendCached(&req, "{\"ok\":true}", 0);
+
+    var cached: [256]u8 = undefined;
+    const nc = try std.posix.read(pair_b[0], &cached);
+
+    try std.testing.expectEqualStrings(plain[0..np], cached[0..nc]);
+}
+
+test "zix http response cache: sendCached without a cache falls back to a plain send" {
+    setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var req = try Request.fromRaw("GET /x HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try res.sendCached(&req, "data", 0);
+
+    var recv: [128]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 200 Ok"));
+    try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\ndata"));
+}
+
+test "zix http response cache: distinct paths and queries are separate keys" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var req_a = try Request.fromRaw("GET /a HTTP/1.1\r\n\r\n", allocator);
+    var req_b = try Request.fromRaw("GET /b HTTP/1.1\r\n\r\n", allocator);
+    var req_q = try Request.fromRaw("GET /a?v=2 HTTP/1.1\r\n\r\n", allocator);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var res_a = Response.init(fds[1], true, undefined, allocator, 16);
+    try res_a.sendCached(&req_a, "alpha", 0);
+
+    var drain: [128]u8 = undefined;
+    _ = try std.posix.read(fds[0], &drain);
+
+    // a different path and a different query are both misses
+    var res_b = Response.init(fds[1], true, undefined, allocator, 16);
+    var res_q = Response.init(fds[1], true, undefined, allocator, 16);
+    try std.testing.expect(!res_b.serveCached(&req_b));
+    try std.testing.expect(!res_q.serveCached(&req_q));
+
+    // the original path and query hits
+    var res_a2 = Response.init(fds[1], true, undefined, allocator, 16);
+    try std.testing.expect(res_a2.serveCached(&req_a));
 }

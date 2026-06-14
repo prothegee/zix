@@ -6,8 +6,23 @@ const core = @import("core.zig");
 const config_mod = @import("config.zig");
 const GrpcServerConfig = config_mod.GrpcServerConfig;
 const DispatchModel = @import("../../config.zig").DispatchModel;
+const rcache = @import("../../../utils/response_cache.zig");
 
 pub const Route = core.Route;
+
+/// Effective cache slot count for a worker, honoring cache_max_total_bytes.
+/// When a memory ceiling is set, the entry count is reduced so the slab
+/// (entries * value_bytes) fits. ResponseCache.init then rounds down to a power
+/// of two, so the slab never exceeds the ceiling.
+fn effectiveCacheEntries(opts: core.GrpcServeOpts) u32 {
+    if (opts.cache_max_total_bytes == 0) return opts.cache_max_entries;
+
+    const value_bytes: usize = @max(1, opts.cache_max_value_bytes);
+    const fit = opts.cache_max_total_bytes / value_bytes;
+    const capped = @min(@as(usize, opts.cache_max_entries), fit);
+
+    return @intCast(@max(@as(usize, 1), capped));
+}
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
 /// Without a logger it prints to stderr only in Debug builds (silent in release).
@@ -322,6 +337,26 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
             var table = GrpcConnTable.init() catch return;
             defer table.deinit();
 
+            // Per-worker unary response cache: lock-free by ownership, never shared.
+            var response_cache: rcache.ResponseCache = undefined;
+            var cache_on = false;
+            if (ctx.opts.response_cache) {
+                if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(ctx.opts),
+                    .max_value_bytes = ctx.opts.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    core.setCache(&response_cache, ctx.opts.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                core.setCache(null, 0);
+                response_cache.deinit();
+            };
+
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             var epoll_timeout: i32 = -1;
             while (true) {
@@ -381,6 +416,11 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 .handler_timeout_ms = cfg.handler_timeout_ms,
                 .io = io,
                 .compress_gzip = cfg.compress_gzip,
+                .response_cache = cfg.response_cache,
+                .cache_max_entries = cfg.cache_max_entries,
+                .cache_max_value_bytes = cfg.cache_max_value_bytes,
+                .cache_ttl_ms = cfg.cache_ttl_ms,
+                .cache_max_total_bytes = cfg.cache_max_total_bytes,
             };
 
             logSystem(cfg, "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
@@ -585,4 +625,21 @@ test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {
     const io = threaded.io();
     var server = try GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083 });
     server.deinit();
+}
+
+test "zix grpc: effectiveCacheEntries honors the memory ceiling" {
+    const base = core.GrpcServeOpts{ .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+
+    // no ceiling: the configured entry count passes through unchanged
+    try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(base));
+
+    // ceiling caps the entry count so entries * value_bytes fits
+    var capped = base;
+    capped.cache_max_total_bytes = 256 * 1024;
+    try std.testing.expectEqual(@as(u32, 16), effectiveCacheEntries(capped));
+
+    // a tiny ceiling still yields at least one slot
+    var tiny = base;
+    tiny.cache_max_total_bytes = 1;
+    try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
 }

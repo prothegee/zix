@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# PoC bench harness for server_response_cache.zig.
+#
+# What:
+#   A/B the dispatch paths that all return the same "Hello, World!" bytes:
+#     /        comptime constant write (best case)
+#     /nocache rebuild + serialize every request (worst case)
+#     /cache   hashed-key lookup then write a cached slice
+#   Because the response bytes are identical, the only variable is the
+#   serialization the cache skips. Comparable to server_hello_epoll.zig.
+#
+# Protocol (fixed, do not change without updating the proposal):
+#   tool        wrk (default). gcannon is the Http alternative, ghz is gRPC.
+#   threads     6
+#   point 1     -c512,  -d5s, run twice
+#   point 2     -c4096, -d5s, run twice
+#   server      waits 2 seconds after start before any bench
+#   output      a .txt file in this directory, machine specs in the header
+#
+# Usage:
+#   rnd/0.4.x/server_response_cache_bench.sh
+#   TOOL=gcannon rnd/0.4.x/server_response_cache_bench.sh
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+SRC="$HERE/server_response_cache.zig"
+BIN="$HERE/server_response_cache.exec"
+PORT=9100
+HOST=127.0.0.1
+
+THREADS=6
+DURATION=5
+PRE_BENCH_WAIT=2
+CONNS=(512 4096)
+ROUTES=(/ /nocache /cache /heavy-nocache /heavy-cache /static-nocache /static-cache)
+RUNS=2
+
+TOOL="${TOOL:-wrk}"
+ZIG="${ZIG:-zig}"
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="$HERE/server_response_cache_bench-$STAMP.txt"
+
+command -v "$TOOL" >/dev/null 2>&1 || { echo "$TOOL not found on PATH" >&2; exit 1; }
+command -v "$ZIG" >/dev/null 2>&1 || { echo "$ZIG not found on PATH" >&2; exit 1; }
+
+# --------------------------------------------------------- #
+# One load run. wrk and gcannon share the same -t/-c/-d shape.
+# ghz speaks gRPC and is out of scope for this Http1 file.
+# --------------------------------------------------------- #
+
+run_load() {
+    local conn="$1"
+    local url="$2"
+
+    case "$TOOL" in
+        wrk)     wrk -t"$THREADS" -c"$conn" -d"${DURATION}s" "$url" ;;
+        gcannon) gcannon -t"$THREADS" -c"$conn" -d"${DURATION}s" "$url" ;;
+        *)       echo "unsupported TOOL=$TOOL (use wrk or gcannon)" >&2; return 1 ;;
+    esac
+}
+
+# --------------------------------------------------------- #
+# Machine specs header.
+# --------------------------------------------------------- #
+
+{
+    echo "server_response_cache PoC bench"
+    echo "date            : $(date -Is)"
+    echo "host            : $(uname -n)"
+    echo "kernel          : $(uname -sr)"
+    echo "arch            : $(uname -m)"
+    if command -v lscpu >/dev/null 2>&1; then
+        echo "cpu             : $(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -n1)"
+        echo "cores (logical) : $(nproc)"
+    fi
+    if command -v free >/dev/null 2>&1; then
+        echo "memory          : $(free -h | awk '/^Mem:/ {print $2 " total, " $7 " avail"}')"
+    fi
+    echo "zig             : $($ZIG version)"
+    echo "tool            : $TOOL ($($TOOL --version 2>&1 | head -n1 || true))"
+    echo "memlock limit   : $(ulimit -l)"
+    echo "params          : threads=$THREADS duration=${DURATION}s conns=${CONNS[*]} runs=$RUNS pre_bench_wait=${PRE_BENCH_WAIT}s"
+    echo "------------------------------------------------------------"
+} | tee "$OUT"
+
+# --------------------------------------------------------- #
+# Build (ReleaseFast).
+# --------------------------------------------------------- #
+
+echo "building $SRC ..." | tee -a "$OUT"
+( cd "$ROOT" && "$ZIG" build-exe "$SRC" -OReleaseFast -femit-bin="$BIN" )
+
+# --------------------------------------------------------- #
+# Serve, wait 2 seconds, run, tear down.
+# --------------------------------------------------------- #
+
+# Run from the repo root so the server creates its static file under rnd/0.4.x.
+( cd "$ROOT" && "$BIN" ) &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+echo "server pid $SERVER_PID, waiting ${PRE_BENCH_WAIT}s before bench ..." | tee -a "$OUT"
+sleep "$PRE_BENCH_WAIT"
+
+for conn in "${CONNS[@]}"; do
+    for route in "${ROUTES[@]}"; do
+        for run in $(seq 1 "$RUNS"); do
+            {
+                echo
+                echo "=== tool=$TOOL route=$route conns=$conn run=$run/$RUNS ==="
+                run_load "$conn" "http://$HOST:$PORT$route"
+            } | tee -a "$OUT"
+        done
+    done
+done
+
+echo | tee -a "$OUT"
+echo "saved: $OUT" | tee -a "$OUT"
