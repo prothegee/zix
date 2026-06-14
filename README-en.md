@@ -46,6 +46,7 @@
 - [Documentation](./README-en.md#documentation)
 - [Getting Started](./README-en.md#getting-started)
 - [Build](./README-en.md#build)
+- [Server Config Consistency](./README-en.md#server-config-consistency)
 - [HTTP/1](./README-en.md#http1)
 - [Examples](./README-en.md#examples)
 - [Minimal](./README-en.md#minimal-examples)
@@ -364,6 +365,38 @@ kill %1                                 # stop it
 ```
 
 There is no `zig build install` library output and no `-Doptimize` is required for a plain compile check. To consume zix in another project, follow Getting Started above: it is added as a `build.zig.zon` dependency and imported with `exe.root_module.addImport("zix", zix.module("zix"))`, never linked as a system library.
+
+<br>
+
+## Server Config Consistency
+
+Every server config shares one vocabulary: the same concept uses the same field name and type across `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. Moving a config between protocols is mechanical, not a relearn. These fields are common to all of them:
+
+| Field | Type | Meaning |
+| :- | :- | :- |
+| `io` | `std.Io` | I/O backend, required, must outlive the server |
+| `ip` | `[]const u8` | Bind address |
+| `port` | `u16` | Bind port, must be non-zero |
+| `dispatch_model` | `DispatchModel` | `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` |
+| `kernel_backlog` | `u31` | TCP listen backlog |
+| `workers` | `usize` | Accept or EPOLL worker count, `0` selects cpu_count |
+| `pool_size` | `usize` | Pool thread count for `.POOL`, `0` selects a formula |
+| `logger` | `?*Logger` | Optional logger, caller-owned |
+
+Buffer, timeout, and cache fields keep the same names wherever a protocol has the feature:
+
+| Field | Type | Present on |
+| :- | :- | :- |
+| `max_recv_buf` | `usize` | `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Uds` |
+| `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
+| `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
+| `response_cache` and the four `cache_*` fields | see [Response Cache Awareness](#response-cache-awareness-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+
+A few differences are by design, not drift:
+
+- `zix.Http1` has no `conn_timeout_ms`: it runs no connection-registry timer thread (see the Timeouts note in the HTTP/1 LLD docs).
+- `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
+- `zix.Udp` (datagram) carries `ip` / `port` / `logger`, and `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path, each only the subset that applies.
 
 <br>
 
