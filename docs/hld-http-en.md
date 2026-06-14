@@ -93,6 +93,30 @@ flowchart TD
 - `pool_size` is ignored. `workers` controls accept thread count.
 - Balanced throughput and latency, higher jitter than `.POOL` under saturation.
 
+### .EPOLL: Shared-Nothing epoll Workers (Linux-only)
+
+```mermaid
+flowchart TD
+    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn cpu_count workers\n(or workers = N)"]
+    SPAWN --> W1["Worker 0\nSO_REUSEPORT listener\nepoll_create1"]
+    SPAWN --> W2["Worker 1\nSO_REUSEPORT listener\nepoll_create1"]
+    SPAWN --> WN["Worker N-1\n..."]
+    W1 --> EL["event loop\nepoll_wait(1024)"]
+    EL -->|listener fd| ACC["drain accept4(SOCK_CLOEXEC)\nsetNoDelay\nepoll_ctl ADD EPOLLIN+RDHUP"]
+    EL -->|conn fd RDHUP/ERR| CLOSE["epoll_ctl DEL\nclose(fd)"]
+    EL -->|conn fd readable| SERVE["handleOneRequest(fd)\nblocking read/write"]
+    SERVE -->|keep-alive| EL
+    SERVE -->|close| CLOSE
+    ACC --> EL
+```
+
+- Each worker owns one `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers with no shared queue.
+- Level-triggered `EPOLLIN`: connections stay registered after each request and re-fire when new data arrives. No explicit re-arm.
+- Blocking fds: `handleOneRequest` does a synchronous recv/parse/send, then returns the worker to `epoll_wait`.
+- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
+- Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
+- Non-Linux builds fall back to `.POOL` automatically.
+
 `zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.
 
 ---
@@ -101,7 +125,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    zix["src/zix.zig\npublic API root"]
+    zix["src/lib.zig\npublic API root"]
 
     zix --> Http["tcp/http/Http.zig\nzix.Http"]
     zix --> Tcp["tcp/Tcp.zig\nzix.Tcp"]
@@ -229,8 +253,8 @@ pub const HttpServerConfig = struct {
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
     conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
-    workers:              usize             = 0,          // 0 = cpu_count accept threads, ignored by .ASYNC
-    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2) .POOL only
+    workers:              usize             = 0,          // 0 = cpu_count; accept threads for .POOL/.MIXED, workers for .EPOLL; ignored by .ASYNC
+    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (ignored by .EPOLL, .MIXED, .ASYNC)
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
 };
 ```
