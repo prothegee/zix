@@ -45,6 +45,7 @@
 - [Important Contribution Notes](./README-en.md#important-contribution-notes)
 - [Documentation](./README-en.md#documentation)
 - [Getting Started](./README-en.md#getting-started)
+- [Build](./README-en.md#build)
 - [HTTP/1](./README-en.md#http1)
 - [Examples](./README-en.md#examples)
 - [Minimal](./README-en.md#minimal-examples)
@@ -334,6 +335,35 @@ const zix = b.dependency("zix", .{
 
 exe.root_module.addImport("zix", zix.module("zix"));
 ```
+
+<br>
+
+## Build
+
+zix is consumed as a Zig module (source), not shipped as a prebuilt library. The repository defines the `zix` module with `b.addModule`, so there is no `addStaticLibrary` or `addSharedLibrary` artifact. Running `zig build` on its own runs the default `install` step with nothing to install: no `.a`, no `.so`, nothing under `zig-out/lib`. It compiles the module graph and is useful only as a quick "does it still compile" check.
+
+The real entry points are the named steps. List them any time with `zig build -l`:
+
+| Step | What it does |
+| :- | :- |
+| `zig build` | Compile the module graph only. No artifact is emitted, because zix is a source module. |
+| `zig build test-all` | Run unit, integration, behaviour, and edge tests. |
+| `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
+| `zig build examples` | Build every example into `zig-out/bin/`. |
+| `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
+| `zig build example-<name>` | Build and run one example, for example `example-http1_websocket`. |
+| `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-epoll`. |
+| `zig build test-runner-all` | Run every server-plus-client integration runner. |
+
+Built example binaries land in `zig-out/bin/`. To build all examples, then run one in the background and stop it:
+
+```sh
+zig build examples                      # build every example into zig-out/bin/
+zig-out/bin/example-http1_websocket &   # run one in the background
+kill %1                                 # stop it
+```
+
+There is no `zig build install` library output and no `-Doptimize` is required for a plain compile check. To consume zix in another project, follow Getting Started above: it is added as a `build.zig.zon` dependency and imported with `exe.root_module.addImport("zix", zix.module("zix"))`, never linked as a system library.
 
 <br>
 
