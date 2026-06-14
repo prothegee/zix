@@ -62,6 +62,37 @@ close():      lock -> closed = true -> unlock -> broadcast   (membuka blokir sem
         else |_| { handleConnection(stream, io, self); }
 ```
 
+### run(): .EPOLL (dispatch_model = .EPOLL, Linux-only)
+
+```
+1. worker_count = if (workers == 0) cpu_count else workers
+2. spawn worker_count thread -> epollWorker(self, io)
+3. join semua thread
+
+epollWorker():
+  1. resolve + listen dengan SO_REUSEPORT (reuse_address = true)
+  2. setNonBlock(listener_fd)
+  3. epoll_create1
+  4. epoll_ctl(ADD, listener_fd, EPOLLIN)
+  5. read buf + ArenaAllocator per-worker
+  6. event loop (epoll_wait EPOLL_MAX_EVENTS = 1024):
+       listener fd:
+         loop: conn_fd = accept4(SOCK_CLOEXEC)  <- drain semua pending
+               break on EAGAIN / EWOULDBLOCK
+               tcp_nodelay(conn_fd)
+               epoll_ctl(ADD, conn_fd, EPOLLIN | EPOLLRDHUP)
+       conn fd (HUP | ERR | RDHUP):
+               epoll_ctl(DEL, conn_fd)
+               linux.close(conn_fd)
+       conn fd (readable):
+               result = handleOneRequest(conn_fd, buf, arena, self)
+               .keep_alive -> tetap terdaftar (level-triggered, tidak perlu re-arm)
+               .close      -> epoll_ctl(DEL, conn_fd) + linux.close(conn_fd)
+```
+
+Tidak ada state bersama antar worker. `handleOneRequest` dipanggil langsung di thread worker
+yang melakukan recv/parse/dispatch/send secara blocking sinkron. Arena di-reset antar request.
+
 ### workerEntry() (accept thread .POOL)
 
 ```
