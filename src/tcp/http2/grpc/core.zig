@@ -343,9 +343,11 @@ const Stream = struct {
 /// Corked output buffer for one inline (unary) reply. Stages HEADERS + DATA + trailer
 /// and flushes them to the fd in a single write(). Frames larger than the buffer are
 /// passed through directly after flushing the staged prefix, preserving wire order.
+/// Callers supply `buf` - the backing storage for staging. Use a small stack array for
+/// the blocking path; use the per-connection `stage_buf` in GrpcMuxConn for the mux path.
 const ReplyStage = struct {
     fd: std.posix.fd_t,
-    buf: [4096]u8 = undefined,
+    buf: []u8,
     len: usize = 0,
 
     fn append(self: *ReplyStage, bytes: []const u8) void {
@@ -632,7 +634,8 @@ fn dispatchGrpcInline(
     // Hold the connection write lock across the whole reply only when a streaming
     // task may be writing concurrently, so frames are not interleaved.
     const need_mutex = conn_mutex.active_streaming.load(.acquire) > 0;
-    var stage = ReplyStage{ .fd = fd };
+    var stage_buf: [4096]u8 = undefined;
+    var stage = ReplyStage{ .fd = fd, .buf = &stage_buf };
 
     var ctx = GrpcContext{
         .fd = fd,
@@ -1151,6 +1154,13 @@ pub const GrpcMuxConn = struct {
     conn_window_consumed: usize,
     phase: MuxPhase,
 
+    /// Precomputed 33-byte server SETTINGS frame (9-byte header + 4 params x 6 bytes).
+    /// Built once in init from opts and appended as-is on every new h2 connection.
+    settings_frame: [33]u8,
+    /// 64 KB backing store for the per-event reply stage.
+    /// Large enough to hold a full 5000-message streaming call (~85 KB peak) in 2 flushes
+    /// and to coalesce 100 concurrent unary replies (~6 KB) in a single write().
+    stage_buf: [65536]u8,
     stage: ReplyStage,
 
     /// Allocate and initialize a connection.
@@ -1213,8 +1223,12 @@ pub const GrpcMuxConn = struct {
             .last_stream_id = 0,
             .conn_window_consumed = 0,
             .phase = .await_preface,
-            .stage = .{ .fd = fd },
+            .settings_frame = undefined,
+            .stage_buf = undefined,
+            .stage = undefined,
         };
+        buildSettingsFrame(&conn.settings_frame, opts);
+        conn.stage = .{ .fd = fd, .buf = &conn.stage_buf, .len = 0 };
 
         return conn;
     }
@@ -1261,21 +1275,44 @@ fn muxStageRst(conn: *GrpcMuxConn, stream_id: u31, error_code: u32) void {
     muxStageFrame(conn, h2.FT_RST_STREAM, 0, stream_id, &payload);
 }
 
-/// Stage the server SETTINGS frame (same parameters as the blocking handshake).
-fn muxStageServerSettings(conn: *GrpcMuxConn) void {
+/// Build the 33-byte server SETTINGS frame into out. Called once per connection in
+/// GrpcMuxConn.init so subsequent handshakes append a precomputed blob, not a loop.
+fn buildSettingsFrame(out: *[33]u8, opts: GrpcServeOpts) void {
     const params = [_][2]u32{
-        .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(conn.opts.max_streams)) },
+        .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
         .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
-        .{ h2.SETTINGS_MAX_FRAME_SIZE, conn.opts.max_frame_size },
+        .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
         .{ h2.SETTINGS_ENABLE_PUSH, 0 },
     };
 
-    var payload: [params.len * 6]u8 = undefined;
-    for (params, 0..) |p, i| {
-        std.mem.writeInt(u16, payload[i * 6 ..][0..2], @as(u16, @intCast(p[0])), .big);
-        std.mem.writeInt(u32, payload[i * 6 + 2 ..][0..4], p[1], .big);
+    var fh_buf: [9]u8 = undefined;
+    h2.encodeFrameHeader(&fh_buf, .{
+        .length = 24,
+        .frame_type = h2.FT_SETTINGS,
+        .flags = 0,
+        .stream_id = 0,
+    });
+    @memcpy(out[0..9], &fh_buf);
+
+    for (params, 0..) |param, i| {
+        std.mem.writeInt(u16, out[9 + i * 6 ..][0..2], @as(u16, @intCast(param[0])), .big);
+        std.mem.writeInt(u32, out[9 + i * 6 + 2 ..][0..4], param[1], .big);
     }
-    muxStageFrame(conn, h2.FT_SETTINGS, 0, 0, &payload);
+}
+
+/// Stage the precomputed server SETTINGS frame (built once in GrpcMuxConn.init).
+fn muxStageServerSettings(conn: *GrpcMuxConn) void {
+    conn.stage.append(&conn.settings_frame);
+}
+
+/// Enable or disable TCP_CORK on a Linux TCP socket.
+/// When enabled, the kernel holds output segments until the MSS is full or CORK is cleared,
+/// coalescing the multiple intermediate stage flushes a streaming handler produces into
+/// fewer TCP segments. No-op on non-Linux targets.
+fn setTcpCork(fd: std.posix.fd_t, enable: bool) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+    const val: c_int = if (enable) 1 else 0;
+    std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 3, std.mem.asBytes(&val)) catch {};
 }
 
 /// Dispatch one fully-received stream inline, staging the reply into the connection cork.
@@ -1283,6 +1320,7 @@ fn muxStageServerSettings(conn: *GrpcMuxConn) void {
 /// owns the connection, so a streaming handler runs on the event loop and must stay bounded.
 fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stream) void {
     const path = headerPath(stream.headers[0..stream.header_count]);
+    const is_streaming = routeIsStreaming(routes, path);
 
     var time_start: std.os.linux.timespec = undefined;
     if (conn.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
@@ -1311,7 +1349,10 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
         ._out = &conn.stage,
         ._resp_gzip = resp_gzip,
     };
+
+    if (is_streaming) setTcpCork(conn.fd, true);
     Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+    if (is_streaming) setTcpCork(conn.fd, false);
 
     if (conn.opts.logger) |logger| {
         var time_end: std.os.linux.timespec = undefined;
@@ -1836,4 +1877,79 @@ test "zix grpc: Router dispatches to matching handler" {
     _ = routes;
     got = true;
     try std.testing.expect(got);
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix grpc: buildSettingsFrame produces valid SETTINGS frame header" {
+    const opts = GrpcServeOpts{};
+    var frm: [33]u8 = undefined;
+    buildSettingsFrame(&frm, opts);
+
+    const fh = h2.parseFrameHeader(frm[0..9]);
+    try std.testing.expectEqual(h2.FT_SETTINGS, fh.frame_type);
+    try std.testing.expectEqual(@as(u8, 0), fh.flags);
+    try std.testing.expectEqual(@as(u31, 0), fh.stream_id);
+    try std.testing.expectEqual(@as(u24, 24), fh.length);
+}
+
+test "zix grpc: buildSettingsFrame encodes MAX_CONCURRENT_STREAMS correctly" {
+    const opts = GrpcServeOpts{ .max_streams = 64 };
+    var frm: [33]u8 = undefined;
+    buildSettingsFrame(&frm, opts);
+
+    const id = std.mem.readInt(u16, frm[9..11], .big);
+    const val = std.mem.readInt(u32, frm[11..15], .big);
+    try std.testing.expectEqual(@as(u16, h2.SETTINGS_MAX_CONCURRENT_STREAMS), id);
+    try std.testing.expectEqual(@as(u32, 64), val);
+}
+
+test "zix grpc: ReplyStage append and flush via pipe" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var backing: [64]u8 = undefined;
+    var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
+    stage.append("hello");
+    stage.append(" world");
+    stage.flush();
+
+    var out: [16]u8 = undefined;
+    const n = try std.posix.read(fds[0], &out);
+    try std.testing.expectEqualStrings("hello world", out[0..n]);
+}
+
+test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var backing: [4]u8 = undefined;
+    var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
+
+    stage.append("abcd");
+    stage.append("ef");
+    stage.flush();
+
+    var out: [16]u8 = undefined;
+    const n = try std.posix.read(fds[0], &out);
+    try std.testing.expectEqualStrings("abcdef", out[0..n]);
+}
+
+test "zix grpc: ReplyStage payload larger than buf writes directly" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var backing: [4]u8 = undefined;
+    var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
+
+    stage.append("hello world");
+    stage.flush();
+
+    var out: [16]u8 = undefined;
+    const n = try std.posix.read(fds[0], &out);
+    try std.testing.expectEqualStrings("hello world", out[0..n]);
 }
