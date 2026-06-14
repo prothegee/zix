@@ -27,7 +27,7 @@ zig build test-all
 
 ## Pengujian Unit
 
-Sumber: `src/zix.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yang memverifikasi bahwa setiap deklarasi publik berhasil dikompilasi dan setiap blok `test` inline lolos.
+Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yang memverifikasi bahwa setiap deklarasi publik berhasil dikompilasi dan setiap blok `test` inline lolos.
 
 ### zix.Tcp (raw)
 
