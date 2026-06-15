@@ -19,6 +19,8 @@ pub fn addSteps(
         .{ "example-http1_basic_2_pool", "examples/http1_basic_2_pool.zig", "http1" },
         .{ "example-http1_basic_3_mixed", "examples/http1_basic_3_mixed.zig", "http1" },
         .{ "example-http1_basic_4_epoll", "examples/http1_basic_4_epoll.zig", "http1" },
+        .{ "example-http1_basic_5_uring", "examples/http1_basic_5_uring.zig", "http1" },
+        .{ "example-http1_cache", "examples/http1_cache.zig", "http1" },
         .{ "example-http1_json", "examples/http1_json.zig", "http1" },
         .{ "example-http1_middleware", "examples/http1_middleware.zig", "http1" },
         .{ "example-http1_params", "examples/http1_params.zig", "http1" },
