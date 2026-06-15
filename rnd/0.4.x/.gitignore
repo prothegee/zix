@@ -1,0 +1,16 @@
+!/perf-http-epoll-c4096-20260615.perf.data
+!/perf-http-epoll-c512-20260615.perf.data
+!/perf-http-uring-c4096-20260615.perf.data
+!/perf-http-uring-c512-20260615.perf.data
+!/perf-http1-epoll-c4096-20260615.perf.data
+!/perf-http1-epoll-c512-20260615.perf.data
+!/perf-http1-uring-c4096-20260615.perf.data
+!/perf-http1-uring-c512-20260615.perf.data
+!/perf-kernel-http-epoll-c4096-20260616.perf.data
+!/perf-kernel-http-epoll-c512-20260616.perf.data
+!/perf-kernel-http-uring-c4096-20260616.perf.data
+!/perf-kernel-http-uring-c512-20260616.perf.data
+!/perf-kernel-http1-epoll-c4096-20260616.perf.data
+!/perf-kernel-http1-epoll-c512-20260616.perf.data
+!/perf-kernel-http1-uring-c4096-20260616.perf.data
+!/perf-kernel-http1-uring-c512-20260616.perf.data
