@@ -63,12 +63,14 @@ pub fn main(process: std.process.Init) !void {
     // REQUIRED mode: port is taken from SERVER_PORT, no CLI arg parsing.
     // To accept --port at runtime instead, replace with:
     // var server = try MyServer.initArgs(.{
+    //     .io        = io,
     //     .ip        = SERVER_IP,
     //     .port      = SERVER_PORT, // default fallback if --port is not passed
     //     .port_mode = .CONFIGURABLE,
     //     ...
     // }, process.minimal.args);
     var server = try MyServer.init(.{
+        .io = io,
         .allocator = std.heap.smp_allocator,
         .ip = SERVER_IP,
         .port = SERVER_PORT,
@@ -107,5 +109,5 @@ pub fn main(process: std.process.Init) !void {
     });
     defer server.deinit();
 
-    try server.run(io);
+    try server.run();
 }

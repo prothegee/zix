@@ -33,14 +33,15 @@ fn frameHandler(payload: []const u8, fd: std.posix.fd_t) void {
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Tcp.Server.initFramedArgs(frameHandler, .{
+    var server = try zix.Tcp.Server.initFramed(frameHandler, .{
+        .io = process.io,
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
-    }, process.minimal.args);
+    });
     defer server.deinit();
 
-    try server.run(process.io);
+    try server.run();
 }
