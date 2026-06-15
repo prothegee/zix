@@ -402,7 +402,9 @@ pub const FixServer = struct {
                 for (acc_threads) |t| t.join();
             },
 
-            .EPOLL => {
+            // .URING has no native ring path in zix.Fix yet, so it falls back to
+            // the .EPOLL shared-nothing loop (ADR-037 implements .URING in zix.Http1 first).
+            .EPOLL, .URING => {
                 if (comptime @import("builtin").target.os.tag == .linux) {
                     try self.runEpoll(io, conn_opts, cpu);
                 } else {

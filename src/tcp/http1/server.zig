@@ -1,5 +1,6 @@
-//! zix http1 server: ASYNC, POOL, MIXED, and EPOLL dispatch models.
-//! EPOLL is native on Linux (shared-nothing event loop), non-Linux falls back to POOL.
+//! zix http1 server: ASYNC, POOL, MIXED, EPOLL, and URING dispatch models.
+//! EPOLL (readiness) and URING (io_uring completion) are native on Linux,
+//! both shared-nothing per-worker event loops. Non-Linux falls back to POOL.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,7 +9,9 @@ const DispatchModel = @import("../config.zig").DispatchModel;
 const core = @import("core.zig");
 const cache = @import("../../utils/response_cache.zig");
 const ws = @import("websocket.zig");
+const uring = @import("../io_uring/ring.zig");
 const HandlerFn = core.HandlerFn;
+const IoUring = std.os.linux.IoUring;
 
 /// Max epoll events drained per epoll_wait call. 4096 reduces round-trips at
 /// high connection counts where many fds can be ready simultaneously.
@@ -939,6 +942,476 @@ fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?co
 }
 
 // --------------------------------------------------------- //
+// URING model: shared-nothing io_uring, one ring + listener per worker (ADR-037).
+// Minimal correct core: multishot accept, an fd-indexed slot table with a
+// generation-tagged user_data against fd reuse, a fixed per-connection recv
+// buffer with a plain recv SQE (data lands directly in conn.buf, zero copy),
+// one coalesced send per readable batch, and a batched CQE drain. Half-duplex
+// per connection (at most one recv or one send in flight), so a blocking sink
+// flush can never interleave with an in-flight send.
+//
+// Two Phase 3 (ADR-037) levers were measured and REVERTED here, both losing to
+// this minimal core (see rnd/0.4.x/uring_phase3_results.txt):
+// 1. ring setup flags (SINGLE_ISSUER|COOP_TASKRUN, SINGLE_ISSUER|DEFER_TASKRUN):
+//    null. A busy submit_and_wait loop under single-issuer already drains
+//    completions at enter, so there is no IPI/task-run cost to remove.
+// 2. multishot recv + provided buffer ring: regression. It forces a memcpy from
+//    the kernel-selected buffer into conn.buf for accumulation, and that copy
+//    (largest at pipeline depth 16) outweighs the multishot re-arm saving the
+//    plain recv-into-conn.buf path avoids by receiving in place.
+
+/// SQ entries per worker ring.
+const URING_ENTRIES: u16 = 4096;
+
+/// Max CQEs drained per loop pass.
+const URING_CQE_BATCH: usize = 512;
+
+/// Per-connection staged-response buffer. Matches the EPOLL sink size so a full
+/// pipelined burst coalesces into one send SQE.
+const URING_SEND_BUF_SIZE: usize = EPOLL_OUT_BUF_SIZE;
+
+/// Per-connection ring state. buf accumulates request bytes between recv
+/// completions. send_buf front [0..inflight] is owned by the kernel while a
+/// send SQE is outstanding, [inflight..staged] is appended and waiting.
+/// closing marks a connection that must be freed once the last send lands.
+const UringConn = struct {
+    fd: std.posix.fd_t,
+    gen: u24,
+    buf: []u8,
+    filled: usize,
+    send_buf: []u8,
+    staged: usize,
+    inflight: usize,
+    closing: bool,
+};
+
+/// Build a concrete io_uring worker with the handler and optional raw
+/// interceptor baked in at compile time, mirroring epollWorkerFn.
+fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) type {
+    return struct {
+        ring: IoUring,
+        slots: []?*UringConn,
+        listener_fd: std.posix.fd_t,
+        gen_counter: u24,
+        recv_buf_size: usize,
+        handler_timeout_ms: u32,
+
+        const Self = @This();
+        const allocator = std.heap.smp_allocator;
+        const linux = std.os.linux;
+
+        fn deinit(self: *Self) void {
+            for (self.slots) |maybe_conn| {
+                if (maybe_conn) |conn| {
+                    _ = linux.close(conn.fd);
+                    allocator.free(conn.buf);
+                    allocator.free(conn.send_buf);
+                    allocator.destroy(conn);
+                }
+            }
+
+            allocator.free(self.slots);
+            self.ring.deinit();
+        }
+
+        /// Get an SQE, submitting the staged batch first when the SQ is full.
+        fn getSqe(self: *Self) ?*linux.io_uring_sqe {
+            return self.ring.get_sqe() catch {
+                _ = self.ring.submit() catch return null;
+
+                return self.ring.get_sqe() catch null;
+            };
+        }
+
+        fn lookup(self: *Self, decoded: uring.Decoded) ?*UringConn {
+            const idx: usize = @intCast(decoded.fd);
+            if (idx >= self.slots.len) return null;
+
+            const conn = self.slots[idx] orelse return null;
+            if (conn.gen != decoded.gen) return null;
+
+            return conn;
+        }
+
+        fn destroyConn(self: *Self, conn: *UringConn) void {
+            self.slots[@intCast(conn.fd)] = null;
+
+            allocator.free(conn.buf);
+            allocator.free(conn.send_buf);
+            allocator.destroy(conn);
+        }
+
+        fn finishClose(self: *Self, conn: *UringConn) void {
+            _ = linux.close(conn.fd);
+            self.destroyConn(conn);
+        }
+
+        /// Close intent: flush staged bytes first when possible, otherwise free
+        /// now. With a send in flight the free is deferred to the send CQE.
+        fn beginClose(self: *Self, conn: *UringConn) void {
+            conn.closing = true;
+            if (conn.inflight > 0) return;
+
+            if (conn.staged > 0) {
+                self.submitSend(conn);
+                return;
+            }
+
+            self.finishClose(conn);
+        }
+
+        fn armAccept(self: *Self) void {
+            const sqe = self.getSqe() orelse return;
+            sqe.prep_multishot_accept(self.listener_fd, null, null, 0);
+            sqe.user_data = uring.packUserData(.accept, 0, self.listener_fd);
+        }
+
+        fn armRecv(self: *Self, conn: *UringConn) void {
+            if (conn.filled >= conn.buf.len) {
+                self.beginClose(conn);
+                return;
+            }
+
+            const sqe = self.getSqe() orelse {
+                self.beginClose(conn);
+                return;
+            };
+            sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
+            sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
+        }
+
+        fn submitSend(self: *Self, conn: *UringConn) void {
+            const sqe = self.getSqe() orelse {
+                self.finishClose(conn);
+                return;
+            };
+            sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], linux.MSG.NOSIGNAL);
+            sqe.user_data = uring.packUserData(.send, conn.gen, conn.fd);
+
+            conn.inflight = conn.staged;
+        }
+
+        // ----------------------------------------------------- //
+
+        fn handleAccept(self: *Self, cqe: linux.io_uring_cqe) void {
+            const rearm = (cqe.flags & linux.IORING_CQE_F_MORE) == 0;
+            defer if (rearm) self.armAccept();
+
+            if (cqe.res < 0) return;
+
+            const conn_fd: std.posix.fd_t = cqe.res;
+            const idx: usize = @intCast(conn_fd);
+            if (idx >= self.slots.len) {
+                _ = linux.close(conn_fd);
+                return;
+            }
+
+            setNoDelay(conn_fd);
+
+            const conn = allocator.create(UringConn) catch {
+                _ = linux.close(conn_fd);
+                return;
+            };
+            const buf = allocator.alloc(u8, self.recv_buf_size) catch {
+                allocator.destroy(conn);
+                _ = linux.close(conn_fd);
+                return;
+            };
+            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+                allocator.free(buf);
+                allocator.destroy(conn);
+                _ = linux.close(conn_fd);
+                return;
+            };
+
+            self.gen_counter +%= 1;
+            conn.* = .{
+                .fd = conn_fd,
+                .gen = self.gen_counter,
+                .buf = buf,
+                .filled = 0,
+                .send_buf = send_buf,
+                .staged = 0,
+                .inflight = 0,
+                .closing = false,
+            };
+            self.slots[idx] = conn;
+
+            self.armRecv(conn);
+        }
+
+        fn handleRecv(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
+            const conn = self.lookup(decoded) orelse return;
+
+            // res == 0 is a peer hangup, res < 0 a receive error: both close.
+            if (cqe.res <= 0) {
+                self.beginClose(conn);
+                return;
+            }
+
+            conn.filled += @intCast(cqe.res);
+
+            const outcome = self.dispatch(conn);
+
+            if (conn.staged > 0) {
+                self.submitSend(conn);
+                if (outcome == .close) conn.closing = true;
+
+                return;
+            }
+
+            if (outcome == .close) {
+                self.beginClose(conn);
+                return;
+            }
+
+            self.armRecv(conn);
+        }
+
+        /// Parse every complete request in conn.buf and dispatch it. Responses
+        /// stage into conn.send_buf through the core sink, so a pipelined burst
+        /// coalesces into one send. Trailing partial bytes are compacted to the
+        /// front for the next recv completion. Mirrors serveEpollConnInner's
+        /// parse loop without the read.
+        ///
+        /// Note:
+        /// - Minimal ring core: chunked bodies, bodies larger than the recv
+        ///   buffer, and WebSocket upgrades are not served yet and close the
+        ///   connection cleanly.
+        fn dispatch(self: *Self, conn: *UringConn) core.ConnOutcome {
+            const fd = conn.fd;
+
+            var sink = core.RespSink{ .fd = fd, .buf = conn.send_buf };
+            core.tl_resp_sink = &sink;
+            defer core.tl_resp_sink = null;
+
+            var consumed: usize = 0;
+            var keep_alive = true;
+            while (consumed < conn.filled) {
+                const rem = conn.buf[consumed..conn.filled];
+                const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
+                    if (rem.len >= conn.buf.len) {
+                        core.fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                        keep_alive = false;
+                    }
+
+                    break;
+                };
+
+                if (comptime raw_fn != null) {
+                    if (raw_fn.?(rem, header_end, fd)) |end| {
+                        consumed += end;
+                        continue;
+                    }
+                }
+
+                const parsed = parseGetFastPath(rem, header_end) orelse
+                    core.parseHeadAt(rem, header_end) catch {
+                    core.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+                    keep_alive = false;
+                    break;
+                };
+                const head = parsed.head;
+
+                if (head.chunked_request) {
+                    keep_alive = false;
+                    break;
+                }
+
+                var body: []const u8 = &.{};
+                var request_len = parsed.body_offset;
+                if (head.content_length > 0) {
+                    const content_length: usize = @intCast(head.content_length);
+                    const need = parsed.body_offset + content_length;
+
+                    if (need <= rem.len) {
+                        body = rem[parsed.body_offset..need];
+                        request_len = need;
+                    } else if (need > conn.buf.len) {
+                        keep_alive = false;
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
+                handler_fn(&head, body, fd);
+
+                consumed += request_len;
+
+                // WebSocket promotion is not supported on the ring path yet:
+                // drop the pending handoff and close after the response drains.
+                if (core.takeWebSocket()) |_| {
+                    keep_alive = false;
+                    break;
+                }
+
+                if (!head.keep_alive) {
+                    keep_alive = false;
+                    break;
+                }
+            }
+
+            if (consumed >= conn.filled) {
+                conn.filled = 0;
+            } else if (consumed > 0) {
+                std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - consumed], conn.buf[consumed..conn.filled]);
+                conn.filled -= consumed;
+            }
+
+            conn.staged = sink.len;
+            if (sink.failed) return .close;
+
+            return if (keep_alive) .keep_alive else .close;
+        }
+
+        fn handleSend(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
+            const conn = self.lookup(decoded) orelse return;
+
+            if (cqe.res < 0) {
+                self.beginClose(conn);
+                return;
+            }
+
+            // A short send leaves a remainder: shift it to the front and send
+            // again before reading the next request.
+            const sent: usize = @intCast(cqe.res);
+            if (sent < conn.staged) {
+                std.mem.copyForwards(u8, conn.send_buf, conn.send_buf[sent..conn.staged]);
+                conn.staged -= sent;
+                conn.inflight = 0;
+                self.submitSend(conn);
+
+                return;
+            }
+
+            conn.staged = 0;
+            conn.inflight = 0;
+
+            if (conn.closing) {
+                self.finishClose(conn);
+                return;
+            }
+
+            self.armRecv(conn);
+        }
+
+        // ----------------------------------------------------- //
+
+        fn run(self: *Self) void {
+            self.armAccept();
+
+            var cqes: [URING_CQE_BATCH]linux.io_uring_cqe = undefined;
+            while (true) {
+                _ = self.ring.submit_and_wait(1) catch |err| switch (err) {
+                    error.SignalInterrupt => continue,
+                    else => return,
+                };
+
+                const count = self.ring.copy_cqes(&cqes, 0) catch return;
+                for (cqes[0..count]) |cqe| {
+                    const decoded = uring.unpackUserData(cqe.user_data);
+                    switch (decoded.op) {
+                        .accept => self.handleAccept(cqe),
+                        .recv => self.handleRecv(cqe, decoded),
+                        .send => self.handleSend(cqe, decoded),
+                    }
+                }
+            }
+        }
+    };
+}
+
+const UringWorkerCtx = struct { config: Config, worker_id: usize };
+
+/// Return a concrete io_uring worker entry with handler_fn baked in at compile
+/// time, mirroring epollWorkerFn so Thread.spawn gets a direct call.
+fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) fn (UringWorkerCtx) void {
+    return struct {
+        fn run(ctx: UringWorkerCtx) void {
+            pinToCpu(ctx.worker_id);
+
+            const config = ctx.config;
+            const io = config.io;
+
+            core.setDateHeader(config.send_date_header);
+
+            const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
+            var srv = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = config.kernel_backlog,
+                .reuse_address = true,
+            }) catch return;
+            defer srv.deinit(io);
+            const listener_fd = srv.socket.handle;
+
+            const slots = std.heap.smp_allocator.alloc(?*UringConn, MAX_FD) catch return;
+            @memset(slots, null);
+
+            const Worker = UringWorker(handler_fn, raw_fn);
+            var worker = Worker{
+                .ring = undefined,
+                .slots = slots,
+                .listener_fd = listener_fd,
+                .gen_counter = 0,
+                .recv_buf_size = config.max_recv_buf,
+                .handler_timeout_ms = config.handler_timeout_ms,
+            };
+            worker.ring = IoUring.init(URING_ENTRIES, 0) catch return;
+            defer worker.deinit();
+
+            // Per-worker response cache (ADR-036), owned for this worker's
+            // lifetime. Lock-free by ownership: this thread is the sole creator,
+            // setter, and user, exactly like the EPOLL worker, so the same
+            // install holds on the ring path. Lives on the worker stack so
+            // tl_cache stays valid until run() returns.
+            var response_cache: cache.ResponseCache = undefined;
+            var cache_on = false;
+            if (config.response_cache) {
+                if (cache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(config),
+                    .max_value_bytes = config.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    core.setCache(&response_cache, config.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                core.setCache(null, 0);
+                response_cache.deinit();
+            };
+
+            worker.run();
+        }
+    }.run;
+}
+
+fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) !void {
+    const cpu = getAvailableCpuCount();
+    const worker_count = if (config.workers == 0) cpu else config.workers;
+
+    logSystem(config, "listening on {s}:{d} (io_uring, {d} workers, shared-nothing)", .{ config.ip, config.port, worker_count });
+
+    const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+    defer std.heap.smp_allocator.free(threads);
+
+    const worker = uringWorkerFn(handler_fn, raw_fn);
+    for (threads, 0..) |*t, worker_id| {
+        t.* = try std.Thread.spawn(
+            .{ .stack_size = 512 * 1024 },
+            worker,
+            .{UringWorkerCtx{ .config = config, .worker_id = worker_id }},
+        );
+    }
+
+    for (threads) |t| t.join();
+}
+
+// --------------------------------------------------------- //
 
 fn runMixed(config: Config, handler: HandlerFn) !void {
     const io = config.io;
@@ -992,6 +1465,12 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
                     runEpoll(self.config, handler, raw_fn)
                 else blk: {
                     logSystem(self.config, "EPOLL is Linux-only. Falling back to POOL.", .{});
+                    break :blk runPool(self.config, handler);
+                },
+                .URING => if (comptime @import("builtin").target.os.tag == .linux)
+                    runUring(self.config, handler, raw_fn)
+                else blk: {
+                    logSystem(self.config, "URING is Linux-only. Falling back to POOL.", .{});
                     break :blk runPool(self.config, handler);
                 },
             };

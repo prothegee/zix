@@ -907,13 +907,16 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
             defer timer_thread.detach();
 
             const effective_model: DispatchModel = blk: {
+                // zix.Http has no native ring path yet, so .URING follows .EPOLL
+                // (ADR-037 implements .URING in zix.Http1 first).
+                const requested: DispatchModel = if (cfg.dispatch_model == .URING) .EPOLL else cfg.dispatch_model;
                 if (comptime @import("builtin").target.os.tag != .linux) {
-                    if (cfg.dispatch_model == .EPOLL) {
+                    if (requested == .EPOLL) {
                         logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
                         break :blk .POOL;
                     }
                 }
-                break :blk cfg.dispatch_model;
+                break :blk requested;
             };
 
             switch (effective_model) {
@@ -990,7 +993,9 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     for (acc_threads) |t| t.join();
                 },
 
-                .EPOLL => {
+                // The blk above folds .URING into .EPOLL, so effective_model is
+                // never .URING here. The label keeps the switch exhaustive.
+                .EPOLL, .URING => {
                     try self.runEpoll(thread_io);
                 },
             }

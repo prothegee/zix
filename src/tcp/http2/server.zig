@@ -287,7 +287,9 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     for (acc_threads) |t| t.join();
                 },
 
-                .EPOLL => {
+                // .URING has no native ring path in zix.Http2, so it follows .EPOLL
+                // and falls back to POOL (ADR-037 implements .URING in zix.Http1 first).
+                .EPOLL, .URING => {
                     logSystem("EPOLL is HTTP-only. Falling back to POOL.", .{});
                     var fallback = self.*;
                     fallback.config.dispatch_model = .POOL;

@@ -431,7 +431,9 @@ pub const TcpServer = struct {
                 for (acc_threads) |t| t.join();
             },
 
-            .EPOLL => {
+            // .URING has no native ring path in zix.Tcp yet, so it falls back to
+            // the .EPOLL shared-nothing loop (ADR-037 implements .URING in zix.Http1 first).
+            .EPOLL, .URING => {
                 if (comptime @import("builtin").target.os.tag == .linux) {
                     try self.runEpoll(io, handler, cpu);
                 } else {

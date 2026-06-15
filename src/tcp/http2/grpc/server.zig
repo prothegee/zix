@@ -565,7 +565,9 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     for (acc_threads) |t| t.join();
                 },
 
-                .EPOLL => {
+                // .URING has no native ring path in zix.Grpc yet, so it falls back to
+                // the .EPOLL multiplexed loop (ADR-037 implements .URING in zix.Http1 first).
+                .EPOLL, .URING => {
                     if (comptime @import("builtin").target.os.tag == .linux) {
                         try self.runEpoll(io);
                     } else {

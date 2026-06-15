@@ -27,6 +27,14 @@ pub const DispatchModel = enum(u8) {
     /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
     /// Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
     EPOLL = 3,
+    /// Shared-nothing io_uring: each worker owns one SO_REUSEPORT listener and
+    /// one completion ring (ADR-037). Same thread-per-core topology as .EPOLL,
+    /// but completion-based instead of readiness-based, so most syscall
+    /// transitions are batched away. Linux-only.
+    /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
+    /// zix.Http1 implements natively on Linux. The other engines fall back to
+    /// .EPOLL until their ring path lands (Http1 first, then WebSocket, Grpc, Http).
+    URING = 4,
 }; // for all Tcp
 
 // --------------------------------------------------------- //
@@ -87,6 +95,12 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
+test "zix test: DispatchModel, URING variant value and ordering" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(DispatchModel.ASYNC));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(DispatchModel.URING));
 }
 
 test "zix test: TcpClientConfig, default field values" {
