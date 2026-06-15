@@ -242,6 +242,15 @@ pub const Response = struct {
     /// Sets res.streaming = true so handleConnection closes after the handler exits.
     /// Requires workers = 1 (Model 1). Long-lived SSE connections exhaust a blocking pool (Model 2).
     pub fn stream(self: *Response) !SseWriter {
+        // SSE draining is handler-side: a blocking write parks the handler itself,
+        // so detach any coalescing sink. Each event must flush to the fd directly
+        // rather than buffer into the .EPOLL/.URING response sink (which only
+        // flushes after the handler returns, but an SSE handler never returns).
+        if (tl_resp_sink) |sink| {
+            sink.flush();
+            tl_resp_sink = null;
+        }
+
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 
@@ -462,6 +471,33 @@ fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
             else => return error.BrokenPipe,
         }
     }
+}
+
+/// Write as much of data to fd as possible without parking the worker.
+/// Used by the .EPOLL response flush: a partial write (send buffer full) returns
+/// the byte count written so far, and the worker stages the unwritten tail to
+/// drain on the next EPOLLOUT event instead of dropping the connection.
+///
+/// Return:
+/// - usize (bytes written so far, may be less than data.len on EAGAIN)
+/// - null on a permanent write error
+pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
+    var written: usize = 0;
+    while (written < data.len) {
+        const write_result = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(write_result)) {
+            .SUCCESS => {
+                const n: usize = @intCast(write_result);
+                if (n == 0) return null;
+                written += n;
+            },
+            .INTR => continue,
+            .AGAIN => return written,
+            else => return null,
+        }
+    }
+
+    return written;
 }
 
 /// Coalescing sink for the .URING ring path (ADR-037 Phase 4 step 4). While
@@ -774,4 +810,75 @@ test "zix http response cache: distinct paths and queries are separate keys" {
     // the original path and query hits
     var res_a2 = Response.init(fds[1], true, undefined, allocator, 16);
     try std.testing.expect(res_a2.serveCached(&req_a));
+}
+
+test "zix http: fdWriteNonBlock stages a partial write then resumes after drain" {
+    const linux = std.os.linux;
+
+    // Nonblocking AF_UNIX stream pair with a tiny send/recv budget, so a large
+    // write fills the kernel buffer and returns a partial count (the .EPOLL
+    // backpressure path) instead of blocking the worker.
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    const small: c_int = 2048;
+    std.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&small)) catch {};
+    std.posix.setsockopt(fds[1], std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&small)) catch {};
+
+    const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+
+    // First write makes progress but cannot drain the whole payload: a partial.
+    const first = fdWriteNonBlock(fds[0], payload) orelse return error.UnexpectedWriteError;
+    try std.testing.expect(first > 0);
+    try std.testing.expect(first < payload.len);
+
+    // Reading on the peer frees buffer space for the staged tail.
+    const read_buf = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(read_buf);
+    var consumed: usize = 0;
+    while (consumed < first) {
+        const n = std.posix.read(fds[1], read_buf) catch break;
+        if (n == 0) break;
+        consumed += n;
+    }
+
+    // The previously-blocked tail now makes forward progress.
+    const second = fdWriteNonBlock(fds[0], payload[first..]) orelse return error.UnexpectedWriteError;
+    try std.testing.expect(second > 0);
+}
+
+test "zix http: Response.stream detaches the coalescing sink for direct SSE writes" {
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Install a sink as the .EPOLL/.URING worker would before a handler runs.
+    var out_buf: [4096]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &out_buf };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 8);
+    const writer = try res.stream();
+
+    // stream() must detach the sink so SSE events write straight to the fd.
+    try std.testing.expect(tl_resp_sink == null);
+    try std.testing.expect(res.streaming);
+
+    try writer.writeEvent("hello");
+
+    // The header and event landed on the socket directly, not staged in the sink.
+    var buf: [256]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "text/event-stream") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "data: hello") != null);
 }
