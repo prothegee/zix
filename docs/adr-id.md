@@ -781,8 +781,69 @@ Cakupan keputusan:
 - Hasil akhirnya adalah CPU per request dan koneksi per core, bukan angka req/s loopback yang lebih besar. Throughput loopback puncak tetap setara pada depth 1 karena beban itu terikat kernel dan client. Penerimaan diukur dengan `cycles:u` dan `L1-miss/req` di bawah beban pipelined, back to back melawan `.EPOLL` pada mesin yang sama, server segar per run (ring mem-pin halaman memlock, jadi memakai ulang instance server lintas run menghabiskan budget memlock per-user).
 - zix memiliki lifecycle ring dan kasus tepinya: race completion close-versus-recv, fd reuse (ditangani generation tag), dan budget memlock per-user yang dikonsumsi ring. Ini biaya pemeliharaan yang ditukar untuk kontrol yang dibutuhkan kemenangan terukur.
 - Pendekatan A tetap menjadi fallback jika surface raw-syscall terbukti terlalu mahal dipelihara, atau jika `std.Io` masa depan mengekspos multishot dan provided buffer sebagai operasi kelas-satu.
-- Dua pre-win engine (lazy `parseHead`, re-arm `EPOLLOUT`) sudah ada di `zix.Http1` dan menguntungkan `.EPOLL` terlepas dari keputusan ini. Keduanya tetap pending untuk `zix.Http`, dilacak terpisah.
+- Dua pre-win engine (lazy `parseHead`, re-arm `EPOLLOUT`) ada di `zix.Http1` dan menguntungkan `.EPOLL` terlepas dari keputusan ini. Keduanya kini di-port ke `zix.Http` juga: `ParsedHead`-nya membuang array header 64-entry per-request dan mencatat blok header mentah sebagai offset untuk di-rescan `getHeader` sesuai kebutuhan, dan worker `.EPOLL`-nya men-stage tail respons yang belum tertulis pada partial write lalu mengarm `EPOLLOUT` untuk men-drain-nya pada writable event berikutnya alih-alih membuang koneksi. Sink coalescing di-bypass untuk SSE, yang draining-nya tetap handler-side (blocking write memarkir handler, bukan event loop library).
 - Tuas spesifik-io_uring di atas bertumpu pada mekanisme kernel yang terdokumentasi tetapi belum punya bukti spesifik-beban kerja, jadi masing-masing diselesaikan secara lokal oleh A/B dengan sinyal perf-counter bernama alih-alih diasumsikan. Bukti io_uring yang peer-reviewed kebanyakan storage, jadi untuk networking landasannya adalah mekanisme FlexSC plus catatan desain maintainer kernel.
+
+**Ekstensi ke `zix.Tcp` dan `zix.Fix` (callback ring):**
+- Dua engine ini tidak bisa langsung di-port ke ring: handler-nya adalah `fn(stream, io)` blocking yang memiliki koneksi dan loop pada read dan write sinkron, yang tidak bisa dijalankan loop completion single-threaded. Jadi masing-masing memperoleh API callback baru yang digerakkan engine berdampingan dengan API blocking yang ada. `zix.Tcp` menambah `runFramed` dengan `FrameFn` per-frame di atas length prefix 4-byte, dan `zix.Fix` menambah path `.URING` yang menjalankan session processor resumable (`core.processFixRing`) per batch readable. Path blocking `runWith` dan `serveConn` tidak berubah, dan `.URING`-nya tetap melipat ke `.EPOLL`.
+- Heartbeat FIX di ring memakai timer periodik per-worker, bukan per-koneksi. Satu SQE `prep_timeout` per worker (di-re-arm tiap kali fire, ditandai `OpKind` `.timeout` baru yang diperlakukan engine lain sebagai no-op) berdetak tiap `heartbeat_timeout_ms`. Pada tiap fire worker memindai slot table-nya dan, untuk tiap session yang sudah login dan idle melewati interval, mengirim TestRequest pada tick pertama lalu Logout pada tick berikutnya, ditulis langsung ke fd. Satu SQE per worker plus scan O(n) per tick mengalahkan timeout per-koneksi yang akan cancel dan re-arm pada tiap pesan masuk. Memanen session idle aman-close: satu-satunya op in-flight-nya adalah recv idle tanpa data ter-buffer, jadi menutupnya menyisakan completion recv basi untuk dijatuhkan generation tag. Ini melengkapi session: `processFixRing` menjawab Heartbeat/TestRequest peer secara reaktif, dan timer menambah paruh yang diinisiasi-server.
+
+## ADR-038: server `zix.Tcp` membakar handler pada comptime, `run` tunggal, mengikuti bentuk server engine
+
+**Status:** Diterima
+
+**Konteks:** Setiap engine server zix kecuali `zix.Tcp` membakar handler-nya (atau route table) ke dalam tipe server pada `init`, sehingga handler diketahui pada comptime dan `run` tidak menerima argumen handler (`zix.Http1`, `zix.Http2`, `zix.Grpc`). `zix.Tcp` adalah pengecualian: ia menerima handler sebagai runtime function pointer lewat `runWith(io, handler)`, dengan `run(io)` sebagai entry terpisah yang memakai echo handler bawaan, plus `runFramed(io, frame_fn)` untuk callback per-frame. Pemisahan `run` versus `runWith` dan pointer runtime itu tidak konsisten dengan engine lain dan dengan prinsip explicit-over-implicit serta comptime-where-structural milik proyek. Catatan, asimetri itu sudah separuh teratasi: `FrameFn` per-frame (`runFramed`) sudah comptime, hanya `HandlerFn` per-connection yang runtime. Perubahan ini dibenarkan atas dasar konsistensi dan kejelasan, bukan pengukuran. Handler blocking per-connection berjalan sekali per koneksi yang diterima (titik dispatch yang dingin), jadi men-devirtualize-nya dapat diabaikan, berbeda dengan handler per-request `zix.Http1` atau `FrameFn` per-frame, itulah sebabnya keduanya sudah comptime.
+
+**Keputusan:** Ikuti bentuk server `zix.Http1` / `zix.Grpc`. Bakar handler (atau callback per-frame) ke dalam tipe server pada `init` sehingga `run` hanya menerima `io`. `zix.Tcp.Server` menjadi namespace tanpa field dengan constructor comptime di atas dua factory type privat:
+
+| Constructor | Mengembalikan | Kontrak |
+| :- | :- | :- |
+| `Server.init(comptime handler, config)` / `initArgs(..., args)` | `TcpServerImpl(handler)` | `HandlerFn` per-connection (memiliki stream) |
+| `Server.initFramed(comptime frame_fn, config)` / `initFramedArgs(..., args)` | `TcpFramedServerImpl(frame_fn)` | `FrameFn` per-frame (engine memiliki koneksi) |
+
+Kedua factory type hanya menyimpan `config` dan mengekspos `init`, `deinit`, dan `run(io)`. Echo handler bawaan tidak lagi menjadi default tersembunyi di balik `run`: ia adalah `zix.Tcp.echoHandler` publik, dilewatkan secara eksplisit (`Server.init(zix.Tcp.echoHandler, config)`), sesuai explicit-over-implicit. Method `runWith` dan `runFramed` dihapus.
+
+Dua factory type (bukan satu tipe dengan parameter comptime kedua opsional, seperti `zix.Http1` untuk `(handler, raw_fn)`) mengikuti aturan compose-versus-alternative. Pada `zix.Http1` raw interceptor menyatu (compose) dengan handler (koneksi sama, sebuah hook pra-parse), jadi satu impl membawa keduanya. Pada `zix.Tcp`, `HandlerFn` (memiliki koneksi, blocking) dan `FrameFn` (engine-owned, tidak pernah blocking, berjalan di ring `.URING`) adalah kontrak yang saling eksklusif: sebuah koneksi tidak bisa sekaligus hand-owned dan engine-deframed. Dua factory type menjaga state mustahil itu tidak terwakili. Kontrak `FrameFn` dari ADR-037 tidak berubah, hanya entry point-nya yang berpindah.
+
+`io` tetap argumen `run(io)` alih-alih field config (berbeda dari `zix.Http1` / `zix.Grpc`, yang `io`-nya ada di config). Memindahkan `io` ke `TcpServerConfig` demi paritas bentuk penuh (yang sekaligus menyelesaikan inkonsistensi penempatan io lintas server config) adalah perubahan terpisah yang lebih besar, mencakup struct config dan setiap call site, ditunda ke keputusannya sendiri.
+
+**Konsekuensi:**
+- Perubahan API yang breaking: `runWith` dan `runFramed` hilang, `run(io)` menjadi satu-satunya jalur run, dan constructor membawa handler. Fungsi worker internal (`serveDispatch`, `runEpoll`, dan entry pool / async / epoll) tetap menyimpan handler sebagai nilai runtime, persis seperti `runAsync` / `runPool` / `runMixed` milik `zix.Http1`. Ikatan comptime berada di batas tipe (tanpa registrasi runtime), bukan devirtualization hot-loop.
+- Handler harus diketahui pada comptime. Handler yang dipilih saat runtime (`const h = pick(cfg)`) kini bercabang di call site (`if (...) Server.init(handlerA, ...) else ...`). Inilah satu-satunya biaya ekspresivitas, diterima atas prinsip untuk engine raw-TCP.
+- Menggantikan (supersede) nama API ekstensi pada ADR-037: jalur blocking adalah `Server.init(handler, config)` lalu `run(io)` (dahulu `runWith`), jalur framed ring adalah `Server.initFramed(frame_fn, config)` lalu `run(io)` (dahulu `runFramed`). `.URING` tetap melipat (fold) ke `.EPOLL` untuk handler per-connection dan berjalan native untuk callback framed.
+- Terverifikasi: library kompilasi, kelima contoh `tcp_server_*` kompilasi, suite unit / integration / edge / behaviour lulus, dan kelima end-to-end runner (async, pool, mixed, epoll, uring) lulus.
+
+---
+
+## ADR-039: `zix.Tcp` / `zix.Udp` / `zix.Uds` memindahkan `io` ke dalam config server dan `zix.Uds` membakukan handler pada comptime, menyatukan bentuk server pada `run()`
+
+**Status:** Diterima
+
+**Konteks:** Lima engine server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`) membawa `io: std.Io` di config-nya, sehingga `run()` tidak menerima argumen. Tiga server sisanya menyimpang: `zix.Tcp` dan `zix.Udp` menerima `io` sebagai parameter `run(io)`, dan `zix.Uds` menerima `io` dan handler sekaligus pada run (`run(io, handler)`). Ini adalah inkonsistensi bentuk server terakhir di library: memindahkan server antar protokol berarti harus mengingat mana yang meneruskan `io` lewat `run`. ADR-038 sudah membakukan handler `zix.Tcp` ke dalam tipe pada `init`, tetapi sengaja menunda penempatan `io` sebagai perubahan terpisah yang lebih besar. Tidak ada yang menghalangi pemindahan: engine server membuktikan polanya, dan fungsi worker internal sudah menerima `io` sebagai nilai biasa.
+
+**Keputusan:** Pindahkan `io` ke dalam config dan bakukan handler `zix.Uds` pada `init`, sehingga setiap server dikonstruksi dengan cara yang sama dan `run()` tidak menerima argumen.
+
+- Tambahkan `io: std.Io` sebagai field pertama yang wajib pada `TcpServerConfig`, `UdpServerConfig`, dan `UdsServerConfig`.
+- `run()` tidak menerima argumen pada ketiganya. Ia membaca `self.config.io` dan meneruskan nilai itu ke worker internal yang sudah ada (`serveDispatch`, `runEpoll`, receive loop Udp, accept loop Uds), sehingga tidak ada perubahan hot-path atau ownership.
+- `zix.Uds` mengadopsi bentuk factory ADR-038: `Server.init(comptime handler, config)` mengembalikan tipe terspesialisasi yang `run()`-nya tidak menerima apa pun. Default echo bawaan adalah `zix.Uds.echoHandler` publik, dilewatkan secara eksplisit. Jalur `run(io, handler)` / `runWith` lama dihapus.
+
+Peta constructor server kini seragam:
+
+| Server | Konstruksi | Run |
+| :- | :- | :- |
+| `zix.Http` / `zix.Http1` / `zix.Http2` / `zix.Grpc` / `zix.Fix` | `Server.init(routes_or_handler, config)` | `run()` |
+| `zix.Tcp` | `Server.init(handler, config)` / `initFramed(frame_fn, config)` | `run()` |
+| `zix.Udp` | `Server(Packet).init(config)` | `run()` |
+| `zix.Uds` | `Server.init(handler, config)` | `run()` |
+
+Client (`zix.Tcp.Client`, `zix.Udp.Client`, `zix.Uds.Client`) tetap menerima `io` sebagai parameter `connect()` / `init()`. Penempatan `io` client adalah axis terpisah (`zix.Grpc.Client` juga menerima `io` sebagai parameter sementara `zix.Http.Client` membawanya di config), ditunda ke keputusannya sendiri.
+
+**Konsekuensi:**
+- Perubahan API breaking: setiap call site server `zix.Tcp` / `zix.Udp` / `zix.Uds` menambah `.io = process.io` ke literal config dan menghapus argumen `run`. Pemanggil `zix.Uds` juga melewatkan handler ke `init` (jalur `runWith` hilang).
+- `io` harus hidup lebih lama dari server, kontrak sama yang sudah didokumentasikan config engine.
+- Menggantikan (supersede) penempatan `io` pada ADR-038: jalur run `zix.Tcp` kini `run()` (dahulu `run(io)`). Keputusan handler-at-`init` dari ADR-038 tidak berubah dan diperluas ke `zix.Uds`.
+- Paritas bentuk server penuh: kedelapan server dikonstruksi dengan config yang membawa `io` dan dilayani dengan `run()` tanpa argumen. Memindahkan server antar protokol bersifat mekanis.
+- Terverifikasi: library kompilasi, setiap contoh `tcp_server_*` / `udp_server` / `uds_server` kompilasi, suite unit / integration / edge / behaviour lulus, dan runner `tcp` (kelima model), `udp`, dan `uds` lulus.
 
 ---
 

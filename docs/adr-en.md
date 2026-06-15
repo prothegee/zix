@@ -781,8 +781,69 @@ Scope of the decision:
 - The deliverable is CPU per request and connections per core, not a bigger loopback req/s number. Peak loopback throughput stays parity at depth 1 because that workload is kernel and client bound. Acceptance is measured with `cycles:u` and `L1-miss/req` under pipelined load, back to back against `.EPOLL` on the same machine, fresh server per run (the ring pins memlock pages, so reusing a server instance across runs exhausts the per-user memlock budget).
 - zix owns the ring lifecycle and its edge cases: the close-versus-recv completion race, fd reuse (handled by the generation tag), and the per-user memlock budget the rings consume. This is the maintenance cost traded for the control that the measured win requires.
 - Approach A stays the fallback if the raw-syscall surface proves too costly to maintain, or if a future `std.Io` exposes multishot and provided buffers as first-class operations.
-- The two engine pre-wins (lazy `parseHead`, `EPOLLOUT` re-arm) are already in `zix.Http1` and benefit `.EPOLL` independently of this decision. They remain pending for `zix.Http`, tracked separately.
+- The two engine pre-wins (lazy `parseHead`, `EPOLLOUT` re-arm) are in `zix.Http1` and benefit `.EPOLL` independently of this decision. Both are now ported to `zix.Http` as well: its `ParsedHead` drops the per-request 64-entry header array and records the raw header block as offsets for `getHeader` to rescan on demand, and its `.EPOLL` worker stages the unwritten response tail on a partial write and arms `EPOLLOUT` to drain it on the next writable event instead of dropping the connection. The coalescing sink is bypassed for SSE, whose draining stays handler-side (a blocking write parks the handler, not a library event loop).
 - The io_uring-specific levers above rest on documented kernel mechanisms but have no workload-specific proof yet, so each is settled locally by an A/B with a named perf-counter signal rather than assumed. Peer-reviewed io_uring evidence is mostly storage, so for networking the backing is the FlexSC mechanism plus the kernel maintainer design notes.
+
+**Extension to `zix.Tcp` and `zix.Fix` (callback rings):**
+- These two engines could not take a direct ring port: their handler is a blocking `fn(stream, io)` that owns the connection and loops on synchronous reads and writes, which a single-threaded completion loop cannot run. So each gains a new engine-driven callback API alongside the existing blocking one. `zix.Tcp` adds `runFramed` with a per-frame `FrameFn` over a 4-byte length prefix, and `zix.Fix` adds a `.URING` path that runs a resumable session processor (`core.processFixRing`) per readable batch. The blocking `runWith` and `serveConn` paths are unchanged, and their `.URING` still folds to `.EPOLL`.
+- FIX heartbeats on the ring use a per-worker periodic timer, not a per-connection one. A single `prep_timeout` SQE per worker (re-armed on each fire, tagged with a new `.timeout` `OpKind` that the other engines treat as a no-op) ticks every `heartbeat_timeout_ms`. On each fire the worker scans its slot table and, for every logged-in session idle past the interval, sends a TestRequest on the first tick then a Logout on the next, written straight to the fd. One SQE per worker plus an O(n) scan per tick beats a per-connection timeout that would cancel and re-arm on every inbound message. Reaping an idle session is close-safe: its only in-flight op is an idle recv with no buffered data, so closing it leaves the stale recv completion to be dropped by the generation tag. This completes the session: `processFixRing` answers peer Heartbeat/TestRequest reactively, and the timer adds the server-initiated half.
+
+## ADR-038: `zix.Tcp` server bakes the handler at comptime, single `run`, mirroring the engine server shape
+
+**Status:** Accepted
+
+**Context:** Every zix server engine except `zix.Tcp` bakes its handler (or route table) into the server type at `init`, so the handler is comptime-known and `run` takes no handler argument (`zix.Http1`, `zix.Http2`, `zix.Grpc`). `zix.Tcp` was the exception: it took the handler as a runtime function pointer through `runWith(io, handler)`, with `run(io)` as a separate entry that used the built-in echo handler, plus `runFramed(io, frame_fn)` for the per-frame callback. The `run` versus `runWith` split and the runtime pointer were inconsistent with the other engines and with the project's explicit-over-implicit and comptime-where-structural principles. Note the asymmetry was already half-resolved: the per-frame `FrameFn` (`runFramed`) was comptime, only the per-connection `HandlerFn` was runtime. This change is justified on consistency and clarity, not measurement. The per-connection blocking handler runs once per accepted connection (a cold dispatch point), so devirtualizing it is negligible, unlike `zix.Http1`'s per-request handler or the per-frame `FrameFn`, which is why those are already comptime.
+
+**Decision:** Mirror the `zix.Http1` / `zix.Grpc` server shape. Bake the handler (or per-frame callback) into the server type at `init` so `run` takes only `io`. `zix.Tcp.Server` becomes a fieldless namespace with comptime constructors over two private factory types:
+
+| Constructor | Returns | Contract |
+| :- | :- | :- |
+| `Server.init(comptime handler, config)` / `initArgs(..., args)` | `TcpServerImpl(handler)` | per-connection `HandlerFn` (owns the stream) |
+| `Server.initFramed(comptime frame_fn, config)` / `initFramedArgs(..., args)` | `TcpFramedServerImpl(frame_fn)` | per-frame `FrameFn` (engine owns the connection) |
+
+Both factory types hold only `config` and expose `init`, `deinit`, and `run(io)`. The built-in echo handler stops being a hidden default behind `run`: it is the public `zix.Tcp.echoHandler`, passed explicitly (`Server.init(zix.Tcp.echoHandler, config)`), per explicit-over-implicit. The `runWith` and `runFramed` methods are removed.
+
+The two factory types (rather than one type with an optional second comptime parameter, as `zix.Http1` uses for `(handler, raw_fn)`) follow a compose-versus-alternative rule. In `zix.Http1` the raw interceptor composes with the handler (same connection, a pre-parse hook), so one impl carries both. In `zix.Tcp`, `HandlerFn` (owns the connection, blocks) and `FrameFn` (engine-owned, never blocks, runs on the `.URING` ring) are mutually exclusive contracts: a connection cannot be both hand-owned and engine-deframed. Two factory types keep that impossible state unrepresentable. The `FrameFn` contract from ADR-037 is unchanged, only its entry point moves.
+
+`io` stays a `run(io)` argument rather than a config field (unlike `zix.Http1` / `zix.Grpc`, whose `io` lives in config). Moving `io` into `TcpServerConfig` for full shape parity (which would also resolve the io-placement inconsistency across the server configs) is a separate, larger change spanning the config struct and every call site, deferred to its own decision.
+
+**Consequences:**
+- Breaking API change: `runWith` and `runFramed` are gone, `run(io)` is the only run path, and the constructor carries the handler. The internal worker functions (`serveDispatch`, `runEpoll`, and the pool / async / epoll entries) keep the handler as a runtime value, exactly as `zix.Http1`'s `runAsync` / `runPool` / `runMixed` do. The comptime binding is at the type boundary (no runtime registration), not a hot-loop devirtualization.
+- The handler must be comptime-known. A runtime-selected handler (`const h = pick(cfg)`) now branches at the call site (`if (...) Server.init(handlerA, ...) else ...`). This is the one expressiveness cost, accepted on principle for the raw-TCP engine.
+- Supersedes the extension API names in ADR-037: the blocking path is `Server.init(handler, config)` then `run(io)` (was `runWith`), the framed ring path is `Server.initFramed(frame_fn, config)` then `run(io)` (was `runFramed`). `.URING` still folds to `.EPOLL` for the per-connection handler and runs natively for the framed callback.
+- Verified: the library compiles, all five `tcp_server_*` examples compile, the unit / integration / edge / behaviour suites pass, and all five end-to-end runners (async, pool, mixed, epoll, uring) pass.
+
+---
+
+## ADR-039: `zix.Tcp` / `zix.Udp` / `zix.Uds` move `io` into the server config and `zix.Uds` bakes the handler at comptime, unifying the server shape on `run()`
+
+**Status:** Accepted
+
+**Context:** Five server engines (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`) carry `io: std.Io` in their config, so `run()` takes no argument. The three remaining servers diverged: `zix.Tcp` and `zix.Udp` took `io` as a `run(io)` parameter, and `zix.Uds` took both `io` and the handler at run (`run(io, handler)`). This was the last server-shape inconsistency in the library: moving a server between protocols meant remembering which ones thread `io` through `run`. ADR-038 already baked the `zix.Tcp` handler into the type at `init`, but deliberately deferred the `io` placement as a separate, larger change. Nothing prevents the move: the engine servers prove the pattern, and the internal worker functions already take `io` as a plain value.
+
+**Decision:** Move `io` into the config and bake the `zix.Uds` handler at `init`, so every server is constructed the same way and `run()` takes no argument.
+
+- Add `io: std.Io` as the first, required field of `TcpServerConfig`, `UdpServerConfig`, and `UdsServerConfig`.
+- `run()` takes no argument on all three. It reads `self.config.io` and passes that value to the existing internal workers (`serveDispatch`, `runEpoll`, the Udp receive loop, the Uds accept loop), so there is no hot-path or ownership change.
+- `zix.Uds` adopts the ADR-038 factory shape: `Server.init(comptime handler, config)` returns a specialized type whose `run()` takes nothing. The built-in echo default is the public `zix.Uds.echoHandler`, passed explicitly. The old `run(io, handler)` / `runWith` path is removed.
+
+The server constructor map is now uniform:
+
+| Server | Construct | Run |
+| :- | :- | :- |
+| `zix.Http` / `zix.Http1` / `zix.Http2` / `zix.Grpc` / `zix.Fix` | `Server.init(routes_or_handler, config)` | `run()` |
+| `zix.Tcp` | `Server.init(handler, config)` / `initFramed(frame_fn, config)` | `run()` |
+| `zix.Udp` | `Server(Packet).init(config)` | `run()` |
+| `zix.Uds` | `Server.init(handler, config)` | `run()` |
+
+Clients (`zix.Tcp.Client`, `zix.Udp.Client`, `zix.Uds.Client`) keep `io` as a `connect()` / `init()` parameter. Client `io` placement is a separate axis (`zix.Grpc.Client` also takes `io` as a parameter while `zix.Http.Client` carries it in config), deferred to its own decision.
+
+**Consequences:**
+- Breaking API change: every `zix.Tcp` / `zix.Udp` / `zix.Uds` server call site adds `.io = process.io` to the config literal and drops the `run` argument. `zix.Uds` callers also pass the handler to `init` (the `runWith` path is gone).
+- `io` must outlive the server, the same contract the engine configs already document.
+- Supersedes the `io` placement recorded in ADR-038: the `zix.Tcp` run path is now `run()` (was `run(io)`). The handler-at-`init` decision from ADR-038 is unchanged and is extended to `zix.Uds`.
+- Full server-shape parity: all eight servers are constructed with a config that carries `io` and served with a no-argument `run()`. Moving a server between protocols is mechanical.
+- Verified: the library compiles, every `tcp_server_*` / `udp_server` / `uds_server` example compiles, the unit / integration / edge / behaviour suites pass, and the `tcp` (all five models), `udp`, and `uds` end-to-end runners pass.
 
 ---
 
