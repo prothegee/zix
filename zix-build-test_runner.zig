@@ -19,6 +19,7 @@ pub fn addSteps(
         .{ "test-runner-http-pool", "tests/runner/http_runner.zig", "tr-server-http-pool", "examples/http_basic_2_pool.zig", "9100", "", "", "" },
         .{ "test-runner-http-mixed", "tests/runner/http_runner.zig", "tr-server-http-mixed", "examples/http_basic_3_mixed.zig", "9100", "", "", "" },
         .{ "test-runner-http-epoll", "tests/runner/http_runner.zig", "tr-server-http-epoll", "examples/http_basic_4_epoll.zig", "9100", "", "", "" },
+        .{ "test-runner-http-uring", "tests/runner/http_runner.zig", "tr-server-http-uring", "examples/http_basic_5_uring.zig", "9114", "", "", "" },
         .{ "test-runner-http1-async", "tests/runner/http1_runner.zig", "tr-server-http1-async", "examples/http1_basic_1_async.zig", "9100", "", "", "" },
         .{ "test-runner-http1-pool", "tests/runner/http1_runner.zig", "tr-server-http1-pool", "examples/http1_basic_2_pool.zig", "9100", "", "", "" },
         .{ "test-runner-http1-mixed", "tests/runner/http1_runner.zig", "tr-server-http1-mixed", "examples/http1_basic_3_mixed.zig", "9100", "", "", "" },
@@ -28,14 +29,18 @@ pub fn addSteps(
         .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "8083", "", "", "" },
         .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "8083", "", "", "" },
         .{ "test-runner-grpc-epoll", "tests/runner/grpc_runner.zig", "tr-server-grpc-epoll", "examples/grpc_server_4_epoll.zig", "8083", "", "", "" },
+        .{ "test-runner-grpc-uring", "tests/runner/grpc_runner.zig", "tr-server-grpc-uring", "examples/grpc_server_5_uring.zig", "9115", "", "", "" },
+        .{ "test-runner-grpc-stream-uring", "tests/runner/grpc_stream_runner.zig", "tr-server-grpc-stream-uring", "examples/grpc_server_5_uring.zig", "9115", "", "", "" },
         .{ "test-runner-tcp-async", "tests/runner/tcp_runner.zig", "tr-server-tcp-async", "examples/tcp_server_1_async.zig", "9300", "", "", "" },
         .{ "test-runner-tcp-pool", "tests/runner/tcp_runner.zig", "tr-server-tcp-pool", "examples/tcp_server_2_pool.zig", "9301", "", "", "" },
         .{ "test-runner-tcp-mixed", "tests/runner/tcp_runner.zig", "tr-server-tcp-mixed", "examples/tcp_server_3_mixed.zig", "9302", "", "", "" },
         .{ "test-runner-tcp-epoll", "tests/runner/tcp_runner.zig", "tr-server-tcp-epoll", "examples/tcp_server_4_epoll.zig", "9303", "", "", "" },
+        .{ "test-runner-tcp-uring", "tests/runner/tcp_runner.zig", "tr-server-tcp-uring", "examples/tcp_server_5_uring.zig", "9304", "", "", "" },
         .{ "test-runner-fix-async", "tests/runner/fix_runner.zig", "tr-server-fix-async", "examples/fix_server_1_async.zig", "9500", "", "", "" },
         .{ "test-runner-fix-pool", "tests/runner/fix_runner.zig", "tr-server-fix-pool", "examples/fix_server_2_pool.zig", "9500", "", "", "" },
         .{ "test-runner-fix-mixed", "tests/runner/fix_runner.zig", "tr-server-fix-mixed", "examples/fix_server_3_mixed.zig", "9500", "", "", "" },
         .{ "test-runner-fix-epoll", "tests/runner/fix_runner.zig", "tr-server-fix-epoll", "examples/fix_server_4_epoll.zig", "9500", "", "", "" },
+        .{ "test-runner-fix-uring", "tests/runner/fix_runner.zig", "tr-server-fix-uring", "examples/fix_server_5_uring.zig", "9501", "", "", "" },
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9100", "", "", "" },
         .{ "test-runner-uds", "tests/runner/uds_runner.zig", "tr-server-uds", "examples/uds_server.zig", "0", "", "", "" },
         // http feature runners (http_get_runner: arg4=route, arg5=origin, arg6=expected)
@@ -66,6 +71,8 @@ pub fn addSteps(
         .{ "test-runner-http1-sse", "tests/runner/sse_runner.zig", "tr-server-http1-sse", "examples/http1_sse.zig", "9108", "", "", "" },
         // http1 websocket runner
         .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9111", "/ws", "", "" },
+        // http1 websocket runner on the io_uring (.URING) dispatch model
+        .{ "test-runner-http1-websocket-uring", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-uring", "examples/http1_websocket_uring.zig", "9113", "/ws", "", "" },
         // http1 response-cache runner (unique port; small body so the GET is bounded)
         .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9112", "/cache?kb=1", "", "ok" },
         // grpc location runners
