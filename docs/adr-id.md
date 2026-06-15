@@ -734,8 +734,55 @@ Sebuah sweep ukuran body (c512) menempatkan crossover dekat 4 KiB: delta tetap d
 - Kemenangan jelas untuk serialization mahal melewati crossover ~4 KiB (+12.6% pada 4 KiB, naik ke +37% pada 64 KiB, c512) dan tanpa regresi di bawahnya, itulah mengapa opt-in wajib alih-alih default.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker. Terbatas dan dapat diprediksi, trade yang disengaja untuk lock-free per-worker ownership.
 - Sengaja tidak ditujukan untuk respons file-backed atau static: OS page cache sudah menyajikan itu dengan murah, jadi `sendfile` / `splice` adalah tuas yang lebih baik di sana.
-- Kebenaran bertumpu pada opt-in: framework tidak pernah auto-cache output handler. Handler memutuskan cacheability dan TTL. Respons dinamis atau berbasis database menyetel `cache_ttl_ms` yang pendek (menerima staleness sebesar itu) atau tidak mem-cache dan menulis langsung. Key HTTP hanya mencakup method, path, dan query, jadi respons yang bervariasi pada header atau cookie tidak boleh di-cache.
+- Kebenaran bertumpu pada opt-in: engine tidak pernah auto-cache output handler. Handler memutuskan cacheability dan TTL. Respons dinamis atau berbasis database menyetel `cache_ttl_ms` yang pendek (menerima staleness sebesar itu) atau tidak mem-cache dan menulis langsung. Key HTTP hanya mencakup method, path, dan query, jadi respons yang bervariasi pada header atau cookie tidak boleh di-cache.
 - Struktur cache bersifat engine-agnostic di `src/utils`, sehingga glue per-engine (cache thread-local plus penurunan key) adalah satu-satunya bagian yang spesifik protokol.
+
+---
+
+## ADR-037: Model dispatch `.URING` di atas surface io_uring linux mentah, ring shared-nothing thread-per-core
+
+**Status:** Diterima
+
+**Konteks:** zix menawarkan empat opsi dispatch model readiness (`.POOL`, `.ASYNC`, `.MIXED`, `.EPOLL`), semuanya model level-triggered atau thread-per-task yang dibangun di atas interface readiness `epoll`. Jalur `.EPOLL` bersifat shared-nothing dan kompetitif pada throughput loopback mentah, tetapi di bawah beban pipelined ia menghabiskan porsi besar siklus userspace pada transisi syscall (satu `recv`, satu `send`, dan bookkeeping `epoll_wait` per event yang siap). Dispatch io_uring berbasis completion mem-batch submission dan menuai completion, menghapus sebagian besar transisi itu. Sebuah PoC mengukur efeknya (loopback, ReleaseFast, hanya dua build zix, engine `.EPOLL` versus hello server io_uring buatan tangan):
+
+| Metrik | zix-epoll | zix-uring (PoC) |
+| :- | :- | :- |
+| p1 cycles/req (userspace) | 1627 | 818 |
+| p1 L1-miss/req | 73.5 | 22.9 |
+| p16 cycles/req (userspace) | 710 | 240 |
+| p16 server CPU (t4 c128, 10s) | ~45.1s | ~37.25s |
+
+io_uring kira-kira memangkas separuh siklus userspace per request pada pipeline depth 1 dan memotong CPU server sekitar 21 persen pada throughput setara di bawah depth 16. Throughput loopback puncak setara pada depth 1 (terikat kernel dan client), jadi keuntungannya adalah headroom efisiensi, bukan req/s puncak. Penurunan cyc/req userspace dan L1-miss/req mereproduksi mekanisme syscall exception-less, batched-submission yang sudah mapan (FlexSC, OSDI 2010), jadi ini verifikasi efek yang dikenal, bukan asumsi lokal. PoC membuktikan keuntungannya. Pertanyaan terbuka yang diselesaikan ADR ini, sebelum pekerjaan `src/` dimulai, adalah fondasi io_uring mana yang dipakai membangun `.URING`, karena pilihan itu menggerakkan seluruh port. Dua pre-win engine independen yang menguntungkan `.EPOLL` terlepas dari ini sudah mendarat di `zix.Http1` (lazy `parseHead` dan re-arm `EPOLLOUT`), diverifikasi oleh `zig build test-all`. Keduanya masih pending untuk `zix.Http`.
+
+**Keputusan:** Bangun model dispatch `.URING` di atas surface io_uring linux mentah (`std.os.linux.IoUring`, ring low-level yang stabil), bukan `std.Io.Uring` berbasis fiber. Kedua fondasi ditimbang sebagai:
+
+| Aspek | A. std posix io_uring (`std.Io.Uring`) | B. raw linux io_uring (`std.os.linux.IoUring`) |
+| :- | :- | :- |
+| Source | backend `Evented` berbasis fiber dari std, drop-in `std.Io` | ring per-worker buatan tangan di atas ring API low-level yang stabil |
+| Coupling | menumpang field config `io: std.Io` yang ada, satu jalur kode untuk semua backend | runtime khusus `.URING` baru, terpisah dari abstraksi `std.Io` |
+| Control | submission dan reaping dimiliki std, opaque ke zix | kontrol penuh: ring flags, buffer rings, multishot ops, kebijakan batching |
+| Features used | apa pun yang std ekspos lewat `std.Io` | multishot accept dan recv, provided buffer ring, satu send terkoalesensi per completion yang readable, `user_data` gen-tagged, deferred close saat send sedang in-flight |
+| Shared-nothing | bergantung pada topologi executor std | native: satu ring per worker, tanpa handoff lintas-thread, cocok dengan desain `.EPOLL` |
+| Stability risk | mengikuti internal std (surface io_uring berubah lintas 0.16.x) | hanya bergantung pada ABI kernel io_uring yang stabil, bukan internal std |
+| Maintenance | rendah (std memelihara engine) | lebih tinggi (zix memiliki lifecycle ring dan kasus tepinya) |
+
+Alasan untuk B: kemenangan terukur datang dari fitur yang std saat ini tidak ekspos lewat `std.Io` (multishot accept dan recv, provided buffer ring), jadi pendekatan A tidak bisa mencapai angka PoC. Model ring per-worker shared-nothing (satu ring, satu listener `SO_REUSEPORT`, tanpa accept queue bersama) sudah menjadi topologi yang dipakai jalur `.EPOLL`, jadi pendekatan B mempertahankannya utuh, sementara pendekatan A memperkenalkan kembali topologi executor milik std yang tidak dikontrol zix (masalah ownership yang sama yang membatasi response cache ke `.EPOLL`, ADR-036). Pendekatan B hanya bergantung pada ABI kernel yang stabil, jadi surface io_uring std yang berubah tidak menghalanginya dan pekerjaan dimulai pada Zig saat ini (0.16.x).
+
+Cakupan keputusan:
+- Topologi dipertahankan dari `.EPOLL`: thread-per-core, satu ring per worker, satu listener `SO_REUSEPORT` per worker, tanpa accept queue bersama, tanpa handoff fd lintas-thread. Process-per-core (fork-per-core) ditolak karena akan memisahkan route table per-worker dan response cache keluar dari satu address space.
+- Core minimal yang benar lebih dulu: multishot accept yang di-re-arm pada `!IORING_CQE_F_MORE`, slot table ter-index fd (index langsung, tanpa hashmap) yang dijaga terhadap race completion close-versus-recv dengan generation tag di `user_data` melawan fd reuse, recv buffer per-koneksi tetap dengan `recv` SQE biasa, dan CQE drain ter-batch ke stack array. Setup listener memakai `linux.*` mentah (atau `std.Io.net`) karena `std.posix.socket` / `bind` / `listen` / `close` dihapus di 0.16.x.
+- Ring flags adalah optimisasi, bukan prasyarat: ring yang diinisialisasi tanpa flag sudah benar. `SINGLE_ISSUER`, `COOP_TASKRUN`, dan `DEFER_TASKRUN` (yang terakhir butuh kernel 6.1 atau lebih baru) ditambahkan dan diukur satu per satu.
+- Strategi buffer bertahap: mulai dengan recv buffer per-koneksi tetap plus `recv` SQE biasa (sudah cukup untuk bersaing), dan pindah ke provided buffer ring teregistrasi dengan multishot recv hanya jika penghematan syscall terukur membenarkan lifecycle buffer yang lebih sulit.
+- Tuas bertahap lain (masing-masing di balik A/B sendiri, diselesaikan oleh perf counter): registered atau direct files (`IOSQE_FIXED_FILE`, `accept_direct`), send buffer teregistrasi yang memegang payload response-cache (`send_fixed` saat hit), membaca clock sekali per batch CQE untuk TTL cache, dan `SEND_ZC` untuk respons melewati size gate.
+- Urutan implementasi: `zix.Http1` lebih dulu (membuktikan ring core), lalu WebSocket (memakai ulang upgrade path, koalesensi readable-burst memetakan ke satu batched send), lalu `zix.Grpc` (framing h2, HPACK, dan multipleks stream bersifat stateful), lalu `zix.Http` (memakai ulang ring core Http1, paling murah terakhir).
+- `DispatchModel.URING` ditambahkan ke setiap `config.zig` server, dengan fallback non-Linux compile-time atau run-time ke `.EPOLL` (mencerminkan fallback non-Linux `.EPOLL` ke `.POOL` yang ada).
+
+**Konsekuensi:**
+- Hasil akhirnya adalah CPU per request dan koneksi per core, bukan angka req/s loopback yang lebih besar. Throughput loopback puncak tetap setara pada depth 1 karena beban itu terikat kernel dan client. Penerimaan diukur dengan `cycles:u` dan `L1-miss/req` di bawah beban pipelined, back to back melawan `.EPOLL` pada mesin yang sama, server segar per run (ring mem-pin halaman memlock, jadi memakai ulang instance server lintas run menghabiskan budget memlock per-user).
+- zix memiliki lifecycle ring dan kasus tepinya: race completion close-versus-recv, fd reuse (ditangani generation tag), dan budget memlock per-user yang dikonsumsi ring. Ini biaya pemeliharaan yang ditukar untuk kontrol yang dibutuhkan kemenangan terukur.
+- Pendekatan A tetap menjadi fallback jika surface raw-syscall terbukti terlalu mahal dipelihara, atau jika `std.Io` masa depan mengekspos multishot dan provided buffer sebagai operasi kelas-satu.
+- Dua pre-win engine (lazy `parseHead`, re-arm `EPOLLOUT`) sudah ada di `zix.Http1` dan menguntungkan `.EPOLL` terlepas dari keputusan ini. Keduanya tetap pending untuk `zix.Http`, dilacak terpisah.
+- Tuas spesifik-io_uring di atas bertumpu pada mekanisme kernel yang terdokumentasi tetapi belum punya bukti spesifik-beban kerja, jadi masing-masing diselesaikan secara lokal oleh A/B dengan sinyal perf-counter bernama alih-alih diasumsikan. Bukti io_uring yang peer-reviewed kebanyakan storage, jadi untuk networking landasannya adalah mekanisme FlexSC plus catatan desain maintainer kernel.
 
 ---
 
