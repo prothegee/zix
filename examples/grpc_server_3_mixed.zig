@@ -49,12 +49,14 @@ fn echoHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
     ctx.finish(zix.Grpc.Status.OK, "");
 }
 
+const Routes = [_]zix.Grpc.Route{
+    .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
+    .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .is_server_streaming = true },
+};
+
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Grpc.Server.init(
-        &[_]zix.Grpc.Route{
-            .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
-            .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .is_server_streaming = true },
-        },
+        &Routes,
         .{
             .io = process.io,
             .ip = "127.0.0.1",

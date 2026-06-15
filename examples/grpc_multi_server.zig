@@ -90,6 +90,11 @@ fn sendLocationAndSave(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Grpc.Route{
+    .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
+    .{ .path = "/location.Location/SendLocationAndSave", .handler = sendLocationAndSave },
+};
+
 pub fn main(process: std.process.Init) !void {
     var logger = try zix.Logger.init(std.heap.smp_allocator, .{
         .console = .ALWAYS,
@@ -98,10 +103,7 @@ pub fn main(process: std.process.Init) !void {
     defer logger.deinit();
 
     var server = try zix.Grpc.Server.init(
-        &[_]zix.Grpc.Route{
-            .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
-            .{ .path = "/location.Location/SendLocationAndSave", .handler = sendLocationAndSave },
-        },
+        &Routes,
         .{
             .io = process.io,
             .ip = "127.0.0.1",

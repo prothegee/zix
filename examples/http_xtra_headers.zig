@@ -120,13 +120,15 @@ pub fn injectGuardHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: 
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/info", .handler = infoHandler },
+    .{ .path = "/cors", .handler = corsHandler },
+    .{ .path = "/overflow", .handler = overflowHandler },
+    .{ .path = "/inject-guard", .handler = injectGuardHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/info", .handler = infoHandler },
-        .{ .path = "/cors", .handler = corsHandler },
-        .{ .path = "/overflow", .handler = overflowHandler },
-        .{ .path = "/inject-guard", .handler = injectGuardHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

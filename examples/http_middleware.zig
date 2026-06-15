@@ -157,13 +157,15 @@ pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    // /public: origin check only
+    .{ .path = "/public", .handler = withOriginCheck(publicHandler) },
+    // /private: origin check + basic auth (composed: left = outermost = runs first)
+    .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
+};
+
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        // /public: origin check only
-        .{ .path = "/public", .handler = withOriginCheck(publicHandler) },
-        // /private: origin check + basic auth (composed: left = outermost = runs first)
-        .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

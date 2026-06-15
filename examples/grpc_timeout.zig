@@ -80,16 +80,18 @@ fn extendedHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) vo
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Grpc.Route{
+    // SayHello: per-route cap of 3s (tightens the 5s global cap).
+    .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
+    // Echo: per-route cap of 10s (loosens nothing, global 5s cap still wins).
+    .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
+    // Extended: ignores per-route cap. Overrides deadline_ns at runtime.
+    .{ .path = "/helloworld.Greeter/Extended", .handler = extendedHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
     var server = try zix.Grpc.Server.init(
-        &[_]zix.Grpc.Route{
-            // SayHello: per-route cap of 3s (tightens the 5s global cap).
-            .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
-            // Echo: per-route cap of 10s (loosens nothing, global 5s cap still wins).
-            .{ .path = "/helloworld.Greeter/Echo", .handler = echoHandler, .timeout_ms = 10_000, .is_server_streaming = true },
-            // Extended: ignores per-route cap. Overrides deadline_ns at runtime.
-            .{ .path = "/helloworld.Greeter/Extended", .handler = extendedHandler },
-        },
+        &Routes,
         .{
             .io = process.io,
             .ip = "127.0.0.1",
