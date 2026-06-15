@@ -56,6 +56,7 @@ zig-pkg
 !/rnd/0.4.x/server_response_cache_bench-20260615-012259.txt
 !/rnd/0.4.x/server_response_cache_sweep-c512-20260615-011854.txt
 !/rnd/0.4.x/uring_phase3_results.txt
+!/rnd/0.4.x/uring_vs_epoll_c512-20260615.txt
 
 ##
 ## file: include
