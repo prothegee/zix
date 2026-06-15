@@ -437,6 +437,18 @@ fn requestKey(req: *const Request) u64 {
 /// Return:
 /// - error.BrokenPipe on any write failure (caller ignores or propagates)
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (tl_resp_sink) |sink| {
+        sink.append(data);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    return rawFdWrite(fd, data);
+}
+
+/// Direct socket write, bypassing the .URING coalescing sink. Used by the sink
+/// itself (to avoid recursion) and by every non-ring dispatch model.
+fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var remaining = data;
     while (remaining.len > 0) {
         const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -451,6 +463,47 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
         }
     }
 }
+
+/// Coalescing sink for the .URING ring path (ADR-037 Phase 4 step 4). While
+/// installed (tl_resp_sink), fdWriteAll stages into buf instead of writing to the
+/// fd, so a whole response coalesces into one ring send. An oversize write flushes
+/// straight to the fd, which is safe under the ring's half-duplex guarantee (no
+/// send is in flight while a handler runs).
+pub const RespSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    pub fn append(self: *RespSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            rawFdWrite(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn flush(self: *RespSink) void {
+        if (self.len == 0) return;
+
+        rawFdWrite(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Active response sink for the current worker thread (the .URING ring path).
+/// null for every other dispatch model, so fdWriteAll writes straight to the fd.
+pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 // --------------------------------------------------------- //
 
