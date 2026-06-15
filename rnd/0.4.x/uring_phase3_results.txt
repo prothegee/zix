@@ -107,19 +107,60 @@ while the rebuild cost scales with body size: the win grows from +118% rps at
 available on the ring. NOTE: this is cache-vs-nocache WITHIN .URING, not a
 .URING-vs-.EPOLL comparison (the cache helps both engines the same way).
 
+Lever: registered/direct files (checklist #1) (REVERTED, null)
+-------------------------------------------------------------
+Registered a sparse fixed file table per worker (register_files_sparse(MAX_FD)),
+registered each accepted fd at index == fd (register_files_update on accept,
+unregister on close), and set IOSQE_FIXED_FILE on recv and send so the kernel
+resolves the socket from the table and skips the per-op fget/fput. Correct
+(GET/echo/404/keep-alive/pipelined, test-all). A/B vs the minimal core, cache
+off, GET /:
+  | depth | minimal | registered-files |
+  | :-    | :-      | :-               |
+  | p1    | ~10.63  | ~10.61           |
+  | p16   | ~5.36   | ~5.34            |
+Verdict: NULL (identical within ~0.2% noise, both depths). fget/fput is cheap
+relative to the engine's userspace work, and the per-accept register_files_update
+syscall offsets the per-op saving. Reverted. Signal ("fewer fget/fput, lower
+cyc/req") did not fire.
+
+Lever: clock read once per CQE batch (checklist #5) (REVERTED, null)
+-------------------------------------------------------------------
+Refreshed a coarse per-CQE-batch timestamp once per batch (core.refreshBatchClock
+in the run loop) and had cacheLookup/cacheStore reuse it instead of reading the
+clock per request. A/B vs the minimal cache server, /cache?kb=4 (small body =
+highest req rate = most clock reads), wrk -t6 -c512 -d10s:
+  baseline (clock/req) ~12.6 us/req vs clock-once ~12.66 us/req = NULL.
+Verdict: NULL, reverted. Moot by construction: cache.nowMillis() already uses
+clock_gettime(MONOTONIC_COARSE), a near-free vDSO memory read (the kernel updates
+a page per tick), not the costly clock the lever assumes. There are no
+clock_gettime cycles to remove, so the signal cannot fire.
+
+Lever status summary (ADR-037 >=70% tier)
+-----------------------------------------
+  | lever                                | confirm/deny signal               | result          |
+  | :-                                   | :-                                | :-              |
+  | DEFER_TASKRUN + SINGLE_ISSUER        | lower task-run/IPI, cyc drop p16  | NULL (reverted) |
+  | response cache past the crossover    | cache vs nocache A/B 4/16/64 KiB  | CONFIRMED (win) |
+  | registered/direct files              | fewer fget/fput, lower cyc p16    | NULL (reverted) |
+  | clock read once per CQE batch        | clock_gettime cycles vanish p16   | NULL (reverted) |
+  | registered send buffer (send_fixed)  | fewer get_user_pages on hit       | DEFERRED        |
+Only the response cache is a confirmed win, and it helps .EPOLL equally, so it is
+NOT a .URING-specific gain. send_fixed is DEFERRED (not implemented): same class
+of kernel-side saving as the three null levers, most invasive of the five (engine
+must route slab sends + handle send_zc's dual completion), only touches large
+cached responses (already +750% from the cache), and its signal (fewer
+get_user_pages) is kernel-side, unmeasurable here under paranoid=2. Expected null.
+
 Conclusion / next
 -----------------
 On the real (already-optimized shared-nothing) zix.Http1 engine the minimal ring
-core is CPU-parity with .EPOLL at p1 and p16 with a cache-locality edge. Lever
-results so far:
-  - ring setup flags (lever 1): null.
-  - multishot + provided buffer ring (structural): regression (extra copy).
-  - per-worker response cache (lever 3): big win, but it is an engine feature
-    that helps .EPOLL equally, not a URING-specific gain.
-So no lever has made .URING beat .EPOLL on CPU; .URING's own edge stays cache
-locality plus headroom at very high connection counts. Remaining cache-adjacent
-levers now unblocked (cache is installed): clock-read-once-per-CQE-batch and a
-registered send buffer holding the cache payload (send_fixed on a hit). The one
-independent structural candidate left is registered/direct files
-(IOSQE_FIXED_FILE, accept_direct). Given the engine is userspace-work dominated,
-expect these to be small.
+core is CPU-parity with .EPOLL at p1 and p16 with a cache-locality edge. No lever
+has made .URING beat .EPOLL on CPU. .URING's own edge stays cache locality plus
+headroom at very high connection counts (the latter unproven here: gcannon is
+memlock-blocked). The last untested >=70% lever is the registered send buffer
+(send_fixed on a cache hit): it needs send_zc_fixed from the registered cache
+slab, only helps large cached responses (plain send_zc adds a notification CQE
+that loses for small), and is architecturally invasive (the engine must route
+slab sends and handle the dual completion). Given every other lever is
+null/marginal, expect it small.
