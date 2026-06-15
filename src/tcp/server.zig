@@ -6,6 +6,8 @@ const Config = @import("config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const Logger = @import("../logger/logger.zig").Logger;
+const uring = @import("io_uring/ring.zig");
+const IoUring = std.os.linux.IoUring;
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
 /// Without a logger it prints to stderr only in Debug builds (silent in release).
@@ -27,6 +29,101 @@ const EPOLL_MAX_EVENTS: usize = 512;
 /// User-provided connection handler. Receives the accepted stream and io.
 /// The handler owns the stream for its lifetime. It must call stream.close(io) when done.
 pub const HandlerFn = *const fn (stream: std.Io.net.Stream, io: std.Io) void;
+
+/// Per-frame callback for the framed engine (runFramed). Called once per
+/// length-prefixed frame (the engine drives the read/write loop, the callback
+/// just processes one payload and writes a reply via frameRespond / fdWriteAll).
+/// Unlike HandlerFn it does not own the connection and never blocks, so it can
+/// run on the single-threaded .URING completion ring (ADR-037).
+pub const FrameFn = *const fn (payload: []const u8, fd: std.posix.fd_t) void;
+
+/// Frame wire format for the framed engine: a 4-byte big-endian length prefix
+/// followed by that many payload bytes. Frames larger than this are rejected
+/// (the connection is closed).
+pub const FRAME_LEN_PREFIX: usize = 4;
+pub const FRAME_MAX_PAYLOAD: usize = 1 << 20;
+
+// --------------------------------------------------------- //
+// Framed-engine response sink + helpers. While a sink is installed
+// (tl_resp_sink, the .URING ring path), writes stage into it and coalesce into
+// one ring send; otherwise they go straight to the fd (the blocking adapter).
+
+/// Direct socket write, bypassing the coalescing sink.
+fn rawFrameWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const rc = std.posix.system.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.BrokenPipe;
+
+                remaining = remaining[n..];
+            },
+            .INTR => continue,
+            else => return error.BrokenPipe,
+        }
+    }
+}
+
+/// Coalescing sink for the framed .URING path. Oversize writes flush straight to
+/// the fd (safe under the ring's half-duplex guarantee).
+pub const RespSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    pub fn append(self: *RespSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            rawFrameWrite(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn flush(self: *RespSink) void {
+        if (self.len == 0) return;
+
+        rawFrameWrite(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Active sink for the current worker thread (set by the framed ring worker).
+pub threadlocal var tl_resp_sink: ?*RespSink = null;
+
+/// Write raw bytes to the connection: into the sink when one is installed
+/// (coalesced ring send), otherwise straight to the fd.
+pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (tl_resp_sink) |sink| {
+        sink.append(data);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    return rawFrameWrite(fd, data);
+}
+
+/// Send a length-prefixed frame: a 4-byte big-endian length followed by payload.
+/// The framed-engine reply helper for a FrameFn callback.
+pub fn frameRespond(fd: std.posix.fd_t, payload: []const u8) error{BrokenPipe}!void {
+    var hdr: [FRAME_LEN_PREFIX]u8 = undefined;
+    std.mem.writeInt(u32, &hdr, @intCast(payload.len), .big);
+
+    try fdWriteAll(fd, &hdr);
+    try fdWriteAll(fd, payload);
+}
 
 // --------------------------------------------------------- //
 
@@ -483,7 +580,440 @@ pub const TcpServer = struct {
 
         for (workers) |t| t.join();
     }
+
+    /// Listen and serve a per-frame callback (length-prefixed framing). On the
+    /// .URING dispatch model this runs the native io_uring ring (shared-nothing,
+    /// one ring per worker; the engine drives recv -> frame_fn -> one coalesced
+    /// send, so the callback never owns or blocks the connection). On every other
+    /// model the callback is wrapped in a blocking per-connection adapter and
+    /// served through the normal path.
+    ///
+    /// Param:
+    /// frame_fn - comptime FrameFn (baked into the ring worker type)
+    ///
+    /// Return:
+    /// - !void
+    pub fn runFramed(self: *Self, io: std.Io, comptime frame_fn: FrameFn) !void {
+        if (comptime builtin.target.os.tag == .linux) {
+            if (self.config.dispatch_model == .URING) {
+                return runFramedUring(self.config, io, frame_fn);
+            }
+        }
+
+        return self.runWith(io, frameAdapter(frame_fn));
+    }
 };
+
+// --------------------------------------------------------- //
+// Framed io_uring ring (ADR-037 Phase 4 extension): shared-nothing, one ring +
+// listener per worker. recv into the connection buffer, parse length-prefixed
+// frames, call frame_fn per frame (the reply stages through tl_resp_sink), and
+// submit one coalesced send per readable batch. Half-duplex per connection.
+// Mirrors the zix.Http1 ring core with frame parsing in place of HTTP parsing.
+
+const FrameOutcome = enum { keep_alive, close };
+
+/// SQ entries per worker ring.
+const URING_ENTRIES: u16 = 4096;
+/// CQ entries per worker ring (multishot completion headroom).
+const URING_CQ_ENTRIES: u32 = 16 * 1024;
+/// Max CQEs drained per loop pass.
+const URING_CQE_BATCH: usize = 512;
+/// Per-connection staged-response buffer.
+const URING_SEND_BUF_SIZE: usize = 64 * 1024;
+
+/// Initialize a worker ring with the single-issuer fast-path flags, falling back
+/// to a flagless ring when the kernel does not support them.
+fn initUringRing() !IoUring {
+    const linux = std.os.linux;
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = linux.IORING_SETUP_SINGLE_ISSUER |
+            linux.IORING_SETUP_DEFER_TASKRUN |
+            linux.IORING_SETUP_CQSIZE |
+            linux.IORING_SETUP_CLAMP,
+        .cq_entries = URING_CQ_ENTRIES,
+        .sq_thread_idle = 1000,
+    });
+
+    return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
+}
+
+fn ringSetNoDelay(fd: std.posix.fd_t) void {
+    std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&@as(c_int, 1))) catch {};
+}
+
+/// Per-connection ring state. buf accumulates frame bytes until whole frames are
+/// present; send_buf holds the coalesced reply while a send is in flight; gen
+/// guards against fd reuse.
+const UringConn = struct {
+    fd: std.posix.fd_t,
+    gen: u24,
+    buf: []u8,
+    filled: usize,
+    send_buf: []u8,
+    staged: usize,
+    inflight: usize,
+    closing: bool,
+};
+
+const UringFrameCtx = struct {
+    io: std.Io,
+    ip: []const u8,
+    port: u16,
+    kernel_backlog: u31,
+    recv_buf_size: usize,
+};
+
+/// Build a concrete framed io_uring worker entry with frame_fn baked in at
+/// compile time, mirroring the zix.Http1 ring worker.
+fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
+    return struct {
+        const Worker = struct {
+            ring: IoUring,
+            slots: []?*UringConn,
+            listener_fd: std.posix.fd_t,
+            gen_counter: u24,
+            recv_buf_size: usize,
+
+            const W = @This();
+            const allocator = std.heap.smp_allocator;
+            const lx = std.os.linux;
+
+            fn deinit(w: *W) void {
+                for (w.slots) |maybe_conn| {
+                    if (maybe_conn) |conn| {
+                        _ = lx.close(conn.fd);
+                        allocator.free(conn.buf);
+                        allocator.free(conn.send_buf);
+                        allocator.destroy(conn);
+                    }
+                }
+
+                allocator.free(w.slots);
+                w.ring.deinit();
+            }
+
+            fn getSqe(w: *W) ?*lx.io_uring_sqe {
+                return w.ring.get_sqe() catch {
+                    _ = w.ring.submit() catch return null;
+
+                    return w.ring.get_sqe() catch null;
+                };
+            }
+
+            fn lookup(w: *W, decoded: uring.Decoded) ?*UringConn {
+                const idx: usize = @intCast(decoded.fd);
+                if (idx >= w.slots.len) return null;
+
+                const conn = w.slots[idx] orelse return null;
+                if (conn.gen != decoded.gen) return null;
+
+                return conn;
+            }
+
+            fn destroyConn(w: *W, conn: *UringConn) void {
+                w.slots[@intCast(conn.fd)] = null;
+
+                allocator.free(conn.buf);
+                allocator.free(conn.send_buf);
+                allocator.destroy(conn);
+            }
+
+            fn finishClose(w: *W, conn: *UringConn) void {
+                _ = lx.close(conn.fd);
+                w.destroyConn(conn);
+            }
+
+            fn beginClose(w: *W, conn: *UringConn) void {
+                conn.closing = true;
+                if (conn.inflight > 0) return;
+
+                if (conn.staged > 0) {
+                    w.submitSend(conn);
+                    return;
+                }
+
+                w.finishClose(conn);
+            }
+
+            fn armAccept(w: *W) void {
+                const sqe = w.getSqe() orelse return;
+                sqe.prep_multishot_accept(w.listener_fd, null, null, 0);
+                sqe.user_data = uring.packUserData(.accept, 0, w.listener_fd);
+            }
+
+            fn armRecv(w: *W, conn: *UringConn) void {
+                if (conn.filled >= conn.buf.len) {
+                    w.beginClose(conn);
+                    return;
+                }
+
+                const sqe = w.getSqe() orelse {
+                    w.beginClose(conn);
+                    return;
+                };
+                sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
+                sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
+            }
+
+            fn submitSend(w: *W, conn: *UringConn) void {
+                const sqe = w.getSqe() orelse {
+                    w.finishClose(conn);
+                    return;
+                };
+                sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], lx.MSG.NOSIGNAL);
+                sqe.user_data = uring.packUserData(.send, conn.gen, conn.fd);
+
+                conn.inflight = conn.staged;
+            }
+
+            fn handleAccept(w: *W, cqe: lx.io_uring_cqe) void {
+                const rearm = (cqe.flags & lx.IORING_CQE_F_MORE) == 0;
+                defer if (rearm) w.armAccept();
+
+                if (cqe.res < 0) return;
+
+                const conn_fd: std.posix.fd_t = cqe.res;
+                const idx: usize = @intCast(conn_fd);
+                if (idx >= w.slots.len) {
+                    _ = lx.close(conn_fd);
+                    return;
+                }
+
+                ringSetNoDelay(conn_fd);
+
+                const conn = allocator.create(UringConn) catch {
+                    _ = lx.close(conn_fd);
+                    return;
+                };
+                const buf = allocator.alloc(u8, w.recv_buf_size) catch {
+                    allocator.destroy(conn);
+                    _ = lx.close(conn_fd);
+                    return;
+                };
+                const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+                    allocator.free(buf);
+                    allocator.destroy(conn);
+                    _ = lx.close(conn_fd);
+                    return;
+                };
+
+                w.gen_counter +%= 1;
+                conn.* = .{
+                    .fd = conn_fd,
+                    .gen = w.gen_counter,
+                    .buf = buf,
+                    .filled = 0,
+                    .send_buf = send_buf,
+                    .staged = 0,
+                    .inflight = 0,
+                    .closing = false,
+                };
+                w.slots[idx] = conn;
+
+                w.armRecv(conn);
+            }
+
+            fn handleRecv(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+                const conn = w.lookup(decoded) orelse return;
+
+                if (cqe.res <= 0) {
+                    w.beginClose(conn);
+                    return;
+                }
+
+                conn.filled += @intCast(cqe.res);
+
+                const outcome = w.dispatch(conn);
+
+                if (conn.staged > 0) {
+                    w.submitSend(conn);
+                    if (outcome == .close) conn.closing = true;
+
+                    return;
+                }
+
+                if (outcome == .close) {
+                    w.beginClose(conn);
+                    return;
+                }
+
+                w.armRecv(conn);
+            }
+
+            fn handleSend(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+                const conn = w.lookup(decoded) orelse return;
+
+                if (cqe.res < 0) {
+                    w.beginClose(conn);
+                    return;
+                }
+
+                const sent: usize = @intCast(cqe.res);
+                if (sent < conn.staged) {
+                    std.mem.copyForwards(u8, conn.send_buf[0 .. conn.staged - sent], conn.send_buf[sent..conn.staged]);
+                    conn.staged -= sent;
+                    conn.inflight = 0;
+                    w.submitSend(conn);
+
+                    return;
+                }
+
+                conn.staged = 0;
+                conn.inflight = 0;
+
+                if (conn.closing) {
+                    w.finishClose(conn);
+                    return;
+                }
+
+                w.armRecv(conn);
+            }
+
+            /// Parse every complete length-prefixed frame in conn.buf and call
+            /// frame_fn for each (reply staged through the sink into send_buf),
+            /// then compact the trailing partial frame to the front.
+            fn dispatch(w: *W, conn: *UringConn) FrameOutcome {
+                _ = w;
+                const fd = conn.fd;
+
+                var sink = RespSink{ .fd = fd, .buf = conn.send_buf };
+                tl_resp_sink = &sink;
+                defer tl_resp_sink = null;
+
+                var consumed: usize = 0;
+                var keep_alive = true;
+                while (conn.filled - consumed >= FRAME_LEN_PREFIX) {
+                    const rem = conn.buf[consumed..conn.filled];
+                    const len = std.mem.readInt(u32, rem[0..FRAME_LEN_PREFIX], .big);
+                    if (len == 0 or len > FRAME_MAX_PAYLOAD or FRAME_LEN_PREFIX + len > conn.buf.len) {
+                        keep_alive = false;
+                        break;
+                    }
+
+                    const need = FRAME_LEN_PREFIX + len;
+                    if (rem.len < need) break;
+
+                    frame_fn(rem[FRAME_LEN_PREFIX..need], fd);
+                    consumed += need;
+                }
+
+                if (consumed >= conn.filled) {
+                    conn.filled = 0;
+                } else if (consumed > 0) {
+                    std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - consumed], conn.buf[consumed..conn.filled]);
+                    conn.filled -= consumed;
+                }
+
+                conn.staged = sink.len;
+                if (sink.failed) return .close;
+
+                return if (keep_alive) .keep_alive else .close;
+            }
+
+            fn run(w: *W) void {
+                w.armAccept();
+
+                var cqes: [URING_CQE_BATCH]lx.io_uring_cqe = undefined;
+                while (true) {
+                    _ = w.ring.submit_and_wait(1) catch |err| switch (err) {
+                        error.SignalInterrupt => continue,
+                        else => return,
+                    };
+
+                    const count = w.ring.copy_cqes(&cqes, 0) catch return;
+                    for (cqes[0..count]) |cqe| {
+                        const decoded = uring.unpackUserData(cqe.user_data);
+                        switch (decoded.op) {
+                            .accept => w.handleAccept(cqe),
+                            .recv => w.handleRecv(cqe, decoded),
+                            .send => w.handleSend(cqe, decoded),
+                        }
+                    }
+                }
+            }
+        };
+
+        fn run(ctx: UringFrameCtx) void {
+            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+            var net_server = addr.listen(ctx.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+                .reuse_address = true,
+                .kernel_backlog = ctx.kernel_backlog,
+            }) catch return;
+            defer net_server.deinit(ctx.io);
+            const listener_fd = net_server.socket.handle;
+
+            const slots = std.heap.smp_allocator.alloc(?*UringConn, 1 << 16) catch return;
+            @memset(slots, null);
+
+            var worker = Worker{
+                .ring = undefined,
+                .slots = slots,
+                .listener_fd = listener_fd,
+                .gen_counter = 0,
+                .recv_buf_size = ctx.recv_buf_size,
+            };
+            worker.ring = initUringRing() catch return;
+            defer worker.deinit();
+
+            worker.run();
+        }
+    }.run;
+}
+
+fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: FrameFn) !void {
+    const worker_count = if (cfg.workers == 0) (std.Thread.getCpuCount() catch 1) else cfg.workers;
+
+    logSystem(cfg, "listening on {s}:{d} (io_uring framed/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
+
+    const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+    defer std.heap.smp_allocator.free(threads);
+
+    const worker_fn = uringFrameWorkerFn(frame_fn);
+    for (threads) |*t|
+        t.* = try std.Thread.spawn(
+            .{ .stack_size = 512 * 1024 },
+            worker_fn,
+            .{UringFrameCtx{
+                .io = io,
+                .ip = cfg.ip,
+                .port = cfg.port,
+                .kernel_backlog = cfg.kernel_backlog,
+                .recv_buf_size = cfg.max_recv_buf,
+            }},
+        );
+
+    for (threads) |t| t.join();
+}
+
+/// Blocking adapter: wrap a FrameFn in a per-connection HandlerFn that reads
+/// length-prefixed frames and dispatches each. Used for every dispatch model
+/// other than .URING so runFramed works everywhere.
+fn frameAdapter(comptime frame_fn: FrameFn) HandlerFn {
+    return struct {
+        fn handle(stream: std.Io.net.Stream, io: std.Io) void {
+            defer stream.close(io);
+            const fd = stream.socket.handle;
+
+            const payload_buf = std.heap.smp_allocator.alloc(u8, FRAME_MAX_PAYLOAD) catch return;
+            defer std.heap.smp_allocator.free(payload_buf);
+
+            var read_buf: [4096]u8 = undefined;
+            var reader = stream.reader(io, &read_buf);
+
+            while (true) {
+                const len = reader.interface.takeVarInt(u32, .big, FRAME_LEN_PREFIX) catch return;
+                if (len == 0 or len > FRAME_MAX_PAYLOAD) return;
+
+                reader.interface.readSliceAll(payload_buf[0..len]) catch return;
+
+                frame_fn(payload_buf[0..len], fd);
+            }
+        }
+    }.handle;
+}
 
 // --------------------------------------------------------- //
 
