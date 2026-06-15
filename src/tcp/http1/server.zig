@@ -950,18 +950,25 @@ fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?co
 // per connection (at most one recv or one send in flight), so a blocking sink
 // flush can never interleave with an in-flight send.
 //
-// Two Phase 3 (ADR-037) levers were measured and REVERTED here, both losing to
-// this minimal core (see rnd/0.4.x/uring_phase3_results.txt):
-// 1. ring setup flags (SINGLE_ISSUER|COOP_TASKRUN, SINGLE_ISSUER|DEFER_TASKRUN):
-//    null. A busy submit_and_wait loop under single-issuer already drains
-//    completions at enter, so there is no IPI/task-run cost to remove.
-// 2. multishot recv + provided buffer ring: regression. It forces a memcpy from
-//    the kernel-selected buffer into conn.buf for accumulation, and that copy
-//    (largest at pipeline depth 16) outweighs the multishot re-arm saving the
-//    plain recv-into-conn.buf path avoids by receiving in place.
+// Phase 3 (ADR-037) lever results (rnd/0.4.x/uring_phase3_results.txt):
+// 1. ring setup flags (SINGLE_ISSUER | DEFER_TASKRUN): measured null on the
+//    12-core loopback box, but the reference ring engines run with them at
+//    scale, so they are applied here behind a kernel-version probe with a
+//    flagless fallback (initUringRing). Costless where the kernel lacks them,
+//    and matches the reference engines' single-issuer fast path otherwise.
+// 2. multishot recv + provided buffer ring: REVERTED, a regression. It forces a
+//    memcpy from the kernel-selected buffer into conn.buf for accumulation, and
+//    that copy (largest at pipeline depth 16) outweighs the multishot re-arm
+//    saving the plain recv-into-conn.buf path avoids by receiving in place.
 
 /// SQ entries per worker ring.
 const URING_ENTRIES: u16 = 4096;
+
+/// CQ entries per worker ring. Multishot accept plus a coalesced send per
+/// readable batch can land many completions per enter at high connection
+/// counts, so the completion queue is requested larger than the default (2x SQ)
+/// via IORING_SETUP_CQSIZE to leave overflow headroom.
+const URING_CQ_ENTRIES: u32 = 16 * 1024;
 
 /// Max CQEs drained per loop pass.
 const URING_CQE_BATCH: usize = 512;
@@ -969,6 +976,35 @@ const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer. Matches the EPOLL sink size so a full
 /// pipelined burst coalesces into one send SQE.
 const URING_SEND_BUF_SIZE: usize = EPOLL_OUT_BUF_SIZE;
+
+/// Initialize a worker ring with the single-issuer fast-path flags, falling
+/// back to a flagless ring when the kernel does not support them.
+///
+/// Note:
+/// - SINGLE_ISSUER and DEFER_TASKRUN cut enter-time task-run overhead on a
+///   one-thread-per-ring loop (kernel >= 6.1, and the ring is created,
+///   submitted, and reaped on this one worker thread). CQSIZE enlarges the
+///   completion queue to URING_CQ_ENTRIES and CLAMP keeps the requested sizes
+///   within the kernel maximum. On an older kernel init_params returns an
+///   error, so the flagless init is the correct fallback (the same fallback the
+///   reference ring engines ship).
+///
+/// Return:
+/// - IoUring on success
+/// - error only when the flagless fallback also fails (no ring possible)
+fn initUringRing() !IoUring {
+    const linux = std.os.linux;
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = linux.IORING_SETUP_SINGLE_ISSUER |
+            linux.IORING_SETUP_DEFER_TASKRUN |
+            linux.IORING_SETUP_CQSIZE |
+            linux.IORING_SETUP_CLAMP,
+        .cq_entries = URING_CQ_ENTRIES,
+        .sq_thread_idle = 1000,
+    });
+
+    return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
+}
 
 /// Per-connection ring state. buf accumulates request bytes between recv
 /// completions. send_buf front [0..inflight] is owned by the kernel while a
@@ -1358,7 +1394,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .recv_buf_size = config.max_recv_buf,
                 .handler_timeout_ms = config.handler_timeout_ms,
             };
-            worker.ring = IoUring.init(URING_ENTRIES, 0) catch return;
+            worker.ring = initUringRing() catch return;
             defer worker.deinit();
 
             // Per-worker response cache (ADR-036), owned for this worker's
@@ -1776,4 +1812,17 @@ test "zix http1: parseGetFastPath raw_headers covers host line" {
     const host = core.getHeader(&result.head, "host");
     try std.testing.expect(host != null);
     try std.testing.expectEqualStrings("example.com", host.?);
+}
+
+test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    // Skip where io_uring is unavailable (older kernel, or blocked by a seccomp
+    // sandbox): the engine itself falls back to POOL in that case.
+    var ring = initUringRing() catch return error.SkipZigTest;
+    defer ring.deinit();
+
+    // Usable whether the kernel accepted the single-issuer fast-path flags or
+    // the flagless fallback was taken. Getting an SQE proves the queues mapped.
+    _ = try ring.get_sqe();
 }
