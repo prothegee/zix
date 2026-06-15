@@ -289,6 +289,14 @@ const EpollConn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
     filled: usize,
+    /// Response bytes staged when a write hit EAGAIN (send buffer full). The
+    /// worker arms EPOLLOUT and drains this on the next writable event instead of
+    /// parking on a slow client. Heap-owned (smp_allocator) while non-empty.
+    write_pending: []u8 = &.{},
+    /// Bytes of write_pending already flushed.
+    write_pending_off: usize = 0,
+    /// Close the connection once the staged bytes finish flushing.
+    write_pending_close: bool = false,
 };
 
 /// Private per-worker fd to EpollConn map. The slab (MAX_FD * buf_size virtual
@@ -341,6 +349,7 @@ const EpollConnTable = struct {
         const conn = &self.slots[idx];
         if (conn.buf.len == 0) return;
 
+        if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
         conn.* = std.mem.zeroes(EpollConn);
     }
 };
@@ -356,6 +365,10 @@ const URING_CQ_ENTRIES: u32 = 16 * 1024;
 const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer: one coalesced send per request.
 const URING_SEND_BUF_SIZE: usize = 64 * 1024;
+
+/// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
+/// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
+const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
 /// Outcome of one ring process pass over a connection's read buffer.
 const HttpProcOutcome = enum { need_more, keep_alive, close };
@@ -794,6 +807,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 response_cache.deinit();
             };
 
+            // Per-worker response staging buffer: the handler's writes coalesce
+            // into this sink, then the worker flushes it once per request.
+            const out_buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch return;
+            defer std.heap.smp_allocator.free(out_buf);
+
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             var epoll_timeout: i32 = -1;
             while (true) {
@@ -826,6 +844,45 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     }
 
                     const conn = table.get(conn_fd) orelse continue;
+
+                    // Drain a staged response before anything else: never start a
+                    // new request while a prior response is still flushing, so the
+                    // response order is preserved under pipelining (the connection
+                    // is EPOLLOUT-armed only while write_pending holds bytes).
+                    if (conn.write_pending.len > conn.write_pending_off) {
+                        const pending = conn.write_pending[conn.write_pending_off..];
+                        const written = resp_mod.fdWriteNonBlock(conn_fd, pending) orelse {
+                            table.free(conn_fd);
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                            continue;
+                        };
+
+                        conn.write_pending_off += written;
+                        if (conn.write_pending_off < conn.write_pending.len) continue;
+
+                        const drained_close = conn.write_pending_close;
+                        std.heap.smp_allocator.free(conn.write_pending);
+                        conn.write_pending = &.{};
+                        conn.write_pending_off = 0;
+                        conn.write_pending_close = false;
+                        conn.filled = 0;
+
+                        if (drained_close) {
+                            table.free(conn_fd);
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                            continue;
+                        }
+
+                        var disarm_ev = linux.epoll_event{
+                            .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
+                            .data = .{ .fd = conn_fd },
+                        };
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn_fd, &disarm_ev);
+
+                        continue;
+                    }
 
                     // Recv into conn.buf[conn.filled..]. NONBLOCK fd: read() returns
                     // EAGAIN when no more data is buffered in the kernel, so we break
@@ -866,9 +923,44 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
                     const stream = std.Io.net.Stream{ .socket = .{ .handle = conn_fd, .address = undefined } };
                     _ = arena.reset(.retain_capacity);
-                    const outcome = processRequest(self, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
 
-                    if (outcome != .keep_alive) {
+                    var sink = RespSink{ .fd = conn_fd, .buf = out_buf };
+                    resp_mod.tl_resp_sink = &sink;
+                    const outcome = processRequest(self, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
+                    resp_mod.tl_resp_sink = null;
+
+                    var close_conn = (outcome != .keep_alive) or sink.failed;
+
+                    // Flush the coalesced response. A partial write (EAGAIN) stages
+                    // the unwritten tail and arms EPOLLOUT instead of dropping it.
+                    if (!sink.failed and sink.len > 0) {
+                        if (resp_mod.fdWriteNonBlock(conn_fd, sink.buf[0..sink.len])) |written| {
+                            if (written < sink.len) {
+                                const remaining = sink.buf[written..sink.len];
+                                if (std.heap.smp_allocator.alloc(u8, remaining.len)) |staged| {
+                                    @memcpy(staged, remaining);
+                                    conn.write_pending = staged;
+                                    conn.write_pending_off = 0;
+                                    conn.write_pending_close = (outcome != .keep_alive);
+                                    conn.filled = 0;
+
+                                    var arm_ev = linux.epoll_event{
+                                        .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP,
+                                        .data = .{ .fd = conn_fd },
+                                    };
+                                    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn_fd, &arm_ev);
+
+                                    continue;
+                                } else |_| {
+                                    close_conn = true;
+                                }
+                            }
+                        } else {
+                            close_conn = true;
+                        }
+                    }
+
+                    if (close_conn) {
                         table.free(conn_fd);
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
                         _ = linux.close(conn_fd);
