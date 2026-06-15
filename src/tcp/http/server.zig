@@ -1213,6 +1213,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                                 .accept => w.handleAccept(cqe),
                                 .recv => w.handleRecv(cqe, decoded),
                                 .send => w.handleSend(cqe, decoded),
+                                .timeout => {},
                             }
                         }
                     }

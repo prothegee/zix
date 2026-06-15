@@ -568,6 +568,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         gen_counter: u24,
         comp_id: []const u8,
         opts: FixServeOpts,
+        hb_ms: u32,
+        hb_timespec: lx.kernel_timespec,
 
         const W = @This();
         const allocator = std.heap.smp_allocator;
@@ -718,6 +720,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             }
 
             conn.filled += @intCast(cqe.res);
+            conn.fix_state.last_activity_ms = core.monotonicMs();
+            conn.fix_state.sent_test_request = false;
 
             const close = w.dispatch(conn);
 
@@ -788,8 +792,36 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             return result.close or sink.failed;
         }
 
+        fn armTimeout(w: *W) void {
+            if (w.hb_ms == 0) return;
+
+            const sqe = w.getSqe() orelse return;
+            sqe.prep_timeout(&w.hb_timespec, 0, 0);
+            sqe.user_data = uring.packUserData(.timeout, 0, w.listener_fd);
+        }
+
+        /// Periodic heartbeat tick: send a TestRequest to every idle logged-in
+        /// session, reap one that stayed silent through a Logout, then re-arm. The
+        /// reaped connection has only an idle recv in flight (no buffered data), so
+        /// closing it is safe: the stale recv completion is dropped by the gen tag.
+        fn handleTimeout(w: *W, cqe: lx.io_uring_cqe) void {
+            _ = cqe;
+
+            const now = core.monotonicMs();
+            for (w.slots) |maybe_conn| {
+                if (maybe_conn) |conn| {
+                    if (core.fixHeartbeatTick(&conn.fix_state, w.comp_id, conn.fd, now, w.hb_ms)) {
+                        w.finishClose(conn);
+                    }
+                }
+            }
+
+            w.armTimeout();
+        }
+
         fn run(w: *W) void {
             w.armAccept();
+            w.armTimeout();
 
             var cqes: [URING_CQE_BATCH]lx.io_uring_cqe = undefined;
             while (true) {
@@ -805,6 +837,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                         .accept => w.handleAccept(cqe),
                         .recv => w.handleRecv(cqe, decoded),
                         .send => w.handleSend(cqe, decoded),
+                        .timeout => w.handleTimeout(cqe),
                     }
                 }
             }
@@ -823,6 +856,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     const slots = std.heap.smp_allocator.alloc(?*UringFixConn, 1 << 16) catch return;
     @memset(slots, null);
 
+    const hb_ms = ctx.opts.heartbeat_timeout_ms;
     var worker = Worker{
         .ring = undefined,
         .slots = slots,
@@ -830,6 +864,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         .gen_counter = 0,
         .comp_id = ctx.comp_id,
         .opts = ctx.opts,
+        .hb_ms = hb_ms,
+        .hb_timespec = .{ .sec = @intCast(hb_ms / 1000), .nsec = @intCast((hb_ms % 1000) * 1_000_000) },
     };
     worker.ring = initUringRing() catch return;
     defer worker.deinit();

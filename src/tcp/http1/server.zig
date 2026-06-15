@@ -1509,6 +1509,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         .accept => self.handleAccept(cqe),
                         .recv => self.handleRecv(cqe, decoded),
                         .send => self.handleSend(cqe, decoded),
+                        .timeout => {},
                     }
                 }
             }

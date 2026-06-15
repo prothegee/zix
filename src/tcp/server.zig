@@ -928,6 +928,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                             .accept => w.handleAccept(cqe),
                             .recv => w.handleRecv(cqe, decoded),
                             .send => w.handleSend(cqe, decoded),
+                            .timeout => {},
                         }
                     }
                 }

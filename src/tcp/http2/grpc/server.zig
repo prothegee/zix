@@ -514,6 +514,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                             .accept => self.handleAccept(cqe),
                             .recv => self.handleRecv(cqe, decoded),
                             .send => self.handleSend(cqe, decoded),
+                            .timeout => {},
                         }
                     }
                 }
