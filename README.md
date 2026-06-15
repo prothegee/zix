@@ -62,6 +62,7 @@
 
 <!--
 perf record -F 99 -o my_custom_output.perf.data ./myprogram;
+git commit --allow-empty -m "ci: retrigger" && git push;
 -->
 
 ###### end of readme
