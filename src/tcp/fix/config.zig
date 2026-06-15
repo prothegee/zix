@@ -18,7 +18,8 @@ pub const FixServerConfig = struct {
     port: u16,
     /// Server SenderCompID (tag 49). Caller-provided. Must outlive the server.
     comp_id: []const u8,
-    /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
+    /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
+    /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
