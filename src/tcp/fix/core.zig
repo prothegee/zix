@@ -292,6 +292,80 @@ pub const FixRoute = struct {
     timeout_ms: u32 = 0,
 };
 
+// --------------------------------------------------------- //
+// Framed-engine response sink (ADR-037 Phase 4 extension). While a sink is
+// installed (tl_resp_sink, the .URING ring path), FIX replies stage into it and
+// coalesce into one ring send; otherwise they go straight to the fd (the blocking
+// serveConn path), preserving the existing behavior.
+
+fn rawFixWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const rc = std.posix.system.write(fd, remaining.ptr, remaining.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.BrokenPipe;
+
+                remaining = remaining[n..];
+            },
+            .INTR => continue,
+            else => return error.BrokenPipe,
+        }
+    }
+}
+
+/// Coalescing sink for the FIX .URING path. Oversize writes flush straight to the
+/// fd (safe under the ring's half-duplex guarantee).
+pub const RespSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    pub fn append(self: *RespSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            rawFixWrite(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn flush(self: *RespSink) void {
+        if (self.len == 0) return;
+
+        rawFixWrite(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Active sink for the current worker thread (set by the FIX ring worker).
+pub threadlocal var tl_resp_sink: ?*RespSink = null;
+
+/// Write bytes to the connection: into the sink when installed (coalesced ring
+/// send), otherwise straight to the fd (the blocking serveConn path).
+pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (tl_resp_sink) |sink| {
+        sink.append(data);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    return rawFixWrite(fd, data);
+}
+
+// --------------------------------------------------------- //
+
 /// Per-connection context passed to each routed handler.
 pub const FixContext = struct {
     /// SenderCompID of the peer (from their Logon message, tag 49).
@@ -314,13 +388,10 @@ pub const FixContext = struct {
         var out_buf: [MAX_MSG_SIZE]u8 = undefined;
         const n = buildMessage(&out_buf, self.target_comp_id, self.sender_comp_id, self._seq_out.*, msg_type, extra) catch return;
         self._seq_out.* += 1;
-        var sent: usize = 0;
-        while (sent < n) {
-            const rc = std.posix.system.write(self._fd, out_buf[sent..n].ptr, n - sent);
-            const written: isize = @bitCast(rc);
-            if (written <= 0) return;
-            sent += @intCast(written);
-        }
+
+        // Routes through tl_resp_sink on the ring (coalesced send), direct
+        // posix write under the blocking serveConn path (sink null).
+        fdWriteAll(self._fd, out_buf[0..n]) catch {};
     }
 
     /// Return true if deadline_ns is set and the current wall clock has passed it.
@@ -555,6 +626,143 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
         }
     }
+}
+
+// --------------------------------------------------------- //
+
+/// Per-connection FIX session state for the .URING ring path. seq_out is the
+/// outbound sequence number; peer_comp_id is the peer's SenderCompID captured at
+/// Logon. Lives on the ring connection slot across recv completions.
+pub const FixRingState = struct {
+    seq_out: u32 = 1,
+    peer_comp_id: [64]u8 = undefined,
+    peer_len: usize = 0,
+};
+
+/// One ring process pass result: bytes consumed from the front of recv (whole
+/// messages only) and whether the session should close (Logout or a protocol
+/// error).
+pub const FixRingResult = struct {
+    consumed: usize,
+    close: bool,
+};
+
+/// Resumable FIX message processor for the .URING ring path. Dispatches every
+/// complete message in recv (session admin Logon/Logout/Heartbeat/TestRequest and
+/// routed application messages), with every reply written through the installed
+/// sink (tl_resp_sink) so the whole batch coalesces into one ring send. The caller
+/// installs the sink, owns recv accumulation, and compacts the unconsumed tail
+/// with the returned consumed count.
+///
+/// Note:
+/// - This is the reactive half of the FIX session: it replies to peer
+///   Heartbeat/TestRequest but does not drive the proactive idle-heartbeat timer
+///   (server-initiated TestRequest/Logout on silence), which on the ring would
+///   need an io_uring timeout SQE. The blocking serveConn keeps that timer.
+///
+/// Return:
+/// - FixRingResult (consumed bytes, close flag)
+pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeOpts, recv: []const u8, fd: std.posix.fd_t) FixRingResult {
+    var consumed: usize = 0;
+
+    while (true) {
+        const rem = recv[consumed..];
+        const msg_end = findMessageEnd(rem) orelse break;
+        const raw = rem[0..msg_end];
+        consumed += msg_end;
+
+        var fields: [MAX_FIELDS]Field = undefined;
+        const field_count = parseFields(raw, &fields) catch return .{ .consumed = consumed, .close = true };
+        const fslice = fields[0..field_count];
+
+        if (!verifyChecksum(raw)) return .{ .consumed = consumed, .close = true };
+
+        const msgtype = getField(fslice, .MsgType) orelse return .{ .consumed = consumed, .close = true };
+        const sender = getField(fslice, .SenderCompID) orelse "";
+        const seq_in = std.fmt.parseInt(u64, getField(fslice, .MsgSeqNum) orelse "0", 10) catch 0;
+
+        var out_buf: [MAX_MSG_SIZE]u8 = undefined;
+
+        if (std.mem.eql(u8, msgtype, MsgType.Logon)) {
+            @memcpy(state.peer_comp_id[0..sender.len], sender);
+            state.peer_len = sender.len;
+            const hb_int = getField(fslice, .HeartBtInt) orelse "30";
+            const extra = [_]BuildField{
+                .{ .tag = .EncryptMethod, .value = "0" },
+                .{ .tag = .HeartBtInt, .value = hb_int },
+            };
+            const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Logon, &extra) catch return .{ .consumed = consumed, .close = true };
+            state.seq_out += 1;
+            fdWriteAll(fd, out_buf[0..n]) catch {};
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logon");
+        } else if (std.mem.eql(u8, msgtype, MsgType.Logout)) {
+            const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Logout, &.{}) catch return .{ .consumed = consumed, .close = true };
+            state.seq_out += 1;
+            fdWriteAll(fd, out_buf[0..n]) catch {};
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logout");
+
+            return .{ .consumed = consumed, .close = true };
+        } else if (std.mem.eql(u8, msgtype, MsgType.Heartbeat)) {
+            var extra_buf: [1]BuildField = undefined;
+            var extra_len: usize = 0;
+            if (getField(fslice, .TestReqID)) |test_req_id| {
+                extra_buf[0] = .{ .tag = .TestReqID, .value = test_req_id };
+                extra_len = 1;
+            }
+            const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Heartbeat, extra_buf[0..extra_len]) catch return .{ .consumed = consumed, .close = true };
+            state.seq_out += 1;
+            fdWriteAll(fd, out_buf[0..n]) catch {};
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
+        } else if (std.mem.eql(u8, msgtype, MsgType.TestRequest)) {
+            const test_req_id = getField(fslice, .TestReqID) orelse "0";
+            const extra = [_]BuildField{.{ .tag = .TestReqID, .value = test_req_id }};
+            const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Heartbeat, &extra) catch return .{ .consumed = consumed, .close = true };
+            state.seq_out += 1;
+            fdWriteAll(fd, out_buf[0..n]) catch {};
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
+        } else if (opts.routes.len > 0 and state.peer_len > 0) {
+            for (opts.routes) |route| {
+                if (std.mem.eql(u8, msgtype, route.msg_type)) {
+                    const effective_ms = blk: {
+                        const a = route.timeout_ms;
+                        const b = opts.handler_timeout_ms;
+                        break :blk if (a > 0 and b > 0) @min(a, b) else if (a > 0) a else b;
+                    };
+                    var ctx = FixContext{
+                        .sender_comp_id = state.peer_comp_id[0..state.peer_len],
+                        .target_comp_id = comp_id,
+                        .deadline_ns = if (effective_ms > 0) wallClockNs() + @as(u64, effective_ms) * std.time.ns_per_ms else null,
+                        ._fd = fd,
+                        ._seq_out = &state.seq_out,
+                    };
+                    route.handler(fslice, &ctx);
+                    if (opts.logger) |lg| lg.session(msgtype, state.peer_comp_id[0..state.peer_len], comp_id, seq_in, "dispatch");
+
+                    break;
+                }
+            }
+        } else {
+            var body_fields: [MAX_FIELDS]BuildField = undefined;
+            var body_count: usize = 0;
+            for (fslice) |f| {
+                switch (f.tag) {
+                    .BeginString, .BodyLength, .MsgType, .SenderCompID, .TargetCompID, .MsgSeqNum, .SendingTime, .CheckSum => {},
+                    else => {
+                        if (body_count < body_fields.len) {
+                            body_fields[body_count] = .{ .tag = f.tag, .value = f.value };
+                            body_count += 1;
+                        }
+                    },
+                }
+            }
+            const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, msgtype, body_fields[0..body_count]) catch return .{ .consumed = consumed, .close = true };
+            state.seq_out += 1;
+            fdWriteAll(fd, out_buf[0..n]) catch {};
+            if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
+        }
+    }
+
+    return .{ .consumed = consumed, .close = false };
 }
 
 // --------------------------------------------------------- //
