@@ -70,7 +70,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Tcp.Server.initArgs(.{
+    var server = try zix.Tcp.Server.initArgs(myHandler, .{
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
@@ -80,5 +80,5 @@ pub fn main(process: std.process.Init) !void {
     }, process.minimal.args);
     defer server.deinit();
 
-    try server.runWith(process.io, myHandler);
+    try server.run(process.io);
 }
