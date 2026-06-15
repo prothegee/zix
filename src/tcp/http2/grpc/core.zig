@@ -1008,7 +1008,7 @@ fn serveGrpcLoop(
         const payload = reader.take(frame_header.length);
 
         switch (frame_header.frame_type) {
-            h2.FT_SETTINGS => {
+            h2.FRAME_TYPE_SETTINGS => {
                 if ((frame_header.flags & h2.FLAG_ACK) != 0) continue;
                 var i: usize = 0;
                 while (i + 6 <= payload.len) : (i += 6) {
@@ -1028,9 +1028,9 @@ fn serveGrpcLoop(
                 }
             },
 
-            h2.FT_WINDOW_UPDATE => {},
+            h2.FRAME_TYPE_WINDOW_UPDATE => {},
 
-            h2.FT_PING => {
+            h2.FRAME_TYPE_PING => {
                 if ((frame_header.flags & h2.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
                     {
@@ -1049,7 +1049,7 @@ fn serveGrpcLoop(
                 }
             },
 
-            h2.FT_HEADERS => {
+            h2.FRAME_TYPE_HEADERS => {
                 const stream_id = frame_header.stream_id;
                 if (stream_id == 0) {
                     {
@@ -1120,7 +1120,7 @@ fn serveGrpcLoop(
                 }
             },
 
-            h2.FT_CONTINUATION => {
+            h2.FRAME_TYPE_CONTINUATION => {
                 const stream_id = frame_header.stream_id;
                 const slot = findSlot(stream_id, streams, stream_slots) orelse {
                     {
@@ -1148,7 +1148,7 @@ fn serveGrpcLoop(
                 }
             },
 
-            h2.FT_DATA => {
+            h2.FRAME_TYPE_DATA => {
                 const stream_id = frame_header.stream_id;
                 if (stream_id == 0) {
                     {
@@ -1208,13 +1208,13 @@ fn serveGrpcLoop(
                 }
             },
 
-            h2.FT_RST_STREAM => {
+            h2.FRAME_TYPE_RST_STREAM => {
                 const stream_id = frame_header.stream_id;
                 if (findSlot(stream_id, streams, stream_slots)) |slot| stream_slots[slot] = false;
             },
 
-            h2.FT_GOAWAY => return,
-            h2.FT_PRIORITY => {},
+            h2.FRAME_TYPE_GOAWAY => return,
+            h2.FRAME_TYPE_PRIORITY => {},
             else => {},
         }
     }
@@ -1359,20 +1359,20 @@ fn muxStageFrame(conn: *GrpcMuxConn, frame_type: u8, flags: u8, stream_id: u31, 
 fn muxStageWindowUpdate(conn: *GrpcMuxConn, stream_id: u31, increment: u31) void {
     var payload: [4]u8 = undefined;
     std.mem.writeInt(u32, &payload, @as(u32, increment), .big);
-    muxStageFrame(conn, h2.FT_WINDOW_UPDATE, 0, stream_id, &payload);
+    muxStageFrame(conn, h2.FRAME_TYPE_WINDOW_UPDATE, 0, stream_id, &payload);
 }
 
 fn muxStageGoaway(conn: *GrpcMuxConn, last_stream: u31, error_code: u32) void {
     var payload: [8]u8 = undefined;
     std.mem.writeInt(u32, payload[0..4], @as(u32, last_stream), .big);
     std.mem.writeInt(u32, payload[4..8], error_code, .big);
-    muxStageFrame(conn, h2.FT_GOAWAY, 0, 0, &payload);
+    muxStageFrame(conn, h2.FRAME_TYPE_GOAWAY, 0, 0, &payload);
 }
 
 fn muxStageRst(conn: *GrpcMuxConn, stream_id: u31, error_code: u32) void {
     var payload: [4]u8 = undefined;
     std.mem.writeInt(u32, &payload, error_code, .big);
-    muxStageFrame(conn, h2.FT_RST_STREAM, 0, stream_id, &payload);
+    muxStageFrame(conn, h2.FRAME_TYPE_RST_STREAM, 0, stream_id, &payload);
 }
 
 /// Build the 33-byte server SETTINGS frame into out. Called once per connection in
@@ -1388,7 +1388,7 @@ fn buildSettingsFrame(out: *[33]u8, opts: GrpcServeOpts) void {
     var fh_buf: [9]u8 = undefined;
     h2.encodeFrameHeader(&fh_buf, .{
         .length = 24,
-        .frame_type = h2.FT_SETTINGS,
+        .frame_type = h2.FRAME_TYPE_SETTINGS,
         .flags = 0,
         .stream_id = 0,
     });
@@ -1564,7 +1564,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
         conn.rstart += fh.length;
 
         switch (fh.frame_type) {
-            h2.FT_SETTINGS => {
+            h2.FRAME_TYPE_SETTINGS => {
                 if ((fh.flags & h2.FLAG_ACK) != 0) continue;
                 var i: usize = 0;
                 while (i + 6 <= payload.len) : (i += 6) {
@@ -1577,23 +1577,23 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                     }
                 }
 
-                muxStageFrame(conn, h2.FT_SETTINGS, h2.FLAG_ACK, 0, &.{});
+                muxStageFrame(conn, h2.FRAME_TYPE_SETTINGS, h2.FLAG_ACK, 0, &.{});
                 muxStageWindowUpdate(conn, 0, CONN_WINDOW_BUMP);
             },
 
-            h2.FT_WINDOW_UPDATE => {},
+            h2.FRAME_TYPE_WINDOW_UPDATE => {},
 
-            h2.FT_PING => {
+            h2.FRAME_TYPE_PING => {
                 if ((fh.flags & h2.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_FRAME_SIZE_ERROR);
                     return .close;
                 }
 
-                muxStageFrame(conn, h2.FT_PING, h2.FLAG_ACK, 0, payload);
+                muxStageFrame(conn, h2.FRAME_TYPE_PING, h2.FLAG_ACK, 0, payload);
             },
 
-            h2.FT_HEADERS => {
+            h2.FRAME_TYPE_HEADERS => {
                 const stream_id = fh.stream_id;
                 if (stream_id == 0) {
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
@@ -1644,7 +1644,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 }
             },
 
-            h2.FT_CONTINUATION => {
+            h2.FRAME_TYPE_CONTINUATION => {
                 const stream_id = fh.stream_id;
                 const slot = findSlot(stream_id, conn.streams, conn.slots) orelse {
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
@@ -1664,7 +1664,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 }
             },
 
-            h2.FT_DATA => {
+            h2.FRAME_TYPE_DATA => {
                 const stream_id = fh.stream_id;
                 if (stream_id == 0) {
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
@@ -1707,12 +1707,12 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 }
             },
 
-            h2.FT_RST_STREAM => {
+            h2.FRAME_TYPE_RST_STREAM => {
                 if (findSlot(fh.stream_id, conn.streams, conn.slots)) |slot| conn.slots[slot] = false;
             },
 
-            h2.FT_GOAWAY => return .close,
-            h2.FT_PRIORITY => {},
+            h2.FRAME_TYPE_GOAWAY => return .close,
+            h2.FRAME_TYPE_PRIORITY => {},
             else => {},
         }
     }
@@ -2006,7 +2006,7 @@ test "zix grpc: buildSettingsFrame produces valid SETTINGS frame header" {
     buildSettingsFrame(&frm, opts);
 
     const fh = h2.parseFrameHeader(frm[0..9]);
-    try std.testing.expectEqual(h2.FT_SETTINGS, fh.frame_type);
+    try std.testing.expectEqual(h2.FRAME_TYPE_SETTINGS, fh.frame_type);
     try std.testing.expectEqual(@as(u8, 0), fh.flags);
     try std.testing.expectEqual(@as(u31, 0), fh.stream_id);
     try std.testing.expectEqual(@as(u24, 24), fh.length);

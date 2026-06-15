@@ -124,7 +124,7 @@ pub const GrpcClient = struct {
 
         try h2.writeFrameHeader(self.fd, .{
             .length = @intCast(hblock.len),
-            .frame_type = h2.FT_HEADERS,
+            .frame_type = h2.FRAME_TYPE_HEADERS,
             .flags = h2.FLAG_END_HEADERS,
             .stream_id = sid,
         });
@@ -138,7 +138,7 @@ pub const GrpcClient = struct {
         frm.writeGrpcPrefix(&prefix, false, @intCast(data.len));
         try h2.writeFrameHeader(self.fd, .{
             .length = @intCast(5 + data.len),
-            .frame_type = h2.FT_DATA,
+            .frame_type = h2.FRAME_TYPE_DATA,
             .flags = 0,
             .stream_id = sid,
         });
@@ -150,7 +150,7 @@ pub const GrpcClient = struct {
     pub fn endStream(self: *Self, sid: u31) !void {
         try h2.writeFrameHeader(self.fd, .{
             .length = 0,
-            .frame_type = h2.FT_DATA,
+            .frame_type = h2.FRAME_TYPE_DATA,
             .flags = h2.FLAG_END_STREAM,
             .stream_id = sid,
         });
@@ -171,11 +171,11 @@ pub const GrpcClient = struct {
             if (fh.length > 0) try h2.recvExact(self.fd, payload);
 
             switch (fh.frame_type) {
-                h2.FT_SETTINGS => {
+                h2.FRAME_TYPE_SETTINGS => {
                     if ((fh.flags & h2.FLAG_ACK) == 0) try h2.sendSettingsAck(self.fd);
                 },
-                h2.FT_WINDOW_UPDATE => {},
-                h2.FT_PING => {
+                h2.FRAME_TYPE_WINDOW_UPDATE => {},
+                h2.FRAME_TYPE_PING => {
                     if ((fh.flags & h2.FLAG_ACK) == 0) {
                         var ping_payload: [8]u8 = undefined;
                         @memcpy(&ping_payload, payload[0..8]);
@@ -183,7 +183,7 @@ pub const GrpcClient = struct {
                         try h2.sendPingAck(self.fd, ping_payload);
                     }
                 },
-                h2.FT_HEADERS => {
+                h2.FRAME_TYPE_HEADERS => {
                     if (fh.stream_id != sid) continue;
                     self.resp_hdr_count = try self.hdec.decode(
                         payload,
@@ -199,7 +199,7 @@ pub const GrpcClient = struct {
                     if ((fh.flags & h2.FLAG_END_STREAM) != 0)
                         return .{ .status = GrpcStatus.OK };
                 },
-                h2.FT_DATA => {
+                h2.FRAME_TYPE_DATA => {
                     if (fh.stream_id != sid) continue;
                     if (payload.len < 5) return error.TooShort;
                     const compress_flag = payload[0] != 0;
@@ -223,8 +223,8 @@ pub const GrpcClient = struct {
                         return .{ .status = GrpcStatus.OK };
                     return .{ .data = buf[0..data_len] };
                 },
-                h2.FT_GOAWAY => return error.ServerGoaway,
-                h2.FT_RST_STREAM => return error.StreamReset,
+                h2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
+                h2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
                 else => {},
             }
         }

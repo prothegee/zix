@@ -8,6 +8,9 @@ const h2 = @import("../Http2.zig");
 /// gRPC length-prefix header size: 1 compress flag + 4 message length bytes.
 pub const grpc_prefix_len: usize = 5;
 
+/// HTTP/2 frame header length in octets (re-exported from the h2 frame module).
+const FRAME_HEADER_LEN = h2.FRAME_HEADER_LEN;
+
 /// gRPC 5-byte length-prefix header.
 pub const GrpcPrefix = struct {
     compress: bool,
@@ -61,16 +64,16 @@ const TRAILER_OK_BLOCK = blk: {
 /// Stamp a HEADERS frame header (with stream_id and flags) plus a precomputed HPACK block into
 /// out. Return: bytes written.
 fn emitCachedHeaders(out: []u8, stream_id: u31, flags: u8, block: []const u8) usize {
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(block.len),
-        .frame_type = h2.FT_HEADERS,
+        .frame_type = h2.FRAME_TYPE_HEADERS,
         .flags = flags,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    @memcpy(out[9..][0..block.len], block);
-    return 9 + block.len;
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    @memcpy(out[FRAME_HEADER_LEN..][0..block.len], block);
+    return FRAME_HEADER_LEN + block.len;
 }
 
 /// Encode initial response HEADERS (:status 200, content-type) into out. No END_STREAM.
@@ -88,16 +91,16 @@ pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) usi
     hpack_enc.writeHeader("content-type", content_type) catch return 0;
     const hblock = hpack_enc.encoded();
 
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(hblock.len),
-        .frame_type = h2.FT_HEADERS,
+        .frame_type = h2.FRAME_TYPE_HEADERS,
         .flags = h2.FLAG_END_HEADERS,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    @memcpy(out[9..][0..hblock.len], hblock);
-    return 9 + hblock.len;
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    @memcpy(out[FRAME_HEADER_LEN..][0..hblock.len], hblock);
+    return FRAME_HEADER_LEN + hblock.len;
 }
 
 /// Encode the 9-byte DATA frame header plus the 5-byte gRPC prefix into out (14 bytes).
@@ -109,15 +112,15 @@ pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) usi
 /// Return:
 /// - bytes written into out (always 14).
 pub fn buildGrpcDataHeader(out: []u8, stream_id: u31, msg_len: usize, compress: bool) usize {
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(5 + msg_len),
-        .frame_type = h2.FT_DATA,
+        .frame_type = h2.FRAME_TYPE_DATA,
         .flags = 0,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    writeGrpcPrefix(out[9..14], compress, @intCast(msg_len));
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    writeGrpcPrefix(out[FRAME_HEADER_LEN .. FRAME_HEADER_LEN + grpc_prefix_len], compress, @intCast(msg_len));
     return 14;
 }
 
@@ -134,16 +137,16 @@ pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8)
     hpack_enc.writeHeader("grpc-encoding", "gzip") catch return 0;
     const hblock = hpack_enc.encoded();
 
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(hblock.len),
-        .frame_type = h2.FT_HEADERS,
+        .frame_type = h2.FRAME_TYPE_HEADERS,
         .flags = h2.FLAG_END_HEADERS,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    @memcpy(out[9..][0..hblock.len], hblock);
-    return 9 + hblock.len;
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    @memcpy(out[FRAME_HEADER_LEN..][0..hblock.len], hblock);
+    return FRAME_HEADER_LEN + hblock.len;
 }
 
 // --------------------------------------------------------- //
@@ -235,16 +238,16 @@ pub fn buildGrpcTrailer(out: []u8, stream_id: u31, grpc_status: u8, grpc_message
     if (grpc_message.len > 0) hpack_enc.writeHeader("grpc-message", grpc_message) catch return 0;
     const hblock = hpack_enc.encoded();
 
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(hblock.len),
-        .frame_type = h2.FT_HEADERS,
+        .frame_type = h2.FRAME_TYPE_HEADERS,
         .flags = h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    @memcpy(out[9..][0..hblock.len], hblock);
-    return 9 + hblock.len;
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    @memcpy(out[FRAME_HEADER_LEN..][0..hblock.len], hblock);
+    return FRAME_HEADER_LEN + hblock.len;
 }
 
 /// Encode a trailers-only error response (no DATA frame) into out.
@@ -262,16 +265,16 @@ pub fn buildGrpcError(out: []u8, stream_id: u31, grpc_status: u8, grpc_message: 
     if (grpc_message.len > 0) hpack_enc.writeHeader("grpc-message", grpc_message) catch return 0;
     const hblock = hpack_enc.encoded();
 
-    var fh: [9]u8 = undefined;
+    var fh: [FRAME_HEADER_LEN]u8 = undefined;
     h2.encodeFrameHeader(&fh, .{
         .length = @intCast(hblock.len),
-        .frame_type = h2.FT_HEADERS,
+        .frame_type = h2.FRAME_TYPE_HEADERS,
         .flags = h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM,
         .stream_id = stream_id,
     });
-    @memcpy(out[0..9], &fh);
-    @memcpy(out[9..][0..hblock.len], hblock);
-    return 9 + hblock.len;
+    @memcpy(out[0..FRAME_HEADER_LEN], &fh);
+    @memcpy(out[FRAME_HEADER_LEN..][0..hblock.len], hblock);
+    return FRAME_HEADER_LEN + hblock.len;
 }
 
 /// Send initial response HEADERS (:status 200, content-type). No END_STREAM.
@@ -311,7 +314,7 @@ test "zix grpc: cached buildGrpcHeaders proto decodes to status 200 + content-ty
     var buf: [128]u8 = undefined;
     const n = buildGrpcHeaders(&buf, 1, GRPC_CONTENT_TYPE);
     const fh = h2.parseFrameHeader(buf[0..9]);
-    try std.testing.expectEqual(h2.FT_HEADERS, fh.frame_type);
+    try std.testing.expectEqual(h2.FRAME_TYPE_HEADERS, fh.frame_type);
     try std.testing.expectEqual(h2.FLAG_END_HEADERS, fh.flags);
 
     var decoder = h2.HpackDecoder.init();
@@ -332,7 +335,7 @@ test "zix grpc: cached buildGrpcTrailer OK decodes to grpc-status 0 with END_STR
     var buf: [64]u8 = undefined;
     const n = buildGrpcTrailer(&buf, 3, 0, "");
     const fh = h2.parseFrameHeader(buf[0..9]);
-    try std.testing.expectEqual(h2.FT_HEADERS, fh.frame_type);
+    try std.testing.expectEqual(h2.FRAME_TYPE_HEADERS, fh.frame_type);
     try std.testing.expectEqual(h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM, fh.flags);
 
     var decoder = h2.HpackDecoder.init();
@@ -351,7 +354,7 @@ test "zix grpc: buildGrpcHeadersGzip includes grpc-encoding header" {
     var buf: [256]u8 = undefined;
     const n = buildGrpcHeadersGzip(&buf, 1, GRPC_CONTENT_TYPE);
     const fh = h2.parseFrameHeader(buf[0..9]);
-    try std.testing.expectEqual(h2.FT_HEADERS, fh.frame_type);
+    try std.testing.expectEqual(h2.FRAME_TYPE_HEADERS, fh.frame_type);
     try std.testing.expectEqual(h2.FLAG_END_HEADERS, fh.flags);
 
     var decoder = h2.HpackDecoder.init();
