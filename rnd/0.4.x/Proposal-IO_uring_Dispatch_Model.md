@@ -92,12 +92,14 @@ Reads:
 - At pipeline depth 16 the epoll engine burns about 21 percent more CPU at equal
   throughput. Peak loopback throughput is parity at depth 1 (kernel and client bound), so
   the io_uring gain is efficiency headroom, not peak req/s.
-- Independent of io_uring, two engine wins already surfaced in the PoC and should land
-  first because they cut the epoll cost too: lazy `parseHead` (drop the fixed header
-  array, scan headers on demand) cut engine userspace cost about 33 percent at depth 16,
-  and an `EPOLLOUT` re-arm fixes a head-of-line write stall at
-  `src/tcp/http1/core.zig` (a write hitting `EAGAIN` currently blocks the worker on
-  `poll(POLLOUT, -1)`).
+- Independent of io_uring, two engine wins surfaced in the PoC and have already landed in
+  `zix.Http1` on `main` because they cut the epoll cost too: lazy `parseHead` (drop the
+  fixed header array, scan headers on demand) cut engine userspace cost about 33 percent at
+  depth 16, and an `EPOLLOUT` re-arm removed a head-of-line write stall on the `.EPOLL` path
+  in `src/tcp/http1/server.zig` (a flush hitting `EAGAIN` is now staged in
+  `conn.write_pending` and `EPOLLOUT` is armed, instead of blocking the worker on
+  `poll(POLLOUT, -1)`). The same two wins are still pending for `zix.Http`, which keeps the
+  fixed header array in `src/tcp/http/parser.zig`.
 
 **Implementation order:** `zix.Http1` first, then WebSocket, then `zix.Grpc`, then `zix.Http`.
 
@@ -194,8 +196,9 @@ Below 70% (opportunistic, only after the above land and the profile still shows 
    fallback).
 3. Shared-nothing topology preserved: one ring per worker, `SO_REUSEPORT` listener per
    worker, no shared accept queue, no cross-thread fd handoff.
-4. The two independent engine wins (lazy `parseHead`, `EPOLLOUT` re-arm) land first as
-   separate issues, since they benefit `.EPOLL` regardless of the io_uring outcome.
+4. The two independent engine wins (lazy `parseHead`, `EPOLLOUT` re-arm) land first, since
+   they benefit `.EPOLL` regardless of the io_uring outcome. Already satisfied in `main` for
+   `zix.Http1` (verified by `zig build test-all`), still pending for `zix.Http`.
 5. Benchmark protocol on completion: `wrk -c512 -t6 -d5s` twice, then
    `wrk -c4096 -t6 -d5s` twice, each run saved to `rnd/0.4.x/` as a `.txt` file. Compare
    `.URING` against `.EPOLL` on the same machine, back to back, fresh server per run
