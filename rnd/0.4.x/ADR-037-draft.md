@@ -117,13 +117,40 @@ Scope of the decision:
 - Approach A stays the fallback if the raw-syscall surface proves too costly to
   maintain, or if a future `std.Io` exposes multishot and provided buffers as
   first-class operations.
-- The two engine pre-wins (lazy `parseHead`, `EPOLLOUT` re-arm) are already in
-  `zix.Http1` on `main` and benefit `.EPOLL` independently of this decision. They
-  remain pending for `zix.Http`, tracked separately.
+- The two engine pre-wins (lazy `parseHead`, `EPOLLOUT` re-arm) are in `zix.Http1`
+  and benefit `.EPOLL` independently of this decision. Both are now ported to
+  `zix.Http` as well: its `ParsedHead` drops the per-request 64-entry header array
+  and records the raw header block as offsets for `getHeader` to rescan on demand,
+  and its `.EPOLL` worker stages the unwritten response tail on a partial write and
+  arms `EPOLLOUT` to drain it on the next writable event instead of dropping the
+  connection. The coalescing sink is bypassed for SSE, whose draining stays
+  handler-side (a blocking write parks the handler, not a library event loop).
 - The io_uring-specific levers above rest on documented kernel mechanisms but have
   no workload-specific proof yet, so each is settled locally by an A/B with a named
   perf-counter signal rather than assumed. Peer-reviewed io_uring evidence is mostly
   storage, so for networking the backing is the FlexSC mechanism plus the kernel
   maintainer design notes.
+
+**Extension to `zix.Tcp` and `zix.Fix` (callback rings):**
+- These two engines could not take a direct ring port: their handler is a blocking
+  `fn(stream, io)` that owns the connection and loops on synchronous reads and
+  writes, which a single-threaded completion loop cannot run. So each gains a new
+  engine-driven callback API alongside the existing blocking one. `zix.Tcp` adds
+  `runFramed` with a per-frame `FrameFn` over a 4-byte length prefix, and `zix.Fix`
+  adds a `.URING` path that runs a resumable session processor
+  (`core.processFixRing`) per readable batch. The blocking `runWith` and `serveConn`
+  paths are unchanged, and their `.URING` still folds to `.EPOLL`.
+- FIX heartbeats on the ring use a per-worker periodic timer, not a per-connection
+  one. A single `prep_timeout` SQE per worker (re-armed on each fire, tagged with a
+  new `.timeout` `OpKind` that the other engines treat as a no-op) ticks every
+  `heartbeat_timeout_ms`. On each fire the worker scans its slot table and, for every
+  logged-in session idle past the interval, sends a TestRequest on the first tick
+  then a Logout on the next, written straight to the fd. One SQE per worker plus an
+  O(n) scan per tick beats a per-connection timeout that would cancel and re-arm on
+  every inbound message. Reaping an idle session is close-safe: its only in-flight op
+  is an idle recv with no buffered data, so closing it leaves the stale recv
+  completion to be dropped by the generation tag. This completes the session:
+  `processFixRing` answers peer Heartbeat/TestRequest reactively, and the timer adds
+  the server-initiated half.
 
 ---
