@@ -23,6 +23,7 @@ pub fn addSteps(
         .{ "test-runner-http1-pool", "tests/runner/http1_runner.zig", "tr-server-http1-pool", "examples/http1_basic_2_pool.zig", "9100", "", "", "" },
         .{ "test-runner-http1-mixed", "tests/runner/http1_runner.zig", "tr-server-http1-mixed", "examples/http1_basic_3_mixed.zig", "9100", "", "", "" },
         .{ "test-runner-http1-epoll", "tests/runner/http1_runner.zig", "tr-server-http1-epoll", "examples/http1_basic_4_epoll.zig", "9100", "", "", "" },
+        .{ "test-runner-http1-uring", "tests/runner/http1_runner.zig", "tr-server-http1-uring", "examples/http1_basic_5_uring.zig", "9100", "", "", "" },
         .{ "test-runner-grpc-async", "tests/runner/grpc_runner.zig", "tr-server-grpc-async", "examples/grpc_server_1_async.zig", "8083", "", "", "" },
         .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "8083", "", "", "" },
         .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "8083", "", "", "" },
@@ -65,6 +66,8 @@ pub fn addSteps(
         .{ "test-runner-http1-sse", "tests/runner/sse_runner.zig", "tr-server-http1-sse", "examples/http1_sse.zig", "9108", "", "", "" },
         // http1 websocket runner
         .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9111", "/ws", "", "" },
+        // http1 response-cache runner (unique port; small body so the GET is bounded)
+        .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9112", "/cache?kb=1", "", "ok" },
         // grpc location runners
         .{ "test-runner-grpc-location-async", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-async", "examples/grpc_location_server_1_async.zig", "10101", "", "", "" },
         .{ "test-runner-grpc-location-pool", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig", "10101", "", "", "" },
@@ -194,12 +197,12 @@ pub fn addSteps(
 
     // --------------------------------------------------------- //
 
-    // test-runner-all: one binary, all 56 server paths as argv.
+    // test-runner-all: one binary, all 58 server paths as argv.
     // Independent of the individual test-runner-* steps above.
     // argv order matches the path declarations in all_runner.zig.
     {
         const all_server_srcs = .{
-            // basic dispatch-model servers (22)
+            // basic dispatch-model servers (23)
             .{ "tr-all-server-http-async", "examples/http_basic_1_async.zig" },
             .{ "tr-all-server-http-pool", "examples/http_basic_2_pool.zig" },
             .{ "tr-all-server-http-mixed", "examples/http_basic_3_mixed.zig" },
@@ -208,6 +211,7 @@ pub fn addSteps(
             .{ "tr-all-server-http1-pool", "examples/http1_basic_2_pool.zig" },
             .{ "tr-all-server-http1-mixed", "examples/http1_basic_3_mixed.zig" },
             .{ "tr-all-server-http1-epoll", "examples/http1_basic_4_epoll.zig" },
+            .{ "tr-all-server-http1-uring", "examples/http1_basic_5_uring.zig" },
             .{ "tr-all-server-grpc-async", "examples/grpc_server_1_async.zig" },
             .{ "tr-all-server-grpc-pool", "examples/grpc_server_2_pool.zig" },
             .{ "tr-all-server-grpc-mixed", "examples/grpc_server_3_mixed.zig" },
@@ -233,7 +237,7 @@ pub fn addSteps(
             .{ "tr-all-server-http-static", "examples/http_static.zig" },
             .{ "tr-all-server-http-sse", "examples/http_sse.zig" },
             .{ "tr-all-server-http-websocket", "examples/http_websocket.zig" },
-            // http1 feature servers (10)
+            // http1 feature servers (11)
             .{ "tr-all-server-http1-json", "examples/http1_json.zig" },
             .{ "tr-all-server-http1-middleware", "examples/http1_middleware.zig" },
             .{ "tr-all-server-http1-params", "examples/http1_params.zig" },
@@ -244,6 +248,7 @@ pub fn addSteps(
             .{ "tr-all-server-http1-static", "examples/http1_static.zig" },
             .{ "tr-all-server-http1-sse", "examples/http1_sse.zig" },
             .{ "tr-all-server-http1-websocket", "examples/http1_websocket.zig" },
+            .{ "tr-all-server-http1-cache", "examples/http1_cache.zig" },
             // grpc location + multi + timeout (6)
             .{ "tr-all-server-grpc-location-async", "examples/grpc_location_server_1_async.zig" },
             .{ "tr-all-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig" },
