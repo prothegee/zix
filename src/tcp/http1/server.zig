@@ -1006,10 +1006,21 @@ fn initUringRing() !IoUring {
     return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
 }
 
-/// Per-connection ring state. buf accumulates request bytes between recv
-/// completions. send_buf front [0..inflight] is owned by the kernel while a
+/// WebSocket provided-buffer ring (ADR-037 Phase 4b). One ring per worker,
+/// shared by every WebSocket connection, so an idle connection holds no recv
+/// buffer: the kernel hands one over only when a frame actually arrives. That is
+/// the memory-scaling win at high connection counts, and parsing in place out of
+/// the selected buffer keeps the common whole-frame path zero-copy.
+const WS_RING_BGID: u16 = 1;
+const WS_RING_BUF_SIZE: u32 = 4096;
+const WS_RING_BUF_COUNT: u16 = 256;
+
+/// Per-connection ring state. buf accumulates request (or frame) bytes between
+/// recv completions. send_buf front [0..inflight] is owned by the kernel while a
 /// send SQE is outstanding, [inflight..staged] is appended and waiting.
-/// closing marks a connection that must be freed once the last send lands.
+/// closing marks a connection that must be freed once the last send lands. ws is
+/// set once the connection upgrades to WebSocket: from then on buf holds frame
+/// bytes and the recv loop pumps frames instead of parsing HTTP.
 const UringConn = struct {
     fd: std.posix.fd_t,
     gen: u24,
@@ -1019,6 +1030,7 @@ const UringConn = struct {
     staged: usize,
     inflight: usize,
     closing: bool,
+    ws: ?core.WsFrameFn = null,
 };
 
 /// Build a concrete io_uring worker with the handler and optional raw
@@ -1031,6 +1043,13 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         gen_counter: u24,
         recv_buf_size: usize,
         handler_timeout_ms: u32,
+        /// Shared per-worker scratch for unmasking WebSocket frame payloads
+        /// during a pump pass. Used transiently, never held across calls.
+        ws_payload_buf: []u8,
+        /// Shared provided-buffer ring for WebSocket recvs (Phase 4b). null when
+        /// the kernel does not support buffer rings: WebSocket then falls back to
+        /// the plain recv-into-conn.buf path (4a).
+        ws_bufs: ?IoUring.BufferGroup,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -1047,6 +1066,8 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
 
             allocator.free(self.slots);
+            allocator.free(self.ws_payload_buf);
+            if (self.ws_bufs) |*bg| bg.deinit(allocator);
             self.ring.deinit();
         }
 
@@ -1108,12 +1129,34 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 return;
             }
 
+            // WebSocket reads come off the shared provided-buffer ring when it is
+            // available, so an idle connection ties up no recv buffer.
+            if (conn.ws != null) {
+                if (self.ws_bufs) |*bg| {
+                    self.armWsRecv(conn, bg);
+                    return;
+                }
+            }
+
             const sqe = self.getSqe() orelse {
                 self.beginClose(conn);
                 return;
             };
             sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
             sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
+        }
+
+        /// Arm a buffer-select recv for a WebSocket connection: the kernel picks
+        /// a buffer from the shared ring only when a frame arrives. Submits and
+        /// retries once if the SQ is momentarily full.
+        fn armWsRecv(self: *Self, conn: *UringConn, bg: *IoUring.BufferGroup) void {
+            const ud = uring.packUserData(.recv, conn.gen, conn.fd);
+            if (bg.recv(ud, conn.fd, 0)) |_| {
+                return;
+            } else |_| {
+                _ = self.ring.submit() catch {};
+                if (bg.recv(ud, conn.fd, 0)) |_| {} else |_| self.beginClose(conn);
+            }
         }
 
         fn submitSend(self: *Self, conn: *UringConn) void {
@@ -1177,18 +1220,74 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         fn handleRecv(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
-            const conn = self.lookup(decoded) orelse return;
+            const has_buf = (cqe.flags & linux.IORING_CQE_F_BUFFER) != 0;
 
-            // res == 0 is a peer hangup, res < 0 a receive error: both close.
+            const conn = self.lookup(decoded) orelse {
+                // The connection was freed while this buffer-select recv was in
+                // flight: hand the selected buffer back so it is not leaked.
+                if (has_buf) {
+                    if (self.ws_bufs) |*bg| bg.put(cqe) catch {};
+                }
+
+                return;
+            };
+
             if (cqe.res <= 0) {
+                // The buffer ring ran dry: re-arm rather than drop the connection.
+                if (cqe.res == -@as(i32, @intFromEnum(linux.E.NOBUFS)) and conn.ws != null and self.ws_bufs != null) {
+                    self.armRecv(conn);
+                    return;
+                }
+
+                if (has_buf) {
+                    if (self.ws_bufs) |*bg| bg.put(cqe) catch {};
+                }
+
                 self.beginClose(conn);
+                return;
+            }
+
+            // WebSocket frames delivered into a ring-selected buffer: parse in
+            // place, then recycle the buffer.
+            if (has_buf) {
+                const close = blk: {
+                    const bg = if (self.ws_bufs) |*b| b else break :blk true;
+                    const data = bg.get(cqe) catch break :blk true;
+                    const should_close = self.wsHandleBuf(conn, data);
+                    bg.put(cqe) catch {};
+
+                    break :blk should_close;
+                };
+
+                self.afterDrain(conn, if (close) .close else .keep_alive);
                 return;
             }
 
             conn.filled += @intCast(cqe.res);
 
-            const outcome = self.dispatch(conn);
+            // Established WebSocket on the plain-recv fallback (no buffer ring).
+            if (conn.ws != null) {
+                const close = self.wsPump(conn);
+                self.afterDrain(conn, if (close) .close else .keep_alive);
 
+                return;
+            }
+
+            var outcome = self.dispatch(conn);
+
+            // dispatch may have just upgraded this connection (the 101 is staged
+            // and conn.ws is set). Pump any frames the client pipelined after the
+            // handshake so the first echo rides out with the 101.
+            if (conn.ws != null and conn.filled > 0) {
+                if (self.wsPump(conn)) outcome = .close;
+            }
+
+            self.afterDrain(conn, outcome);
+        }
+
+        /// Submit the staged send when there is one, otherwise close or re-arm a
+        /// recv. Shared by the HTTP and WebSocket recv completions.
+        fn afterDrain(self: *Self, conn: *UringConn, outcome: core.ConnOutcome) void {
             if (conn.staged > 0) {
                 self.submitSend(conn);
                 if (outcome == .close) conn.closing = true;
@@ -1204,6 +1303,63 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             self.armRecv(conn);
         }
 
+        /// Pump every complete frame in conn.buf through the WebSocket frame
+        /// loop, staging echoes after the bytes already in send_buf (the 101 on
+        /// the first pass), then compact the trailing partial frame to the front
+        /// of conn.buf for the next recv.
+        ///
+        /// Return:
+        /// - bool (true when the connection must close: a close frame or a write
+        ///   failure)
+        fn wsPump(self: *Self, conn: *UringConn) bool {
+            const result = ws.pumpRing(conn.fd, conn.buf[0..conn.filled], self.ws_payload_buf, conn.send_buf[conn.staged..], conn.ws.?);
+            conn.staged += result.staged;
+
+            if (result.consumed >= conn.filled) {
+                conn.filled = 0;
+            } else if (result.consumed > 0) {
+                std.mem.copyForwards(u8, conn.buf[0 .. conn.filled - result.consumed], conn.buf[result.consumed..conn.filled]);
+                conn.filled -= result.consumed;
+            }
+
+            return result.close;
+        }
+
+        /// Handle a WebSocket frame batch delivered into a ring-selected buffer.
+        /// With no carried partial frame the bytes are pumped straight from the
+        /// selected buffer (zero copy) and only a trailing partial frame is
+        /// copied into conn.buf. With a carry, the new bytes are appended into
+        /// conn.buf and pumped from there.
+        ///
+        /// Return:
+        /// - bool (true when the connection must close)
+        fn wsHandleBuf(self: *Self, conn: *UringConn, data: []const u8) bool {
+            if (conn.filled > 0) {
+                const room = conn.buf.len - conn.filled;
+                if (data.len > room) return true;
+
+                @memcpy(conn.buf[conn.filled..][0..data.len], data);
+                conn.filled += data.len;
+
+                return self.wsPump(conn);
+            }
+
+            const result = ws.pumpRing(conn.fd, data, self.ws_payload_buf, conn.send_buf[conn.staged..], conn.ws.?);
+            conn.staged += result.staged;
+
+            const leftover = data[result.consumed..];
+            if (leftover.len > conn.buf.len) return true;
+
+            if (leftover.len > 0) {
+                @memcpy(conn.buf[0..leftover.len], leftover);
+                conn.filled = leftover.len;
+            } else {
+                conn.filled = 0;
+            }
+
+            return result.close;
+        }
+
         /// Parse every complete request in conn.buf and dispatch it. Responses
         /// stage into conn.send_buf through the core sink, so a pipelined burst
         /// coalesces into one send. Trailing partial bytes are compacted to the
@@ -1211,9 +1367,9 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// parse loop without the read.
         ///
         /// Note:
-        /// - Minimal ring core: chunked bodies, bodies larger than the recv
-        ///   buffer, and WebSocket upgrades are not served yet and close the
-        ///   connection cleanly.
+        /// - Minimal ring core: chunked bodies and bodies larger than the recv
+        ///   buffer are not served yet and close the connection cleanly. A
+        ///   WebSocket upgrade switches the connection to the frame loop.
         fn dispatch(self: *Self, conn: *UringConn) core.ConnOutcome {
             const fd = conn.fd;
 
@@ -1276,10 +1432,11 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
 
                 consumed += request_len;
 
-                // WebSocket promotion is not supported on the ring path yet:
-                // drop the pending handoff and close after the response drains.
-                if (core.takeWebSocket()) |_| {
-                    keep_alive = false;
+                // WebSocket upgrade: stop parsing HTTP and switch to the frame
+                // loop. The 101 is already staged in the sink; bytes the client
+                // pipelined after the handshake are pumped by handleRecv.
+                if (core.takeWebSocket()) |pending| {
+                    conn.ws = pending.on_frame;
                     break;
                 }
 
@@ -1385,6 +1542,10 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             const slots = std.heap.smp_allocator.alloc(?*UringConn, MAX_FD) catch return;
             @memset(slots, null);
 
+            // Per-worker scratch for unmasking WebSocket payloads. Sized to the
+            // recv buffer, the largest frame a connection can accumulate.
+            const ws_payload_buf = std.heap.smp_allocator.alloc(u8, config.max_recv_buf) catch return;
+
             const Worker = UringWorker(handler_fn, raw_fn);
             var worker = Worker{
                 .ring = undefined,
@@ -1393,8 +1554,14 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .gen_counter = 0,
                 .recv_buf_size = config.max_recv_buf,
                 .handler_timeout_ms = config.handler_timeout_ms,
+                .ws_payload_buf = ws_payload_buf,
+                .ws_bufs = null,
             };
             worker.ring = initUringRing() catch return;
+            // Provided-buffer ring for WebSocket recvs (Phase 4b). Optional: a
+            // kernel without buffer-ring support leaves it null, and WebSocket
+            // uses the plain recv path.
+            worker.ws_bufs = IoUring.BufferGroup.init(&worker.ring, std.heap.smp_allocator, WS_RING_BGID, WS_RING_BUF_SIZE, WS_RING_BUF_COUNT) catch null;
             defer worker.deinit();
 
             // Per-worker response cache (ADR-036), owned for this worker's
