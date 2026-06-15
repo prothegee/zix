@@ -637,6 +637,10 @@ pub const FixRingState = struct {
     seq_out: u32 = 1,
     peer_comp_id: [64]u8 = undefined,
     peer_len: usize = 0,
+    /// Monotonic ms of the last inbound activity (the .URING heartbeat timer).
+    last_activity_ms: u64 = 0,
+    /// True once a TestRequest was sent on idle and a reply is awaited.
+    sent_test_request: bool = false,
 };
 
 /// One ring process pass result: bytes consumed from the front of recv (whole
@@ -763,6 +767,49 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
     }
 
     return .{ .consumed = consumed, .close = false };
+}
+
+/// Monotonic clock in milliseconds, for the .URING heartbeat timer.
+pub fn monotonicMs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    const s: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
+    const ms: u64 = if (ts.nsec >= 0) @as(u64, @intCast(ts.nsec)) / 1_000_000 else 0;
+
+    return s * 1000 + ms;
+}
+
+/// Per-connection heartbeat tick for the .URING ring, called from the per-worker
+/// periodic timer. When the session is logged in and idle past hb_ms, sends a
+/// TestRequest on the first tick and a Logout on the next (written straight to fd,
+/// outside the sink, since the timer fires between recv/send cycles). The caller
+/// reaps the connection when this returns true.
+///
+/// Return:
+/// - bool (true means Logout was sent after continued silence: reap the connection)
+pub fn fixHeartbeatTick(state: *FixRingState, comp_id: []const u8, fd: std.posix.fd_t, now_ms: u64, hb_ms: u32) bool {
+    if (hb_ms == 0 or state.peer_len == 0) return false;
+    if (now_ms - state.last_activity_ms < hb_ms) return false;
+
+    var out_buf: [MAX_MSG_SIZE]u8 = undefined;
+
+    if (state.sent_test_request) {
+        const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Logout, &.{}) catch return true;
+        state.seq_out += 1;
+        rawFixWrite(fd, out_buf[0..n]) catch {};
+
+        return true;
+    }
+
+    state.sent_test_request = true;
+    var id_buf: [16]u8 = undefined;
+    const id = std.fmt.bufPrint(&id_buf, "{d}", .{state.seq_out}) catch "1";
+    const extra = [_]BuildField{.{ .tag = .TestReqID, .value = id }};
+    const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.TestRequest, &extra) catch return false;
+    state.seq_out += 1;
+    rawFixWrite(fd, out_buf[0..n]) catch {};
+
+    return false;
 }
 
 // --------------------------------------------------------- //
@@ -928,4 +975,51 @@ test "zix fix: MsgType application two-char constants" {
     try std.testing.expectEqualStrings("AF", MsgType.OrderMassStatusRequest);
     try std.testing.expectEqualStrings("AG", MsgType.QuoteRequestReject);
     try std.testing.expectEqualStrings("AH", MsgType.RFQRequest);
+}
+
+test "zix fix: fixHeartbeatTick sends TestRequest then Logout on idle" {
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var state = FixRingState{};
+    @memcpy(state.peer_comp_id[0..6], "CLIENT");
+    state.peer_len = 6;
+    state.last_activity_ms = 0;
+
+    // Not idle yet (now - last < hb): no write, no state change.
+    try std.testing.expect(!fixHeartbeatTick(&state, "ZIX", fds[1], 100, 200));
+    try std.testing.expect(!state.sent_test_request);
+
+    // Idle: first tick sends a TestRequest (35=1) and returns false.
+    try std.testing.expect(!fixHeartbeatTick(&state, "ZIX", fds[1], 1000, 200));
+    try std.testing.expect(state.sent_test_request);
+
+    var buf: [512]u8 = undefined;
+    const n1 = try std.posix.read(fds[0], &buf);
+    var f1: [MAX_FIELDS]Field = undefined;
+    const c1 = try parseFields(buf[0..findMessageEnd(buf[0..n1]).?], &f1);
+    try std.testing.expectEqualStrings(MsgType.TestRequest, getField(f1[0..c1], .MsgType).?);
+
+    // Still idle on the next tick: sends Logout (35=5) and returns true (reap).
+    try std.testing.expect(fixHeartbeatTick(&state, "ZIX", fds[1], 2000, 200));
+
+    const n2 = try std.posix.read(fds[0], &buf);
+    var f2: [MAX_FIELDS]Field = undefined;
+    const c2 = try parseFields(buf[0..findMessageEnd(buf[0..n2]).?], &f2);
+    try std.testing.expectEqualStrings(MsgType.Logout, getField(f2[0..c2], .MsgType).?);
+}
+
+test "zix fix: fixHeartbeatTick is a no-op before Logon or when disabled" {
+    var state = FixRingState{};
+    state.last_activity_ms = 0;
+
+    // peer_len == 0 (not logged in): no-op even when long idle.
+    try std.testing.expect(!fixHeartbeatTick(&state, "ZIX", -1, 99999, 200));
+
+    // hb_ms == 0 (disabled): no-op even when logged in.
+    state.peer_len = 6;
+    try std.testing.expect(!fixHeartbeatTick(&state, "ZIX", -1, 99999, 0));
 }
