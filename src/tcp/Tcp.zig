@@ -1,7 +1,7 @@
 //! zix tcp
 
 pub const Http = @import("http/Http.zig");
-pub const Server = @import("server.zig").TcpServer;
+pub const Server = @import("server.zig").Server;
 pub const Client = @import("client.zig").TcpClient;
 pub const HandlerFn = @import("server.zig").HandlerFn;
 pub const FrameFn = @import("server.zig").FrameFn;

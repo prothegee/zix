@@ -402,205 +402,262 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 
 // --------------------------------------------------------- //
 
-/// TCP stream server. Dispatches connections via POOL, ASYNC, MIXED, or EPOLL (Linux-only: non-Linux falls back to POOL).
+/// Dispatch core: listen and serve connections with handler, selecting the
+/// concurrency model from cfg.dispatch_model. handler(stream, io) runs once per
+/// accepted connection and owns the stream (it must close it before returning).
+/// Shared by the per-connection server (TcpServerImpl) and the framed adapter
+/// fallback (TcpFramedServerImpl on every model except .URING).
+fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void {
+    const cpu = try std.Thread.getCpuCount();
+
+    switch (cfg.dispatch_model) {
+        .ASYNC => {
+            logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
+
+            const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
+            var net_server = try addr.listen(io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
+                .kernel_backlog = cfg.kernel_backlog,
+            });
+            defer net_server.deinit(io);
+
+            while (true) {
+                const stream = net_server.accept(io) catch |err| {
+                    if (err != error.ConnectionAborted) {
+                        if (cfg.logger) |lg| lg.system(.WARN, "tcp", "accept error: {}", .{err});
+                        break;
+                    }
+                    continue;
+                };
+                applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
+
+                _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
+            }
+        },
+
+        .POOL => {
+            const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
+            const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
+
+            logSystem(cfg, "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
+
+            var queue = ConnQueue{};
+            defer queue.deinit();
+
+            const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
+            defer std.heap.smp_allocator.free(pool_threads);
+            for (pool_threads) |*t| {
+                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, poolEntry, .{ &queue, io, handler, cfg.logger });
+            }
+
+            const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+            defer std.heap.smp_allocator.free(acc_threads);
+            for (acc_threads) |*t| {
+                t.* = try std.Thread.spawn(.{}, workerEntry, .{ cfg, &queue, io });
+            }
+
+            for (acc_threads) |t| t.join();
+            queue.close(io);
+            for (pool_threads) |t| t.join();
+        },
+
+        .MIXED => {
+            const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
+
+            logSystem(cfg, "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
+
+            const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+            defer std.heap.smp_allocator.free(acc_threads);
+            for (acc_threads) |*t| {
+                t.* = try std.Thread.spawn(.{}, asyncWorkerEntry, .{ cfg, io, handler });
+            }
+
+            for (acc_threads) |t| t.join();
+        },
+
+        // The per-connection blocking handler cannot run on the single-threaded
+        // .URING ring, so .URING folds to the .EPOLL shared-nothing loop here.
+        // The framed callback path (Server.initFramed) does run natively on the
+        // ring (ADR-037, ADR-038).
+        .EPOLL, .URING => {
+            if (comptime @import("builtin").target.os.tag == .linux) {
+                try runEpoll(cfg, io, handler, cpu);
+            } else {
+                logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+
+                var pool_cfg = cfg;
+                pool_cfg.dispatch_model = .POOL;
+
+                try serveDispatch(pool_cfg, io, handler);
+            }
+        },
+    }
+}
+
+/// EPOLL dispatch: spawns shared-nothing workers, each with its own
+/// SO_REUSEPORT listener and epoll instance. Linux-only.
+///
+/// Note:
+/// - The kernel distributes connections across per-worker listeners with no
+///   shared queue and no cross-thread fd handoff.
+/// - Each accepted connection is dispatched via io.async: the worker returns
+///   to epoll_wait immediately and is not parked on the connection lifetime.
+/// - workers = 0 (default): cpu_count workers.
+/// - pool_size is ignored for EPOLL (no session-worker pool needed).
+fn runEpoll(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn, cpu: usize) !void {
+    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
+
+    logSystem(cfg, "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
+
+    const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+    defer std.heap.smp_allocator.free(workers);
+
+    for (workers) |*t|
+        t.* = try std.Thread.spawn(
+            .{ .stack_size = 512 * 1024 },
+            epollWorkerEntry,
+            .{EpollWorkerCtx{
+                .io = io,
+                .ip = cfg.ip,
+                .port = cfg.port,
+                .kernel_backlog = cfg.kernel_backlog,
+                .recv_timeout_ms = cfg.recv_timeout_ms,
+                .send_timeout_ms = cfg.send_timeout_ms,
+                .handler = handler,
+                .logger = cfg.logger,
+            }},
+        );
+
+    for (workers) |t| t.join();
+}
+
+/// Per-connection TCP server specialized over a comptime handler. The handler
+/// is baked into the type at init, so run takes no handler argument (matching
+/// the zix.Http1 / zix.Grpc shape). The handler owns each accepted stream and
+/// must close it before returning.
+fn TcpServerImpl(comptime handler: HandlerFn) type {
+    return struct {
+        config: TcpServerConfig,
+
+        const Self = @This();
+
+        pub fn init(config: TcpServerConfig) !Self {
+            if (config.port == 0) return error.PortNotConfigured;
+
+            return .{ .config = config };
+        }
+
+        pub fn deinit(_: *Self) void {}
+
+        /// Listen and serve. Selects the concurrency model from config.dispatch_model.
+        pub fn run(self: *const Self, io: std.Io) !void {
+            return serveDispatch(self.config, io, handler);
+        }
+    };
+}
+
+/// Framed TCP server specialized over a comptime per-frame callback. On .URING
+/// the engine owns the connection and runs frame_fn on the io_uring ring; on
+/// every other model frame_fn is wrapped in a blocking per-connection adapter
+/// and served through serveDispatch. run takes no callback argument: it is
+/// baked into the type at init.
+fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
+    return struct {
+        config: TcpServerConfig,
+
+        const Self = @This();
+
+        pub fn init(config: TcpServerConfig) !Self {
+            if (config.port == 0) return error.PortNotConfigured;
+
+            return .{ .config = config };
+        }
+
+        pub fn deinit(_: *Self) void {}
+
+        pub fn run(self: *const Self, io: std.Io) !void {
+            if (comptime builtin.target.os.tag == .linux) {
+                if (self.config.dispatch_model == .URING) return runFramedUring(self.config, io, frame_fn);
+            }
+
+            return serveDispatch(self.config, io, frameAdapter(frame_fn));
+        }
+    };
+}
+
+/// Apply --ip and --port CLI overrides onto a config, falling back to the
+/// config defaults when an arg is absent.
+fn applyArgs(config: TcpServerConfig, args: anytype) TcpServerConfig {
+    var cfg = config;
+    var it = std.process.Args.Iterator.init(args);
+    _ = it.skip();
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--ip")) {
+            if (it.next()) |val| cfg.ip = val;
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            if (it.next()) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
+        }
+    }
+
+    return cfg;
+}
+
+/// TCP stream server. The handler (or framed callback) is baked into the
+/// server type at init (comptime), so run takes no handler argument, matching
+/// the zix.Http1 / zix.Grpc server shape.
 ///
 /// Usage:
 /// ```zig
-/// var server = try TcpServer.init(config);
+/// // per-connection handler (owns the stream)
+/// var server = try zix.Tcp.Server.init(myHandler, config);
 /// defer server.deinit();
-/// try server.run(io);               // built-in echo handler
-/// try server.runWith(io, myFn);     // custom handler
+/// try server.run(io);
+///
+/// // the built-in echo handler, passed explicitly
+/// var server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, config);
+///
+/// // per-frame callback (engine owns the connection, runs on .URING)
+/// var server = try zix.Tcp.Server.initFramed(myFrameFn, config);
+/// try server.run(io);
 /// ```
-pub const TcpServer = struct {
-    const Self = @This();
-
-    config: TcpServerConfig,
-
-    // --------------------------------------------------------- //
-
-    /// Initialize.
-    ///
-    /// Return:
-    /// - !Self
-    /// - error.PortNotConfigured if config.port is 0
-    pub fn init(config: TcpServerConfig) !Self {
-        if (config.port == 0) return error.PortNotConfigured;
-        return .{ .config = config };
-    }
-
-    /// Initialize with CLI arg overrides for --ip and --port.
-    /// Falls back to config defaults when args are absent.
-    pub fn initArgs(config: TcpServerConfig, args: anytype) !Self {
-        var cfg = config;
-        var it = std.process.Args.Iterator.init(args);
-        _ = it.skip();
-        while (it.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--ip")) {
-                if (it.next()) |val| cfg.ip = val;
-            } else if (std.mem.eql(u8, arg, "--port")) {
-                if (it.next()) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
-            }
-        }
-        return Self.init(cfg);
-    }
-
-    /// No-op: resources released inside run/runWith via defer.
-    pub fn deinit(self: *Self) void {
-        _ = self;
-    }
-
-    /// Listen and serve using the built-in echo handler.
-    pub fn run(self: *Self, io: std.Io) !void {
-        try self.runWith(io, echoHandler);
-    }
-
-    /// Listen and serve using a user-provided handler.
-    /// handler(stream, io) is called for each accepted connection.
-    /// The handler owns the stream and must call stream.close(io) before returning.
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void {
-        const cfg = self.config;
-        const cpu = try std.Thread.getCpuCount();
-
-        switch (cfg.dispatch_model) {
-            .ASYNC => {
-                logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
-
-                const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
-                var net_server = try addr.listen(io, .{
-                    .mode = .stream,
-                    .protocol = .tcp,
-                    .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-                    .kernel_backlog = cfg.kernel_backlog,
-                });
-                defer net_server.deinit(io);
-
-                while (true) {
-                    const stream = net_server.accept(io) catch |err| {
-                        if (err != error.ConnectionAborted) {
-                            if (cfg.logger) |lg| lg.system(.WARN, "tcp", "accept error: {}", .{err});
-                            break;
-                        }
-                        continue;
-                    };
-                    applyConnTimeout(stream.socket.handle, cfg.recv_timeout_ms, cfg.send_timeout_ms);
-
-                    _ = io.async(dispatchConn, .{ConnTask{ .stream = stream, .io = io, .handler = handler, .logger = cfg.logger }});
-                }
-            },
-
-            .POOL => {
-                const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
-                const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
-
-                logSystem(cfg, "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
-
-                var queue = ConnQueue{};
-                defer queue.deinit();
-
-                const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
-                defer std.heap.smp_allocator.free(pool_threads);
-                for (pool_threads) |*t| {
-                    t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, poolEntry, .{ &queue, io, handler, cfg.logger });
-                }
-
-                const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
-                defer std.heap.smp_allocator.free(acc_threads);
-                for (acc_threads) |*t| {
-                    t.* = try std.Thread.spawn(.{}, workerEntry, .{ cfg, &queue, io });
-                }
-
-                for (acc_threads) |t| t.join();
-                queue.close(io);
-                for (pool_threads) |t| t.join();
-            },
-
-            .MIXED => {
-                const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
-
-                logSystem(cfg, "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
-
-                const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
-                defer std.heap.smp_allocator.free(acc_threads);
-                for (acc_threads) |*t| {
-                    t.* = try std.Thread.spawn(.{}, asyncWorkerEntry, .{ cfg, io, handler });
-                }
-
-                for (acc_threads) |t| t.join();
-            },
-
-            // .URING has no native ring path in zix.Tcp yet, so it falls back to
-            // the .EPOLL shared-nothing loop (ADR-037 implements .URING in zix.Http1 first).
-            .EPOLL, .URING => {
-                if (comptime @import("builtin").target.os.tag == .linux) {
-                    try self.runEpoll(io, handler, cpu);
-                } else {
-                    logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
-                    var fallback = self.*;
-                    fallback.config.dispatch_model = .POOL;
-                    try fallback.runWith(io, handler);
-                }
-            },
-        }
-    }
-
-    /// EPOLL dispatch: spawns shared-nothing workers, each with its own
-    /// SO_REUSEPORT listener and epoll instance. Linux-only.
-    ///
-    /// Note:
-    /// - The kernel distributes connections across per-worker listeners with no
-    ///   shared queue and no cross-thread fd handoff.
-    /// - Each accepted connection is dispatched via io.async: the worker returns
-    ///   to epoll_wait immediately and is not parked on the connection lifetime.
-    /// - workers = 0 (default): cpu_count workers.
-    /// - pool_size is ignored for EPOLL (no session-worker pool needed).
-    fn runEpoll(self: *Self, io: std.Io, handler: HandlerFn, cpu: usize) !void {
-        const cfg = self.config;
-        const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
-
-        logSystem(cfg, "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
-
-        const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
-        defer std.heap.smp_allocator.free(workers);
-
-        for (workers) |*t|
-            t.* = try std.Thread.spawn(
-                .{ .stack_size = 512 * 1024 },
-                epollWorkerEntry,
-                .{EpollWorkerCtx{
-                    .io = io,
-                    .ip = cfg.ip,
-                    .port = cfg.port,
-                    .kernel_backlog = cfg.kernel_backlog,
-                    .recv_timeout_ms = cfg.recv_timeout_ms,
-                    .send_timeout_ms = cfg.send_timeout_ms,
-                    .handler = handler,
-                    .logger = cfg.logger,
-                }},
-            );
-
-        for (workers) |t| t.join();
-    }
-
-    /// Listen and serve a per-frame callback (length-prefixed framing). On the
-    /// .URING dispatch model this runs the native io_uring ring (shared-nothing,
-    /// one ring per worker; the engine drives recv -> frame_fn -> one coalesced
-    /// send, so the callback never owns or blocks the connection). On every other
-    /// model the callback is wrapped in a blocking per-connection adapter and
-    /// served through the normal path.
+pub const Server = struct {
+    /// Initialize a per-connection server with a comptime handler.
     ///
     /// Param:
-    /// frame_fn - comptime FrameFn (baked into the ring worker type)
+    /// handler - comptime HandlerFn (baked into the server type)
+    /// config - TcpServerConfig
     ///
     /// Return:
-    /// - !void
-    pub fn runFramed(self: *Self, io: std.Io, comptime frame_fn: FrameFn) !void {
-        if (comptime builtin.target.os.tag == .linux) {
-            if (self.config.dispatch_model == .URING) {
-                return runFramedUring(self.config, io, frame_fn);
-            }
-        }
+    /// - !TcpServerImpl(handler)
+    /// - error.PortNotConfigured if config.port is 0
+    pub fn init(comptime handler: HandlerFn, config: TcpServerConfig) !TcpServerImpl(handler) {
+        return TcpServerImpl(handler).init(config);
+    }
 
-        return self.runWith(io, frameAdapter(frame_fn));
+    /// Like init, but applies --ip and --port CLI overrides from args.
+    pub fn initArgs(comptime handler: HandlerFn, config: TcpServerConfig, args: anytype) !TcpServerImpl(handler) {
+        return TcpServerImpl(handler).init(applyArgs(config, args));
+    }
+
+    /// Initialize a framed server with a comptime per-frame callback. The
+    /// callback never owns the connection, so it can run on the .URING ring.
+    ///
+    /// Param:
+    /// frame_fn - comptime FrameFn (baked into the server type)
+    /// config - TcpServerConfig
+    ///
+    /// Return:
+    /// - !TcpFramedServerImpl(frame_fn)
+    /// - error.PortNotConfigured if config.port is 0
+    pub fn initFramed(comptime frame_fn: FrameFn, config: TcpServerConfig) !TcpFramedServerImpl(frame_fn) {
+        return TcpFramedServerImpl(frame_fn).init(config);
+    }
+
+    /// Like initFramed, but applies --ip and --port CLI overrides from args.
+    pub fn initFramedArgs(comptime frame_fn: FrameFn, config: TcpServerConfig, args: anytype) !TcpFramedServerImpl(frame_fn) {
+        return TcpFramedServerImpl(frame_fn).init(applyArgs(config, args));
     }
 };
 
@@ -1051,22 +1108,22 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
 test "zix test: TcpServer init, port zero returns PortNotConfigured" {
     try std.testing.expectError(
         error.PortNotConfigured,
-        TcpServer.init(.{ .ip = "127.0.0.1", .port = 0 }),
+        Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 0 }),
     );
 }
 
 test "zix test: TcpServer init, valid config succeeds and deinit is safe" {
-    var server = try TcpServer.init(.{ .ip = "127.0.0.1", .port = 9300 });
+    var server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300 });
     server.deinit();
 }
 
 test "zix test: TcpServer init with EPOLL dispatch model succeeds and deinit is safe" {
-    var server = try TcpServer.init(.{ .ip = "127.0.0.1", .port = 9300, .dispatch_model = .EPOLL });
+    var server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300, .dispatch_model = .EPOLL });
     server.deinit();
 }
 
 test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size is ignored" {
-    const server = try TcpServer.init(.{
+    const server = try Server.init(echoHandler, .{
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .EPOLL,
@@ -1078,13 +1135,13 @@ test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size i
 }
 
 test "zix test: TcpServer init, timeout fields default to zero" {
-    const server = try TcpServer.init(.{ .ip = "127.0.0.1", .port = 9300 });
+    const server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300 });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
 
 test "zix test: TcpServer init, timeout fields stored from config" {
-    const server = try TcpServer.init(.{
+    const server = try Server.init(echoHandler, .{
         .ip = "127.0.0.1",
         .port = 9300,
         .recv_timeout_ms = 5000,
@@ -1092,6 +1149,38 @@ test "zix test: TcpServer init, timeout fields stored from config" {
     });
     try std.testing.expectEqual(@as(u32, 5000), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 3000), server.config.send_timeout_ms);
+}
+
+fn testTcpHandler(stream: std.Io.net.Stream, io: std.Io) void {
+    stream.close(io);
+}
+
+fn testTcpFrame(payload: []const u8, fd: std.posix.fd_t) void {
+    _ = payload;
+    _ = fd;
+}
+
+test "zix test: Tcp.Server.init bakes a comptime handler and stores config" {
+    const server = try Server.init(testTcpHandler, .{
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .MIXED,
+        .workers = 3,
+    });
+    try std.testing.expectEqual(@as(usize, 3), server.config.workers);
+    try std.testing.expectEqual(DispatchModel.MIXED, server.config.dispatch_model);
+}
+
+test "zix test: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
+    try std.testing.expectError(
+        error.PortNotConfigured,
+        Server.initFramed(testTcpFrame, .{ .ip = "127.0.0.1", .port = 0 }),
+    );
+}
+
+test "zix test: Tcp.Server.initFramed, valid config succeeds and deinit is safe" {
+    var server = try Server.initFramed(testTcpFrame, .{ .ip = "127.0.0.1", .port = 9304, .dispatch_model = .URING });
+    server.deinit();
 }
 
 test "zix test: applyConnTimeout, zero ms is no-op on real socket" {
