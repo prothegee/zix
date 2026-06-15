@@ -1765,6 +1765,23 @@ pub fn grpcMuxOnReadable(comptime routes: []const Route, conn: *GrpcMuxConn) Grp
     }
 }
 
+/// Process buffered frames for the .URING ring path (ADR-037 Phase 4 step 3).
+/// Like grpcMuxOnReadable but without the blocking read loop and without the
+/// final fd flush: the ring worker has already filled conn.rbuf (advancing
+/// conn.rend), and it submits conn.stage.buf[0..conn.stage.len] as one ring send
+/// afterwards. rbuf compaction before each recv is the caller's responsibility.
+/// A large reply that overflows the cork still flushes straight to the fd inside
+/// muxProcess, which is safe under the ring's half-duplex guarantee.
+///
+/// Return:
+/// - .keep_alive when the buffer is drained or holds only a partial frame
+/// - .close on a protocol error or peer close (a GOAWAY/close reply is staged first)
+pub fn grpcMuxProcessRing(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+    conn.stage.len = 0;
+
+    return muxProcess(routes, conn);
+}
+
 fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
     var storage: std.posix.sockaddr.storage = undefined;
     var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
