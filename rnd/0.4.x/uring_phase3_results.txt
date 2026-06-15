@@ -164,3 +164,58 @@ slab, only helps large cached responses (plain send_zc adds a notification CQE
 that loses for small), and is architecturally invasive (the engine must route
 slab sends and handle the dual completion). Given every other lever is
 null/marginal, expect it small.
+
+
+================================================================
+RE-ASSESSMENT 2026-06-15 (external engine-category cross-check)
+================================================================
+
+Trigger: before any Phase 4 work, Phase 3's verdicts were re-judged against what
+the top external reference engines actually do, read in their own source trees
+(two raw io_uring HTTP engines, a raw epoll HTTP engine, two async runtimes). The
+named write-up is kept in internal R&D notes. Every "null" verdict here was
+reached on a box that cannot
+measure a differentiator (loopback kernel-bound, paranoid=2 no kernel cycles,
+memlock 8 MB no gcannon), so external evidence is the tiebreaker.
+
+Per-lever re-judgement:
+  | lever                         | this box   | reference-engine evidence                  | re-assessed |
+  | :-                            | :-         | :-                                         | :-          |
+  | SINGLE_ISSUER + DEFER_TASKRUN | null       | both reference ring engines run them       | APPLIED     |
+  | provided buffer ring (HTTP)   | regression | a no-accumulate engine uses it, others omit| stays OFF   |
+  | registered / direct files     | null       | no reference engine uses them              | stays OFF   |
+  | response cache                | confirmed  | reference engines precompute response bytes| unchanged   |
+  | clock once per CQE batch      | null       | not applicable (zix-specific TTL)          | unchanged   |
+  | send_fixed / send_zc          | deferred   | reference engines use plain send this size | declined    |
+
+Only the ring flags flipped. Everything Phase 3 marked null or off is now
+corroborated by the reference engines making the same choice, not by an unmeasurable
+local box. That is the basis for closing Phase 3.
+
+Applied change (src/tcp/http1/server.zig initUringRing): ring init via
+IoUring.init_params with SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP and
+cq_entries = 16384, with a flagless IoUring.init fallback for kernels that reject
+the flags (the same fallback the reference ring engines ship). Probe on this box
+(kernel 7.0.11): init_params accepts the flags and cq_entries = 16384 is granted
+(not clamped), so the flag path engages here, not the fallback.
+
+ReleaseFast A/B confirmation (this box, GET / hello, wrk -t6 -c512 -d5s x2,
+interleaved flagged vs flagless via git stash, fresh server per variant):
+  | variant                       | run 1   | run 2   | mean   |
+  | :-                            | :-      | :-      | :-     |
+  | flagged (flags + CQ 16384)    | 572.6k  | 563.6k  | ~568k  |
+  | flagless (init(ENTRIES,0))    | 550.8k  | 552.8k  | ~552k  |
+flagged is +2.9% over flagless, inside the wider loopback error bars (Phase 3
+measured the flags as parity at finer granularity), so the read is NO
+REGRESSION, leaning marginally positive. The real magnitude is still gated on a
+64-core rig with gcannon (c4096), which this box cannot run.
+
+Method correction: the first A/B pass was built in Debug (no -Doptimize) and is
+discarded. Debug understated throughput to ~490k vs the ReleaseFast ~568k, so
+Debug numbers are not valid for a perf verdict. The numbers above are
+ReleaseFast, matching the rest of this file.
+
+Phase 3 status: CLOSED. send_fixed is the only un-landed >=70% lever and it is
+declined for these workloads (no reference engine uses zero-copy send here).
+Phase 4 (the WS ring path with a provided buffer ring, the one workload where it
+pays) remains gated on the same rig.
