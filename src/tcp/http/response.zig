@@ -134,10 +134,26 @@ pub const Response = struct {
     }
 
     /// Write and flush the HTTP response with the given body.
+    /// Sink path (.EPOLL/.URING): serialize straight into the sink's free space, no copy.
     /// Fast path (no extra headers, body fits in staging buffer): one posix.write() syscall.
     /// Slow path (extra headers or large body): fixed headers + extra headers + body.
     pub fn send(self: *Response, body_data: []const u8) !void {
         self.bytes_written = body_data.len;
+
+        // Sink path: when a coalescing sink is installed (.EPOLL/.URING), serialize
+        // the response directly into the sink's free space. This is byte-identical to
+        // the staging-buffer path (buildResponse is what the cache serializes too) and
+        // skips the stack buffer plus the copy that fdWriteAll -> RespSink.append makes.
+        if (tl_resp_sink) |sink| {
+            if (sink.fd == self.fd and !sink.failed) {
+                if (self.buildResponse(body_data, sink.buf[sink.len..])) |written| {
+                    sink.len += written;
+
+                    return;
+                }
+            }
+        }
+
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 
@@ -881,4 +897,37 @@ test "zix http: Response.stream detaches the coalescing sink for direct SSE writ
     const n = try std.posix.read(fds[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "data: hello") != null);
+}
+
+test "zix http: send() into an installed sink is byte-identical to a direct send" {
+    const linux = std.os.linux;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    // Direct send (no sink): build via the staging buffer, capture off the socket.
+    tl_resp_sink = null;
+    var res_direct = Response.init(fds[1], true, undefined, allocator, 8);
+    res_direct.setContentType(.APPLICATION_JSON);
+    try res_direct.addHeader("X-Test", "1");
+    try res_direct.send("{\"ok\":true}");
+    var direct: [512]u8 = undefined;
+    const nd = try std.posix.read(fds[0], &direct);
+
+    // Sink send: serialize straight into the sink buffer (the optimized path).
+    var out_buf: [512]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &out_buf };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+    var res_sink = Response.init(fds[1], true, undefined, allocator, 8);
+    res_sink.setContentType(.APPLICATION_JSON);
+    try res_sink.addHeader("X-Test", "1");
+    try res_sink.send("{\"ok\":true}");
+
+    try std.testing.expectEqualStrings(direct[0..nd], sink.buf[0..sink.len]);
 }
