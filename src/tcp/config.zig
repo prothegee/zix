@@ -40,7 +40,7 @@ pub const DispatchModel = enum(u8) {
 // --------------------------------------------------------- //
 
 /// TCP stream server configuration.
-/// Pass to TcpServer.init(). Fields without defaults (ip, port) are required.
+/// Pass to Tcp.Server.init(). Fields without defaults (ip, port) are required.
 pub const TcpServerConfig = struct {
     /// Bind address.
     ip: []const u8,
