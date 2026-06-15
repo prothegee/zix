@@ -32,16 +32,19 @@ pub const DispatchModel = enum(u8) {
     /// but completion-based instead of readiness-based, so most syscall
     /// transitions are batched away. Linux-only.
     /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
-    /// zix.Http1 implements natively on Linux. The other engines fall back to
-    /// .EPOLL until their ring path lands (Http1 first, then WebSocket, Grpc, Http).
+    /// zix.Http1, zix.Http, zix.Grpc, and zix.Fix implement natively on Linux,
+    /// as do the WebSocket pump and the zix.Tcp framed path. Http2 folds to
+    /// .POOL, and the zix.Tcp per-connection handler folds to .EPOLL.
     URING = 4,
 }; // for all Tcp
 
 // --------------------------------------------------------- //
 
 /// TCP stream server configuration.
-/// Pass to Tcp.Server.init(). Fields without defaults (ip, port) are required.
+/// Pass to Tcp.Server.init(). Fields without defaults (io, ip, port) are required.
 pub const TcpServerConfig = struct {
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero.
@@ -85,7 +88,10 @@ pub const TcpClientConfig = struct {
 // --------------------------------------------------------- //
 
 test "zix test: TcpServerConfig, default field values" {
-    const cfg = TcpServerConfig{ .ip = "127.0.0.1", .port = 9300 };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = TcpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);

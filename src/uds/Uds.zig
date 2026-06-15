@@ -10,8 +10,11 @@ pub const ClientConfig = config.UdsClientConfig;
 // --------------------------------------------------------- //
 
 /// UDS stream server.
-/// Example: var server = try zix.Uds.Server.init(.{ .path = "/tmp/app.sock", .allocator = alloc });
+/// Example: var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{ .io = io, .path = "/tmp/app.sock", .allocator = alloc });
 pub const Server = @import("server.zig").UdsServer;
+
+/// Per-connection handler type: fn(stream, io) void.
+pub const HandlerFn = @import("server.zig").HandlerFn;
 
 /// UDS stream client.
 /// Example: var client = try zix.Uds.Client.connect(.{ .path = "/tmp/app.sock" }, io);

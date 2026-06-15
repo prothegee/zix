@@ -33,82 +33,103 @@ fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
 
 // --------------------------------------------------------- //
 
-/// UDS stream server. Accepts connections and dispatches each via io.concurrent.
+/// Per-connection handler. Owns the accepted stream and must call
+/// stream.close(io) before returning.
+pub const HandlerFn = fn (std.Io.net.Stream, std.Io) void;
+
+/// UDS server specialized over a comptime handler. The handler is baked into
+/// the type at init, so run takes no argument. io comes from config.io.
+fn UdsServerImpl(comptime handler: HandlerFn) type {
+    return struct {
+        const Self = @This();
+
+        config: UdsServerConfig,
+
+        pub fn init(config: UdsServerConfig) !Self {
+            if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+            if (config.path.len == 0) return error.PathEmpty;
+
+            return .{ .config = config };
+        }
+
+        /// No-op: resources are released inside run() via defer.
+        pub fn deinit(self: *Self) void {
+            _ = self;
+        }
+
+        /// Listen and serve. The comptime handler is called for each accepted
+        /// connection (it owns the stream and must close it). io is taken from
+        /// config.io (caller-provided, must outlive the server).
+        pub fn run(self: *Self) !void {
+            if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+
+            const io = self.config.io;
+
+            // Remove stale socket from a previous run before binding.
+            std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+
+            const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
+            var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog });
+            defer {
+                net_server.deinit(io);
+                std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+            }
+
+            logSystem(self.config, "listening on {s}", .{self.config.path});
+
+            const ConnTask = struct {
+                stream: std.Io.net.Stream,
+                io: std.Io,
+                logger: ?*Logger,
+            };
+
+            const dispatch = struct {
+                fn call(task: ConnTask) void {
+                    if (task.logger) |lg| lg.system(.INFO, "uds", "connection accepted", .{});
+                    handler(task.stream, task.io);
+                }
+            }.call;
+
+            while (true) {
+                const stream = net_server.accept(io) catch |err| {
+                    if (self.config.logger) |lg| lg.system(.WARN, "uds", "accept error: {}", .{err});
+                    continue;
+                };
+                applyConnTimeout(stream.socket.handle, self.config.recv_timeout_ms, self.config.send_timeout_ms);
+
+                const task = ConnTask{ .stream = stream, .io = io, .logger = self.config.logger };
+                if (io.concurrent(dispatch, .{task})) |_| {} else |_| {
+                    dispatch(task);
+                }
+            }
+        }
+    };
+}
+
+/// UDS stream server. The handler is baked into the server type at init
+/// (comptime), so run takes no argument, matching the zix.Tcp server shape.
 ///
 /// Usage:
 /// ```zig
-/// var server = try UdsServer.init(config);
+/// var server = try zix.Uds.Server.init(myHandler, config); // config.io required
 /// defer server.deinit();
-/// try server.run(io, echoHandler);  // built-in echo handler
-/// try server.run(io, myHandler);    // custom handler
+/// try server.run();
+///
+/// // the built-in echo handler, passed explicitly
+/// var server = try zix.Uds.Server.init(zix.Uds.echoHandler, config);
 /// ```
 pub const UdsServer = struct {
-    const Self = @This();
-
-    config: UdsServerConfig,
-
-    // --------------------------------------------------------- //
-
-    /// Initialize the server.
+    /// Initialize a UDS server with a comptime handler.
+    ///
+    /// Param:
+    /// handler - comptime HandlerFn (baked into the server type)
+    /// config - UdsServerConfig
     ///
     /// Return:
-    /// - !Self
+    /// - !UdsServerImpl(handler)
     /// - error.PathEmpty if config.path is empty
-    pub fn init(config: UdsServerConfig) !Self {
-        if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
-        if (config.path.len == 0) return error.PathEmpty;
-
-        return .{ .config = config };
-    }
-
-    /// No-op: resources are released inside run() via defer.
-    pub fn deinit(self: *Self) void {
-        _ = self;
-    }
-
-    /// Listen and serve using a comptime handler.
-    /// handler(stream, io) is called for each accepted connection.
-    /// The handler owns stream and must call stream.close(io) before returning.
-    pub fn run(self: *Self, io: std.Io, comptime handler: fn (std.Io.net.Stream, std.Io) void) !void {
-        if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
-
-        // Remove stale socket from a previous run before binding.
-        std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
-
-        const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
-        var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog });
-        defer {
-            net_server.deinit(io);
-            std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
-        }
-
-        logSystem(self.config, "listening on {s}", .{self.config.path});
-
-        const ConnTask = struct {
-            stream: std.Io.net.Stream,
-            io: std.Io,
-            logger: ?*Logger,
-        };
-
-        const dispatch = struct {
-            fn call(task: ConnTask) void {
-                if (task.logger) |lg| lg.system(.INFO, "uds", "connection accepted", .{});
-                handler(task.stream, task.io);
-            }
-        }.call;
-
-        while (true) {
-            const stream = net_server.accept(io) catch |err| {
-                if (self.config.logger) |lg| lg.system(.WARN, "uds", "accept error: {}", .{err});
-                continue;
-            };
-            applyConnTimeout(stream.socket.handle, self.config.recv_timeout_ms, self.config.send_timeout_ms);
-
-            const task = ConnTask{ .stream = stream, .io = io, .logger = self.config.logger };
-            if (io.concurrent(dispatch, .{task})) |_| {} else |_| {
-                dispatch(task);
-            }
-        }
+    pub fn init(comptime handler: HandlerFn, config: UdsServerConfig) !UdsServerImpl(handler) {
+        return UdsServerImpl(handler).init(config);
     }
 };
 
@@ -159,19 +180,28 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 
 test "zix test: UdsServer init, empty path returns PathEmpty" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     try std.testing.expectError(
         error.PathEmpty,
-        UdsServer.init(.{ .path = "", .allocator = std.testing.allocator }),
+        UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "", .allocator = std.testing.allocator }),
     );
 }
 
 test "zix test: UdsServer init, valid path succeeds" {
-    var server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
     server.deinit();
 }
 
 test "zix test: UdsServer init, timeout fields default to zero" {
-    const server = try UdsServer.init(.{ .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
@@ -214,7 +244,11 @@ test "zix test: echoHandler echoes big-endian frame" {
 }
 
 test "zix test: UdsServer init, timeout fields stored from config" {
-    const server = try UdsServer.init(.{
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const server = try UdsServer.init(echoHandler, .{
+        .io = threaded.io(),
         .path = "/tmp/zix_test.sock",
         .allocator = std.testing.allocator,
         .recv_timeout_ms = 5000,

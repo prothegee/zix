@@ -552,8 +552,9 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
         pub fn deinit(_: *Self) void {}
 
         /// Listen and serve. Selects the concurrency model from config.dispatch_model.
-        pub fn run(self: *const Self, io: std.Io) !void {
-            return serveDispatch(self.config, io, handler);
+        /// io is taken from config.io (caller-provided, must outlive the server).
+        pub fn run(self: *const Self) !void {
+            return serveDispatch(self.config, self.config.io, handler);
         }
     };
 }
@@ -577,7 +578,8 @@ fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
 
         pub fn deinit(_: *Self) void {}
 
-        pub fn run(self: *const Self, io: std.Io) !void {
+        pub fn run(self: *const Self) !void {
+            const io = self.config.io;
             if (comptime builtin.target.os.tag == .linux) {
                 if (self.config.dispatch_model == .URING) return runFramedUring(self.config, io, frame_fn);
             }
@@ -605,22 +607,23 @@ fn applyArgs(config: TcpServerConfig, args: anytype) TcpServerConfig {
 }
 
 /// TCP stream server. The handler (or framed callback) is baked into the
-/// server type at init (comptime), so run takes no handler argument, matching
-/// the zix.Http1 / zix.Grpc server shape.
+/// server type at init (comptime), so run takes no handler argument. io is a
+/// config field (config.io), so run takes no argument either, matching the
+/// zix.Http1 / zix.Grpc server shape.
 ///
 /// Usage:
 /// ```zig
 /// // per-connection handler (owns the stream)
-/// var server = try zix.Tcp.Server.init(myHandler, config);
+/// var server = try zix.Tcp.Server.init(myHandler, config); // config.io required
 /// defer server.deinit();
-/// try server.run(io);
+/// try server.run();
 ///
 /// // the built-in echo handler, passed explicitly
 /// var server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, config);
 ///
 /// // per-frame callback (engine owns the connection, runs on .URING)
 /// var server = try zix.Tcp.Server.initFramed(myFrameFn, config);
-/// try server.run(io);
+/// try server.run();
 /// ```
 pub const Server = struct {
     /// Initialize a per-connection server with a comptime handler.
@@ -1106,24 +1109,37 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 
 test "zix test: TcpServer init, port zero returns PortNotConfigured" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     try std.testing.expectError(
         error.PortNotConfigured,
-        Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 0 }),
+        Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 }),
     );
 }
 
 test "zix test: TcpServer init, valid config succeeds and deinit is safe" {
-    var server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300 });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 });
     server.deinit();
 }
 
 test "zix test: TcpServer init with EPOLL dispatch model succeeds and deinit is safe" {
-    var server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300, .dispatch_model = .EPOLL });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .EPOLL });
     server.deinit();
 }
 
 test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size is ignored" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const server = try Server.init(echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .EPOLL,
@@ -1135,13 +1151,20 @@ test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size i
 }
 
 test "zix test: TcpServer init, timeout fields default to zero" {
-    const server = try Server.init(echoHandler, .{ .ip = "127.0.0.1", .port = 9300 });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
 
 test "zix test: TcpServer init, timeout fields stored from config" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const server = try Server.init(echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .recv_timeout_ms = 5000,
@@ -1161,7 +1184,11 @@ fn testTcpFrame(payload: []const u8, fd: std.posix.fd_t) void {
 }
 
 test "zix test: Tcp.Server.init bakes a comptime handler and stores config" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const server = try Server.init(testTcpHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .MIXED,
@@ -1172,14 +1199,20 @@ test "zix test: Tcp.Server.init bakes a comptime handler and stores config" {
 }
 
 test "zix test: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     try std.testing.expectError(
         error.PortNotConfigured,
-        Server.initFramed(testTcpFrame, .{ .ip = "127.0.0.1", .port = 0 }),
+        Server.initFramed(testTcpFrame, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 }),
     );
 }
 
 test "zix test: Tcp.Server.initFramed, valid config succeeds and deinit is safe" {
-    var server = try Server.initFramed(testTcpFrame, .{ .ip = "127.0.0.1", .port = 9304, .dispatch_model = .URING });
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var server = try Server.initFramed(testTcpFrame, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9304, .dispatch_model = .URING });
     server.deinit();
 }
 
