@@ -344,7 +344,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Model Dispatch
 
-Sama seperti empat model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX berumur panjang. POOL dapat menghabiskan thread di bawah beban berkelanjutan):
+Sama seperti lima model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX berumur panjang. POOL dapat menghabiskan thread di bawah beban berkelanjutan):
 
 | Model | Accept thread | Catatan |
 | :- | :- | :- |
@@ -352,6 +352,7 @@ Sama seperti empat model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX be
 | `.POOL` | cpu_count | Volume koneksi tinggi dengan sesi pendek |
 | `.MIXED` | cpu_count | Throughput dan latensi yang seimbang |
 | `.EPOLL` | 1 (Linux-only) | Single epoll accept loop. Pool worker memegang setiap koneksi selama masa hidupnya. Non-Linux fallback ke POOL. |
+| `.URING` | cpu_count (Linux-only) | Worker io_uring shared-nothing yang menjalankan session processor resumable (`core.processFixRing`) per batch readable (ADR-037). Non-Linux fallback ke POOL. |
 
 ---
 

@@ -20,7 +20,7 @@ UDP server and client built on Zig 0.16.x `std.Io`. No relation to the TCP/HTTP 
 
 ```mermaid
 flowchart TD
-    A["UdpServer(Packet).run(io)"] --> B["IpAddress.bind(io, .dgram .udp)"]
+    A["UdpServer(Packet).run()"] --> B["IpAddress.bind(io, .dgram .udp)"]
     B --> C["receive loop"]
     C --> D["socket.receiveTimeout(io, buf, poll_timeout)"]
     D -->|Timeout| E["checkDisconnections(clients, now)"]
@@ -107,7 +107,7 @@ Access via `const zix = @import("zix");`
 | :- | :- |
 | `init(config)` | REQUIRED mode: port must be non-zero |
 | `initArgs(config, args)` | CONFIGURABLE mode: reads `--port` from CLI args |
-| `run(io)` | Bind socket, enter receive loop. Blocks until error. |
+| `run()` | Bind socket (io from config.io), enter receive loop. Blocks until error. |
 | `deinit()` | Release resources. |
 
 ### UdpClient(Packet) methods

@@ -6,21 +6,29 @@ Detail implementasi internal. Untuk dasar keputusan desain lihat [`docs/hld-tcp-
 
 ## server.zig
 
-### TcpServer
+### Namespace Server dan factory type
 
 ```zig
-pub const TcpServer = struct {
-    config: TcpServerConfig,
-
-    pub fn init(config: TcpServerConfig) !Self       // error.PortNotConfigured if port == 0
-    pub fn initArgs(config: TcpServerConfig, args: anytype) !Self
-    pub fn deinit(self: *Self) void                  // no-op
-    pub fn run(self: *Self, io: std.Io) !void        // uses echoHandler
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void
+// Namespace tanpa field dengan constructor comptime (ADR-038).
+pub const Server = struct {
+    pub fn init(comptime handler: HandlerFn, config: TcpServerConfig) !TcpServerImpl(handler)
+    pub fn initArgs(comptime handler: HandlerFn, config: TcpServerConfig, args: anytype) !TcpServerImpl(handler)
+    pub fn initFramed(comptime frame_fn: FrameFn, config: TcpServerConfig) !TcpFramedServerImpl(frame_fn)
+    pub fn initFramedArgs(comptime frame_fn: FrameFn, config: TcpServerConfig, args: anytype) !TcpFramedServerImpl(frame_fn)
 };
+
+// Factory per-connection: handler dibakukan ke tipe, run() hanya menerima io.
+fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> error.PortNotConfigured jika port == 0; .deinit() no-op; .run() membaca config.io
+fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type   // .init(config); .deinit(); .run() -> ring di .URING, selain itu fallback frameAdapter
+
+// Worker dispatch bebas (handler disimpan sebagai nilai runtime, bentuk sama seperti zix.Http1):
+fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // switch ASYNC/POOL/MIXED/EPOLL
+fn runEpoll(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn, cpu: usize) !void
 ```
 
-### runWith() jalur ASYNC
+Handler (atau callback per-frame) diketahui comptime di batas tipe, tetapi fungsi worker internal menerimanya sebagai nilai runtime, sehingga `serveDispatch` / `runEpoll` dibagi lintas setiap spesialisasi tanpa code bloat per-handler (ADR-038). Default echo bawaan adalah `zix.Tcp.echoHandler` publik, dilewatkan secara eksplisit ke `init`.
+
+### serveDispatch jalur ASYNC
 
 ```
 1. resolve ip:port -> addr
@@ -34,7 +42,7 @@ pub const TcpServer = struct {
 
 Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept loop tidak pernah memblokir pada penanganan koneksi.
 
-### runWith() jalur POOL
+### serveDispatch jalur POOL
 
 ```
 1. worker_count = cfg.workers  (0 -> cpu_count)
@@ -49,7 +57,7 @@ Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept 
 
 Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai nilai; `std.Io.Threaded` bersifat thread-safe).
 
-### runWith() jalur MIXED
+### serveDispatch jalur MIXED
 
 ```
 1. worker_count = cfg.workers (0 -> cpu_count)

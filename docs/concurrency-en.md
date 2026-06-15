@@ -1,6 +1,6 @@
 # Concurrency Models: zix
 
-Four dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Default: `.ASYNC`.
+Five dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Default: `.ASYNC`.
 
 ---
 
@@ -12,12 +12,13 @@ pub const DispatchModel = enum(u8) {
     POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
     EPOLL = 3, // shared-nothing epoll workers, Linux-only
+    URING = 4, // shared-nothing io_uring workers, Linux-only
 };
 ```
 
-Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (for `zix.Http`) and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All four values are present in every config.
+Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (for `zix.Http`) and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All five values are present in every config.
 
-`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `zix.Http2` and non-Linux builds fall back to `.POOL` automatically. See the Dispatch Model Comparison table below.
+`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `zix.Http2` and non-Linux builds fall back to `.POOL` automatically. `.URING = 4` is also Linux-only and native in `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. `zix.Http2` folds to `.POOL` and the `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
 
 ---
 
@@ -265,6 +266,17 @@ try server.run();
 
 ---
 
+## .URING: Shared-Nothing io_uring Event Loop (Linux-only)
+
+`.URING` is the completion-based sibling of `.EPOLL`: the same shared-nothing, thread-per-core topology (one `SO_REUSEPORT` listener and one ring per worker, no shared queue, no cross-thread fd handoff), but accepts, reads, and writes are submitted as io_uring SQEs and reaped as CQEs instead of waiting on `epoll_wait` readiness. Most syscall transitions are batched into the ring (ADR-037 Phase 4).
+
+- Native engines: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Non-Linux builds fall back to `.POOL`.
+- `workers` (Http/Http1) or `pool_size` (gRPC/FIX/TCP) sizes the worker count, exactly as `.EPOLL`.
+- On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. Prefer `.EPOLL` as the default and `.URING` for sustained, pipelined load.
+- Same "when NOT to use" as `.EPOLL`: SSE / WebSocket on `zix.Http`, low connection counts, non-Linux targets.
+
+---
+
 ## Thread Count Reference
 
 | Field | Default | Meaning |
@@ -293,6 +305,8 @@ try server.run();
 | Best for | throughput, high connection counts | SSE, WebSocket, low latency | balanced, multi-accept async | high-throughput HTTP/1 or gRPC on Linux |
 | Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 falls back to .POOL) |
 
+`.URING` (Linux-only) mirrors the `.EPOLL` column: a shared-nothing per-worker ring, completion-based, native in Http1, Http, Grpc, and Fix. Http2 folds to `.POOL`, and the Tcp per-connection handler folds to `.EPOLL` (the Tcp framed callback runs the ring).
+
 ---
 
 ## Protocol Applicability
@@ -309,12 +323,14 @@ try server.run();
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | yes (io.concurrent() per connection) | n/a | n/a |
 
+`.URING` (Linux-only) matches the `.EPOLL` column per protocol: native for HTTP, gRPC, TCP, and FIX, n/a for SSE / WebSocket / UDP / UDS, and Http2 falls back to `.POOL`.
+
 ---
 
 ## Channel
 
 `zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive
-that works alongside all four dispatch models. A Channel connects producer and consumer tasks
+that works alongside all five dispatch models. A Channel connects producer and consumer tasks
 (OS threads or `io.async()` fibers) within the same process. It does not cross a network or
 process boundary.
 
@@ -322,7 +338,7 @@ process boundary.
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-All four dispatch models can spawn `io.async()` tasks or OS threads that communicate through
+All five dispatch models can spawn `io.async()` tasks or OS threads that communicate through
 a Channel. The Channel itself is independent of which dispatch model is in use.
 
 | Property | Channel |

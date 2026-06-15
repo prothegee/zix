@@ -4,7 +4,7 @@
 
 - Server dan client gRPC h2c (HTTP/2 cleartext) diimplementasikan tanpa C FFI.
 - Semua 4 tipe RPC: unary, server streaming, client streaming, bidirectional streaming.
-- Semua 4 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux).
+- Semua 5 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux).
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
 - TLS didelegasikan ke reverse proxy (nginx, haproxy). Backend berbicara h2c saja.
@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok) |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux) |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux), URING=4 (hanya Linux) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |

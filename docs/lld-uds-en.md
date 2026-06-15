@@ -6,20 +6,26 @@ Internal implementation details. For design rationale see [`docs/hld-uds.md`](hl
 
 ## server.zig
 
-### UdsServer
+### Server namespace and factory type
 
 ```zig
+// Namespace with a comptime constructor (ADR-039), mirroring zix.Tcp.
 pub const UdsServer = struct {
-    config: UdsServerConfig,
-
-    pub fn init(config: UdsServerConfig) !Self
-    pub fn deinit(self: *Self) void   // no-op: resources released inside run()
-    pub fn run(self: *Self, io: std.Io) !void          // uses echoHandler
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void
+    pub fn init(comptime handler: HandlerFn, config: UdsServerConfig) !UdsServerImpl(handler)
 };
+
+// Per-connection factory: handler baked into the type, io from config.io.
+fn UdsServerImpl(comptime handler: HandlerFn) type {
+    // config: UdsServerConfig
+    // pub fn init(config) !Self          -> error.PathEmpty if config.path is empty
+    // pub fn deinit(self) void           -> no-op: resources released inside run()
+    // pub fn run(self) !void             -> reads config.io, runs the accept loop
+}
 ```
 
-### runWith()
+The built-in echo default is the public `zix.Uds.echoHandler`, passed explicitly to `init`.
+
+### run()
 
 ```
 1. unlink config.path (ignore error, stale socket cleanup)

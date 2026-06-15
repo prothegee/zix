@@ -351,7 +351,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Dispatch Models
 
-Same four models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-lived. POOL can exhaust threads under sustained load):
+Same five models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-lived. POOL can exhaust threads under sustained load):
 
 | Model | Accept threads | Notes |
 | :- | :- | :- |
@@ -359,6 +359,7 @@ Same four models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-l
 | `.POOL` | cpu_count | High connection volume with short sessions |
 | `.MIXED` | cpu_count | Balanced throughput and latency |
 | `.EPOLL` | 1 (Linux-only) | Single epoll accept loop. Pool workers hold each connection for its full lifetime. Non-Linux falls back to POOL. |
+| `.URING` | cpu_count (Linux-only) | Shared-nothing io_uring workers running a resumable session processor (`core.processFixRing`) per readable batch (ADR-037). Non-Linux falls back to POOL. |
 
 ---
 

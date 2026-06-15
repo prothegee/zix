@@ -23,7 +23,7 @@ HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
 
 ## Model Runtime
 
-Empat model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.ASYNC`.
+Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.ASYNC`.
 
 ### .POOL: Work-Queue Thread Pool
 
@@ -115,6 +115,15 @@ flowchart TD
 - Fd blocking: `handleOneRequest` melakukan recv/parse/send secara sinkron, lalu mengembalikan worker ke `epoll_wait`.
 - `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
 - Terbaik untuk request berumur pendek throughput tinggi di Linux. Tidak cocok untuk SSE atau WebSocket (blocking read akan menahan worker).
+- Build non-Linux otomatis fallback ke `.POOL`.
+
+### .URING: Worker io_uring Shared-Nothing (Linux-only)
+
+Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama), tetapi completion-based alih-alih readiness-based: accept, read, dan write disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring (`self.runUring(io)`, ADR-037 Fase 4).
+
+- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
+- Terbaik untuk beban sustained dan pipelined di mana ring yang di-batch mengamortisasi syscall. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality.
+- Seperti `.EPOLL`, serve per-connection bersifat blocking begitu request siap, jadi tidak cocok untuk SSE atau WebSocket.
 - Build non-Linux otomatis fallback ke `.POOL`.
 
 `zix.Http.Server` menerima nilai `std.Io` yang opak dan tidak memiliki atau memanggil deinit pada backend tersebut. Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk detail jumlah thread dan perbandingan model.

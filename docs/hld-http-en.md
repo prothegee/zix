@@ -23,7 +23,7 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
 
 ### .POOL: Work-Queue Thread Pool
 
@@ -115,6 +115,15 @@ flowchart TD
 - Blocking fds: `handleOneRequest` does a synchronous recv/parse/send, then returns the worker to `epoll_wait`.
 - `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
 - Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
+- Non-Linux builds fall back to `.POOL` automatically.
+
+### .URING: Shared-Nothing io_uring Workers (Linux-only)
+
+Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based: accepts, reads, and writes are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring (`self.runUring(io)`, ADR-037 Phase 4).
+
+- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
+- Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality.
+- Like `.EPOLL`, the per-connection serve is blocking once a request is ready, so it is not suited to SSE or WebSocket.
 - Non-Linux builds fall back to `.POOL` automatically.
 
 `zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.

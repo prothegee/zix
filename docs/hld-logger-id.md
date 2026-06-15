@@ -159,13 +159,14 @@ pub fn main(process: std.process.Init) !void {
     logger.system(.INFO, "startup", "server starting on port {d}", .{9300});
 
     // Sambungkan ke server (logging access/conn/packet/session otomatis)
-    var server = try zix.Tcp.Server.init(.{
+    var server = try zix.Tcp.Server.init(myHandler, .{
+        .io     = process.io,
         .ip     = "127.0.0.1",
         .port   = 9300,
         .logger = &logger,
     });
     defer server.deinit();
-    try server.runWith(process.io, myHandler);
+    try server.run();
 }
 ```
 

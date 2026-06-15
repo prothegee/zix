@@ -1,6 +1,6 @@
 # Model Konkurensi: zix
 
-Empat model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Default: `.ASYNC`.
+Lima model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Default: `.ASYNC`.
 
 ---
 
@@ -12,12 +12,13 @@ pub const DispatchModel = enum(u8) {
     POOL  = 1, // work-queue thread pool
     MIXED = 2, // N accept threads, each dispatching via io.async()
     EPOLL = 3, // shared-nothing epoll workers, Linux-only
+    URING = 4, // shared-nothing io_uring workers, Linux-only
 };
 ```
 
-Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/config.zig` (untuk `zix.Http`) dan diimpor oleh `src/tcp/http2/grpc/config.zig` (untuk `zix.Grpc`). Keempat nilai tersedia di setiap konfigurasi.
+Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/config.zig` (untuk `zix.Http`) dan diimpor oleh `src/tcp/http2/grpc/config.zig` (untuk `zix.Grpc`). Kelima nilai tersedia di setiap konfigurasi.
 
-`.EPOLL = 3` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. `zix.Http2` dan build non-Linux akan fallback ke `.POOL` secara otomatis. Lihat tabel Perbandingan Model Dispatch di bawah.
+`.EPOLL = 3` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. `zix.Http2` dan build non-Linux akan fallback ke `.POOL` secara otomatis. `.URING = 4` juga hanya tersedia di Linux dan native di `zix.Http1`, `zix.Http`, `zix.Grpc`, dan `zix.Fix`. `zix.Http2` melipat ke `.POOL` dan handler per-connection `zix.Tcp` melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring secara native). Lihat tabel Perbandingan Model Dispatch di bawah.
 
 ---
 
@@ -260,6 +261,17 @@ try server.run();
 
 ---
 
+## .URING: Event Loop io_uring Shared-Nothing (Linux-only)
+
+`.URING` adalah saudara completion-based dari `.EPOLL`: topologi thread-per-core, shared-nothing yang sama (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama, tanpa perpindahan fd antar thread), tetapi accept, read, dan write disubmit sebagai SQE io_uring dan dipanen sebagai CQE alih-alih menunggu readiness `epoll_wait`. Sebagian besar transisi syscall di-batch ke dalam ring (ADR-037 Fase 4).
+
+- Engine native: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` dan handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.POOL` / `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Build non-Linux fallback ke `.POOL`.
+- `workers` (Http/Http1) atau `pool_size` (gRPC/FIX/TCP) menentukan jumlah worker, persis seperti `.EPOLL`.
+- Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Pilih `.EPOLL` sebagai default dan `.URING` untuk beban sustained dan pipelined.
+- "Kapan tidak digunakan" sama dengan `.EPOLL`: SSE / WebSocket di `zix.Http`, jumlah koneksi rendah, target non-Linux.
+
+---
+
 ## Jumlah Thread
 
 | Field | Default | Makna |
@@ -308,13 +320,13 @@ try server.run();
 
 ## Channel
 
-`zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan keempat model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
+`zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan kelima model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
 
 ```
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-Keempat model dispatch dapat menghasilkan task `io.async()` atau OS thread yang berkomunikasi melalui Channel. Channel itu sendiri tidak bergantung pada model dispatch yang sedang digunakan.
+Kelima model dispatch dapat menghasilkan task `io.async()` atau OS thread yang berkomunikasi melalui Channel. Channel itu sendiri tidak bergantung pada model dispatch yang sedang digunakan.
 
 | Properti | Channel |
 | :- | :- |
