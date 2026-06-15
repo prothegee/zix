@@ -1,0 +1,15 @@
+-- wrk pipelined load, depth 16, GET / keep-alive.
+-- Each request() returns 16 pipelined GETs so one socket write carries a
+-- depth-16 burst, matching the p16 profile used in the io_uring A/B.
+
+init = function(args)
+    local r = {}
+    for i = 1, 16 do
+        r[i] = wrk.format("GET", "/")
+    end
+    req = table.concat(r)
+end
+
+request = function()
+    return req
+end

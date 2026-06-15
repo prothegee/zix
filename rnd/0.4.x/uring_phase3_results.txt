@@ -1,0 +1,125 @@
+io_uring .URING Phase 3 measurements (ADR-037)
+================================================
+
+Date: 2026-06-15
+Host: 12 logical cores, Linux 7.0.11. perf_event_paranoid=2 (userspace counters
+only, no kernel-cycle counting). RLIMIT_MEMLOCK = 8 MB and not raisable, so
+gcannon (needs unlimited memlock) is unusable here. wrk + perf only.
+
+Method
+------
+Same zix.Http1 engine, dispatch model the only variable. Routes identical
+(GET / -> "Hello, World!"). Server = examples/http1_basic_5_uring (URING) and
+http1_basic_4_epoll (EPOLL), run directly (not via `zig build`, which would run
+the step). Load: wrk -t6 -c512 -d10s.
+  p1  = plain wrk (HTTP keep-alive, pipeline depth 1)
+  p16 = wrk -s rnd/0.4.x/uring_pipeline.lua (pipeline depth 16)
+Metrics:
+  cpu/req    = total server CPU (utime+stime from /proc/PID/stat over the wrk
+               window) / requests. Includes kernel time, so it captures the
+               io_uring syscall-batching effect that cycles:u cannot.
+  l1miss/req = perf -e L1-dcache-load-misses:u -p <server> / requests.
+
+Baseline: EPOLL vs URING (minimal core, flagless ring)
+------------------------------------------------------
+p16 (depth 16):
+  | model          | rps        | cpu/req (us) | l1miss/req |
+  | :-             | :-         | :-           | :-         |
+  | epoll          | ~1.74-1.77M| ~5.27        | 58-70      |
+  | uring          | ~1.76-1.79M| ~5.26        | 39-41      |
+
+p1 (depth 1):
+  | model          | rps   | cpu/req (us) | l1miss/req |
+  | :-             | :-    | :-           | :-         |
+  | epoll          | ~467k | ~10.9        | ~248       |
+  | uring          | ~463k | ~11.0        | ~197       |
+
+Reads:
+- Throughput parity at both depths (loopback is kernel/client bound), as ADR-037
+  predicted.
+- Total server CPU/req: URING == EPOLL within run-to-run noise (~1%) at both
+  depths. The io_uring syscall-batching win does not show as lower CPU on this
+  engine: at p16 each recv already carries ~16 requests (syscalls amortized for
+  both models), and at p1 the minimal core re-arms a plain recv per completion,
+  so it gives up the multishot-recv saving the PoC had.
+- L1-miss/req: URING consistently lower, -20% at p1 (248 -> 197) and -33% at p16
+  (~63 -> ~40). The ring keeps userspace caches hotter, reproducing the PoC's
+  L1 signature, but the misses saved are a small fraction of total cycles so
+  they do not move cpu/req at these operating points.
+
+Lever 1: ring setup flags (REVERTED, null result)
+--------------------------------------------------
+p1, total CPU, interleaved no-flags vs flags:
+  | variant                       | cpu/req (us)        |
+  | :-                            | :-                  |
+  | flagless                      | 10.99 / 10.99 / 10.99 |
+  | SINGLE_ISSUER|COOP_TASKRUN    | 11.02 / 10.96 / 11.03 |
+  | SINGLE_ISSUER|DEFER_TASKRUN   | 11.10 / 11.16 / 11.15 |
+p16 spot-check: flagless 5.43, DEFER 5.44 (parity).
+
+Verdict: NULL. Neither COOP_TASKRUN nor DEFER_TASKRUN moves cpu/req above noise,
+at either depth. Falsification signal (lower task-run cost / cpu drop) did not
+fire. Reverted to a flagless ring. Reason: a busy submit_and_wait(1) loop under
+single-issuer ownership already drains completions at enter time, so there is
+little IPI/task-run overhead for the flags to remove, and the engine's userspace
+work (identical to .EPOLL) dominates cpu/req.
+
+Structural lever: multishot recv + provided buffer ring (REVERTED, regression)
+------------------------------------------------------------------------------
+Replaced the minimal core's plain per-connection recv (direct into conn.buf,
+half-duplex) with multishot recv off a per-worker provided buffer ring
+(BUF_COUNT=256 x BUF_SIZE=16K, incremental consumption) + full-duplex send
+(recv stays armed while a send SQE is in flight; core.RespSink gained a no_flush
+mode so a dispatch appends after the kernel-owned send prefix without a blocking
+write). Correctness verified (GET/404/keep-alive/pipelined burst, test-all).
+
+A/B vs the minimal core and .EPOLL (cpu/req, interleaved):
+  | depth | EPOLL  | URING minimal | URING multishot+bufring |
+  | :-    | :-     | :-            | :-                      |
+  | p1    | ~10.90 | ~11.0         | ~11.23  (WORSE)         |
+  | p16   | ~5.31  | ~5.26         | ~5.49   (WORSE ~3-4%)   |
+
+Verdict: REGRESSION at both depths, reverted. Root cause: the minimal core's
+plain recv lands data DIRECTLY in conn.buf (zero copy). The provided buffer ring
+recv's into a kernel-selected buffer, so the engine must memcpy it into conn.buf
+for cross-completion accumulation. That extra copy (largest at p16, where each
+completion carries a 16-request chunk) outweighs the multishot re-arm saving.
+A provided buffer ring only pays when the consumer can parse in place out of the
+ring buffer; this engine accumulates, so direct-recv-into-buffer wins. The
+no_flush RespSink mode was reverted with it.
+
+Lever 3: per-worker response cache on the ring (CONFIRMED, big win)
+------------------------------------------------------------------
+Installed the per-worker ResponseCache on the .URING worker, the same install as
+the EPOLL worker (each ring worker is a single owner thread, so the lock-free by
+ownership invariant holds). Verified active and measured the lever via /cache
+(replay) vs /nocache (rebuild) on ONE cache-enabled URING server, same body per
+pair (examples/http1_cache.zig, wrk -t4 -c128 -d8s):
+  | body   | /nocache rps | /cache rps | /nocache cpu/req | /cache cpu/req |
+  | :-     | :-           | :-         | :-               | :-             |
+  | 4 KiB  | 162k         | 354k       | 56.9 us          | 13.2 us        |
+  | 16 KiB | 53.6k        | 242k       | 193 us           | 15.9 us        |
+  | 64 KiB | 15.1k        | 128k       | 731 us           | 20.4 us        |
+The cache replays precomputed bytes, so cache cpu/req stays ~flat (~13-20 us)
+while the rebuild cost scales with body size: the win grows from +118% rps at
+4 KiB to +750% at 64 KiB, crossover below 4 KiB. This is an ALGORITHMIC win
+(replay vs rebuild), identical in kind to the EPOLL cache (ADR-036), now
+available on the ring. NOTE: this is cache-vs-nocache WITHIN .URING, not a
+.URING-vs-.EPOLL comparison (the cache helps both engines the same way).
+
+Conclusion / next
+-----------------
+On the real (already-optimized shared-nothing) zix.Http1 engine the minimal ring
+core is CPU-parity with .EPOLL at p1 and p16 with a cache-locality edge. Lever
+results so far:
+  - ring setup flags (lever 1): null.
+  - multishot + provided buffer ring (structural): regression (extra copy).
+  - per-worker response cache (lever 3): big win, but it is an engine feature
+    that helps .EPOLL equally, not a URING-specific gain.
+So no lever has made .URING beat .EPOLL on CPU; .URING's own edge stays cache
+locality plus headroom at very high connection counts. Remaining cache-adjacent
+levers now unblocked (cache is installed): clock-read-once-per-CQE-batch and a
+registered send buffer holding the cache payload (send_fixed on a hit). The one
+independent structural candidate left is registered/direct files
+(IOSQE_FIXED_FILE, accept_direct). Given the engine is userspace-work dominated,
+expect these to be small.
