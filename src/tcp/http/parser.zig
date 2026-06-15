@@ -47,8 +47,11 @@ pub const ParsedHead = struct {
     path_len: u16,
     query_start: u16, // 0 when no query string. Check query_len instead.
     query_len: u16,
-    header_count: u8,
-    headers: [MAX_HEADERS]HeaderEntry,
+    /// Raw header block: the header lines after the request line, up to but not
+    /// including the terminating CRLF. Scanned on demand by getHeader. Lazy: no
+    /// per-request header array is built, only the framing headers are pre-parsed.
+    headers_start: u16,
+    headers_len: u16,
     body_offset: u16, // byte index of first body byte (header_end + 4)
     keep_alive: bool, // false when Connection: close was sent, true otherwise (HTTP/1.1 default)
     content_length: u64,
@@ -125,15 +128,17 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         path_len = @intCast(target.len);
     }
 
-    // Parse header lines into HeaderEntry slots.
-    // All name/value positions are absolute offsets into buf (= into head_buf since head_buf = buf[0..header_end]).
-    var headers: [MAX_HEADERS]HeaderEntry = undefined;
+    // Scan header lines once to pre-parse the framing headers and enforce the
+    // header-count limit. Individual headers are NOT stored: getHeader rescans the
+    // raw block on demand (lazy parseHead), which keeps ParsedHead small and skips
+    // the per-request header-array fill on the hot path.
+    const headers_start: usize = first_nl + 1;
     var header_count: u8 = 0;
     var keep_alive = true; // HTTP/1.1 default
     var content_length: u64 = 0;
     var chunked = false;
 
-    var pos: usize = first_nl + 1;
+    var pos: usize = headers_start;
     while (pos < head_buf.len) {
         // Vectorized scan for the line's '\n', then step back over the '\r'.
         const nl = std.mem.indexOfScalarPos(u8, head_buf, pos, '\n') orelse head_buf.len;
@@ -146,22 +151,14 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
             continue;
         };
 
+        if (header_count >= max_headers) return error.TooManyHeaders;
+        header_count += 1;
+
         // Skip colon + leading whitespace for value.
         var val_off = colon + 1;
         while (val_off < line.len and line[val_off] == ' ') val_off += 1;
 
-        if (header_count >= max_headers) return error.TooManyHeaders;
-        const name_len: u8 = @intCast(colon);
-        const val_len: u16 = @intCast(line.len - val_off);
-        headers[header_count] = .{
-            .name_start = @intCast(pos),
-            .name_len = name_len,
-            .value_start = @intCast(pos + val_off),
-            .value_len = val_len,
-        };
-        header_count += 1;
-
-        // Pre-parse known headers to avoid repeat scans on the hot path.
+        // Pre-parse the framing headers to avoid rescanning them on the hot path.
         const name = line[0..colon];
         const value = line[val_off..];
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
@@ -181,13 +178,48 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         .path_len = path_len,
         .query_start = query_start,
         .query_len = query_len,
-        .header_count = header_count,
-        .headers = headers,
+        .headers_start = @intCast(headers_start),
+        .headers_len = @intCast(if (headers_start < head_buf.len) head_buf.len - headers_start else 0),
         .body_offset = @intCast(header_end + 4),
         .keep_alive = keep_alive,
         .content_length = content_length,
         .chunked = chunked,
     };
+}
+
+/// Look up a request header value by name (case-insensitive), scanning the raw
+/// header block on demand. The lazy counterpart to the old per-request header
+/// array: nothing is stored at parse time, the block is rescanned per lookup.
+///
+/// Param:
+/// head - ParsedHead
+/// buf - []const u8 (the read buffer the offsets point into)
+/// name - []const u8 (header name, case-insensitive)
+///
+/// Return:
+/// - the header value with leading optional whitespace trimmed, or null when absent
+pub fn getHeader(head: ParsedHead, buf: []const u8, name: []const u8) ?[]const u8 {
+    if (head.headers_len == 0) return null;
+
+    const block = buf[head.headers_start..][0..head.headers_len];
+    var pos: usize = 0;
+    while (pos < block.len) {
+        const nl = std.mem.indexOfScalarPos(u8, block, pos, '\n') orelse block.len;
+        const line_end = if (nl > pos and block[nl - 1] == '\r') nl - 1 else nl;
+        const line = block[pos..line_end];
+        pos = nl + 1;
+        if (line.len == 0) continue;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+
+        var val_off = colon + 1;
+        while (val_off < line.len and line[val_off] == ' ') val_off += 1;
+
+        return line[val_off..];
+    }
+
+    return null;
 }
 
 /// Decode HTTP/1.1 chunked transfer encoding.
@@ -254,7 +286,7 @@ test "zix test: parser minimal GET" {
     try std.testing.expectEqual(Method.Code.GET, h.method);
     try std.testing.expectEqualStrings("/", raw[h.path_start..][0..h.path_len]);
     try std.testing.expectEqual(@as(u16, 0), h.query_len);
-    try std.testing.expectEqual(@as(u8, 1), h.header_count);
+    try std.testing.expectEqualStrings("localhost", getHeader(h, raw, "host").?);
     try std.testing.expect(h.keep_alive);
     try std.testing.expectEqual(@as(u64, 0), h.content_length);
 }
@@ -271,17 +303,10 @@ test "zix test: parser header offsets" {
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqual(Method.Code.POST, h.method);
     try std.testing.expectEqual(@as(u64, 5), h.content_length);
-    try std.testing.expectEqual(@as(u8, 2), h.header_count);
-    // First header: Content-Length
-    const header0_name = raw[h.headers[0].name_start..][0..h.headers[0].name_len];
-    const header0_value = raw[h.headers[0].value_start..][0..h.headers[0].value_len];
-    try std.testing.expectEqualStrings("Content-Length", header0_name);
-    try std.testing.expectEqualStrings("5", header0_value);
-    // Second header: X-Foo
-    const header1_name = raw[h.headers[1].name_start..][0..h.headers[1].name_len];
-    const header1_value = raw[h.headers[1].value_start..][0..h.headers[1].value_len];
-    try std.testing.expectEqualStrings("X-Foo", header1_name);
-    try std.testing.expectEqualStrings("bar", header1_value);
+    // Headers are scanned on demand from the raw block (case-insensitive).
+    try std.testing.expectEqualStrings("5", getHeader(h, raw, "content-length").?);
+    try std.testing.expectEqualStrings("bar", getHeader(h, raw, "X-Foo").?);
+    try std.testing.expect(getHeader(h, raw, "missing") == null);
     // Body offset points right after \r\n\r\n
     try std.testing.expectEqualStrings("hello", raw[h.body_offset..]);
 }
