@@ -4,7 +4,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 test "zix integration: TcpServer.init, valid config succeeds and deinit is safe" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     var server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
     });
@@ -12,7 +16,11 @@ test "zix integration: TcpServer.init, valid config succeeds and deinit is safe"
 }
 
 test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and deinit is safe" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     var server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .EPOLL,
@@ -21,7 +29,11 @@ test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and dei
 }
 
 test "zix integration: TcpServer EPOLL, workers governs worker count and pool_size is ignored" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     const server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .EPOLL,
@@ -33,7 +45,11 @@ test "zix integration: TcpServer EPOLL, workers governs worker count and pool_si
 }
 
 test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     const result = zix.Tcp.Server.init(zix.Tcp.echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 0,
     });

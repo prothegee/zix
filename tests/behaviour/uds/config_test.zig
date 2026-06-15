@@ -7,7 +7,11 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix behaviour: UdsServerConfig, kernel_backlog defaults to 128" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Uds.ServerConfig{
+        .io = threaded.io(),
         .path = "/tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
@@ -15,7 +19,11 @@ test "zix behaviour: UdsServerConfig, kernel_backlog defaults to 128" {
 }
 
 test "zix behaviour: UdsServerConfig, max_recv_buf defaults to 4096" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Uds.ServerConfig{
+        .io = threaded.io(),
         .path = "/tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
