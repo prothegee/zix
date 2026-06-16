@@ -286,8 +286,8 @@ try server.run();
 | `dispatch_model = .MIXED` | N accept, io.async() | N accept threads, each dispatching via io.async() |
 | `workers = 0` | cpu_count threads | used by `.POOL`, `.MIXED`, and `.EPOLL` (for `zix.Http` and `zix.Http1`) |
 | `workers = N` | N threads | explicit override for `.POOL`, `.MIXED`, and `.EPOLL` (for `zix.Http` and `zix.Http1`) |
-| `pool_size = 0` | `max(10, cpu_count * 2)` | pool thread count for `.POOL`; worker count for `.EPOLL` in `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
-| `pool_size = N` | N pool or mux workers | explicit size for `.POOL`; explicit EPOLL worker count for `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = 0` | `max(10, cpu_count * 2)` | pool thread count for `.POOL`. Worker count for `.EPOLL` in `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = N` | N pool or mux workers | explicit size for `.POOL`. Explicit EPOLL worker count for `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
 
 ---
 
@@ -301,7 +301,7 @@ try server.run();
 | Pool threads | yes (`pool_size`) | no | no | no |
 | `SO_REUSEPORT` | yes | no | yes | yes (per-worker listener, Http only) |
 | `workers` field used | yes | no (ignored) | yes | yes (Http/Http1 only) |
-| `pool_size` field used | yes | no (ignored) | no (ignored) | no (Http: ignored); yes (gRPC/FIX/TCP) |
+| `pool_size` field used | yes | no (ignored) | no (ignored) | no (Http: ignored). Yes (gRPC/FIX/TCP) |
 | Best for | throughput, high connection counts | SSE, WebSocket, low latency | balanced, multi-accept async | high-throughput HTTP/1 or gRPC on Linux |
 | Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 falls back to .POOL) |
 

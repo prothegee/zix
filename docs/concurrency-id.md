@@ -281,8 +281,8 @@ try server.run();
 | `dispatch_model = .MIXED` | N accept, io.async() | N accept thread, masing-masing mendispatch via io.async() |
 | `workers = 0` | cpu_count thread | digunakan oleh `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
 | `workers = N` | N thread | override eksplisit untuk `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
-| `pool_size = 0` | `max(10, cpu_count * 2)` | jumlah pool thread untuk `.POOL`; jumlah worker EPOLL untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
-| `pool_size = N` | N pool atau mux worker | ukuran eksplisit untuk `.POOL`; jumlah worker EPOLL eksplisit untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = 0` | `max(10, cpu_count * 2)` | jumlah pool thread untuk `.POOL`. Jumlah worker EPOLL untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `pool_size = N` | N pool atau mux worker | ukuran eksplisit untuk `.POOL`. Jumlah worker EPOLL eksplisit untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
 
 ---
 
@@ -296,7 +296,7 @@ try server.run();
 | Pool thread | ada (`pool_size`) | tidak ada | tidak ada | tidak ada |
 | `SO_REUSEPORT` | ya | tidak | ya | ya (listener per-worker, Http only) |
 | Field `workers` digunakan | ya | tidak (diabaikan) | ya | ya (Http/Http1 only) |
-| Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (Http: diabaikan); ya (gRPC/FIX/TCP) |
+| Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (Http: diabaikan). Ya (gRPC/FIX/TCP) |
 | Terbaik untuk | throughput, jumlah koneksi tinggi | SSE, WebSocket, latensi rendah | balanced, multi-accept async | HTTP/1 atau gRPC throughput tinggi di Linux |
 | Tersedia di | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 fallback ke .POOL) |
 
