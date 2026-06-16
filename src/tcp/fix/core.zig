@@ -295,7 +295,7 @@ pub const FixRoute = struct {
 // --------------------------------------------------------- //
 // Framed-engine response sink (ADR-037 Phase 4 extension). While a sink is
 // installed (tl_resp_sink, the .URING ring path), FIX replies stage into it and
-// coalesce into one ring send; otherwise they go straight to the fd (the blocking
+// coalesce into one ring send, otherwise they go straight to the fd (the blocking
 // serveConn path), preserving the existing behavior.
 
 fn rawFixWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
@@ -631,7 +631,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
 // --------------------------------------------------------- //
 
 /// Per-connection FIX session state for the .URING ring path. seq_out is the
-/// outbound sequence number; peer_comp_id is the peer's SenderCompID captured at
+/// outbound sequence number, peer_comp_id is the peer's SenderCompID captured at
 /// Logon. Lives on the ring connection slot across recv completions.
 pub const FixRingState = struct {
     seq_out: u32 = 1,
