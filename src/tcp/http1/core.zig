@@ -410,6 +410,36 @@ fn statusPhrase(code: u16) []const u8 {
     };
 }
 
+/// Comptime-baked "HTTP/1.1 <code> <phrase>\r\n" status line for the known codes,
+/// so the response builder emits the whole line in one copy instead of
+/// assembling it from five pieces per request. Returns "" for an unknown code,
+/// where the caller falls back to the piecewise build. Byte-identical to that
+/// build for every known code.
+fn statusLine(code: u16) []const u8 {
+    return switch (code) {
+        100 => "HTTP/1.1 100 Continue\r\n",
+        200 => "HTTP/1.1 200 OK\r\n",
+        201 => "HTTP/1.1 201 Created\r\n",
+        204 => "HTTP/1.1 204 No Content\r\n",
+        206 => "HTTP/1.1 206 Partial Content\r\n",
+        301 => "HTTP/1.1 301 Moved Permanently\r\n",
+        302 => "HTTP/1.1 302 Found\r\n",
+        304 => "HTTP/1.1 304 Not Modified\r\n",
+        400 => "HTTP/1.1 400 Bad Request\r\n",
+        401 => "HTTP/1.1 401 Unauthorized\r\n",
+        403 => "HTTP/1.1 403 Forbidden\r\n",
+        404 => "HTTP/1.1 404 Not Found\r\n",
+        405 => "HTTP/1.1 405 Method Not Allowed\r\n",
+        408 => "HTTP/1.1 408 Request Timeout\r\n",
+        416 => "HTTP/1.1 416 Range Not Satisfiable\r\n",
+        431 => "HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        500 => "HTTP/1.1 500 Internal Server Error\r\n",
+        501 => "HTTP/1.1 501 Not Implemented\r\n",
+        503 => "HTTP/1.1 503 Service Unavailable\r\n",
+        else => "",
+    };
+}
+
 fn formatHttpDate(secs: u64, buf: []u8) []u8 {
     const ep = std.time.epoch;
     const es = ep.EpochSeconds{ .secs = secs };
@@ -503,12 +533,19 @@ fn appendBytes(buf: []u8, pos: usize, s: []const u8) usize {
 /// buf must be at least 256 bytes. Returns the number of bytes written.
 fn buildSimpleHeaderInto(buf: []u8, status: u16, content_type: []const u8, body_len: usize) usize {
     var pos: usize = 0;
-    pos = appendBytes(buf, pos, "HTTP/1.1 ");
-    pos = appendStatusCode(buf, pos, status);
-    buf[pos] = ' ';
-    pos += 1;
-    pos = appendBytes(buf, pos, statusPhrase(status));
-    pos = appendBytes(buf, pos, "\r\n");
+
+    const line = statusLine(status);
+    if (line.len > 0) {
+        pos = appendBytes(buf, pos, line);
+    } else {
+        pos = appendBytes(buf, pos, "HTTP/1.1 ");
+        pos = appendStatusCode(buf, pos, status);
+        buf[pos] = ' ';
+        pos += 1;
+        pos = appendBytes(buf, pos, statusPhrase(status));
+        pos = appendBytes(buf, pos, "\r\n");
+    }
+
     if (content_type.len > 0) {
         pos = appendBytes(buf, pos, "Content-Type: ");
         pos = appendBytes(buf, pos, content_type);
@@ -1182,6 +1219,26 @@ test "zix http1: buildSimpleHeaderInto omits Content-Type when empty" {
     const hdr = buf[0..len];
     try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Type") == null);
     try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Length: 0\r\n") != null);
+}
+
+test "zix http1: buildSimpleHeaderInto baked status line is byte-identical across paths" {
+    const saved = tl_send_date;
+    tl_send_date = false;
+    defer tl_send_date = saved;
+
+    var buf: [HEADER_BUF_SIZE]u8 = undefined;
+
+    // Known code: baked one-copy status line.
+    const a = buildSimpleHeaderInto(&buf, 200, "text/plain", 2);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n", buf[0..a]);
+
+    // Another known code, non-200.
+    const b = buildSimpleHeaderInto(&buf, 404, "text/plain", 9);
+    try std.testing.expectEqualStrings("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\n", buf[0..b]);
+
+    // Unknown code: piecewise fallback must match the legacy bytes exactly.
+    const c = buildSimpleHeaderInto(&buf, 599, "text/plain", 0);
+    try std.testing.expectEqualStrings("HTTP/1.1 599 Unknown\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n", buf[0..c]);
 }
 
 test "zix http1: writeSimple builds header directly into active sink without hdr_buf bounce" {

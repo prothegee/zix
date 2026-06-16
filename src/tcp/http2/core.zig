@@ -434,8 +434,17 @@ fn dispatchStream(comptime routes: []const Route, s: *Stream, fd: std.posix.fd_t
     var method: []const u8 = "GET";
     var path: []const u8 = "/";
     for (s.headers[0..s.header_count]) |h| {
-        if (std.mem.eql(u8, h.name, ":method")) method = h.value;
-        if (std.mem.eql(u8, h.name, ":path")) path = h.value;
+        // The two pseudo-headers have distinct lengths (":path" 5, ":method" 7),
+        // so dispatch on length first and do at most one compare per header.
+        switch (h.name.len) {
+            5 => if (std.mem.eql(u8, h.name, ":path")) {
+                path = h.value;
+            },
+            7 => if (std.mem.eql(u8, h.name, ":method")) {
+                method = h.value;
+            },
+            else => {},
+        }
     }
     Router(routes).dispatch(method, path, s.headers[0..s.header_count], s.body[0..s.body_len], fd, s.id);
 }

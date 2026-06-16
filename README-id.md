@@ -692,10 +692,15 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
+---
+
 __*In the nutshell:*__
 - Looking for high throughput? Use `.EPOLL` or `.URING`.
 - Looking for consistent latency? Use `.ASYNC`.
 - For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
+
+> Dalam banyak kasus untuk throughput tinggi, URING umumnya unggul dalam efisiensi CPU & RAM,
+> Namun dalam beberapa kasus, kinerjanya bisa berbeda, lihat bagian benchmark untuk referensi.
 
 **Kapan digunakan:** model dispatch adalah satu knob yang membentuk ulang seluruh server. Pakai `.ASYNC` saat latensi dan koneksi berumur panjang (SSE, WebSocket) penting, `.POOL` / `.MIXED` untuk throughput mentah di platform mana pun, dan `.EPOLL` / `.URING` di Linux untuk jumlah koneksi tertinggi dengan biaya per-request terendah. Di mesin ini `.URING` setara `.EPOLL` pada throughput dan hanya menang pada cache locality, jadi default ke `.EPOLL` dan beralih ke `.URING` untuk beban sustained dan pipelined.
 
@@ -1820,87 +1825,81 @@ RAM: 32 GB
 LIGHTBENCH: 6/12 Threads
 Tested Using: `./benchmark-httparena-lite*`
 
-<details>
-<summary>zix 0.4.x EPOLL</summary>
+> *Untuk melihat benchmark terbaru, kunjungi HttpArena.*
 
-Http/1.1 <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/875) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
+<details>
+<summary>zix.Http1 0.4.x EPOLL</summary>
+
+HTTP/1.1 <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| baseline | 512 | 585,239 | 291.0% | 106MiB |
-| baseline | 4096 | 454,950 | 281.0% | 297MiB |
-| pipelined | 512 | 7,156,160 | 325.5% | 110MiB |
-| pipelined | 4096 | 5,602,430 | 263.6% | 321MiB |
-| limited-conn | 512 | 363,584 | 282.6% | 127MiB |
-| limited-conn | 4096 | 302,312 | 225.2% | 402MiB |
-| json | 4096 | 290,692 | 231.5% | 384MiB |
-| upload | 32 | 2,295 | 143.4% | 100MiB |
-| upload | 256 | 2,260 | 121.4% | 118MiB |
-| static | 1024 | 222,193 | 168.6% | 154MiB |
-| static | 4096 | 188,936 | 158.3% | 349MiB |
-| static | 6800 | 186,193 | 173.8% | 533MiB |
+| baseline | 512 | 614,416 | 281.5% | 118MiB |
+| baseline | 4096 | 445,136 | 242.7% | 321MiB |
+| pipelined | 512 | 7,682,896 | 374.6% | 113MiB |
+| pipelined | 4096 | 5,611,766 | 260.1% | 321MiB |
+| limited-conn | 512 | 372,984 | 289.5% | 120MiB |
+| limited-conn | 4096 | 308,156 | 222.8% | 376MiB |
+| json | 4096 | 297,697 | 231.2% | 397MiB |
+| upload | 32 | 2,309 | 124.6% | 94MiB |
+| upload | 256 | 2,285 | 113.7% | 119MiB |
+| static | 1024 | 228,303 | 166.7% | 154MiB |
+| static | 4096 | 191,737 | 194.2% | 341MiB |
+| static | 6800 | 189,817 | 203.8% | 522MiB |
 
 WebSocket <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/872) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| echo-ws | 512 | 628,334 | 194.0% | 265MiB |
-| echo-ws | 4096 | 467,031 | 164.7% | 67MiB |
-| echo-ws-pipeline | 512 | 9,219,340 | 259.3% | 289MiB |
-| echo-ws-pipeline | 4096 | 7,052,780 | 234.2% | 2MiB |
+| echo-ws | 512 | 609,513 | 252.1% | 289MiB |
+| echo-ws | 4096 | 468,273 | 218.1% | 2MiB |
+| echo-ws-pipeline | 512 | 9,247,302 | 262.1% | 274MiB |
+| echo-ws-pipeline | 4096 | 6,904,938 | 225.3% | 2MiB |
 
 gRPC <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| unary-grpc | 1024 | 1,228,023 | 408.1% | 994MiB |
-| stream-grpc | 64 | 778 | 10.1% | 58MiB |
+| unary-grpc | 1024 | 1,226,804 | 440.1% | 837MiB |
+| stream-grpc | 64 | 758 | 9.8% | 51MiB |
 
 </details>
 
 <details>
-<summary>zix 0.4.x URING</summary>
+<summary>zix.Http1 0.4.x URING</summary>
 
-Http/1.1 <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/875) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
+HTTP/1.1 <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| baseline | 512 | 651,208 | 325.0% | 40MiB |
-| baseline | 4096 | 455,351 | 245.6% | 178MiB |
-| pipelined | 512 | 7,822,582 | 311.1% | 57MiB |
-| pipelined | 4096 | 5,570,960 | 256.1% | 297MiB |
-| limited-conn | 512 | 310,628 | 209.1% | 52MiB |
-| limited-conn | 4096 | 296,074 | 253.1% | 294MiB |
-| json | 4096 | 275,396 | 267.3% | 182MiB |
-| upload | 32 | 2,306 | 117.7% | 33MiB |
-| upload | 256 | 2,284 | 115.5% | 56MiB |
-| static | 1024 | 227,468 | 198.0% | 71MiB |
-| static | 4096 | 190,778 | 166.0% | 183MiB |
-| static | 6800 | 188,446 | 178.7% | 317MiB |
+| baseline | 512 | 635,878 | 317.9% | 37MiB |
+| baseline | 4096 | 446,622 | 251.2% | 283MiB |
+| pipelined | 512 | 7,560,083 | 356.4% | 35MiB |
+| pipelined | 4096 | 5,564,217 | 255.6% | 292MiB |
+| limited-conn | 512 | 330,187 | 232.6% | 50MiB |
+| limited-conn | 4096 | 288,613 | 250.1% | 235MiB |
+| json | 4096 | 276,378 | 242.8% | 229MiB |
+| upload | 32 | 2,327 | 135.2% | 32MiB |
+| upload | 256 | 2,294 | 112.4% | 44MiB |
+| static | 1024 | 224,561 | 169.5% | 60MiB |
+| static | 4096 | 189,983 | 195.8% | 192MiB |
+| static | 6800 | 187,713 | 178.4% | 313MiB |
 
 WebSocket <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/872) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| echo-ws | 512 | 661,699 | 175.2% | 53MiB |
-| echo-ws | 4096 | 463,651 | 204.1% | 259MiB |
-| echo-ws-pipeline | 512 | 9,126,902 | 178.6% | 45MiB |
-| echo-ws-pipeline | 4096 | 6,588,869 | 212.0% | 214MiB |
+| echo-ws | 512 | 659,722 | 175.3% | 52MiB |
+| echo-ws | 4096 | 465,203 | 203.3% | 209MiB |
+| echo-ws-pipeline | 512 | 9,281,192 | 245.1% | 60MiB |
+| echo-ws-pipeline | 4096 | 6,594,320 | 211.1% | 271MiB |
 
 gRPC <br>
-[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
-[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
-| unary-grpc | 1024 | 1,256,889 | 453.8% | 848MiB |
-| stream-grpc | 64 | 784 | 12.9% | 61MiB |
+| unary-grpc | 1024 | 1,239,053 | 415.9% | 856MiB |
+| stream-grpc | 64 | 771 | 11.0% | 83MiB |
 
 </details>
+
+[Implementasi zix.Http1 HTTP/1.1](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix)
+[Implementasi zix.Http1 WebSocket](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws)
+[Implementasi zix.Http1 gRPC Unary & Stream](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc)
 
 <br>
 

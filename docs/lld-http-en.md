@@ -258,10 +258,10 @@ Starts at 4 slots, doubles on each overflow, capped at `max_headers` (from `Head
       status line: Status.statusLine(code) -> @memcpy pre-built string for common codes
                    uncommon codes: bufPrint "HTTP/1.1 {d} {s}\r\n"
       if status != 204 No Content:
-          if content_type set: "Content-Type: {ct}\r\n"
+          if content_type set: "Content-Type: {ct}\r\n"  // @memcpy prefix + value, no std.fmt
           "Content-Length: {N}\r\n"  // hand-rolled writeDecimal, no std.fmt
       if keep_alive set: "Connection: keep-alive\r\n" or "Connection: close\r\n"
-      "Date: {date_cache}\r\n"
+      "Date: {date_cache}\r\n"  // @memcpy prefix + value, no std.fmt
 2. Fast path (no extra headers AND body fits in remaining buffer space):
       append "\r\n" + body into the same 512-byte buffer
       one writeAll + flush // single syscall for most responses
@@ -272,6 +272,8 @@ Starts at 4 slots, doubles on each overflow, capped at `max_headers` (from `Head
       writeAll(body)
       flush()
 ```
+
+Content-Type and Date are written with `@memcpy` of the literal prefix plus the value (not `bufPrint`), so a per-response `send()` no longer enters the `std.Io.Writer` formatting path. `buildResponse` (the zero-copy serializer the `.EPOLL` / `.URING` sink uses) produces byte-identical output the same way.
 
 ### stream(): SSE header write format
 

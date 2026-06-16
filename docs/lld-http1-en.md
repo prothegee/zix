@@ -61,6 +61,8 @@ GZIP_OUT_SIZE = 256 * 1024  // writeGzip output buffer
 
 All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.{ head, body_offset }` where `body_offset` is the first byte after the blank line.
 
+`parseGetFastPath` (server.zig) is the keep-alive fast path for plain `GET` requests: it confirms the `"GET "` prefix and the `"HTTP/1.1"` version with single integer loads (`std.mem.readInt` of one `u32` and one `u64`, not `mem.eql`), extracts path and query by arithmetic, and only falls back to the full `parseHead` when `Connection: close` may be present. Same `ParsedHead` shape, no per-header scan.
+
 ### recvHead()
 
 Bulk-read into `buf` until `\r\n\r\n` is found. `pre_filled` bytes carried over from the previous keep-alive iteration are scanned first. On each read the scan restarts at `filled - 3` so a CRLFCRLF split across reads is still found. `error.HeaderTooLarge` when `buf` fills without a blank line, `error.Closed` on EOF or read failure.
@@ -135,7 +137,7 @@ Fixed headers are staged into a caller-provided 256-byte buffer with hand-rolled
 "\r\nDate: " + cachedDate() + "\r\n\r\n"
 ```
 
-`statusPhrase` covers the 20 common codes, anything else prints `Unknown`. `appendStatusCode` and `appendDec` are manual digit writers.
+For a known status the whole `"HTTP/1.1 <code> <phrase>\r\n"` line is emitted in one `memcpy` from a comptime-baked `statusLine` table, instead of assembling it from five pieces (`"HTTP/1.1 "` + `appendStatusCode` + `' '` + `statusPhrase` + `"\r\n"`) per response. `statusLine` returns `""` for an unknown code, where the build falls back to the piecewise path above, byte-identical to the baked line. `statusPhrase` covers the same common codes (anything else prints `Unknown`); `appendStatusCode` and `appendDec` are the manual digit writers for that fallback.
 
 **Per-thread date cache:**
 
