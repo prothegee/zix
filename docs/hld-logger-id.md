@@ -77,10 +77,10 @@ pub const Logger = @import("logger/logger.zig").Logger;
 ### Penurunan Level
 
 - `access()`: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR, lainnya=DEBUG.
-- `conn()`: `err == null` -> INFO; `err != null` -> WARN.
+- `conn()`: `err == null` -> INFO, `err != null` -> WARN.
 - `packet()`, `frame()`: sama dengan `conn()`.
 - `session()`: selalu INFO.
-- `rpc()`: `grpc_status == 0` -> INFO; `grpc_status != 0` -> WARN.
+- `rpc()`: `grpc_status == 0` -> INFO, `grpc_status != 0` -> WARN.
 - `system()`: pemanggil menyediakan level secara eksplisit.
 
 ---
