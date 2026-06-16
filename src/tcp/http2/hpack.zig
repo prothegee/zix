@@ -447,7 +447,7 @@ pub const HpackDecoder = struct {
 
     // Repack live dyn[] entries contiguously at the start of dyn_buf.
     // Called when dyn_buf_pos + needed > dyn_buf.len after eviction freed entries.
-    // Safe: entries are stored oldest (low addr) -> newest (high addr); compaction
+    // Safe: entries are stored oldest (low addr) -> newest (high addr). Compaction
     // writes oldest first at new_pos=0 so source always >= dest, no overlap.
     fn compactDynBuf(self: *HpackDecoder) void {
         var new_pos: usize = 0;
