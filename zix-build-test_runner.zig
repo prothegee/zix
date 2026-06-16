@@ -75,6 +75,10 @@ pub fn addSteps(
         .{ "test-runner-http1-websocket-uring", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-uring", "examples/http1_websocket_uring.zig", "9113", "/ws", "", "" },
         // http1 response-cache runner (unique port; small body so the GET is bounded)
         .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9112", "/cache?kb=1", "", "ok" },
+        // http1 over-large request-body drain runners (EPOLL + URING only; the
+        // other models truncate the body instead of draining it)
+        .{ "test-runner-http1-drain-epoll", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-epoll", "examples/http1_basic_4_epoll.zig", "9100", "", "", "" },
+        .{ "test-runner-http1-drain-uring", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-uring", "examples/http1_basic_5_uring.zig", "9100", "", "", "" },
         // grpc location runners
         .{ "test-runner-grpc-location-async", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-async", "examples/grpc_location_server_1_async.zig", "10101", "", "", "" },
         .{ "test-runner-grpc-location-pool", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig", "10101", "", "", "" },
