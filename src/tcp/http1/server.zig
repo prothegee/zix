@@ -564,14 +564,14 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
 /// Returns null when the request is not a GET or the format is unexpected.
 fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
     if (rem.len < 16) return null;
-    if (rem[0] != 'G' or rem[1] != 'E' or rem[2] != 'T' or rem[3] != ' ') return null;
+    if (std.mem.readInt(u32, rem[0..4], .little) != comptime std.mem.readInt(u32, "GET ", .little)) return null;
 
     const line_end = std.mem.indexOfScalarPos(u8, rem, 4, '\r') orelse return null;
 
     // Minimum for "GET / HTTP/1.1": line_end >= 14, last 9 chars = " HTTP/1.1"
     if (line_end < 14) return null;
     if (rem[line_end - 9] != ' ') return null;
-    if (!std.mem.eql(u8, rem[line_end - 8 .. line_end], "HTTP/1.1")) return null;
+    if (std.mem.readInt(u64, rem[line_end - 8 ..][0..8], .little) != comptime std.mem.readInt(u64, "HTTP/1.1", .little)) return null;
 
     const full_path = rem[4 .. line_end - 9];
     var path = full_path;
@@ -2147,6 +2147,20 @@ test "zix http1: parseGetFastPath rejects HTTP/1.0" {
     const req = "GET / HTTP/1.0\r\n\r\n";
     const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
     try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(req, header_end));
+}
+
+test "zix http1: parseGetFastPath integer compare matches the full word" {
+    // Method differs only in the trailing byte ("GETX" vs "GET ").
+    const bad_method = "GETX/ HTTP/1.1\r\n\r\n";
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(bad_method, std.mem.indexOf(u8, bad_method, "\r\n\r\n").?));
+
+    // Version differs only in a middle byte ("HXTP/1.1" vs "HTTP/1.1").
+    const bad_version = "GET / HXTP/1.1\r\n\r\n";
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(bad_version, std.mem.indexOf(u8, bad_version, "\r\n\r\n").?));
+
+    // The exact words still match.
+    const good = "GET / HTTP/1.1\r\n\r\n";
+    try std.testing.expect(parseGetFastPath(good, std.mem.indexOf(u8, good, "\r\n\r\n").?) != null);
 }
 
 test "zix http1: parseGetFastPath raw_headers covers host line" {
