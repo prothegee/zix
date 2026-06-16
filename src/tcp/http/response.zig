@@ -174,8 +174,17 @@ pub const Response = struct {
         const skip_body_headers = self.status == .NO_CONTENT;
         if (!skip_body_headers) {
             if (self.content_type) |ct| {
-                const s = try std.fmt.bufPrint(fixed[offset..], "Content-Type: {s}\r\n", .{ct.asString()});
-                offset += s.len;
+                const ct_str = ct.asString();
+                const ct_prefix = "Content-Type: ";
+                if (offset + ct_prefix.len + ct_str.len + 2 > fixed.len) return error.BufferTooSmall;
+
+                @memcpy(fixed[offset..][0..ct_prefix.len], ct_prefix);
+                offset += ct_prefix.len;
+                @memcpy(fixed[offset..][0..ct_str.len], ct_str);
+                offset += ct_str.len;
+                fixed[offset] = '\r';
+                fixed[offset + 1] = '\n';
+                offset += 2;
             }
             const cl_prefix = "Content-Length: ";
             if (offset + cl_prefix.len + 22 > fixed.len) return error.BufferTooSmall;
@@ -196,8 +205,16 @@ pub const Response = struct {
             offset += conn.len;
         }
         if (date_value.len > 0) {
-            const s = try std.fmt.bufPrint(fixed[offset..], "Date: {s}\r\n", .{date_value});
-            offset += s.len;
+            const date_prefix = "Date: ";
+            if (offset + date_prefix.len + date_value.len + 2 > fixed.len) return error.BufferTooSmall;
+
+            @memcpy(fixed[offset..][0..date_prefix.len], date_prefix);
+            offset += date_prefix.len;
+            @memcpy(fixed[offset..][0..date_value.len], date_value);
+            offset += date_value.len;
+            fixed[offset] = '\r';
+            fixed[offset + 1] = '\n';
+            offset += 2;
         }
 
         // Fast path: no extra headers AND body fits in the remaining buffer, one write().
@@ -272,7 +289,7 @@ pub const Response = struct {
 
         var fixed: [256]u8 = undefined;
         var offset: usize = 0;
-        const sse_hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n";
+        const sse_hdr = "HTTP/1.1 200 Ok\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n";
         @memcpy(fixed[0..sse_hdr.len], sse_hdr);
         offset += sse_hdr.len;
         if (date_value.len > 0) {
@@ -324,8 +341,17 @@ pub const Response = struct {
         const skip_body_headers = self.status == .NO_CONTENT;
         if (!skip_body_headers) {
             if (self.content_type) |ct| {
-                const s = std.fmt.bufPrint(out[offset..], "Content-Type: {s}\r\n", .{ct.asString()}) catch return null;
-                offset += s.len;
+                const ct_str = ct.asString();
+                const ct_prefix = "Content-Type: ";
+                if (offset + ct_prefix.len + ct_str.len + 2 > out.len) return null;
+
+                @memcpy(out[offset..][0..ct_prefix.len], ct_prefix);
+                offset += ct_prefix.len;
+                @memcpy(out[offset..][0..ct_str.len], ct_str);
+                offset += ct_str.len;
+                out[offset] = '\r';
+                out[offset + 1] = '\n';
+                offset += 2;
             }
 
             const cl_prefix = "Content-Length: ";
@@ -349,8 +375,16 @@ pub const Response = struct {
         }
 
         if (date_value.len > 0) {
-            const s = std.fmt.bufPrint(out[offset..], "Date: {s}\r\n", .{date_value}) catch return null;
-            offset += s.len;
+            const date_prefix = "Date: ";
+            if (offset + date_prefix.len + date_value.len + 2 > out.len) return null;
+
+            @memcpy(out[offset..][0..date_prefix.len], date_prefix);
+            offset += date_prefix.len;
+            @memcpy(out[offset..][0..date_value.len], date_value);
+            offset += date_value.len;
+            out[offset] = '\r';
+            out[offset + 1] = '\n';
+            offset += 2;
         }
 
         if (self.extra_buf) |extra| {
@@ -930,4 +964,24 @@ test "zix http: send() into an installed sink is byte-identical to a direct send
     try res_sink.send("{\"ok\":true}");
 
     try std.testing.expectEqualStrings(direct[0..nd], sink.buf[0..sink.len]);
+}
+
+test "zix http: buildResponse emits Content-Type and Date without bufPrint, byte-exact" {
+    var res = Response.init(-1, true, undefined, std.testing.allocator, 0);
+    res.status = .OK;
+    res.content_type = .TEXT_PLAIN;
+    res.date_cache = "Mon, 01 Jan 2026 00:00:00 GMT";
+
+    var out: [512]u8 = undefined;
+    const n = res.buildResponse("ok", &out).?;
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nDate: Mon, 01 Jan 2026 00:00:00 GMT\r\n\r\nok",
+        out[0..n],
+    );
+
+    // No content-type and no date: both branches skip cleanly.
+    var bare = Response.init(-1, true, undefined, std.testing.allocator, 0);
+    bare.status = .OK;
+    const m = bare.buildResponse("hi", &out).?;
+    try std.testing.expectEqualStrings("HTTP/1.1 200 Ok\r\nContent-Length: 2\r\n\r\nhi", out[0..m]);
 }
