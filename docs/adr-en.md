@@ -10,7 +10,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** The server must handle many concurrent connections without blocking on I/O. Zig 0.16 provides `std.Io` as an opaque event loop abstraction over OS facilities (epoll, kqueue, io_uring, etc.). The alternative was raw OS threads with explicit synchronization.
 
-**Decision:** Accept `std.Io` as a parameter in `zix.Http.Server` and `zix.Udp.Server`. The caller owns and provides the backend (`process.io` for runtime-managed or `std.Io.Threaded` for an explicit cap). The server uses `io.concurrent()` in model 1; in model 2 the pool threads call `handleConnection` directly with a `std.Io` derived from `std.Io.Threaded`.
+**Decision:** Accept `std.Io` as a parameter in `zix.Http.Server` and `zix.Udp.Server`. The caller owns and provides the backend (`process.io` for runtime-managed or `std.Io.Threaded` for an explicit cap). The server uses `io.concurrent()` in model 1. In model 2 the pool threads call `handleConnection` directly with a `std.Io` derived from `std.Io.Threaded`.
 
 **Consequences:**
 - Caller controls the concurrency model. zix does not own or deinit the backend.
@@ -336,7 +336,7 @@ SSE connections are long-lived (seconds to minutes per stream). `.POOL`'s blocki
 
 **Consequences:**
 - No change to `Response.send()`: existing handlers are unaffected.
-- `res.streaming` defaults to `false`; only SSE handlers set it to `true`.
+- `res.streaming` defaults to `false`. Only SSE handlers set it to `true`.
 - The `.ASYNC` preference is a usage constraint, not enforced at compile time. Handlers that call `res.stream()` in a `.POOL` server will work but will block pool threads for the stream duration.
 - `SseWriter` is exported from `zix.Http.SseWriter` for handler authors who want to type-annotate the writer.
 
@@ -384,7 +384,7 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 **Decision:** Replace `ArrayList(Route)` with `MultiArrayList(Route)`. Each field (`kind`, `path`, `handler`) is stored in its own contiguous array. Pass 2 iterates only `items(.kind)` with an index, touching `items(.path)[i]` and `items(.handler)[i]` only on a PARAM match. Pass 3 zips `items(.kind)` and `items(.path)` without loading `items(.handler)` until a prefix candidate is confirmed.
 
 **Consequences:**
-- `routes.items.len` becomes `routes.len`; field access becomes `routes.items(.field)[i]`
+- `routes.items.len` becomes `routes.len`. Field access becomes `routes.items(.field)[i]`
 - `init()` simplified: `routes` default-initializes to `.{}`, no explicit `.empty` needed
 - `append()` and `deinit()` signatures are unchanged
 - Unit tests in `router.zig` updated, integration tests and examples unchanged (public API unaffected)
@@ -436,7 +436,7 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 
 **Decision:** Introduce `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` as a named field `dispatch_model: DispatchModel = .POOL` in `HttpServerConfig`. The three models are:
 
-- `.POOL` (default): N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count; `pool_size` controls pool thread count.
+- `.POOL` (default): N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count. `pool_size` controls pool thread count.
 - `.ASYNC`: Single accept thread dispatches each connection via `io.async()`. Preferred for SSE and WebSocket: long-lived connections do not hold pool threads. `workers` and `pool_size` are ignored.
 - `.MIXED`: N accept threads each dispatch via `io.async()` directly, no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
 
@@ -481,7 +481,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Context:** Every server implementation (HTTP, TCP, UDP, UDS, FIX, gRPC) needs a logging layer. `std.debug.print` is unsafe on background OS threads because it routes through `std.Options.debug_io`, a global `Io.Threaded` singleton: calling it from any spawned thread races with the test runner's IPC channel and causes a panic. A logging primitive that is safe on background OS threads without a `std.Io` dependency is required.
 
-**Decision:** Implement `zix.Logger` as a struct with a per-instance spinlock (atomic CAS) protecting a 64 KB write buffer and file descriptor. All I/O uses raw `std.posix.write` (no `std.Io`, no `std.debug.print`). Protocol-specific log methods provide machine-parseable lines without post-processing: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Each server config accepts `logger: ?*Logger = null`; the logger is optional and the server is silent when null.
+**Decision:** Implement `zix.Logger` as a struct with a per-instance spinlock (atomic CAS) protecting a 64 KB write buffer and file descriptor. All I/O uses raw `std.posix.write` (no `std.Io`, no `std.debug.print`). Protocol-specific log methods provide machine-parseable lines without post-processing: `system()`, `access()` (HTTP), `conn()` (TCP), `packet()` (UDP), `frame()` (UDS), `session()` (FIX), `rpc()` (gRPC). Each server config accepts `logger: ?*Logger = null`. The logger is optional and the server is silent when null.
 
 **Consequences:**
 - All log methods are safe to call simultaneously from any OS thread including thread-pool workers, accept threads, and connection handlers.
@@ -724,7 +724,7 @@ A body-size sweep (c512) puts the crossover near 4 KiB: the delta stays inside r
 **Decision:** Add an opt-in, per-worker ResponseCache as a shared module, off by default and scoped to compute-heavy responses, and wire it into `zix.Http1`, `zix.Http`, and `zix.Grpc`. Adopt the same build-once principle for WebSocket broadcast.
 
 - Shared structure in `src/utils/response_cache.zig`: a structure-of-arrays slab (`keys: []u64` open addressing with 0 as the empty sentinel, `meta: []Meta` of `insert_tick_ms` / `len` / `ttl_ms`, and one flat payload slab). Slot count is a power of two indexed by mask. An arena allocates the slab once at init and frees it whole at deinit. A churning cache reuses fixed slots in place, so the arena never grows. Lazy on-access TTL: an entry expires exactly at `insert_tick_ms + ttl_ms`, so `ttl_ms = 0` is never fresh. Expired slots are reused in place by the next store, never zeroed, since zeroing would truncate an open-addressing probe chain. No timer thread is introduced.
-- One cache per worker, never shared, never locked (lock-free by ownership). The invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it. Under `.EPOLL` shared-nothing each worker is exactly that, so the cache is installed there. `.POOL` is also zix-owned and could be wired safely, but each pool thread would hold an independent cache (lower hit rate, N times the memory), so it is deferred. `.ASYNC` and `.MIXED` run handlers on the `std.Io` executor pool that zix does not own, where a task is not pinned to one thread, so a shared cache would need locks and break the lock-free design. In this release the cache is installed under `.EPOLL` only, the other models leave it uninstalled and the API degrades to a plain send.
+- One cache per worker, never shared, never locked (lock-free by ownership). The invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it. Under `.EPOLL` shared-nothing each worker is exactly that, so the cache is installed there. The `.URING` rings are the same (one thread per ring), so the cache is installed there too. `.POOL` is also zix-owned and could be wired safely, but each pool thread would hold an independent cache (lower hit rate, N times the memory), so it is deferred. `.ASYNC` and `.MIXED` run handlers on the `std.Io` executor pool that zix does not own, where a task is not pinned to one thread, so a shared cache would need locks and break the lock-free design. In this release the cache is installed under `.EPOLL` and `.URING`, the other models leave it uninstalled and the API degrades to a plain send.
 - HTTP (`zix.Http1`, `zix.Http`): the key is method, path, and query, and the cached value is the full serialized HTTP response, written verbatim on a hit. `zix.Http1` exposes the explicit pair `cacheLookup` / `cacheStore` plus the fused `writeWithCache`. `zix.Http` exposes `res.serveCached` (lookup then write verbatim) and `res.sendCached` (serialize, write, store), producing bytes identical to a plain `send`.
 - gRPC (`zix.Grpc`, unary): the key is the path plus the request body, and the cached value is the response message, not the framed reply, because HEADERS are HPACK and stream-id stateful. On a hit the message is re-framed for the current stream so HPACK and stream id stay correct. `ctx.serveCached` replays the stored message and finishes with OK, `ctx.sendCached` sends and stores.
 - WebSocket broadcast adopts the same build-once principle rather than a TTL cache: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` serializes the frame once and fans the same bytes out to every fd in a caller-maintained room, skipping a failed write to a dead peer. This is the WS-shaped form of the follow-up, not a keyed cache.
@@ -766,7 +766,7 @@ io_uring roughly halves userspace cycles per request at pipeline depth 1 and cut
 | Stability risk | tracks std internals (the io_uring surface moved across 0.16.x) | depends only on the stable kernel io_uring ABI, not on std internals |
 | Maintenance | low (std maintains the engine) | higher (zix owns the ring lifecycle and edge cases) |
 
-Reasoning for B: the measured win comes from features std does not currently expose through `std.Io` (multishot accept and recv, provided buffer rings), so approach A cannot reach the PoC numbers. The shared-nothing per-worker ring model (one ring, one `SO_REUSEPORT` listener, no shared accept queue) is already the topology the `.EPOLL` path uses, so approach B keeps it intact, while approach A reintroduces a std-owned executor topology zix does not control (the same ownership problem that confines the response cache to `.EPOLL`, ADR-036). Approach B depends only on the stable kernel ABI, so the moving std io_uring surface does not gate it and the work starts on current Zig (0.16.x).
+Reasoning for B: the measured win comes from features std does not currently expose through `std.Io` (multishot accept and recv, provided buffer rings), so approach A cannot reach the PoC numbers. The shared-nothing per-worker ring model (one ring, one `SO_REUSEPORT` listener, no shared accept queue) is already the topology the `.EPOLL` path uses, so approach B keeps it intact, while approach A reintroduces a std-owned executor topology zix does not control (the same ownership problem that confines the response cache to the shared-nothing per-worker models, ADR-036). Approach B depends only on the stable kernel ABI, so the moving std io_uring surface does not gate it and the work starts on current Zig (0.16.x).
 
 Scope of the decision:
 - Topology preserved from `.EPOLL`: thread-per-core, one ring per worker, one `SO_REUSEPORT` listener per worker, no shared accept queue, no cross-thread fd handoff. Process-per-core (fork-per-core) is rejected because it would split the per-worker route tables and response cache out of one address space.
