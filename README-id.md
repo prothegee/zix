@@ -237,7 +237,7 @@ __*2. Lima model dispatch yang dapat dipilih:*__
 - EPOLL (shared-nothing: setiap worker memiliki SO_REUSEPORT listener + epoll instance, level-triggered, tanpa antrian bersama): khusus Linux, terbaik untuk jumlah koneksi tinggi.
 - URING (shared-nothing io_uring: topologi thread-per-core yang sama dengan EPOLL, tetapi completion-based sehingga sebagian besar transisi syscall di-batch ke dalam ring): khusus Linux.
 
-> strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http1, Http, Grpc, dan Fix mengimplementasikan kelimanya secara native di Linux. Http2 tidak punya jalur epoll atau uring native dan melipat (fold) ke POOL.
+> Strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http1, Http, Grpc, dan Fix mengimplementasikan kelimanya secara native di Linux. Http2 tidak punya jalur epoll atau uring native dan melipat (fold) ke POOL.
 
 <br>
 
@@ -245,7 +245,7 @@ __*3. Konfigurasi eksplisit dan flat:*__
 
 Tanpa sub-config bertingkat: setiap field (mis. dispatch_model, max_response_headers: .MINIMAL, pool_size) berada di level teratas dan eksplisit.
 
-> dapat diprediksi sebagai prinsip. Kamu melihat persis apa yang server lakukan tanpa
+> Dapat diprediksi sebagai prinsip. Kamu melihat persis apa yang server lakukan tanpa
 menelusuri default yang diwariskan.
 
 <br>
@@ -289,7 +289,7 @@ Tipe log per protokol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc
 
 __*8. Kesadaran Cache Respons:*__
 
-Response cache opt-in per-worker (ADR-036) yang dibagikan oleh `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Handler membangun respons sekali, engine menyimpannya di bawah key yang diturunkan dari request, dan request cocok berikutnya memutar ulang byte tersimpan tanpa rebuild dan tanpa re-serialization. Data oriented (structure of arrays plus satu flat payload slab), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dengan TTL lazy on-access. Aktif di bawah model shared-nothing `.EPOLL` (`zix.Http1` juga di bawah `.URING`).
+Response cache opt-in per-worker (ADR-036) yang dibagikan oleh `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Handler membangun respons sekali, engine menyimpannya di bawah key yang diturunkan dari request, dan request cocok berikutnya memutar ulang byte tersimpan tanpa rebuild dan tanpa re-serialization. Data oriented (structure of arrays plus satu flat payload slab), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dengan TTL lazy on-access. Aktif di bawah model shared-nothing `.EPOLL` dan `.URING`.
 
 > Alat yang kamu pakai secara sengaja, bukan layer tersembunyi. Menguntungkan di atas body ~4 KiB (JSON berat ~32 KiB terukur +34% throughput) dan zero-regression wash di bawahnya.
 
@@ -449,7 +449,7 @@ Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua exampl
 
 ```sh
 zig build examples                      # bangun setiap example ke zig-out/bin/
-zig-out/bin/example-http1_websocket &   # jalankan satu di background
+./zig-out/bin/example-http1_websocket & # jalankan satu di background
 kill %1                                 # hentikan
 ```
 
@@ -942,7 +942,7 @@ curl -N http://localhost:9010/events
 
 Lihat `examples/http_sse.zig` untuk contoh lengkap dengan halaman HTML yang kompatibel dengan browser, dan `examples/http_sse_client.zig` untuk client yang cocok. Untuk engine `zix.Http1` mentah lihat `examples/http1_sse.zig`.
 
-**Kapan digunakan:** pilih SSE untuk push server satu arah melalui HTTP biasa (stream progres, notifikasi, log tailing, metrik live) saat client tidak perlu mengirim frame balik. Lebih ringan dari WebSocket dan `EventSource` reconnect otomatis. Selalu jalankan di bawah `.ASYNC`; `.POOL` yang blocking akan membakar satu thread per stream terbuka.
+**Kapan digunakan:** pilih SSE untuk push server satu arah melalui HTTP biasa (stream progres, notifikasi, log tailing, metrik live) saat client tidak perlu mengirim frame balik. Lebih ringan dari WebSocket dan `EventSource` reconnect otomatis. Selalu jalankan di bawah `.ASYNC`. `.POOL` yang blocking akan membakar satu thread per stream terbuka.
 
 <br>
 
@@ -1067,7 +1067,7 @@ curl -X POST "http://localhost:9005/upload" \
 
 Lihat `examples/http_static.zig` untuk contoh lengkap yang berfungsi termasuk static serving, range request, dan unggah multipart.
 
-**Kapan digunakan:** aktifkan `public_dir` untuk menyajikan frontend hasil build, aset, atau unduhan dari server yang sama, dengan range request ditangani otomatis. Pakai jalur multipart untuk unggahan pengguna saat kamu mengontrol target penyimpanan. Untuk throughput statis sangat tinggi, CDN atau jalur berbasis `sendfile` tetap menang; ini untuk kemudahan dan aset co-located, bukan CDN file massal.
+**Kapan digunakan:** aktifkan `public_dir` untuk menyajikan frontend hasil build, aset, atau unduhan dari server yang sama, dengan range request ditangani otomatis. Pakai jalur multipart untuk unggahan pengguna saat kamu mengontrol target penyimpanan. Untuk throughput statis sangat tinggi, CDN atau jalur berbasis `sendfile` tetap menang. Ini untuk kemudahan dan aset co-located, bukan CDN file massal.
 
 <br>
 
@@ -1139,7 +1139,7 @@ Apa yang menjadi key dan nilai yang di-cache bergantung pada engine:
 | `zix.Http1`, `zix.Http` | method, path, query | respons HTTP yang sudah di-serialize penuh, ditulis verbatim |
 | `zix.Grpc` (unary) | path, pesan request | pesan respons, di-frame ulang per stream (HPACK dan stream id tetap benar) |
 
-Secara default fitur ini mati. Aktifkan pada dispatch model `.EPOLL`:
+Secara default fitur ini mati. Aktifkan pada dispatch model `.EPOLL` atau `.URING`:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -1170,7 +1170,7 @@ fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.C
 
 Engine `zix.Http1` mentah mengekspos ide yang sama lewat `cacheLookup` dan `writeWithCache`.
 
-Untuk handler gRPC unary, opt-in berada di call context. `ctx.serveCached` memutar ulang pesan reply tersimpan (di-frame ulang untuk stream saat ini dan diselesaikan dengan OK), dan `ctx.sendCached` mengirim sekaligus menyimpan reply. Aktifkan dengan nama field yang sama pada `GrpcServerConfig` (`response_cache`, `cache_max_entries`, dan seterusnya) di bawah `.EPOLL`:
+Untuk handler gRPC unary, opt-in berada di call context. `ctx.serveCached` memutar ulang pesan reply tersimpan (di-frame ulang untuk stream saat ini dan diselesaikan dengan OK), dan `ctx.sendCached` mengirim sekaligus menyimpan reply. Aktifkan dengan nama field yang sama pada `GrpcServerConfig` (`response_cache`, `cache_max_entries`, dan seterusnya) di bawah `.EPOLL` atau `.URING`:
 
 ```zig
 fn sayHello(_: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
@@ -1196,17 +1196,18 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 #### Aturan dan kondisi
 
 - Opt-in saja. Mati secara default, dan handler harus memanggil `res.serveCached` lalu `res.sendCached` (HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `writeWithCache` milik `zix.Http1`.
-- Hanya `.EPOLL` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
+- Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
 - Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
 - Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.
 
-**Mengapa hanya `.EPOLL`:** cache adalah instance thread-local, tidak pernah dibagi dan tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya.
+**Mengapa hanya `.EPOLL` / `.URING`:** cache adalah instance thread-local, tidak pernah dibagi dan tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya. Worker shared-nothing `.EPOLL` dan worker `.URING` one-thread-per-ring sama-sama memenuhinya.
 
 | Model | Menjalankan handler di | Status cache |
 | :- | :- | :- |
 | `.EPOLL` | worker thread shared-nothing milik zix, satu per core | terpasang: lifecycle bersih, satu thread pemilik, jalur yang di-benchmark |
+| `.URING` | ring worker shared-nothing milik zix, satu per core | terpasang: lifecycle satu-thread-pemilik yang sama dengan `.EPOLL` |
 | `.POOL` | pool thread milik zix | layak dan aman, tetapi setiap thread akan memegang cache-nya sendiri (hit rate lebih rendah, N kali memori), sehingga ditunda, tidak dipasang |
 | `.ASYNC`, `.MIXED` | task `io.async()` di executor pool `std.Io`, bukan milik zix | tidak terpasang: tidak ada hook pasang per-thread, dan task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free |
 
@@ -1214,7 +1215,7 @@ Di model mana pun perilakunya aman, hanya tidak aktif: saat cache tidak terpasan
 
 ```mermaid
 flowchart TD
-    A[Request masuk] --> B{response_cache dan EPOLL?}
+    A[Request masuk] --> B{response_cache dan EPOLL/URING?}
     B -- tidak --> P[Plain send]
     B -- ya --> C{serveCached hit dan fresh?}
     C -- ya --> W[Tulis byte cache, tanpa bangun ulang]
@@ -1224,7 +1225,7 @@ flowchart TD
     E -- tidak --> S[sendCached: tulis lalu simpan di bawah key]
 ```
 
-**Kapan digunakan:** nyalakan cache untuk respons panas, berulang, komputasi-berat di atas ~4 KiB (laporan ter-render, agregat JSON besar) yang disajikan di bawah `.EPOLL` (atau `.URING` pada `zix.Http1`). Biarkan mati untuk respons kecil yang kernel-bound, body unik per-request, atau apa pun yang bervariasi pada header atau cookie, di mana ia tidak menambah manfaat. Baca aturan di atas sebelum men-cache apa pun yang sensitif waktu.
+**Kapan digunakan:** nyalakan cache untuk respons panas, berulang, komputasi-berat di atas ~4 KiB (laporan ter-render, agregat JSON besar) yang disajikan di bawah `.EPOLL` atau `.URING`. Biarkan mati untuk respons kecil yang kernel-bound, body unik per-request, atau apa pun yang bervariasi pada header atau cookie, di mana ia tidak menambah manfaat. Baca aturan di atas sebelum men-cache apa pun yang sensitif waktu.
 
 Lihat ADR-036 untuk rasional desain dan angka terukur.
 
@@ -1437,14 +1438,14 @@ var buf: [4096]u8 = undefined;
 const reply = try client.recvMsg(io, &buf);
 ```
 
-**Override argumen CLI** (tanpa rebuild): `initArgs` / `initFramedArgs` adalah `init` / `initFramed` plus parsing `--ip` / `--port` dari `process.minimal.args`, sehingga satu binary yang sudah di-build bisa bind ke address atau port berbeda. Contoh memakai `init` / `initFramed` polos; pakai varian `Args` hanya saat kamu ingin override runtime.
+**Override argumen CLI** (tanpa rebuild): `initArgs` / `initFramedArgs` adalah `init` / `initFramed` plus parsing `--ip` / `--port` dari `process.minimal.args`, sehingga satu binary yang sudah di-build bisa bind ke address atau port berbeda. Contoh memakai `init` / `initFramed` polos. Pakai varian `Args` hanya saat kamu ingin override runtime.
 
 ```zig
 var server = try zix.Tcp.Server.initArgs(myHandler, .{ .io = process.io, .ip = "127.0.0.1", .port = 9300 }, process.minimal.args);
 var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }, io, process.minimal.args);
 ```
 
-**Kapan digunakan:** pakai `zix.Tcp` ketika kamu memiliki protokol wire-nya sendiri: framing biner kustom, RPC privat, proxy, atau probe di mana overhead HTTP/gRPC tidak diinginkan. Pakai handler per-connection (`init`) untuk sesi stateful, request/response atau streaming di mana handler menggerakkan socket. Pakai callback per-frame `initFramed` ketika kerjanya stateless per frame dan kamu ingin ring `.URING` (engine memiliki koneksi, callback tidak pernah blocking). Jika hanya butuh IPC same-host, pilih `zix.Uds`; jika butuh request routing atau browser, pilih `zix.Http1` / `zix.Http`.
+**Kapan digunakan:** pakai `zix.Tcp` ketika kamu memiliki protokol wire-nya sendiri: framing biner kustom, RPC privat, proxy, atau probe di mana overhead HTTP/gRPC tidak diinginkan. Pakai handler per-connection (`init`) untuk sesi stateful, request/response atau streaming di mana handler menggerakkan socket. Pakai callback per-frame `initFramed` ketika kerjanya stateless per frame dan kamu ingin ring `.URING` (engine memiliki koneksi, callback tidak pernah blocking). Jika hanya butuh IPC same-host, pilih `zix.Uds`. Jika butuh request routing atau browser, pilih `zix.Http1` / `zix.Http`.
 
 Lihat `examples/tcp_server_1_async.zig`, `examples/tcp_server_2_pool.zig`, `examples/tcp_server_3_mixed.zig`, `examples/tcp_server_4_epoll.zig`, `examples/tcp_server_5_uring.zig`, `examples/tcp_client.zig`, dan [`docs/hld-tcp-id.md`](docs/hld-tcp-id.md) untuk detail.
 
@@ -1823,8 +1824,8 @@ Tested Using: `./benchmark-httparena-lite*`
 <summary>zix 0.4.x EPOLL</summary>
 
 Http/1.1 <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/875) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/875) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | baseline | 512 | 585,239 | 291.0% | 106MiB |
@@ -1841,8 +1842,8 @@ Http/1.1 <br>
 | static | 6800 | 186,193 | 173.8% | 533MiB |
 
 WebSocket <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/872) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/872) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | echo-ws | 512 | 628,334 | 194.0% | 265MiB |
@@ -1851,8 +1852,8 @@ WebSocket <br>
 | echo-ws-pipeline | 4096 | 7,052,780 | 234.2% | 2MiB |
 
 gRPC <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/865) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | unary-grpc | 1024 | 1,228,023 | 408.1% | 994MiB |
@@ -1864,8 +1865,8 @@ gRPC <br>
 <summary>zix 0.4.x URING</summary>
 
 Http/1.1 <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/875) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/875) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | baseline | 512 | 651,208 | 325.0% | 40MiB |
@@ -1882,8 +1883,8 @@ Http/1.1 <br>
 | static | 6800 | 188,446 | 178.7% | 317MiB |
 
 WebSocket <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/872) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/872) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | echo-ws | 512 | 661,699 | 175.2% | 53MiB |
@@ -1892,8 +1893,8 @@ WebSocket <br>
 | echo-ws-pipeline | 4096 | 6,588,869 | 212.0% | 214MiB |
 
 gRPC <br>
-<!-- [PR](https://github.com/MDA2AV/HttpArena/pull/865) <br> -->
-<!-- [Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br> -->
+[PR](https://github.com/MDA2AV/HttpArena/pull/865) <br>
+[Implementasi](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc) <br>
 | Test | Conn | RPS | CPU | Mem |
 | :- | :- | :- | :- | :- |
 | unary-grpc | 1024 | 1,256,889 | 453.8% | 848MiB |
