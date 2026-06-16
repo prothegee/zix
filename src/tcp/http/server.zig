@@ -300,7 +300,7 @@ const EpollConn = struct {
 };
 
 /// Private per-worker fd to EpollConn map. The slab (MAX_FD * buf_size virtual
-/// bytes) is pre-allocated once at init; each accept assigns a slice from it with
+/// bytes) is pre-allocated once at init, each accept assigns a slice from it with
 /// no heap call. Physical pages are demand-paged, so only active connections
 /// consume RAM.
 const EpollConnTable = struct {
@@ -456,7 +456,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         /// Parse and dispatch one complete HTTP request from buf.
         /// buf must contain the full header block. arena must be reset by the caller
-        /// before entry; this function does not reset it.
+        /// before entry. This function does not reset it.
         ///
         /// Return:
         /// - .keep_alive when the connection may serve another request
@@ -731,7 +731,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Note:
         /// - EpollConnTable holds per-connection recv state. Each accept assigns a
-        ///   slab slice with no heap call; filled tracks accumulated bytes across events.
+        ///   slab slice with no heap call, filled tracks accumulated bytes across events.
         /// - Accepted fds are NONBLOCK: the recv loop reads until EAGAIN, allowing
         ///   headers that arrive in multiple TCP segments without blocking the worker.
         /// - Connections are level-triggered: the fd stays registered after each request
