@@ -46,7 +46,7 @@ pub const FRAME_MAX_PAYLOAD: usize = 1 << 20;
 // --------------------------------------------------------- //
 // Framed-engine response sink + helpers. While a sink is installed
 // (tl_resp_sink, the .URING ring path), writes stage into it and coalesce into
-// one ring send; otherwise they go straight to the fd (the blocking adapter).
+// one ring send, otherwise they go straight to the fd (the blocking adapter).
 
 /// Direct socket write, bypassing the coalescing sink.
 fn rawFrameWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
@@ -560,7 +560,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 }
 
 /// Framed TCP server specialized over a comptime per-frame callback. On .URING
-/// the engine owns the connection and runs frame_fn on the io_uring ring; on
+/// the engine owns the connection and runs frame_fn on the io_uring ring. On
 /// every other model frame_fn is wrapped in a blocking per-connection adapter
 /// and served through serveDispatch. run takes no callback argument: it is
 /// baked into the type at init.
@@ -703,7 +703,7 @@ fn ringSetNoDelay(fd: std.posix.fd_t) void {
 }
 
 /// Per-connection ring state. buf accumulates frame bytes until whole frames are
-/// present; send_buf holds the coalesced reply while a send is in flight; gen
+/// present, send_buf holds the coalesced reply while a send is in flight, gen
 /// guards against fd reuse.
 const UringConn = struct {
     fd: std.posix.fd_t,
