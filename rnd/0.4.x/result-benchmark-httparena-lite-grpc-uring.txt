@@ -1,0 +1,261 @@
+# last update: 2026-06-16 (Attempt: 1)
+==============================================
+=== zix-grpc / unary-grpc / 256c (tool=h2load) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] gRPC server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.04s, 1159940.00 req/s, 73.01MB/s
+requests: 5799700 total, 5825300 started, 5799700 done, 5799700 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5799700 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 365.06MB (382794280) total, 176.99MB (185590400) headers (space savings 42.86%), 38.72MB (40597900) data
+                     min         max         mean         sd        +/- sd
+time for request:     1.26ms     81.98ms     11.53ms      3.89ms    94.62%
+time for connect:       10us      4.88ms      2.09ms      1.32ms    58.98%
+time to 1st byte:    18.21ms     93.83ms     47.14ms     22.32ms    62.89%
+req/s           :    4350.38     4711.84     4523.51       83.86    62.50%
+[info] CPU 353.5% | Mem 325MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.04s, 1165660.00 req/s, 73.37MB/s
+requests: 5828300 total, 5853900 started, 5828300 done, 5828300 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5828300 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 366.86MB (384681880) total, 177.87MB (186505600) headers (space savings 42.86%), 38.91MB (40798100) data
+                     min         max         mean         sd        +/- sd
+time for request:     6.69ms     28.75ms     11.16ms      1.60ms    76.16%
+time for connect:        8us      5.26ms      2.29ms      1.46ms    57.42%
+time to 1st byte:    24.13ms     45.60ms     32.80ms      4.97ms    67.58%
+req/s           :    4456.54     4610.50     4547.16       37.04    59.77%
+[info] CPU 349.0% | Mem 327MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.04s, 1157100.00 req/s, 72.83MB/s
+requests: 5785500 total, 5811100 started, 5785500 done, 5785500 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5785500 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 364.17MB (381857080) total, 176.56MB (185136000) headers (space savings 42.86%), 38.62MB (40498500) data
+                     min         max         mean         sd        +/- sd
+time for request:     5.38ms     59.47ms     11.33ms      2.44ms    92.75%
+time for connect:       14us      6.35ms      2.68ms      1.68ms    58.20%
+time to 1st byte:    19.75ms     64.82ms     37.61ms     14.68ms    68.75%
+req/s           :    4430.77     4576.25     4512.99       35.80    57.81%
+[info] CPU 342.0% | Mem 328MiB
+
+=== Best: 1156408 req/s (CPU: 349.0%, Mem: 327MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix-grpc
+httparena-bench-zix-grpc
+
+==============================================
+=== zix-grpc / unary-grpc / 1024c (tool=h2load) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] gRPC server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.09s, 1124520.00 req/s, 70.79MB/s
+requests: 5622600 total, 5725000 started, 5622600 done, 5622600 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5622600 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 353.95MB (371147920) total, 171.59MB (179923200) headers (space savings 42.86%), 37.53MB (39358200) data
+                     min         max         mean         sd        +/- sd
+time for request:    28.38ms    225.02ms     48.30ms     17.55ms    95.02%
+time for connect:       35us     61.16ms     19.70ms     22.23ms    75.78%
+time to 1st byte:    91.70ms    241.56ms    163.84ms     26.11ms    75.20%
+req/s           :    1050.94     1133.37     1089.22       19.29    67.09%
+[info] CPU 381.1% | Mem 559MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.09s, 1120640.00 req/s, 70.55MB/s
+requests: 5603200 total, 5705600 started, 5603200 done, 5603200 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5603200 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 352.73MB (369867520) total, 171.00MB (179302400) headers (space savings 42.86%), 37.41MB (39222400) data
+                     min         max         mean         sd        +/- sd
+time for request:    14.82ms    254.97ms     47.77ms     18.27ms    95.25%
+time for connect:       23us     75.35ms     22.16ms     26.07ms    75.78%
+time to 1st byte:    66.88ms    312.14ms    157.83ms     59.92ms    65.53%
+req/s           :    1032.43     1139.23     1088.54       19.57    66.60%
+[info] CPU 344.3% | Mem 750MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.10s, 1125980.00 req/s, 70.88MB/s
+requests: 5629900 total, 5732300 started, 5629900 done, 5629900 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 5629900 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 354.41MB (371629720) total, 171.81MB (180156800) headers (space savings 42.86%), 37.58MB (39409300) data
+                     min         max         mean         sd        +/- sd
+time for request:    13.90ms    289.70ms     48.64ms     22.57ms    94.30%
+time for connect:       34us     72.11ms     22.40ms     25.35ms    75.78%
+time to 1st byte:    66.61ms    339.30ms    168.80ms     72.29ms    62.30%
+req/s           :    1034.06     1156.08     1094.36       27.85    70.21%
+[info] CPU 335.8% | Mem 997MiB
+
+=== Best: 1104636 req/s (CPU: 381.1%, Mem: 559MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix-grpc
+httparena-bench-zix-grpc
+[info] skip: zix-grpc does not subscribe to unary-grpc-tls
+[info] skip: zix-grpc does not subscribe to echo-ws
+[info] skip: zix-grpc does not subscribe to echo-ws-pipeline
+
+==============================================
+=== zix-grpc / stream-grpc / 64c (tool=ghz) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] gRPC server ready
+[info] ghz warm-up 2s
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+
+Summary:
+  Count:	3858
+  Total:	5.19 s
+  Slowest:	2.70 s
+  Fastest:	7.63 ms
+  Average:	298.61 ms
+  Requests/sec:	743.66
+
+Response time histogram:
+  7.627    [1]    |
+  276.663  [2607] |∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
+  545.698  [289]  |∎∎∎∎
+  814.734  [439]  |∎∎∎∎∎∎∎
+  1083.769 [200]  |∎∎∎
+  1352.804 [68]   |∎
+  1621.840 [97]   |∎
+  1890.875 [22]   |
+  2159.911 [11]   |
+  2428.946 [2]    |
+  2697.982 [2]    |
+
+Latency distribution:
+  10 % in 19.32 ms
+  25 % in 38.86 ms
+  50 % in 82.07 ms
+  75 % in 454.41 ms
+  90 % in 837.49 ms
+  95 % in 1.13 s
+  99 % in 1.61 s
+
+Status code distribution:
+  [Canceled]   120 responses
+  [OK]         3738 responses
+
+Error distribution:
+  [120]   rpc error: code = Canceled desc = grpc: the client connection is closing
+[info] CPU 12.8% | Mem 67MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+
+Summary:
+  Count:	3873
+  Total:	5.19 s
+  Slowest:	3.08 s
+  Fastest:	8.96 ms
+  Average:	290.85 ms
+  Requests/sec:	745.76
+
+Response time histogram:
+  8.965    [1]    |
+  315.970  [2771] |∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
+  622.975  [345]  |∎∎∎∎∎
+  929.980  [290]  |∎∎∎∎
+  1236.986 [123]  |∎∎
+  1543.991 [101]  |∎
+  1850.996 [28]   |
+  2158.001 [26]   |
+  2465.006 [13]   |
+  2772.011 [2]    |
+  3079.017 [4]    |
+
+Latency distribution:
+  10 % in 17.92 ms
+  25 % in 39.48 ms
+  50 % in 84.51 ms
+  75 % in 325.22 ms
+  90 % in 807.36 ms
+  95 % in 1.21 s
+  99 % in 1.90 s
+
+Status code distribution:
+  [Canceled]   169 responses
+  [OK]         3704 responses
+
+Error distribution:
+  [169]   rpc error: code = Canceled desc = grpc: the client connection is closing
+[info] CPU 10.7% | Mem 67MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+
+Summary:
+  Count:	3836
+  Total:	5.17 s
+  Slowest:	4.09 s
+  Fastest:	8.17 ms
+  Average:	315.23 ms
+  Requests/sec:	741.66
+
+Response time histogram:
+  8.169    [1]    |
+  416.429  [2819] |∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
+  824.688  [441]  |∎∎∎∎∎∎
+  1232.947 [139]  |∎∎
+  1641.206 [139]  |∎∎
+  2049.465 [54]   |∎
+  2457.724 [35]   |
+  2865.983 [24]   |
+  3274.242 [14]   |
+  3682.502 [10]   |
+  4090.761 [2]    |
+
+Latency distribution:
+  10 % in 16.49 ms
+  25 % in 27.70 ms
+  50 % in 60.18 ms
+  75 % in 350.32 ms
+  90 % in 943.58 ms
+  95 % in 1.47 s
+  99 % in 2.72 s
+
+Status code distribution:
+  [OK]         3678 responses
+  [Canceled]   158 responses
+
+Error distribution:
+  [158]   rpc error: code = Canceled desc = grpc: the client connection is closing
+[info] CPU 10.4% | Mem 64MiB
+
+=== Best: 3738000 req/s (CPU: 12.8%, Mem: 67MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix-grpc
+httparena-bench-zix-grpc
+[info] skip: zix-grpc does not subscribe to stream-grpc-tls
+[info] restoring loopback MTU to 65536
