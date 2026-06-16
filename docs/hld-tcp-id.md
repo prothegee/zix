@@ -259,7 +259,7 @@ Argumen diproses dari kiri ke kanan. Argumen yang tidak dikenal dilewati tanpa p
 
 `TcpServerConfig.logger: ?*Logger = null`. Jika tidak null:
 - `system(.INFO, "tcp", ...)` dipanggil saat bind dan shutdown.
-- `conn(peer, dur_ms, err)` dipanggil setelah handler kembali untuk setiap koneksi. `peer` adalah alamat remote (`"1.2.3.4:54321"` atau `"-"` jika tidak tersedia); `dur_ms` adalah durasi koneksi berdasarkan wall-clock; `err` bernilai null jika koneksi ditutup dengan bersih.
+- `conn(peer, dur_ms, err)` dipanggil setelah handler kembali untuk setiap koneksi. `peer` adalah alamat remote (`"1.2.3.4:54321"` atau `"-"` jika tidak tersedia). `dur_ms` adalah durasi koneksi berdasarkan wall-clock. `err` bernilai null jika koneksi ditutup dengan bersih.
 
 ```zig
 var logger = try zix.Logger.init(std.heap.smp_allocator, .{

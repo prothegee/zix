@@ -259,7 +259,7 @@ Args are parsed left-to-right. Unknown args are silently skipped. Missing `--ip`
 
 `TcpServerConfig.logger: ?*Logger = null`. When non-null:
 - `system(.INFO, "tcp", ...)` on bind and shutdown.
-- `conn(peer, dur_ms, err)` after the handler returns for each connection. `peer` is the remote address (`"1.2.3.4:54321"` or `"-"` if unavailable); `dur_ms` is the wall-clock connection duration; `err` is null on clean close.
+- `conn(peer, dur_ms, err)` after the handler returns for each connection. `peer` is the remote address (`"1.2.3.4:54321"` or `"-"` if unavailable). `dur_ms` is the wall-clock connection duration. `err` is null on clean close.
 
 ```zig
 var logger = try zix.Logger.init(std.heap.smp_allocator, .{
