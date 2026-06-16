@@ -125,9 +125,9 @@ Three inputs determine `ctx.deadline_ns` at dispatch time:
 
 | Input | Where | Notes |
 | :- | :- | :- |
-| `GrpcServerConfig.handler_timeout_ms` | config | global cap; 0 = disabled |
-| `Route.timeout_ms` | comptime route table | per-route default; 0 = use global cap |
-| `grpc-timeout` header | client request | parsed by `parseTimeout`; takes effect if tighter |
+| `GrpcServerConfig.handler_timeout_ms` | config | global cap (0 = disabled) |
+| `Route.timeout_ms` | comptime route table | per-route default (0 = use global cap) |
+| `grpc-timeout` header | client request | parsed by `parseTimeout` (takes effect if tighter) |
 
 `ctx.deadline_ns: ?u64` is the tightest of all three (CLOCK_REALTIME nanoseconds). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set, so per-route timeout only tightens, never loosens.
 

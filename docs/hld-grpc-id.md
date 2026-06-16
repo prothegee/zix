@@ -125,9 +125,9 @@ Tiga input menentukan `ctx.deadline_ns` saat dispatch:
 
 | Input | Lokasi | Catatan |
 | :- | :- | :- |
-| `GrpcServerConfig.handler_timeout_ms` | config | batas global; 0 = dinonaktifkan |
-| `Route.timeout_ms` | tabel route comptime | default per route; 0 = gunakan batas global |
-| header `grpc-timeout` | request client | di-parse oleh `parseTimeout`; berlaku jika lebih ketat |
+| `GrpcServerConfig.handler_timeout_ms` | config | batas global (0 = dinonaktifkan) |
+| `Route.timeout_ms` | tabel route comptime | default per route (0 = gunakan batas global) |
+| header `grpc-timeout` | request client | di-parse oleh `parseTimeout` (berlaku jika lebih ketat) |
 
 `ctx.deadline_ns: ?u64` adalah yang paling ketat dari ketiganya (nanodetik CLOCK_REALTIME). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur, sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
 
