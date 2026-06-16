@@ -366,6 +366,52 @@ Satu read (level-triggered, byte tersisa memicu ulang event), lalu `ws.pump` ata
 
 Membuang `conn.drain` byte dengan `recvfrom(MSG_TRUNC)`: kernel menjatuhkan byte di tempat, tanpa salinan ke `conn.buf`, ukuran per panggilan tidak dibatasi buffer (dibatasi 1 GB per panggilan). Membaca sampai EAGAIN, tidak pernah melewati `conn.drain`, sehingga byte request pipelined berikutnya tidak tersentuh. Saat drain mencapai nol: `.close` bila `drain_close`, selain itu kembali ke parsing HTTP normal.
 
+### Engine URING
+
+Hanya Linux (`run()` jatuh kembali ke `runPool` di tempat lain). Kembaran berbasis completion dari Engine EPOLL: topologi shared-nothing yang sama (satu `SO_REUSEPORT` listener dan satu ring `io_uring` per worker, tanpa queue bersama, tanpa handoff fd), tetapi digerakkan oleh completion alih-alih readiness, sehingga sebagian besar transisi syscall di-batch ke dalam ring (ADR-037).
+
+#### UringConn dan slot table
+
+```zig
+UringConn = {
+    fd, gen, buf, filled,             // gen: u24 generation tag terhadap reuse fd
+    send_buf, staged, inflight,       // send_buf[0..inflight] dipegang kernel selama send in-flight
+    closing,                          // bebaskan setelah send terakhir mendarat
+    drain: usize = 0,                 // byte body oversize yang masih harus dibuang (mirror Conn.drain)
+    drain_close: bool = false,
+    ws: ?WsFrameFn = null,
+}
+```
+
+`slots` adalah `[]?*UringConn` datar yang diindeks fd (`MAX_FD` entri). `user_data` setiap completion mengemas `{ op, gen, fd }`, dan `lookup` menolak CQE yang `gen`-nya tidak lagi cocok dengan slot, yang menutup race close-versus-recv pada fd yang digunakan ulang. Sebuah koneksi bersifat half-duplex (paling banyak satu recv atau satu send in-flight), sehingga flush sink yang blocking tidak pernah bisa menyela send yang sedang in-flight.
+
+#### initUringRing()
+
+`IoUring.init_params` dengan `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` (fast path single-issuer pada loop one-thread-per-ring, plus completion queue yang diperbesar), jatuh kembali ke `IoUring.init` tanpa flag pada kernel yang tidak memilikinya. SQ `URING_ENTRIES = 4096`, CQ `URING_CQ_ENTRIES = 16 K`.
+
+#### run() loop
+
+```
+1. armAccept (multishot)
+2. submit_and_wait(1), copy_cqes ke array stack 512-entri
+3. per CQE, switch pada user_data.op:
+      accept -> handleAccept   // re-arm saat !IORING_CQE_F_MORE, alloc conn, armRecv
+      recv   -> handleRecv
+      send   -> handleSend
+```
+
+#### armRecv() / handleRecv() / dispatch()
+
+`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker. Body yang lebih besar dari `conn.buf` dijawab dengan body kosong, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) mengambil alih. Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`.
+
+#### armDrainRecv()
+
+Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras dan re-arm sampai `conn.drain` mencapai nol, lalu kembali ke pembacaan normal (atau menutup saat `drain_close`). Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain-{epoll,uring}`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive.
+
+#### WebSocket di ring
+
+`IoUring.BufferGroup` per-worker (provided-buffer ring) melayani recv WebSocket (Phase 4b): kernel menyerahkan buffer hanya saat sebuah frame tiba, sehingga koneksi idle tidak mengikat recv buffer apa pun, kemenangan memory-scaling pada jumlah koneksi tinggi. `wsHandleBuf` mem-parse satu batch whole-frame di tempat dari buffer yang dipilih (zero copy) dan hanya menyalin frame parsial yang tertinggal ke `conn.buf`. Kernel tanpa dukungan buffer-ring membiarkan `ws_bufs` null, dan WebSocket jatuh kembali ke jalur plain recv-into-`conn.buf`.
+
 ### Http1ServerImpl / Server
 
 ```zig
