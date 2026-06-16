@@ -567,7 +567,7 @@ fn DispatchTask(comptime routes: []const Route) type {
 
             var path: []const u8 = "/";
             for (self.headers[0..self.header_count]) |header| {
-                if (std.mem.eql(u8, header.name, ":path")) path = header.value;
+                if (header.name.len == 5 and std.mem.eql(u8, header.name, ":path")) path = header.value;
             }
 
             var time_start: std.os.linux.timespec = undefined;
@@ -696,7 +696,7 @@ fn spawnGrpcStream(
 
 fn headerPath(headers: []const h2.Header) []const u8 {
     for (headers) |header| {
-        if (std.mem.eql(u8, header.name, ":path")) return header.value;
+        if (header.name.len == 5 and std.mem.eql(u8, header.name, ":path")) return header.value;
     }
     return "/";
 }
