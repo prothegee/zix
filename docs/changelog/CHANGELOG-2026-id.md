@@ -34,7 +34,7 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (2026-06-16)
+## 0.4.0 (TBA)
 
 __*Ditambahkan:*__
 - `io` server ke dalam config dan handler-at-init `zix.Uds` (ADR-039):
