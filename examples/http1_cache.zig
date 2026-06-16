@@ -19,7 +19,7 @@ const WORKERS: usize = 0; // 0 = cpu_count
 //                      builds the response once and stores it.
 //   GET /nocache?kb=N  always rebuilds and serializes, never cached.
 //   GET /              trivial "Hello, World!".
-// A/B /cache vs /nocache at a given kb isolates the cache's effect; the cache
+// A/B /cache vs /nocache at a given kb isolates the cache's effect. The cache
 // pays once the build-and-serialize cost passes the crossover (a few KiB).
 
 // Per-worker scratch. Thread-local so each worker owns its own buffers and the
