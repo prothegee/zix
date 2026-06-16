@@ -1160,16 +1160,27 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         /// Arm a discard recv for a connection draining an oversized request
-        /// body: read up to the remaining drain count into conn.buf (the bytes
-        /// are thrown away on completion). Capping at conn.drain leaves any
-        /// pipelined bytes after the body untouched on the socket.
+        /// body whose response was already staged. MSG.TRUNC makes the kernel
+        /// drop the bytes in place (no copy into conn.buf), and the request is
+        /// not capped by the buffer length, so a single recv drains up to the
+        /// whole remaining body instead of one round-trip per buffer. Mirrors
+        /// serveEpollDrain. Capping at conn.drain leaves any pipelined bytes
+        /// after the body untouched on the socket.
+        ///
+        /// Note:
+        /// - prep_recv derives len from the buffer slice, so len is overridden
+        ///   after it to request the full remaining drain. With MSG.TRUNC the
+        ///   kernel never writes the buffer, so a len past conn.buf.len is safe
+        ///   (the same trick serveEpollDrain uses with recvfrom).
         fn armDrainRecv(self: *Self, conn: *UringConn) void {
-            const want = @min(conn.drain, conn.buf.len);
+            const want = @min(conn.drain, @as(usize, 1 << 30));
             const sqe = self.getSqe() orelse {
                 self.beginClose(conn);
                 return;
             };
-            sqe.prep_recv(conn.fd, conn.buf[0..want], 0);
+
+            sqe.prep_recv(conn.fd, conn.buf, linux.MSG.TRUNC);
+            sqe.len = @intCast(want);
             sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
         }
 
