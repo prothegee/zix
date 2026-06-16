@@ -111,7 +111,7 @@ pub fn UdpServer(comptime Packet: type) type {
             logSystem(self.config, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
             // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
-            //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
+            //       The client list grows and shrinks (swapRemove on disconnect). The broadcast peer
             //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
             //       so snapshots would accumulate unboundedly until the server stops.
             var clients = std.array_list.Managed(ClientRecord).init(self.config.allocator);
