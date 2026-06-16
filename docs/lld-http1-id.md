@@ -61,6 +61,8 @@ GZIP_OUT_SIZE = 256 * 1024  // buffer output writeGzip
 
 Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Mengembalikan `.{ head, body_offset }` dengan `body_offset` byte pertama setelah baris kosong.
 
+`parseGetFastPath` (server.zig) adalah fast path keep-alive untuk request `GET` polos: ia memastikan prefix `"GET "` dan versi `"HTTP/1.1"` dengan integer load tunggal (`std.mem.readInt` satu `u32` dan satu `u64`, bukan `mem.eql`), mengekstrak path dan query secara aritmetika, dan hanya jatuh ke `parseHead` penuh bila `Connection: close` mungkin ada. Bentuk `ParsedHead` sama, tanpa scan per-header.
+
 ### recvHead()
 
 Bulk-read ke `buf` sampai `\r\n\r\n` ditemukan. `pre_filled` byte sisa iterasi keep-alive sebelumnya dipindai lebih dulu. Setiap kali membaca, pemindaian diulang dari `filled - 3` sehingga CRLFCRLF yang terbelah antar read tetap ditemukan. `error.HeaderTooLarge` saat `buf` penuh tanpa baris kosong, `error.Closed` saat EOF atau read gagal.
@@ -135,7 +137,7 @@ Header tetap ditahapkan ke buffer 256 byte milik pemanggil dengan append manual 
 "\r\nDate: " + cachedDate() + "\r\n\r\n"
 ```
 
-`statusPhrase` mencakup 20 kode umum, selain itu mencetak `Unknown`. `appendStatusCode` dan `appendDec` adalah penulis digit manual.
+Untuk status yang dikenal, seluruh baris `"HTTP/1.1 <code> <phrase>\r\n"` ditulis dalam satu `memcpy` dari tabel `statusLine` yang dibaked pada comptime, alih-alih merakitnya dari lima potongan (`"HTTP/1.1 "` + `appendStatusCode` + `' '` + `statusPhrase` + `"\r\n"`) per response. `statusLine` mengembalikan `""` untuk kode tak dikenal, di mana build jatuh ke jalur piecewise di atas, byte-identik dengan baris yang dibaked. `statusPhrase` mencakup kode umum yang sama (selain itu mencetak `Unknown`); `appendStatusCode` dan `appendDec` adalah penulis digit manual untuk fallback itu.
 
 **Date cache per-thread:**
 
