@@ -158,15 +158,23 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         var val_off = colon + 1;
         while (val_off < line.len and line[val_off] == ' ') val_off += 1;
 
-        // Pre-parse the framing headers to avoid rescanning them on the hot path.
+        // Pre-parse the framing headers to avoid rescanning them on the hot
+        // path. Dispatch on name length first: the three framing names have
+        // distinct lengths (10, 14, 17), so most header lines do no string
+        // compare at all, and a length match does at most one.
         const name = line[0..colon];
         const value = line[val_off..];
-        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            content_length = std.fmt.parseInt(u64, value, 10) catch 0;
-        } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
-            if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
-        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.eqlIgnoreCase(value, "chunked")) chunked = true;
+        switch (name.len) {
+            10 => if (std.ascii.eqlIgnoreCase(name, "connection")) {
+                if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
+            },
+            14 => if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+                content_length = std.fmt.parseInt(u64, value, 10) catch 0;
+            },
+            17 => if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+                if (std.ascii.eqlIgnoreCase(value, "chunked")) chunked = true;
+            },
+            else => {},
         }
 
         pos = nl + 1;
@@ -342,6 +350,17 @@ test "zix test: parser chunked flag set when Transfer-Encoding: chunked" {
     const raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expect(h.chunked);
+}
+
+test "zix test: parser length-switch rejects same-length non-framing headers" {
+    // Names that collide in length with the framing headers must still be
+    // rejected by the eqlIgnoreCase guard inside each switch arm: "User-Agent"
+    // (10) vs "connection", "Accept-Charset" (14) vs "content-length".
+    const raw = "GET / HTTP/1.1\r\nUser-Agent: ua\r\nAccept-Charset: utf-8\r\n\r\n";
+    const h = (try parse(raw, 16)).?;
+    try std.testing.expect(h.keep_alive);
+    try std.testing.expectEqual(@as(u64, 0), h.content_length);
+    try std.testing.expect(!h.chunked);
 }
 
 test "zix test: parser chunked flag false when Transfer-Encoding absent" {
