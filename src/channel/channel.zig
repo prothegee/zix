@@ -142,7 +142,7 @@ test "zix test: Channel, ring buffer wraps correctly" {
     ch.buf[2] = 30;
     ch.count = 3;
 
-    // head starts at 0; tail = (0+3)%4 = 3
+    // head starts at 0, tail = (0+3)%4 = 3
     const tail = (ch.head + ch.count) % ch.buf.len;
     try std.testing.expectEqual(@as(usize, 3), tail);
     try std.testing.expectEqual(@as(u32, 10), ch.buf[ch.head]);
