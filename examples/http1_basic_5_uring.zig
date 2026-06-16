@@ -20,8 +20,8 @@ const POOL_SIZE: usize = 0; // ignored by .URING (used only on the non-Linux POO
 // It is the completion-based twin of .EPOLL: same shared-nothing topology, but most
 // syscall transitions are batched away. On non-Linux targets the server falls back to .POOL.
 //
-// Minimal core in this release: chunked request bodies, bodies larger than max_recv_buf,
-// and WebSocket upgrades are not served on the ring path yet and close the connection.
+// Ring core status: chunked request bodies (fully present), bodies larger than max_recv_buf
+// (answered then drained off the socket), and WebSocket upgrades are all served on the ring path.
 
 // --------------------------------------------------------- //
 
