@@ -366,6 +366,52 @@ One read (level-triggered, remaining bytes re-fire the event), then `ws.pump` ov
 
 Discards `conn.drain` bytes with `recvfrom(MSG_TRUNC)`: the kernel drops the bytes in place, no copy into `conn.buf`, chunk size not capped by the buffer (capped at 1 GB per call). Reads to EAGAIN, never past `conn.drain`, so the next pipelined request's bytes are untouched. When the drain hits zero: `.close` if `drain_close`, else back to normal HTTP parsing.
 
+### URING engine
+
+Linux only (`run()` falls back to `runPool` elsewhere). The completion-based twin of the EPOLL engine: the same shared-nothing topology (one `SO_REUSEPORT` listener and one `io_uring` ring per worker, no shared queue, no fd handoff), but driven by completions instead of readiness, so most syscall transitions are batched into the ring (ADR-037).
+
+#### UringConn and the slot table
+
+```zig
+UringConn = {
+    fd, gen, buf, filled,             // gen: u24 generation tag against fd reuse
+    send_buf, staged, inflight,       // send_buf[0..inflight] held by the kernel while a send is in flight
+    closing,                          // free once the last send lands
+    drain: usize = 0,                 // oversize-body bytes still to discard (mirrors Conn.drain)
+    drain_close: bool = false,
+    ws: ?WsFrameFn = null,
+}
+```
+
+`slots` is a flat `[]?*UringConn` indexed by fd (`MAX_FD` entries). Every completion's `user_data` packs `{ op, gen, fd }`, and `lookup` rejects a CQE whose `gen` no longer matches the slot, which closes the close-versus-recv race on a reused fd. A connection is half-duplex (at most one recv or one send in flight), so a blocking sink flush can never interleave with an in-flight send.
+
+#### initUringRing()
+
+`IoUring.init_params` with `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` (single-issuer fast path on a one-thread-per-ring loop, plus an enlarged completion queue), falling back to a flagless `IoUring.init` on a kernel that lacks them. SQ `URING_ENTRIES = 4096`, CQ `URING_CQ_ENTRIES = 16 K`.
+
+#### run() loop
+
+```
+1. armAccept (multishot)
+2. submit_and_wait(1), copy_cqes into a 512-entry stack array
+3. per CQE, switch on user_data.op:
+      accept -> handleAccept   // re-arm on !IORING_CQE_F_MORE, alloc conn, armRecv
+      recv   -> handleRecv
+      send   -> handleSend
+```
+
+#### armRecv() / handleRecv() / dispatch()
+
+`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`. A body larger than `conn.buf` is answered with an empty body, `conn.drain` is set to the unread remainder, and the drain (below) takes over. Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`.
+
+#### armDrainRecv()
+
+The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down and re-arms until `conn.drain` reaches zero, then resumes normal reads (or closes when `drain_close`). Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain-{epoll,uring}` runners, which pipeline an over-large POST then a follow-up GET on one keep-alive connection.
+
+#### WebSocket on the ring
+
+A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs (Phase 4b): the kernel hands a buffer over only when a frame arrives, so an idle connection ties up no recv buffer, the memory-scaling win at high connection counts. `wsHandleBuf` parses a whole-frame batch in place out of the selected buffer (zero copy) and copies only a trailing partial frame into `conn.buf`. A kernel without buffer-ring support leaves `ws_bufs` null, and WebSocket falls back to the plain recv-into-`conn.buf` path.
+
 ### Http1ServerImpl / Server
 
 ```zig
