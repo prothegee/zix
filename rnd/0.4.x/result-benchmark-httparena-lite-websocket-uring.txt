@@ -1,4 +1,4 @@
-# last update: 2026-06-16 (Attempt: 2)
+# zix-ws uring last update: 2026-06-16 (Attempt: 3)
 ==============================================
 === zix-ws / echo-ws / 512c (tool=gcannon) ===
 ==============================================
@@ -18,15 +18,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    773us    391us   1.74ms   5.81ms   7.76ms
+    Latency    774us    394us   1.65ms   5.82ms   7.77ms
 
-  3308497 frames sent in 5.00s, 3308497 frames received
-  Throughput: 661.04K req/s
+  3305208 frames sent in 5.01s, 3305208 frames received
+  Throughput: 660.33K req/s
   Bandwidth:  4.41MB/s
   WS upgrades: 512
-  WS frames:   3308497
-  Latency samples: 3308497 / 3308497 responses (100.0%)
-[info] CPU 175.2% | Mem 53MiB
+  WS frames:   3305208
+  Latency samples: 3305168 / 3305208 responses (100.0%)
+[info] CPU 175.3% | Mem 52MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -41,15 +41,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    791us    399us   1.72ms   5.83ms   7.99ms
+    Latency    779us    394us   1.73ms   5.88ms   7.85ms
 
-  3231921 frames sent in 5.00s, 3231920 frames received
-  Throughput: 646.26K req/s
-  Bandwidth:  4.31MB/s
+  3285614 frames sent in 5.01s, 3285614 frames received
+  Throughput: 656.30K req/s
+  Bandwidth:  4.38MB/s
   WS upgrades: 512
-  WS frames:   3231920
-  Latency samples: 3231844 / 3231920 responses (100.0%)
-[info] CPU 239.4% | Mem 64MiB
+  WS frames:   3285614
+  Latency samples: 3285614 / 3285614 responses (100.0%)
+[info] CPU 239.8% | Mem 55MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -64,17 +64,17 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    790us    394us   1.76ms   5.84ms   7.84ms
+    Latency    784us    396us   1.73ms   5.86ms   7.81ms
 
-  3235891 frames sent in 5.00s, 3235891 frames received
-  Throughput: 646.92K req/s
-  Bandwidth:  4.32MB/s
+  3261141 frames sent in 5.00s, 3261141 frames received
+  Throughput: 651.98K req/s
+  Bandwidth:  4.35MB/s
   WS upgrades: 512
-  WS frames:   3235891
-  Latency samples: 3235871 / 3235891 responses (100.0%)
-[info] CPU 249.8% | Mem 64MiB
+  WS frames:   3261141
+  Latency samples: 3261141 / 3261141 responses (100.0%)
+[info] CPU 250.6% | Mem 49MiB
 
-=== Best: 661699 req/s (CPU: 175.2%, Mem: 53MiB) ===
+=== Best: 659722 req/s (CPU: 175.3%, Mem: 52MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix-ws
 httparena-bench-zix-ws
@@ -98,15 +98,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   8.73ms   8.29ms   12.60ms   17.30ms   32.80ms
+    Latency   8.84ms   8.43ms   12.70ms   17.70ms   39.00ms
 
-  2315230 frames sent in 5.00s, 2311134 frames received
-  Throughput: 461.89K req/s
-  Bandwidth:  3.18MB/s
+  2272585 frames sent in 5.01s, 2268489 frames received
+  Throughput: 452.92K req/s
+  Bandwidth:  3.12MB/s
   WS upgrades: 4096
-  WS frames:   2311134
-  Latency samples: 2311134 / 2311134 responses (100.0%)
-[info] CPU 143.4% | Mem 161MiB
+  WS frames:   2268489
+  Latency samples: 2268489 / 2268489 responses (100.0%)
+[info] CPU 139.9% | Mem 173MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -121,15 +121,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   8.76ms   8.39ms   12.60ms   16.70ms   25.30ms
+    Latency   8.76ms   8.39ms   12.60ms   17.20ms   25.30ms
 
-  2326990 frames sent in 5.01s, 2322894 frames received
-  Throughput: 463.67K req/s
-  Bandwidth:  3.20MB/s
+  2334767 frames sent in 5.01s, 2330671 frames received
+  Throughput: 465.43K req/s
+  Bandwidth:  3.21MB/s
   WS upgrades: 4096
-  WS frames:   2322894
-  Latency samples: 2322894 / 2322894 responses (100.0%)
-[info] CPU 204.1% | Mem 259MiB
+  WS frames:   2330671
+  Latency samples: 2330671 / 2330671 responses (100.0%)
+[info] CPU 203.3% | Mem 209MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -144,17 +144,17 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   8.84ms   8.49ms   12.70ms   17.20ms   26.20ms
+    Latency   8.95ms   8.56ms   12.80ms   17.10ms   27.10ms
 
-  2313512 frames sent in 5.00s, 2309416 frames received
-  Throughput: 461.52K req/s
-  Bandwidth:  3.18MB/s
+  2278763 frames sent in 5.01s, 2274667 frames received
+  Throughput: 454.40K req/s
+  Bandwidth:  3.13MB/s
   WS upgrades: 4096
-  WS frames:   2309416
-  Latency samples: 2309416 / 2309416 responses (100.0%)
-[info] CPU 212.8% | Mem 166MiB
+  WS frames:   2274667
+  Latency samples: 2274667 / 2274667 responses (100.0%)
+[info] CPU 213.6% | Mem 173MiB
 
-=== Best: 463651 req/s (CPU: 204.1%, Mem: 259MiB) ===
+=== Best: 465203 req/s (CPU: 203.3%, Mem: 209MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix-ws
 httparena-bench-zix-ws
@@ -178,15 +178,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    897us    451us   2.01ms   5.91ms   8.09ms
+    Latency    893us    442us   2.07ms   6.01ms   8.38ms
 
-  45634511 frames sent in 5.00s, 45634511 frames received
-  Throughput: 9.12M req/s
-  Bandwidth:  60.91MB/s
+  45815523 frames sent in 5.00s, 45815523 frames received
+  Throughput: 9.16M req/s
+  Bandwidth:  61.15MB/s
   WS upgrades: 512
-  WS frames:   45634511
-  Latency samples: 45634191 / 45634511 responses (100.0%)
-[info] CPU 178.6% | Mem 45MiB
+  WS frames:   45815523
+  Latency samples: 45815523 / 45815523 responses (100.0%)
+[info] CPU 179.9% | Mem 45MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -201,15 +201,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    905us    449us   2.12ms   5.99ms   8.14ms
+    Latency    882us    443us   2.00ms   5.95ms   8.04ms
 
-  45211564 frames sent in 5.00s, 45211564 frames received
-  Throughput: 9.04M req/s
-  Bandwidth:  60.34MB/s
+  46405964 frames sent in 5.00s, 46405964 frames received
+  Throughput: 9.28M req/s
+  Bandwidth:  61.94MB/s
   WS upgrades: 512
-  WS frames:   45211564
-  Latency samples: 45211564 / 45211564 responses (100.0%)
-[info] CPU 244.1% | Mem 57MiB
+  WS frames:   46405964
+  Latency samples: 46405964 / 46405964 responses (100.0%)
+[info] CPU 245.1% | Mem 60MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -224,17 +224,17 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    912us    452us   2.13ms   5.96ms   8.02ms
+    Latency    894us    453us   2.04ms   6.02ms    5.00s
 
-  44897628 frames sent in 5.00s, 44897628 frames received
-  Throughput: 8.97M req/s
-  Bandwidth:  59.91MB/s
+  45780438 frames sent in 5.00s, 45780438 frames received
+  Throughput: 9.15M req/s
+  Bandwidth:  61.12MB/s
   WS upgrades: 512
-  WS frames:   44897628
-  Latency samples: 44897308 / 44897628 responses (100.0%)
-[info] CPU 255.7% | Mem 46MiB
+  WS frames:   45780438
+  Latency samples: 45844853 / 45780438 responses (100.1%)
+[info] CPU 256.8% | Mem 61MiB
 
-=== Best: 9126902 req/s (CPU: 178.6%, Mem: 45MiB) ===
+=== Best: 9281192 req/s (CPU: 245.1%, Mem: 60MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix-ws
 httparena-bench-zix-ws
@@ -258,15 +258,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   9.76ms   9.23ms   13.90ms   19.70ms   86.90ms
+    Latency   9.91ms   9.17ms   14.10ms   20.20ms   188.10ms
 
-  32848997 frames sent in 5.01s, 32783461 frames received
-  Throughput: 6.55M req/s
-  Bandwidth:  43.80MB/s
-  WS upgrades: 4096
-  WS frames:   32783461
-  Latency samples: 32783461 / 32783461 responses (100.0%)
-[info] CPU 150.7% | Mem 170MiB
+  32598883 frames sent in 5.00s, 32533363 frames received
+  Throughput: 6.50M req/s
+  Bandwidth:  43.53MB/s
+  WS upgrades: 4095
+  WS frames:   32533363
+  Latency samples: 32533363 / 32533363 responses (100.0%)
+[info] CPU 154.8% | Mem 162MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -281,15 +281,15 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   9.88ms   9.35ms   13.80ms   18.80ms   37.30ms
+    Latency   9.84ms   9.32ms   13.70ms   18.00ms   31.10ms
 
-  33009882 frames sent in 5.00s, 32944346 frames received
-  Throughput: 6.58M req/s
-  Bandwidth:  44.06MB/s
+  33103084 frames sent in 5.01s, 33037548 frames received
+  Throughput: 6.60M req/s
+  Bandwidth:  44.15MB/s
   WS upgrades: 4096
-  WS frames:   32944346
-  Latency samples: 32944346 / 32944346 responses (100.0%)
-[info] CPU 212.0% | Mem 214MiB
+  WS frames:   33037548
+  Latency samples: 33037548 / 33037548 responses (100.0%)
+[info] CPU 211.1% | Mem 271MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -304,17 +304,17 @@ gcannon v0.5.3 [WS]
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   9.90ms   9.37ms   14.00ms   19.60ms   62.60ms
+    Latency   9.94ms   9.52ms   13.90ms   18.20ms   30.00ms
 
-  33003929 frames sent in 5.00s, 32943465 frames received
-  Throughput: 6.59M req/s
-  Bandwidth:  44.06MB/s
-  WS upgrades: 4092
-  WS frames:   32943465
-  Latency samples: 32943465 / 32943465 responses (100.0%)
-[info] CPU 222.6% | Mem 190MiB
+  32806378 frames sent in 5.00s, 32740842 frames received
+  Throughput: 6.55M req/s
+  Bandwidth:  43.80MB/s
+  WS upgrades: 4096
+  WS frames:   32740842
+  Latency samples: 32740842 / 32740842 responses (100.0%)
+[info] CPU 218.5% | Mem 164MiB
 
-=== Best: 6588869 req/s (CPU: 212.0%, Mem: 214MiB) ===
+=== Best: 6594320 req/s (CPU: 211.1%, Mem: 271MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix-ws
 httparena-bench-zix-ws
