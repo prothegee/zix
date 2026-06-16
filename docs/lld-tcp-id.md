@@ -55,7 +55,7 @@ Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept 
 7. join pool threads
 ```
 
-Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai nilai; `std.Io.Threaded` bersifat thread-safe).
+Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai nilai, `std.Io.Threaded` bersifat thread-safe).
 
 ### serveDispatch jalur MIXED
 

@@ -55,7 +55,7 @@ Single accept thread. Each connection is dispatched as an `io.async()` task. The
 7. join pool threads
 ```
 
-Accept threads and pool threads share the same `io` handle (passed by value; `std.Io.Threaded` is thread-safe).
+Accept threads and pool threads share the same `io` handle (passed by value, `std.Io.Threaded` is thread-safe).
 
 ### serveDispatch MIXED path
 
