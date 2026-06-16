@@ -41,7 +41,8 @@ pub const Http1ServerConfig = struct {
     send_date_header: bool = true,
     /// Enable the per-worker response cache (ADR-036). Default false. When off,
     /// the handler cache API (cacheLookup / cacheStore / writeWithCache) degrades
-    /// to a no-op. Active under the .EPOLL dispatch model in this release.
+    /// to a no-op. Active under the .EPOLL and .URING dispatch models (both are
+    /// shared-nothing, one owner thread per cache).
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.

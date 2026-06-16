@@ -4,7 +4,7 @@
 
 - gRPC h2c (HTTP/2 cleartext) server and client implemented without C FFI.
 - All 4 RPC types: unary, server streaming, client streaming, bidirectional streaming.
-- All 4 dispatch models: ASYNC (default), POOL, MIXED, EPOLL (Linux-only).
+- All 5 dispatch models: ASYNC (default), POOL, MIXED, EPOLL (Linux-only), URING (Linux-only).
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
 - grpc-timeout header parsing, grpc-status trailer serialization.
 - TLS delegated to a reverse proxy (nginx, haproxy). Backend speaks h2c only.
@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` (sends UNIMPLEMENTED if no route matches) |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (Linux-only) |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (Linux-only), URING=4 (Linux-only) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
@@ -74,7 +74,7 @@ graph LR
 | `io` | required | caller-provided `std.Io` backend |
 | `ip` | required | bind address |
 | `port` | required | listen port, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, or `.EPOLL` (Linux-only, native) |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, or `.URING` (the last two Linux-only, native) |
 | `kernel_backlog` | 1024 | `listen()` backlog |
 | `workers` | 0 | 0 -> cpu_count accept threads (POOL and MIXED) |
 | `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool threads. EPOLL: 0 -> cpu_count multiplexing workers |
@@ -125,9 +125,9 @@ Three inputs determine `ctx.deadline_ns` at dispatch time:
 
 | Input | Where | Notes |
 | :- | :- | :- |
-| `GrpcServerConfig.handler_timeout_ms` | config | global cap; 0 = disabled |
-| `Route.timeout_ms` | comptime route table | per-route default; 0 = use global cap |
-| `grpc-timeout` header | client request | parsed by `parseTimeout`; takes effect if tighter |
+| `GrpcServerConfig.handler_timeout_ms` | config | global cap (0 = disabled) |
+| `Route.timeout_ms` | comptime route table | per-route default (0 = use global cap) |
+| `grpc-timeout` header | client request | parsed by `parseTimeout` (takes effect if tighter) |
 
 `ctx.deadline_ns: ?u64` is the tightest of all three (CLOCK_REALTIME nanoseconds). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set, so per-route timeout only tightens, never loosens.
 
@@ -305,10 +305,11 @@ When the handler calls `ctx.finish(status, msg)` without sending any data, the s
 | `.POOL` | cpu_count | shared `ConnQueue` + blocking pool | workers and pool_size apply |
 | `.MIXED` | cpu_count | `io.async()` per accept thread | no ConnQueue, pool_size ignored |
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
+| `.URING` | per worker | multiplexed io_uring loop (Linux only) | same shape as `.EPOLL`, completion-based |
 
 MIXED accept threads use `.{}` default stack size (system default ~8MB) to prevent stack overflow when `io.async()` falls back to inline execution.
 
-`.EPOLL` is Linux-specific. On non-Linux platforms, `.EPOLL` falls back to `.POOL` automatically.
+`.EPOLL` is Linux-specific. On non-Linux platforms, `.EPOLL` falls back to `.POOL` automatically. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `pool_size` workers (0 = cpu_count), Linux-only, and also falls back to `.POOL` on non-Linux.
 
 ### `.EPOLL` is multiplexed and shared-nothing
 

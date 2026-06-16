@@ -80,15 +80,16 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Tcp.Server.initArgs(.{
+    var server = try zix.Tcp.Server.init(myHandler, .{
+        .io = process.io,
         .ip = IP,
         .port = PORT,
         .dispatch_model = DISPATCH_MODEL,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
         // .logger = &logger, // uncomment to wire logger (TCP lifecycle + conn logging)
-    }, process.minimal.args);
+    });
     defer server.deinit();
 
-    try server.runWith(process.io, myHandler);
+    try server.run();
 }

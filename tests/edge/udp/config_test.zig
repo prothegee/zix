@@ -15,16 +15,22 @@ test "zix edge: PortMode, REQUIRED has backing value 1" {
 }
 
 test "zix edge: UdpServer.init, port zero with REQUIRED mode returns error.PortNotConfigured" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     const S = zix.Udp.Server(extern struct { id: u32 });
     try std.testing.expectError(
         error.PortNotConfigured,
-        S.init(.{ .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0 }),
+        S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0 }),
     );
 }
 
 test "zix edge: UdpServer.init, non-zero port with REQUIRED mode succeeds" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
     const S = zix.Udp.Server(extern struct { id: u32 });
-    _ = try S.init(.{ .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 9199 });
+    _ = try S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 9199 });
 }
 
 test "zix edge: UdpClientConfig, recv_timeout_ms = 0 disables timeout (default)" {

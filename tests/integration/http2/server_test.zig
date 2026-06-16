@@ -105,7 +105,7 @@ fn sendRequest(
 
     try zix.Http2.writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
-        .frame_type = zix.Http2.FT_HEADERS,
+        .frame_type = zix.Http2.FRAME_TYPE_HEADERS,
         .flags = end_stream,
         .stream_id = sid,
     });
@@ -114,7 +114,7 @@ fn sendRequest(
     if (body) |b| {
         try zix.Http2.writeFrameHeader(fd, .{
             .length = @intCast(b.len),
-            .frame_type = zix.Http2.FT_DATA,
+            .frame_type = zix.Http2.FRAME_TYPE_DATA,
             .flags = zix.Http2.FLAG_END_STREAM,
             .stream_id = sid,
         });
@@ -135,31 +135,31 @@ fn recvResponse(fd: std.posix.fd_t, sid: u31, buf: []u8) ![]const u8 {
         if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
 
         switch (fh.frame_type) {
-            zix.Http2.FT_SETTINGS => {
+            zix.Http2.FRAME_TYPE_SETTINGS => {
                 if ((fh.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAck(fd);
             },
-            zix.Http2.FT_WINDOW_UPDATE => {},
-            zix.Http2.FT_PING => {
+            zix.Http2.FRAME_TYPE_WINDOW_UPDATE => {},
+            zix.Http2.FRAME_TYPE_PING => {
                 if ((fh.flags & zix.Http2.FLAG_ACK) == 0) {
                     var p8: [8]u8 = undefined;
                     @memcpy(&p8, payload[0..8]);
                     try zix.Http2.sendPingAck(fd, p8);
                 }
             },
-            zix.Http2.FT_HEADERS => {
+            zix.Http2.FRAME_TYPE_HEADERS => {
                 if (fh.stream_id != sid) continue;
                 _ = try hdec.decode(payload, &hdrs, &scratch);
                 if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
             },
-            zix.Http2.FT_DATA => {
+            zix.Http2.FRAME_TYPE_DATA => {
                 if (fh.stream_id != sid) continue;
                 const to_copy = @min(payload.len, buf.len - body_len);
                 @memcpy(buf[body_len..][0..to_copy], payload[0..to_copy]);
                 body_len += to_copy;
                 if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
             },
-            zix.Http2.FT_GOAWAY => return error.ServerGoaway,
-            zix.Http2.FT_RST_STREAM => return error.StreamReset,
+            zix.Http2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
+            zix.Http2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
             else => {},
         }
     }

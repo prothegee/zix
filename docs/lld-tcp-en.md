@@ -6,21 +6,29 @@ Internal implementation details. For design rationale see [`docs/hld-tcp.md`](hl
 
 ## server.zig
 
-### TcpServer
+### Server namespace and factory types
 
 ```zig
-pub const TcpServer = struct {
-    config: TcpServerConfig,
-
-    pub fn init(config: TcpServerConfig) !Self       // error.PortNotConfigured if port == 0
-    pub fn initArgs(config: TcpServerConfig, args: anytype) !Self
-    pub fn deinit(self: *Self) void                  // no-op
-    pub fn run(self: *Self, io: std.Io) !void        // uses echoHandler
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void
+// Fieldless namespace with comptime constructors (ADR-038).
+pub const Server = struct {
+    pub fn init(comptime handler: HandlerFn, config: TcpServerConfig) !TcpServerImpl(handler)
+    pub fn initArgs(comptime handler: HandlerFn, config: TcpServerConfig, args: anytype) !TcpServerImpl(handler)
+    pub fn initFramed(comptime frame_fn: FrameFn, config: TcpServerConfig) !TcpFramedServerImpl(frame_fn)
+    pub fn initFramedArgs(comptime frame_fn: FrameFn, config: TcpServerConfig, args: anytype) !TcpFramedServerImpl(frame_fn)
 };
+
+// Per-connection factory: handler baked into the type, run() takes only io.
+fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> error.PortNotConfigured if port == 0; .deinit() no-op; .run() reads config.io
+fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type   // .init(config); .deinit(); .run() -> ring on .URING, else frameAdapter fallback
+
+// Free dispatch workers (handler kept as a runtime value, same shape as zix.Http1):
+fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // ASYNC/POOL/MIXED/EPOLL switch
+fn runEpoll(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn, cpu: usize) !void
 ```
 
-### runWith() ASYNC path
+The handler (or per-frame callback) is comptime-known at the type boundary, but the internal worker functions take it as a runtime value, so `serveDispatch` / `runEpoll` are shared across every specialization with no per-handler code bloat (ADR-038). The built-in echo default is the public `zix.Tcp.echoHandler`, passed explicitly to `init`.
+
+### serveDispatch ASYNC path
 
 ```
 1. resolve ip:port -> addr
@@ -34,7 +42,7 @@ pub const TcpServer = struct {
 
 Single accept thread. Each connection is dispatched as an `io.async()` task. The accept loop never blocks on connection handling.
 
-### runWith() POOL path
+### serveDispatch POOL path
 
 ```
 1. worker_count = cfg.workers  (0 -> cpu_count)
@@ -47,9 +55,9 @@ Single accept thread. Each connection is dispatched as an `io.async()` task. The
 7. join pool threads
 ```
 
-Accept threads and pool threads share the same `io` handle (passed by value; `std.Io.Threaded` is thread-safe).
+Accept threads and pool threads share the same `io` handle (passed by value, `std.Io.Threaded` is thread-safe).
 
-### runWith() MIXED path
+### serveDispatch MIXED path
 
 ```
 1. worker_count = cfg.workers (0 -> cpu_count)

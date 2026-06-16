@@ -137,13 +137,15 @@ pub fn tenantHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
 // --------------------------------------------------------- //
 
+// Param routes: more-literal patterns first, all-param patterns after.
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/path/user/:id", .handler = userHandler, .kind = .PARAM },
+    .{ .path = "/path/:tenant-id/:tenant-branch", .handler = tenantHandler, .kind = .PARAM },
+    .{ .path = "/path", .handler = pathsHandler, .kind = .PREFIX },
+};
+
 pub fn main(process: std.process.Init) !void {
-    // Param routes: more-literal patterns first, all-param patterns after.
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/path/user/:id", .handler = userHandler, .kind = .PARAM },
-        .{ .path = "/path/:tenant-id/:tenant-branch", .handler = tenantHandler, .kind = .PARAM },
-        .{ .path = "/path", .handler = pathsHandler, .kind = .PREFIX },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

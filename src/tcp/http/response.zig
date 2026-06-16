@@ -134,10 +134,26 @@ pub const Response = struct {
     }
 
     /// Write and flush the HTTP response with the given body.
+    /// Sink path (.EPOLL/.URING): serialize straight into the sink's free space, no copy.
     /// Fast path (no extra headers, body fits in staging buffer): one posix.write() syscall.
     /// Slow path (extra headers or large body): fixed headers + extra headers + body.
     pub fn send(self: *Response, body_data: []const u8) !void {
         self.bytes_written = body_data.len;
+
+        // Sink path: when a coalescing sink is installed (.EPOLL/.URING), serialize
+        // the response directly into the sink's free space. This is byte-identical to
+        // the staging-buffer path (buildResponse is what the cache serializes too) and
+        // skips the stack buffer plus the copy that fdWriteAll -> RespSink.append makes.
+        if (tl_resp_sink) |sink| {
+            if (sink.fd == self.fd and !sink.failed) {
+                if (self.buildResponse(body_data, sink.buf[sink.len..])) |written| {
+                    sink.len += written;
+
+                    return;
+                }
+            }
+        }
+
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 
@@ -242,6 +258,15 @@ pub const Response = struct {
     /// Sets res.streaming = true so handleConnection closes after the handler exits.
     /// Requires workers = 1 (Model 1). Long-lived SSE connections exhaust a blocking pool (Model 2).
     pub fn stream(self: *Response) !SseWriter {
+        // SSE draining is handler-side: a blocking write parks the handler itself,
+        // so detach any coalescing sink. Each event must flush to the fd directly
+        // rather than buffer into the .EPOLL/.URING response sink (which only
+        // flushes after the handler returns, but an SSE handler never returns).
+        if (tl_resp_sink) |sink| {
+            sink.flush();
+            tl_resp_sink = null;
+        }
+
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 
@@ -437,6 +462,18 @@ fn requestKey(req: *const Request) u64 {
 /// Return:
 /// - error.BrokenPipe on any write failure (caller ignores or propagates)
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (tl_resp_sink) |sink| {
+        sink.append(data);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    return rawFdWrite(fd, data);
+}
+
+/// Direct socket write, bypassing the .URING coalescing sink. Used by the sink
+/// itself (to avoid recursion) and by every non-ring dispatch model.
+fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var remaining = data;
     while (remaining.len > 0) {
         const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -451,6 +488,74 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
         }
     }
 }
+
+/// Write as much of data to fd as possible without parking the worker.
+/// Used by the .EPOLL response flush: a partial write (send buffer full) returns
+/// the byte count written so far, and the worker stages the unwritten tail to
+/// drain on the next EPOLLOUT event instead of dropping the connection.
+///
+/// Return:
+/// - usize (bytes written so far, may be less than data.len on EAGAIN)
+/// - null on a permanent write error
+pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
+    var written: usize = 0;
+    while (written < data.len) {
+        const write_result = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(write_result)) {
+            .SUCCESS => {
+                const n: usize = @intCast(write_result);
+                if (n == 0) return null;
+                written += n;
+            },
+            .INTR => continue,
+            .AGAIN => return written,
+            else => return null,
+        }
+    }
+
+    return written;
+}
+
+/// Coalescing sink for the .URING ring path (ADR-037 Phase 4 step 4). While
+/// installed (tl_resp_sink), fdWriteAll stages into buf instead of writing to the
+/// fd, so a whole response coalesces into one ring send. An oversize write flushes
+/// straight to the fd, which is safe under the ring's half-duplex guarantee (no
+/// send is in flight while a handler runs).
+pub const RespSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    pub fn append(self: *RespSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            rawFdWrite(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    pub fn flush(self: *RespSink) void {
+        if (self.len == 0) return;
+
+        rawFdWrite(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Active response sink for the current worker thread (the .URING ring path).
+/// null for every other dispatch model, so fdWriteAll writes straight to the fd.
+pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 // --------------------------------------------------------- //
 
@@ -721,4 +826,108 @@ test "zix http response cache: distinct paths and queries are separate keys" {
     // the original path and query hits
     var res_a2 = Response.init(fds[1], true, undefined, allocator, 16);
     try std.testing.expect(res_a2.serveCached(&req_a));
+}
+
+test "zix http: fdWriteNonBlock stages a partial write then resumes after drain" {
+    const linux = std.os.linux;
+
+    // Nonblocking AF_UNIX stream pair with a tiny send/recv budget, so a large
+    // write fills the kernel buffer and returns a partial count (the .EPOLL
+    // backpressure path) instead of blocking the worker.
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    const small: c_int = 2048;
+    std.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&small)) catch {};
+    std.posix.setsockopt(fds[1], std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&small)) catch {};
+
+    const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+
+    // First write makes progress but cannot drain the whole payload: a partial.
+    const first = fdWriteNonBlock(fds[0], payload) orelse return error.UnexpectedWriteError;
+    try std.testing.expect(first > 0);
+    try std.testing.expect(first < payload.len);
+
+    // Reading on the peer frees buffer space for the staged tail.
+    const read_buf = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(read_buf);
+    var consumed: usize = 0;
+    while (consumed < first) {
+        const n = std.posix.read(fds[1], read_buf) catch break;
+        if (n == 0) break;
+        consumed += n;
+    }
+
+    // The previously-blocked tail now makes forward progress.
+    const second = fdWriteNonBlock(fds[0], payload[first..]) orelse return error.UnexpectedWriteError;
+    try std.testing.expect(second > 0);
+}
+
+test "zix http: Response.stream detaches the coalescing sink for direct SSE writes" {
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Install a sink as the .EPOLL/.URING worker would before a handler runs.
+    var out_buf: [4096]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &out_buf };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 8);
+    const writer = try res.stream();
+
+    // stream() must detach the sink so SSE events write straight to the fd.
+    try std.testing.expect(tl_resp_sink == null);
+    try std.testing.expect(res.streaming);
+
+    try writer.writeEvent("hello");
+
+    // The header and event landed on the socket directly, not staged in the sink.
+    var buf: [256]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "text/event-stream") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "data: hello") != null);
+}
+
+test "zix http: send() into an installed sink is byte-identical to a direct send" {
+    const linux = std.os.linux;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    // Direct send (no sink): build via the staging buffer, capture off the socket.
+    tl_resp_sink = null;
+    var res_direct = Response.init(fds[1], true, undefined, allocator, 8);
+    res_direct.setContentType(.APPLICATION_JSON);
+    try res_direct.addHeader("X-Test", "1");
+    try res_direct.send("{\"ok\":true}");
+    var direct: [512]u8 = undefined;
+    const nd = try std.posix.read(fds[0], &direct);
+
+    // Sink send: serialize straight into the sink buffer (the optimized path).
+    var out_buf: [512]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &out_buf };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+    var res_sink = Response.init(fds[1], true, undefined, allocator, 8);
+    res_sink.setContentType(.APPLICATION_JSON);
+    try res_sink.addHeader("X-Test", "1");
+    try res_sink.send("{\"ok\":true}");
+
+    try std.testing.expectEqualStrings(direct[0..nd], sink.buf[0..sink.len]);
 }

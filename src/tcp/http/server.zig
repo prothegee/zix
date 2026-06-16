@@ -16,6 +16,10 @@ const static = @import("static.zig");
 const parser = @import("parser.zig");
 const rcache = @import("../../utils/response_cache.zig");
 const setCache = @import("response.zig").setCache;
+const RespSink = @import("response.zig").RespSink;
+const resp_mod = @import("response.zig");
+const uring = @import("../io_uring/ring.zig");
+const IoUring = std.os.linux.IoUring;
 
 // --------------------------------------------------------- //
 
@@ -285,10 +289,18 @@ const EpollConn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
     filled: usize,
+    /// Response bytes staged when a write hit EAGAIN (send buffer full). The
+    /// worker arms EPOLLOUT and drains this on the next writable event instead of
+    /// parking on a slow client. Heap-owned (smp_allocator) while non-empty.
+    write_pending: []u8 = &.{},
+    /// Bytes of write_pending already flushed.
+    write_pending_off: usize = 0,
+    /// Close the connection once the staged bytes finish flushing.
+    write_pending_close: bool = false,
 };
 
 /// Private per-worker fd to EpollConn map. The slab (MAX_FD * buf_size virtual
-/// bytes) is pre-allocated once at init; each accept assigns a slice from it with
+/// bytes) is pre-allocated once at init, each accept assigns a slice from it with
 /// no heap call. Physical pages are demand-paged, so only active connections
 /// consume RAM.
 const EpollConnTable = struct {
@@ -337,8 +349,60 @@ const EpollConnTable = struct {
         const conn = &self.slots[idx];
         if (conn.buf.len == 0) return;
 
+        if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
         conn.* = std.mem.zeroes(EpollConn);
     }
+};
+
+// --------------------------------------------------------- //
+// URING per-connection state + ring init (ADR-037 Phase 4 step 4)
+
+/// SQ entries per worker ring.
+const URING_ENTRIES: u16 = 4096;
+/// CQ entries per worker ring (multishot completion headroom).
+const URING_CQ_ENTRIES: u32 = 16 * 1024;
+/// Max CQEs drained per loop pass.
+const URING_CQE_BATCH: usize = 512;
+/// Per-connection staged-response buffer: one coalesced send per request.
+const URING_SEND_BUF_SIZE: usize = 64 * 1024;
+
+/// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
+/// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
+const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
+
+/// Outcome of one ring process pass over a connection's read buffer.
+const HttpProcOutcome = enum { need_more, keep_alive, close };
+
+/// Initialize a worker ring with the single-issuer fast-path flags, falling back
+/// to a flagless ring when the kernel does not support them. Mirrors the
+/// zix.Http1 ring init.
+fn initUringRing() !IoUring {
+    const linux = std.os.linux;
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = linux.IORING_SETUP_SINGLE_ISSUER |
+            linux.IORING_SETUP_DEFER_TASKRUN |
+            linux.IORING_SETUP_CQSIZE |
+            linux.IORING_SETUP_CLAMP,
+        .cq_entries = URING_CQ_ENTRIES,
+        .sq_thread_idle = 1000,
+    });
+
+    return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
+}
+
+/// Per-connection ring state. buf accumulates request bytes until the header end
+/// is found, send_buf holds the coalesced response while a send is in flight, and
+/// gen guards against fd reuse. One request is served per buffer (no pipelined
+/// drain), matching the EPOLL path.
+const UringHttpConn = struct {
+    fd: std.posix.fd_t,
+    gen: u24,
+    buf: []u8,
+    filled: usize,
+    send_buf: []u8,
+    staged: usize,
+    inflight: usize,
+    closing: bool,
 };
 
 /// Accept every pending connection on listener_fd and register each in epfd.
@@ -392,7 +456,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
         /// Parse and dispatch one complete HTTP request from buf.
         /// buf must contain the full header block. arena must be reset by the caller
-        /// before entry; this function does not reset it.
+        /// before entry. This function does not reset it.
         ///
         /// Return:
         /// - .keep_alive when the connection may serve another request
@@ -667,7 +731,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         ///
         /// Note:
         /// - EpollConnTable holds per-connection recv state. Each accept assigns a
-        ///   slab slice with no heap call; filled tracks accumulated bytes across events.
+        ///   slab slice with no heap call, filled tracks accumulated bytes across events.
         /// - Accepted fds are NONBLOCK: the recv loop reads until EAGAIN, allowing
         ///   headers that arrive in multiple TCP segments without blocking the worker.
         /// - Connections are level-triggered: the fd stays registered after each request
@@ -743,6 +807,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 response_cache.deinit();
             };
 
+            // Per-worker response staging buffer: the handler's writes coalesce
+            // into this sink, then the worker flushes it once per request.
+            const out_buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch return;
+            defer std.heap.smp_allocator.free(out_buf);
+
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             var epoll_timeout: i32 = -1;
             while (true) {
@@ -775,6 +844,45 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                     }
 
                     const conn = table.get(conn_fd) orelse continue;
+
+                    // Drain a staged response before anything else: never start a
+                    // new request while a prior response is still flushing, so the
+                    // response order is preserved under pipelining (the connection
+                    // is EPOLLOUT-armed only while write_pending holds bytes).
+                    if (conn.write_pending.len > conn.write_pending_off) {
+                        const pending = conn.write_pending[conn.write_pending_off..];
+                        const written = resp_mod.fdWriteNonBlock(conn_fd, pending) orelse {
+                            table.free(conn_fd);
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                            continue;
+                        };
+
+                        conn.write_pending_off += written;
+                        if (conn.write_pending_off < conn.write_pending.len) continue;
+
+                        const drained_close = conn.write_pending_close;
+                        std.heap.smp_allocator.free(conn.write_pending);
+                        conn.write_pending = &.{};
+                        conn.write_pending_off = 0;
+                        conn.write_pending_close = false;
+                        conn.filled = 0;
+
+                        if (drained_close) {
+                            table.free(conn_fd);
+                            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
+                            _ = linux.close(conn_fd);
+                            continue;
+                        }
+
+                        var disarm_ev = linux.epoll_event{
+                            .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
+                            .data = .{ .fd = conn_fd },
+                        };
+                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn_fd, &disarm_ev);
+
+                        continue;
+                    }
 
                     // Recv into conn.buf[conn.filled..]. NONBLOCK fd: read() returns
                     // EAGAIN when no more data is buffered in the kernel, so we break
@@ -815,9 +923,44 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
                     const stream = std.Io.net.Stream{ .socket = .{ .handle = conn_fd, .address = undefined } };
                     _ = arena.reset(.retain_capacity);
-                    const outcome = processRequest(self, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
 
-                    if (outcome != .keep_alive) {
+                    var sink = RespSink{ .fd = conn_fd, .buf = out_buf };
+                    resp_mod.tl_resp_sink = &sink;
+                    const outcome = processRequest(self, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
+                    resp_mod.tl_resp_sink = null;
+
+                    var close_conn = (outcome != .keep_alive) or sink.failed;
+
+                    // Flush the coalesced response. A partial write (EAGAIN) stages
+                    // the unwritten tail and arms EPOLLOUT instead of dropping it.
+                    if (!sink.failed and sink.len > 0) {
+                        if (resp_mod.fdWriteNonBlock(conn_fd, sink.buf[0..sink.len])) |written| {
+                            if (written < sink.len) {
+                                const remaining = sink.buf[written..sink.len];
+                                if (std.heap.smp_allocator.alloc(u8, remaining.len)) |staged| {
+                                    @memcpy(staged, remaining);
+                                    conn.write_pending = staged;
+                                    conn.write_pending_off = 0;
+                                    conn.write_pending_close = (outcome != .keep_alive);
+                                    conn.filled = 0;
+
+                                    var arm_ev = linux.epoll_event{
+                                        .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP,
+                                        .data = .{ .fd = conn_fd },
+                                    };
+                                    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn_fd, &arm_ev);
+
+                                    continue;
+                                } else |_| {
+                                    close_conn = true;
+                                }
+                            }
+                        } else {
+                            close_conn = true;
+                        }
+                    }
+
+                    if (close_conn) {
                         table.free(conn_fd);
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
                         _ = linux.close(conn_fd);
@@ -857,6 +1000,347 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
             for (threads, 0..) |*t, idx| {
                 t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, epollWorker, .{ self, io, idx });
+            }
+
+            for (threads) |t| t.join();
+        }
+
+        // --------------------------------------------------------- //
+        // URING dispatch (Linux): shared-nothing io_uring ring per worker.
+
+        /// One io_uring worker: a private SO_REUSEPORT listener and completion
+        /// loop. Each readable batch recvs into the connection buffer, runs one
+        /// request through processRequest with the response staged into a
+        /// RespSink, and submits one coalesced send. Half-duplex per connection,
+        /// one request per buffer (matches the EPOLL path, ADR-037 Phase 4 step 4).
+        fn uringWorker(self: *Self, io: std.Io, worker_id: usize) void {
+            const cfg = self.config;
+
+            pinToCpu(worker_id);
+
+            const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch return;
+            var net_server = addr.listen(io, .{
+                .mode = .stream,
+                .kernel_backlog = @intCast(cfg.kernel_backlog),
+                .reuse_address = true,
+            }) catch return;
+            defer net_server.deinit(io);
+            const listener_fd = net_server.socket.handle;
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
+            _ = arena.reset(.retain_capacity);
+
+            // Per-worker response cache: lock-free by ownership, never shared.
+            var response_cache: rcache.ResponseCache = undefined;
+            var cache_on = false;
+            if (cfg.response_cache) {
+                if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(cfg),
+                    .max_value_bytes = cfg.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    setCache(&response_cache, cfg.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                setCache(null, 0);
+                response_cache.deinit();
+            };
+
+            const slots = std.heap.smp_allocator.alloc(?*UringHttpConn, MAX_FD) catch return;
+            @memset(slots, null);
+
+            const Worker = struct {
+                ring: IoUring,
+                slots: []?*UringHttpConn,
+                listener_fd: std.posix.fd_t,
+                gen_counter: u24,
+                server: *Self,
+                io: std.Io,
+                arena: *std.heap.ArenaAllocator,
+                recv_buf_size: usize,
+
+                const W = @This();
+                const allocator = std.heap.smp_allocator;
+                const lx = std.os.linux;
+
+                fn deinit(w: *W) void {
+                    for (w.slots) |maybe_conn| {
+                        if (maybe_conn) |conn| {
+                            _ = lx.close(conn.fd);
+                            allocator.free(conn.buf);
+                            allocator.free(conn.send_buf);
+                            allocator.destroy(conn);
+                        }
+                    }
+
+                    allocator.free(w.slots);
+                    w.ring.deinit();
+                }
+
+                fn getSqe(w: *W) ?*lx.io_uring_sqe {
+                    return w.ring.get_sqe() catch {
+                        _ = w.ring.submit() catch return null;
+
+                        return w.ring.get_sqe() catch null;
+                    };
+                }
+
+                fn lookup(w: *W, decoded: uring.Decoded) ?*UringHttpConn {
+                    const idx: usize = @intCast(decoded.fd);
+                    if (idx >= w.slots.len) return null;
+
+                    const conn = w.slots[idx] orelse return null;
+                    if (conn.gen != decoded.gen) return null;
+
+                    return conn;
+                }
+
+                fn destroyConn(w: *W, conn: *UringHttpConn) void {
+                    w.slots[@intCast(conn.fd)] = null;
+
+                    allocator.free(conn.buf);
+                    allocator.free(conn.send_buf);
+                    allocator.destroy(conn);
+                }
+
+                fn finishClose(w: *W, conn: *UringHttpConn) void {
+                    _ = lx.close(conn.fd);
+                    w.destroyConn(conn);
+                }
+
+                fn beginClose(w: *W, conn: *UringHttpConn) void {
+                    conn.closing = true;
+                    if (conn.inflight > 0) return;
+
+                    if (conn.staged > 0) {
+                        w.submitSend(conn);
+                        return;
+                    }
+
+                    w.finishClose(conn);
+                }
+
+                fn armAccept(w: *W) void {
+                    const sqe = w.getSqe() orelse return;
+                    sqe.prep_multishot_accept(w.listener_fd, null, null, 0);
+                    sqe.user_data = uring.packUserData(.accept, 0, w.listener_fd);
+                }
+
+                fn armRecv(w: *W, conn: *UringHttpConn) void {
+                    if (conn.filled >= conn.buf.len) {
+                        w.beginClose(conn);
+                        return;
+                    }
+
+                    const sqe = w.getSqe() orelse {
+                        w.beginClose(conn);
+                        return;
+                    };
+                    sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
+                    sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
+                }
+
+                fn submitSend(w: *W, conn: *UringHttpConn) void {
+                    const sqe = w.getSqe() orelse {
+                        w.finishClose(conn);
+                        return;
+                    };
+                    sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], lx.MSG.NOSIGNAL);
+                    sqe.user_data = uring.packUserData(.send, conn.gen, conn.fd);
+
+                    conn.inflight = conn.staged;
+                }
+
+                fn handleAccept(w: *W, cqe: lx.io_uring_cqe) void {
+                    const rearm = (cqe.flags & lx.IORING_CQE_F_MORE) == 0;
+                    defer if (rearm) w.armAccept();
+
+                    if (cqe.res < 0) return;
+
+                    const conn_fd: std.posix.fd_t = cqe.res;
+                    const idx: usize = @intCast(conn_fd);
+                    if (idx >= w.slots.len) {
+                        _ = lx.close(conn_fd);
+                        return;
+                    }
+
+                    setNoDelay(conn_fd);
+
+                    const conn = allocator.create(UringHttpConn) catch {
+                        _ = lx.close(conn_fd);
+                        return;
+                    };
+                    const buf = allocator.alloc(u8, w.recv_buf_size) catch {
+                        allocator.destroy(conn);
+                        _ = lx.close(conn_fd);
+                        return;
+                    };
+                    const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+                        allocator.free(buf);
+                        allocator.destroy(conn);
+                        _ = lx.close(conn_fd);
+                        return;
+                    };
+
+                    w.gen_counter +%= 1;
+                    conn.* = .{
+                        .fd = conn_fd,
+                        .gen = w.gen_counter,
+                        .buf = buf,
+                        .filled = 0,
+                        .send_buf = send_buf,
+                        .staged = 0,
+                        .inflight = 0,
+                        .closing = false,
+                    };
+                    w.slots[idx] = conn;
+
+                    w.armRecv(conn);
+                }
+
+                fn handleRecv(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+                    const conn = w.lookup(decoded) orelse return;
+
+                    if (cqe.res <= 0) {
+                        w.beginClose(conn);
+                        return;
+                    }
+
+                    conn.filled += @intCast(cqe.res);
+
+                    switch (w.process(conn)) {
+                        .need_more => w.armRecv(conn),
+                        .keep_alive => {
+                            if (conn.staged > 0) w.submitSend(conn) else w.armRecv(conn);
+                        },
+                        .close => {
+                            if (conn.staged > 0) {
+                                w.submitSend(conn);
+                                conn.closing = true;
+                            } else {
+                                w.beginClose(conn);
+                            }
+                        },
+                    }
+                }
+
+                fn handleSend(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+                    const conn = w.lookup(decoded) orelse return;
+
+                    if (cqe.res < 0) {
+                        w.beginClose(conn);
+                        return;
+                    }
+
+                    const sent: usize = @intCast(cqe.res);
+                    if (sent < conn.staged) {
+                        std.mem.copyForwards(u8, conn.send_buf[0 .. conn.staged - sent], conn.send_buf[sent..conn.staged]);
+                        conn.staged -= sent;
+                        conn.inflight = 0;
+                        w.submitSend(conn);
+
+                        return;
+                    }
+
+                    conn.staged = 0;
+                    conn.inflight = 0;
+
+                    if (conn.closing) {
+                        w.finishClose(conn);
+                        return;
+                    }
+
+                    w.armRecv(conn);
+                }
+
+                /// Find the header terminator (accumulating across recvs), then
+                /// run one request with the response staged into a RespSink. The
+                /// request is consumed (conn.filled reset to 0), matching the
+                /// EPOLL one-request-per-buffer behavior.
+                fn process(w: *W, conn: *UringHttpConn) HttpProcOutcome {
+                    if (parser.findHeaderEnd(conn.buf[0..conn.filled], 0) == null) {
+                        if (conn.filled >= conn.buf.len) {
+                            fdWriteAll(conn.fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                            return .close;
+                        }
+
+                        return .need_more;
+                    }
+
+                    var sink = RespSink{ .fd = conn.fd, .buf = conn.send_buf };
+                    resp_mod.tl_resp_sink = &sink;
+                    _ = w.arena.reset(.retain_capacity);
+
+                    const stream = std.Io.net.Stream{ .socket = .{ .handle = conn.fd, .address = undefined } };
+                    const outcome = processRequest(w.server, stream, conn.fd, w.io, conn.buf[0..conn.filled], w.arena);
+                    resp_mod.tl_resp_sink = null;
+
+                    conn.staged = sink.len;
+                    conn.filled = 0;
+                    if (sink.failed) return .close;
+
+                    return if (outcome == .keep_alive) .keep_alive else .close;
+                }
+
+                fn run(w: *W) void {
+                    w.armAccept();
+
+                    var cqes: [URING_CQE_BATCH]lx.io_uring_cqe = undefined;
+                    while (true) {
+                        _ = w.ring.submit_and_wait(1) catch |err| switch (err) {
+                            error.SignalInterrupt => continue,
+                            else => return,
+                        };
+
+                        const count = w.ring.copy_cqes(&cqes, 0) catch return;
+                        for (cqes[0..count]) |cqe| {
+                            const decoded = uring.unpackUserData(cqe.user_data);
+                            switch (decoded.op) {
+                                .accept => w.handleAccept(cqe),
+                                .recv => w.handleRecv(cqe, decoded),
+                                .send => w.handleSend(cqe, decoded),
+                                .timeout => {},
+                            }
+                        }
+                    }
+                }
+            };
+
+            var worker = Worker{
+                .ring = undefined,
+                .slots = slots,
+                .listener_fd = listener_fd,
+                .gen_counter = 0,
+                .server = self,
+                .io = io,
+                .arena = &arena,
+                .recv_buf_size = cfg.max_recv_buf,
+            };
+            worker.ring = initUringRing() catch return;
+            defer worker.deinit();
+
+            worker.run();
+        }
+
+        /// URING dispatch (Linux-only): shared-nothing io_uring ring per worker.
+        fn runUring(self: *Self, io: std.Io) !void {
+            const worker_count = if (self.config.workers == 0) getAvailableCpuCount() else self.config.workers;
+
+            logSystem(self.config, "listening on {s}:{d} (io_uring, {d} workers, shared-nothing)", .{
+                self.config.ip, self.config.port, worker_count,
+            });
+
+            const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
+            defer std.heap.smp_allocator.free(threads);
+
+            for (threads, 0..) |*t, idx| {
+                t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, uringWorker, .{ self, io, idx });
             }
 
             for (threads) |t| t.join();
@@ -908,8 +1392,9 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
             const effective_model: DispatchModel = blk: {
                 if (comptime @import("builtin").target.os.tag != .linux) {
-                    if (cfg.dispatch_model == .EPOLL) {
-                        logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+                    // EPOLL and URING are Linux-only: fall back to POOL elsewhere.
+                    if (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING) {
+                        logSystem(cfg, "EPOLL/URING are Linux-only. Falling back to POOL.", .{});
                         break :blk .POOL;
                     }
                 }
@@ -992,6 +1477,11 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
                 .EPOLL => {
                     try self.runEpoll(thread_io);
+                },
+
+                // Native io_uring ring path (ADR-037 Phase 4 step 4).
+                .URING => {
+                    try self.runUring(thread_io);
                 },
             }
         }

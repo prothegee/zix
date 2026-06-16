@@ -20,7 +20,7 @@ UDP server dan client yang dibangun di atas Zig 0.16.x `std.Io`. Tidak terkait d
 
 ```mermaid
 flowchart TD
-    A["UdpServer(Packet).run(io)"] --> B["IpAddress.bind(io, .dgram .udp)"]
+    A["UdpServer(Packet).run()"] --> B["IpAddress.bind(io, .dgram .udp)"]
     B --> C["receive loop"]
     C --> D["socket.receiveTimeout(io, buf, poll_timeout)"]
     D -->|Timeout| E["checkDisconnections(clients, now)"]
@@ -107,7 +107,7 @@ Akses melalui `const zix = @import("zix");`
 | :- | :- |
 | `init(config)` | Mode REQUIRED: port harus bukan nol |
 | `initArgs(config, args)` | Mode CONFIGURABLE: membaca `--port` dari argumen CLI |
-| `run(io)` | Bind socket, masuk ke receive loop. Memblokir sampai terjadi error. |
+| `run()` | Bind socket (io dari config.io), masuk ke receive loop. Memblokir sampai terjadi error. |
 | `deinit()` | Lepaskan resource. |
 
 ### Metode UdpClient(Packet)
@@ -301,7 +301,7 @@ Gunakan `std.heap.smp_allocator` (atau general-purpose allocator apapun) agar `f
 
 `UdpServerConfig.logger: ?*Logger = null`. Ketika bernilai non-null:
 - `system(.INFO, "udp", ...)` saat bind dan shutdown.
-- `packet(.RECV, peer, size, err)` di dalam `processPacket` setelah setiap datagram diterima. `peer` adalah alamat pengirim; `size` adalah `@sizeOf(Packet)`.
+- `packet(.RECV, peer, size, err)` di dalam `processPacket` setelah setiap datagram diterima. `peer` adalah alamat pengirim. `size` adalah `@sizeOf(Packet)`.
 
 ```zig
 var logger = try zix.Logger.init(std.heap.smp_allocator, .{

@@ -45,3 +45,13 @@ test "zix integration: Http1 Server.init EPOLL dispatch model" {
     });
     server.deinit();
 }
+
+test "zix integration: Http1 Server.init URING dispatch model" {
+    var server = zix.Http1.Server.init(noopHandler, .{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9200,
+        .dispatch_model = .URING,
+    });
+    server.deinit();
+}

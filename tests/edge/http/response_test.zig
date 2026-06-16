@@ -57,7 +57,7 @@ test "zix edge: addHeader, buffer grows from 4 to 5 on the 5th header" {
 }
 
 test "zix edge: addHeader, max_headers=1 rejects second header without growth" {
-    // initial buf=min(4,1)=1; on the second call extra_buf.len(1) >= max_headers(1) -> TooManyHeaders
+    // initial buf=min(4,1)=1. On the second call extra_buf.len(1) >= max_headers(1) -> TooManyHeaders
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var res = zix.Http.Response.init(undefined, false, undefined, arena.allocator(), 1);

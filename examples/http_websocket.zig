@@ -161,13 +161,15 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
+};
+
 pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

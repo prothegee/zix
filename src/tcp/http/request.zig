@@ -40,13 +40,7 @@ pub const Request = struct {
 
     /// Get a request header value by name (case-insensitive).
     pub fn header(self: Request, name: []const u8) ?[]const u8 {
-        for (self.head.headers[0..self.head.header_count]) |h| {
-            const n = self.buf[h.name_start..][0..h.name_len];
-            if (std.ascii.eqlIgnoreCase(n, name)) {
-                return self.buf[h.value_start..][0..h.value_len];
-            }
-        }
-        return null;
+        return parser.getHeader(self.head, self.buf, name);
     }
 
     /// Read and return the full request body.

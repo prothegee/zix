@@ -58,6 +58,12 @@ pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/", .handler = homeHandler },
+    .{ .path = "/echo", .handler = echoHandler },
+    .{ .path = "/about", .handler = aboutHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -79,11 +85,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/", .handler = homeHandler },
-        .{ .path = "/echo", .handler = echoHandler },
-        .{ .path = "/about", .handler = aboutHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

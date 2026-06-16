@@ -50,6 +50,9 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/server.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
 
+    // # zix.io_uring (shared ring runtime, .URING dispatch model)
+    std.testing.refAllDecls(@import("tcp/io_uring/ring.zig"));
+
     // # zix.Http2
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));
     std.testing.refAllDecls(@import("tcp/http2/hpack.zig"));

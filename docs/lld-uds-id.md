@@ -6,20 +6,26 @@ Detail implementasi internal. Untuk alasan desain lihat [`docs/hld-uds-id.md`](h
 
 ## server.zig
 
-### UdsServer
+### Namespace Server dan factory type
 
 ```zig
+// Namespace dengan constructor comptime (ADR-039), mengikuti zix.Tcp.
 pub const UdsServer = struct {
-    config: UdsServerConfig,
-
-    pub fn init(config: UdsServerConfig) !Self
-    pub fn deinit(self: *Self) void   // no-op: resources released inside run()
-    pub fn run(self: *Self, io: std.Io) !void          // uses echoHandler
-    pub fn runWith(self: *Self, io: std.Io, handler: HandlerFn) !void
+    pub fn init(comptime handler: HandlerFn, config: UdsServerConfig) !UdsServerImpl(handler)
 };
+
+// Factory per-connection: handler dibakukan ke tipe, io dari config.io.
+fn UdsServerImpl(comptime handler: HandlerFn) type {
+    // config: UdsServerConfig
+    // pub fn init(config) !Self          -> error.PathEmpty jika config.path kosong
+    // pub fn deinit(self) void           -> no-op: resource dibebaskan di dalam run()
+    // pub fn run(self) !void             -> membaca config.io, menjalankan accept loop
+}
 ```
 
-### runWith()
+Default echo bawaan adalah `zix.Uds.echoHandler` publik, dilewatkan secara eksplisit ke `init`.
+
+### run()
 
 ```
 1. unlink config.path (abaikan error, bersihkan socket yang kedaluwarsa)

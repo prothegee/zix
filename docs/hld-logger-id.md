@@ -77,10 +77,10 @@ pub const Logger = @import("logger/logger.zig").Logger;
 ### Penurunan Level
 
 - `access()`: 2xx/3xx=INFO, 4xx=WARN, 5xx=ERROR, lainnya=DEBUG.
-- `conn()`: `err == null` -> INFO; `err != null` -> WARN.
+- `conn()`: `err == null` -> INFO, `err != null` -> WARN.
 - `packet()`, `frame()`: sama dengan `conn()`.
 - `session()`: selalu INFO.
-- `rpc()`: `grpc_status == 0` -> INFO; `grpc_status != 0` -> WARN.
+- `rpc()`: `grpc_status == 0` -> INFO, `grpc_status != 0` -> WARN.
 - `system()`: pemanggil menyediakan level secara eksplisit.
 
 ---
@@ -159,13 +159,14 @@ pub fn main(process: std.process.Init) !void {
     logger.system(.INFO, "startup", "server starting on port {d}", .{9300});
 
     // Sambungkan ke server (logging access/conn/packet/session otomatis)
-    var server = try zix.Tcp.Server.init(.{
+    var server = try zix.Tcp.Server.init(myHandler, .{
+        .io     = process.io,
         .ip     = "127.0.0.1",
         .port   = 9300,
         .logger = &logger,
     });
     defer server.deinit();
-    try server.runWith(process.io, myHandler);
+    try server.run();
 }
 ```
 

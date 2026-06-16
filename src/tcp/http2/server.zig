@@ -11,9 +11,14 @@ pub const Route = core.Route;
 
 // --------------------------------------------------------- //
 
-/// Emit a server lifecycle line. Http2ServerConfig has no logger, so this prints
-/// to stderr only in Debug builds (silent in release).
-fn logSystem(comptime fmt: []const u8, args: anytype) void {
+/// Emit a server lifecycle line. Routes through cfg.logger when set, otherwise
+/// prints to stderr only in Debug builds (silent in release).
+fn logSystem(cfg: Http2ServerConfig, comptime fmt: []const u8, args: anytype) void {
+    if (cfg.logger) |lg| {
+        lg.system(.INFO, "http2", fmt, args);
+        return;
+    }
+
     if (comptime builtin.mode == .Debug) std.debug.print("zix http2: " ++ fmt ++ "\n", args);
 }
 
@@ -202,7 +207,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 
             switch (cfg.dispatch_model) {
                 .ASYNC => {
-                    logSystem("listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
+                    logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
                     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
                     var listener = try addr.listen(io, .{
@@ -214,7 +219,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     while (true) {
                         const stream = listener.accept(io) catch |err| {
                             if (err != error.ConnectionAborted) {
-                                logSystem("accept error: {}", .{err});
+                                logSystem(cfg, "accept error: {}", .{err});
                                 break;
                             }
                             continue;
@@ -230,7 +235,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
                     const pool_count = if (cfg.pool_size == 0) @max(10, cpu * 2) else cfg.pool_size;
 
-                    logSystem("listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
+                    logSystem(cfg, "listening on {s}:{d} (pool/{d}x{d})", .{ cfg.ip, cfg.port, worker_count, pool_count });
 
                     var queue = ConnQueue{};
                     defer queue.deinit();
@@ -267,7 +272,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 .MIXED => {
                     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-                    logSystem("listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
+                    logSystem(cfg, "listening on {s}:{d} (mixed/{d})", .{ cfg.ip, cfg.port, worker_count });
 
                     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
                     defer std.heap.smp_allocator.free(acc_threads);
@@ -287,8 +292,10 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                     for (acc_threads) |t| t.join();
                 },
 
-                .EPOLL => {
-                    logSystem("EPOLL is HTTP-only. Falling back to POOL.", .{});
+                // .URING has no native ring path in zix.Http2, so it follows .EPOLL
+                // and falls back to POOL (ADR-037 implements .URING in zix.Http1 first).
+                .EPOLL, .URING => {
+                    logSystem(cfg, "EPOLL is HTTP-only. Falling back to POOL.", .{});
                     var fallback = self.*;
                     fallback.config.dispatch_model = .POOL;
                     try fallback.run();

@@ -2,40 +2,40 @@
 // Runs each protocol test sequentially. Exits 0 only when every test passes.
 //
 // Invoked by `zig build test-runner-all`.
-// Server binary paths are passed as argv[1..56] by build.zig in this order:
+// Server binary paths are passed as argv[1..58] by build.zig in this order:
 //
-// Basic dispatch-model servers (argv[1..22]):
+// Basic dispatch-model servers (argv[1..23]):
 //   http-async, http-pool, http-mixed, http-epoll,
-//   http1-async, http1-pool, http1-mixed, http1-epoll,
+//   http1-async, http1-pool, http1-mixed, http1-epoll, http1-uring,
 //   grpc-async, grpc-pool, grpc-mixed, grpc-epoll,
 //   tcp-async, tcp-pool, tcp-mixed, tcp-epoll,
 //   fix-async, fix-pool, fix-mixed, fix-epoll,
 //   udp, uds
 //
-// HTTP feature servers (argv[23..32]):
+// HTTP feature servers (argv[24..33]):
 //   http-json, http-middleware, http-params, http-paths,
 //   http-timeout-resp, http-xtra-headers, http-manual-concurrent,
 //   http-static, http-sse, http-websocket
 //
-// HTTP1 feature servers (argv[33..42]):
+// HTTP1 feature servers (argv[34..44]):
 //   http1-json, http1-middleware, http1-params, http1-paths,
 //   http1-timeout-resp, http1-xtra-headers, http1-manual-concurrent,
-//   http1-static, http1-sse, http1-websocket
+//   http1-static, http1-sse, http1-websocket, http1-cache
 //
-// gRPC feature servers (argv[43..48]):
+// gRPC feature servers (argv[45..50]):
 //   grpc-location-async, grpc-location-pool, grpc-location-mixed, grpc-location-epoll,
 //   grpc-multi, grpc-timeout
 //
-// FIX trading (argv[49]):
+// FIX trading (argv[51]):
 //   fix-trading
 //
-// UDS HTTP pair (argv[50..51]):
+// UDS HTTP pair (argv[52..53]):
 //   uds-http-a (uds_server), uds-http-b (uds_http)
 //
-// Channel self-terminating (argv[52..54]):
+// Channel self-terminating (argv[54..56]):
 //   channel-basic, channel-pipeline, channel-worker-pool
 //
-// Channel IPC pair (argv[55..56]):
+// Channel IPC pair (argv[57..58]):
 //   channel-ipc-a, channel-ipc-b
 
 const std = @import("std");
@@ -88,6 +88,7 @@ pub fn main(process: std.process.Init) void {
     const http1_pool_path = arg_iter.next() orelse exitMissing("http1-pool");
     const http1_mixed_path = arg_iter.next() orelse exitMissing("http1-mixed");
     const http1_epoll_path = arg_iter.next() orelse exitMissing("http1-epoll");
+    const http1_uring_path = arg_iter.next() orelse exitMissing("http1-uring");
 
     const grpc_async_path = arg_iter.next() orelse exitMissing("grpc-async");
     const grpc_pool_path = arg_iter.next() orelse exitMissing("grpc-pool");
@@ -130,6 +131,7 @@ pub fn main(process: std.process.Init) void {
     const http1_static_path = arg_iter.next() orelse exitMissing("http1-static");
     const http1_sse_path = arg_iter.next() orelse exitMissing("http1-sse");
     const http1_websocket_path = arg_iter.next() orelse exitMissing("http1-websocket");
+    const http1_cache_path = arg_iter.next() orelse exitMissing("http1-cache");
 
     // gRPC feature servers.
     const grpc_location_async_path = arg_iter.next() orelse exitMissing("grpc-location-async");
@@ -165,6 +167,7 @@ pub fn main(process: std.process.Init) void {
     report("http1-pool", runHttp1(io, http1_pool_path), &failed);
     report("http1-mixed", runHttp1(io, http1_mixed_path), &failed);
     report("http1-epoll", runHttp1(io, http1_epoll_path), &failed);
+    report("http1-uring", runHttp1(io, http1_uring_path), &failed);
 
     report("grpc-async", runGrpc(io, grpc_async_path), &failed);
     report("grpc-pool", runGrpc(io, grpc_pool_path), &failed);
@@ -207,6 +210,7 @@ pub fn main(process: std.process.Init) void {
     report("http1-static", runHttpStatic(io, http1_static_path, 9106, "http1_text_file.txt", "this is http1 text file example."), &failed);
     report("http1-sse", runSse(io, http1_sse_path, 9108), &failed);
     report("http1-websocket", runWs(io, http1_websocket_path, 9111, "/ws"), &failed);
+    report("http1-cache", runHttpGet(io, http1_cache_path, 9112, "/cache?kb=1", "", "ok"), &failed);
 
     // gRPC feature tests.
     report("grpc-location-async", runGrpcLocation(io, grpc_location_async_path, 10101), &failed);
@@ -235,7 +239,7 @@ pub fn main(process: std.process.Init) void {
         std.process.exit(1);
     }
 
-    std.debug.print("all 54 protocols passed\n", .{});
+    std.debug.print("all 56 protocols passed\n", .{});
 }
 
 // --------------------------------------------------------- //

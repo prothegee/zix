@@ -101,12 +101,13 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Uds.Server.init(.{
+    var server = try zix.Uds.Server.init(dataHandler, .{
+        .io = process.io,
         .path = SOCK_PATH,
         .allocator = std.heap.smp_allocator,
         // .logger = &logger, // uncomment to wire logger (UDS lifecycle logging)
     });
     defer server.deinit();
 
-    try server.run(process.io, dataHandler);
+    try server.run();
 }

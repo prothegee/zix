@@ -404,7 +404,7 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 ```
 
 - `join(room, conn, io)`: `getOrPut(room)` -> append `conn` to the list
-- `leave(room, conn, io)`: find `conn` in the list by pointer, `swapRemove`; sends close frame to removed conn
+- `leave(room, conn, io)`: find `conn` in the list by pointer, `swapRemove`, then send a close frame to the removed conn
 - `broadcast(room, msg, io)`: iterate list, build and write frame to each conn's stream, silently skip write failures (dead connections removed when their own handler's leave fires)
 
 ---

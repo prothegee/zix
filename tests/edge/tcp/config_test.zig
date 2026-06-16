@@ -7,7 +7,10 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix edge: TcpServer.init, port zero returns PortNotConfigured" {
-    const result = zix.Tcp.Server.init(.{ .ip = "127.0.0.1", .port = 0 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    const result = zix.Tcp.Server.init(zix.Tcp.echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 });
     try std.testing.expectError(error.PortNotConfigured, result);
 }
 
@@ -27,7 +30,11 @@ test "zix edge: TCP frame, max u32 length encodes and decodes correctly" {
 }
 
 test "zix edge: TcpServer EPOLL with workers = 1, minimum explicit count initializes correctly" {
-    var server = try zix.Tcp.Server.init(.{
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    var server = try zix.Tcp.Server.init(zix.Tcp.echoHandler, .{
+        .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
         .dispatch_model = .EPOLL,

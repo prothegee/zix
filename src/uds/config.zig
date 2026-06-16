@@ -7,6 +7,8 @@ const Logger = @import("../logger/logger.zig").Logger;
 
 /// UDS stream server configuration.
 pub const UdsServerConfig = struct {
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Filesystem path for the socket file (max 107 bytes on Linux/macOS).
     /// Server unlinks this path before binding and again when run() exits.
     path: []const u8,
@@ -41,7 +43,11 @@ pub const UdsClientConfig = struct {
 // --------------------------------------------------------- //
 
 test "zix test: UdsServerConfig, default field values" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = UdsServerConfig{
+        .io = threaded.io(),
         .path = "/tmp/zix.sock",
         .allocator = std.testing.allocator,
     };

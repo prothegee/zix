@@ -256,7 +256,7 @@ fn serveH2cLoop(
         if (fh.length > 0) try frame.recvExact(fd, payload);
 
         switch (fh.frame_type) {
-            frame.FT_SETTINGS => {
+            frame.FRAME_TYPE_SETTINGS => {
                 if ((fh.flags & frame.FLAG_ACK) != 0) continue;
                 var i: usize = 0;
                 while (i + 6 <= payload.len) : (i += 6) {
@@ -272,9 +272,9 @@ fn serveH2cLoop(
                 try frame.sendWindowUpdate(fd, 0, 65535);
             },
 
-            frame.FT_WINDOW_UPDATE => {},
+            frame.FRAME_TYPE_WINDOW_UPDATE => {},
 
-            frame.FT_PING => {
+            frame.FRAME_TYPE_PING => {
                 if ((fh.flags & frame.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
                     frame.sendGoaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
@@ -285,7 +285,7 @@ fn serveH2cLoop(
                 try frame.sendPingAck(fd, p8);
             },
 
-            frame.FT_HEADERS => {
+            frame.FRAME_TYPE_HEADERS => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
                     frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
@@ -336,7 +336,7 @@ fn serveH2cLoop(
                 }
             },
 
-            frame.FT_CONTINUATION => {
+            frame.FRAME_TYPE_CONTINUATION => {
                 const sid = fh.stream_id;
                 const slot = findSlot(sid, streams, stream_slots) orelse {
                     frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
@@ -356,7 +356,7 @@ fn serveH2cLoop(
                 }
             },
 
-            frame.FT_DATA => {
+            frame.FRAME_TYPE_DATA => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
                     frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
@@ -396,16 +396,16 @@ fn serveH2cLoop(
                 }
             },
 
-            frame.FT_RST_STREAM => {
+            frame.FRAME_TYPE_RST_STREAM => {
                 const sid = fh.stream_id;
                 if (findSlot(sid, streams, stream_slots)) |slot| {
                     stream_slots[slot] = false;
                 }
             },
 
-            frame.FT_GOAWAY => return,
+            frame.FRAME_TYPE_GOAWAY => return,
 
-            frame.FT_PRIORITY => {},
+            frame.FRAME_TYPE_PRIORITY => {},
 
             else => {},
         }

@@ -126,14 +126,16 @@ pub fn usersHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/status", .handler = statusHandler },
+    .{ .path = "/echo", .handler = echoHandler },
+    .{ .path = "/post", .handler = postHandler },
+    .{ .path = "/user", .handler = userHandler },
+    .{ .path = "/users", .handler = usersHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/status", .handler = statusHandler },
-        .{ .path = "/echo", .handler = echoHandler },
-        .{ .path = "/post", .handler = postHandler },
-        .{ .path = "/user", .handler = userHandler },
-        .{ .path = "/users", .handler = usersHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

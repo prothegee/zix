@@ -1,0 +1,56 @@
+zix.Http1 EPOLL vs URING head-to-head (post ring-flags)
+=======================================================
+
+Date: 2026-06-15
+Host: 12 logical cores, Linux 7.0.11. Loopback (wrk and server on the same box),
+so the measurement is ~85% kernel-bound and run-to-run variance is wide (~5-7%).
+perf_event_paranoid=2, RLIMIT_MEMLOCK 8 MB (gcannon unusable, no c4096-class
+load generator here).
+Build: -Doptimize=ReleaseFast (Debug is NOT valid for a perf verdict, it
+understated throughput by ~16% in an earlier pass).
+
+Subject: confirm EPOLL vs URING throughput after the URING ring flags landed
+(initUringRing: SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP, cq_entries =
+16384, flagless fallback). Probe on this kernel: init_params accepts the flags,
+cq_entries = 16384 granted, so the flag path engages (not the fallback).
+
+Workload: GET / -> "Hello, World!" (examples/http1_basic_4_epoll.zig and
+http1_basic_5_uring.zig, both port 9100, identical route, 12 workers each).
+Load: wrk -t6 -c512 -d5s. Fresh server per measurement.
+
+Interleaved c512 (the fair number, alternating EPOLL/URING cancels time drift)
+-----------------------------------------------------------------------------
+  | round | EPOLL rps | URING rps |
+  | :-    | :-        | :-        |
+  | 1     | 515031    | 523051    |
+  | 2     | 511920    | 526315    |
+  | 3     | 521342    | 522030    |
+  | mean  | ~516k     | ~524k     |
+URING is +1.5% over EPOLL, inside the loopback noise floor.
+
+Sequential snapshots (same session, wider time gaps, more drift)
+----------------------------------------------------------------
+  | model | c512 run 1 | c512 run 2 | c4096 (1 pass) |
+  | :-    | :-         | :-         | :-             |
+  | EPOLL | 553346     | 539290     | 433141         |
+  | URING | 532953     | 527074     | 401906         |
+A separate flagged-vs-flagless URING A/B earlier in the session read URING c512
+at 572.6k / 563.6k (flagged) vs 550.8k / 552.8k (flagless), +2.9% for the flags.
+The absolute c512 number wanders ~510k-572k across runs depending on box state.
+
+Reads
+-----
+- EPOLL and URING are at PARITY on throughput on this box. The fair interleaved
+  test gives URING a ~1.5% edge, which is below the ~5-7% run-to-run spread, so
+  it is not a separable difference. This reproduces the Phase 3 verdict
+  (uring_phase3_results.txt): on loopback both models do the same coalesced
+  batch work in userspace, and the kernel dominates.
+- c4096 figures are lower (~400-433k) and unreliable here (loopback contention
+  at high connection counts, no proper load generator under the memlock cap).
+- These are LOOPBACK numbers, not comparable to a large many-core server's
+  figures (millions of rps). They measure EPOLL-vs-URING on one box, nothing
+  else.
+- A real separation between EPOLL and URING needs a 64-core rig with raisable
+  memlock and gcannon at c4096, which this box cannot run. Until then the ring
+  flags are kept because they are costless-to-slightly-positive here and match
+  the configuration the top io_uring engines ship.

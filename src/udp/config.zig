@@ -34,6 +34,8 @@ pub const Endianness = enum(u8) {
 // --------------------------------------------------------- //
 
 pub const UdpServerConfig = struct {
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Backing allocator for client list and broadcast peer snapshots. Caller owns must outlive the server.
     /// Note:
     /// - must be a general-purpose allocator (e.g. std.heap.smp_allocator).
@@ -96,7 +98,11 @@ pub const UdpClientConfig = struct {
 // These tests verify that defaults are safe and that enum representations are stable.
 
 test "zix test: UdpServerConfig, default field values" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = UdpServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,

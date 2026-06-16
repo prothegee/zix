@@ -7,7 +7,11 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix edge: UdsServer.init, empty path returns error.PathEmpty" {
-    const result = zix.Uds.Server.init(.{
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const result = zix.Uds.Server.init(zix.Uds.echoHandler, .{
+        .io = threaded.io(),
         .path = "",
         .allocator = std.testing.allocator,
     });

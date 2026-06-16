@@ -7,6 +7,9 @@ const builtin = @import("builtin");
 
 const WRITE_BUF_SIZE: usize = 64 * 1024;
 
+/// Stack buffer for formatting one log line before it is written.
+const LINE_BUF_SIZE: usize = 4096;
+
 const Timestamp = struct {
     date: [10]u8,
     time: [12]u8,
@@ -293,7 +296,7 @@ pub const Logger = struct {
         const ua_out = if (ua.len > 0) ua else "-";
         const origin_out = if (origin.len > 0) origin else "-";
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\" \"{s}\"",
@@ -333,7 +336,7 @@ pub const Logger = struct {
         const timestamp = getTimestamp();
         const err_out = err orelse "-";
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [tcp:conn] {s} dur={d}ms {s}",
@@ -376,7 +379,7 @@ pub const Logger = struct {
         const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
         const err_out = err orelse "-";
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [udp:pkt] {s} {s} size={d} {s}",
@@ -419,7 +422,7 @@ pub const Logger = struct {
         const dir_out: []const u8 = if (dir == .RECV) "recv" else "send";
         const err_out = err orelse "-";
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [uds:frame] {s} {s} size={d} {s}",
@@ -461,7 +464,7 @@ pub const Logger = struct {
 
         const timestamp = getTimestamp();
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [fix:sess] 35={s} sender={s} target={s} seq={d} {s}",
@@ -505,7 +508,7 @@ pub const Logger = struct {
 
         const timestamp = getTimestamp();
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [grpc:rpc] {s} {s} status={d} recv={d} sent={d} dur={d}ms",
@@ -545,7 +548,7 @@ pub const Logger = struct {
         var msg_buf: [2048]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [LINE_BUF_SIZE]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buf,
             "{s} {s} {s}  [{s}] {s}",

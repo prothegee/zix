@@ -724,7 +724,7 @@ Sebuah sweep ukuran body (c512) menempatkan crossover dekat 4 KiB: delta tetap d
 **Keputusan:** Tambahkan ResponseCache per-worker yang opt-in sebagai modul bersama, mati secara default dan diarahkan ke respons yang berat komputasi, lalu pasang ke `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Pakai prinsip build-once yang sama untuk WebSocket broadcast.
 
 - Struktur bersama di `src/utils/response_cache.zig`: structure-of-arrays slab (`keys: []u64` open addressing dengan 0 sebagai empty sentinel, `meta: []Meta` berisi `insert_tick_ms` / `len` / `ttl_ms`, dan satu payload slab datar). Jumlah slot adalah pangkat dua yang diindeks dengan mask. Sebuah arena mengalokasikan slab sekali saat init dan membebaskannya utuh saat deinit. Cache yang terus berganti memakai ulang slot tetap di tempat, jadi arena tidak pernah tumbuh. Lazy on-access TTL: sebuah entri kedaluwarsa tepat pada `insert_tick_ms + ttl_ms`, sehingga `ttl_ms = 0` tidak pernah fresh. Slot kedaluwarsa dipakai ulang di tempat oleh store berikutnya, tidak pernah di-nol-kan, karena meng-nol-kan akan memotong probe chain open-addressing. Tidak ada timer thread yang diperkenalkan.
-- Satu cache per worker, tidak pernah dibagi, tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya. Di bawah `.EPOLL` shared-nothing setiap worker persis seperti itu, jadi cache dipasang di sana. `.POOL` juga milik zix dan bisa dipasang dengan aman, tetapi setiap pool thread akan memegang cache independen (hit rate lebih rendah, N kali memori), sehingga ditunda. `.ASYNC` dan `.MIXED` menjalankan handler di executor pool `std.Io` yang bukan milik zix, di mana sebuah task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free. Di rilis ini cache dipasang di bawah `.EPOLL` saja, model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
+- Satu cache per worker, tidak pernah dibagi, tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya. Di bawah `.EPOLL` shared-nothing setiap worker persis seperti itu, jadi cache dipasang di sana. Ring `.URING` sama (satu thread per ring), jadi cache dipasang di sana juga. `.POOL` juga milik zix dan bisa dipasang dengan aman, tetapi setiap pool thread akan memegang cache independen (hit rate lebih rendah, N kali memori), sehingga ditunda. `.ASYNC` dan `.MIXED` menjalankan handler di executor pool `std.Io` yang bukan milik zix, di mana sebuah task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free. Di rilis ini cache dipasang di bawah `.EPOLL` dan `.URING`, model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
 - HTTP (`zix.Http1`, `zix.Http`): key adalah method, path, dan query, dan nilai yang di-cache adalah respons HTTP yang sudah di-serialize penuh, ditulis verbatim saat hit. `zix.Http1` mengekspos pasangan eksplisit `cacheLookup` / `cacheStore` plus `writeWithCache` yang menyatu. `zix.Http` mengekspos `res.serveCached` (lookup lalu tulis verbatim) dan `res.sendCached` (serialize, tulis, simpan), menghasilkan byte yang identik dengan plain `send`.
 - gRPC (`zix.Grpc`, unary): key adalah path plus body request, dan nilai yang di-cache adalah pesan respons, bukan reply yang sudah di-frame, karena HEADERS bersifat stateful terhadap HPACK dan stream-id. Saat hit pesan di-frame ulang untuk stream saat ini sehingga HPACK dan stream id tetap benar. `ctx.serveCached` memutar ulang pesan tersimpan dan menyelesaikan dengan OK, `ctx.sendCached` mengirim dan menyimpan.
 - WebSocket broadcast memakai prinsip build-once yang sama alih-alih TTL cache: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` men-serialize frame sekali dan menyebarkan byte yang sama ke setiap fd dalam room yang dikelola pemanggil, melewati write yang gagal ke peer mati. Ini adalah bentuk follow-up yang berbentuk WS, bukan keyed cache.
@@ -734,8 +734,116 @@ Sebuah sweep ukuran body (c512) menempatkan crossover dekat 4 KiB: delta tetap d
 - Kemenangan jelas untuk serialization mahal melewati crossover ~4 KiB (+12.6% pada 4 KiB, naik ke +37% pada 64 KiB, c512) dan tanpa regresi di bawahnya, itulah mengapa opt-in wajib alih-alih default.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker. Terbatas dan dapat diprediksi, trade yang disengaja untuk lock-free per-worker ownership.
 - Sengaja tidak ditujukan untuk respons file-backed atau static: OS page cache sudah menyajikan itu dengan murah, jadi `sendfile` / `splice` adalah tuas yang lebih baik di sana.
-- Kebenaran bertumpu pada opt-in: framework tidak pernah auto-cache output handler. Handler memutuskan cacheability dan TTL. Respons dinamis atau berbasis database menyetel `cache_ttl_ms` yang pendek (menerima staleness sebesar itu) atau tidak mem-cache dan menulis langsung. Key HTTP hanya mencakup method, path, dan query, jadi respons yang bervariasi pada header atau cookie tidak boleh di-cache.
+- Kebenaran bertumpu pada opt-in: engine tidak pernah auto-cache output handler. Handler memutuskan cacheability dan TTL. Respons dinamis atau berbasis database menyetel `cache_ttl_ms` yang pendek (menerima staleness sebesar itu) atau tidak mem-cache dan menulis langsung. Key HTTP hanya mencakup method, path, dan query, jadi respons yang bervariasi pada header atau cookie tidak boleh di-cache.
 - Struktur cache bersifat engine-agnostic di `src/utils`, sehingga glue per-engine (cache thread-local plus penurunan key) adalah satu-satunya bagian yang spesifik protokol.
+
+---
+
+## ADR-037: Model dispatch `.URING` di atas surface io_uring linux mentah, ring shared-nothing thread-per-core
+
+**Status:** Diterima
+
+**Konteks:** zix menawarkan empat opsi dispatch model readiness (`.POOL`, `.ASYNC`, `.MIXED`, `.EPOLL`), semuanya model level-triggered atau thread-per-task yang dibangun di atas interface readiness `epoll`. Jalur `.EPOLL` bersifat shared-nothing dan kompetitif pada throughput loopback mentah, tetapi di bawah beban pipelined ia menghabiskan porsi besar siklus userspace pada transisi syscall (satu `recv`, satu `send`, dan bookkeeping `epoll_wait` per event yang siap). Dispatch io_uring berbasis completion mem-batch submission dan menuai completion, menghapus sebagian besar transisi itu. Sebuah PoC mengukur efeknya (loopback, ReleaseFast, hanya dua build zix, engine `.EPOLL` versus hello server io_uring buatan tangan):
+
+| Metrik | zix-epoll | zix-uring (PoC) |
+| :- | :- | :- |
+| p1 cycles/req (userspace) | 1627 | 818 |
+| p1 L1-miss/req | 73.5 | 22.9 |
+| p16 cycles/req (userspace) | 710 | 240 |
+| p16 server CPU (t4 c128, 10s) | ~45.1s | ~37.25s |
+
+io_uring kira-kira memangkas separuh siklus userspace per request pada pipeline depth 1 dan memotong CPU server sekitar 21 persen pada throughput setara di bawah depth 16. Throughput loopback puncak setara pada depth 1 (terikat kernel dan client), jadi keuntungannya adalah headroom efisiensi, bukan req/s puncak. Penurunan cyc/req userspace dan L1-miss/req mereproduksi mekanisme syscall exception-less, batched-submission yang sudah mapan (FlexSC, OSDI 2010), jadi ini verifikasi efek yang dikenal, bukan asumsi lokal. PoC membuktikan keuntungannya. Pertanyaan terbuka yang diselesaikan ADR ini, sebelum pekerjaan `src/` dimulai, adalah fondasi io_uring mana yang dipakai membangun `.URING`, karena pilihan itu menggerakkan seluruh port. Dua pre-win engine independen yang menguntungkan `.EPOLL` terlepas dari ini sudah mendarat di `zix.Http1` (lazy `parseHead` dan re-arm `EPOLLOUT`), diverifikasi oleh `zig build test-all`. Keduanya masih pending untuk `zix.Http`.
+
+**Keputusan:** Bangun model dispatch `.URING` di atas surface io_uring linux mentah (`std.os.linux.IoUring`, ring low-level yang stabil), bukan `std.Io.Uring` berbasis fiber. Kedua fondasi ditimbang sebagai:
+
+| Aspek | A. std posix io_uring (`std.Io.Uring`) | B. raw linux io_uring (`std.os.linux.IoUring`) |
+| :- | :- | :- |
+| Source | backend `Evented` berbasis fiber dari std, drop-in `std.Io` | ring per-worker buatan tangan di atas ring API low-level yang stabil |
+| Coupling | menumpang field config `io: std.Io` yang ada, satu jalur kode untuk semua backend | runtime khusus `.URING` baru, terpisah dari abstraksi `std.Io` |
+| Control | submission dan reaping dimiliki std, opaque ke zix | kontrol penuh: ring flags, buffer rings, multishot ops, kebijakan batching |
+| Features used | apa pun yang std ekspos lewat `std.Io` | multishot accept dan recv, provided buffer ring, satu send terkoalesensi per completion yang readable, `user_data` gen-tagged, deferred close saat send sedang in-flight |
+| Shared-nothing | bergantung pada topologi executor std | native: satu ring per worker, tanpa handoff lintas-thread, cocok dengan desain `.EPOLL` |
+| Stability risk | mengikuti internal std (surface io_uring berubah lintas 0.16.x) | hanya bergantung pada ABI kernel io_uring yang stabil, bukan internal std |
+| Maintenance | rendah (std memelihara engine) | lebih tinggi (zix memiliki lifecycle ring dan kasus tepinya) |
+
+Alasan untuk B: kemenangan terukur datang dari fitur yang std saat ini tidak ekspos lewat `std.Io` (multishot accept dan recv, provided buffer ring), jadi pendekatan A tidak bisa mencapai angka PoC. Model ring per-worker shared-nothing (satu ring, satu listener `SO_REUSEPORT`, tanpa accept queue bersama) sudah menjadi topologi yang dipakai jalur `.EPOLL`, jadi pendekatan B mempertahankannya utuh, sementara pendekatan A memperkenalkan kembali topologi executor milik std yang tidak dikontrol zix (masalah ownership yang sama yang membatasi response cache ke model per-worker shared-nothing, ADR-036). Pendekatan B hanya bergantung pada ABI kernel yang stabil, jadi surface io_uring std yang berubah tidak menghalanginya dan pekerjaan dimulai pada Zig saat ini (0.16.x).
+
+Cakupan keputusan:
+- Topologi dipertahankan dari `.EPOLL`: thread-per-core, satu ring per worker, satu listener `SO_REUSEPORT` per worker, tanpa accept queue bersama, tanpa handoff fd lintas-thread. Process-per-core (fork-per-core) ditolak karena akan memisahkan route table per-worker dan response cache keluar dari satu address space.
+- Core minimal yang benar lebih dulu: multishot accept yang di-re-arm pada `!IORING_CQE_F_MORE`, slot table ter-index fd (index langsung, tanpa hashmap) yang dijaga terhadap race completion close-versus-recv dengan generation tag di `user_data` melawan fd reuse, recv buffer per-koneksi tetap dengan `recv` SQE biasa, dan CQE drain ter-batch ke stack array. Setup listener memakai `linux.*` mentah (atau `std.Io.net`) karena `std.posix.socket` / `bind` / `listen` / `close` dihapus di 0.16.x.
+- Ring flags adalah optimisasi, bukan prasyarat: ring yang diinisialisasi tanpa flag sudah benar. `SINGLE_ISSUER`, `COOP_TASKRUN`, dan `DEFER_TASKRUN` (yang terakhir butuh kernel 6.1 atau lebih baru) ditambahkan dan diukur satu per satu.
+- Strategi buffer bertahap: mulai dengan recv buffer per-koneksi tetap plus `recv` SQE biasa (sudah cukup untuk bersaing), dan pindah ke provided buffer ring teregistrasi dengan multishot recv hanya jika penghematan syscall terukur membenarkan lifecycle buffer yang lebih sulit.
+- Tuas bertahap lain (masing-masing di balik A/B sendiri, diselesaikan oleh perf counter): registered atau direct files (`IOSQE_FIXED_FILE`, `accept_direct`), send buffer teregistrasi yang memegang payload response-cache (`send_fixed` saat hit), membaca clock sekali per batch CQE untuk TTL cache, dan `SEND_ZC` untuk respons melewati size gate.
+- Urutan implementasi: `zix.Http1` lebih dulu (membuktikan ring core), lalu WebSocket (memakai ulang upgrade path, koalesensi readable-burst memetakan ke satu batched send), lalu `zix.Grpc` (framing h2, HPACK, dan multipleks stream bersifat stateful), lalu `zix.Http` (memakai ulang ring core Http1, paling murah terakhir).
+- `DispatchModel.URING` ditambahkan ke setiap `config.zig` server, dengan fallback non-Linux compile-time atau run-time ke `.EPOLL` (mencerminkan fallback non-Linux `.EPOLL` ke `.POOL` yang ada).
+
+**Konsekuensi:**
+- Hasil akhirnya adalah CPU per request dan koneksi per core, bukan angka req/s loopback yang lebih besar. Throughput loopback puncak tetap setara pada depth 1 karena beban itu terikat kernel dan client. Penerimaan diukur dengan `cycles:u` dan `L1-miss/req` di bawah beban pipelined, back to back melawan `.EPOLL` pada mesin yang sama, server segar per run (ring mem-pin halaman memlock, jadi memakai ulang instance server lintas run menghabiskan budget memlock per-user).
+- zix memiliki lifecycle ring dan kasus tepinya: race completion close-versus-recv, fd reuse (ditangani generation tag), dan budget memlock per-user yang dikonsumsi ring. Ini biaya pemeliharaan yang ditukar untuk kontrol yang dibutuhkan kemenangan terukur.
+- Pendekatan A tetap menjadi fallback jika surface raw-syscall terbukti terlalu mahal dipelihara, atau jika `std.Io` masa depan mengekspos multishot dan provided buffer sebagai operasi kelas-satu.
+- Dua pre-win engine (lazy `parseHead`, re-arm `EPOLLOUT`) ada di `zix.Http1` dan menguntungkan `.EPOLL` terlepas dari keputusan ini. Keduanya kini di-port ke `zix.Http` juga: `ParsedHead`-nya membuang array header 64-entry per-request dan mencatat blok header mentah sebagai offset untuk di-rescan `getHeader` sesuai kebutuhan, dan worker `.EPOLL`-nya men-stage tail respons yang belum tertulis pada partial write lalu mengarm `EPOLLOUT` untuk men-drain-nya pada writable event berikutnya alih-alih membuang koneksi. Sink coalescing di-bypass untuk SSE, yang draining-nya tetap handler-side (blocking write memarkir handler, bukan event loop library).
+- Tuas spesifik-io_uring di atas bertumpu pada mekanisme kernel yang terdokumentasi tetapi belum punya bukti spesifik-beban kerja, jadi masing-masing diselesaikan secara lokal oleh A/B dengan sinyal perf-counter bernama alih-alih diasumsikan. Bukti io_uring yang peer-reviewed kebanyakan storage, jadi untuk networking landasannya adalah mekanisme FlexSC plus catatan desain maintainer kernel.
+
+**Ekstensi ke `zix.Tcp` dan `zix.Fix` (callback ring):**
+- Dua engine ini tidak bisa langsung di-port ke ring: handler-nya adalah `fn(stream, io)` blocking yang memiliki koneksi dan loop pada read dan write sinkron, yang tidak bisa dijalankan loop completion single-threaded. Jadi masing-masing memperoleh API callback baru yang digerakkan engine berdampingan dengan API blocking yang ada. `zix.Tcp` menambah `runFramed` dengan `FrameFn` per-frame di atas length prefix 4-byte, dan `zix.Fix` menambah path `.URING` yang menjalankan session processor resumable (`core.processFixRing`) per batch readable. Path blocking `runWith` dan `serveConn` tidak berubah, dan `.URING`-nya tetap melipat ke `.EPOLL`.
+- Heartbeat FIX di ring memakai timer periodik per-worker, bukan per-koneksi. Satu SQE `prep_timeout` per worker (di-re-arm tiap kali fire, ditandai `OpKind` `.timeout` baru yang diperlakukan engine lain sebagai no-op) berdetak tiap `heartbeat_timeout_ms`. Pada tiap fire worker memindai slot table-nya dan, untuk tiap session yang sudah login dan idle melewati interval, mengirim TestRequest pada tick pertama lalu Logout pada tick berikutnya, ditulis langsung ke fd. Satu SQE per worker plus scan O(n) per tick mengalahkan timeout per-koneksi yang akan cancel dan re-arm pada tiap pesan masuk. Memanen session idle aman-close: satu-satunya op in-flight-nya adalah recv idle tanpa data ter-buffer, jadi menutupnya menyisakan completion recv basi untuk dijatuhkan generation tag. Ini melengkapi session: `processFixRing` menjawab Heartbeat/TestRequest peer secara reaktif, dan timer menambah paruh yang diinisiasi-server.
+
+## ADR-038: server `zix.Tcp` membakar handler pada comptime, `run` tunggal, mengikuti bentuk server engine
+
+**Status:** Diterima
+
+**Konteks:** Setiap engine server zix kecuali `zix.Tcp` membakar handler-nya (atau route table) ke dalam tipe server pada `init`, sehingga handler diketahui pada comptime dan `run` tidak menerima argumen handler (`zix.Http1`, `zix.Http2`, `zix.Grpc`). `zix.Tcp` adalah pengecualian: ia menerima handler sebagai runtime function pointer lewat `runWith(io, handler)`, dengan `run(io)` sebagai entry terpisah yang memakai echo handler bawaan, plus `runFramed(io, frame_fn)` untuk callback per-frame. Pemisahan `run` versus `runWith` dan pointer runtime itu tidak konsisten dengan engine lain dan dengan prinsip explicit-over-implicit serta comptime-where-structural milik proyek. Catatan, asimetri itu sudah separuh teratasi: `FrameFn` per-frame (`runFramed`) sudah comptime, hanya `HandlerFn` per-connection yang runtime. Perubahan ini dibenarkan atas dasar konsistensi dan kejelasan, bukan pengukuran. Handler blocking per-connection berjalan sekali per koneksi yang diterima (titik dispatch yang dingin), jadi men-devirtualize-nya dapat diabaikan, berbeda dengan handler per-request `zix.Http1` atau `FrameFn` per-frame, itulah sebabnya keduanya sudah comptime.
+
+**Keputusan:** Ikuti bentuk server `zix.Http1` / `zix.Grpc`. Bakar handler (atau callback per-frame) ke dalam tipe server pada `init` sehingga `run` hanya menerima `io`. `zix.Tcp.Server` menjadi namespace tanpa field dengan constructor comptime di atas dua factory type privat:
+
+| Constructor | Mengembalikan | Kontrak |
+| :- | :- | :- |
+| `Server.init(comptime handler, config)` / `initArgs(..., args)` | `TcpServerImpl(handler)` | `HandlerFn` per-connection (memiliki stream) |
+| `Server.initFramed(comptime frame_fn, config)` / `initFramedArgs(..., args)` | `TcpFramedServerImpl(frame_fn)` | `FrameFn` per-frame (engine memiliki koneksi) |
+
+Kedua factory type hanya menyimpan `config` dan mengekspos `init`, `deinit`, dan `run(io)`. Echo handler bawaan tidak lagi menjadi default tersembunyi di balik `run`: ia adalah `zix.Tcp.echoHandler` publik, dilewatkan secara eksplisit (`Server.init(zix.Tcp.echoHandler, config)`), sesuai explicit-over-implicit. Method `runWith` dan `runFramed` dihapus.
+
+Dua factory type (bukan satu tipe dengan parameter comptime kedua opsional, seperti `zix.Http1` untuk `(handler, raw_fn)`) mengikuti aturan compose-versus-alternative. Pada `zix.Http1` raw interceptor menyatu (compose) dengan handler (koneksi sama, sebuah hook pra-parse), jadi satu impl membawa keduanya. Pada `zix.Tcp`, `HandlerFn` (memiliki koneksi, blocking) dan `FrameFn` (engine-owned, tidak pernah blocking, berjalan di ring `.URING`) adalah kontrak yang saling eksklusif: sebuah koneksi tidak bisa sekaligus hand-owned dan engine-deframed. Dua factory type menjaga state mustahil itu tidak terwakili. Kontrak `FrameFn` dari ADR-037 tidak berubah, hanya entry point-nya yang berpindah.
+
+`io` tetap argumen `run(io)` alih-alih field config (berbeda dari `zix.Http1` / `zix.Grpc`, yang `io`-nya ada di config). Memindahkan `io` ke `TcpServerConfig` demi paritas bentuk penuh (yang sekaligus menyelesaikan inkonsistensi penempatan io lintas server config) adalah perubahan terpisah yang lebih besar, mencakup struct config dan setiap call site, ditunda ke keputusannya sendiri.
+
+**Konsekuensi:**
+- Perubahan API yang breaking: `runWith` dan `runFramed` hilang, `run(io)` menjadi satu-satunya jalur run, dan constructor membawa handler. Fungsi worker internal (`serveDispatch`, `runEpoll`, dan entry pool / async / epoll) tetap menyimpan handler sebagai nilai runtime, persis seperti `runAsync` / `runPool` / `runMixed` milik `zix.Http1`. Ikatan comptime berada di batas tipe (tanpa registrasi runtime), bukan devirtualization hot-loop.
+- Handler harus diketahui pada comptime. Handler yang dipilih saat runtime (`const h = pick(cfg)`) kini bercabang di call site (`if (...) Server.init(handlerA, ...) else ...`). Inilah satu-satunya biaya ekspresivitas, diterima atas prinsip untuk engine raw-TCP.
+- Menggantikan (supersede) nama API ekstensi pada ADR-037: jalur blocking adalah `Server.init(handler, config)` lalu `run(io)` (dahulu `runWith`), jalur framed ring adalah `Server.initFramed(frame_fn, config)` lalu `run(io)` (dahulu `runFramed`). `.URING` tetap melipat (fold) ke `.EPOLL` untuk handler per-connection dan berjalan native untuk callback framed.
+- Terverifikasi: library kompilasi, kelima contoh `tcp_server_*` kompilasi, suite unit / integration / edge / behaviour lulus, dan kelima end-to-end runner (async, pool, mixed, epoll, uring) lulus.
+
+---
+
+## ADR-039: `zix.Tcp` / `zix.Udp` / `zix.Uds` memindahkan `io` ke dalam config server dan `zix.Uds` membakukan handler pada comptime, menyatukan bentuk server pada `run()`
+
+**Status:** Diterima
+
+**Konteks:** Lima engine server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`) membawa `io: std.Io` di config-nya, sehingga `run()` tidak menerima argumen. Tiga server sisanya menyimpang: `zix.Tcp` dan `zix.Udp` menerima `io` sebagai parameter `run(io)`, dan `zix.Uds` menerima `io` dan handler sekaligus pada run (`run(io, handler)`). Ini adalah inkonsistensi bentuk server terakhir di library: memindahkan server antar protokol berarti harus mengingat mana yang meneruskan `io` lewat `run`. ADR-038 sudah membakukan handler `zix.Tcp` ke dalam tipe pada `init`, tetapi sengaja menunda penempatan `io` sebagai perubahan terpisah yang lebih besar. Tidak ada yang menghalangi pemindahan: engine server membuktikan polanya, dan fungsi worker internal sudah menerima `io` sebagai nilai biasa.
+
+**Keputusan:** Pindahkan `io` ke dalam config dan bakukan handler `zix.Uds` pada `init`, sehingga setiap server dikonstruksi dengan cara yang sama dan `run()` tidak menerima argumen.
+
+- Tambahkan `io: std.Io` sebagai field pertama yang wajib pada `TcpServerConfig`, `UdpServerConfig`, dan `UdsServerConfig`.
+- `run()` tidak menerima argumen pada ketiganya. Ia membaca `self.config.io` dan meneruskan nilai itu ke worker internal yang sudah ada (`serveDispatch`, `runEpoll`, receive loop Udp, accept loop Uds), sehingga tidak ada perubahan hot-path atau ownership.
+- `zix.Uds` mengadopsi bentuk factory ADR-038: `Server.init(comptime handler, config)` mengembalikan tipe terspesialisasi yang `run()`-nya tidak menerima apa pun. Default echo bawaan adalah `zix.Uds.echoHandler` publik, dilewatkan secara eksplisit. Jalur `run(io, handler)` / `runWith` lama dihapus.
+
+Peta constructor server kini seragam:
+
+| Server | Konstruksi | Run |
+| :- | :- | :- |
+| `zix.Http` / `zix.Http1` / `zix.Http2` / `zix.Grpc` / `zix.Fix` | `Server.init(routes_or_handler, config)` | `run()` |
+| `zix.Tcp` | `Server.init(handler, config)` / `initFramed(frame_fn, config)` | `run()` |
+| `zix.Udp` | `Server(Packet).init(config)` | `run()` |
+| `zix.Uds` | `Server.init(handler, config)` | `run()` |
+
+Client (`zix.Tcp.Client`, `zix.Udp.Client`, `zix.Uds.Client`) tetap menerima `io` sebagai parameter `connect()` / `init()`. Penempatan `io` client adalah axis terpisah (`zix.Grpc.Client` juga menerima `io` sebagai parameter sementara `zix.Http.Client` membawanya di config), ditunda ke keputusannya sendiri.
+
+**Konsekuensi:**
+- Perubahan API breaking: setiap call site server `zix.Tcp` / `zix.Udp` / `zix.Uds` menambah `.io = process.io` ke literal config dan menghapus argumen `run`. Pemanggil `zix.Uds` juga melewatkan handler ke `init` (jalur `runWith` hilang).
+- `io` harus hidup lebih lama dari server, kontrak sama yang sudah didokumentasikan config engine.
+- Menggantikan (supersede) penempatan `io` pada ADR-038: jalur run `zix.Tcp` kini `run()` (dahulu `run(io)`). Keputusan handler-at-`init` dari ADR-038 tidak berubah dan diperluas ke `zix.Uds`.
+- Paritas bentuk server penuh: kedelapan server dikonstruksi dengan config yang membawa `io` dan dilayani dengan `run()` tanpa argumen. Memindahkan server antar protokol bersifat mekanis.
+- Terverifikasi: library kompilasi, setiap contoh `tcp_server_*` / `udp_server` / `uds_server` kompilasi, suite unit / integration / edge / behaviour lulus, dan runner `tcp` (kelima model), `udp`, dan `uds` lulus.
 
 ---
 

@@ -7,7 +7,11 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix behaviour: UdpServerConfig, disconnect_timeout_ms defaults to 5000" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
@@ -16,7 +20,11 @@ test "zix behaviour: UdpServerConfig, disconnect_timeout_ms defaults to 5000" {
 }
 
 test "zix behaviour: UdpServerConfig, poll_timeout_ms defaults to 2000" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
@@ -25,7 +33,11 @@ test "zix behaviour: UdpServerConfig, poll_timeout_ms defaults to 2000" {
 }
 
 test "zix behaviour: UdpServerConfig, auto_ack defaults to false" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
@@ -34,7 +46,11 @@ test "zix behaviour: UdpServerConfig, auto_ack defaults to false" {
 }
 
 test "zix behaviour: UdpServerConfig, broadcast defaults to false" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
@@ -43,7 +59,11 @@ test "zix behaviour: UdpServerConfig, broadcast defaults to false" {
 }
 
 test "zix behaviour: UdpServerConfig, endianness defaults to LITTLE" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
@@ -52,7 +72,11 @@ test "zix behaviour: UdpServerConfig, endianness defaults to LITTLE" {
 }
 
 test "zix behaviour: UdpServerConfig, port_mode defaults to REQUIRED" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const cfg = zix.Udp.ServerConfig{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,

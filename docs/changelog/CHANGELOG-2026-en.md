@@ -34,11 +34,33 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBD)
+## 0.4.0 (2026-06-16)
 
 __*Update:*__
+- Server `io` into config and `zix.Uds` handler-at-init (ADR-039):
+    - `zix.Tcp`, `zix.Udp`, and `zix.Uds` now carry `io: std.Io` as the first config field, so `run()` takes no argument, matching the five engine servers. Every zix server is now constructed with a config that carries `io` and served with a no-argument `run()`.
+    - `zix.Uds` adopts the ADR-038 factory shape: `Server.init(comptime handler, config)` bakes the handler into the type, and the built-in `zix.Uds.echoHandler` is passed explicitly. The `run(io, handler)` / `runWith` path is removed.
+    - Breaking: every `zix.Tcp` / `zix.Udp` / `zix.Uds` server call site adds `.io = process.io` and drops the `run` argument. Clients keep `io` as a `connect()` parameter (deferred to a separate decision).
+    ---
+- io_uring dispatch model (`.URING`, ADR-037):
+    - New shared-nothing `.URING = 4` dispatch model: same thread-per-core topology as `.EPOLL` (one `SO_REUSEPORT` listener and one completion ring per worker, no shared queue), but completion-based, so most syscall transitions are batched into the ring. Linux-only, falls back to `.POOL` on non-Linux.
+    - Native across `zix.Http1` (reference engine, plus the WebSocket pump on a `BufferGroup`), `zix.Http`, `zix.Grpc` (multiplexed h2), and `zix.Fix` (resumable `core.processFixRing` per readable batch). `zix.Http2` folds to `.POOL` and the `zix.Tcp` per-connection handler folds to `.EPOLL`.
+    - Request bodies on the ring (`zix.Http1`): a chunked request body fully present in the recv buffer is decoded in place, and a body larger than `max_recv_buf` is answered then its remainder is drained off the socket with a single `MSG_TRUNC` recv (the kernel discards the bytes in place, zero copy, capped at the declared length), mirroring the `.EPOLL` drain. So `.URING` serves large uploads and chunked requests, not only buffered ones.
+    - On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. Prefer `.EPOLL` by default, `.URING` for sustained, pipelined load.
+    ---
+- `zix.Tcp` server API reshape (ADR-038):
+    - The handler is baked into the server type at `init`, so `run` takes no handler argument, mirroring `zix.Http1` / `zix.Grpc` (ADR-039 then moves `io` into config, so `run()` takes nothing). `zix.Tcp.Server` is now a fieldless namespace with comptime constructors `init(handler, config)` / `initArgs(handler, config, args)` (per-connection) and `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (per-frame ring).
+    - Breaking: `runWith` and `runFramed` are removed. The built-in echo default is the public `zix.Tcp.echoHandler`, passed explicitly. The per-connection handler runs `.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` (`.URING` folds to `.EPOLL`). The new per-frame `FrameFn` callback (`initFramed`) runs natively on the `.URING` ring.
+    ---
+- `Http2ServerConfig.logger`:
+    - New optional `logger: ?*Logger` field on `Http2ServerConfig`, for consistency with the other server configs. When set, `zix.Http2` lifecycle lines route through `logger.system(.INFO, "http2", ...)` instead of the Debug-only `std.debug.print`.
+    ---
+- `zix.Http2` frame constants:
+    - The HTTP/2 frame-type bytes are renamed from `FT_*` to the spelled-out `FRAME_TYPE_*` (`FT_DATA` -> `FRAME_TYPE_DATA`, and so on). Breaking for any code referencing `zix.Http2.FT_*`.
+    - New `pub const FRAME_HEADER_LEN` (9) in the h2 frame module (re-exported from `zix.Http2`) names the 9-octet frame header length, replacing the inline `9` literals across the h2 and gRPC frame codecs.
+    ---
 - Response cache awareness (opt-in, ADR-036):
-    - New shared `src/utils/response_cache.zig`: a per-worker, lock-free precomputed-response cache (structure-of-arrays slab, open addressing, lazy on-access TTL). Off by default, installed under `.EPOLL` only (other dispatch models leave it uninstalled and the API degrades to a plain send).
+    - New shared `src/utils/response_cache.zig`: a per-worker, lock-free precomputed-response cache (structure-of-arrays slab, open addressing, lazy on-access TTL). Off by default, installed under `.EPOLL` and `.URING`. The other dispatch models leave it uninstalled and the API degrades to a plain send.
     - Five flat config fields with identical names across `Http1ServerConfig`, `HttpServerConfig`, and `GrpcServerConfig`: `response_cache` (`bool`, default `false`), `cache_max_entries` (`u32`), `cache_max_value_bytes` (`u32`), `cache_ttl_ms` (`u32`), and `cache_max_total_bytes` (`usize`).
     - `zix.Http`: `res.serveCached(req)` and `res.sendCached(req, body, ttl)` cache the full serialized response, keyed on method, path, and query. `zix.Http1` keeps `cacheLookup` / `cacheStore` / `writeWithCache`.
     - `zix.Grpc` (unary): `ctx.serveCached(content_type)` and `ctx.sendCached(content_type, data, ttl)` cache the response message, keyed on path plus request body, re-framed per stream so HPACK and stream id stay correct.
@@ -80,7 +102,7 @@ __*Update:*__
     ---
 - Unified, Debug-gated server init logging:
     - Every server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) now emits lifecycle lines (listening, EPOLL fallback, accept errors) through one gated `logSystem` shape: route to `config.logger` when set, otherwise `std.debug.print` only in Debug builds, silent in release. A release server with no logger emits no init noise.
-    - Removed the junk and duplicate raw prints: `zix.Grpc` previously printed each listening line raw and also logged it; `zix.Http2`/`zix.Fix`/`zix.Tcp` printed raw lifecycle/fallback lines unconditionally. `zix.Udp`/`zix.Uds` init lines now also appear in Debug builds without a logger (were logger-only before).
+    - Removed the junk and duplicate raw prints: `zix.Grpc` previously printed each listening line raw and also logged it. `zix.Http2`/`zix.Fix`/`zix.Tcp` printed raw lifecycle/fallback lines unconditionally. `zix.Udp`/`zix.Uds` init lines now also appear in Debug builds without a logger (were logger-only before).
     - `zix.Channel.init` gained a Debug-only init notice (`zix channel: init <T> cap=<N>`), suppressed in release and under the test runner (`builtin.is_test`) to avoid poisoning the test IPC.
     - Reworded a `src/tcp/http1/server.zig` comment to drop a stale external benchmark reference.
     ---

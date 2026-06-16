@@ -148,6 +148,12 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/data", .handler = dataHandler },
+    .{ .path = "/stream", .handler = streamHandler },
+    .{ .path = "/", .handler = homeHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
@@ -164,11 +170,7 @@ pub fn main(process: std.process.Init) !void {
         std.debug.print("uds_http: fetcher spawn error: {}\n", .{err});
     }
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/data", .handler = dataHandler },
-        .{ .path = "/stream", .handler = streamHandler },
-        .{ .path = "/", .handler = homeHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = io,
         .ip = IP,
         .port = PORT,

@@ -8,6 +8,11 @@ const fdWriteAll = @import("response.zig").fdWriteAll;
 
 // --------------------------------------------------------- //
 
+/// Stack buffer for reading and copying a file in chunks during static serving.
+const FILE_BUF_SIZE: usize = 8 * 1024;
+
+// --------------------------------------------------------- //
+
 const RangeRequest = struct {
     start: u64,
     end: ?u64,
@@ -69,7 +74,7 @@ pub fn serve(
             const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, length, start, end, stat.size }) catch return false;
             fdWriteAll(fd, s) catch return false;
 
-            var file_buf: [8192]u8 = undefined;
+            var file_buf: [FILE_BUF_SIZE]u8 = undefined;
             var reader = f.reader(io, &file_buf);
             var skipped: u64 = 0;
             while (skipped < start) {
@@ -78,7 +83,7 @@ pub fn serve(
                 if (n == 0) break;
                 skipped += n;
             }
-            var copy_buf: [8192]u8 = undefined;
+            var copy_buf: [FILE_BUF_SIZE]u8 = undefined;
             var remaining = length;
             while (remaining > 0) {
                 const to_read = @min(remaining, copy_buf.len);
@@ -95,9 +100,9 @@ pub fn serve(
     const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, stat.size }) catch return false;
     fdWriteAll(fd, s) catch return false;
 
-    var file_buf: [8192]u8 = undefined;
+    var file_buf: [FILE_BUF_SIZE]u8 = undefined;
     var reader = f.reader(io, &file_buf);
-    var copy_buf: [8192]u8 = undefined;
+    var copy_buf: [FILE_BUF_SIZE]u8 = undefined;
     var remaining = stat.size;
     while (remaining > 0) {
         const to_read = @min(remaining, copy_buf.len);

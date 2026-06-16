@@ -27,7 +27,7 @@ Both are HTTP/1.1 servers. `zix.Http` is the full-featured layer, `zix.Http1` is
 | Static files / multipart / SSE writer | built in | not built in (handlers compose from helpers) |
 | Routing | comptime route table | comptime route table (optional, handler can be bare) |
 | WebSocket | handler-owned frame loop | engine-owned frame pump (.EPOLL) |
-| Dispatch models | ASYNC, POOL, MIXED, EPOLL | ASYNC, POOL, MIXED, EPOLL |
+| Dispatch models | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
 
 Use `zix.Http` when handlers need an allocator, static file serving, or the richer request/response API. Use `zix.Http1` when raw throughput and predictable per-request cost matter more than convenience.
 
@@ -35,7 +35,7 @@ Use `zix.Http` when handlers need an allocator, static file serving, or the rich
 
 ## Runtime Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -99,6 +99,10 @@ flowchart TD
 - On non-Linux targets `.EPOLL` falls back to `.POOL` with a logged notice.
 - This is the only model that honors engine-owned WebSocket promotion (see WebSocket section).
 
+### .URING: Shared-Nothing io_uring Event Loop (Linux only)
+
+`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, and send are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). On non-Linux it falls back to `.POOL`. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality, so default to `.EPOLL` and pick `.URING` for sustained, pipelined load.
+
 ---
 
 ## Source Layout
@@ -108,7 +112,7 @@ graph TD
     zix["src/lib.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
-    Http1 --> server["server.zig\nServer + 4 dispatch models\nEPOLL engine"]
+    Http1 --> server["server.zig\nServer + 5 dispatch models\nEPOLL + URING engines"]
     Http1 --> config["config.zig\nHttp1ServerConfig"]
     Http1 --> router["router.zig\ncomptime Router + pathParam"]
     Http1 --> websocket["websocket.zig\nRFC 6455 codec + pump"]
@@ -130,7 +134,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` |
 | `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: register a `RawFn` that owns the connection fd directly |
 | `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
-| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) |
+| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
 | `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
 | `zix.Http1.RawFn` | type | Raw handler given the fd and parsed head, owns the wire directly (custom framing, streaming) |
 | `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, headers, flags) |

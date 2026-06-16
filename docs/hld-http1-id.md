@@ -35,7 +35,7 @@ Pakai `zix.Http` saat handler membutuhkan allocator, static file serving, atau A
 
 ## Model Runtime
 
-Empat model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Default: `.ASYNC`.
+Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Default: `.ASYNC`.
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -98,6 +98,10 @@ flowchart TD
 - Request pipelined yang tiba dalam satu readable event semuanya di-parse dan di-dispatch dalam satu pass, dan response-nya digabung menjadi satu `write()` melalui response sink per-event.
 - Pada target non-Linux `.EPOLL` jatuh kembali ke `.POOL` dengan notice yang dicatat di log.
 - Ini satu-satunya model yang menghormati promosi WebSocket milik engine (lihat bagian WebSocket).
+
+### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
+
+`zix.Http1` adalah engine referensi untuk jalur io_uring (ADR-037). Topologi shared-nothing, thread-per-core yang sama dengan `.EPOLL` (listener `SO_REUSEPORT` pribadi dan satu ring per worker), tetapi completion-based: accept, recv, dan send disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Pump WebSocket juga berjalan native di ring (BufferGroup). Di non-Linux melipat ke `.POOL`. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality per-request, jadi default ke `.EPOLL` dan pilih `.URING` untuk beban sustained dan pipelined.
 
 ---
 

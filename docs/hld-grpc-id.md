@@ -4,7 +4,7 @@
 
 - Server dan client gRPC h2c (HTTP/2 cleartext) diimplementasikan tanpa C FFI.
 - Semua 4 tipe RPC: unary, server streaming, client streaming, bidirectional streaming.
-- Semua 4 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux).
+- Semua 5 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux).
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
 - TLS didelegasikan ke reverse proxy (nginx, haproxy). Backend berbicara h2c saja.
@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok) |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux) |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux), URING=4 (hanya Linux) |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |
@@ -125,9 +125,9 @@ Tiga input menentukan `ctx.deadline_ns` saat dispatch:
 
 | Input | Lokasi | Catatan |
 | :- | :- | :- |
-| `GrpcServerConfig.handler_timeout_ms` | config | batas global; 0 = dinonaktifkan |
-| `Route.timeout_ms` | tabel route comptime | default per route; 0 = gunakan batas global |
-| header `grpc-timeout` | request client | di-parse oleh `parseTimeout`; berlaku jika lebih ketat |
+| `GrpcServerConfig.handler_timeout_ms` | config | batas global (0 = dinonaktifkan) |
+| `Route.timeout_ms` | tabel route comptime | default per route (0 = gunakan batas global) |
+| header `grpc-timeout` | request client | di-parse oleh `parseTimeout` (berlaku jika lebih ketat) |
 
 `ctx.deadline_ns: ?u64` adalah yang paling ketat dari ketiganya (nanodetik CLOCK_REALTIME). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur, sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
 

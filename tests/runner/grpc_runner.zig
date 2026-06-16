@@ -1,14 +1,13 @@
-// Test runner for zix.Grpc.Server (grpc_server_*, port 8083).
+// Test runner for zix.Grpc.Server (grpc_server_*).
 // Spawns the server, sends a unary SayHello RPC, asserts response, kills server.
 //
 // Invoked by `zig build test-runner-grpc-<model>`.
-// argv[1]: server binary path, argv[2]: label, argv[3]: port (unused).
+// argv[1]: server binary path, argv[2]: label, argv[3]: port.
 
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 
-const PORT: u16 = 8083;
 const WAIT_MS: u64 = 5000;
 const GRPC_PATH: []const u8 = "/helloworld.Greeter/SayHello";
 const EXPECTED_PREFIX: []const u8 = "Hello,";
@@ -26,21 +25,29 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL grpc: missing label\n", .{});
         std.process.exit(1);
     };
+    const port_str = arg_iter.next() orelse {
+        std.debug.print("FAIL {s}: missing port\n", .{label});
+        std.process.exit(1);
+    };
+    const port = std.fmt.parseInt(u16, port_str, 10) catch {
+        std.debug.print("FAIL {s}: invalid port\n", .{label});
+        std.process.exit(1);
+    };
 
-    run(process.io, server_path) catch |err| {
+    run(process.io, server_path, port) catch |err| {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
     std.debug.print("PASS {s}\n", .{label});
 }
 
-fn run(io: std.Io, server_path: []const u8) !void {
+fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, PORT, WAIT_MS);
+    try common.waitForTcpPort(io, port, WAIT_MS);
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = PORT }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = port }, io);
     defer client.deinit();
 
     var resp_buf: [256]u8 = undefined;

@@ -442,6 +442,66 @@ pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []
     return .{ .consumed = offset, .close = close or sink.failed };
 }
 
+/// Outcome of one staged pump pass for the .URING ring path.
+pub const RingPumpResult = struct {
+    /// Bytes consumed from the front of data (whole frames only).
+    consumed: usize,
+    /// Whether the connection should close (close frame seen or a write failed).
+    close: bool,
+    /// Bytes staged into out_buf for the caller to submit as one send.
+    staged: usize,
+};
+
+/// Like pump, but stages every outbound frame into out_buf and returns the
+/// staged length instead of writing to the fd. The .URING engine submits one
+/// ring send of out_buf[0..staged] afterwards, so the frame loop issues no
+/// blocking write of its own.
+///
+/// Note:
+/// - If the echoes overflow out_buf mid-pass, the overflowing batch is written
+///   straight to the fd (a rare correctness fallback, safe under the ring's
+///   half-duplex guarantee that no send is in flight during a pump pass), and
+///   only the trailing bytes are returned as staged.
+///
+/// Param:
+/// fd - std.posix.fd_t
+/// data - []const u8 (raw frame bytes received so far)
+/// payload_buf - []u8 (scratch for unmasking, must hold the largest payload)
+/// out_buf - []u8 (staging for the coalesced ring send)
+/// on_frame - WsFrameFn
+///
+/// Return:
+/// - RingPumpResult
+pub fn pumpRing(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []u8, on_frame: WsFrameFn) RingPumpResult {
+    var sink = SendSink{ .fd = fd, .buf = out_buf };
+    tl_send_sink = &sink;
+    defer tl_send_sink = null;
+
+    var offset: usize = 0;
+    var close = false;
+
+    while (offset < data.len) {
+        const result = parseFrame(data[offset..], payload_buf) orelse break;
+
+        switch (result.frame.opcode) {
+            .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
+            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .close => {
+                send(fd, .close, &.{}) catch {};
+                offset += result.consumed;
+                close = true;
+                break;
+            },
+            .pong, .continuation => {},
+            else => {},
+        }
+
+        offset += result.consumed;
+    }
+
+    return .{ .consumed = offset, .close = close or sink.failed, .staged = sink.len };
+}
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
@@ -557,6 +617,45 @@ test "zix http1 ws: pump echoes masked client frames over a socketpair" {
 
     const second = parseFrame(recv[first.consumed..n], &scratch).?;
     try std.testing.expectEqualStrings("yo", second.frame.payload);
+}
+
+test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
+    // Two pipelined masked client text frames: "hi" and "yo".
+    const data = [_]u8{
+        0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02,
+        0x81, 0x82, 0x05, 0x06, 0x07, 0x08, 'y' ^ 0x05, 'o' ^ 0x06,
+    };
+
+    var payload_buf: [128]u8 = undefined;
+    var out_buf: [128]u8 = undefined;
+    // fd -1 is never written: the echoes fit in out_buf, so they stage only.
+    const result = pumpRing(-1, &data, &payload_buf, &out_buf, testEcho);
+
+    try std.testing.expectEqual(data.len, result.consumed);
+    try std.testing.expect(!result.close);
+    try std.testing.expect(result.staged > 0);
+
+    // The staged bytes are two server frames, parseable in order.
+    var scratch: [128]u8 = undefined;
+    const first = parseFrame(out_buf[0..result.staged], &scratch).?;
+    try std.testing.expectEqualStrings("hi", first.frame.payload);
+
+    const second = parseFrame(out_buf[first.consumed..result.staged], &scratch).?;
+    try std.testing.expectEqualStrings("yo", second.frame.payload);
+}
+
+test "zix http1 ws: pumpRing reports close and consumes the close frame" {
+    // Masked client close frame (opcode 0x8) with an empty payload.
+    const data = [_]u8{ 0x88, 0x80, 0x01, 0x02, 0x03, 0x04 };
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+    const result = pumpRing(-1, &data, &payload_buf, &out_buf, testEcho);
+
+    try std.testing.expect(result.close);
+    try std.testing.expectEqual(data.len, result.consumed);
+    // The server close echo is staged (2-byte header, empty payload).
+    try std.testing.expect(result.staged >= 2);
 }
 
 test "zix http1 ws: broadcast fans one built frame out to every member" {

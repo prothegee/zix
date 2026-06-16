@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const DispatchModel = @import("../config.zig").DispatchModel;
+const Logger = @import("../../logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
@@ -14,7 +15,8 @@ pub const Http2ServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
+    /// Connection dispatch model. Selects between .ASYNC, .POOL, and .MIXED.
+    /// This engine has no native .EPOLL or .URING path, both fall back to .POOL.
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog.
@@ -35,6 +37,11 @@ pub const Http2ServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle
+    /// events (listening, fallback notices) instead of std.debug.print. The h2c handler
+    /// owns its frame I/O, so per-request access logging is the handler's responsibility.
+    /// Caller owns the Logger and must ensure it outlives the server.
+    logger: ?*Logger = null,
 };
 
 // --------------------------------------------------------- //
@@ -78,4 +85,13 @@ test "zix test: Http2ServerConfig stream and frame defaults" {
     try std.testing.expectEqual(@as(usize, 16), cfg.max_streams);
     try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
     try std.testing.expectEqual(@as(usize, 65536), cfg.max_body);
+}
+
+test "zix test: Http2ServerConfig logger defaults to null" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    try std.testing.expect(cfg.logger == null);
 }

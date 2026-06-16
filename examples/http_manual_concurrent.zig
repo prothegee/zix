@@ -47,16 +47,22 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // Comparison:
 // Auto (default in other examples):
 // pub fn main(process: std.process.Init) !void {
-//     var server = try zix.Http.Server.init(4096, &routes, .{ .io = process.io, ... });
+//     var server = try zix.Http.Server.init(4096, &Routes, .{ .io = process.io, ... });
 //     // ...
 // }
 //
 // Manual (this example):
 // pub fn main() !void {
 //     var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//     var server = try zix.Http.Server.init(4096, &routes, .{ .io = threaded.io(), ... });
+//     var server = try zix.Http.Server.init(4096, &Routes, .{ .io = threaded.io(), ... });
 //     // ...
 // }
+
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/", .handler = homeHandler },
+    .{ .path = "/info", .handler = infoHandler },
+};
+
 pub fn main() !void {
     const limit: std.Io.Limit = if (CONCURRENT_LIMIT == 0)
         .unlimited
@@ -68,10 +74,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/", .handler = homeHandler },
-        .{ .path = "/info", .handler = infoHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = threaded.io(),
         .ip = IP,
         .port = PORT,

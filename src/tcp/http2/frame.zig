@@ -6,16 +6,19 @@ const std = @import("std");
 
 pub const PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-pub const FT_DATA: u8 = 0x00;
-pub const FT_HEADERS: u8 = 0x01;
-pub const FT_PRIORITY: u8 = 0x02;
-pub const FT_RST_STREAM: u8 = 0x03;
-pub const FT_SETTINGS: u8 = 0x04;
-pub const FT_PUSH_PROMISE: u8 = 0x05;
-pub const FT_PING: u8 = 0x06;
-pub const FT_GOAWAY: u8 = 0x07;
-pub const FT_WINDOW_UPDATE: u8 = 0x08;
-pub const FT_CONTINUATION: u8 = 0x09;
+/// HTTP/2 frame header length in octets (RFC 7540 section 4.1): 3 length + 1 type + 1 flags + 4 stream id.
+pub const FRAME_HEADER_LEN: usize = 9;
+
+pub const FRAME_TYPE_DATA: u8 = 0x00;
+pub const FRAME_TYPE_HEADERS: u8 = 0x01;
+pub const FRAME_TYPE_PRIORITY: u8 = 0x02;
+pub const FRAME_TYPE_RST_STREAM: u8 = 0x03;
+pub const FRAME_TYPE_SETTINGS: u8 = 0x04;
+pub const FRAME_TYPE_PUSH_PROMISE: u8 = 0x05;
+pub const FRAME_TYPE_PING: u8 = 0x06;
+pub const FRAME_TYPE_GOAWAY: u8 = 0x07;
+pub const FRAME_TYPE_WINDOW_UPDATE: u8 = 0x08;
+pub const FRAME_TYPE_CONTINUATION: u8 = 0x09;
 
 pub const FLAG_END_STREAM: u8 = 0x01;
 pub const FLAG_END_HEADERS: u8 = 0x04;
@@ -74,13 +77,13 @@ pub fn parseFrameHeader(buf: []const u8) FrameHeader {
 }
 
 pub fn readFrameHeader(fd: std.posix.fd_t) !FrameHeader {
-    var buf: [9]u8 = undefined;
+    var buf: [FRAME_HEADER_LEN]u8 = undefined;
     try recvExact(fd, &buf);
     return parseFrameHeader(&buf);
 }
 
 /// Encode a 9-byte frame header into buf. No I/O. Use for staged/coalesced writes.
-pub fn encodeFrameHeader(buf: *[9]u8, fh: FrameHeader) void {
+pub fn encodeFrameHeader(buf: *[FRAME_HEADER_LEN]u8, fh: FrameHeader) void {
     buf[0] = @intCast((fh.length >> 16) & 0xFF);
     buf[1] = @intCast((fh.length >> 8) & 0xFF);
     buf[2] = @intCast(fh.length & 0xFF);
@@ -94,7 +97,7 @@ pub fn encodeFrameHeader(buf: *[9]u8, fh: FrameHeader) void {
 }
 
 pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
-    var buf: [9]u8 = undefined;
+    var buf: [FRAME_HEADER_LEN]u8 = undefined;
     encodeFrameHeader(&buf, fh);
     try fdWriteAll(fd, &buf);
 }
@@ -138,7 +141,7 @@ pub fn sendSettings(fd: std.posix.fd_t, params: []const [2]u32) !void {
     const payload_len: usize = params.len * 6;
     try writeFrameHeader(fd, .{
         .length = @intCast(payload_len),
-        .frame_type = FT_SETTINGS,
+        .frame_type = FRAME_TYPE_SETTINGS,
         .flags = 0,
         .stream_id = 0,
     });
@@ -159,7 +162,7 @@ pub fn sendSettings(fd: std.posix.fd_t, params: []const [2]u32) !void {
 pub fn sendSettingsAck(fd: std.posix.fd_t) !void {
     try writeFrameHeader(fd, .{
         .length = 0,
-        .frame_type = FT_SETTINGS,
+        .frame_type = FRAME_TYPE_SETTINGS,
         .flags = FLAG_ACK,
         .stream_id = 0,
     });
@@ -168,7 +171,7 @@ pub fn sendSettingsAck(fd: std.posix.fd_t) !void {
 pub fn sendPingAck(fd: std.posix.fd_t, payload: [8]u8) !void {
     try writeFrameHeader(fd, .{
         .length = 8,
-        .frame_type = FT_PING,
+        .frame_type = FRAME_TYPE_PING,
         .flags = FLAG_ACK,
         .stream_id = 0,
     });
@@ -178,7 +181,7 @@ pub fn sendPingAck(fd: std.posix.fd_t, payload: [8]u8) !void {
 pub fn sendGoaway(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
     try writeFrameHeader(fd, .{
         .length = 8,
-        .frame_type = FT_GOAWAY,
+        .frame_type = FRAME_TYPE_GOAWAY,
         .flags = 0,
         .stream_id = 0,
     });
@@ -198,7 +201,7 @@ pub fn sendGoaway(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
 pub fn sendRstStream(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void {
     try writeFrameHeader(fd, .{
         .length = 4,
-        .frame_type = FT_RST_STREAM,
+        .frame_type = FRAME_TYPE_RST_STREAM,
         .flags = 0,
         .stream_id = stream_id,
     });
@@ -213,7 +216,7 @@ pub fn sendRstStream(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void 
 pub fn sendWindowUpdate(fd: std.posix.fd_t, stream_id: u31, increment: u31) !void {
     try writeFrameHeader(fd, .{
         .length = 4,
-        .frame_type = FT_WINDOW_UPDATE,
+        .frame_type = FRAME_TYPE_WINDOW_UPDATE,
         .flags = 0,
         .stream_id = stream_id,
     });
@@ -255,7 +258,7 @@ pub fn sendResponse(
 
     try writeFrameHeader(fd, .{
         .length = @intCast(hblock.len),
-        .frame_type = FT_HEADERS,
+        .frame_type = FRAME_TYPE_HEADERS,
         .flags = end_stream_flag,
         .stream_id = stream_id,
     });
@@ -264,7 +267,7 @@ pub fn sendResponse(
     if (body.len > 0) {
         try writeFrameHeader(fd, .{
             .length = @intCast(body.len),
-            .frame_type = FT_DATA,
+            .frame_type = FRAME_TYPE_DATA,
             .flags = FLAG_END_STREAM,
             .stream_id = stream_id,
         });
@@ -287,8 +290,8 @@ test "zix test: fdWriteAll delivers data on a blocking fd" {
     try std.testing.expectEqualStrings("frame", buf[0..n]);
 }
 
-test "zix test: frame constants, FT_HEADERS is 0x01" {
-    try std.testing.expectEqual(@as(u8, 0x01), FT_HEADERS);
+test "zix test: frame constants, FRAME_TYPE_HEADERS is 0x01" {
+    try std.testing.expectEqual(@as(u8, 0x01), FRAME_TYPE_HEADERS);
 }
 
 test "zix test: frame constants, FLAG_END_STREAM is 0x01" {
@@ -306,7 +309,7 @@ test "zix test: writeFrameHeader and readFrameHeader roundtrip via pipe" {
 
     const fh = FrameHeader{
         .length = 42,
-        .frame_type = FT_HEADERS,
+        .frame_type = FRAME_TYPE_HEADERS,
         .flags = FLAG_END_HEADERS,
         .stream_id = 3,
     };
@@ -334,7 +337,7 @@ test "zix test: sendSettings empty params writes 9-byte SETTINGS frame via pipe"
     _ = std.posix.system.close(fds[1]);
 
     const fh = try readFrameHeader(fds[0]);
-    try std.testing.expectEqual(@as(u8, FT_SETTINGS), fh.frame_type);
+    try std.testing.expectEqual(@as(u8, FRAME_TYPE_SETTINGS), fh.frame_type);
     try std.testing.expectEqual(@as(u24, 0), fh.length);
     try std.testing.expectEqual(@as(u31, 0), fh.stream_id);
 }

@@ -16,7 +16,8 @@ pub const GrpcServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Selects between POOL, ASYNC, and MIXED.
+    /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
+    /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog.

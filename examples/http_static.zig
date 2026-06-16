@@ -224,14 +224,16 @@ pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/", .handler = homeHandler },
+    .{ .path = "/upload", .handler = uploadHandler },
+    .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
+};
+
 pub fn main(process: std.process.Init) !void {
     createInitDirs(process.io);
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/", .handler = homeHandler },
-        .{ .path = "/upload", .handler = uploadHandler },
-        .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

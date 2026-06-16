@@ -34,11 +34,33 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBD)
+## 0.4.0 (2026-06-16)
 
 __*Ditambahkan:*__
+- `io` server ke dalam config dan handler-at-init `zix.Uds` (ADR-039):
+    - `zix.Tcp`, `zix.Udp`, dan `zix.Uds` kini membawa `io: std.Io` sebagai field config pertama, sehingga `run()` tidak menerima argumen, mengikuti lima engine server. Setiap server zix kini dikonstruksi dengan config yang membawa `io` dan dilayani dengan `run()` tanpa argumen.
+    - `zix.Uds` mengadopsi bentuk factory ADR-038: `Server.init(comptime handler, config)` membakukan handler ke dalam tipe, dan `zix.Uds.echoHandler` bawaan dilewatkan secara eksplisit. Jalur `run(io, handler)` / `runWith` dihapus.
+    - Breaking: setiap call site server `zix.Tcp` / `zix.Udp` / `zix.Uds` menambah `.io = process.io` dan menghapus argumen `run`. Client tetap menerima `io` sebagai parameter `connect()` (ditunda ke keputusan terpisah).
+    ---
+- Model dispatch io_uring (`.URING`, ADR-037):
+    - Model dispatch shared-nothing baru `.URING = 4`: topologi thread-per-core yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu completion ring per worker, tanpa queue bersama), tetapi completion-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Khusus Linux, fallback ke `.POOL` di non-Linux.
+    - Native di `zix.Http1` (engine referensi, plus pump WebSocket di atas `BufferGroup`), `zix.Http`, `zix.Grpc` (h2 multiplexed), dan `zix.Fix` (`core.processFixRing` resumable per batch readable). `zix.Http2` melipat ke `.POOL` dan handler per-connection `zix.Tcp` melipat ke `.EPOLL`.
+    - Request body di ring (`zix.Http1`): body request chunked yang sepenuhnya ada di recv buffer di-decode di tempat, dan body yang lebih besar dari `max_recv_buf` dijawab lalu sisanya di-drain dari socket dengan satu recv `MSG_TRUNC` (kernel membuang byte di tempat, zero copy, dibatasi pada panjang yang dideklarasikan), mengikuti drain `.EPOLL`. Jadi `.URING` melayani upload besar dan request chunked, bukan hanya yang ter-buffer.
+    - Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Pilih `.EPOLL` sebagai default, `.URING` untuk beban sustained dan pipelined.
+    ---
+- Reshape API server `zix.Tcp` (ADR-038):
+    - Handler dibakukan ke dalam tipe server pada `init`, sehingga `run` tidak menerima argumen handler, mengikuti `zix.Http1` / `zix.Grpc` (ADR-039 kemudian memindahkan `io` ke config, sehingga `run()` tidak menerima apa pun). `zix.Tcp.Server` kini namespace tanpa field dengan constructor comptime `init(handler, config)` / `initArgs(handler, config, args)` (per-connection) dan `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (ring per-frame).
+    - Breaking: `runWith` dan `runFramed` dihapus. Default echo bawaan adalah `zix.Tcp.echoHandler` publik, dilewatkan secara eksplisit. Handler per-connection berjalan `.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` (`.URING` melipat ke `.EPOLL`). Callback `FrameFn` per-frame baru (`initFramed`) berjalan native di ring `.URING`.
+    ---
+- `Http2ServerConfig.logger`:
+    - Field opsional baru `logger: ?*Logger` pada `Http2ServerConfig`, demi konsistensi dengan config server lain. Bila diset, baris lifecycle `zix.Http2` dirutekan melalui `logger.system(.INFO, "http2", ...)` alih-alih `std.debug.print` yang hanya Debug.
+    ---
+- Konstanta frame `zix.Http2`:
+    - Byte frame-type HTTP/2 diganti nama dari `FT_*` menjadi `FRAME_TYPE_*` yang dieja penuh (`FT_DATA` -> `FRAME_TYPE_DATA`, dan seterusnya). Breaking untuk kode apa pun yang mereferensi `zix.Http2.FT_*`.
+    - `pub const FRAME_HEADER_LEN` baru (9) di modul frame h2 (di-re-export dari `zix.Http2`) menamai panjang frame header 9-octet, menggantikan literal `9` inline di seluruh codec frame h2 dan gRPC.
+    ---
 - Response cache awareness (opt-in, ADR-036):
-    - Modul bersama baru `src/utils/response_cache.zig`: precomputed-response cache per-worker yang lock-free (structure-of-arrays slab, open addressing, lazy on-access TTL). Mati secara default, dipasang hanya di bawah `.EPOLL` (dispatch model lain membiarkannya tidak terpasang dan API menurun menjadi plain send).
+    - Modul bersama baru `src/utils/response_cache.zig`: precomputed-response cache per-worker yang lock-free (structure-of-arrays slab, open addressing, lazy on-access TTL). Mati secara default, dipasang di bawah `.EPOLL` dan `.URING`. Dispatch model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
     - Lima field config flat dengan nama yang identik di `Http1ServerConfig`, `HttpServerConfig`, dan `GrpcServerConfig`: `response_cache` (`bool`, default `false`), `cache_max_entries` (`u32`), `cache_max_value_bytes` (`u32`), `cache_ttl_ms` (`u32`), dan `cache_max_total_bytes` (`usize`).
     - `zix.Http`: `res.serveCached(req)` dan `res.sendCached(req, body, ttl)` mem-cache respons yang sudah di-serialize penuh, di-key pada method, path, dan query. `zix.Http1` tetap memakai `cacheLookup` / `cacheStore` / `writeWithCache`.
     - `zix.Grpc` (unary): `ctx.serveCached(content_type)` dan `ctx.sendCached(content_type, data, ttl)` mem-cache pesan respons, di-key pada path plus body request, di-frame ulang per stream sehingga HPACK dan stream id tetap benar.
@@ -80,7 +102,7 @@ __*Ditambahkan:*__
     ---
 - Init logging server terpadu dan ter-gate Debug:
     - Setiap server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) kini mengeluarkan baris lifecycle (listening, fallback EPOLL, error accept) melalui satu bentuk `logSystem` ter-gate: rute ke `config.logger` bila diset, selain itu `std.debug.print` hanya pada Debug build, diam pada release. Server release tanpa logger tidak mengeluarkan init noise.
-    - Menghapus print mentah junk dan duplikat: `zix.Grpc` sebelumnya mencetak tiap baris listening mentah sekaligus me-log-nya; `zix.Http2`/`zix.Fix`/`zix.Tcp` mencetak baris lifecycle/fallback mentah tanpa syarat. Baris init `zix.Udp`/`zix.Uds` kini juga muncul pada Debug build tanpa logger (sebelumnya logger-only).
+    - Menghapus print mentah junk dan duplikat: `zix.Grpc` sebelumnya mencetak tiap baris listening mentah sekaligus me-log-nya. `zix.Http2`/`zix.Fix`/`zix.Tcp` mencetak baris lifecycle/fallback mentah tanpa syarat. Baris init `zix.Udp`/`zix.Uds` kini juga muncul pada Debug build tanpa logger (sebelumnya logger-only).
     - `zix.Channel.init` mendapat notice init khusus Debug (`zix channel: init <T> cap=<N>`), ditekan pada release dan di bawah test runner (`builtin.is_test`) untuk menghindari peracunan IPC test.
     - Menyusun ulang komentar `src/tcp/http1/server.zig` untuk membuang referensi benchmark eksternal yang usang.
     ---

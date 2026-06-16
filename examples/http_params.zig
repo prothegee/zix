@@ -126,12 +126,14 @@ pub fn calcHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/echo", .handler = echoHandler },
+    .{ .path = "/greet", .handler = greetHandler },
+    .{ .path = "/calc", .handler = calcHandler },
+};
+
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
-        .{ .path = "/echo", .handler = echoHandler },
-        .{ .path = "/greet", .handler = greetHandler },
-        .{ .path = "/calc", .handler = calcHandler },
-    }, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

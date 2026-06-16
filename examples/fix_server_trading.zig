@@ -142,6 +142,11 @@ fn handleCancelOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void 
 
 // --------------------------------------------------------- //
 
+const Routes = [_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder, .timeout_ms = 500 },
+    .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancelOrder, .timeout_ms = 500 },
+};
+
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
     std.Io.Dir.cwd().createDirPath(io, LOG_DIR) catch {};
@@ -155,10 +160,7 @@ pub fn main(process: std.process.Init) !void {
     defer logger.deinit();
 
     var server = try zix.Fix.Server.init(
-        &[_]zix.Fix.Route{
-            .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder, .timeout_ms = 500 },
-            .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancelOrder, .timeout_ms = 500 },
-        },
+        &Routes,
         .{
             .io = io,
             .ip = IP,

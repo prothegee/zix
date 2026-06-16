@@ -7,6 +7,9 @@ const cache = @import("../../utils/response_cache.zig");
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
 
+/// Scratch buffer for building one HTTP status line plus its headers.
+pub const HEADER_BUF_SIZE: usize = 256;
+
 pub const ParseResult = struct {
     head: ParsedHead,
     body_offset: usize,
@@ -524,7 +527,7 @@ fn buildSimpleHeaderInto(buf: []u8, status: u16, content_type: []const u8, body_
     return pos;
 }
 
-fn buildSimpleHeader(buf: *[256]u8, status: u16, content_type: []const u8, body_len: usize) []u8 {
+fn buildSimpleHeader(buf: *[HEADER_BUF_SIZE]u8, status: u16, content_type: []const u8, body_len: usize) []u8 {
     return buf[0..buildSimpleHeaderInto(buf, status, content_type, body_len)];
 }
 
@@ -644,13 +647,13 @@ pub fn writeSimple(
             // Fast path: build header directly into sink.buf at sink.len, then
             // append body. Eliminates the hdr_buf[256] stack allocation and the
             // hdr_buf-to-sink memcpy on the pipelined hot path.
-            if (sink.len + 256 + body.len <= sink.buf.len) {
+            if (sink.len + HEADER_BUF_SIZE + body.len <= sink.buf.len) {
                 const hdr_len = buildSimpleHeaderInto(sink.buf[sink.len..], status, content_type, body.len);
                 sink.len += hdr_len;
                 @memcpy(sink.buf[sink.len..][0..body.len], body);
                 sink.len += body.len;
             } else {
-                var hdr_buf: [256]u8 = undefined;
+                var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
                 const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
                 sink.append(hdr);
                 if (!sink.failed) sink.append(body);
@@ -660,7 +663,7 @@ pub fn writeSimple(
         }
     }
 
-    var hdr_buf: [256]u8 = undefined;
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
 
     if (body.len <= 3840) {
@@ -711,7 +714,7 @@ pub fn writeSimpleNoBody(
     content_type: []const u8,
     content_length: usize,
 ) !void {
-    var hdr_buf: [256]u8 = undefined;
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const hdr = buildSimpleHeader(&hdr_buf, status, content_type, content_length);
 
     return fdWriteAll(fd, hdr);
@@ -755,7 +758,7 @@ pub fn writeGzip(
     try comp.finish();
 
     const compressed = out_w.buffered();
-    var hdr: [256]u8 = undefined;
+    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
     const h = try std.fmt.bufPrint(
         &hdr,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n",
@@ -767,7 +770,7 @@ pub fn writeGzip(
 
 /// Start a chunked response. Call writeChunk for each chunk, then writeChunkedEnd.
 pub fn writeChunkedStart(fd: std.posix.fd_t, status: u16, content_type: []const u8) !void {
-    var hdr: [256]u8 = undefined;
+    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
     const s = try std.fmt.bufPrint(
         &hdr,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -800,7 +803,7 @@ pub fn writeRange(
 ) !void {
     const total: u64 = full_body.len;
     const range = parseRange(range_val, total) orelse {
-        var hdr: [256]u8 = undefined;
+        var hdr: [HEADER_BUF_SIZE]u8 = undefined;
         const s = try std.fmt.bufPrint(
             &hdr,
             "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{d}\r\nContent-Length: 0\r\n\r\n",
@@ -810,7 +813,7 @@ pub fn writeRange(
     };
 
     const slice = full_body[range.start .. range.end + 1];
-    var hdr: [256]u8 = undefined;
+    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
     const s = try std.fmt.bufPrint(
         &hdr,
         "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\nContent-Length: {d}\r\n\r\n",
@@ -1165,7 +1168,7 @@ test "zix http1: percentDecode, encoded chars decoded in place" {
 }
 
 test "zix http1: buildSimpleHeaderInto writes status, content-type, content-length" {
-    var buf: [256]u8 = undefined;
+    var buf: [HEADER_BUF_SIZE]u8 = undefined;
     const len = buildSimpleHeaderInto(&buf, 200, "text/plain", 3);
     const hdr = buf[0..len];
     try std.testing.expect(std.mem.startsWith(u8, hdr, "HTTP/1.1 200 OK\r\n"));
@@ -1174,7 +1177,7 @@ test "zix http1: buildSimpleHeaderInto writes status, content-type, content-leng
 }
 
 test "zix http1: buildSimpleHeaderInto omits Content-Type when empty" {
-    var buf: [256]u8 = undefined;
+    var buf: [HEADER_BUF_SIZE]u8 = undefined;
     const len = buildSimpleHeaderInto(&buf, 204, "", 0);
     const hdr = buf[0..len];
     try std.testing.expect(std.mem.indexOf(u8, hdr, "Content-Type") == null);

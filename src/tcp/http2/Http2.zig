@@ -39,17 +39,18 @@ pub const sendRstStream = frame_mod.sendRstStream;
 pub const sendWindowUpdate = frame_mod.sendWindowUpdate;
 
 pub const PREFACE = frame_mod.PREFACE;
+pub const FRAME_HEADER_LEN = frame_mod.FRAME_HEADER_LEN;
 
-pub const FT_DATA: u8 = frame_mod.FT_DATA;
-pub const FT_HEADERS: u8 = frame_mod.FT_HEADERS;
-pub const FT_PRIORITY: u8 = frame_mod.FT_PRIORITY;
-pub const FT_RST_STREAM: u8 = frame_mod.FT_RST_STREAM;
-pub const FT_SETTINGS: u8 = frame_mod.FT_SETTINGS;
-pub const FT_PUSH_PROMISE: u8 = frame_mod.FT_PUSH_PROMISE;
-pub const FT_PING: u8 = frame_mod.FT_PING;
-pub const FT_GOAWAY: u8 = frame_mod.FT_GOAWAY;
-pub const FT_WINDOW_UPDATE: u8 = frame_mod.FT_WINDOW_UPDATE;
-pub const FT_CONTINUATION: u8 = frame_mod.FT_CONTINUATION;
+pub const FRAME_TYPE_DATA: u8 = frame_mod.FRAME_TYPE_DATA;
+pub const FRAME_TYPE_HEADERS: u8 = frame_mod.FRAME_TYPE_HEADERS;
+pub const FRAME_TYPE_PRIORITY: u8 = frame_mod.FRAME_TYPE_PRIORITY;
+pub const FRAME_TYPE_RST_STREAM: u8 = frame_mod.FRAME_TYPE_RST_STREAM;
+pub const FRAME_TYPE_SETTINGS: u8 = frame_mod.FRAME_TYPE_SETTINGS;
+pub const FRAME_TYPE_PUSH_PROMISE: u8 = frame_mod.FRAME_TYPE_PUSH_PROMISE;
+pub const FRAME_TYPE_PING: u8 = frame_mod.FRAME_TYPE_PING;
+pub const FRAME_TYPE_GOAWAY: u8 = frame_mod.FRAME_TYPE_GOAWAY;
+pub const FRAME_TYPE_WINDOW_UPDATE: u8 = frame_mod.FRAME_TYPE_WINDOW_UPDATE;
+pub const FRAME_TYPE_CONTINUATION: u8 = frame_mod.FRAME_TYPE_CONTINUATION;
 
 pub const FLAG_END_STREAM: u8 = frame_mod.FLAG_END_STREAM;
 pub const FLAG_END_HEADERS: u8 = frame_mod.FLAG_END_HEADERS;

@@ -28,10 +28,10 @@ fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) v
 /// Usage:
 /// ```zig
 /// const MyServer = zix.Udp.Server(MyPacket);
-/// var server = try MyServer.init(config);           // REQUIRED mode
+/// var server = try MyServer.init(config);           // REQUIRED mode, config.io required
 /// var server = try MyServer.initArgs(config, args); // CONFIGURABLE mode
 /// defer server.deinit();
-/// try server.run(io);
+/// try server.run();
 /// ```
 pub fn UdpServer(comptime Packet: type) type {
     // RFC 768: max UDP payload = 65,535 - 8 (UDP header) - 20 (min IPv4 header) = 65,507 bytes.
@@ -99,8 +99,11 @@ pub fn UdpServer(comptime Packet: type) type {
         }
 
         /// Bind the socket and start the receive loop. Blocks until an error occurs.
+        /// io is taken from config.io (caller-provided, must outlive the server).
         /// Prints "listening on ip:port" after a successful bind.
-        pub fn run(self: *Self, io: std.Io) !void {
+        pub fn run(self: *Self) !void {
+            const io = self.config.io;
+
             const addr = try std.Io.net.IpAddress.parse(self.config.ip, self.config.port);
             const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
             defer socket.close(io);
@@ -108,7 +111,7 @@ pub fn UdpServer(comptime Packet: type) type {
             logSystem(self.config, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
             // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
-            //       The client list grows and shrinks (swapRemove on disconnect); the broadcast peer
+            //       The client list grows and shrinks (swapRemove on disconnect). The broadcast peer
             //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
             //       so snapshots would accumulate unboundedly until the server stops.
             var clients = std.array_list.Managed(ClientRecord).init(self.config.allocator);
@@ -277,19 +280,29 @@ pub fn UdpServer(comptime Packet: type) type {
 const TestPkt = extern struct { value: u32 };
 
 test "zix test: UdpServer init, port zero returns PortNotConfigured" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const S = UdpServer(TestPkt);
-    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0 }));
+    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0 }));
 }
 
 test "zix test: UdpServer init, nonzero port succeeds" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const S = UdpServer(TestPkt);
-    var server = try S.init(.{ .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100 });
+    var server = try S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100 });
     server.deinit();
 }
 
 test "zix test: UdpServer init, config fields are preserved" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
     const S = UdpServer(TestPkt);
     var server = try S.init(.{
+        .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9200,

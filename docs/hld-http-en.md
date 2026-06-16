@@ -23,7 +23,7 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Four dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
 
 ### .POOL: Work-Queue Thread Pool
 
@@ -89,7 +89,7 @@ flowchart TD
 
 ### .MIXED: N Accept Threads, io.async() Dispatch
 
-- N accept threads (default cpu_count, `SO_REUSEPORT`); each dispatches connections via `io.async()` directly, no `ConnQueue`.
+- N accept threads (default cpu_count, `SO_REUSEPORT`). Each dispatches connections via `io.async()` directly, no `ConnQueue`.
 - `pool_size` is ignored. `workers` controls accept thread count.
 - Balanced throughput and latency, higher jitter than `.POOL` under saturation.
 
@@ -115,6 +115,15 @@ flowchart TD
 - Blocking fds: `handleOneRequest` does a synchronous recv/parse/send, then returns the worker to `epoll_wait`.
 - `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
 - Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
+- Non-Linux builds fall back to `.POOL` automatically.
+
+### .URING: Shared-Nothing io_uring Workers (Linux-only)
+
+Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based: accepts, reads, and writes are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring (`self.runUring(io)`, ADR-037 Phase 4).
+
+- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
+- Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality.
+- Like `.EPOLL`, the per-connection serve is blocking once a request is ready, so it is not suited to SSE or WebSocket.
 - Non-Linux builds fall back to `.POOL` automatically.
 
 `zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.
@@ -346,7 +355,7 @@ Buffers response state, writes on `send()` or equivalent.
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
 | `noContent()` | Sets status `.NO_CONTENT`, sends empty body |
-| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`; sets `streaming = true` so the keep-alive loop exits after the handler returns |
+| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`, and sets `streaming = true` so the keep-alive loop exits after the handler returns |
 
 Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.BufferTooSmall` is returned if exceeded.
 
@@ -632,7 +641,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 
 ## SSE (Server-Sent Events)
 
-One-way server push over HTTP/1.1. The client uses the browser's `EventSource` API or `curl -N`; no upgrade handshake is required.
+One-way server push over HTTP/1.1. The client uses the browser's `EventSource` API or `curl -N`. No upgrade handshake is required.
 
 ```mermaid
 sequenceDiagram
@@ -814,7 +823,7 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | :- | :- |
 | `response_timeout_ms` enforcement | v1: field stored, not yet applied |
 | `read_timeout_ms` enforcement | v1: field stored, not yet applied |
-| TLS / HTTPS | out of scope: terminate TLS at the proxy layer (nginx, HAProxy, Envoy); zix speaks plain HTTP behind the proxy |
+| TLS / HTTPS | out of scope: terminate TLS at the proxy layer (nginx, HAProxy, Envoy), zix speaks plain HTTP behind the proxy |
 | Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
 
 ---

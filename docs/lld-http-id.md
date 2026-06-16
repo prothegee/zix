@@ -404,7 +404,7 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 ```
 
 - `join(room, conn, io)`: `getOrPut(room)` -> tambahkan `conn` ke list
-- `leave(room, conn, io)`: temukan `conn` dalam list berdasarkan pointer, `swapRemove`; kirim close frame ke conn yang dihapus
+- `leave(room, conn, io)`: temukan `conn` dalam list berdasarkan pointer, `swapRemove`, lalu kirim close frame ke conn yang dihapus
 - `broadcast(room, msg, io)`: iterasi list, bangun dan tulis frame ke stream setiap conn, lewati kegagalan penulisan secara diam-diam (koneksi mati dihapus saat leave handler miliknya dipicu)
 
 ---

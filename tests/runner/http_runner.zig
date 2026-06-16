@@ -1,14 +1,13 @@
-// Test runner for zix.Http.Server (http_basic_*, port 9100).
+// Test runner for zix.Http.Server (http_basic_*).
 // Spawns the server, makes a GET / request, asserts 200 + body, kills server.
 //
 // Invoked by `zig build test-runner-http-<model>`.
-// argv[1]: server binary path, argv[2]: label, argv[3]: port (unused).
+// argv[1]: server binary path, argv[2]: label, argv[3]: port.
 
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 
-const PORT: u16 = 9100;
 const WAIT_MS: u64 = 5000;
 
 // --------------------------------------------------------- //
@@ -24,19 +23,27 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL http: missing label\n", .{});
         std.process.exit(1);
     };
+    const port_str = arg_iter.next() orelse {
+        std.debug.print("FAIL {s}: missing port\n", .{label});
+        std.process.exit(1);
+    };
+    const port = std.fmt.parseInt(u16, port_str, 10) catch {
+        std.debug.print("FAIL {s}: invalid port\n", .{label});
+        std.process.exit(1);
+    };
 
-    run(process.io, server_path) catch |err| {
+    run(process.io, server_path, port) catch |err| {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
     std.debug.print("PASS {s}\n", .{label});
 }
 
-fn run(io: std.Io, server_path: []const u8) !void {
+fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, PORT, WAIT_MS);
+    try common.waitForTcpPort(io, port, WAIT_MS);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -49,7 +56,10 @@ fn run(io: std.Io, server_path: []const u8) !void {
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9100/", .{});
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+
+    var resp = try client.get(url, .{});
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;

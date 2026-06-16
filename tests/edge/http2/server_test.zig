@@ -97,7 +97,7 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
         const fh = try zix.Http2.readFrameHeader(fd);
         const payload = payload_buf[0..fh.length];
         if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
-        if (fh.frame_type == zix.Http2.FT_SETTINGS and (fh.flags & zix.Http2.FLAG_ACK) == 0) {
+        if (fh.frame_type == zix.Http2.FRAME_TYPE_SETTINGS and (fh.flags & zix.Http2.FLAG_ACK) == 0) {
             try zix.Http2.sendSettingsAck(fd);
             got_settings = true;
         }
@@ -134,7 +134,7 @@ test "zix edge: writeFrameHeader stream_id high bit is cleared on read" {
 
     const orig = zix.Http2.FrameHeader{
         .length = 0,
-        .frame_type = zix.Http2.FT_DATA,
+        .frame_type = zix.Http2.FRAME_TYPE_DATA,
         .flags = 0,
         .stream_id = 0x7FFF_FFFF,
     };

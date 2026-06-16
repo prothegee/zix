@@ -4,7 +4,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 test "zix integration: UdsServer.init, valid path succeeds and deinit is safe" {
-    var server = try zix.Uds.Server.init(.{
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{
+        .io = threaded.io(),
         .path = "/tmp/zix_integration_test.sock",
         .allocator = std.testing.allocator,
     });

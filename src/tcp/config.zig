@@ -27,13 +27,24 @@ pub const DispatchModel = enum(u8) {
     /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
     /// Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
     EPOLL = 3,
+    /// Shared-nothing io_uring: each worker owns one SO_REUSEPORT listener and
+    /// one completion ring (ADR-037). Same thread-per-core topology as .EPOLL,
+    /// but completion-based instead of readiness-based, so most syscall
+    /// transitions are batched away. Linux-only.
+    /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
+    /// zix.Http1, zix.Http, zix.Grpc, and zix.Fix implement natively on Linux,
+    /// as do the WebSocket pump and the zix.Tcp framed path. Http2 folds to
+    /// .POOL, and the zix.Tcp per-connection handler folds to .EPOLL.
+    URING = 4,
 }; // for all Tcp
 
 // --------------------------------------------------------- //
 
 /// TCP stream server configuration.
-/// Pass to TcpServer.init(). Fields without defaults (ip, port) are required.
+/// Pass to Tcp.Server.init(). Fields without defaults (io, ip, port) are required.
 pub const TcpServerConfig = struct {
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero.
@@ -77,7 +88,10 @@ pub const TcpClientConfig = struct {
 // --------------------------------------------------------- //
 
 test "zix test: TcpServerConfig, default field values" {
-    const cfg = TcpServerConfig{ .ip = "127.0.0.1", .port = 9300 };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = TcpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
@@ -87,6 +101,12 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
+}
+
+test "zix test: DispatchModel, URING variant value and ordering" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(DispatchModel.ASYNC));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(DispatchModel.URING));
 }
 
 test "zix test: TcpClientConfig, default field values" {

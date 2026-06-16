@@ -41,9 +41,9 @@ pub const Uds = @import("uds/Uds.zig");
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Uds.Server` | struct | `init(config)` / `run(io)` / `runWith(io, handlerFn)` / `deinit()` |
+| `zix.Uds.Server` | namespace | `init(handler, config)` returns a server with `run()` / `deinit()`. The built-in `echoHandler` is passed explicitly |
 | `zix.Uds.Client` | struct | `connect(config, io)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Uds.ServerConfig` | struct | `path`, `allocator`, `backlog` (128), `max_msg_len` (4096) |
+| `zix.Uds.ServerConfig` | struct | `io`, `path`, `allocator`, `kernel_backlog` (128), `max_recv_buf` (4096) |
 | `zix.Uds.ClientConfig` | struct | `path` |
 | `zix.Uds.HandlerFn` | type | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` |
 | `zix.Uds.echoHandler` | fn | Default echo handler: reads length-prefixed frames and echoes each back |
@@ -67,7 +67,7 @@ Frames with `payload_len > max_msg_len` (default 4096) close the connection.
 
 ```mermaid
 flowchart TD
-    A["UdsServer.init(config)"] --> B["runWith(io, handler)"]
+    A["Uds.Server.init(handler, config)"] --> B["run() (io from config.io)"]
     B --> C["unlink stale socket if exists"]
     C --> D["UnixAddress.listen(io)"]
     D --> E["accept loop"]
@@ -82,7 +82,7 @@ flowchart TD
 - Stale socket file is unlinked before binding (safe restart after crash).
 - Each accepted connection is dispatched as a concurrent task via `io.concurrent()`.
 - Fallback to synchronous dispatch if concurrent pool is exhausted.
-- Socket file is unlinked again when `runWith()` returns.
+- Socket file is unlinked again when `run()` returns.
 
 ---
 

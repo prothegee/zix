@@ -258,7 +258,7 @@ pub const HttpClient = struct {
     ///
     /// Note:
     /// - Sends Connection: close so the server closes after the response.
-    ///   Content-Length is read when present; otherwise body is read until EOF.
+    ///   Content-Length is read when present, otherwise body is read until EOF.
     /// - wss:// and TLS are not supported. Use the TCP-based request() for those.
     ///
     /// Param:
