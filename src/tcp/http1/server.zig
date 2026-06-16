@@ -568,7 +568,7 @@ fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
 
     const line_end = std.mem.indexOfScalarPos(u8, rem, 4, '\r') orelse return null;
 
-    // Minimum for "GET / HTTP/1.1": line_end >= 14; last 9 chars = " HTTP/1.1"
+    // Minimum for "GET / HTTP/1.1": line_end >= 14, last 9 chars = " HTTP/1.1"
     if (line_end < 14) return null;
     if (rem[line_end - 9] != ' ') return null;
     if (!std.mem.eql(u8, rem[line_end - 8 .. line_end], "HTTP/1.1")) return null;
@@ -1500,7 +1500,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 consumed += request_len;
 
                 // WebSocket upgrade: stop parsing HTTP and switch to the frame
-                // loop. The 101 is already staged in the sink; bytes the client
+                // loop. The 101 is already staged in the sink. Bytes the client
                 // pipelined after the handshake are pumped by handleRecv.
                 if (core.takeWebSocket()) |pending| {
                     conn.ws = pending.on_frame;
@@ -1554,7 +1554,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 return;
             }
 
-            // The response for an oversized request went out first; now read and
+            // The response for an oversized request went out first. Now read and
             // discard the rest of that body before serving the next request.
             if (conn.drain > 0) {
                 self.armDrainRecv(conn);
@@ -1796,7 +1796,7 @@ pub const Server = struct {
     /// Like init, but also installs a raw-request interceptor for the EPOLL
     /// dispatch model. raw_fn is called before any header parsing on each
     /// request. Returning a non-null offset skips the full parse-and-dispatch
-    /// path for that request. Only effective under EPOLL; other models ignore it.
+    /// path for that request. Only effective under EPOLL, other models ignore it.
     ///
     /// Param:
     /// handler - comptime HandlerFn
