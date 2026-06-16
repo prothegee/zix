@@ -20,7 +20,7 @@ const POOL_SIZE: usize = 0; // ignored by URING
 // Reactive session only: Logon, application routing/echo, Heartbeat/TestRequest
 // replies, and Logout are served on the ring. The proactive idle-heartbeat timer
 // (server-initiated TestRequest/Logout on silence) is not driven on the ring yet
-// (it needs an io_uring timeout SQE); use .EPOLL/.POOL/.ASYNC when that matters.
+// (it needs an io_uring timeout SQE). Use .EPOLL/.POOL/.ASYNC when that matters.
 // On non-Linux targets .URING falls back to .POOL automatically.
 
 // --------------------------------------------------------- //
