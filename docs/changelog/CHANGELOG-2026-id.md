@@ -34,7 +34,7 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBD)
+## 0.4.0 (2026-06-16)
 
 __*Ditambahkan:*__
 - `io` server ke dalam config dan handler-at-init `zix.Uds` (ADR-039):
@@ -45,6 +45,7 @@ __*Ditambahkan:*__
 - Model dispatch io_uring (`.URING`, ADR-037):
     - Model dispatch shared-nothing baru `.URING = 4`: topologi thread-per-core yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu completion ring per worker, tanpa queue bersama), tetapi completion-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Khusus Linux, fallback ke `.POOL` di non-Linux.
     - Native di `zix.Http1` (engine referensi, plus pump WebSocket di atas `BufferGroup`), `zix.Http`, `zix.Grpc` (h2 multiplexed), dan `zix.Fix` (`core.processFixRing` resumable per batch readable). `zix.Http2` melipat ke `.POOL` dan handler per-connection `zix.Tcp` melipat ke `.EPOLL`.
+    - Request body di ring (`zix.Http1`): body request chunked yang sepenuhnya ada di recv buffer di-decode di tempat, dan body yang lebih besar dari `max_recv_buf` dijawab lalu sisanya di-drain dari socket dengan satu recv `MSG_TRUNC` (kernel membuang byte di tempat, zero copy, dibatasi pada panjang yang dideklarasikan), mengikuti drain `.EPOLL`. Jadi `.URING` melayani upload besar dan request chunked, bukan hanya yang ter-buffer.
     - Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Pilih `.EPOLL` sebagai default, `.URING` untuk beban sustained dan pipelined.
     ---
 - Reshape API server `zix.Tcp` (ADR-038):
