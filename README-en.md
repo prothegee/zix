@@ -237,7 +237,7 @@ __*2. Five selectable dispatch models:*__
 - EPOLL (shared-nothing: each worker owns a SO_REUSEPORT listener + epoll instance, level-triggered, no shared queue): Linux-only, best for high connection counts.
 - URING (shared-nothing io_uring: same thread-per-core topology as EPOLL, but completion-based so most syscall transitions are batched away): Linux-only.
 
-> concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux. Http2 has no native epoll or uring path and folds to POOL.
+> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux. Http2 has no native epoll or uring path and folds to POOL.
 
 <br>
 
@@ -245,7 +245,7 @@ __*3. Explicit, flat configuration:*__
 
 No nested sub-configs: every field (e.g. dispatch_model, max_response_headers: .MINIMAL, pool_size) is top-level and explicit.
 
-> predictability by principle. You sees exactly what the server does without
+> Predictability by principle. You sees exactly what the server does without
 chasing inherited defaults.
 
 <br>
@@ -287,7 +287,7 @@ Log types per protocol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rp
 
 __*8. Response Cache Awareness:*__
 
-Opt-in, per-worker response cache (ADR-036) shared by `zix.Http1`, `zix.Http`, and `zix.Grpc`. A handler builds its response once, the engine stores it under a key derived from the request, and a later matching request replays the stored bytes with no rebuild and no re-serialization. Data oriented (a structure of arrays plus one flat payload slab), lock-free by ownership (one instance per worker, never shared), with a lazy on-access TTL. Active under the shared-nothing `.EPOLL` model (`zix.Http1` also under `.URING`).
+Opt-in, per-worker response cache (ADR-036) shared by `zix.Http1`, `zix.Http`, and `zix.Grpc`. A handler builds its response once, the engine stores it under a key derived from the request, and a later matching request replays the stored bytes with no rebuild and no re-serialization. Data oriented (a structure of arrays plus one flat payload slab), lock-free by ownership (one instance per worker, never shared), with a lazy on-access TTL. Active under the shared-nothing `.EPOLL` and `.URING` models.
 
 > A tool you reach for deliberately, not a hidden layer. It pays off above a ~4 KiB body (heavy ~32 KiB JSON measured +34% throughput) and is a zero-regression wash below that.
 
@@ -447,7 +447,7 @@ Built example binaries land in `zig-out/bin/`. To build all examples, then run o
 
 ```sh
 zig build examples                      # build every example into zig-out/bin/
-zig-out/bin/example-http1_websocket &   # run one in the background
+./zig-out/bin/example-http1_websocket &   # run one in the background
 kill %1                                 # stop it
 ```
 
@@ -940,7 +940,7 @@ curl -N http://localhost:9010/events
 
 See `examples/http_sse.zig` for a full example with a browser-compatible HTML page, and `examples/http_sse_client.zig` for a matching client. For the raw `zix.Http1` engine see `examples/http1_sse.zig`.
 
-**When to use:** choose SSE for one-way server push over plain HTTP (progress streams, notifications, log tailing, live metrics) when the client does not need to send frames back. It is lighter than WebSocket and `EventSource` reconnects automatically. Always run it under `.ASYNC`; a blocking `.POOL` would burn one thread per open stream.
+**When to use:** choose SSE for one-way server push over plain HTTP (progress streams, notifications, log tailing, live metrics) when the client does not need to send frames back. It is lighter than WebSocket and `EventSource` reconnects automatically. Always run it under `.ASYNC`. A blocking `.POOL` would burn one thread per open stream.
 
 <br>
 
@@ -1065,7 +1065,7 @@ curl -X POST "http://localhost:9005/upload" \
 
 See `examples/http_static.zig` for a full working example including static serving, range requests, and multipart upload.
 
-**When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. For very high static throughput a CDN or a `sendfile`-based path still wins; this is for convenience and co-located assets, not a bulk file CDN.
+**When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. For very high static throughput a CDN or a `sendfile`-based path still wins. This is for convenience and co-located assets, not a bulk file CDN.
 
 <br>
 
@@ -1137,7 +1137,7 @@ What the key and the cached value are depends on the engine:
 | `zix.Http1`, `zix.Http` | method, path, query | the full serialized HTTP response, written verbatim |
 | `zix.Grpc` (unary) | path, request message | the response message, re-framed per stream (HPACK and stream id stay correct) |
 
-It is off by default. Enable it on the `.EPOLL` dispatch model:
+It is off by default. Enable it on the `.EPOLL` or `.URING` dispatch model:
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -1168,7 +1168,7 @@ fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.C
 
 The raw `zix.Http1` engine exposes the same idea through `cacheLookup` and `writeWithCache`.
 
-For gRPC unary handlers the opt-in lives on the call context. `ctx.serveCached` replays a stored reply message (re-framed for the current stream and finished with OK), and `ctx.sendCached` sends and stores the reply. Enable it with the same field names on `GrpcServerConfig` (`response_cache`, `cache_max_entries`, and so on) under `.EPOLL`:
+For gRPC unary handlers the opt-in lives on the call context. `ctx.serveCached` replays a stored reply message (re-framed for the current stream and finished with OK), and `ctx.sendCached` sends and stores the reply. Enable it with the same field names on `GrpcServerConfig` (`response_cache`, `cache_max_entries`, and so on) under `.EPOLL` or `.URING`:
 
 ```zig
 fn sayHello(_: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
@@ -1194,17 +1194,18 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 #### Rules and conditions
 
 - Opt-in only. Off by default, and the handler must call `res.serveCached` then `res.sendCached` (HTTP), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the `zix.Http1` `cacheLookup` / `writeWithCache`.
-- `.EPOLL` only in this release. Other dispatch models leave the cache uninstalled and the API degrades to a plain send.
+- `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
 - For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. For gRPC the key is the path plus the request message, so only an identical request hits.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
 - Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
 - Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.
 
-**Why `.EPOLL` only:** the cache is a thread-local instance, never shared and never locked (lock-free by ownership). That invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it.
+**Why `.EPOLL` / `.URING` only:** the cache is a thread-local instance, never shared and never locked (lock-free by ownership). That invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it. The shared-nothing `.EPOLL` workers and the one-thread-per-ring `.URING` workers both satisfy it.
 
 | Model | Runs the handler on | Cache state |
 | :- | :- | :- |
 | `.EPOLL` | a zix-owned shared-nothing worker thread, one per core | installed: clean lifecycle, one owner thread, the benchmarked path |
+| `.URING` | a zix-owned shared-nothing ring worker, one per core | installed: same one-owner-thread lifecycle as `.EPOLL` |
 | `.POOL` | zix-owned pool threads | feasible and safe, but each thread would hold its own cache (lower hit rate, N times the memory), so it is deferred, not wired |
 | `.ASYNC`, `.MIXED` | `io.async()` tasks on the `std.Io` executor pool, not owned by zix | not installed: no per-thread install hook, and a task is not pinned to one thread, so a shared cache would need locks and break the lock-free design |
 
@@ -1212,7 +1213,7 @@ Under any model the behavior is safe, just inert: with the cache uninstalled, `r
 
 ```mermaid
 flowchart TD
-    A[Incoming request] --> B{response_cache and EPOLL?}
+    A[Incoming request] --> B{response_cache and EPOLL/URING?}
     B -- no --> P[Plain send]
     B -- yes --> C{serveCached hit and fresh?}
     C -- yes --> W[Write cached bytes, no rebuild]
@@ -1222,7 +1223,7 @@ flowchart TD
     E -- no --> S[sendCached: write then store under key]
 ```
 
-**When to use:** turn the cache on for hot, repeatable, compute-heavy responses above ~4 KiB (rendered reports, large JSON aggregates) served under `.EPOLL` (or `.URING` on `zix.Http1`). Leave it off for small kernel-bound responses, per-request unique bodies, or anything that varies on a header or cookie, where it adds no benefit. Read the rules above before caching anything time-sensitive.
+**When to use:** turn the cache on for hot, repeatable, compute-heavy responses above ~4 KiB (rendered reports, large JSON aggregates) served under `.EPOLL` or `.URING`. Leave it off for small kernel-bound responses, per-request unique bodies, or anything that varies on a header or cookie, where it adds no benefit. Read the rules above before caching anything time-sensitive.
 
 See ADR-036 for the design rationale and measured numbers.
 
@@ -1435,14 +1436,14 @@ var buf: [4096]u8 = undefined;
 const reply = try client.recvMsg(io, &buf);
 ```
 
-**CLI arg override** (no rebuild needed): `initArgs` / `initFramedArgs` are `init` / `initFramed` plus `--ip` / `--port` parsing from `process.minimal.args`, so one built binary can bind a different address or port. The examples use the plain `init` / `initFramed`; reach for the `Args` variants only when you want runtime override.
+**CLI arg override** (no rebuild needed): `initArgs` / `initFramedArgs` are `init` / `initFramed` plus `--ip` / `--port` parsing from `process.minimal.args`, so one built binary can bind a different address or port. The examples use the plain `init` / `initFramed`. Reach for the `Args` variants only when you want runtime override.
 
 ```zig
 var server = try zix.Tcp.Server.initArgs(myHandler, .{ .io = process.io, .ip = "127.0.0.1", .port = 9300 }, process.minimal.args);
 var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }, io, process.minimal.args);
 ```
 
-**When to use:** reach for `zix.Tcp` when you own the wire protocol: a custom binary framing, a private RPC, a proxy, or a probe where HTTP/gRPC overhead is unwanted. Use the per-connection handler (`init`) for stateful, request/response or streaming sessions where the handler drives the socket. Use the per-frame `initFramed` callback when the work is stateless per frame and you want the `.URING` ring (engine owns the connection, the callback never blocks). If you only need same-host IPC, prefer `zix.Uds`; if you need request routing or browsers, prefer `zix.Http1` / `zix.Http`.
+**When to use:** reach for `zix.Tcp` when you own the wire protocol: a custom binary framing, a private RPC, a proxy, or a probe where HTTP/gRPC overhead is unwanted. Use the per-connection handler (`init`) for stateful, request/response or streaming sessions where the handler drives the socket. Use the per-frame `initFramed` callback when the work is stateless per frame and you want the `.URING` ring (engine owns the connection, the callback never blocks). If you only need same-host IPC, prefer `zix.Uds`. If you need request routing or browsers, prefer `zix.Http1` / `zix.Http`.
 
 See `examples/tcp_server_1_async.zig`, `examples/tcp_server_2_pool.zig`, `examples/tcp_server_3_mixed.zig`, `examples/tcp_server_4_epoll.zig`, `examples/tcp_server_5_uring.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
 
