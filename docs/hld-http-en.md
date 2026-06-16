@@ -89,7 +89,7 @@ flowchart TD
 
 ### .MIXED: N Accept Threads, io.async() Dispatch
 
-- N accept threads (default cpu_count, `SO_REUSEPORT`); each dispatches connections via `io.async()` directly, no `ConnQueue`.
+- N accept threads (default cpu_count, `SO_REUSEPORT`). Each dispatches connections via `io.async()` directly, no `ConnQueue`.
 - `pool_size` is ignored. `workers` controls accept thread count.
 - Balanced throughput and latency, higher jitter than `.POOL` under saturation.
 
@@ -355,7 +355,7 @@ Buffers response state, writes on `send()` or equivalent.
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
 | `noContent()` | Sets status `.NO_CONTENT`, sends empty body |
-| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`; sets `streaming = true` so the keep-alive loop exits after the handler returns |
+| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`, and sets `streaming = true` so the keep-alive loop exits after the handler returns |
 
 Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.BufferTooSmall` is returned if exceeded.
 
@@ -641,7 +641,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 
 ## SSE (Server-Sent Events)
 
-One-way server push over HTTP/1.1. The client uses the browser's `EventSource` API or `curl -N`; no upgrade handshake is required.
+One-way server push over HTTP/1.1. The client uses the browser's `EventSource` API or `curl -N`. No upgrade handshake is required.
 
 ```mermaid
 sequenceDiagram
@@ -823,7 +823,7 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | :- | :- |
 | `response_timeout_ms` enforcement | v1: field stored, not yet applied |
 | `read_timeout_ms` enforcement | v1: field stored, not yet applied |
-| TLS / HTTPS | out of scope: terminate TLS at the proxy layer (nginx, HAProxy, Envoy); zix speaks plain HTTP behind the proxy |
+| TLS / HTTPS | out of scope: terminate TLS at the proxy layer (nginx, HAProxy, Envoy), zix speaks plain HTTP behind the proxy |
 | Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
 
 ---
