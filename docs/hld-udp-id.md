@@ -301,7 +301,7 @@ Gunakan `std.heap.smp_allocator` (atau general-purpose allocator apapun) agar `f
 
 `UdpServerConfig.logger: ?*Logger = null`. Ketika bernilai non-null:
 - `system(.INFO, "udp", ...)` saat bind dan shutdown.
-- `packet(.RECV, peer, size, err)` di dalam `processPacket` setelah setiap datagram diterima. `peer` adalah alamat pengirim; `size` adalah `@sizeOf(Packet)`.
+- `packet(.RECV, peer, size, err)` di dalam `processPacket` setelah setiap datagram diterima. `peer` adalah alamat pengirim. `size` adalah `@sizeOf(Packet)`.
 
 ```zig
 var logger = try zix.Logger.init(std.heap.smp_allocator, .{

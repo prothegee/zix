@@ -301,7 +301,7 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 
 `UdpServerConfig.logger: ?*Logger = null`. When non-null:
 - `system(.INFO, "udp", ...)` on bind and shutdown.
-- `packet(.RECV, peer, size, err)` inside `processPacket` after each received datagram. `peer` is the sender address; `size` is `@sizeOf(Packet)`.
+- `packet(.RECV, peer, size, err)` inside `processPacket` after each received datagram. `peer` is the sender address. `size` is `@sizeOf(Packet)`.
 
 ```zig
 var logger = try zix.Logger.init(std.heap.smp_allocator, .{
