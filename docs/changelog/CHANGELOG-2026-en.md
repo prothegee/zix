@@ -60,7 +60,7 @@ __*Update:*__
     - New `pub const FRAME_HEADER_LEN` (9) in the h2 frame module (re-exported from `zix.Http2`) names the 9-octet frame header length, replacing the inline `9` literals across the h2 and gRPC frame codecs.
     ---
 - Response cache awareness (opt-in, ADR-036):
-    - New shared `src/utils/response_cache.zig`: a per-worker, lock-free precomputed-response cache (structure-of-arrays slab, open addressing, lazy on-access TTL). Off by default, installed under `.EPOLL` (and `.URING` on `zix.Http1`); other dispatch models leave it uninstalled and the API degrades to a plain send.
+    - New shared `src/utils/response_cache.zig`: a per-worker, lock-free precomputed-response cache (structure-of-arrays slab, open addressing, lazy on-access TTL). Off by default, installed under `.EPOLL` and `.URING`. The other dispatch models leave it uninstalled and the API degrades to a plain send.
     - Five flat config fields with identical names across `Http1ServerConfig`, `HttpServerConfig`, and `GrpcServerConfig`: `response_cache` (`bool`, default `false`), `cache_max_entries` (`u32`), `cache_max_value_bytes` (`u32`), `cache_ttl_ms` (`u32`), and `cache_max_total_bytes` (`usize`).
     - `zix.Http`: `res.serveCached(req)` and `res.sendCached(req, body, ttl)` cache the full serialized response, keyed on method, path, and query. `zix.Http1` keeps `cacheLookup` / `cacheStore` / `writeWithCache`.
     - `zix.Grpc` (unary): `ctx.serveCached(content_type)` and `ctx.sendCached(content_type, data, ttl)` cache the response message, keyed on path plus request body, re-framed per stream so HPACK and stream id stay correct.
@@ -102,7 +102,7 @@ __*Update:*__
     ---
 - Unified, Debug-gated server init logging:
     - Every server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) now emits lifecycle lines (listening, EPOLL fallback, accept errors) through one gated `logSystem` shape: route to `config.logger` when set, otherwise `std.debug.print` only in Debug builds, silent in release. A release server with no logger emits no init noise.
-    - Removed the junk and duplicate raw prints: `zix.Grpc` previously printed each listening line raw and also logged it; `zix.Http2`/`zix.Fix`/`zix.Tcp` printed raw lifecycle/fallback lines unconditionally. `zix.Udp`/`zix.Uds` init lines now also appear in Debug builds without a logger (were logger-only before).
+    - Removed the junk and duplicate raw prints: `zix.Grpc` previously printed each listening line raw and also logged it. `zix.Http2`/`zix.Fix`/`zix.Tcp` printed raw lifecycle/fallback lines unconditionally. `zix.Udp`/`zix.Uds` init lines now also appear in Debug builds without a logger (were logger-only before).
     - `zix.Channel.init` gained a Debug-only init notice (`zix channel: init <T> cap=<N>`), suppressed in release and under the test runner (`builtin.is_test`) to avoid poisoning the test IPC.
     - Reworded a `src/tcp/http1/server.zig` comment to drop a stale external benchmark reference.
     ---

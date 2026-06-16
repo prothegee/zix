@@ -60,7 +60,7 @@ __*Ditambahkan:*__
     - `pub const FRAME_HEADER_LEN` baru (9) di modul frame h2 (di-re-export dari `zix.Http2`) menamai panjang frame header 9-octet, menggantikan literal `9` inline di seluruh codec frame h2 dan gRPC.
     ---
 - Response cache awareness (opt-in, ADR-036):
-    - Modul bersama baru `src/utils/response_cache.zig`: precomputed-response cache per-worker yang lock-free (structure-of-arrays slab, open addressing, lazy on-access TTL). Mati secara default, dipasang di bawah `.EPOLL` (dan `.URING` pada `zix.Http1`); dispatch model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
+    - Modul bersama baru `src/utils/response_cache.zig`: precomputed-response cache per-worker yang lock-free (structure-of-arrays slab, open addressing, lazy on-access TTL). Mati secara default, dipasang di bawah `.EPOLL` dan `.URING`. Dispatch model lain membiarkannya tidak terpasang dan API menurun menjadi plain send.
     - Lima field config flat dengan nama yang identik di `Http1ServerConfig`, `HttpServerConfig`, dan `GrpcServerConfig`: `response_cache` (`bool`, default `false`), `cache_max_entries` (`u32`), `cache_max_value_bytes` (`u32`), `cache_ttl_ms` (`u32`), dan `cache_max_total_bytes` (`usize`).
     - `zix.Http`: `res.serveCached(req)` dan `res.sendCached(req, body, ttl)` mem-cache respons yang sudah di-serialize penuh, di-key pada method, path, dan query. `zix.Http1` tetap memakai `cacheLookup` / `cacheStore` / `writeWithCache`.
     - `zix.Grpc` (unary): `ctx.serveCached(content_type)` dan `ctx.sendCached(content_type, data, ttl)` mem-cache pesan respons, di-key pada path plus body request, di-frame ulang per stream sehingga HPACK dan stream id tetap benar.
@@ -102,7 +102,7 @@ __*Ditambahkan:*__
     ---
 - Init logging server terpadu dan ter-gate Debug:
     - Setiap server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, `zix.Tcp`, `zix.Udp`, `zix.Uds`) kini mengeluarkan baris lifecycle (listening, fallback EPOLL, error accept) melalui satu bentuk `logSystem` ter-gate: rute ke `config.logger` bila diset, selain itu `std.debug.print` hanya pada Debug build, diam pada release. Server release tanpa logger tidak mengeluarkan init noise.
-    - Menghapus print mentah junk dan duplikat: `zix.Grpc` sebelumnya mencetak tiap baris listening mentah sekaligus me-log-nya; `zix.Http2`/`zix.Fix`/`zix.Tcp` mencetak baris lifecycle/fallback mentah tanpa syarat. Baris init `zix.Udp`/`zix.Uds` kini juga muncul pada Debug build tanpa logger (sebelumnya logger-only).
+    - Menghapus print mentah junk dan duplikat: `zix.Grpc` sebelumnya mencetak tiap baris listening mentah sekaligus me-log-nya. `zix.Http2`/`zix.Fix`/`zix.Tcp` mencetak baris lifecycle/fallback mentah tanpa syarat. Baris init `zix.Udp`/`zix.Uds` kini juga muncul pada Debug build tanpa logger (sebelumnya logger-only).
     - `zix.Channel.init` mendapat notice init khusus Debug (`zix channel: init <T> cap=<N>`), ditekan pada release dan di bawah test runner (`builtin.is_test`) untuk menghindari peracunan IPC test.
     - Menyusun ulang komentar `src/tcp/http1/server.zig` untuk membuang referensi benchmark eksternal yang usang.
     ---
