@@ -34,7 +34,7 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBD)
+## 0.4.0 (2026-06-16)
 
 __*Update:*__
 - Server `io` into config and `zix.Uds` handler-at-init (ADR-039):
@@ -45,6 +45,7 @@ __*Update:*__
 - io_uring dispatch model (`.URING`, ADR-037):
     - New shared-nothing `.URING = 4` dispatch model: same thread-per-core topology as `.EPOLL` (one `SO_REUSEPORT` listener and one completion ring per worker, no shared queue), but completion-based, so most syscall transitions are batched into the ring. Linux-only, falls back to `.POOL` on non-Linux.
     - Native across `zix.Http1` (reference engine, plus the WebSocket pump on a `BufferGroup`), `zix.Http`, `zix.Grpc` (multiplexed h2), and `zix.Fix` (resumable `core.processFixRing` per readable batch). `zix.Http2` folds to `.POOL` and the `zix.Tcp` per-connection handler folds to `.EPOLL`.
+    - Request bodies on the ring (`zix.Http1`): a chunked request body fully present in the recv buffer is decoded in place, and a body larger than `max_recv_buf` is answered then its remainder is drained off the socket with a single `MSG_TRUNC` recv (the kernel discards the bytes in place, zero copy, capped at the declared length), mirroring the `.EPOLL` drain. So `.URING` serves large uploads and chunked requests, not only buffered ones.
     - On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. Prefer `.EPOLL` by default, `.URING` for sustained, pipelined load.
     ---
 - `zix.Tcp` server API reshape (ADR-038):
