@@ -847,4 +847,48 @@ Clients (`zix.Tcp.Client`, `zix.Udp.Client`, `zix.Uds.Client`) keep `io` as a `c
 
 ---
 
+## ADR-040: user-space hot-path optimizations across the engine family (integer-compare, baked response prefix, lazy parse, writer bypass, copy reduction)
+
+**Status:** Accepted
+
+**Context:** The 0.4.x kernel-cycle pass showed loopback is ~94% kernel TCP, identical for `.EPOLL` and `.URING`. The io_uring syscall levers (direct descriptors, fixed buffers, send_zc, SQPOLL) are sub-noise on this box, and a probe of the top io_uring HTTP engines (ringzero, zeemo) found they use none of them, so those are deprioritized. The remaining wins that clear the 1% bar are in the shared user-space hot path: they are measurable on loopback and help every dispatch model (`.EPOLL`, `.URING`, `.POOL`, `.ASYNC`, `.MIXED`) at once, because the code lives in the shared parse and response paths, not a dispatch loop. The server-process perf profiles name the hot user-space leaves:
+
+| Symbol | http1 EPOLL | http1 URING | http EPOLL | http URING | Pattern |
+| :- | :- | :- | :- | :- | :- |
+| `mem.eql` (fixed-string compares) | present | 14.99% | present | present | P1 |
+| `buildSimpleHeaderInto` / response build | 4.63% | 9.92% | 5.39% | 7.02% | P2 |
+| `mem.findScalarPos` (eager header scan) | low | low | present | 10.98% | P3 |
+| `Io.Writer.alignBufferOptions` (std writer) | n/a | n/a | 1.91% | 1.97% | P4 |
+| `memcpy.memcpyFast` (build-then-copy) | 1.40% | 1.99% | 4.95% | 9.03% | P5 |
+
+**Decision:** Apply five optimization patterns, each as one increment, applied to every engine whose hot path contains it, gated by `zig build test-all`, `zig build examples`, and `zig build test-runner-all` before the next.
+
+| Id | Pattern | What | Targets |
+| :- | :- | :- | :- |
+| P1 | integer-compare | Replace a hot `mem.eql` against a fixed-length string literal with one integer (u32/u64) load-and-compare. | HTTP/1 version + method, HTTP/2 `:method` / `:path`, gRPC `:path` |
+| P2 | baked response prefix | Replace per-request response-header assembly (many small appends or `bufPrint`) with one `@memcpy` of a comptime-baked prefix, plus the variable Content-Length digits and optional cached Date. | Http1, Http |
+| P3 | lazy header parse | Parse only the framing headers up front, defer the rest to on-demand lookup. | Http (already lazy) |
+| P4 | writer bypass | Write the response straight into the engine sink/fd instead of through `std.Io.Writer`. | Http |
+| P5 | copy reduction | Build the response header directly into the send/sink buffer (write-in-place), removing one copy generation. | any build-then-copy path |
+
+Per-engine application (a pattern applies only where the hot path has it):
+
+| Engine | Change |
+| :- | :- |
+| zix.Http1 | P1 `parseGetFastPath` version/method `readInt` compares. P2 comptime-baked `statusLine` (one `memcpy`) |
+| zix.Http | P1 parser framing-header length-switch. P2 + P4 `buildResponse` + `send` Content-Type / Date `@memcpy` (drops `std.Io.Writer`) |
+| zix.Http2 / zix.Grpc | P1 `:method` / `:path` length-gated compares |
+| WebSocket (Http1 + Http) | already a 16-wide `@Vector(16, u8)` unmask, no change |
+| zix.Fix / zix.Tcp / zix.Udp | byte-level or length-prefixed framing, no hot fixed-string compare, no change |
+
+**Config:** internal optimizations, no new server-config field. Should a toggle ever prove necessary it is added to every server config (`Http`, `Http1`, `Http2`, `Grpc`, `Tcp`, `Udp`, `Uds`, `Fix`) with the same name, type, and default, per the flat-config consistency rule.
+
+**Consequences:**
+- Faster on every dispatch model, and measurable on loopback (unlike the io_uring levers). Each pattern targets a symbol that is at least ~1% of a server profile.
+- No API or behaviour change. Each increment carries an equivalence test (byte-exact output or behaviour), so the wire bytes are unchanged. The unit / integration / behaviour / edge suites plus the end-to-end runners are the regression gate, run green after every increment (56/56 runner protocols each).
+- Verified already-optimal (no change): zix.Http `parse` is already lazy and vectorized (P3 pre-done), zix.Http `buildResponse` already bakes the status line and uses `@memcpy` + `writeDecimal` for Content-Length, WebSocket unmask is already SIMD, and zix.Grpc replies already use comptime-cached HPACK blocks.
+- Result (httparena-lite, attempt 3, post-sweep, AMD Ryzen 5 5600H, 6/12 threads, loopback, recorded in the README Benchmark tables): representative EPOLL HTTP/1.1 throughput rose versus the prior recorded attempt, baseline 512c 585,239 -> 614,416 req/s (+5.0%) and pipelined 512c 7,156,160 -> 7,682,896 req/s (+7.4%), with the remaining scenarios within loopback variance and `.URING` at parity with `.EPOLL` (expected on a 94%-kernel loopback path). These are full-suite numbers (a fresh server per scenario), so they confirm the direction rather than isolate a per-increment delta.
+
+---
+
 ###### end of adr
