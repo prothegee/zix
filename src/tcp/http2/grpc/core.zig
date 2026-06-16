@@ -444,7 +444,7 @@ const Stream = struct {
 /// and flushes them to the fd in a single write(). Frames larger than the buffer are
 /// passed through directly after flushing the staged prefix, preserving wire order.
 /// Callers supply `buf` - the backing storage for staging. Use a small stack array for
-/// the blocking path; use the per-connection `stage_buf` in GrpcMuxConn for the mux path.
+/// the blocking path. Use the per-connection `stage_buf` in GrpcMuxConn for the mux path.
 const ReplyStage = struct {
     fd: std.posix.fd_t,
     buf: []u8,
