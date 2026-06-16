@@ -11,7 +11,7 @@ before-numbers (the perf symbols) and will carry measured after-numbers.
 
 ## ADR-040: user-space hot-path optimizations across the engine family (integer-compare, baked response prefix, lazy parse, writer bypass, copy reduction)
 
-**Status:** Accepted (incremental implementation in progress)
+**Status:** Accepted
 
 **Context:**
 
@@ -113,6 +113,6 @@ No change after audit: zix.Fix framing is byte-level SOH parsing with vectorized
 
 No new server-config field was introduced: every change is internal and behaviour-identical.
 
-Throughput A/B (ReleaseFast, wrk) pending: projected ~+2-3% on the zix.Http1 GET hot path, smaller elsewhere. To be recorded here once measured on a clean tree.
+Result (httparena-lite, attempt 3, post-sweep, AMD Ryzen 5 5600H, 6/12 threads, loopback): recorded in the README Benchmark tables (en + id). Representative EPOLL HTTP/1.1 throughput rose versus the prior recorded attempt: baseline 512c 585,239 -> 614,416 req/s (+5.0%), pipelined 512c 7,156,160 -> 7,682,896 req/s (+7.4%). The remaining scenarios moved within loopback variance, and `.URING` tracks `.EPOLL` at parity (expected on a 94%-kernel loopback path). These are full-suite numbers (a fresh server per scenario), so they confirm the direction rather than isolate a per-increment delta.
 
 ---
