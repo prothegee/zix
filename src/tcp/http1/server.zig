@@ -1030,6 +1030,13 @@ const UringConn = struct {
     staged: usize,
     inflight: usize,
     closing: bool,
+    /// Request-body bytes still to read and discard off the socket for a body
+    /// too large to buffer (the response was already staged). Mirrors the EPOLL
+    /// Conn.drain. While > 0 the connection is draining, not parsing requests.
+    drain: usize = 0,
+    /// Close the connection once the drain finishes (the request was not
+    /// keep-alive). Mirrors the EPOLL Conn.drain_close.
+    drain_close: bool = false,
     ws: ?core.WsFrameFn = null,
 };
 
@@ -1046,6 +1053,11 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// Shared per-worker scratch for unmasking WebSocket frame payloads
         /// during a pump pass. Used transiently, never held across calls.
         ws_payload_buf: []u8,
+        /// Shared per-worker scratch holding a decoded chunked request body while
+        /// the handler runs. Sized to the recv buffer (a chunked body must be
+        /// fully present in conn.buf to decode, so its decoded form never exceeds
+        /// that). Used transiently, never held across calls.
+        body_buf: []u8,
         /// Shared provided-buffer ring for WebSocket recvs (Phase 4b). null when
         /// the kernel does not support buffer rings: WebSocket then falls back to
         /// the plain recv-into-conn.buf path (4a).
@@ -1067,6 +1079,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
 
             allocator.free(self.slots);
             allocator.free(self.ws_payload_buf);
+            allocator.free(self.body_buf);
             if (self.ws_bufs) |*bg| bg.deinit(allocator);
             self.ring.deinit();
         }
@@ -1143,6 +1156,20 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 return;
             };
             sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
+            sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
+        }
+
+        /// Arm a discard recv for a connection draining an oversized request
+        /// body: read up to the remaining drain count into conn.buf (the bytes
+        /// are thrown away on completion). Capping at conn.drain leaves any
+        /// pipelined bytes after the body untouched on the socket.
+        fn armDrainRecv(self: *Self, conn: *UringConn) void {
+            const want = @min(conn.drain, conn.buf.len);
+            const sqe = self.getSqe() orelse {
+                self.beginClose(conn);
+                return;
+            };
+            sqe.prep_recv(conn.fd, conn.buf[0..want], 0);
             sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
         }
 
@@ -1244,6 +1271,22 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 }
 
                 self.beginClose(conn);
+                return;
+            }
+
+            // Large request-body overflow in progress: these bytes are body to
+            // discard (the response is already on its way), not a new request.
+            // Count them down and keep draining off the socket until the declared
+            // length is consumed, then resume normal reads or close.
+            if (conn.drain > 0) {
+                const n: usize = @intCast(cqe.res);
+                conn.drain -= @min(n, conn.drain);
+                if (conn.drain == 0) {
+                    if (conn.drain_close) self.beginClose(conn) else self.armRecv(conn);
+                } else {
+                    self.armDrainRecv(conn);
+                }
+
                 return;
             }
 
@@ -1367,9 +1410,11 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// parse loop without the read.
         ///
         /// Note:
-        /// - Minimal ring core: chunked bodies and bodies larger than the recv
-        ///   buffer are not served yet and close the connection cleanly. A
-        ///   WebSocket upgrade switches the connection to the frame loop.
+        /// - A chunked request body that is fully present in conn.buf is decoded
+        ///   into self.body_buf and served. A body larger than the recv buffer is
+        ///   answered with an empty-body response, then its remainder is drained
+        ///   off the socket (see armDrainRecv) so keep-alive survives. A WebSocket
+        ///   upgrade switches the connection to the frame loop.
         fn dispatch(self: *Self, conn: *UringConn) core.ConnOutcome {
             const fd = conn.fd;
 
@@ -1405,14 +1450,13 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 };
                 const head = parsed.head;
 
-                if (head.chunked_request) {
-                    keep_alive = false;
-                    break;
-                }
-
                 var body: []const u8 = &.{};
                 var request_len = parsed.body_offset;
-                if (head.content_length > 0) {
+                if (head.chunked_request) {
+                    const decoded = decodeChunkedInBuf(rem[parsed.body_offset..], self.body_buf) orelse break;
+                    body = self.body_buf[0..decoded.len];
+                    request_len = parsed.body_offset + decoded.consumed;
+                } else if (head.content_length > 0) {
                     const content_length: usize = @intCast(head.content_length);
                     const need = parsed.body_offset + content_length;
 
@@ -1420,7 +1464,19 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         body = rem[parsed.body_offset..need];
                         request_len = need;
                     } else if (need > conn.buf.len) {
-                        keep_alive = false;
+                        // Body is larger than the recv buffer and can never fit.
+                        // Respond now with an empty body (large-body endpoints use
+                        // content_length, not the bytes), stage it, then drain the
+                        // declared remainder off the socket over later completions
+                        // so the connection stays usable for keep-alive.
+                        if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
+                        handler_fn(&head, &.{}, fd);
+
+                        const present_body = rem.len - parsed.body_offset;
+                        conn.drain = content_length - present_body;
+                        conn.drain_close = !head.keep_alive;
+                        consumed = conn.filled;
+
                         break;
                     } else {
                         break;
@@ -1487,6 +1543,13 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 return;
             }
 
+            // The response for an oversized request went out first; now read and
+            // discard the rest of that body before serving the next request.
+            if (conn.drain > 0) {
+                self.armDrainRecv(conn);
+                return;
+            }
+
             self.armRecv(conn);
         }
 
@@ -1547,6 +1610,11 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             // recv buffer, the largest frame a connection can accumulate.
             const ws_payload_buf = std.heap.smp_allocator.alloc(u8, config.max_recv_buf) catch return;
 
+            // Per-worker scratch for a decoded chunked request body. Sized to the
+            // recv buffer, since a chunked body must be fully present in conn.buf
+            // to decode and its decoded form is always shorter than the raw bytes.
+            const body_buf = std.heap.smp_allocator.alloc(u8, config.max_recv_buf) catch return;
+
             const Worker = UringWorker(handler_fn, raw_fn);
             var worker = Worker{
                 .ring = undefined,
@@ -1556,6 +1624,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .recv_buf_size = config.max_recv_buf,
                 .handler_timeout_ms = config.handler_timeout_ms,
                 .ws_payload_buf = ws_payload_buf,
+                .body_buf = body_buf,
                 .ws_bufs = null,
             };
             worker.ring = initUringRing() catch return;
@@ -1762,6 +1831,102 @@ test "zix http1: Server.init with EPOLL dispatch model" {
         .dispatch_model = .EPOLL,
     });
     server.deinit();
+}
+
+test "zix http1: Server.init with URING dispatch model" {
+    var server = Server.init(testNoopHandler, .{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9200,
+        .dispatch_model = .URING,
+    });
+    server.deinit();
+}
+
+// Echo the received body size: content_length when present (the large-body
+// drain path passes an empty body), otherwise the decoded body length.
+fn testEchoLenHandler(head: *const core.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+    var buf: [24]u8 = undefined;
+    const n: u64 = if (head.content_length > 0) head.content_length else body.len;
+    const out = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
+
+    core.writeSimple(fd, 200, "text/plain", out) catch {};
+}
+
+// Build a UringWorker instance for dispatch-level tests. dispatch() reads only
+// body_buf and handler_timeout_ms and never touches the ring, so the ring and
+// slots can stay empty.
+fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8) UringWorker(handler, null) {
+    return .{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = body_buf.len,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = body_buf,
+        .ws_bufs = null,
+    };
+}
+
+test "zix http1: URING dispatch decodes a fully-present chunked body" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var body_buf: [4096]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf);
+
+    // One chunk "20" (2 bytes) then the zero terminator: decodes to "20".
+    const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..req.len], req);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = req.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    // The handler saw a 2-byte decoded body, so it echoes "2".
+    const resp = send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n2"));
+}
+
+test "zix http1: URING dispatch arms drain for an oversized request body" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var body_buf: [256]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf);
+
+    // Content-Length far exceeds the 256-byte conn.buf, with only a partial body
+    // present: dispatch must respond, arm the drain, and clear the buffer.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100000\r\n\r\n";
+    const partial = "abcdef";
+    var conn_buf: [256]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    @memcpy(conn_buf[head.len..][0..partial.len], partial);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len + partial.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 100000 - partial.len), conn.drain);
+    try std.testing.expectEqual(false, conn.drain_close);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    // The handler echoed content_length, and the buffer was cleared for the drain.
+    const resp = send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n100000"));
 }
 
 fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
