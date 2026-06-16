@@ -258,10 +258,10 @@ Dimulai dari 4 slot, berlipat ganda setiap overflow, dibatasi pada `max_headers`
       baris status: Status.statusLine(code) -> @memcpy string pre-built untuk kode umum
                     kode tidak umum: bufPrint "HTTP/1.1 {d} {s}\r\n"
       if status != 204 No Content:
-          if content_type diatur: "Content-Type: {ct}\r\n"
+          if content_type diatur: "Content-Type: {ct}\r\n"  // @memcpy prefix + value, tanpa std.fmt
           "Content-Length: {N}\r\n"  // writeDecimal buatan tangan, tanpa std.fmt
       if keep_alive diatur: "Connection: keep-alive\r\n" atau "Connection: close\r\n"
-      "Date: {date_cache}\r\n"
+      "Date: {date_cache}\r\n"  // @memcpy prefix + value, tanpa std.fmt
 2. Fast path (tidak ada extra header DAN body muat di sisa ruang buffer):
       tambahkan "\r\n" + body ke buffer 512 byte yang sama
       satu writeAll + flush // satu syscall untuk sebagian besar respons
@@ -272,6 +272,8 @@ Dimulai dari 4 slot, berlipat ganda setiap overflow, dibatasi pada `max_headers`
       writeAll(body)
       flush()
 ```
+
+Content-Type dan Date ditulis dengan `@memcpy` prefix literal plus value (bukan `bufPrint`), sehingga `send()` per-response tidak lagi memasuki jalur formatting `std.Io.Writer`. `buildResponse` (serializer zero-copy yang dipakai sink `.EPOLL` / `.URING`) menghasilkan output byte-identik dengan cara yang sama.
 
 ### stream(): format penulisan header SSE
 
