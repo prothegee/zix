@@ -847,4 +847,48 @@ Client (`zix.Tcp.Client`, `zix.Udp.Client`, `zix.Uds.Client`) tetap menerima `io
 
 ---
 
+## ADR-040: optimasi hot-path user-space lintas keluarga engine (integer-compare, baked response prefix, lazy parse, writer bypass, copy reduction)
+
+**Status:** Diterima
+
+**Konteks:** Pass kernel-cycle 0.4.x menunjukkan loopback ~94% kernel TCP, identik untuk `.EPOLL` dan `.URING`. Lever syscall io_uring (direct descriptors, fixed buffers, send_zc, SQPOLL) berada di bawah noise pada mesin ini, dan probe terhadap engine io_uring HTTP teratas (ringzero, zeemo) menemukan tidak satu pun memakainya, jadi lever itu dideprioritaskan. Kemenangan sisa yang melewati ambang 1% ada di hot-path user-space bersama: terukur pada loopback dan membantu setiap dispatch model (`.EPOLL`, `.URING`, `.POOL`, `.ASYNC`, `.MIXED`) sekaligus, karena kodenya berada di jalur parse dan response bersama, bukan di loop dispatch. Profil server-process menyebut leaf user-space terpanas:
+
+| Simbol | http1 EPOLL | http1 URING | http EPOLL | http URING | Pola |
+| :- | :- | :- | :- | :- | :- |
+| `mem.eql` (compare string tetap) | ada | 14.99% | ada | ada | P1 |
+| `buildSimpleHeaderInto` / build response | 4.63% | 9.92% | 5.39% | 7.02% | P2 |
+| `mem.findScalarPos` (scan header eager) | rendah | rendah | ada | 10.98% | P3 |
+| `Io.Writer.alignBufferOptions` (writer std) | n/a | n/a | 1.91% | 1.97% | P4 |
+| `memcpy.memcpyFast` (build-lalu-copy) | 1.40% | 1.99% | 4.95% | 9.03% | P5 |
+
+**Keputusan:** Terapkan lima pola optimasi, masing-masing sebagai satu increment, diterapkan ke setiap engine yang hot-path-nya memuatnya, di-gate oleh `zig build test-all`, `zig build examples`, dan `zig build test-runner-all` sebelum increment berikutnya.
+
+| Id | Pola | Apa | Target |
+| :- | :- | :- | :- |
+| P1 | integer-compare | Ganti `mem.eql` panas terhadap string literal panjang-tetap dengan satu integer (u32/u64) load-and-compare. | versi + method HTTP/1, `:method` / `:path` HTTP/2, `:path` gRPC |
+| P2 | baked response prefix | Ganti perakitan header response per-request (banyak append kecil atau `bufPrint`) dengan satu `@memcpy` prefix yang dibaked pada comptime, plus digit Content-Length variabel dan Date yang di-cache. | Http1, Http |
+| P3 | lazy header parse | Parse hanya header framing di awal, tunda sisanya ke lookup on-demand. | Http (sudah lazy) |
+| P4 | writer bypass | Tulis response langsung ke sink/fd engine alih-alih lewat `std.Io.Writer`. | Http |
+| P5 | copy reduction | Build header response langsung ke buffer send/sink (write-in-place), menghapus satu generasi copy. | jalur build-lalu-copy mana pun |
+
+Penerapan per-engine (sebuah pola berlaku hanya di tempat hot-path-nya memilikinya):
+
+| Engine | Perubahan |
+| :- | :- |
+| zix.Http1 | P1 compare `readInt` versi/method `parseGetFastPath`. P2 `statusLine` yang dibaked pada comptime (satu `memcpy`) |
+| zix.Http | P1 length-switch header framing parser. P2 + P4 Content-Type / Date `@memcpy` pada `buildResponse` + `send` (membuang `std.Io.Writer`) |
+| zix.Http2 / zix.Grpc | P1 compare `:method` / `:path` yang di-gate panjang |
+| WebSocket (Http1 + Http) | sudah unmask `@Vector(16, u8)` 16-lebar, tanpa perubahan |
+| zix.Fix / zix.Tcp / zix.Udp | framing byte-level atau length-prefixed, tanpa compare string tetap panas, tanpa perubahan |
+
+**Config:** optimasi internal, tanpa field server-config baru. Bila suatu toggle ternyata diperlukan, ia ditambahkan ke setiap config server (`Http`, `Http1`, `Http2`, `Grpc`, `Tcp`, `Udp`, `Uds`, `Fix`) dengan nama, tipe, dan default yang sama, sesuai aturan konsistensi flat-config.
+
+**Konsekuensi:**
+- Lebih cepat di setiap dispatch model, dan terukur pada loopback (tidak seperti lever io_uring). Setiap pola menyasar simbol yang setidaknya ~1% dari profil server.
+- Tanpa perubahan API atau behaviour. Setiap increment membawa test ekuivalensi (output byte-exact atau behaviour), jadi byte di wire tidak berubah. Suite unit / integration / behaviour / edge plus runner end-to-end adalah gate regresi, hijau setelah setiap increment (56/56 protokol runner tiap kali).
+- Terverifikasi sudah-optimal (tanpa perubahan): `parse` zix.Http sudah lazy dan tervektorisasi (P3 sudah ada), `buildResponse` zix.Http sudah membaked status line dan memakai `@memcpy` + `writeDecimal` untuk Content-Length, unmask WebSocket sudah SIMD, dan reply zix.Grpc sudah memakai blok HPACK yang di-cache pada comptime.
+- Hasil (httparena-lite, attempt 3, pasca-sweep, AMD Ryzen 5 5600H, 6/12 threads, loopback, tercatat di tabel Benchmark README): throughput EPOLL HTTP/1.1 representatif naik dibanding attempt yang tercatat sebelumnya, baseline 512c 585,239 -> 614,416 req/s (+5.0%) dan pipelined 512c 7,156,160 -> 7,682,896 req/s (+7.4%), dengan skenario sisanya dalam variansi loopback dan `.URING` setara dengan `.EPOLL` (sesuai ekspektasi pada jalur loopback 94%-kernel). Ini angka full-suite (server segar per skenario), jadi mengonfirmasi arah, bukan mengisolasi delta per-increment.
+
+---
+
 ###### end of adr
