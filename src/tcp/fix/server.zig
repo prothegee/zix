@@ -469,7 +469,7 @@ pub const FixServer = struct {
     /// worker drives many FIX sessions through the resumable core.processFixRing on
     /// a completion loop and sends one coalesced reply per readable batch (ADR-037
     /// Phase 4 extension). Serves the reactive session (Logon, routing, admin
-    /// replies, Logout); the proactive idle-heartbeat timer is not driven on the
+    /// replies, Logout). The proactive idle-heartbeat timer is not driven on the
     /// ring (see core.processFixRing).
     fn runUring(self: *Self, io: std.Io, conn_opts: FixServeOpts, cpu: usize) !void {
         const cfg = self.config;
@@ -537,8 +537,8 @@ fn ringSetNoDelay(fd: std.posix.fd_t) void {
 }
 
 /// Per-connection ring state. buf accumulates FIX bytes until whole messages are
-/// present; send_buf holds the coalesced reply while a send is in flight; gen
-/// guards against fd reuse; fix_state is the resumable FIX session.
+/// present, send_buf holds the coalesced reply while a send is in flight, gen
+/// guards against fd reuse, fix_state is the resumable FIX session.
 const UringFixConn = struct {
     fd: std.posix.fd_t,
     gen: u24,
