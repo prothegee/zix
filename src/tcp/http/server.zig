@@ -18,7 +18,7 @@ const rcache = @import("../../utils/response_cache.zig");
 const setCache = @import("response.zig").setCache;
 const RespSink = @import("response.zig").RespSink;
 const resp_mod = @import("response.zig");
-const uring = @import("../io_uring/ring.zig");
+const uring = @import("../../multiplexers/ring.zig");
 const IoUring = std.os.linux.IoUring;
 
 // --------------------------------------------------------- //
@@ -1306,6 +1306,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                                 .recv => w.handleRecv(cqe, decoded),
                                 .send => w.handleSend(cqe, decoded),
                                 .timeout => {},
+                                .close => {},
                             }
                         }
                     }
