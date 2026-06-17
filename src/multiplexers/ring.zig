@@ -11,9 +11,12 @@ const linux = std.os.linux;
 
 /// Completion routing tag, carried in the top byte of user_data so the loop
 /// knows which handler a CQE belongs to without a per-fd lookup first. timeout
-/// is the per-worker periodic timer (used by zix.Fix for proactive heartbeats);
-/// engines that do not arm a timer treat it as a no-op.
-pub const OpKind = enum(u8) { accept, recv, send, timeout };
+/// is the per-worker periodic timer (used by zix.Fix for proactive heartbeats):
+/// engines that do not arm a timer treat it as a no-op. close is a ring close
+/// (prep_close) submitted in place of a synchronous linux.close at teardown: its
+/// CQE carries no connection (the slot is already cleared), so every engine
+/// treats it as a no-op.
+pub const OpKind = enum(u8) { accept, recv, send, timeout, close };
 
 /// Decoded user_data fields.
 pub const Decoded = struct { op: OpKind, gen: u24, fd: linux.fd_t };
@@ -67,7 +70,7 @@ test "zix io_uring: user_data round trip preserves op, gen, fd" {
 }
 
 test "zix io_uring: user_data each op kind decodes back" {
-    inline for (.{ OpKind.accept, OpKind.recv, OpKind.send, OpKind.timeout }) |op| {
+    inline for (.{ OpKind.accept, OpKind.recv, OpKind.send, OpKind.timeout, OpKind.close }) |op| {
         const decoded = unpackUserData(packUserData(op, 1, 7));
         try std.testing.expectEqual(op, decoded.op);
         try std.testing.expectEqual(@as(u24, 1), decoded.gen);
