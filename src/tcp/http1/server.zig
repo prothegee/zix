@@ -973,9 +973,12 @@ const URING_CQ_ENTRIES: u32 = 16 * 1024;
 /// Max CQEs drained per loop pass.
 const URING_CQE_BATCH: usize = 512;
 
-/// Per-connection staged-response buffer. Matches the EPOLL sink size so a full
-/// pipelined burst coalesces into one send SQE.
-const URING_SEND_BUF_SIZE: usize = EPOLL_OUT_BUF_SIZE;
+/// Per-connection staged-response buffer. Since URING is fully async (unlike
+/// EPOLL), each connection needs its own buffer. 16 KiB easily covers the max
+/// response (~12 KiB for `/json`) plus a tiny pipelined burst. Dropping this
+/// from EPOLL's 64 KiB saves 48 KiB/conn, which is critical for memory limits
+/// at high concurrency. Oversize responses flush directly via `RespSink.append`.
+const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 
 /// Initialize a worker ring with the single-issuer fast-path flags, falling
 /// back to a flagless ring when the kernel does not support them.
@@ -1038,6 +1041,9 @@ const UringConn = struct {
     /// keep-alive). Mirrors the EPOLL Conn.drain_close.
     drain_close: bool = false,
     ws: ?core.WsFrameFn = null,
+    /// Free-list link, valid only while this connection sits in the worker's
+    /// idle pool between a close and the next accept that reuses it.
+    next: ?*UringConn = null,
 };
 
 /// Build a concrete io_uring worker with the handler and optional raw
@@ -1062,6 +1068,12 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// the kernel does not support buffer rings: WebSocket then falls back to
         /// the plain recv-into-conn.buf path (4a).
         ws_bufs: ?IoUring.BufferGroup,
+        /// Idle-connection pool. A closed connection is pushed here with its recv
+        /// and send buffers intact instead of being freed, so a later accept
+        /// reuses the allocation. This removes the three per-connection heap
+        /// allocations (struct + recv buf + 64 KiB send buf) from the steady-state
+        /// accept/close cycle, which dominates the short-lived (churn) test.
+        free_list: ?*UringConn,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -1075,6 +1087,14 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                     allocator.free(conn.send_buf);
                     allocator.destroy(conn);
                 }
+            }
+
+            var idle = self.free_list;
+            while (idle) |conn| {
+                idle = conn.next;
+                allocator.free(conn.buf);
+                allocator.free(conn.send_buf);
+                allocator.destroy(conn);
             }
 
             allocator.free(self.slots);
@@ -1103,12 +1123,43 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             return conn;
         }
 
+        /// Take a connection object for a freshly accepted fd: pop one from the
+        /// idle pool (recv and send buffers intact) when available, otherwise
+        /// allocate a new one with both buffers. Returns null only when a fresh
+        /// allocation fails. The caller resets the per-connection state fields.
+        fn acquireConn(self: *Self) ?*UringConn {
+            if (self.free_list) |conn| {
+                self.free_list = conn.next;
+                return conn;
+            }
+
+            const conn = allocator.create(UringConn) catch return null;
+            const buf = allocator.alloc(u8, self.recv_buf_size) catch {
+                allocator.destroy(conn);
+                return null;
+            };
+            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+                allocator.free(buf);
+                allocator.destroy(conn);
+                return null;
+            };
+            conn.buf = buf;
+            conn.send_buf = send_buf;
+
+            return conn;
+        }
+
+        /// Return a closed connection to the idle pool, keeping its buffers for
+        /// the next accept to reuse. The slot table no longer references it.
+        fn releaseConn(self: *Self, conn: *UringConn) void {
+            conn.next = self.free_list;
+            self.free_list = conn;
+        }
+
         fn destroyConn(self: *Self, conn: *UringConn) void {
             self.slots[@intCast(conn.fd)] = null;
 
-            allocator.free(conn.buf);
-            allocator.free(conn.send_buf);
-            allocator.destroy(conn);
+            self.releaseConn(conn);
         }
 
         fn finishClose(self: *Self, conn: *UringConn) void {
@@ -1225,23 +1276,14 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
 
             setNoDelay(conn_fd);
 
-            const conn = allocator.create(UringConn) catch {
-                _ = linux.close(conn_fd);
-                return;
-            };
-            const buf = allocator.alloc(u8, self.recv_buf_size) catch {
-                allocator.destroy(conn);
-                _ = linux.close(conn_fd);
-                return;
-            };
-            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
-                allocator.free(buf);
-                allocator.destroy(conn);
+            const conn = self.acquireConn() orelse {
                 _ = linux.close(conn_fd);
                 return;
             };
 
             self.gen_counter +%= 1;
+            const buf = conn.buf;
+            const send_buf = conn.send_buf;
             conn.* = .{
                 .fd = conn_fd,
                 .gen = self.gen_counter,
@@ -1637,6 +1679,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .ws_payload_buf = ws_payload_buf,
                 .body_buf = body_buf,
                 .ws_bufs = null,
+                .free_list = null,
             };
             worker.ring = initUringRing() catch return;
             // Provided-buffer ring for WebSocket recvs (Phase 4b). Optional: a
@@ -1878,6 +1921,7 @@ fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8) UringWorker(hand
         .ws_payload_buf = &[_]u8{},
         .body_buf = body_buf,
         .ws_bufs = null,
+        .free_list = null,
     };
 }
 
