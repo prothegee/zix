@@ -7,7 +7,7 @@ const config_mod = @import("config.zig");
 const GrpcServerConfig = config_mod.GrpcServerConfig;
 const DispatchModel = @import("../../config.zig").DispatchModel;
 const rcache = @import("../../../utils/response_cache.zig");
-const uring = @import("../../io_uring/ring.zig");
+const uring = @import("../../../multiplexers/ring.zig");
 const IoUring = std.os.linux.IoUring;
 
 pub const Route = core.Route;
@@ -515,6 +515,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                             .recv => self.handleRecv(cqe, decoded),
                             .send => self.handleSend(cqe, decoded),
                             .timeout => {},
+                            .close => {},
                         }
                     }
                 }
