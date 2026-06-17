@@ -1,0 +1,14 @@
+{
+  "display_name": "zix-grpc",
+  "language": "Zig",
+  "type": "engine",
+  "engine": "zix",
+  "description": "Zig gRPC h2c server using the zix network backend library. Shared-nothing io_uring: each worker owns its own ring and listener, multiplexing streams per connection. Implements GetSum (unary) and StreamSum (server-streaming).",
+  "repo": "https://codeberg.org/prothegee/zix",
+  "enabled": true,
+  "tests": [
+    "unary-grpc",
+    "stream-grpc"
+  ],
+  "maintainers": ["prothegee"]
+}
