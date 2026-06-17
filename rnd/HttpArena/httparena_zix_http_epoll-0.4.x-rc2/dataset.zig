@@ -1,5 +1,4 @@
 //! HttpArena: zix
-//! zix version: 0.4.x-rc2
 //!
 //! Dataset loader for the /json endpoint.
 //!

@@ -1,5 +1,4 @@
 //! HttpArena: zix
-//! zix version: 0.4.x-rc2
 //!
 //! zix HttpArena HTTP/1.1 entry point.
 //!
