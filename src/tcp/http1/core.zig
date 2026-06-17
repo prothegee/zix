@@ -578,17 +578,42 @@ pub const RespSink = struct {
     buf: []u8,
     len: usize = 0,
     failed: bool = false,
+    /// When set, an overflowing append grows buf (realloc up to grow_cap)
+    /// instead of flushing to the socket. The URING dispatch installs this over
+    /// the per-connection send buffer so a response larger than the staged
+    /// buffer still goes out as one on-ring send instead of stalling the whole
+    /// worker on a blocking off-ring write. null (the EPOLL path) keeps the
+    /// flush-on-overflow behavior.
+    grow_allocator: ?std.mem.Allocator = null,
+    /// Hard ceiling for grow_allocator growth. Past this an oversized response
+    /// falls back to a single direct flush rather than unbounded buffering.
+    grow_cap: usize = 0,
 
     pub fn append(self: *RespSink, bytes: []const u8) void {
+        // Single response larger than the whole buffer: grow to hold it when
+        // backed by an allocator, otherwise flush the staged batch and write
+        // this payload straight through.
         if (bytes.len > self.buf.len) {
+            if (self.grow(self.len + bytes.len)) {
+                @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+                self.len += bytes.len;
+
+                return;
+            }
+
             self.flush();
             fdWriteAllDirect(self.fd, bytes) catch {
                 self.failed = true;
             };
+
             return;
         }
 
-        if (self.len + bytes.len > self.buf.len) self.flush();
+        // Cumulative overflow: the staged batch plus these bytes exceed the
+        // buffer. Grow to keep the batch on the ring, otherwise flush it first.
+        if (self.len + bytes.len > self.buf.len) {
+            if (!self.grow(self.len + bytes.len)) self.flush();
+        }
 
         @memcpy(self.buf[self.len..][0..bytes.len], bytes);
         self.len += bytes.len;
@@ -601,6 +626,25 @@ pub const RespSink = struct {
             self.failed = true;
         };
         self.len = 0;
+    }
+
+    /// Grow buf to hold at least need bytes when backed by a growable allocator.
+    /// Returns false when growth is unavailable (no allocator) or would exceed
+    /// grow_cap, so the caller falls back to a direct flush. Never shrinks, so a
+    /// grown per-connection buffer is reused by later requests on that fd.
+    fn grow(self: *RespSink, need: usize) bool {
+        const gpa = self.grow_allocator orelse return false;
+        if (need <= self.buf.len) return true;
+        if (need > self.grow_cap) return false;
+
+        var new_len = @max(self.buf.len, 1) * 2;
+        while (new_len < need) new_len *= 2;
+        if (new_len > self.grow_cap) new_len = self.grow_cap;
+
+        const grown = gpa.realloc(self.buf, new_len) catch return false;
+        self.buf = grown;
+
+        return true;
     }
 };
 
@@ -1414,4 +1458,48 @@ test "zix http1: RespSink oversized payload writes through in order" {
     var recv: [64]u8 = undefined;
     const n = try std.posix.read(fds[0], &recv);
     try std.testing.expectEqualStrings("abc0123456789", recv[0..n]);
+}
+
+test "zix http1: RespSink grows in place instead of flushing when backed by an allocator" {
+    const gpa = std.testing.allocator;
+
+    // 8-byte initial buffer, fd -1 so any accidental flush would error and trip
+    // failed: the grow path must never touch the socket.
+    const buf = try gpa.alloc(u8, 8);
+    var sink = RespSink{ .fd = -1, .buf = buf, .grow_allocator = gpa, .grow_cap = 1024 };
+    defer gpa.free(sink.buf);
+
+    sink.append("0123456789ABCDEF");
+
+    // Buffer grew to fit, the bytes are staged, nothing was flushed.
+    try std.testing.expect(!sink.failed);
+    try std.testing.expect(sink.buf.len >= 16);
+    try std.testing.expectEqual(@as(usize, 16), sink.len);
+    try std.testing.expectEqualStrings("0123456789ABCDEF", sink.buf[0..sink.len]);
+}
+
+test "zix http1: RespSink grow refuses past grow_cap" {
+    const gpa = std.testing.allocator;
+
+    const buf = try gpa.alloc(u8, 8);
+    var sink = RespSink{ .fd = -1, .buf = buf, .grow_allocator = gpa, .grow_cap = 32 };
+    defer gpa.free(sink.buf);
+
+    // Past the cap: refuses and leaves buf untouched.
+    try std.testing.expect(!sink.grow(64));
+    try std.testing.expectEqual(@as(usize, 8), sink.buf.len);
+
+    // Within the cap: grows to a power-of-two that covers need, clamped to cap.
+    try std.testing.expect(sink.grow(20));
+    try std.testing.expect(sink.buf.len >= 20 and sink.buf.len <= 32);
+}
+
+test "zix http1: RespSink without a grow allocator does not grow" {
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = -1, .buf = &stage };
+
+    // EPOLL path (null allocator): grow is a no-op, so a stack or static buffer
+    // is never reallocated and overflow stays on the flush path.
+    try std.testing.expect(!sink.grow(64));
+    try std.testing.expectEqual(@as(usize, 8), sink.buf.len);
 }
