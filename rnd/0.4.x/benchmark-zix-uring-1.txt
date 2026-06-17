@@ -19,16 +19,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    688us    198us   1.31ms   7.00ms   19.00ms
+    Latency    716us    195us   1.46ms   7.79ms   16.80ms
 
-  3689170 requests in 5.01s, 3689170 responses
-  Throughput: 736.91K req/s
-  Bandwidth:  46.38MB/s
-  Status codes: 2xx=3689170, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 3689150 / 3689170 responses (100.0%)
-  Per-template: 1215820,1240886,1232444
-  Per-template-ok: 1215820,1240886,1232444
-[info] CPU 322.2% | Mem 31MiB
+  3557028 requests in 5.00s, 3557028 responses
+  Throughput: 710.97K req/s
+  Bandwidth:  44.75MB/s
+  Status codes: 2xx=3557028, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 3556968 / 3557028 responses (100.0%)
+  Per-template: 1151291,1218447,1187230
+  Per-template-ok: 1151291,1218447,1187230
+[info] CPU 335.8% | Mem 32MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -44,16 +44,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    759us    188us   1.86ms   9.10ms   16.10ms
+    Latency    754us    193us   1.88ms   8.81ms   14.80ms
 
-  3371231 requests in 5.00s, 3371231 responses
-  Throughput: 673.77K req/s
-  Bandwidth:  42.41MB/s
-  Status codes: 2xx=3371231, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 3371211 / 3371231 responses (100.0%)
-  Per-template: 1131593,1127627,1111991
-  Per-template-ok: 1131593,1127627,1111991
-[info] CPU 302.3% | Mem 32MiB
+  3392514 requests in 5.00s, 3392514 responses
+  Throughput: 678.19K req/s
+  Bandwidth:  42.69MB/s
+  Status codes: 2xx=3392514, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 3392514 / 3392514 responses (100.0%)
+  Per-template: 1147062,1124663,1120789
+  Per-template-ok: 1147062,1124663,1120789
+[info] CPU 302.7% | Mem 32MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -69,18 +69,18 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    758us    205us   1.84ms   8.65ms   14.80ms
+    Latency    723us    193us   1.59ms   8.11ms   16.10ms
 
-  3375503 requests in 5.00s, 3375503 responses
-  Throughput: 674.55K req/s
-  Bandwidth:  42.46MB/s
-  Status codes: 2xx=3375503, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 3375463 / 3375503 responses (100.0%)
-  Per-template: 1122985,1127590,1124888
-  Per-template-ok: 1122985,1127590,1124888
-[info] CPU 295.7% | Mem 32MiB
+  3534804 requests in 5.00s, 3534804 responses
+  Throughput: 706.58K req/s
+  Bandwidth:  44.47MB/s
+  Status codes: 2xx=3534804, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 3534762 / 3534804 responses (100.0%)
+  Per-template: 1193260,1185364,1156138
+  Per-template-ok: 1193260,1185364,1156138
+[info] CPU 297.1% | Mem 33MiB
 
-=== Best: 736361 req/s (CPU: 322.2%, Mem: 31MiB) ===
+=== Best: 711405 req/s (CPU: 335.8%, Mem: 32MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -106,16 +106,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   6.95ms   3.92ms   10.50ms   68.30ms   305.10ms
+    Latency   6.79ms   3.74ms   10.10ms   75.20ms   270.90ms
 
-  2940219 requests in 5.00s, 2939829 responses
-  Throughput: 587.43K req/s
-  Bandwidth:  36.97MB/s
-  Status codes: 2xx=2939829, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 2939829 / 2939829 responses (100.0%)
-  Per-template: 979888,975157,984784
-  Per-template-ok: 979888,975157,984784
-[info] CPU 283.7% | Mem 99MiB
+  3014896 requests in 5.01s, 3014896 responses
+  Throughput: 602.18K req/s
+  Bandwidth:  37.90MB/s
+  Status codes: 2xx=3014896, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 3014896 / 3014896 responses (100.0%)
+  Per-template: 996223,1012767,1005906
+  Per-template-ok: 996223,1012767,1005906
+[info] CPU 299.7% | Mem 92MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -131,16 +131,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   7.06ms   4.99ms   10.90ms   44.20ms   274.90ms
+    Latency   6.91ms   4.85ms   10.70ms   40.80ms   257.60ms
 
-  2888971 requests in 5.01s, 2884875 responses
-  Throughput: 575.83K req/s
-  Bandwidth:  36.24MB/s
-  Status codes: 2xx=2884875, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 2884875 / 2884875 responses (100.0%)
-  Per-template: 972627,968827,943421
-  Per-template-ok: 972627,968827,943421
-[info] CPU 290.6% | Mem 100MiB
+  2940901 requests in 5.01s, 2939690 responses
+  Throughput: 587.12K req/s
+  Bandwidth:  36.95MB/s
+  Status codes: 2xx=2939690, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2939670 / 2939690 responses (100.0%)
+  Per-template: 972215,989662,977793
+  Per-template-ok: 972215,989662,977793
+[info] CPU 297.6% | Mem 93MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -156,18 +156,18 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   7.04ms   4.36ms   11.10ms   52.20ms   277.70ms
+    Latency   6.73ms   3.83ms   9.95ms   66.50ms   276.00ms
 
-  2905713 requests in 5.01s, 2902839 responses
-  Throughput: 579.51K req/s
-  Bandwidth:  36.48MB/s
-  Status codes: 2xx=2902839, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 2902819 / 2902839 responses (100.0%)
-  Per-template: 975909,967977,958933
-  Per-template-ok: 975909,967977,958933
-[info] CPU 281.3% | Mem 100MiB
+  3027445 requests in 5.00s, 3023349 responses
+  Throughput: 604.24K req/s
+  Bandwidth:  38.03MB/s
+  Status codes: 2xx=3023349, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 3023349 / 3023349 responses (100.0%)
+  Per-template: 1016217,1006048,1001084
+  Per-template-ok: 1016217,1006048,1001084
+[info] CPU 288.1% | Mem 92MiB
 
-=== Best: 587965 req/s (CPU: 283.7%, Mem: 99MiB) ===
+=== Best: 604669 req/s (CPU: 288.1%, Mem: 92MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -192,14 +192,14 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    927us    317us   1.59ms   6.65ms   60.40ms
+    Latency    934us    335us   1.77ms   7.66ms   47.90ms
 
-  44089264 requests in 5.00s, 44089264 responses
-  Throughput: 8.81M req/s
-  Bandwidth:  554.66MB/s
-  Status codes: 2xx=44089264, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 44089150 / 44089264 responses (100.0%)
-[info] CPU 344.9% | Mem 32MiB
+  43575136 requests in 5.00s, 43575123 responses
+  Throughput: 8.71M req/s
+  Bandwidth:  548.22MB/s
+  Status codes: 2xx=43575123, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 43574416 / 43575123 responses (100.0%)
+[info] CPU 377.5% | Mem 32MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -214,14 +214,14 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    913us    312us   1.43ms   5.77ms   82.20ms
+    Latency    923us    320us   1.68ms   6.35ms   50.50ms
 
-  44534928 requests in 5.00s, 44534928 responses
-  Throughput: 8.90M req/s
-  Bandwidth:  560.23MB/s
-  Status codes: 2xx=44534928, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 44534608 / 44534928 responses (100.0%)
-[info] CPU 333.5% | Mem 32MiB
+  44132640 requests in 5.00s, 44132624 responses
+  Throughput: 8.82M req/s
+  Bandwidth:  555.42MB/s
+  Status codes: 2xx=44132624, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 44132384 / 44132624 responses (100.0%)
+[info] CPU 336.1% | Mem 32MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -236,16 +236,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency    929us    330us   1.72ms   5.97ms   52.70ms
+    Latency    962us    368us   1.72ms   6.33ms   65.30ms
 
-  43772352 requests in 5.00s, 43772352 responses
-  Throughput: 8.75M req/s
-  Bandwidth:  550.90MB/s
-  Status codes: 2xx=43772352, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 43767571 / 43772352 responses (100.0%)
-[info] CPU 323.2% | Mem 32MiB
+  42324128 requests in 5.00s, 42324128 responses
+  Throughput: 8.46M req/s
+  Bandwidth:  532.69MB/s
+  Status codes: 2xx=42324128, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 42323392 / 42324128 responses (100.0%)
+[info] CPU 323.0% | Mem 32MiB
 
-=== Best: 8906985 req/s (CPU: 333.5%, Mem: 32MiB) ===
+=== Best: 8826524 req/s (CPU: 336.1%, Mem: 32MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -270,14 +270,14 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.22ms   6.25ms   15.30ms   106.30ms   301.30ms
+    Latency   10.25ms   6.41ms   15.10ms   105.00ms   296.40ms
 
-  31952032 requests in 5.01s, 31886496 responses
-  Throughput: 6.37M req/s
-  Bandwidth:  400.86MB/s
-  Status codes: 2xx=31886496, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 31886496 / 31886496 responses (100.0%)
-[info] CPU 318.2% | Mem 91MiB
+  31946736 requests in 5.01s, 31881200 responses
+  Throughput: 6.36M req/s
+  Bandwidth:  400.31MB/s
+  Status codes: 2xx=31881200, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 31881200 / 31881200 responses (100.0%)
+[info] CPU 332.8% | Mem 92MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -292,14 +292,14 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.10ms   6.71ms   16.40ms   81.60ms   232.40ms
+    Latency   10.07ms   7.04ms   16.00ms   72.10ms   240.80ms
 
-  32365456 requests in 5.01s, 32299920 responses
-  Throughput: 6.45M req/s
-  Bandwidth:  406.01MB/s
-  Status codes: 2xx=32299920, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 32299920 / 32299920 responses (100.0%)
-[info] CPU 327.1% | Mem 93MiB
+  32381568 requests in 5.01s, 32373185 responses
+  Throughput: 6.46M req/s
+  Bandwidth:  406.71MB/s
+  Status codes: 2xx=32373185, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 32372816 / 32373185 responses (100.0%)
+[info] CPU 323.9% | Mem 93MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -314,16 +314,16 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.52ms   8.22ms   16.30ms   61.70ms   231.80ms
+    Latency   10.26ms   7.36ms   15.70ms   76.40ms   286.60ms
 
-  31218368 requests in 5.02s, 31152832 responses
-  Throughput: 6.20M req/s
-  Bandwidth:  390.34MB/s
-  Status codes: 2xx=31152832, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 31152832 / 31152832 responses (100.0%)
-[info] CPU 315.9% | Mem 94MiB
+  31780528 requests in 5.01s, 31764976 responses
+  Throughput: 6.34M req/s
+  Bandwidth:  399.07MB/s
+  Status codes: 2xx=31764976, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 31764976 / 31764976 responses (100.0%)
+[info] CPU 318.1% | Mem 94MiB
 
-=== Best: 6447089 req/s (CPU: 327.1%, Mem: 93MiB) ===
+=== Best: 6461713 req/s (CPU: 323.9%, Mem: 93MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -349,17 +349,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   1.22ms    451us   2.93ms   11.00ms   32.20ms
+    Latency   1.15ms    441us   2.77ms   9.98ms   20.50ms
 
-  1979941 requests in 5.01s, 1979931 responses
-  Throughput: 395.43K req/s
-  Bandwidth:  24.89MB/s
-  Status codes: 2xx=1979931, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1979902 / 1979931 responses (100.0%)
-  Reconnects: 198004
-  Per-template: 659946,659980,659976
-  Per-template-ok: 659946,659980,659976
-[info] CPU 294.6% | Mem 59MiB
+  2096630 requests in 5.00s, 2096586 responses
+  Throughput: 418.92K req/s
+  Bandwidth:  26.37MB/s
+  Status codes: 2xx=2096586, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2096465 / 2096586 responses (100.0%)
+  Reconnects: 209659
+  Per-template: 698813,698837,698815
+  Per-template-ok: 698813,698837,698815
+[info] CPU 299.2% | Mem 57MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -375,17 +375,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   1.18ms    460us   2.85ms   10.00ms   19.10ms
+    Latency   1.15ms    435us   2.84ms   10.20ms   20.20ms
 
-  2046242 requests in 5.01s, 2046215 responses
-  Throughput: 408.55K req/s
-  Bandwidth:  25.72MB/s
-  Status codes: 2xx=2046215, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 2046215 / 2046215 responses (100.0%)
-  Reconnects: 204628
-  Per-template: 682162,682025,682028
-  Per-template-ok: 682162,682025,682028
-[info] CPU 268.1% | Mem 77MiB
+  2075190 requests in 5.00s, 2075152 responses
+  Throughput: 414.81K req/s
+  Bandwidth:  26.11MB/s
+  Status codes: 2xx=2075152, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2075136 / 2075152 responses (100.0%)
+  Reconnects: 207700
+  Per-template: 691757,691614,691765
+  Per-template-ok: 691757,691614,691765
+[info] CPU 274.0% | Mem 64MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -401,19 +401,19 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   1.16ms    482us   2.83ms   9.77ms   17.90ms
+    Latency   1.16ms    446us   2.82ms   10.40ms   21.10ms
 
-  2065586 requests in 5.01s, 2065575 responses
-  Throughput: 412.52K req/s
-  Bandwidth:  25.97MB/s
-  Status codes: 2xx=2065575, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 2065575 / 2065575 responses (100.0%)
-  Reconnects: 206548
-  Per-template: 688492,688502,688581
-  Per-template-ok: 688492,688502,688581
-[info] CPU 263.4% | Mem 83MiB
+  2077216 requests in 5.01s, 2077202 responses
+  Throughput: 414.60K req/s
+  Bandwidth:  26.10MB/s
+  Status codes: 2xx=2077202, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2077121 / 2077202 responses (100.0%)
+  Reconnects: 207729
+  Per-template: 692386,692327,692407
+  Per-template-ok: 692386,692327,692407
+[info] CPU 265.0% | Mem 74MiB
 
-=== Best: 412290 req/s (CPU: 263.4%, Mem: 83MiB) ===
+=== Best: 419317 req/s (CPU: 299.2%, Mem: 57MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -439,17 +439,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.91ms   8.80ms   15.70ms   81.20ms   300.80ms
+    Latency   10.81ms   9.39ms   15.70ms   37.60ms   171.10ms
 
-  1762931 requests in 5.01s, 1759120 responses
-  Throughput: 351.22K req/s
-  Bandwidth:  22.11MB/s
-  Status codes: 2xx=1759120, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1759120 / 1759120 responses (100.0%)
-  Reconnects: 174185
-  Per-template: 586328,586604,586188
-  Per-template-ok: 586328,586604,586188
-[info] CPU 277.4% | Mem 182MiB
+  1757141 requests in 5.01s, 1757137 responses
+  Throughput: 351.05K req/s
+  Bandwidth:  22.10MB/s
+  Status codes: 2xx=1757137, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1757137 / 1757137 responses (100.0%)
+  Reconnects: 174020
+  Per-template: 585515,585862,585760
+  Per-template-ok: 585515,585862,585760
+[info] CPU 257.2% | Mem 163MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -465,19 +465,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.97ms   9.72ms   16.60ms   30.80ms   114.60ms
+    Latency   10.52ms   9.76ms   15.00ms   26.10ms   39.40ms
 
-  1708512 requests in 5.01s, 1707429 responses
-  Throughput: 340.71K req/s
-  Bandwidth:  21.45MB/s
-  Status codes: 2xx=1707430, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1707416 / 1707429 responses (100.0%)
-  Reconnects: 169056
-  Per-template: 569160,569144,569111
-  Per-template-ok: 569160,569144,569112
-
-  WARNING: 18446744073709551615/1707429 responses (1080381326175762.0%) had unexpected status (expected 2xx)
-[info] CPU 261.9% | Mem 197MiB
+  1772020 requests in 5.01s, 1770389 responses
+  Throughput: 353.67K req/s
+  Bandwidth:  22.26MB/s
+  Status codes: 2xx=1770389, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1770389 / 1770389 responses (100.0%)
+  Reconnects: 175328
+  Per-template: 590191,590126,590072
+  Per-template-ok: 590191,590126,590072
+[info] CPU 257.3% | Mem 166MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -493,19 +491,19 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.84ms   9.81ms   15.90ms   28.50ms   85.70ms
+    Latency   10.47ms   9.66ms   15.00ms   27.20ms   39.90ms
 
-  1720122 requests in 5.01s, 1717062 responses
-  Throughput: 343.02K req/s
-  Bandwidth:  21.59MB/s
-  Status codes: 2xx=1717062, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1717062 / 1717062 responses (100.0%)
-  Reconnects: 170065
-  Per-template: 572350,572350,572362
-  Per-template-ok: 572350,572350,572362
-[info] CPU 256.6% | Mem 200MiB
+  1774048 requests in 5.01s, 1771282 responses
+  Throughput: 353.89K req/s
+  Bandwidth:  22.27MB/s
+  Status codes: 2xx=1771282, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1771282 / 1771282 responses (100.0%)
+  Reconnects: 175583
+  Per-template: 590374,590415,590493
+  Per-template-ok: 590374,590415,590493
+[info] CPU 251.8% | Mem 166MiB
 
-=== Best: 351121 req/s (CPU: 277.4%, Mem: 182MiB) ===
+=== Best: 353549 req/s (CPU: 251.8%, Mem: 166MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -531,17 +529,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.55ms   4.72ms   22.00ms   111.30ms   402.60ms
+    Latency   10.25ms   5.07ms   21.30ms   104.00ms   247.20ms
 
-  1705202 requests in 5.00s, 1704520 responses
-  Throughput: 340.63K req/s
-  Bandwidth:  1.14GB/s
-  Status codes: 2xx=1704520, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1704520 / 1704520 responses (100.0%)
-  Reconnects: 66258
-  Per-template: 243465,243135,242835,243397,243905,244077,243706
-  Per-template-ok: 243465,243135,242835,243397,243905,244077,243706
-[info] CPU 273.8% | Mem 225MiB
+  1724906 requests in 5.00s, 1724674 responses
+  Throughput: 344.73K req/s
+  Bandwidth:  1.15GB/s
+  Status codes: 2xx=1724674, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1724674 / 1724674 responses (100.0%)
+  Reconnects: 66867
+  Per-template: 245911,246052,246870,247214,246691,245993,245943
+  Per-template-ok: 245911,246052,246870,247214,246691,245993,245943
+[info] CPU 294.5% | Mem 212MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -557,17 +555,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.56ms   7.61ms   18.40ms   57.10ms   575.60ms
+    Latency   10.51ms   9.27ms   16.00ms   31.00ms   153.80ms
 
-  1623787 requests in 5.01s, 1620896 responses
-  Throughput: 323.46K req/s
-  Bandwidth:  1.08GB/s
-  Status codes: 2xx=1620896, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1620896 / 1620896 responses (100.0%)
-  Reconnects: 62906
-  Per-template: 230819,230932,231451,232150,231722,231840,231982
-  Per-template-ok: 230819,230932,231451,232150,231722,231840,231982
-[info] CPU 275.3% | Mem 257MiB
+  1571084 requests in 5.00s, 1567044 responses
+  Throughput: 313.18K req/s
+  Bandwidth:  1.05GB/s
+  Status codes: 2xx=1567044, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1567044 / 1567044 responses (100.0%)
+  Reconnects: 60816
+  Per-template: 224296,224130,223958,223762,223202,223489,224207
+  Per-template-ok: 224296,224130,223958,223762,223202,223489,224207
+[info] CPU 274.9% | Mem 226MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -583,19 +581,19 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   10.39ms   7.95ms   19.00ms   69.50ms   301.90ms
+    Latency   10.31ms   9.22ms   15.50ms   30.80ms   159.90ms
 
-  1648673 requests in 5.01s, 1644577 responses
-  Throughput: 328.48K req/s
-  Bandwidth:  1.10GB/s
-  Status codes: 2xx=1644577, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 1644577 / 1644577 responses (100.0%)
-  Reconnects: 63828
-  Per-template: 234345,234744,235243,235739,235444,234674,234388
-  Per-template-ok: 234345,234744,235243,235739,235444,234674,234388
-[info] CPU 266.7% | Mem 276MiB
+  1583748 requests in 5.00s, 1579654 responses
+  Throughput: 315.66K req/s
+  Bandwidth:  1.06GB/s
+  Status codes: 2xx=1579654, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1579654 / 1579654 responses (100.0%)
+  Reconnects: 61683
+  Per-template: 225039,225912,226706,226281,225669,225454,224593
+  Per-template-ok: 225039,225912,226706,226281,225669,225454,224593
+[info] CPU 265.6% | Mem 236MiB
 
-=== Best: 340904 req/s (CPU: 273.8%, Mem: 225MiB) ===
+=== Best: 344934 req/s (CPU: 294.5%, Mem: 212MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -622,17 +620,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   14.78ms   12.60ms   29.70ms   55.00ms   73.00ms
+    Latency   14.21ms   11.70ms   29.90ms   55.00ms   80.60ms
 
-  9039 requests in 5.01s, 9041 responses
-  Throughput: 1.80K req/s
-  Bandwidth:  125.58KB/s
-  Status codes: 2xx=9041, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9041 / 9041 responses (100.0%)
-  Reconnects: 1811
-  Per-template: 2252,2250,2264,2275
-  Per-template-ok: 2252,2250,2264,2275
-[info] CPU 145.5% | Mem 32MiB
+  9428 requests in 5.01s, 9433 responses
+  Throughput: 1.88K req/s
+  Bandwidth:  131.12KB/s
+  Status codes: 2xx=9433, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9433 / 9433 responses (100.0%)
+  Reconnects: 1887
+  Per-template: 2353,2355,2361,2364
+  Per-template-ok: 2353,2355,2361,2364
+[info] CPU 147.1% | Mem 33MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -648,17 +646,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   14.50ms   11.90ms   29.40ms   55.10ms   80.90ms
+    Latency   13.98ms   11.70ms   29.00ms   49.70ms   70.50ms
 
-  9171 requests in 5.01s, 9167 responses
-  Throughput: 1.83K req/s
-  Bandwidth:  127.33KB/s
-  Status codes: 2xx=9167, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9167 / 9167 responses (100.0%)
-  Reconnects: 1830
-  Per-template: 2296,2285,2288,2298
-  Per-template-ok: 2296,2285,2288,2298
-[info] CPU 137.4% | Mem 41MiB
+  9570 requests in 5.01s, 9574 responses
+  Throughput: 1.91K req/s
+  Bandwidth:  132.91KB/s
+  Status codes: 2xx=9574, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9574 / 9574 responses (100.0%)
+  Reconnects: 1912
+  Per-template: 2392,2395,2397,2390
+  Per-template-ok: 2392,2395,2397,2390
+[info] CPU 138.5% | Mem 29MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -674,19 +672,19 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   14.41ms   12.20ms   29.40ms   53.80ms   73.10ms
+    Latency   13.96ms   11.90ms   28.00ms   49.40ms   83.00ms
 
-  9316 requests in 5.02s, 9318 responses
-  Throughput: 1.86K req/s
-  Bandwidth:  129.24KB/s
-  Status codes: 2xx=9318, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9318 / 9318 responses (100.0%)
-  Reconnects: 1864
-  Per-template: 2330,2314,2339,2335
-  Per-template-ok: 2330,2314,2339,2335
-[info] CPU 134.2% | Mem 39MiB
+  9618 requests in 5.01s, 9620 responses
+  Throughput: 1.92K req/s
+  Bandwidth:  133.49KB/s
+  Status codes: 2xx=9620, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9620 / 9620 responses (100.0%)
+  Reconnects: 1932
+  Per-template: 2404,2408,2401,2407
+  Per-template-ok: 2404,2408,2401,2407
+[info] CPU 136.1% | Mem 31MiB
 
-=== Best: 1856 req/s (CPU: 134.2%, Mem: 39MiB) ===
+=== Best: 1920 req/s (CPU: 136.1%, Mem: 31MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -712,17 +710,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   121.55ms   114.70ms   173.10ms   265.70ms   356.90ms
+    Latency   121.61ms   113.00ms   187.60ms   273.00ms   399.30ms
 
-  9336 requests in 5.05s, 9348 responses
-  Throughput: 1.85K req/s
-  Bandwidth:  128.81KB/s
-  Status codes: 2xx=9348, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9348 / 9348 responses (100.0%)
-  Reconnects: 1783
-  Per-template: 2336,2341,2333,2338
-  Per-template-ok: 2336,2341,2333,2338
-[info] CPU 140.8% | Mem 41MiB
+  9206 requests in 5.04s, 9184 responses
+  Throughput: 1.82K req/s
+  Bandwidth:  126.82KB/s
+  Status codes: 2xx=9184, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9184 / 9184 responses (100.0%)
+  Reconnects: 1745
+  Per-template: 2303,2285,2296,2300
+  Per-template-ok: 2303,2285,2296,2300
+[info] CPU 148.4% | Mem 36MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -738,17 +736,17 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   122.65ms   118.50ms   164.20ms   267.30ms   363.70ms
+    Latency   124.53ms   121.00ms   168.80ms   283.80ms   337.00ms
 
-  9322 requests in 5.04s, 9351 responses
-  Throughput: 1.85K req/s
-  Bandwidth:  129.08KB/s
-  Status codes: 2xx=9351, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9351 / 9351 responses (100.0%)
-  Reconnects: 1791
-  Per-template: 2331,2339,2340,2341
-  Per-template-ok: 2331,2339,2340,2341
-[info] CPU 136.5% | Mem 41MiB
+  9137 requests in 5.03s, 9198 responses
+  Throughput: 1.83K req/s
+  Bandwidth:  127.26KB/s
+  Status codes: 2xx=9198, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9198 / 9198 responses (100.0%)
+  Reconnects: 1761
+  Per-template: 2292,2297,2306,2303
+  Per-template-ok: 2292,2297,2306,2303
+[info] CPU 140.0% | Mem 37MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
@@ -764,19 +762,19 @@ gcannon v0.5.3
 
 
   Thread Stats   Avg      p50      p90      p99    p99.9
-    Latency   125.02ms   120.30ms   171.60ms   275.10ms   387.10ms
+    Latency   123.46ms   118.80ms   172.00ms   270.60ms   335.50ms
 
-  9247 requests in 5.04s, 9271 responses
-  Throughput: 1.84K req/s
-  Bandwidth:  127.92KB/s
-  Status codes: 2xx=9271, 3xx=0, 4xx=0, 5xx=0
-  Latency samples: 9271 / 9271 responses (100.0%)
-  Reconnects: 1763
-  Per-template: 2322,2323,2316,2310
-  Per-template-ok: 2322,2323,2316,2310
-[info] CPU 133.2% | Mem 38MiB
+  9199 requests in 5.04s, 9219 responses
+  Throughput: 1.83K req/s
+  Bandwidth:  127.29KB/s
+  Status codes: 2xx=9219, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9219 / 9219 responses (100.0%)
+  Reconnects: 1771
+  Per-template: 2304,2311,2304,2300
+  Per-template-ok: 2304,2311,2304,2300
+[info] CPU 135.9% | Mem 45MiB
 
-=== Best: 1855 req/s (CPU: 136.5%, Mem: 41MiB) ===
+=== Best: 1829 req/s (CPU: 135.9%, Mem: 45MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -793,38 +791,38 @@ Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 1024 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.26ms    2.09ms  52.09ms   88.27%
-    Req/Sec    23.18k     5.05k   43.27k    80.00%
-  1392216 requests in 5.09s, 21.21GB read
-Requests/sec: 273280.28
-Transfer/sec:      4.16GB
-[info] CPU 264.2% | Mem 47MiB
+    Latency     2.35ms    2.33ms  41.72ms   89.57%
+    Req/Sec    22.76k     4.53k   43.96k    80.67%
+  1367732 requests in 5.08s, 20.84GB read
+Requests/sec: 269402.61
+Transfer/sec:      4.10GB
+[info] CPU 259.4% | Mem 43MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 1024 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.34ms    2.21ms  31.23ms   88.05%
-    Req/Sec    22.73k     5.86k   45.21k    76.67%
-  1365055 requests in 5.07s, 20.79GB read
-Requests/sec: 269147.44
-Transfer/sec:      4.10GB
-[info] CPU 238.2% | Mem 47MiB
+    Latency     2.29ms    2.16ms  41.04ms   88.72%
+    Req/Sec    23.07k     4.80k   42.84k    79.83%
+  1384887 requests in 5.07s, 21.10GB read
+Requests/sec: 273281.59
+Transfer/sec:      4.16GB
+[info] CPU 237.4% | Mem 43MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 1024 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.30ms    2.06ms  33.60ms   86.85%
-    Req/Sec    22.86k     6.17k   47.40k    74.33%
-  1373841 requests in 5.09s, 20.93GB read
-Requests/sec: 269772.29
-Transfer/sec:      4.11GB
-[info] CPU 230.3% | Mem 49MiB
+    Latency     2.30ms    2.16ms  43.47ms   88.61%
+    Req/Sec    22.86k     4.92k   45.12k    82.17%
+  1372772 requests in 5.07s, 20.91GB read
+Requests/sec: 270605.77
+Transfer/sec:      4.12GB
+[info] CPU 229.4% | Mem 43MiB
 
-=== Best: 273280 req/s (CPU: 264.2%, Mem: 47MiB) ===
+=== Best: 273281 req/s (CPU: 237.4%, Mem: 43MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -841,38 +839,38 @@ Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 4096 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     9.22ms    4.96ms 100.24ms   83.76%
-    Req/Sec    19.74k     4.64k   41.84k    75.09%
-  1175883 requests in 5.08s, 17.91GB read
-Requests/sec: 231267.53
-Transfer/sec:      3.52GB
-[info] CPU 234.6% | Mem 104MiB
+    Latency     9.32ms    6.50ms 191.99ms   90.41%
+    Req/Sec    20.01k     5.25k   37.02k    70.93%
+  1197507 requests in 5.10s, 18.24GB read
+Requests/sec: 234773.94
+Transfer/sec:      3.58GB
+[info] CPU 238.9% | Mem 102MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 4096 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     9.05ms    4.57ms  89.08ms   80.50%
-    Req/Sec    19.81k     5.10k   37.52k    71.88%
-  1181361 requests in 5.10s, 18.00GB read
-Requests/sec: 231807.09
-Transfer/sec:      3.53GB
-[info] CPU 215.1% | Mem 101MiB
+    Latency     8.87ms    4.06ms  50.95ms   84.70%
+    Req/Sec    20.19k     3.61k   36.15k    81.83%
+  1207576 requests in 5.10s, 18.40GB read
+Requests/sec: 236937.80
+Transfer/sec:      3.61GB
+[info] CPU 213.0% | Mem 104MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 4096 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     9.11ms    4.31ms  56.89ms   80.80%
-    Req/Sec    19.65k     4.65k   37.91k    75.30%
-  1177512 requests in 5.10s, 17.94GB read
-Requests/sec: 230677.96
-Transfer/sec:      3.51GB
-[info] CPU 208.0% | Mem 103MiB
+    Latency     8.81ms    3.90ms  54.65ms   84.25%
+    Req/Sec    20.19k     3.87k   40.62k    82.53%
+  1204741 requests in 5.10s, 18.35GB read
+Requests/sec: 236202.19
+Transfer/sec:      3.60GB
+[info] CPU 208.6% | Mem 103MiB
 
-=== Best: 231807 req/s (CPU: 215.1%, Mem: 101MiB) ===
+=== Best: 236937 req/s (CPU: 213.0%, Mem: 104MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
@@ -889,38 +887,38 @@ Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 6800 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    16.03ms    9.78ms 263.12ms   89.82%
-    Req/Sec    18.80k     4.82k   32.09k    68.23%
-  1115087 requests in 5.09s, 16.99GB read
-Requests/sec: 219286.50
-Transfer/sec:      3.34GB
-[info] CPU 249.4% | Mem 152MiB
+    Latency    15.92ms   13.46ms 339.98ms   95.66%
+    Req/Sec    19.53k     3.21k   32.67k    80.36%
+  1164745 requests in 5.10s, 17.74GB read
+Requests/sec: 228266.70
+Transfer/sec:      3.48GB
+[info] CPU 230.0% | Mem 150MiB
 
 [run 2/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 6800 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    15.14ms    5.76ms  80.83ms   81.32%
-    Req/Sec    19.22k     3.94k   32.51k    80.32%
-  1148921 requests in 5.10s, 17.50GB read
-Requests/sec: 225213.58
-Transfer/sec:      3.43GB
-[info] CPU 217.4% | Mem 152MiB
+    Latency    15.20ms    6.07ms  81.30ms   80.10%
+    Req/Sec    19.27k     4.17k   34.74k    76.76%
+  1140450 requests in 5.08s, 17.37GB read
+Requests/sec: 224462.90
+Transfer/sec:      3.42GB
+[info] CPU 217.7% | Mem 153MiB
 
 [run 3/3]
 Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
 Running 5s test @ http://localhost:8080
   12 threads and 6800 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    15.49ms    6.37ms  86.79ms   76.89%
-    Req/Sec    18.86k     4.77k   37.00k    74.51%
-  1121545 requests in 5.10s, 17.09GB read
-Requests/sec: 220066.47
-Transfer/sec:      3.35GB
-[info] CPU 214.1% | Mem 150MiB
+    Latency    15.06ms    5.79ms  71.86ms   79.21%
+    Req/Sec    19.42k     4.32k   38.08k    76.66%
+  1154659 requests in 5.09s, 17.59GB read
+Requests/sec: 226761.30
+Transfer/sec:      3.45GB
+[info] CPU 210.3% | Mem 148MiB
 
-=== Best: 225213 req/s (CPU: 217.4%, Mem: 152MiB) ===
+=== Best: 228266 req/s (CPU: 230.0%, Mem: 150MiB) ===
 [info] dry-run — not saving (use --save to persist)
 httparena-bench-zix
 httparena-bench-zix
