@@ -15,10 +15,9 @@
 !/perf-kernel-http1-uring-c4096-20260616.perf.data
 !/perf-kernel-http1-uring-c512-20260616.perf.data
 
-!/result-benchmark-httparena-lite-grpc-epoll.txt
-!/result-benchmark-httparena-lite-grpc-uring.txt
-!/result-benchmark-httparena-lite-http-epoll.txt
-!/result-benchmark-httparena-lite-http-uring.txt
-!/result-benchmark-httparena-lite-note.txt
-!/result-benchmark-httparena-lite-websocket-epoll.txt
-!/result-benchmark-httparena-lite-websocket-uring.txt
+!/benchmark-zix_grpc-epoll*.txt
+!/benchmark-zix_grpc-uring*.txt
+!/benchmark-zix-epoll*.txt
+!/benchmark-zix-uring*.txt
+!/benchmark-zix_ws-epoll*.txt
+!/benchmark-zix_ws-uring*.txt
