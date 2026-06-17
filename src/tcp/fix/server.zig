@@ -7,7 +7,7 @@ const FixServerConfig = @import("config.zig").FixServerConfig;
 const DispatchModel = @import("../config.zig").DispatchModel;
 const FixServeOpts = core.FixServeOpts;
 const Logger = @import("../../logger/logger.zig").Logger;
-const uring = @import("../io_uring/ring.zig");
+const uring = @import("../../multiplexers/ring.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
@@ -838,6 +838,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                         .recv => w.handleRecv(cqe, decoded),
                         .send => w.handleSend(cqe, decoded),
                         .timeout => w.handleTimeout(cqe),
+                        .close => {},
                     }
                 }
             }
