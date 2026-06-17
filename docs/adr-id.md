@@ -891,4 +891,30 @@ Penerapan per-engine (sebuah pola berlaku hanya di tempat hot-path-nya memilikin
 
 ---
 
+## ADR-041: penskalaan connection-churn `.URING` (teardown ring `prep_close` + pertumbuhan `RespSink` on-ring) setelah pivot write-path
+
+**Status:** Diterima
+
+**Konteks:** Di mesin HttpArena 64-core, `.URING` terpisah dari `.EPOLL` berdasarkan reqs-per-connection. Ia menang di cell long-lived (baseline +14 sampai +20%, pipelined +9 sampai +13%) dan setara di static, tetapi kolaps di cell connection-churn (json -73%, limited-conn -87%). Throughput per-core setara atau lebih baik untuk `.URING`, jadi masalahnya adalah okupansi core, bukan kerja per request. Di bawah churn, worker hanya mengaktifkan sekitar 7 dari 64 core karena tiap teardown memblokirnya di `linux.close` sinkron antar koneksi, membuat siklus accept-recv-send-close terikat-close. Pembacaan awal menyalahkan write-path (response di atas send buffer 16 KiB jatuh ke `fdWriteAllDirect` off-ring yang memblokir), tetapi cell write-path (static) sudah setara, jadi lever sebenarnya adalah setup dan teardown koneksi.
+
+**Keputusan:** Dua perubahan, keduanya `.URING` saja, dengan `.EPOLL` tidak berubah byte-for-byte:
+
+| Perubahan | Apa |
+| :- | :- |
+| ring close | `finishClose` mengirim SQE `prep_close` (ditag dengan `OpKind.close` bersama yang baru) dan mendaur ulang slot koneksi lebih dulu, alih-alih `linux.close` sinkron, jadi worker terus memanen completion lintas teardown. Ia jatuh ke close sinkron hanya saat SQ sesaat penuh. State per-koneksi half-duplex menjamin tidak ada op in-flight yang menyasar fd yang sedang ditutup. |
+| on-ring growth | `RespSink` menumbuhkan `send_buf` per-koneksi (`realloc` power-of-two hingga `URING_SEND_BUF_MAX` = 1 MiB, tidak pernah menyusut, dipakai ulang lewat idle-conn free list) untuk men-stage response oversized di ring, menghapus fallback `fdWriteAllDirect` yang memblokir. |
+
+`OpKind` bersama berada di `src/multiplexers/ring.zig` (dipindahkan dari `src/tcp/io_uring`) dan memperoleh `close`, jadi setiap engine io_uring membawa arm `.close => {}`. Hanya `zix.Http1` yang meng-arm-nya untuk saat ini.
+
+Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static dideprioritaskan karena static sudah setara, jadi itu kualitas, bukan penggerak composite. API write-strategy `Route.profile` comptime adalah scaffolding alih-alih lever perf, karena parsing terjadi sebelum routing dan write berada di handler, jadi write profile level-route tidak punya apa pun nyata untuk dipilih sampai behavior lain ada. recv buffer-select parse-in-place diimplementasikan lalu di-revert, karena jalur plain recv-into-`conn.buf` sudah parse in place tanpa copy, jadi buffer ring hanya menambah bookkeeping per-recv dan meregresi pipelined 13 sampai 16%. Profil recv-buffer per-mesin `lean` / `throughput` (comptime, level-app, tanpa perubahan engine) disimpan sebagai knob deployment.
+
+**Config:** tanpa field server-config baru. recv buffer per-mesin dipilih oleh deployment lewat `max_recv_buf` yang sudah ada. Cap pertumbuhan send-buffer adalah konstanta internal.
+
+**Konsekuensi:**
+- Cell churn pulih ke paritas di mesin 64-core: json -73% ke -2.4%, limited-conn 512 -87% ke +5.5%, limited-conn 4096 -87% ke -1.5%, lompatan absolut sekitar 8x di limited-conn dan 3.7x di json. Mekanisme terkonfirmasi: CPU server limited-conn 512 naik dari sekitar 722% (sekitar 7 dari 64 core) ke sekitar 5443% (sekitar 54 core), jadi core kini terisi lintas teardown.
+- `.URING` kini mencapai paritas atau lebih baik di setiap cell yang disubscribe dengan memori 50 sampai 85% lebih sedikit dari `.EPOLL` (json 289 MiB versus 1.3 GiB, limited-conn 4096 231 MiB versus 1.5 GiB), jadi entry HttpArena dikirim di `.URING`. `.EPOLL` tidak berubah pada rilis ini.
+- Tanpa perubahan API atau behaviour. Teardown `prep_close` diuji end-to-end oleh runner integrasi io_uring (HTTP, upgrade WebSocket, drain body besar). Jalur grow di-cap dan di-pool, sebuah guard correctness dan tail-latency alih-alih hot path, karena tidak ada cell benchmark yang memancarkan response di atas 16 KiB inline.
+
+---
+
 ###### end of adr
