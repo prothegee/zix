@@ -9,7 +9,7 @@ const DispatchModel = @import("../config.zig").DispatchModel;
 const core = @import("core.zig");
 const cache = @import("../../utils/response_cache.zig");
 const ws = @import("websocket.zig");
-const uring = @import("../io_uring/ring.zig");
+const uring = @import("../../multiplexers/ring.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
 
@@ -977,8 +977,18 @@ const URING_CQE_BATCH: usize = 512;
 /// EPOLL), each connection needs its own buffer. 16 KiB easily covers the max
 /// response (~12 KiB for `/json`) plus a tiny pipelined burst. Dropping this
 /// from EPOLL's 64 KiB saves 48 KiB/conn, which is critical for memory limits
-/// at high concurrency. Oversize responses flush directly via `RespSink.append`.
+/// at high concurrency. A response larger than this grows send_buf up to
+/// URING_SEND_BUF_MAX so it still leaves as one on-ring send.
 const URING_SEND_BUF_SIZE: usize = 16 * 1024;
+
+/// Hard ceiling for a grown per-connection send buffer. A handler emitting a
+/// single response (or a coalesced pipelined batch) larger than
+/// URING_SEND_BUF_SIZE grows send_buf up to this cap so the response still goes
+/// out as one on-ring send, instead of a blocking off-ring write that would
+/// stall every connection on the worker. Past the cap the core sink falls back
+/// to a direct flush. 1 MiB covers any realistic inline response while bounding
+/// worst-case per-connection memory.
+const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 
 /// Initialize a worker ring with the single-issuer fast-path flags, falling
 /// back to a flagless ring when the kernel does not support them.
@@ -1162,9 +1172,29 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             self.releaseConn(conn);
         }
 
+        /// Tear a connection down via a ring close (prep_close) instead of a
+        /// synchronous linux.close on the worker thread. Under connection churn
+        /// (short-lived and limited-keep-alive requests) teardown happens once
+        /// per few requests, and a blocking close syscall on the hot loop kept
+        /// the worker from reaping other completions while it ran, leaving cores
+        /// idle. Handing the close to the kernel lets the worker keep draining
+        /// CQEs. The slot is cleared first, so the .close CQE carries no
+        /// connection and the loop ignores it. The kernel does not reuse the fd
+        /// integer until the close actually runs, so no in-flight op (none is
+        /// outstanding here anyway, the path is half-duplex) can target it.
         fn finishClose(self: *Self, conn: *UringConn) void {
-            _ = linux.close(conn.fd);
+            const fd = conn.fd;
             self.destroyConn(conn);
+
+            const sqe = self.getSqe() orelse {
+                // SQ momentarily full: close synchronously so the fd is never
+                // leaked, then return.
+                _ = linux.close(fd);
+                return;
+            };
+
+            sqe.prep_close(fd);
+            sqe.user_data = uring.packUserData(.close, 0, fd);
         }
 
         /// Close intent: flush staged bytes first when possible, otherwise free
@@ -1471,7 +1501,12 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         fn dispatch(self: *Self, conn: *UringConn) core.ConnOutcome {
             const fd = conn.fd;
 
-            var sink = core.RespSink{ .fd = fd, .buf = conn.send_buf };
+            var sink = core.RespSink{
+                .fd = fd,
+                .buf = conn.send_buf,
+                .grow_allocator = allocator,
+                .grow_cap = URING_SEND_BUF_MAX,
+            };
             core.tl_resp_sink = &sink;
             defer core.tl_resp_sink = null;
 
@@ -1562,6 +1597,10 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 conn.filled -= consumed;
             }
 
+            // The sink may have grown send_buf to fit an oversized response, so
+            // adopt the (possibly reallocated) buffer before submitSend and
+            // handleSend reference it.
+            conn.send_buf = sink.buf;
             conn.staged = sink.len;
             if (sink.failed) return .close;
 
@@ -1626,6 +1665,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         .recv => self.handleRecv(cqe, decoded),
                         .send => self.handleSend(cqe, decoded),
                         .timeout => {},
+                        .close => {},
                     }
                 }
             }
@@ -2227,4 +2267,64 @@ test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)
     // Usable whether the kernel accepted the single-issuer fast-path flags or
     // the flagless fallback was taken. Getting an SQE proves the queues mapped.
     _ = try ring.get_sqe();
+}
+
+test "zix http1: URING finishClose rings the close and recycles the slot" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    const linux = std.os.linux;
+    const gpa = std.testing.allocator;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    // fds[1] is handed to finishClose, which closes it via the ring (not here).
+
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = initUringRing() catch return error.SkipZigTest,
+        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .free_list = null,
+    };
+    @memset(worker.slots, null);
+    defer {
+        worker.ring.deinit();
+        gpa.free(worker.slots);
+    }
+
+    // A connection parked in its fd slot. finishClose recycles it to the free
+    // list (it is not freed), so the test owns the cleanup of its buffers.
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = true };
+    worker.slots[@intCast(fds[1])] = conn;
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+
+    worker.finishClose(conn);
+
+    // Slot cleared and the connection recycled for the next accept to reuse.
+    try std.testing.expectEqual(@as(?*UringConn, null), worker.slots[@intCast(fds[1])]);
+    try std.testing.expectEqual(@as(?*UringConn, conn), worker.free_list);
+
+    // The close was staged on the ring, not run as a synchronous syscall:
+    // submit and reap its CQE, which must report success and carry the .close
+    // tag so the run loop routes it to the no-op arm.
+    _ = try worker.ring.submit_and_wait(1);
+    var cqes: [4]linux.io_uring_cqe = undefined;
+    const count = try worker.ring.copy_cqes(&cqes, 0);
+    try std.testing.expect(count >= 1);
+
+    const decoded = uring.unpackUserData(cqes[0].user_data);
+    try std.testing.expectEqual(uring.OpKind.close, decoded.op);
+    try std.testing.expectEqual(@as(i32, 0), cqes[0].res);
 }
