@@ -132,7 +132,6 @@ pub fn takeWebSocket() ?WsPending {
 
 // --------------------------------------------------------- //
 // Response cache: per-worker, per-key precomputed response (ADR-036).
-// --------------------------------------------------------- //
 
 /// Per-worker response cache. Set once per worker by the EPOLL engine when
 /// config.response_cache is on, null otherwise. When null every cache call below
