@@ -364,7 +364,7 @@ const URING_CQ_ENTRIES: u32 = 16 * 1024;
 /// Max CQEs drained per loop pass.
 const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer: one coalesced send per request.
-const URING_SEND_BUF_SIZE: usize = 64 * 1024;
+const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 
 /// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
 /// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
