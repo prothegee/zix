@@ -96,7 +96,7 @@ takeWebSocket():          baca + bersihkan              // dipanggil engine sete
 ### RespSink: penggabungan response per-event
 
 ```zig
-RespSink = { fd, buf, len, failed }
+RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
@@ -104,13 +104,14 @@ Selama terpasang, `fdWriteAll(fd, ...)` untuk fd yang cocok menambahkan ke `buf`
 
 ```
 append(bytes):
-  bytes.len > buf.len        -> flush, lalu tulis langsung (urutan terjaga)
-  len + bytes.len > buf.len  -> flush dulu
+  bytes.len > buf.len        -> tumbuhkan agar muat bila growable, selain itu flush + tulis langsung
+  len + bytes.len > buf.len  -> tumbuhkan agar muat bila growable, selain itu flush dulu
   selain itu                 -> memcpy ke buf
 flush(): satu fdWriteAllDirect(buf[0..len]), len = 0, failed lengket saat error
+grow(need): realloc buf (power-of-two) hingga grow_cap, tidak pernah menyusut, false bila tak-growable
 ```
 
-Hanya dipasang oleh loop request EPOLL (`serveEpollConn`), sehingga burst pipelined N response berbiaya satu `write()`. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
+Loop request EPOLL (`serveEpollConn`) memasang sink tanpa `grow_allocator`, jadi burst pipelined N response berbiaya satu `write()` dan response oversized mem-flush batch lalu menulis langsung. Loop URING memasang sink di atas `send_buf` per-koneksi dengan `grow_allocator` diset dan `grow_cap = URING_SEND_BUF_MAX` (1 MiB): response yang lebih besar dari buffer ter-stage menumbuhkannya di tempat (realloc power-of-two) sehingga seluruh balasan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir (`fdWriteAllDirect`). Buffer yang ditumbuhkan tidak pernah menyusut, jadi koneksi yang didaur ulang memakainya ulang untuk request berikutnya. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
 
 ### fdWriteAll() / fdWriteAllDirect()
 
@@ -413,6 +414,12 @@ Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` d
 #### WebSocket di ring
 
 `IoUring.BufferGroup` per-worker (provided-buffer ring) melayani recv WebSocket (Phase 4b): kernel menyerahkan buffer hanya saat sebuah frame tiba, sehingga koneksi idle tidak mengikat recv buffer apa pun, kemenangan memory-scaling pada jumlah koneksi tinggi. `wsHandleBuf` mem-parse satu batch whole-frame di tempat dari buffer yang dipilih (zero copy) dan hanya menyalin frame parsial yang tertinggal ke `conn.buf`. Kernel tanpa dukungan buffer-ring membiarkan `ws_bufs` null, dan WebSocket jatuh kembali ke jalur plain recv-into-`conn.buf`.
+
+#### finishClose(): teardown ring (ADR-041)
+
+Teardown menutup fd di ring, bukan secara sinkron. `finishClose` membaca fd, mendaur ulang slot koneksi lebih dulu (`destroyConn`, yang membersihkan slot dan mengembalikan koneksi ke free list), lalu mengirim SQE `prep_close` yang ditag dengan `OpKind.close`. Ia jatuh ke `linux.close` sinkron hanya saat SQ sesaat penuh. State per-koneksi half-duplex menjamin tidak ada op in-flight yang menyasar fd yang sedang ditutup, dan mendaur ulang slot sebelum close selesai aman karena tag generation menolak CQE telat apa pun terhadap fd yang dipakai ulang. Completion `close` adalah no-op (slot sudah bebas). Ini penting di bawah connection churn: `close` sinkron per teardown memblokir worker antar koneksi, jadi di mesin 64-core ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm (limited-conn, json). Menjaga close di ring membuat worker terus memanen completion lintas teardown, sehingga core terisi. Lihat ADR-041 untuk pengukuran 64-core.
+
+`OpKind` bersama (dengan varian `close`) berada di `src/multiplexers/ring.zig` (dipindahkan dari `src/tcp/io_uring`), sehingga setiap engine io_uring membawa arm `.close => {}`. Hanya `zix.Http1` yang meng-arm-nya untuk saat ini.
 
 ### Http1ServerImpl / Server
 
