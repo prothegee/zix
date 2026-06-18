@@ -104,7 +104,3 @@ Tried twice and reverted both times (the naive accumulate-copy form under ADR-03
 - Hardware variance: the 12t dev box is loadgen-bound (server ~3 of 12 cores) and cannot reproduce 64-core churn starvation. Mitigation: gate correctness locally, measure the churn win only on the 64c box.
 - Known-negative retries: multishot was already reverted. Mitigation: only retry the parse-in-place variant, and only if it reachs the in-place recv path.
 - API blast radius: `Route.profile` flows into HttpArena `main.zig` route tables. Mitigation: default `.auto`, behavior-identical, so the field is additive.
-
----
-
-###### end of ADR-041

@@ -96,7 +96,7 @@ takeWebSocket():          read + clear                  // called by the engine 
 ### RespSink: per-event response coalescing
 
 ```zig
-RespSink = { fd, buf, len, failed }
+RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
@@ -104,13 +104,14 @@ While installed, `fdWriteAll(fd, ...)` for the matching fd appends to `buf` inst
 
 ```
 append(bytes):
-  bytes.len > buf.len        -> flush, then write through directly (order preserved)
-  len + bytes.len > buf.len  -> flush first
+  bytes.len > buf.len        -> grow to fit when growable, else flush + write through directly
+  len + bytes.len > buf.len  -> grow to fit when growable, else flush first
   else                       -> memcpy into buf
 flush(): one fdWriteAllDirect(buf[0..len]), len = 0, failed sticky on error
+grow(need): realloc buf (power-of-two) up to grow_cap, never shrinks, false when ungrowable
 ```
 
-Installed only by the EPOLL request loop (`serveEpollConn`), so a pipelined burst of N responses costs one `write()`. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
+The EPOLL request loop (`serveEpollConn`) installs the sink with no `grow_allocator`, so a pipelined burst of N responses costs one `write()` and an oversized response flushes the batch then writes straight through. The URING loop installs the sink over the per-connection `send_buf` with `grow_allocator` set and `grow_cap = URING_SEND_BUF_MAX` (1 MiB): a response larger than the staged buffer grows it in place (power-of-two realloc) so the whole reply still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write (`fdWriteAllDirect`). The grown buffer never shrinks, so the recycled connection reuses it for later requests. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
 
 ### fdWriteAll() / fdWriteAllDirect()
 
@@ -400,6 +401,7 @@ UringConn = {
       accept -> handleAccept   // re-arm on !IORING_CQE_F_MORE, alloc conn, armRecv
       recv   -> handleRecv
       send   -> handleSend
+      close  -> no-op          // teardown completion, slot already recycled
 ```
 
 #### armRecv() / handleRecv() / dispatch()
@@ -413,6 +415,12 @@ The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe
 #### WebSocket on the ring
 
 A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs (Phase 4b): the kernel hands a buffer over only when a frame arrives, so an idle connection ties up no recv buffer, the memory-scaling win at high connection counts. `wsHandleBuf` parses a whole-frame batch in place out of the selected buffer (zero copy) and copies only a trailing partial frame into `conn.buf`. A kernel without buffer-ring support leaves `ws_bufs` null, and WebSocket falls back to the plain recv-into-`conn.buf` path.
+
+#### finishClose(): ring teardown (ADR-041)
+
+Teardown closes the fd on the ring, not synchronously. `finishClose` reads the fd, recycles the connection slot first (`destroyConn`, which clears the slot and returns the connection to the free list), then submits a `prep_close` SQE tagged with `OpKind.close`. It falls back to a synchronous `linux.close` only when the SQ is momentarily full. The half-duplex per-connection state guarantees no in-flight op targets the closing fd, and recycling the slot before the close completes is safe because the generation tag rejects any late CQE against the reused fd. The `close` completion is a no-op (the slot is already free). This matters under connection churn: a synchronous `close` per teardown blocks the worker between connections, so on the 64-core box the ring barely engaged its cores under reconnect storms (limited-conn, json). Keeping the close on the ring lets the worker keep reaping completions across teardowns, so the cores fill. See ADR-041 for the 64-core measurement.
+
+The shared `OpKind` (with the `close` variant) lives in `src/multiplexers/ring.zig` (relocated from `src/tcp/io_uring`), so every io_uring engine carries a `.close => {}` arm. Only `zix.Http1` arms it for now.
 
 ### Http1ServerImpl / Server
 

@@ -81,5 +81,3 @@ Uniform server constructor map:
 - Verified: the library compiles, every `tcp_server_*` / `udp_server` /
   `uds_server` example compiles, the unit / integration / edge / behaviour suites
   pass, and the `tcp` (all five models), `udp`, and `uds` runners pass.
-
----

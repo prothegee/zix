@@ -33,5 +33,3 @@ A body-size sweep (c512) puts the crossover near 4 KiB: the delta stays inside r
 - Deliberately not aimed at file-backed or static responses: the OS page cache already serves those cheaply, so `sendfile` / `splice` is the better lever there.
 - Correctness rests on opt-in: the engine never auto-caches a handler's output. The handler decides cacheability and TTL. A dynamic or database-backed response sets a short `cache_ttl_ms` (accepting that much staleness) or does not cache and writes directly. The HTTP key covers method, path, and query only, so a response that varies on a header or cookie must not be cached.
 - The cache structure is engine-agnostic in `src/utils`, so the per-engine glue (a thread-local cache plus key derivation) is the only protocol-specific part.
-
----

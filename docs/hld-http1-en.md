@@ -101,7 +101,9 @@ flowchart TD
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
-`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, and send are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). On non-Linux it falls back to `.POOL`. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality, so default to `.EPOLL` and pick `.URING` for sustained, pipelined load.
+`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, send, and close are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). On non-Linux it falls back to `.POOL`. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality.
+
+Teardown also rings the close (`prep_close`, ADR-041) instead of a synchronous `linux.close`, so the worker keeps reaping completions across connection teardowns. On the 64-core box this is the difference under connection churn: with the synchronous close the ring barely engaged its cores under reconnect storms, with the ring close it fills them and reaches parity or better on every cell at a fraction of the memory. The shared io_uring `OpKind` and ring helpers live in `src/multiplexers/ring.zig`. See ADR-041 for the measurement.
 
 ---
 

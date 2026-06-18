@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network backend library written in zig.</i>
+    <i>A network backend library/engine written in zig.</i>
 </p>
 
 <div align="center">
@@ -175,8 +175,7 @@ So network/communication system is essential in my end.
 From monolith, micro-service, and modular micro-service.
 
 At early Zig (before 0.16.x), I enjoyed the language.
-Zig is flexible and yet most of the logic
-But "variant of colors" made me go back to Go & C++ again.
+Zig is flexible, but "variant of colors" made me go back to Go & C++ again.
 So in mid 2025 the plan is only idea and some architectural design.
 
 So when Zig 0.16.x release, and in 2026 early March. I started the march.
@@ -229,7 +228,15 @@ different conventions.
 
 <br>
 
-__*2. Five selectable dispatch models:*__
+__*2. Client libraries across the stack:*__
+
+Every engine ships its matching client: `zix.Http.Client`, the gRPC client, and raw `zix.Tcp`, `zix.Udp`, `zix.Uds`, and `zix.Fix` clients, plus dedicated SSE (`sse_client`) and WebSocket (`ws_client`) clients.
+
+> Call and test your own services with the same library that serves them, instead of vendoring a separate client per protocol.
+
+<br>
+
+__*3. Five selectable dispatch models:*__
 
 - ASYNC (single accept thread, io.async() per conn): lowest latency at moderate load.
 - POOL (N acceptors push to a shared queue, M workers handle synchronously): best raw throughput at high connection counts.
@@ -237,29 +244,53 @@ __*2. Five selectable dispatch models:*__
 - EPOLL (shared-nothing: each worker owns a SO_REUSEPORT listener + epoll instance, level-triggered, no shared queue): Linux-only, best for high connection counts.
 - URING (shared-nothing io_uring: same thread-per-core topology as EPOLL, but completion-based so most syscall transitions are batched away): Linux-only.
 
-> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux. Http2 has no native epoll or uring path and folds to POOL.
+> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux.
+Http2 has no native epoll or uring path and folds to POOL.
 
 <br>
 
-__*3. Explicit, flat configuration:*__
+__*4. Shared-nothing architecture:*__
+
+Under `.EPOLL` and `.URING` each worker owns a private SO_REUSEPORT listener, its own event loop, connection slab, and response cache, with no shared queue, no cross-thread fd handoff, and no locking. State is partitioned by ownership, not guarded by mutexes.
+
+> Scales by adding independent workers, one per core, so the hot path never contends and the response cache is lock-free by ownership.
+
+<br>
+
+__*5. Explicit, flat configuration:*__
 
 No nested sub-configs: every field (e.g. dispatch_model, max_response_headers: .MINIMAL, pool_size) is top-level and explicit.
 
 > Predictability by principle. You sees exactly what the server does without
-chasing inherited defaults.
+chasing inherited defaults. Do not buried (1 or 3+ levels deep) config fields at the core public access, it's not a cemetery.
 
 <br>
 
-__*4. Hot-path-optimized HTTP/1 zix.Http1:*__
+__*6. Hot-path-optimized HTTP/1 zix.Http1:*__
 
-- Removed HeadParser, thread-local cached Date header, consolidated writeSimple, serveConn(fd, handler, opts).
-- Engine-owned WebSocket with per-event write coalescing under EPOLL, plus SSE and configurable response-header capacity.
+- Removed HeadParser, thread-local cached Date header, consolidated writeSimple, serveConn(fd, handler, opts), configurable response-header capacity.
 
 > Squeeze the common request path without sacrificing the explicit API.
 
 <br>
 
-__*5. Production-grade gRPC:*__
+__*7. Composable HTTP request handling:*__
+
+A comptime router with path parameters (`matchParam`) shared by `zix.Http` and `zix.Http1`, an explicit middleware chain (`Middleware` / `NextFn`) on `zix.Http`, static file serving, multipart and file upload parsing (`MultipartParser`), and HTTP range request parsing (`parseRange`) for partial content.
+
+> Each piece is an explicit, opt-in part of the engine, with route matching resolved at compile time. You compose only what a request needs instead of inheriting a fixed pipeline.
+
+<br>
+
+__*8. WebSocket and SSE (both HTTP engines):*__
+
+Engine-owned WebSocket on `zix.Http` and `zix.Http1` (RFC 6455, ping auto-ponged, close auto-echoed, broadcast fan-out, per-event write coalescing under EPOLL), and Server-Sent Events with a matching SSE client.
+
+> Long-lived, push-style connections are handled by the engine itself, not bolted on inside the handler.
+
+<br>
+
+__*9. Multiplexed gRPC (h2c):*__
 
 Multiplexed async epoll with a resumable HTTP/2 state machine, comptime-cached HPACK reply blocks, big initial window, buffered reads, max_streams=128 to avoid REFUSED_STREAM bursts. Context timeouts (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
 
@@ -270,22 +301,30 @@ terminator or sidecar required.
 
 <br>
 
-__*6. FIX 4.x:*__
+__*10. FIX 4.x:*__
 
 FixContext, a MsgType struct (47 constants), session-oriented routing, trading examples.
 
-> Domain-specific financial messaging as a first-class citizen, not bolted onto raw
+> Domain-specific financial messaging as a citizen of the engine, not bolted onto raw
 TCP.
 
 <br>
 
-__*7. Protocol-aware logger:*__
+__*11. Channel (typed concurrency and IPC primitive):*__
+
+A generic bounded `Channel(T)` with `send` / `recv` / `close` and drain-after-close semantics, usable for in-process fan-out, worker pools, and inter-process coordination.
+
+> A small, typed building block for coordinating work, the same primitive whether the peers are threads or processes.
+
+<br>
+
+__*12. Protocol-aware logger:*__
 
 Log types per protocol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() is HTTP-only, Channel is system-only.
 
 > The log vocabulary matches the actual unit of work on each protocol.
 
-__*8. Response Cache Awareness:*__
+__*13. Response Cache Awareness:*__
 
 Opt-in, per-worker response cache (ADR-036) shared by `zix.Http1`, `zix.Http`, and `zix.Grpc`. A handler builds its response once, the engine stores it under a key derived from the request, and a later matching request replays the stored bytes with no rebuild and no re-serialization. Data oriented (a structure of arrays plus one flat payload slab), lock-free by ownership (one instance per worker, never shared), with a lazy on-access TTL. Active under the shared-nothing `.EPOLL` and `.URING` models.
 
@@ -293,7 +332,7 @@ Opt-in, per-worker response cache (ADR-036) shared by `zix.Http1`, `zix.Http`, a
 
 <br>
 
-__*9. Bilingual multi-documentation:*__
+__*14. Bilingual multi-documentation:*__
 
 Every doc has it own variants.
 
@@ -367,7 +406,9 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 
 ## Requirements
 
-- Zig >= 0.16.x
+- [Zig](https://ziglang.org/):
+    - [x] 0.16.x
+    - [ ] ~0.17.x~
 
 <br>
 
@@ -447,7 +488,7 @@ Built example binaries land in `zig-out/bin/`. To build all examples, then run o
 
 ```sh
 zig build examples                      # build every example into zig-out/bin/
-./zig-out/bin/example-http1_websocket &   # run one in the background
+./zig-out/bin/example-http1_websocket & # run one in the background
 kill %1                                 # stop it
 ```
 
@@ -481,7 +522,7 @@ Zix has two models API for HTTP/1, `zix.Http` and `zix.Http1`.
 
 `zix.Http` relies on zig `std.http` and works as the convenient approach, while `zix.Http1` does not.
 
-**When to use:** pick `zix.Http` when you want the batteries-included request/response API (Request/Response/Context, an arena per request, middleware, static files). Pick `zix.Http1` when you want the lean hot-path engine with the lowest per-request overhead and are willing to work at the `fn(head, body, fd)` level. Both share the same comptime router and the same dispatch models.
+**When to use:** pick `zix.Http` when you want the high-level request/response API (Request/Response/Context, an arena per request, middleware, static files). Pick `zix.Http1` when you want the lean hot-path engine with the lowest per-request overhead and are willing to work at the `fn(head, body, fd)` level. Both share the same comptime router and the same dispatch models.
 
 <br>
 
@@ -532,7 +573,24 @@ pub fn main() !void {
 }
 ```
 
-See `examples/http_basic_1_async.zig`, `examples/http_basic_2_pool.zig`, `examples/http_basic_3_mixed.zig`, `examples/http_basic_4_epoll.zig`, and `examples/http_basic_5_uring.zig` for per-dispatch-model minimal servers (the last is the io_uring `.URING` ring). See `examples/http_manual_concurrent.zig` for explicit concurrency control via `Io.Threaded`. The raw `zix.Http1` engine has parallel examples: `examples/http1_basic_1_async.zig`, `examples/http1_basic_2_pool.zig`, `examples/http1_basic_3_mixed.zig`, `examples/http1_basic_4_epoll.zig`, `examples/http1_basic_5_uring.zig`, plus `examples/http1_json.zig`, `examples/http1_params.zig`, `examples/http1_middleware.zig`, `examples/http1_cache.zig`, and `examples/http1_manual_concurrent.zig`.
+**Examples:**
+- [examples/http_basic_1_async.zig](examples/http_basic_1_async.zig) - ASYNC dispatch
+- [examples/http_basic_2_pool.zig](examples/http_basic_2_pool.zig) - POOL dispatch
+- [examples/http_basic_3_mixed.zig](examples/http_basic_3_mixed.zig) - MIXED dispatch
+- [examples/http_basic_4_epoll.zig](examples/http_basic_4_epoll.zig) - EPOLL dispatch
+- [examples/http_basic_5_uring.zig](examples/http_basic_5_uring.zig) - URING dispatch (io_uring ring)
+- [examples/http_manual_concurrent.zig](examples/http_manual_concurrent.zig) - explicit concurrency control via `Io.Threaded`
+- [examples/http1_basic_1_async.zig](examples/http1_basic_1_async.zig) - raw `zix.Http1`: ASYNC dispatch
+- [examples/http1_basic_2_pool.zig](examples/http1_basic_2_pool.zig) - raw `zix.Http1`: POOL dispatch
+- [examples/http1_basic_3_mixed.zig](examples/http1_basic_3_mixed.zig) - raw `zix.Http1`: MIXED dispatch
+- [examples/http1_basic_4_epoll.zig](examples/http1_basic_4_epoll.zig) - raw `zix.Http1`: EPOLL dispatch
+- [examples/http1_basic_5_uring.zig](examples/http1_basic_5_uring.zig) - raw `zix.Http1`: URING dispatch
+- [examples/http1_json.zig](examples/http1_json.zig)
+- [examples/http1_params.zig](examples/http1_params.zig)
+- [examples/http1_paths.zig](examples/http1_paths.zig)
+- [examples/http1_middleware.zig](examples/http1_middleware.zig)
+- [examples/http1_cache.zig](examples/http1_cache.zig)
+- [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig)
 
 **When to use:** start here for any plain HTTP service. Auto I/O (default) is the simplest path and lets the runtime size its own thread pool. Switch to manual I/O with `concurrent_limit` only when you must cap concurrency explicitly: constrained memory, a fixed worker budget, or deterministic load tests.
 
@@ -593,7 +651,10 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 // check extension, depth, query params, headers, etc.
 ```
 
-See `examples/http_params.zig` for query and form parameter handling. See `examples/http_paths.zig` for path parameter routing patterns. See `examples/http_json.zig` for JSON response handling.
+**Examples:**
+- [examples/http_params.zig](examples/http_params.zig) - query and form parameter handling
+- [examples/http_paths.zig](examples/http_paths.zig) - path parameter routing patterns
+- [examples/http_json.zig](examples/http_json.zig) - JSON response handling
 
 **Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds and the same `exact > param > prefix` priority. The one difference is param capture: the Http1 handler is `fn(head: *const ParsedHead, body, fd) void` with no `Request`, so captured params are read with the free function `zix.Http1.pathParam("id")` (a per-handler thread-local, the same model as `zix.Http1.setTimeout`, see ADR-029) rather than `req.pathParam("id")`:
 
@@ -610,7 +671,10 @@ var server = zix.Http1.Server.init(Router.dispatch, .{ .ip = "0.0.0.0", .port = 
 const id = zix.Http1.pathParam("id") orelse return;
 ```
 
-See `examples/http1_static.zig` for a prefix route in use. Per-route param capture is capped at 8 params per match. See ADR-033.
+Per-route param capture is capped at 8 params per match. See ADR-033.
+
+**Examples:**
+- [examples/http1_static.zig](examples/http1_static.zig) - a prefix route in use
 
 **When to use:** use the comptime route table whenever a service has more than one endpoint. Prefer `.EXACT` for fixed paths, `.PARAM` for resource ids, and `.PREFIX` for sub-trees or fallthrough to static serving. Register more-literal patterns before all-param patterns of the same depth so the intended route wins.
 
@@ -678,7 +742,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring workers, Linux-only):**
 
-Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL`. Non-Linux builds fall back to `.POOL`.
+Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, ADR-041, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL`. Non-Linux builds fall back to `.POOL`.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
@@ -698,13 +762,15 @@ __*In the nutshell:*__
 - For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
 
 > In many case for high throughput, URING mostly win for CPU & RAM efficiency,
-> But in some-case it could behave different, see benchmark section for reference.
+depend on your environment system result & behaviour may vary. Decide your dispath model intention, switch if you may.
 
-**When to use:** the dispatch model is the one knob that reshapes the whole server. Reach for `.ASYNC` when latency and long-lived connections (SSE, WebSocket) matter, `.POOL` / `.MIXED` for raw throughput on any platform, and `.EPOLL` / `.URING` on Linux for the highest connection counts at the lowest per-request cost. On this box `.URING` matches `.EPOLL` on throughput and wins only on cache locality, so default to `.EPOLL` and switch to `.URING` for sustained, pipelined load.
+**When to use:** the dispatch model is the one knob that reshapes the whole server. Reach for `.ASYNC` when latency and long-lived connections (SSE, WebSocket) matter, `.POOL` / `.MIXED` for raw throughput on any platform, and `.EPOLL` / `.URING` on Linux for the highest connection counts at the lowest per-request cost. On a loopback dev box the two tie on throughput and `.URING` wins mainly on cache locality. On a many-core box the ring close (ADR-041) lets `.URING` keep its cores busy through connection churn, where it reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
+
+**Why per-engine:** each engine implements these models in its own `server.zig`, not behind one shared multiplexer. The split is deliberate and is itself the optimization: it lets every engine tune its own hot path. `zix.Http1` carves connection buffers from a contiguous demand-paged slab (no per-accept heap call), while `zix.Grpc` and `zix.Fix` hold per-connection heap pointers because their connections carry h2 or FIX session state. Only byte-identical primitives are shared (the `.URING` `user_data` codec in `src/multiplexers/ring.zig`): share primitives that must match, keep dispatch loops per-engine. See ADR-042.
 
 > Our workload is not same, what suits you may not suits to someone else.
-> Test your workload when possible maybe at 1:4 ratio from production environment.
-> Zix will not dictate your approach.
+Test your workload with 2:4 ratio at least from production environment when possible.
+Zix will not dictate your approach.
 
 See [`docs/concurrency-en.md`](docs/concurrency-en.md) for architecture details, thread counts, and when to prefer each model.
 
@@ -758,7 +824,11 @@ To override the deadline inside a handler (shorter or longer window than the glo
 ctx.setTimeout(2_000); // override to 2s from now regardless of global cap
 ```
 
-`ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `examples/http_timeout_resp.zig` and `docs/adr-en.md` (ADR-018) for design rationale. For the raw `zix.Http1` engine see `examples/http1_timeout_resp.zig`, which uses `zix.Http1.isExpired()` and `zix.Http1.setTimeout()` (no ctx, see ADR-029).
+`ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `docs/adr-en.md` (ADR-018) for design rationale.
+
+**Examples:**
+- [examples/http_timeout_resp.zig](examples/http_timeout_resp.zig)
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - raw `zix.Http1`, uses `zix.Http1.isExpired()` and `zix.Http1.setTimeout()` (no ctx, see ADR-029)
 
 **When to use:** set `handler_timeout_ms` whenever a handler can run long (external calls, heavy compute) and you want it to bail out cooperatively with a 408 instead of holding a thread. Add `conn_timeout_ms` under `.POOL` to evict clients that stall before completing a request. Leave both at 0 for trusted internal traffic with bounded work.
 
@@ -815,7 +885,8 @@ curl -H "Origin: http://localhost" "http://localhost:9008/private"              
 curl "http://localhost:9008/private"                                                      # 403
 ```
 
-For a full working example see `examples/http_middleware.zig`.
+**Examples:**
+- [examples/http_middleware.zig](examples/http_middleware.zig)
 
 **When to use:** compose middleware for cross-cutting concerns that wrap many routes: auth, origin/CORS checks, rate limits, request logging. Because the chain is built at comptime with no heap and no runtime runner, it costs nothing per request, so prefer it over per-handler boilerplate whenever the same guard repeats across routes.
 
@@ -894,7 +965,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 });
 ```
 
-See `examples/http_websocket.zig` for a full working example, and `examples/http_ws_client.zig` for a matching client. For the raw `zix.Http1` engine see `examples/http1_websocket.zig` (`zix.Http1.WebSocket`, raw-fd echo) and `examples/http1_websocket_uring.zig` (the io_uring WebSocket pump).
+**Examples:**
+- [examples/http_websocket.zig](examples/http_websocket.zig) - full working example
+- [examples/http_ws_client.zig](examples/http_ws_client.zig) - matching client
+- [examples/http1_websocket.zig](examples/http1_websocket.zig) - raw `zix.Http1.WebSocket`, raw-fd echo
+- [examples/http1_websocket_uring.zig](examples/http1_websocket_uring.zig) - io_uring WebSocket pump
 
 **Build-once broadcast fanout**: on the engine-owned `zix.Http1` path, `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` serializes the frame a single time and writes the same bytes to every fd in a caller-maintained room, so a broadcast costs one serialization no matter how many members it reaches. A failed write to a dead peer is skipped (the EPOLL engine reaps that fd on its next event), and the large-payload path builds the header once and writes the payload without copying it into a staging buffer. The high-level `zix.Http.WebSocket.RoomMap.broadcast` follows the same build-once, fan-out shape with a server-managed room registry.
 
@@ -943,7 +1018,10 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 curl -N http://localhost:9010/events
 ```
 
-See `examples/http_sse.zig` for a full example with a browser-compatible HTML page, and `examples/http_sse_client.zig` for a matching client. For the raw `zix.Http1` engine see `examples/http1_sse.zig`.
+**Examples:**
+- [examples/http_sse.zig](examples/http_sse.zig) - full example with a browser-compatible HTML page
+- [examples/http_sse_client.zig](examples/http_sse_client.zig) - matching client
+- [examples/http1_sse.zig](examples/http1_sse.zig) - raw `zix.Http1` engine
 
 **When to use:** choose SSE for one-way server push over plain HTTP (progress streams, notifications, log tailing, live metrics) when the client does not need to send frames back. It is lighter than WebSocket and `EventSource` reconnects automatically. Always run it under `.ASYNC`. A blocking `.POOL` would burn one thread per open stream.
 
@@ -1007,7 +1085,13 @@ defer fast.deinit();
 
 Redirects are followed automatically up to `max_redirects` (default 3). Set `follow_redirects = false` to receive the 3xx response directly.
 
-See `examples/http_client.zig` and [`docs/hld-http-en.md`](docs/hld-http-en.md) for details. The same `zix.Http.Client` works against the raw `zix.Http1` server: see `examples/http1_client.zig`, which sets `.version = .HTTP_1` (the version selector, with `HTTP_2` and `HTTP_3` reserved, see ADR-028).
+The same `zix.Http.Client` works against the raw `zix.Http1` server via `.version = .HTTP_1` (the version selector, with `HTTP_2` and `HTTP_3` reserved, see ADR-028).
+
+**Examples:**
+- [examples/http_client.zig](examples/http_client.zig)
+- [examples/http1_client.zig](examples/http1_client.zig) - sets `.version = .HTTP_1`
+
+[`docs/hld-http-en.md`](docs/hld-http-en.md) for details.
 
 **When to use:** use `zix.Http.Client` for outbound calls from a handler or a standalone tool: health checks, service-to-service requests, webhooks, or fetching a known endpoint. Set `connect_timeout_ms` and `max_response_body` to bound untrusted peers, and disable `follow_redirects` when you must inspect a 3xx yourself.
 
@@ -1068,7 +1152,8 @@ curl -X POST "http://localhost:9005/upload" \
   -F 'data={"userid":0,"sessionid":"01944f5a-0000-7000-8000-000000000000"}'
 ```
 
-See `examples/http_static.zig` for a full working example including static serving, range requests, and multipart upload.
+**Examples:**
+- [examples/http_static.zig](examples/http_static.zig) - full working example including static serving, range requests, and multipart upload
 
 **When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. For very high static throughput a CDN or a `sendfile`-based path still wins. This is for convenience and co-located assets, not a bulk file CDN.
 
@@ -1099,7 +1184,11 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena (no ceiling, no clamping).
 
-For security guidance and tier selection see [`docs/headers-en.md`](docs/headers-en.md). For a working demonstration see `examples/http_xtra_headers.zig`. For the raw `zix.Http1` engine see `examples/http1_xtra_headers.zig`, which hand-builds headers with a CR/LF injection guard.
+**Examples:**
+- [examples/http_xtra_headers.zig](examples/http_xtra_headers.zig) - working demonstration
+- [examples/http1_xtra_headers.zig](examples/http1_xtra_headers.zig) - raw `zix.Http1`, hand-builds headers with a CR/LF injection guard
+
+[`docs/headers-en.md`](docs/headers-en.md) for security guidance and tier selection.
 
 **When to use:** raise `max_response_headers` only as far as your deployment needs. Keep `.MINIMAL` for internal APIs, step up to `.LARGE` / `.EXTRA_LARGE` behind CDNs, proxies, or CORS-heavy stacks that add many forwarding headers. A tighter cap is a cheap guard against runaway header growth and is arena-sized to exactly the tier you pick.
 
@@ -1346,23 +1435,22 @@ var server = try zix.Grpc.Server.init(
 );
 ```
 
-Handlers check `ctx.isExpired()` between steps. Override `ctx.deadline_ns` directly for per-call extension: `ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s`. See `examples/grpc_timeout.zig` for the full demo.
+Handlers check `ctx.isExpired()` between steps. Override `ctx.deadline_ns` directly for per-call extension: `ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s`. The `grpc_timeout.zig` example below shows the full demo.
 
-| Example | Pattern |
-| :- | :- |
-| `examples/grpc_server_1_async.zig` | gRPC server: ASYNC dispatch |
-| `examples/grpc_server_2_pool.zig` | gRPC server: POOL dispatch |
-| `examples/grpc_server_3_mixed.zig` | gRPC server: MIXED dispatch |
-| `examples/grpc_server_4_epoll.zig` | gRPC server: EPOLL dispatch (Linux-only) |
-| `examples/grpc_server_5_uring.zig` | gRPC server: URING dispatch (Linux-only, io_uring) |
-| `examples/grpc_client.zig` | gRPC client: unary and streaming |
-| `examples/grpc_multi_server.zig` + `grpc_multi_client.zig` | One port, two services |
-| `examples/grpc_location_server_1_async.zig` | Location service: ASYNC dispatch |
-| `examples/grpc_location_server_2_pool.zig` | Location service: POOL dispatch |
-| `examples/grpc_location_server_3_mixed.zig` | Location service: MIXED dispatch |
-| `examples/grpc_location_server_4_epoll.zig` | Location service: EPOLL dispatch (Linux-only) |
-| `examples/grpc_location_client.zig` | Location service client |
-| `examples/grpc_timeout.zig` | Context timeout: global, per-route, override |
+**Examples:**
+- [examples/grpc_server_1_async.zig](examples/grpc_server_1_async.zig) - gRPC server: ASYNC dispatch
+- [examples/grpc_server_2_pool.zig](examples/grpc_server_2_pool.zig) - gRPC server: POOL dispatch
+- [examples/grpc_server_3_mixed.zig](examples/grpc_server_3_mixed.zig) - gRPC server: MIXED dispatch
+- [examples/grpc_server_4_epoll.zig](examples/grpc_server_4_epoll.zig) - gRPC server: EPOLL dispatch (Linux-only)
+- [examples/grpc_server_5_uring.zig](examples/grpc_server_5_uring.zig) - gRPC server: URING dispatch (Linux-only, io_uring)
+- [examples/grpc_client.zig](examples/grpc_client.zig) - gRPC client: unary and streaming
+- [examples/grpc_multi_server.zig](examples/grpc_multi_server.zig) + [examples/grpc_multi_client.zig](examples/grpc_multi_client.zig) - one port, two services
+- [examples/grpc_location_server_1_async.zig](examples/grpc_location_server_1_async.zig) - Location service: ASYNC dispatch
+- [examples/grpc_location_server_2_pool.zig](examples/grpc_location_server_2_pool.zig) - Location service: POOL dispatch
+- [examples/grpc_location_server_3_mixed.zig](examples/grpc_location_server_3_mixed.zig) - Location service: MIXED dispatch
+- [examples/grpc_location_server_4_epoll.zig](examples/grpc_location_server_4_epoll.zig) - Location service: EPOLL dispatch (Linux-only)
+- [examples/grpc_location_client.zig](examples/grpc_location_client.zig) - Location service client
+- [examples/grpc_timeout.zig](examples/grpc_timeout.zig) - Context timeout: global, per-route, override
 
 **When to use:** use `zix.Grpc` for internal service-to-service RPC where you want typed methods, streaming, and deadlines without standing up a TLS terminator or sidecar (h2c speaks plaintext on a trusted network). All four RPC shapes multiplex over one connection, so prefer it over hand-rolled TCP framing for structured request/response between your own services. Put a proxy in front (see the TLS proxy doc) when it must cross an untrusted boundary.
 
@@ -1450,7 +1538,15 @@ var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }
 
 **When to use:** reach for `zix.Tcp` when you own the wire protocol: a custom binary framing, a private RPC, a proxy, or a probe where HTTP/gRPC overhead is unwanted. Use the per-connection handler (`init`) for stateful, request/response or streaming sessions where the handler drives the socket. Use the per-frame `initFramed` callback when the work is stateless per frame and you want the `.URING` ring (engine owns the connection, the callback never blocks). If you only need same-host IPC, prefer `zix.Uds`. If you need request routing or browsers, prefer `zix.Http1` / `zix.Http`.
 
-See `examples/tcp_server_1_async.zig`, `examples/tcp_server_2_pool.zig`, `examples/tcp_server_3_mixed.zig`, `examples/tcp_server_4_epoll.zig`, `examples/tcp_server_5_uring.zig`, `examples/tcp_client.zig`, and [`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
+**Examples:**
+- [examples/tcp_server_1_async.zig](examples/tcp_server_1_async.zig)
+- [examples/tcp_server_2_pool.zig](examples/tcp_server_2_pool.zig)
+- [examples/tcp_server_3_mixed.zig](examples/tcp_server_3_mixed.zig)
+- [examples/tcp_server_4_epoll.zig](examples/tcp_server_4_epoll.zig)
+- [examples/tcp_server_5_uring.zig](examples/tcp_server_5_uring.zig)
+- [examples/tcp_client.zig](examples/tcp_client.zig)
+
+[`docs/hld-tcp-en.md`](docs/hld-tcp-en.md) for details.
 
 <br>
 
@@ -1546,7 +1642,18 @@ try client.logout(io);
 
 **When to use:** use `zix.Fix` when you integrate with financial counterparties over FIX 4.x: order entry, execution reports, market-data sessions. Session mechanics (Logon/Logout/Heartbeat/TestRequest, sequence handling) are built in, so you write only application-message handlers. Use echo mode for a conformance harness and router mode for real trading logic. For any non-financial protocol use `zix.Tcp` instead.
 
-See `examples/fix_server_1_async.zig`, `examples/fix_server_2_pool.zig`, `examples/fix_server_3_mixed.zig`, `examples/fix_server_4_epoll.zig`, `examples/fix_server_5_uring.zig`, `examples/fix_server_trading.zig`, `examples/fix_client.zig`, `examples/fix_client_raw.zig`, `examples/fix_client_trading.zig`, and [`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
+**Examples:**
+- [examples/fix_server_1_async.zig](examples/fix_server_1_async.zig)
+- [examples/fix_server_2_pool.zig](examples/fix_server_2_pool.zig)
+- [examples/fix_server_3_mixed.zig](examples/fix_server_3_mixed.zig)
+- [examples/fix_server_4_epoll.zig](examples/fix_server_4_epoll.zig)
+- [examples/fix_server_5_uring.zig](examples/fix_server_5_uring.zig)
+- [examples/fix_server_trading.zig](examples/fix_server_trading.zig)
+- [examples/fix_client.zig](examples/fix_client.zig)
+- [examples/fix_client_raw.zig](examples/fix_client_raw.zig)
+- [examples/fix_client_trading.zig](examples/fix_client_trading.zig)
+
+[`docs/hld-fix-en.md`](docs/hld-fix-en.md) for details.
 
 <br>
 
@@ -1600,7 +1707,13 @@ try server.run();
 
 **When to use:** choose UDS for same-host IPC between cooperating processes (a sidecar, a local agent, a privileged helper) where you want stream semantics without a TCP port or the network stack. It is faster and more secure than loopback TCP (filesystem permissions guard the socket). Across hosts, use `zix.Tcp`.
 
-See `examples/uds_server.zig` and `examples/uds_http.zig` for full working examples, `examples/uds_client.zig` for a length-prefixed UDS client, and `examples/http_uds_client.zig` for an HTTP/1.1-over-UDS client. For design details see [`docs/hld-uds-en.md`](docs/hld-uds-en.md).
+**Examples:**
+- [examples/uds_server.zig](examples/uds_server.zig) - full working example
+- [examples/uds_http.zig](examples/uds_http.zig) - full working example (HTTP over UDS)
+- [examples/uds_client.zig](examples/uds_client.zig) - length-prefixed UDS client
+- [examples/http_uds_client.zig](examples/http_uds_client.zig) - HTTP/1.1-over-UDS client
+
+[`docs/hld-uds-en.md`](docs/hld-uds-en.md) for details.
 
 <br>
 
@@ -1637,13 +1750,12 @@ const t = try std.Thread.spawn(.{}, workerFn, .{ &ch, io });
 t.join();
 ```
 
-| Example | Pattern |
-| :- | :- |
-| `examples/channel_basic.zig` | Producer/consumer: two OS threads, Channel(u32) |
-| `examples/channel_worker_pool.zig` | Fan-out: one producer, many consumer workers |
-| `examples/channel_pipeline.zig` | Multi-stage pipeline: backpressure flows upstream |
-| `examples/channel_ipc_a.zig` + `ipc_b.zig` | Inter-process coordination pair |
-| `examples/uds_http.zig` | HTTP + UDS + Channel: full integration pattern |
+**Examples:**
+- [examples/channel_basic.zig](examples/channel_basic.zig) - producer/consumer: two OS threads, Channel(u32)
+- [examples/channel_worker_pool.zig](examples/channel_worker_pool.zig) - fan-out: one producer, many consumer workers
+- [examples/channel_pipeline.zig](examples/channel_pipeline.zig) - multi-stage pipeline: backpressure flows upstream
+- [examples/channel_ipc_a.zig](examples/channel_ipc_a.zig) + [examples/channel_ipc_b.zig](examples/channel_ipc_b.zig) - inter-process coordination pair
+- [examples/uds_http.zig](examples/uds_http.zig) - HTTP + UDS + Channel: full integration pattern
 
 **When to use:** use a `Channel` to hand typed messages between tasks inside one process: producer/consumer, fan-out worker pools, or backpressured pipelines. The bounded ring applies backpressure for you (send blocks when full), which makes it the right primitive for decoupling a fast producer from slower consumers. For cross-process messaging, pair it with UDS.
 
@@ -1716,7 +1828,11 @@ pub fn main(process: std.process.Init) !void {
 
 **When to use:** reach for UDP when you want low-latency, fire-and-forget datagrams with your own `extern struct` packet: telemetry, game state, discovery, heartbeats, or broadcast/relay to many peers, accepting best-effort delivery. If you need ordering, retransmission, or large payloads, use `zix.Tcp` instead.
 
-See `examples/udp_server.zig` and `examples/udp_client.zig` for a full working example with broadcast and configurable ports. For design details see [`docs/hld-udp-en.md`](docs/hld-udp-en.md).
+**Examples:**
+- [examples/udp_server.zig](examples/udp_server.zig) - full working example with broadcast and configurable ports
+- [examples/udp_client.zig](examples/udp_client.zig) - matching client
+
+[`docs/hld-udp-en.md`](docs/hld-udp-en.md) for details.
 
 <br>
 
@@ -1813,91 +1929,32 @@ Wire a logger into any server by setting `logger: &logger` in its config. See [`
 
 ## Benchmark
 
-__*HttpArena*__ <br>
 Website: https://www.http-arena.com <br>
 Project repo: https://github.com/MDA2AV/HttpArena <br>
 
-OS: Arch Linux (7.0.11-arch1-1 x86_64)
-CPU: AMD Ryzen 5 5600H (up to ~4.28 GHz)
-RAM: 32 GB
-LIGHTBENCH: 6/12 Threads
-Tested Using: `./benchmark-httparena-lite*`
+<div align="left">
+    <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" width="235">
+    </a>
+</div>
+<br>
+<div align="left">
+    <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" width="235">
+    </a>
+</div>
+<br>
+<div align="left">
+    <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" width="235">
+    </a>
+</div>
+<br>
 
-> *For latest benchmark checkout the HttpArena*
+> When performance measurement is not narrowed, our workload assumption can't be measure,
+> behaviour of 8-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
 
-<details>
-<summary>zix.Http1 0.4.x EPOLL</summary>
-
-HTTP/1.1 <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| baseline | 512 | 614,416 | 281.5% | 118MiB |
-| baseline | 4096 | 445,136 | 242.7% | 321MiB |
-| pipelined | 512 | 7,682,896 | 374.6% | 113MiB |
-| pipelined | 4096 | 5,611,766 | 260.1% | 321MiB |
-| limited-conn | 512 | 372,984 | 289.5% | 120MiB |
-| limited-conn | 4096 | 308,156 | 222.8% | 376MiB |
-| json | 4096 | 297,697 | 231.2% | 397MiB |
-| upload | 32 | 2,309 | 124.6% | 94MiB |
-| upload | 256 | 2,285 | 113.7% | 119MiB |
-| static | 1024 | 228,303 | 166.7% | 154MiB |
-| static | 4096 | 191,737 | 194.2% | 341MiB |
-| static | 6800 | 189,817 | 203.8% | 522MiB |
-
-WebSocket <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| echo-ws | 512 | 609,513 | 252.1% | 289MiB |
-| echo-ws | 4096 | 468,273 | 218.1% | 2MiB |
-| echo-ws-pipeline | 512 | 9,247,302 | 262.1% | 274MiB |
-| echo-ws-pipeline | 4096 | 6,904,938 | 225.3% | 2MiB |
-
-gRPC <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| unary-grpc | 1024 | 1,226,804 | 440.1% | 837MiB |
-| stream-grpc | 64 | 758 | 9.8% | 51MiB |
-
-</details>
-
-<details>
-<summary>zix.Http1 0.4.x URING</summary>
-
-HTTP/1.1 <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| baseline | 512 | 635,878 | 317.9% | 37MiB |
-| baseline | 4096 | 446,622 | 251.2% | 283MiB |
-| pipelined | 512 | 7,560,083 | 356.4% | 35MiB |
-| pipelined | 4096 | 5,564,217 | 255.6% | 292MiB |
-| limited-conn | 512 | 330,187 | 232.6% | 50MiB |
-| limited-conn | 4096 | 288,613 | 250.1% | 235MiB |
-| json | 4096 | 276,378 | 242.8% | 229MiB |
-| upload | 32 | 2,327 | 135.2% | 32MiB |
-| upload | 256 | 2,294 | 112.4% | 44MiB |
-| static | 1024 | 224,561 | 169.5% | 60MiB |
-| static | 4096 | 189,983 | 195.8% | 192MiB |
-| static | 6800 | 187,713 | 178.4% | 313MiB |
-
-WebSocket <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| echo-ws | 512 | 659,722 | 175.3% | 52MiB |
-| echo-ws | 4096 | 465,203 | 203.3% | 209MiB |
-| echo-ws-pipeline | 512 | 9,281,192 | 245.1% | 60MiB |
-| echo-ws-pipeline | 4096 | 6,594,320 | 211.1% | 271MiB |
-
-gRPC <br>
-| Test | Conn | RPS | CPU | Mem |
-| :- | :- | :- | :- | :- |
-| unary-grpc | 1024 | 1,239,053 | 415.9% | 856MiB |
-| stream-grpc | 64 | 771 | 11.0% | 83MiB |
-
-</details>
-
-[zix.Http1 HTTP/1.1 Implementation](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix)
-[zix.Http1 WebSocket Implementation](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-ws)
-[zix.Http1 gRPC Unary & Stream Implementation](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/zix-grpc)
+> Historical benchmark stored inside `docs/benchmark` directory.
 
 <br>
 

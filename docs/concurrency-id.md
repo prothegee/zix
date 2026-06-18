@@ -267,8 +267,26 @@ try server.run();
 
 - Engine native: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` dan handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.POOL` / `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Build non-Linux fallback ke `.POOL`.
 - `workers` (Http/Http1) atau `pool_size` (gRPC/FIX/TCP) menentukan jumlah worker, persis seperti `.EPOLL`.
-- Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Pilih `.EPOLL` sebagai default dan `.URING` untuk beban sustained dan pipelined.
+- Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Di mesin many-core, ring close (`prep_close`, ADR-041) membuat worker terus memanen completion lintas connection churn alih-alih memblokir di `close` sinkron, jadi `.URING` mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
 - "Kapan tidak digunakan" sama dengan `.EPOLL`: SSE / WebSocket di `zix.Http`, jumlah koneksi rendah, target non-Linux.
+
+---
+
+## Mengapa Dispatch Loop Per-Engine
+
+Tiap engine memegang dispatch loop-nya sendiri di `server.zig`-nya masing-masing, bukan di belakang satu multiplexer generik. Pemisahan ini disengaja dan justru merupakan optimasinya: kepemilikan per-engine membuat tiap engine menyetel hot path-nya untuk bentuk koneksinya sendiri.
+
+Contoh paling jelas adalah connection table `.EPOLL`, yang tampak sebagai bagian paling terduplikasi tetapi sebenarnya terspesialisasi per engine:
+
+| Engine | Connection table | Alokasi | Alasan |
+| :- | :- | :- | :- |
+| `zix.Http1` | slab contiguous demand-paged | tanpa heap call per-accept | buffer diukir dari satu slab `MAX_FD * buf_size`, slot kosong adalah `buf.len == 0` |
+| `zix.Grpc` | pointer heap per-koneksi | satu objek heap per accept | koneksi membawa state h2 + HPACK resumable, terlalu besar dan variabel untuk satu sel slab tetap |
+| `zix.Fix` | pointer heap per-koneksi | satu objek heap per accept | koneksi membawa state sesi FIX (nomor urut, timing heartbeat) |
+
+Satu loop generik akan memaksakan satu bentuk connection-table ke setiap engine (menghapus keuntungan slab) dan menambah indireksi callback-per-event di jalur accept / recv / send, yang merupakan jalur terpanas di library.
+
+Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini itu adalah codec `user_data` `.URING` (`ring.zig`): setiap engine io_uring harus mem-pack bit yang sama (slot ber-key fd yang dijaga oleh generation dalam satu layout), jadi codec-nya diangkat keluar sementara ring loop dan slot table tetap per-engine. Aturannya: bagikan primitive yang harus cocok, pertahankan dispatch loop per-engine. Lihat ADR-042.
 
 ---
 

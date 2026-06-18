@@ -272,8 +272,26 @@ try server.run();
 
 - Native engines: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Non-Linux builds fall back to `.POOL`.
 - `workers` (Http/Http1) or `pool_size` (gRPC/FIX/TCP) sizes the worker count, exactly as `.EPOLL`.
-- On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. Prefer `.EPOLL` as the default and `.URING` for sustained, pipelined load.
+- On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. On a many-core box the ring close (`prep_close`, ADR-041) keeps the worker reaping completions through connection churn instead of blocking in a synchronous `close`, so `.URING` reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 - Same "when NOT to use" as `.EPOLL`: SSE / WebSocket on `zix.Http`, low connection counts, non-Linux targets.
+
+---
+
+## Why Dispatch Loops Are Per-Engine
+
+Each engine keeps its own dispatch loop (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) in its own `server.zig` rather than behind one generic multiplexer. The split is deliberate and is itself the optimization: per-engine ownership lets each engine tune its hot path for its own connection shape.
+
+The clearest example is the `.EPOLL` connection table, which looks like the most duplicated piece but is in fact specialized per engine:
+
+| Engine | Connection table | Allocation | Why |
+| :- | :- | :- | :- |
+| `zix.Http1` | contiguous demand-paged slab | no per-accept heap call | buffers carved from one `MAX_FD * buf_size` slab, empty slot is `buf.len == 0` |
+| `zix.Grpc` | per-connection heap pointer | one heap object per accept | the connection carries resumable h2 + HPACK state, too large and variable for one fixed slab cell |
+| `zix.Fix` | per-connection heap pointer | one heap object per accept | the connection carries FIX session state (sequence numbers, heartbeat timing) |
+
+A single generic loop would force one connection-table shape on every engine (erasing the `zix.Http1` slab win) and add a callback-per-event indirection on the accept / recv / send path, which is the hottest path in the library.
+
+Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is the `.URING` `user_data` codec (`ring.zig`): every io_uring engine must pack the same bits (an fd-keyed slot guarded by a generation in one layout), so the codec is hoisted out while the ring loop and slot table stay per-engine. The rule: share primitives that must match, keep dispatch loops per-engine. See ADR-042.
 
 ---
 

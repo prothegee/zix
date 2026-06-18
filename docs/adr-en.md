@@ -917,4 +917,23 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-042: dispatch loops stay per-engine, only byte-identical primitives are shared
+
+**Status:** Accepted
+
+**Context:** When `.URING` (ADR-037) landed across engines, the only piece hoisted into a shared module was `src/multiplexers/ring.zig`: the `OpKind` tag and the `user_data` codec (about 40 lines). Every io_uring engine reuses it because the bits must match exactly (an fd-keyed slot guarded by a generation in one `user_data` layout). The rest stayed per-engine: each engine keeps its own `.EPOLL` and `.URING` connection table, `acceptAll`, and per-event dispatch. A reader can ask whether those loops should be unified the way the codec was.
+
+**Decision:** Keep each engine's dispatch loop (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) in its own `server.zig`. Do not build a generic multiplexer interface. Share only byte-identical primitives in `src/multiplexers/` (today, the `.URING` `user_data` codec). The rule: share primitives that must match, keep dispatch loops per-engine.
+
+**Rationale:** The split is the optimization. Per-engine ownership lets each engine tune its hot path for its own connection shape: `zix.Http1` carves connection buffers from a contiguous demand-paged slab (no per-accept heap call), while `zix.Grpc` and `zix.Fix` hold per-connection heap pointers because their connection objects carry h2 or FIX session state too large or variable for one fixed slab cell. A single generic loop would force one table shape on every engine (erasing the slab win) and add a callback-per-event indirection on the accept / recv / send path, the hottest path in the library. `ring.zig` deliberately stayed a codec to avoid exactly that indirection.
+
+**Config:** none. No code or API change. This records existing intent.
+
+**Consequences:**
+- A small amount of boilerplate stays duplicated per engine (the epoll bootstrap and the fd-indexed slot table shape), accepted in exchange for per-engine tunability. A bounds or generation fix in that pattern is applied per engine.
+- `src/multiplexers/` stays the home for shared primitives only. The bar for adding to it is byte-identical-by-requirement, not merely similar shape.
+- The connection tables are intentionally not identical: `zix.Http1` slab versus `zix.Grpc` / `zix.Fix` per-connection heap pointers, each chosen for that engine's connection shape.
+
+---
+
 ###### end of adr

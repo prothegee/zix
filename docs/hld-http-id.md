@@ -122,7 +122,7 @@ flowchart TD
 Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama), tetapi completion-based alih-alih readiness-based: accept, read, dan write disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring (`self.runUring(io)`, ADR-037 Fase 4).
 
 - `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
-- Terbaik untuk beban sustained dan pipelined di mana ring yang di-batch mengamortisasi syscall. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality.
+- Terbaik untuk beban sustained dan pipelined di mana ring yang di-batch mengamortisasi syscall. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality. Di mesin many-core, ring close (`prep_close`, ADR-041, native ke `zix.Http1` untuk saat ini) membuat worker terus memanen completion lewat connection churn, di mana `.URING` mencapai paritas atau lebih baik dengan memori jauh lebih sedikit.
 - Seperti `.EPOLL`, serve per-connection bersifat blocking begitu request siap, jadi tidak cocok untuk SSE atau WebSocket.
 - Build non-Linux otomatis fallback ke `.POOL`.
 

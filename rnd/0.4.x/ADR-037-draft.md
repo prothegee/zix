@@ -152,5 +152,3 @@ Scope of the decision:
   completion to be dropped by the generation tag. This completes the session:
   `processFixRing` answers peer Heartbeat/TestRequest reactively, and the timer adds
   the server-initiated half.
-
----

@@ -917,4 +917,23 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-042: dispatch loop tetap per-engine, hanya primitive byte-identical yang dibagikan
+
+**Status:** Diterima
+
+**Konteks:** Saat `.URING` (ADR-037) mendarat lintas engine, satu-satunya bagian yang diangkat ke modul bersama adalah `src/multiplexers/ring.zig`: tag `OpKind` dan codec `user_data` (sekitar 40 baris). Setiap engine io_uring memakainya ulang karena bit-nya harus cocok persis (slot ber-key fd yang dijaga oleh generation dalam satu layout `user_data`). Sisanya tetap per-engine: tiap engine memegang connection table `.EPOLL` dan `.URING`-nya sendiri, `acceptAll`-nya sendiri, dan dispatch per-event-nya sendiri. Pembaca bisa bertanya apakah loop tersebut sebaiknya disatukan seperti codec itu.
+
+**Keputusan:** Pertahankan dispatch loop tiap engine (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) di `server.zig`-nya masing-masing. Jangan membangun interface multiplexer generik. Bagikan hanya primitive byte-identical di `src/multiplexers/` (saat ini, codec `user_data` `.URING`). Aturannya: bagikan primitive yang harus cocok, pertahankan dispatch loop per-engine.
+
+**Alasan:** Pemisahan ini adalah optimasinya. Kepemilikan per-engine membuat tiap engine menyetel hot path-nya untuk bentuk koneksinya sendiri: `zix.Http1` mengukir buffer koneksi dari slab contiguous demand-paged (tanpa heap call per-accept), sementara `zix.Grpc` dan `zix.Fix` memegang pointer heap per-koneksi karena objek koneksinya membawa state sesi h2 atau FIX yang terlalu besar atau variabel untuk satu sel slab tetap. Satu loop generik akan memaksakan satu bentuk table ke setiap engine (menghapus keuntungan slab) dan menambah indireksi callback-per-event di jalur accept / recv / send, jalur terpanas di library. `ring.zig` sengaja tetap menjadi codec untuk menghindari indireksi itu.
+
+**Config:** tidak ada. Tanpa perubahan kode atau API. Ini mencatat intent yang sudah ada.
+
+**Konsekuensi:**
+- Sedikit boilerplate tetap terduplikasi per engine (bootstrap epoll dan bentuk fd-indexed slot table), diterima sebagai tukar-tambah untuk tunabilitas per-engine. Perbaikan bounds atau generation pada pola itu diterapkan per engine.
+- `src/multiplexers/` tetap menjadi rumah untuk primitive bersama saja. Standar untuk menambahkannya adalah byte-identical-by-requirement, bukan sekadar bentuk yang serupa.
+- Connection table-nya sengaja tidak identik: slab `zix.Http1` versus pointer heap per-koneksi `zix.Grpc` / `zix.Fix`, masing-masing dipilih untuk bentuk koneksi engine itu.
+
+---
+
 ###### end of adr

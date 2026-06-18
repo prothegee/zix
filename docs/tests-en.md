@@ -52,15 +52,17 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/upload.zig` | `refAllDecls` + behavioral: MultipartParser parse + getField |
 | `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
 | `tcp/http/context.zig` | `refAllDecls` + behavioral: `timedOut` null deadline returns false, `isExpired` null deadline returns false |
+| `tcp/http/server.zig` | `refAllDecls` + behavioral: `EpollConnTable` slab alloc / free lifecycle, filled-bytes accounting, out-of-range fd returns null, `getAvailableCpuCount` returns at least 1, `effectiveCacheEntries` honors the memory ceiling, EPOLL `processRequest` serves a cache miss then a hit |
 
 ### zix.Http1
 
 | Module | Coverage |
 | :- | :- |
 | `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, writeSimple into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query |
-| `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (POOL / EPOLL), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring |
+| `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (POOL / EPOLL), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
 | `tcp/http1/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, buildFrame/parseFrame round-trip, SIMD unmask matches scalar (and tail bytes), buildHeader prefix, pump echoes over a socketpair, pumpRing stages then reports close, broadcast fan-out (+ dead-fd skip, empty list) |
 | `tcp/http1/router.zig` | `refAllDecls` + behavioral: matchParam, comptime router |
+| `tcp/http1/config.zig` | `refAllDecls` (default values exercised by `tests/behaviour/http1/config_test.zig`) |
 
 ### zix.Udp
 
@@ -85,6 +87,8 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
 | `tcp/http/client.zig` | `refAllDecls` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`) |
 
 ### zix.Channel
 
@@ -100,6 +104,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
 | `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
 | `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
+| `tcp/fix/router.zig` | `refAllDecls` + behavioral: dispatch calls the matching handler, no match leaves the handler uncalled, route timeout sets `deadline_ns` |
 
 ### zix.Http2
 
@@ -135,6 +140,13 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + behavioral: extension, save |
+| `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
+
+### zix.Multiplexers
+
+| Module | Coverage |
+| :- | :- |
+| `multiplexers/ring.zig` | `refAllDecls` + behavioral: io_uring `user_data` round-trip preserves `{ op, gen, fd }`, each `OpKind` variant (`accept` / `recv` / `send` / `timeout` / `close`) decodes back, max generation does not bleed into the fd field |
 
 ---
 

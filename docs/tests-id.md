@@ -52,6 +52,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http/upload.zig` | `refAllDecls` + perilaku: MultipartParser parse + getField |
 | `tcp/http/websocket.zig` | `refAllDecls` + perilaku: vektor RFC acceptKey, round-trip buildFrame + parseFrame, frame bermasker |
 | `tcp/http/context.zig` | `refAllDecls` + perilaku: `timedOut` dengan deadline null menghasilkan false, `isExpired` dengan deadline null menghasilkan false |
+| `tcp/http/server.zig` | `refAllDecls` + perilaku: siklus hidup alloc / free slab `EpollConnTable`, akuntansi filled-bytes, fd di luar jangkauan menghasilkan null, `getAvailableCpuCount` menghasilkan minimal 1, `effectiveCacheEntries` menghormati plafon memori, EPOLL `processRequest` melayani cache miss lalu hit |
 
 ### zix.Http1
 
@@ -61,6 +62,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (POOL / EPOLL), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
 | `tcp/http1/websocket.zig` | `refAllDecls` + perilaku: acceptKey vektor RFC 6455, round-trip buildFrame/parseFrame, SIMD unmask cocok dengan scalar (dan tail bytes), prefix buildHeader, pump echo lewat socketpair, pumpRing stage lalu melaporkan close, broadcast fan-out (+ skip fd mati, list kosong) |
 | `tcp/http1/router.zig` | `refAllDecls` + perilaku: matchParam, router comptime |
+| `tcp/http1/config.zig` | `refAllDecls` (nilai default diuji oleh `tests/behaviour/http1/config_test.zig`) |
 
 ### zix.Udp
 
@@ -85,6 +87,8 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | :- | :- |
 | `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
 | `tcp/http/client.zig` | `refAllDecls` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`) |
 
 ### zix.Channel
 
@@ -100,6 +104,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/fix/core.zig` | `refAllDecls` + perilaku: round-trip `parseFields`, pencarian `getField` dan kasus null, vektor `computeChecksum` yang diketahui, `verifyChecksum` valid/terpotong/salah, `findMessageEnd` lengkap/parsial/tanpa-terminator, `buildMessage` menghasilkan checksum valid |
 | `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
 | `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.PortNotConfigured` |
+| `tcp/fix/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, tanpa kecocokan handler tidak dipanggil, timeout route menyetel `deadline_ns` |
 
 ### zix.Http2
 
@@ -135,6 +140,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + perilaku: extension, save |
+| `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
 
 ---
 

@@ -114,5 +114,3 @@ No change after audit: zix.Fix framing is byte-level SOH parsing with vectorized
 No new server-config field was introduced: every change is internal and behaviour-identical.
 
 Result (httparena-lite, attempt 3, post-sweep, AMD Ryzen 5 5600H, 6/12 threads, loopback): recorded in the README Benchmark tables (en + id). Representative EPOLL HTTP/1.1 throughput rose versus the prior recorded attempt: baseline 512c 585,239 -> 614,416 req/s (+5.0%), pipelined 512c 7,156,160 -> 7,682,896 req/s (+7.4%). The remaining scenarios moved within loopback variance, and `.URING` tracks `.EPOLL` at parity (expected on a 94%-kernel loopback path). These are full-suite numbers (a fresh server per scenario), so they confirm the direction rather than isolate a per-increment delta.
-
----
