@@ -122,7 +122,7 @@ flowchart TD
 Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based: accepts, reads, and writes are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring (`self.runUring(io)`, ADR-037 Phase 4).
 
 - `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
-- Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality.
+- Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality. On a many-core box the ring close (`prep_close`, ADR-041, native to `zix.Http1` for now) keeps the worker reaping completions through connection churn, where `.URING` reaches parity or better at a fraction of the memory.
 - Like `.EPOLL`, the per-connection serve is blocking once a request is ready, so it is not suited to SSE or WebSocket.
 - Non-Linux builds fall back to `.POOL` automatically.
 
