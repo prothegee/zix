@@ -43,12 +43,15 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/client_config.zig"));
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
     std.testing.refAllDecls(@import("tcp/http/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http/sse_client.zig"));
+    std.testing.refAllDecls(@import("tcp/http/ws_client.zig"));
 
     // # zix.Http1
     std.testing.refAllDecls(@import("tcp/http1/core.zig"));
     std.testing.refAllDecls(@import("tcp/http1/config.zig"));
     std.testing.refAllDecls(@import("tcp/http1/server.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/websocket.zig"));
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
@@ -93,6 +96,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/fix/config.zig"));
     std.testing.refAllDecls(@import("tcp/fix/server.zig"));
     std.testing.refAllDecls(@import("tcp/fix/client.zig"));
+    std.testing.refAllDecls(@import("tcp/fix/router.zig"));
 
     // # zix.Uds
     std.testing.refAllDecls(@import("uds/config.zig"));
