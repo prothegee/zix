@@ -95,5 +95,3 @@ call site, deferred to its own decision.
 - Verified: the library compiles, all five `tcp_server_*` examples compile, the
   unit / integration / edge / behaviour suites pass, and all five end-to-end runners
   (async, pool, mixed, epoll, uring) pass.
-
----
