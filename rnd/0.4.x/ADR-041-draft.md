@@ -80,7 +80,7 @@ Done as increment 1. `RespSink` grows `send_buf` (power-of-two realloc up to `UR
 Deprioritized by the pivot. Comptime `SendFileMode` (`.copy` from a warm in-RAM fixture cache via `prep_send`, `.splice` zero-copy via a per-worker pipe). Static already ties `.EPOLL`, so this is quality (move static on-ring), not a composite mover.
 
 ### 4. Multishot Recv + Buffer Ring
-Tried twice and reverted both times (the naive accumulate-copy form under ADR-037 Phase 3, and the refined parse-in-place form as attempt 4). See the increment-4 note: provided buffers cannot beat the in-place `conn.buf` recv, and the bookkeeping regresses pipelined. Closed, not worth a third attempt on this engine.
+Tried twice and reverted both times (the naive accumulate-copy form under ADR-037 Phase 3, and the refined parse-in-place form as attempt 4). See the increment-4 note: provided buffers cannot reach the in-place `conn.buf` recv, and the bookkeeping regresses pipelined. Closed, not worth a third attempt on this engine.
 
 ### 5. Per-Machine Profiles
 12t box (lean): small buffers, memory-bound. 64c box (throughput): larger recv/send buffers, 64 workers, RAM-abundant. The 12t results do not extrapolate to 64c.
@@ -97,12 +97,12 @@ Tried twice and reverted both times (the naive accumulate-copy form under ADR-03
 ## Acceptance Criteria and Testing
 - [x] increment 1 and ring close pass `zig build test-all`, `examples`, `test-runner-all`, `zig fmt`.
 - [x] 64c EPOLL-vs-URING shows json and limited-conn recovering toward parity (the decisive measurement). MET: json -73% to -2.4%, limited-conn -87% to +5.5% / -1.5%. See Outcome.
-- [x] any retried multishot variant must beat the plain recv-into-`conn.buf` path it replaced, not just match it. CLOSED: the buffer-select retry (increment 4) lost (pipelined -13 to -16%) and was reverted, so no variant cleared the bar and the gate is not pursued further.
+- [x] any retried multishot variant must reach the plain recv-into-`conn.buf` path it replaced, not just match it. CLOSED: the buffer-select retry (increment 4) lost (pipelined -13 to -16%) and was reverted, so no variant cleared the bar and the gate is not pursued further.
 - [x] transient per-connection memory from grow-on-demand buffers stays capped and pooled. MET by design: growth is capped at `URING_SEND_BUF_MAX` (1 MiB), the buffer never shrinks, and the connection (with its grown buffer) is recycled through the idle-conn free list. The 64c run confirms it: URING memory is 50 to 85% below EPOLL on every cell, no blowup. The grow path is not exercised by any HttpArena cell (no >16 KiB inline response), so it is a correctness and tail-latency guard, not a hot path.
 
 ## Risks and Mitigations
 - Hardware variance: the 12t dev box is loadgen-bound (server ~3 of 12 cores) and cannot reproduce 64-core churn starvation. Mitigation: gate correctness locally, measure the churn win only on the 64c box.
-- Known-negative retries: multishot was already reverted. Mitigation: only retry the parse-in-place variant, and only if it beats the in-place recv path.
+- Known-negative retries: multishot was already reverted. Mitigation: only retry the parse-in-place variant, and only if it reachs the in-place recv path.
 - API blast radius: `Route.profile` flows into HttpArena `main.zig` route tables. Mitigation: default `.auto`, behavior-identical, so the field is additive.
 
 ---
