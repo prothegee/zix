@@ -5,7 +5,14 @@ const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9100;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .URING;
 const KERNEL_BACKLOG: u31 = 1024;
-const MAX_RECV_BUF: usize = 16 * 1024;
+// Comptime per-deployment tuning profile (ADR-041): .lean uses a small recv
+// buffer for memory-bound hosts, .throughput a larger one for RAM-abundant hosts.
+const Profile = enum { lean, throughput };
+const PROFILE: Profile = .throughput;
+const MAX_RECV_BUF: usize = switch (PROFILE) {
+    .lean => 4 * 1024,
+    .throughput => 16 * 1024,
+};
 const MAX_GZIP_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count ring workers (shared-nothing, one listener + ring each)

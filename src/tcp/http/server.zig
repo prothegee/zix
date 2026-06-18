@@ -18,7 +18,7 @@ const rcache = @import("../../utils/response_cache.zig");
 const setCache = @import("response.zig").setCache;
 const RespSink = @import("response.zig").RespSink;
 const resp_mod = @import("response.zig");
-const uring = @import("../io_uring/ring.zig");
+const uring = @import("../../multiplexers/ring.zig");
 const IoUring = std.os.linux.IoUring;
 
 // --------------------------------------------------------- //
@@ -364,7 +364,7 @@ const URING_CQ_ENTRIES: u32 = 16 * 1024;
 /// Max CQEs drained per loop pass.
 const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer: one coalesced send per request.
-const URING_SEND_BUF_SIZE: usize = 64 * 1024;
+const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 
 /// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
 /// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
@@ -1306,6 +1306,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                                 .recv => w.handleRecv(cqe, decoded),
                                 .send => w.handleSend(cqe, decoded),
                                 .timeout => {},
+                                .close => {},
                             }
                         }
                     }

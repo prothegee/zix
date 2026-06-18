@@ -891,4 +891,30 @@ Per-engine application (a pattern applies only where the hot path has it):
 
 ---
 
+## ADR-041: `.URING` connection-churn scaling (ring `prep_close` teardown + on-ring `RespSink` growth) after the write-path pivot
+
+**Status:** Accepted
+
+**Context:** On the 64-core HttpArena box, `.URING` split from `.EPOLL` by reqs-per-connection. It won the long-lived cells (baseline +14 to +20%, pipelined +9 to +13%) and tied static, but collapsed on the connection-churn cells (json -73%, limited-conn -87%). Per-core throughput was equal or better for `.URING`, so the problem was core occupancy, not work done per request. Under churn the worker engaged only about 7 of 64 cores because each teardown blocked it in a synchronous `linux.close` between connections, making the accept-recv-send-close cycle close-bound. The earlier read had blamed the write path (a response over the 16 KiB send buffer falling back to a blocking off-ring `fdWriteAllDirect`), but the write-path cell (static) already tied, so the real lever was connection setup and teardown.
+
+**Decision:** Two changes, both `.URING` only, with `.EPOLL` byte-for-byte unchanged:
+
+| Change | What |
+| :- | :- |
+| ring close | `finishClose` submits a `prep_close` SQE (tagged with a new shared `OpKind.close`) and recycles the connection slot first, instead of a synchronous `linux.close`, so the worker keeps reaping completions across teardowns. It falls back to a synchronous close only when the SQ is momentarily full. The half-duplex per-connection state guarantees no in-flight op targets the closing fd. |
+| on-ring growth | `RespSink` grows the per-connection `send_buf` (power-of-two `realloc` up to `URING_SEND_BUF_MAX` = 1 MiB, never shrinks, reused through the idle-conn free list) to stage an oversized response on the ring, removing the blocking `fdWriteAllDirect` fallback. |
+
+The shared `OpKind` lives in `src/multiplexers/ring.zig` (relocated from `src/tcp/io_uring`) and gained `close`, so every io_uring engine carries a `.close => {}` arm. Only `zix.Http1` arms it for now.
+
+Rejected on the way, kept for the record. Ring `sendFile` for static was deprioritized because static already ties, so it is quality, not a composite mover. A comptime `Route.profile` write-strategy API is scaffolding rather than a perf lever, because parsing happens before routing and writes live in the handler, so a route-level write profile has nothing real to select until other behaviors exist. A buffer-select parse-in-place recv was implemented and reverted, because the plain recv-into-`conn.buf` path already parses in place with no copy, so the buffer ring only added per-recv bookkeeping and regressed pipelined 13 to 16%. A per-machine `lean` / `throughput` recv-buffer profile (comptime, app-level, no engine change) is kept as a deployment knob.
+
+**Config:** no new server-config field. The per-machine recv buffer is selected by the deployment through the existing `max_recv_buf`. The send-buffer grow cap is an internal constant.
+
+**Consequences:**
+- The churn cells recovered to parity on the 64-core box: json -73% to -2.4%, limited-conn 512 -87% to +5.5%, limited-conn 4096 -87% to -1.5%, an absolute jump of roughly 8x on limited-conn and 3.7x on json. Mechanism confirmed: limited-conn 512 server CPU rose from about 722% (around 7 of 64 cores) to about 5443% (around 54 cores), so the cores now fill across teardowns.
+- `.URING` now reaches parity or better on every subscribed cell at 50 to 85% less memory than `.EPOLL` (json 289 MiB versus 1.3 GiB, limited-conn 4096 231 MiB versus 1.5 GiB), so the HttpArena entry ships on `.URING`. `.EPOLL` is unchanged this release.
+- No API or behaviour change. The `prep_close` teardown is exercised end-to-end by the io_uring integration runners (HTTP, WebSocket upgrade, large-body drain). The grow path is capped and pooled, a correctness and tail-latency guard rather than a hot path, because no benchmark cell emits a response over 16 KiB inline.
+
+---
+
 ###### end of adr

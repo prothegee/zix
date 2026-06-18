@@ -6,7 +6,7 @@ const Config = @import("config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const Logger = @import("../logger/logger.zig").Logger;
-const uring = @import("io_uring/ring.zig");
+const uring = @import("../multiplexers/ring.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
@@ -989,6 +989,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                             .recv => w.handleRecv(cqe, decoded),
                             .send => w.handleSend(cqe, decoded),
                             .timeout => {},
+                            .close => {},
                         }
                     }
                 }
