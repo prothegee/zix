@@ -34,9 +34,14 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBA)
+## 0.4.0 (2026-06-19)
 
 __*Update:*__
+- io_uring churn scaling and on-ring response overflow (ADR-041):
+    - `zix.Http1` `.URING` teardown now rings the close (`prep_close`, tagged with a new shared `OpKind.close`) instead of a synchronous `linux.close`, recycling the connection slot first and falling back to a synchronous close only when the SQ is momentarily full. Under connection churn the synchronous close blocked the worker between connections, so the ring barely engaged its cores. With the ring close the worker keeps reaping completions across teardowns. On the 64-core box this lifts the churn cells (limited-conn, json) from far behind `.EPOLL` to parity or better, at a fraction of the memory, so `.URING` now reaches parity or better on every measured cell.
+    - `RespSink` (`tcp/http1/core.zig`) grows its staging buffer on overflow when backed by an allocator: the `.URING` loop installs it over the per-connection `send_buf` with a 1 MiB cap (`URING_SEND_BUF_MAX`), so a response larger than the staged buffer grows in place (power-of-two realloc, never shrinks, reused by the recycled connection) and still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write. The `.EPOLL` path installs no grow allocator and is unchanged (flush-on-overflow).
+    - The shared io_uring `OpKind` and ring helpers moved from `src/tcp/io_uring` to `src/multiplexers/ring.zig`. Every io_uring engine carries a `.close => {}` arm. Only `zix.Http1` arms the ring close for now.
+    ---
 - Server `io` into config and `zix.Uds` handler-at-init (ADR-039):
     - `zix.Tcp`, `zix.Udp`, and `zix.Uds` now carry `io: std.Io` as the first config field, so `run()` takes no argument, matching the five engine servers. Every zix server is now constructed with a config that carries `io` and served with a no-argument `run()`.
     - `zix.Uds` adopts the ADR-038 factory shape: `Server.init(comptime handler, config)` bakes the handler into the type, and the built-in `zix.Uds.echoHandler` is passed explicitly. The `run(io, handler)` / `runWith` path is removed.
