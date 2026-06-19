@@ -6,7 +6,7 @@ pub fn addSteps(
     optimize: std.builtin.OptimizeMode,
     zix: *std.Build.Module,
 ) void {
-    // Examples - not built by default. Third field is the group tag used to wire
+    // Examples: not built by default. Third field is the group tag used to wire
     // per-category steps. `zig build examples` builds all, `zig build example-<group>`
     // builds one category, `zig build example-<name>` builds and runs a single one.
     const examples = .{
@@ -149,7 +149,7 @@ pub fn addSteps(
 
     // --------------------------------------------------------- //
 
-    // Bug reproduction programs - not built by default.
+    // Bug reproduction programs: not built by default.
     const bugs_0_2_x = .{
         .{ "bug-grpc_error_response_server", "rnd/bug-0.2.x/grpc_error_response_server.zig", "Bug 1: gRPC error response missing content-type" },
         .{ "bug-grpc_stream_concurrent_server", "rnd/bug-0.2.x/grpc_stream_concurrent_server.zig", "Bug 2: gRPC blocking dispatch under concurrent streams" },
