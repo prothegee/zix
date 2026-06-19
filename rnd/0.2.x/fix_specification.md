@@ -344,7 +344,7 @@ Throughput is measured per session (single connection), not aggregate.
 | Scenario | Target |
 | :- | :- |
 | Echo server (single session, POOL) | >= 200k msg/s |
-| Parse and dispatch latency per message | < 5µs |
+| Parse and dispatch latency per message | < 5us |
 | CheckSum computation (1KB message) | < 500ns |
 | Logon handshake round trip | < 1ms (loopback) |
 | Heartbeat timer accuracy | within 100ms of configured interval |
