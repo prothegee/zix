@@ -1,5 +1,9 @@
+
 #!/usr/bin/env bash
 # benchmark-httparena-lite-isolate - low-noise wrapper around benchmark-httparena-lite.
+#
+# Default:
+#   ./benchmark-httparena-lite-isolate zix_http_epoll ../HttpArena --source local --probe --sample-mem
 #
 # What:
 #   Runs the existing lite HttpArena bench inside a quiesced, pinned environment
@@ -28,8 +32,13 @@
 #                     base_frequency if exposed, else the current scaling_max_freq.
 #   --probe           run the spin.c noise-floor gate before benching and abort
 #                     when relative stddev is over 1% (the box is not quiet).
-#   --sample-mem      poll the framework container cgroup for steady-state RSS
-#                     and peak while the bench runs (best-effort, cgroup v2).
+#   --sample-mem      poll the framework container cgroup while the bench runs:
+#                     total memory (peak + steady median), the anon/sock/slab
+#                     split (process vs kernel-socket memory), a periodic
+#                     smaps_rollup, and a one-shot full smaps captured at the
+#                     peak-memory moment (saved to isolate-smaps-<fw>-<stamp>.txt,
+#                     with a top-regions summary in the result). Best-effort,
+#                     cgroup v2.
 #   --no-quiesce      skip the quiesce and pin, only run the bench. Useful to
 #                     measure the noisy baseline the isolate path is meant to fix.
 #   --out-dir DIR     where the result .txt and memory log are written. Default:
@@ -74,6 +83,14 @@ set -euo pipefail
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     exec sudo -E -- "$0" "$@"
 fi
+
+# Record the full invocation as a re-runnable shell command, captured before the
+# argument parsing consumes "$@". After the sudo re-exec above, $0 and "$@" are
+# still the original path and arguments, so the result file is self-documenting
+# (it shows exactly what was run, including --probe / --sample-mem or their
+# absence). printf %q keeps it copy-paste safe.
+INVOCATION="$(printf '%q ' "$0" "$@")"
+INVOCATION="${INVOCATION% }"
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LITE="$SELF_DIR/benchmark-httparena-lite"
@@ -279,6 +296,7 @@ SAMPLER_PID=""
 # MEM_LOG is the raw sample file the summary is computed from.
 PROBE_RESULT=""
 MEM_LOG=""
+SMAPS_FILE=""
 cleanup() {
     [ -n "$PINNER_PID" ] && kill "$PINNER_PID" 2>/dev/null || true
     [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null || true
@@ -452,28 +470,84 @@ start_server_pinner() {
     PINNER_PID=$!
 }
 
-# Best-effort steady-state RSS + peak sampler for the memory-squeeze claim.
-# Reads the container cgroup memory.current at interval (cgroup v2, read from
-# inside the container first, host scope path as fallback). Output lands in the
-# result dir. Container name confirmed against ../HttpArena (httparena-bench-<fw>).
+# Best-effort memory sampler for the memory-squeeze claim. Per second it records
+# the container cgroup total (memory.current) plus the cgroup memory.stat split,
+# so process memory (anon) is separated from kernel socket buffers (sock), which
+# is the term buf_size tuning cannot touch. Every 15 ticks it also dumps the
+# server's process memory map (smaps_rollup, per-region RSS) via the container's
+# host pid. cgroup memory.stat is preferred over ss -m because it is the
+# per-container socket total (ss under --network host is host-wide and noisy).
+# All reads fall back to the host cgroup scope path. Container name confirmed
+# against ../HttpArena (httparena-bench-<fw>).
 start_mem_sampler() {
     command -v docker >/dev/null 2>&1 || return 0
 
     local name="httparena-bench-$FRAMEWORK"
     MEM_LOG="$RESULT_DIR/isolate-mem-${FRAMEWORK}-${RUN_STAMP}.txt"
+    SMAPS_FILE="$RESULT_DIR/isolate-smaps-${FRAMEWORK}-${RUN_STAMP}.txt"
     echo "[isolate] memory samples -> $MEM_LOG" >&2
     (
+        local tick=0 peak_cur=0
         while true; do
-            local id ts cur
+            local id ts both scope host_pid
+            local cur=0 anon=0 file=0 sock=0 slab=0 kstack=0
             # Full (untruncated) id, so the host cgroup scope path matches. The
             # systemd cgroup driver names the scope docker-<full64>.scope.
             id=$(docker ps -q --no-trunc --filter "name=$name" 2>/dev/null | head -1 || true)
             if [ -n "$id" ]; then
                 ts=$(date +%s)
-                cur=$(docker exec "$id" cat /sys/fs/cgroup/memory.current 2>/dev/null ||
-                      cat "/sys/fs/cgroup/system.slice/docker-$id.scope/memory.current" 2>/dev/null || true)
-                [ -n "$cur" ] && echo "$ts current=$cur" >> "$MEM_LOG"
+                scope="/sys/fs/cgroup/system.slice/docker-$id.scope"
+
+                # Read memory.current and memory.stat in ONE shot so the total and
+                # its split come from the same instant. Two separate reads skew
+                # against each other when memory changes fast (anon could read
+                # larger than current, which is impossible at one instant). cat
+                # concatenates: line 1 is memory.current, the rest is memory.stat.
+                both=$(docker exec "$id" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat' 2>/dev/null ||
+                       cat "$scope/memory.current" "$scope/memory.stat" 2>/dev/null || true)
+
+                # The trailing newline matters: read returns non-zero on a line
+                # without it, which under set -e would kill this sampler. The
+                # `|| true` and the defaults above are belt-and-suspenders.
+                read -r cur anon file sock slab kstack < <(printf '%s\n' "$both" | awk '
+                    NR == 1              { cur = $1 }
+                    $1 == "anon"         { a = $2 }
+                    $1 == "file"         { f = $2 }
+                    $1 == "sock"         { s = $2 }
+                    $1 == "slab"         { sl = $2 }
+                    $1 == "kernel_stack" { k = $2 }
+                    END { printf "%d %d %d %d %d %d\n", cur + 0, a + 0, f + 0, s + 0, sl + 0, k + 0 }') || true
+
+                [ "$cur" != 0 ] && echo "$ts current=$cur anon=$anon file=$file sock=$sock slab=$slab kstack=$kstack" >> "$MEM_LOG"
+
+                # Server host pid (works regardless of the in-container pid, and
+                # we are root on the host). Used for both the rollup and the full
+                # smaps below.
+                host_pid=$(docker inspect -f '{{.State.Pid}}' "$id" 2>/dev/null || true)
+
+                # Periodic smaps_rollup (per-region RSS totals) into the mem log.
+                if [ $(( tick % 15 )) -eq 0 ] && [ -n "$host_pid" ] && [ -r "/proc/$host_pid/smaps_rollup" ]; then
+                    {
+                        echo "# smaps_rollup pid=$host_pid @${ts}"
+                        cat "/proc/$host_pid/smaps_rollup"
+                        echo
+                    } >> "$MEM_LOG"
+                fi
+
+                # Full per-region smaps captured at the highest-memory moment,
+                # overwritten on each new peak, so the file ends up holding the
+                # peak-memory map. This itemizes the fixed base (stacks, heap,
+                # slab, mappings) that the rollup only totals.
+                if [ -n "$cur" ] && [ "${cur:-0}" -gt "$peak_cur" ] && [ -n "$host_pid" ] && [ -r "/proc/$host_pid/smaps" ]; then
+                    peak_cur=$cur
+                    {
+                        echo "# full smaps pid=$host_pid @${ts} current=$cur"
+                        cat "/proc/$host_pid/smaps"
+                    } > "$SMAPS_FILE" 2>/dev/null || true
+                fi
             fi
+
+            tick=$(( tick + 1 ))
             sleep 1
         done
     ) &
@@ -490,6 +564,7 @@ RESULT_TXT="$RESULT_DIR/isolate-${FRAMEWORK}-${RUN_STAMP}.txt"
 # result file, so a saved .txt opens with when the run began (millisecond stamp).
 START_BANNER="Isolate: $FRAMEWORK bench start $START_HUMAN"
 echo "[isolate] $START_BANNER" >&2
+echo "[isolate] command: $INVOCATION" >&2
 
 save_state
 derive_split
@@ -523,9 +598,10 @@ export GCANNON_CPUS="$LOADGEN_CPUS"
     echo "$START_BANNER"
     echo
     echo "# zix isolate bench"
+    echo "# command:     $INVOCATION"
     echo "# stamp:        $RUN_STAMP"
     echo "# framework:    $FRAMEWORK"
-    echo "# args:         ${PASSTHROUGH[*]}"
+    echo "# args:         ${PASSTHROUGH[*]} (effective, --load-threads injected if absent)"
     echo "# server_cpus:  $SERVER_CPUS"
     echo "# loadgen_cpus: $LOADGEN_CPUS"
     echo "# quiesce:      $DO_QUIESCE (governor/boost/freq/cstate/thp/irqbalance/lo-mtu/paranoid)"
@@ -536,7 +612,12 @@ export GCANNON_CPUS="$LOADGEN_CPUS"
 } > "$RESULT_TXT"
 
 echo "[isolate] running bench, result -> $RESULT_TXT" >&2
-"$LITE" "${PASSTHROUGH[@]}" 2>&1 | tee -a "$RESULT_TXT"
+# Tolerate a non-zero bench exit (the lite bench returns non-zero on skipped
+# tests). Without this, set -e would abort here and skip the settle, the memory
+# summary, and the result-saved notice. The EXIT trap still restores the host.
+bench_rc=0
+"$LITE" "${PASSTHROUGH[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
+[ "$bench_rc" -eq 0 ] || echo "[isolate] note: bench exited $bench_rc, continuing to summary and restore" >&2
 
 echo "[isolate] settling ${SETTLE}s before restore" >&2
 sleep "$SETTLE"
@@ -547,14 +628,43 @@ if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
     {
         echo
         echo "# memory (from $(basename "$MEM_LOG")):"
+
+        # Total cgroup memory: peak and steady-state median.
         awk -F'current=' 'NF > 1 { print $2 + 0 }' "$MEM_LOG" | sort -n | awk '
             { a[n++] = $1 }
             END {
                 if (n == 0) { print "#   no samples"; exit }
                 peak = a[n - 1]
                 median = (n % 2) ? a[int(n / 2)] : (a[n / 2 - 1] + a[n / 2]) / 2
-                printf "#   peak=%.1fMiB  steady_median=%.1fMiB  samples=%d\n", peak / 1048576, median / 1048576, n
+                printf "#   total: peak=%.1fMiB  steady_median=%.1fMiB  samples=%d\n", peak / 1048576, median / 1048576, n
             }'
+
+        # Split medians: anon = process memory (engine controllable), sock =
+        # kernel socket buffers (only SO_RCVBUF/SO_SNDBUF can move it), slab.
+        for field in anon sock slab; do
+            grep -ho "$field=[0-9]*" "$MEM_LOG" 2>/dev/null | cut -d= -f2 | sort -n | awk -v f="$field" '
+                { a[n++] = $1 }
+                END {
+                    if (n == 0) exit
+                    median = (n % 2) ? a[int(n / 2)] : (a[n / 2 - 1] + a[n / 2]) / 2
+                    printf "#   %-5s median=%.1fMiB\n", f, median / 1048576
+                }' || true
+        done
+
+        # Top process-memory regions at peak, summed per label (anon vs stack vs
+        # heap vs each mapping), to itemize the fixed base.
+        if [ -n "$SMAPS_FILE" ] && [ -s "$SMAPS_FILE" ]; then
+            echo "#   --- top regions at peak (from $(basename "$SMAPS_FILE")) ---"
+            awk '
+                /^[0-9a-f]+-[0-9a-f]+ / {
+                    label = $6 == "" ? "[anon]" : $6
+                    for (i = 7; i <= NF; i++) label = label " " $i
+                }
+                /^Rss:/ { rss[label] += $2 }
+                END { for (l in rss) printf "%d\t%s\n", rss[l], l }
+            ' "$SMAPS_FILE" | sort -rn | head -8 | awk -F'\t' '
+                { printf "#   %8.1fMiB  %s\n", $1 / 1024, $2 }' || true
+        fi
     } >> "$RESULT_TXT"
 fi
 
