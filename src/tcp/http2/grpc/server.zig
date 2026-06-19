@@ -8,6 +8,7 @@ const GrpcServerConfig = config_mod.GrpcServerConfig;
 const DispatchModel = @import("../../config.zig").DispatchModel;
 const rcache = @import("../../../utils/response_cache.zig");
 const uring = @import("../../../multiplexers/ring.zig");
+const slab = @import("../../../multiplexers/slab.zig");
 const IoUring = std.os.linux.IoUring;
 
 pub const Route = core.Route;
@@ -56,8 +57,9 @@ const GrpcConnTable = struct {
     slots: []?*core.GrpcMuxConn,
 
     fn init() !GrpcConnTable {
-        const slots = try std.heap.smp_allocator.alloc(?*core.GrpcMuxConn, MAX_FD);
-        @memset(slots, null);
+        // mmap'd pointer slots: kernel-zeroed (zero == null) and demand-paged, so
+        // they cost no physical memory until used. See multiplexers/slab.
+        const slots = try slab.mapZeroedSlots(?*core.GrpcMuxConn, MAX_FD);
 
         return .{ .slots = slots };
     }
@@ -67,7 +69,7 @@ const GrpcConnTable = struct {
             if (maybe_conn) |conn| conn.deinit();
         }
 
-        std.heap.smp_allocator.free(self.slots);
+        slab.unmapSlots(self.slots);
     }
 
     fn get(self: *GrpcConnTable, fd: std.posix.fd_t) ?*core.GrpcMuxConn {
@@ -313,7 +315,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                     }
                 }
 
-                allocator.free(self.slots);
+                slab.unmapSlots(self.slots);
                 self.ring.deinit();
             }
 
@@ -531,8 +533,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             defer srv.deinit(ctx.io);
             const listener_fd = srv.socket.handle;
 
-            const slots = std.heap.smp_allocator.alloc(?*UringGrpcConn, MAX_FD) catch return;
-            @memset(slots, null);
+            const slots = slab.mapZeroedSlots(?*UringGrpcConn, MAX_FD) catch return;
 
             var worker = Worker{
                 .ring = undefined,
