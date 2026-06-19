@@ -10,6 +10,7 @@ const core = @import("core.zig");
 const cache = @import("../../utils/response_cache.zig");
 const ws = @import("websocket.zig");
 const uring = @import("../../multiplexers/ring.zig");
+const slab = @import("../../multiplexers/slab.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
 
@@ -284,14 +285,17 @@ const ConnTable = struct {
     buf_size: usize,
 
     fn init(buf_size: usize) !ConnTable {
-        const slots = try std.heap.smp_allocator.alloc(Conn, MAX_FD);
-        @memset(std.mem.sliceAsBytes(slots), 0);
+        // Slots are mmap'd (kernel-zeroed, demand-paged) rather than allocated +
+        // memset: an untouched slot reads as zero (which get() treats as empty)
+        // and costs no physical memory, and a memset would fault in all MAX_FD
+        // slots per worker (which scales with core count). See multiplexers/slab.
+        const conn_slots = try slab.mapZeroedSlots(Conn, MAX_FD);
 
         // Slab is intentionally not memset: Linux demand-paging means physical
         // pages are only committed when a connection first recvs into its slot.
-        const slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
 
-        return .{ .slots = slots, .slab = slab, .buf_size = buf_size };
+        return .{ .slots = conn_slots, .slab = recv_slab, .buf_size = buf_size };
     }
 
     fn deinit(self: *ConnTable) void {
@@ -301,7 +305,7 @@ const ConnTable = struct {
         }
 
         std.heap.smp_allocator.free(self.slab);
-        std.heap.smp_allocator.free(self.slots);
+        slab.unmapSlots(self.slots);
     }
 
     fn get(self: *ConnTable, fd: std.posix.fd_t) ?*Conn {
@@ -331,6 +335,7 @@ const ConnTable = struct {
         if (conn.buf.len == 0) return;
 
         if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
+        slab.releaseSlabPages(conn.buf);
         conn.* = std.mem.zeroes(Conn);
     }
 };
@@ -388,7 +393,7 @@ fn setNonBlock(fd: std.posix.fd_t) void {
     _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
 }
 
-/// Spin up to 50 µs before blocking. Reduces wake-up latency on saturated
+/// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
 fn setBusyPoll(fd: std.posix.fd_t) void {
     const SO_BUSY_POLL: u32 = 46;
@@ -1107,7 +1112,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 allocator.destroy(conn);
             }
 
-            allocator.free(self.slots);
+            slab.unmapSlots(self.slots);
             allocator.free(self.ws_payload_buf);
             allocator.free(self.body_buf);
             if (self.ws_bufs) |*bg| bg.deinit(allocator);
@@ -1696,8 +1701,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             defer srv.deinit(io);
             const listener_fd = srv.socket.handle;
 
-            const slots = std.heap.smp_allocator.alloc(?*UringConn, MAX_FD) catch return;
-            @memset(slots, null);
+            const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
 
             // Per-worker scratch for unmasking WebSocket payloads. Sized to the
             // recv buffer, the largest frame a connection can accumulate.
@@ -2146,6 +2150,18 @@ test "zix http1: ConnTable inline slab alloc and free lifecycle" {
     try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
 
     table.free(5);
+}
+
+test "zix http1: ConnTable slots read empty without an init memset (demand-paged)" {
+    var table = try ConnTable.init(256);
+    defer table.deinit();
+
+    // The slots array is no longer memset, so this proves untouched slots across
+    // the whole array still read as zero (empty), which is what keeps get()
+    // correct while letting the array demand-page instead of being fully resident.
+    for ([_]std.posix.fd_t{ 0, 1, 7, 100, 1000, 50000, MAX_FD - 1 }) |fd| {
+        try std.testing.expectEqual(@as(?*Conn, null), table.get(fd));
+    }
 }
 
 test "zix http1: ConnTable buf_size takes ws_recv_buf when larger" {

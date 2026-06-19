@@ -8,6 +8,7 @@ const DispatchModel = @import("../config.zig").DispatchModel;
 const FixServeOpts = core.FixServeOpts;
 const Logger = @import("../../logger/logger.zig").Logger;
 const uring = @import("../../multiplexers/ring.zig");
+const slab = @import("../../multiplexers/slab.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
@@ -585,7 +586,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 }
             }
 
-            allocator.free(w.slots);
+            slab.unmapSlots(w.slots);
             w.ring.deinit();
         }
 
@@ -854,8 +855,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     defer net_server.deinit(ctx.io);
     const listener_fd = net_server.socket.handle;
 
-    const slots = std.heap.smp_allocator.alloc(?*UringFixConn, 1 << 16) catch return;
-    @memset(slots, null);
+    const slots = slab.mapZeroedSlots(?*UringFixConn, 1 << 16) catch return;
 
     const hb_ms = ctx.opts.heartbeat_timeout_ms;
     var worker = Worker{

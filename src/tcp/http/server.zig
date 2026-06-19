@@ -19,6 +19,7 @@ const setCache = @import("response.zig").setCache;
 const RespSink = @import("response.zig").RespSink;
 const resp_mod = @import("response.zig");
 const uring = @import("../../multiplexers/ring.zig");
+const slab = @import("../../multiplexers/slab.zig");
 const IoUring = std.os.linux.IoUring;
 
 // --------------------------------------------------------- //
@@ -309,18 +310,20 @@ const EpollConnTable = struct {
     buf_size: usize,
 
     fn init(buf_size: usize) !EpollConnTable {
-        const slots = try std.heap.smp_allocator.alloc(EpollConn, MAX_FD);
-        @memset(std.mem.sliceAsBytes(slots), 0);
+        // Slots are mmap'd (kernel-zeroed, demand-paged) rather than allocated +
+        // memset, so untouched slots cost no physical memory and the array does
+        // not fault in all MAX_FD slots per worker. See multiplexers/slab.
+        const slots = try slab.mapZeroedSlots(EpollConn, MAX_FD);
 
         // Slab not memset: physical pages committed only on first recv per slot.
-        const slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
 
-        return .{ .slots = slots, .slab = slab, .buf_size = buf_size };
+        return .{ .slots = slots, .slab = recv_slab, .buf_size = buf_size };
     }
 
     fn deinit(self: *EpollConnTable) void {
         std.heap.smp_allocator.free(self.slab);
-        std.heap.smp_allocator.free(self.slots);
+        slab.unmapSlots(self.slots);
     }
 
     fn get(self: *EpollConnTable, fd: std.posix.fd_t) ?*EpollConn {
@@ -350,6 +353,7 @@ const EpollConnTable = struct {
         if (conn.buf.len == 0) return;
 
         if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
+        slab.releaseSlabPages(conn.buf);
         conn.* = std.mem.zeroes(EpollConn);
     }
 };
@@ -1052,8 +1056,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 response_cache.deinit();
             };
 
-            const slots = std.heap.smp_allocator.alloc(?*UringHttpConn, MAX_FD) catch return;
-            @memset(slots, null);
+            const slots = slab.mapZeroedSlots(?*UringHttpConn, MAX_FD) catch return;
 
             const Worker = struct {
                 ring: IoUring,
@@ -1079,7 +1082,7 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                         }
                     }
 
-                    allocator.free(w.slots);
+                    slab.unmapSlots(w.slots);
                     w.ring.deinit();
                 }
 

@@ -34,9 +34,14 @@ __*Fix:*__
 
 <br>
 
-## 0.4.0 (TBA)
+## 0.4.0 (2026-06-19)
 
 __*Ditambahkan:*__
+- Penskalaan churn io_uring dan overflow response on-ring (ADR-041):
+    - Teardown `.URING` `zix.Http1` kini me-ring close-nya (`prep_close`, ditag dengan `OpKind.close` bersama yang baru) alih-alih `linux.close` sinkron, mendaur ulang slot koneksi lebih dulu dan jatuh ke close sinkron hanya saat SQ sesaat penuh. Di bawah connection churn, close sinkron memblokir worker antar koneksi, jadi ring nyaris tidak mengaktifkan core-nya. Dengan ring close, worker terus memanen completion lintas teardown. Di mesin 64-core ini mengangkat cell churn (limited-conn, json) dari jauh di belakang `.EPOLL` ke paritas atau lebih baik, dengan memori jauh lebih sedikit, jadi `.URING` kini mencapai paritas atau lebih baik di setiap cell yang diukur.
+    - `RespSink` (`tcp/http1/core.zig`) menumbuhkan buffer staging-nya saat overflow ketika didukung oleh allocator: loop `.URING` memasangnya di atas `send_buf` per-koneksi dengan cap 1 MiB (`URING_SEND_BUF_MAX`), jadi response yang lebih besar dari buffer ter-stage tumbuh di tempat (realloc power-of-two, tidak pernah menyusut, dipakai ulang oleh koneksi yang didaur ulang) dan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir. Jalur `.EPOLL` tidak memasang grow allocator dan tidak berubah (flush-on-overflow).
+    - `OpKind` io_uring bersama dan helper ring dipindahkan dari `src/tcp/io_uring` ke `src/multiplexers/ring.zig`. Setiap engine io_uring membawa arm `.close => {}`. Hanya `zix.Http1` yang meng-arm ring close untuk saat ini.
+    ---
 - `io` server ke dalam config dan handler-at-init `zix.Uds` (ADR-039):
     - `zix.Tcp`, `zix.Udp`, dan `zix.Uds` kini membawa `io: std.Io` sebagai field config pertama, sehingga `run()` tidak menerima argumen, mengikuti lima engine server. Setiap server zix kini dikonstruksi dengan config yang membawa `io` dan dilayani dengan `run()` tanpa argumen.
     - `zix.Uds` mengadopsi bentuk factory ADR-038: `Server.init(comptime handler, config)` membakukan handler ke dalam tipe, dan `zix.Uds.echoHandler` bawaan dilewatkan secara eksplisit. Jalur `run(io, handler)` / `runWith` dihapus.
