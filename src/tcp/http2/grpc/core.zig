@@ -385,7 +385,7 @@ pub const GrpcServeOpts = struct {
     /// 0 = disabled. Combined with Route.timeout_ms and grpc-timeout header at dispatch.
     handler_timeout_ms: u32 = 0,
     /// When set, spawnGrpcStream uses io.async (work-stealing pool) instead of std.Thread.spawn.
-    /// Avoids per-request clone() syscall cost (~20-50µs per stream) under concurrent load.
+    /// Avoids per-request clone() syscall cost (~20-50us per stream) under concurrent load.
     /// Null falls back to std.Thread.spawn for compatibility with standalone serveConn callers.
     io: ?std.Io = null,
     /// Enable gzip response compression. When true, compresses DATA frames for clients

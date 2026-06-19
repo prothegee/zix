@@ -388,7 +388,7 @@ fn setNonBlock(fd: std.posix.fd_t) void {
     _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
 }
 
-/// Spin up to 50 µs before blocking. Reduces wake-up latency on saturated
+/// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
 fn setBusyPoll(fd: std.posix.fd_t) void {
     const SO_BUSY_POLL: u32 = 46;
