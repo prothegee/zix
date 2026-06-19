@@ -19,9 +19,6 @@ pub fn addSteps(
     const integration_tests = .{
         // tcp
         "tests/integration/tcp/config_test.zig",
-        // http1
-        "tests/integration/http1/server_test.zig",
-        "tests/integration/http1/router_test.zig",
         // http
         "tests/integration/http/request_test.zig",
         "tests/integration/http/router_test.zig",
@@ -31,12 +28,17 @@ pub fn addSteps(
         "tests/integration/http/client_test.zig",
         "tests/integration/http/ws_client_test.zig",
         "tests/integration/http/sse_client_test.zig",
+        // http1
+        "tests/integration/http1/server_test.zig",
+        "tests/integration/http1/router_test.zig",
         // http2
         "tests/integration/http2/server_test.zig",
-        // grpc
-        "tests/integration/grpc/server_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
+        // fix
+        "tests/integration/fix/server_test.zig",
+        // grpc
+        "tests/integration/grpc/server_test.zig",
         // udp
         "tests/integration/udp/packet_test.zig",
         "tests/integration/udp/config_test.zig",
@@ -46,8 +48,6 @@ pub fn addSteps(
         "tests/integration/channel/channel_test.zig",
         // logger
         "tests/integration/logger/logger_test.zig",
-        // fix
-        "tests/integration/fix/server_test.zig",
     };
 
     var prev_integ: ?*std.Build.Step = null;
@@ -73,9 +73,6 @@ pub fn addSteps(
     const behaviour_tests = .{
         // tcp
         "tests/behaviour/tcp/config_test.zig",
-        // http1
-        "tests/behaviour/http1/config_test.zig",
-        "tests/behaviour/http1/core_test.zig",
         // http
         "tests/behaviour/http/request_test.zig",
         "tests/behaviour/http/router_test.zig",
@@ -83,12 +80,17 @@ pub fn addSteps(
         "tests/behaviour/http/config_test.zig",
         "tests/behaviour/http/sse_test.zig",
         "tests/behaviour/http/client_test.zig",
+        // http1
+        "tests/behaviour/http1/config_test.zig",
+        "tests/behaviour/http1/core_test.zig",
         // http2
         "tests/behaviour/http2/config_test.zig",
-        // grpc
-        "tests/behaviour/grpc/config_test.zig",
         // websocket
         "tests/behaviour/websocket/websocket_test.zig",
+        // fix
+        "tests/behaviour/fix/session_test.zig",
+        // grpc
+        "tests/behaviour/grpc/config_test.zig",
         // udp
         "tests/behaviour/udp/packet_test.zig",
         "tests/behaviour/udp/config_test.zig",
@@ -98,8 +100,6 @@ pub fn addSteps(
         "tests/behaviour/channel/channel_test.zig",
         // logger
         "tests/behaviour/logger/logger_test.zig",
-        // fix
-        "tests/behaviour/fix/session_test.zig",
     };
 
     var prev_behav: ?*std.Build.Step = null;
@@ -125,8 +125,6 @@ pub fn addSteps(
     const edge_tests = .{
         // tcp
         "tests/edge/tcp/config_test.zig",
-        // http1
-        "tests/edge/http1/core_test.zig",
         // http
         "tests/edge/http/request_test.zig",
         "tests/edge/http/router_test.zig",
@@ -135,12 +133,16 @@ pub fn addSteps(
         "tests/edge/http/client_test.zig",
         "tests/edge/http/ws_client_test.zig",
         "tests/edge/http/sse_client_test.zig",
+        // http1
+        "tests/edge/http1/core_test.zig",
         // http2
         "tests/edge/http2/server_test.zig",
-        // grpc
-        "tests/edge/grpc/server_test.zig",
         // websocket
         "tests/edge/websocket/websocket_test.zig",
+        // fix
+        "tests/edge/fix/session_test.zig",
+        // grpc
+        "tests/edge/grpc/server_test.zig",
         // udp
         "tests/edge/udp/packet_test.zig",
         "tests/edge/udp/config_test.zig",
@@ -150,8 +152,6 @@ pub fn addSteps(
         "tests/edge/channel/channel_test.zig",
         // logger
         "tests/edge/logger/logger_test.zig",
-        // fix
-        "tests/edge/fix/session_test.zig",
     };
 
     var prev_edge: ?*std.Build.Step = null;
