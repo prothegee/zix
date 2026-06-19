@@ -271,6 +271,33 @@ const Conn = struct {
 /// so the table stays sparse. Connections on fds at or above this are refused.
 const MAX_FD: usize = 1 << 16;
 
+/// Return the slab pages backing a closed connection to the OS, so resident
+/// memory tracks live connections instead of the lifetime high-water of fd
+/// indices touched. The slab is anonymous demand-paged memory, so the next first
+/// touch on a reused fd faults a fresh zero page.
+///
+/// Note:
+/// - MADV_DONTNEED needs a page-aligned range, so only the pages fully covered
+///   by the slice are advised. With a page-aligned slab base and a page-multiple
+///   buf_size that is the whole slice.
+/// - Best-effort: a failed advise is ignored, the slot is reusable either way.
+///
+/// Param:
+/// buf - []u8 (the connection slab slice handed out by ConnTable.alloc)
+///
+/// Return:
+/// - void
+fn releaseSlabPages(buf: []u8) void {
+    const page = std.heap.page_size_min;
+    const base = @intFromPtr(buf.ptr);
+    const start = std.mem.alignForward(usize, base, page);
+    const end = std.mem.alignBackward(usize, base + buf.len, page);
+    if (end <= start) return;
+
+    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+    std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
+}
+
 /// Private per-worker fd to Conn map. Not shared between workers: a connection
 /// fd is accepted and served by a single worker, and freed before its fd can
 /// be reused, so a stale slot is always zeroed by the time it is reused.
@@ -284,8 +311,24 @@ const ConnTable = struct {
     buf_size: usize,
 
     fn init(buf_size: usize) !ConnTable {
-        const slots = try std.heap.smp_allocator.alloc(Conn, MAX_FD);
-        @memset(std.mem.sliceAsBytes(slots), 0);
+        // Slots are a raw anonymous mmap, not an allocator allocation: the kernel
+        // hands back zero-filled, demand-paged pages, so an untouched slot reads
+        // as zero (which get() treats as empty) and costs no physical memory
+        // until a connection touches it. The std allocators cannot be used here,
+        // they scribble 0xAA over fresh memory in safe builds, which would make
+        // untouched slots look live. A memset would fix the zero but fault in all
+        // MAX_FD slots up front (~MAX_FD * sizeof(Conn) resident per worker, which
+        // scales with core count). A slot is only ever read after alloc() fills
+        // it, so the zero pages are the correct empty state.
+        const mapped = try std.posix.mmap(
+            null,
+            MAX_FD * @sizeOf(Conn),
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        );
+        const slots = std.mem.bytesAsSlice(Conn, mapped);
 
         // Slab is intentionally not memset: Linux demand-paging means physical
         // pages are only committed when a connection first recvs into its slot.
@@ -301,7 +344,7 @@ const ConnTable = struct {
         }
 
         std.heap.smp_allocator.free(self.slab);
-        std.heap.smp_allocator.free(self.slots);
+        std.posix.munmap(@alignCast(std.mem.sliceAsBytes(self.slots)));
     }
 
     fn get(self: *ConnTable, fd: std.posix.fd_t) ?*Conn {
@@ -331,6 +374,7 @@ const ConnTable = struct {
         if (conn.buf.len == 0) return;
 
         if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
+        releaseSlabPages(conn.buf);
         conn.* = std.mem.zeroes(Conn);
     }
 };
@@ -2146,6 +2190,36 @@ test "zix http1: ConnTable inline slab alloc and free lifecycle" {
     try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
 
     table.free(5);
+}
+
+test "zix http1: releaseSlabPages returns pages so the next touch reads zero" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const page = std.heap.page_size_min;
+    const mem = try std.heap.page_allocator.alloc(u8, page * 2);
+    defer std.heap.page_allocator.free(mem);
+
+    @memset(mem, 0xAA);
+    try std.testing.expectEqual(@as(u8, 0xAA), mem[0]);
+
+    releaseSlabPages(mem);
+
+    // MADV_DONTNEED on anonymous memory: the next read faults a fresh zero page,
+    // which is how a reused fd's slab slice starts clean without a memset.
+    try std.testing.expectEqual(@as(u8, 0), mem[0]);
+    try std.testing.expectEqual(@as(u8, 0), mem[page]);
+}
+
+test "zix http1: ConnTable slots read empty without an init memset (demand-paged)" {
+    var table = try ConnTable.init(256);
+    defer table.deinit();
+
+    // The slots array is no longer memset, so this proves untouched slots across
+    // the whole array still read as zero (empty), which is what keeps get()
+    // correct while letting the array demand-page instead of being fully resident.
+    for ([_]std.posix.fd_t{ 0, 1, 7, 100, 1000, 50000, MAX_FD - 1 }) |fd| {
+        try std.testing.expectEqual(@as(?*Conn, null), table.get(fd));
+    }
 }
 
 test "zix http1: ConnTable buf_size takes ws_recv_buf when larger" {
