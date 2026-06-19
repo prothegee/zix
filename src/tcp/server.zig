@@ -7,6 +7,7 @@ const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const Logger = @import("../logger/logger.zig").Logger;
 const uring = @import("../multiplexers/ring.zig");
+const slab = @import("../multiplexers/slab.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
@@ -749,7 +750,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                     }
                 }
 
-                allocator.free(w.slots);
+                slab.unmapSlots(w.slots);
                 w.ring.deinit();
             }
 
@@ -1007,8 +1008,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             defer net_server.deinit(ctx.io);
             const listener_fd = net_server.socket.handle;
 
-            const slots = std.heap.smp_allocator.alloc(?*UringConn, 1 << 16) catch return;
-            @memset(slots, null);
+            const slots = slab.mapZeroedSlots(?*UringConn, 1 << 16) catch return;
 
             var worker = Worker{
                 .ring = undefined,
