@@ -10,6 +10,7 @@ const core = @import("core.zig");
 const cache = @import("../../utils/response_cache.zig");
 const ws = @import("websocket.zig");
 const uring = @import("../../multiplexers/ring.zig");
+const slab = @import("../../multiplexers/slab.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
 
@@ -271,33 +272,6 @@ const Conn = struct {
 /// so the table stays sparse. Connections on fds at or above this are refused.
 const MAX_FD: usize = 1 << 16;
 
-/// Return the slab pages backing a closed connection to the OS, so resident
-/// memory tracks live connections instead of the lifetime high-water of fd
-/// indices touched. The slab is anonymous demand-paged memory, so the next first
-/// touch on a reused fd faults a fresh zero page.
-///
-/// Note:
-/// - MADV_DONTNEED needs a page-aligned range, so only the pages fully covered
-///   by the slice are advised. With a page-aligned slab base and a page-multiple
-///   buf_size that is the whole slice.
-/// - Best-effort: a failed advise is ignored, the slot is reusable either way.
-///
-/// Param:
-/// buf - []u8 (the connection slab slice handed out by ConnTable.alloc)
-///
-/// Return:
-/// - void
-fn releaseSlabPages(buf: []u8) void {
-    const page = std.heap.page_size_min;
-    const base = @intFromPtr(buf.ptr);
-    const start = std.mem.alignForward(usize, base, page);
-    const end = std.mem.alignBackward(usize, base + buf.len, page);
-    if (end <= start) return;
-
-    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
-    std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
-}
-
 /// Private per-worker fd to Conn map. Not shared between workers: a connection
 /// fd is accepted and served by a single worker, and freed before its fd can
 /// be reused, so a stale slot is always zeroed by the time it is reused.
@@ -311,30 +285,17 @@ const ConnTable = struct {
     buf_size: usize,
 
     fn init(buf_size: usize) !ConnTable {
-        // Slots are a raw anonymous mmap, not an allocator allocation: the kernel
-        // hands back zero-filled, demand-paged pages, so an untouched slot reads
-        // as zero (which get() treats as empty) and costs no physical memory
-        // until a connection touches it. The std allocators cannot be used here,
-        // they scribble 0xAA over fresh memory in safe builds, which would make
-        // untouched slots look live. A memset would fix the zero but fault in all
-        // MAX_FD slots up front (~MAX_FD * sizeof(Conn) resident per worker, which
-        // scales with core count). A slot is only ever read after alloc() fills
-        // it, so the zero pages are the correct empty state.
-        const mapped = try std.posix.mmap(
-            null,
-            MAX_FD * @sizeOf(Conn),
-            .{ .READ = true, .WRITE = true },
-            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-            -1,
-            0,
-        );
-        const slots = std.mem.bytesAsSlice(Conn, mapped);
+        // Slots are mmap'd (kernel-zeroed, demand-paged) rather than allocated +
+        // memset: an untouched slot reads as zero (which get() treats as empty)
+        // and costs no physical memory, and a memset would fault in all MAX_FD
+        // slots per worker (which scales with core count). See multiplexers/slab.
+        const conn_slots = try slab.mapZeroedSlots(Conn, MAX_FD);
 
         // Slab is intentionally not memset: Linux demand-paging means physical
         // pages are only committed when a connection first recvs into its slot.
-        const slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
 
-        return .{ .slots = slots, .slab = slab, .buf_size = buf_size };
+        return .{ .slots = conn_slots, .slab = recv_slab, .buf_size = buf_size };
     }
 
     fn deinit(self: *ConnTable) void {
@@ -344,7 +305,7 @@ const ConnTable = struct {
         }
 
         std.heap.smp_allocator.free(self.slab);
-        std.posix.munmap(@alignCast(std.mem.sliceAsBytes(self.slots)));
+        slab.unmapSlots(self.slots);
     }
 
     fn get(self: *ConnTable, fd: std.posix.fd_t) ?*Conn {
@@ -374,7 +335,7 @@ const ConnTable = struct {
         if (conn.buf.len == 0) return;
 
         if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
-        releaseSlabPages(conn.buf);
+        slab.releaseSlabPages(conn.buf);
         conn.* = std.mem.zeroes(Conn);
     }
 };
@@ -1151,7 +1112,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 allocator.destroy(conn);
             }
 
-            allocator.free(self.slots);
+            slab.unmapSlots(self.slots);
             allocator.free(self.ws_payload_buf);
             allocator.free(self.body_buf);
             if (self.ws_bufs) |*bg| bg.deinit(allocator);
@@ -1740,8 +1701,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             defer srv.deinit(io);
             const listener_fd = srv.socket.handle;
 
-            const slots = std.heap.smp_allocator.alloc(?*UringConn, MAX_FD) catch return;
-            @memset(slots, null);
+            const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
 
             // Per-worker scratch for unmasking WebSocket payloads. Sized to the
             // recv buffer, the largest frame a connection can accumulate.
@@ -2190,24 +2150,6 @@ test "zix http1: ConnTable inline slab alloc and free lifecycle" {
     try std.testing.expectEqual(@as(?*Conn, null), table.get(5));
 
     table.free(5);
-}
-
-test "zix http1: releaseSlabPages returns pages so the next touch reads zero" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-
-    const page = std.heap.page_size_min;
-    const mem = try std.heap.page_allocator.alloc(u8, page * 2);
-    defer std.heap.page_allocator.free(mem);
-
-    @memset(mem, 0xAA);
-    try std.testing.expectEqual(@as(u8, 0xAA), mem[0]);
-
-    releaseSlabPages(mem);
-
-    // MADV_DONTNEED on anonymous memory: the next read faults a fresh zero page,
-    // which is how a reused fd's slab slice starts clean without a memset.
-    try std.testing.expectEqual(@as(u8, 0), mem[0]);
-    try std.testing.expectEqual(@as(u8, 0), mem[page]);
 }
 
 test "zix http1: ConnTable slots read empty without an init memset (demand-paged)" {
