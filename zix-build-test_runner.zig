@@ -157,6 +157,7 @@ pub fn addSteps(
             .optimize = optimize,
         });
         uds_http_runner_mod.addImport("zix", zix);
+
         const uds_http_runner_exe = b.addExecutable(.{ .name = "test-runner-uds-http", .root_module = uds_http_runner_mod });
 
         const run_uds_http = b.addRunArtifact(uds_http_runner_exe);
