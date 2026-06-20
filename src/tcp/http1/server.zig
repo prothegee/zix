@@ -995,6 +995,13 @@ const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 /// worst-case per-connection memory.
 const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 
+/// Idle-pool warm floor (A2). The minimum number of closed connections kept warm
+/// (buffers resident, allocation-free to reuse) when the worker is otherwise idle,
+/// so a trickle of new connections after a quiet spell still skips the allocator.
+/// The effective warm cap is derived per worker as max(live_count, this floor),
+/// see UringWorker.idleCap.
+const URING_IDLE_POOL_FLOOR: usize = 64;
+
 /// Initialize a worker ring with the single-issuer fast-path flags, falling
 /// back to a flagless ring when the kernel does not support them.
 ///
@@ -1056,9 +1063,13 @@ const UringConn = struct {
     /// keep-alive). Mirrors the EPOLL Conn.drain_close.
     drain_close: bool = false,
     ws: ?core.WsFrameFn = null,
-    /// Free-list link, valid only while this connection sits in the worker's
-    /// idle pool between a close and the next accept that reuses it.
+    /// Idle-pool links, valid only while this connection sits in the worker's
+    /// idle pool between a close and the next accept that reuses it. The warm
+    /// pool is doubly linked (most-recently-used at the head, least-recently-used
+    /// at the tail) so the release path can evict the LRU tail in O(1). The cold
+    /// stack uses next only.
     next: ?*UringConn = null,
+    prev: ?*UringConn = null,
 };
 
 /// Build a concrete io_uring worker with the handler and optional raw
@@ -1083,12 +1094,36 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// the kernel does not support buffer rings: WebSocket then falls back to
         /// the plain recv-into-conn.buf path (4a).
         ws_bufs: ?IoUring.BufferGroup,
-        /// Idle-connection pool. A closed connection is pushed here with its recv
-        /// and send buffers intact instead of being freed, so a later accept
-        /// reuses the allocation. This removes the three per-connection heap
-        /// allocations (struct + recv buf + 64 KiB send buf) from the steady-state
-        /// accept/close cycle, which dominates the short-lived (churn) test.
-        free_list: ?*UringConn,
+        /// Warm idle-connection pool, doubly linked. A closed connection is pushed
+        /// to the head (most-recently-used) with its recv and send buffers intact
+        /// instead of being freed, so a later accept reuses the allocation. This
+        /// removes the three per-connection heap allocations (struct + recv buf +
+        /// send buf) from the steady-state accept/close cycle, which dominates the
+        /// short-lived (churn) test. When the pool grows past idleCap the
+        /// least-recently-used tail is evicted, not the connection just released,
+        /// so the active working set at the head is never the one reclaimed.
+        warm_head: ?*UringConn = null,
+        warm_tail: ?*UringConn = null,
+        /// Number of connections currently in the warm pool. Compared against
+        /// idleCap to decide when to evict the LRU tail. The single worker thread
+        /// owns it, so no synchronization is needed.
+        warm_count: usize = 0,
+        /// Cold idle-connection stack. An evicted warm tail has its buffer pages
+        /// returned to the OS (MADV_DONTNEED) and is pushed here. The struct and
+        /// virtual allocation stay reusable, so an accept that drains the warm pool
+        /// reuses a cold connection with no allocator call, paying only a recv
+        /// first-touch fault to bring its pages back. Singly linked via next.
+        cold_head: ?*UringConn = null,
+        /// Live connections currently held in the slot table (this worker's
+        /// concurrency). Incremented when an accepted connection installs into a
+        /// slot, decremented when it is torn down. The warm idle-pool cap is
+        /// derived from this so the pool always covers the active working set
+        /// regardless of how many workers split the host, see idleCap.
+        live_count: usize = 0,
+        /// Minimum warm pool floor. See URING_IDLE_POOL_FLOOR. A field (not the
+        /// constant directly) so tests can drive the eviction path with a small
+        /// pool.
+        idle_floor: usize = URING_IDLE_POOL_FLOOR,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -1104,9 +1139,17 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 }
             }
 
-            var idle = self.free_list;
-            while (idle) |conn| {
-                idle = conn.next;
+            var warm = self.warm_head;
+            while (warm) |conn| {
+                warm = conn.next;
+                allocator.free(conn.buf);
+                allocator.free(conn.send_buf);
+                allocator.destroy(conn);
+            }
+
+            var cold = self.cold_head;
+            while (cold) |conn| {
+                cold = conn.next;
                 allocator.free(conn.buf);
                 allocator.free(conn.send_buf);
                 allocator.destroy(conn);
@@ -1142,9 +1185,23 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// idle pool (recv and send buffers intact) when available, otherwise
         /// allocate a new one with both buffers. Returns null only when a fresh
         /// allocation fails. The caller resets the per-connection state fields.
+        ///
+        /// Note:
+        /// - The warm pool is preferred (its pages are resident, no fault), and
+        ///   the cold pool is the fallback (reusable, but its first recv faults
+        ///   the pages back). Only when both are empty is a buffer allocated.
         fn acquireConn(self: *Self) ?*UringConn {
-            if (self.free_list) |conn| {
-                self.free_list = conn.next;
+            if (self.warm_head) |conn| {
+                self.warm_head = conn.next;
+                if (self.warm_head) |head| head.prev = null else self.warm_tail = null;
+                self.warm_count -= 1;
+
+                return conn;
+            }
+
+            if (self.cold_head) |conn| {
+                self.cold_head = conn.next;
+
                 return conn;
             }
 
@@ -1164,15 +1221,72 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             return conn;
         }
 
-        /// Return a closed connection to the idle pool, keeping its buffers for
-        /// the next accept to reuse. The slot table no longer references it.
+        /// Warm idle-pool cap, derived from this worker's live concurrency. The
+        /// pool keeps up to one full reconnect of the live working set warm, so
+        /// steady connection churn always finds a resident buffer at the head. The
+        /// floor keeps a small warm reserve when the worker is idle. Deriving from
+        /// live_count (not a flat constant) makes the cap scale with the per-worker
+        /// concurrency, which differs by how many workers split the host.
+        fn idleCap(self: *const Self) usize {
+            return @max(self.live_count, self.idle_floor);
+        }
+
+        /// Evict the least-recently-used warm connection (the tail) to the cold
+        /// stack: return its buffer pages to the OS with MADV_DONTNEED, unlink it
+        /// from the warm pool, and push it cold. The struct and virtual allocation
+        /// stay reusable, only the physical pages go back, and a later accept that
+        /// reaches the cold stack faults them in on the next recv. Reclaiming the
+        /// LRU tail (not the connection just released, which is the hot head) is
+        /// what keeps the active churn working set resident.
+        fn evictColdTail(self: *Self) void {
+            const victim = self.warm_tail orelse return;
+
+            self.warm_tail = victim.prev;
+            if (victim.prev) |p| p.next = null else self.warm_head = null;
+            self.warm_count -= 1;
+
+            slab.releaseSlabPages(victim.buf);
+            slab.releaseSlabPages(victim.send_buf);
+
+            victim.prev = null;
+            victim.next = self.cold_head;
+            self.cold_head = victim;
+        }
+
+        /// Return a closed connection to the warm idle pool (A2), then trim the
+        /// cold tail if the pool now exceeds the cap. Both steps are off the parse
+        /// and handler hot path.
+        ///
+        /// Note:
+        /// - A send_buf the grow allocator doubled for an oversized response is
+        ///   shrunk back to the base size. Oversized responses are rare, so this
+        ///   realloc is off the churn path, and it stops a connection that served
+        ///   one large response from carrying a multi-MiB buffer for life.
+        /// - The connection is pushed to the warm head (most-recently-used). Past
+        ///   the cap the least-recently-used tail is evicted to the cold stack, so
+        ///   the buffer reclaimed is never the one a churn accept is about to
+        ///   reuse. The accept path overwrites buf and send_buf before reading, so
+        ///   a cold connection's zeroed pages are safe to reuse.
         fn releaseConn(self: *Self, conn: *UringConn) void {
-            conn.next = self.free_list;
-            self.free_list = conn;
+            if (conn.send_buf.len > URING_SEND_BUF_SIZE) {
+                if (allocator.realloc(conn.send_buf, URING_SEND_BUF_SIZE)) |shrunk| {
+                    conn.send_buf = shrunk;
+                } else |_| {}
+            }
+
+            conn.prev = null;
+            conn.next = self.warm_head;
+            if (self.warm_head) |head| head.prev = conn;
+            self.warm_head = conn;
+            if (self.warm_tail == null) self.warm_tail = conn;
+            self.warm_count += 1;
+
+            if (self.warm_count > self.idleCap()) self.evictColdTail();
         }
 
         fn destroyConn(self: *Self, conn: *UringConn) void {
             self.slots[@intCast(conn.fd)] = null;
+            self.live_count -= 1;
 
             self.releaseConn(conn);
         }
@@ -1330,6 +1444,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 .closing = false,
             };
             self.slots[idx] = conn;
+            self.live_count += 1;
 
             self.armRecv(conn);
         }
@@ -1723,7 +1838,6 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .ws_payload_buf = ws_payload_buf,
                 .body_buf = body_buf,
                 .ws_bufs = null,
-                .free_list = null,
             };
             worker.ring = initUringRing() catch return;
             // Provided-buffer ring for WebSocket recvs (Phase 4b). Optional: a
@@ -1965,7 +2079,6 @@ fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8) UringWorker(hand
         .ws_payload_buf = &[_]u8{},
         .body_buf = body_buf,
         .ws_bufs = null,
-        .free_list = null,
     };
 }
 
@@ -2307,7 +2420,7 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
         .ws_payload_buf = &[_]u8{},
         .body_buf = &[_]u8{},
         .ws_bufs = null,
-        .free_list = null,
+        .live_count = 1,
     };
     @memset(worker.slots, null);
     defer {
@@ -2328,9 +2441,9 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
 
     worker.finishClose(conn);
 
-    // Slot cleared and the connection recycled for the next accept to reuse.
+    // Slot cleared and the connection recycled into the warm pool for reuse.
     try std.testing.expectEqual(@as(?*UringConn, null), worker.slots[@intCast(fds[1])]);
-    try std.testing.expectEqual(@as(?*UringConn, conn), worker.free_list);
+    try std.testing.expectEqual(@as(?*UringConn, conn), worker.warm_head);
 
     // The close was staged on the ring, not run as a synchronous syscall:
     // submit and reap its CQE, which must report success and carry the .close
@@ -2343,4 +2456,169 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
     const decoded = uring.unpackUserData(cqes[0].user_data);
     try std.testing.expectEqual(uring.OpKind.close, decoded.op);
     try std.testing.expectEqual(@as(i32, 0), cqes[0].res);
+}
+
+test "zix http1: URING releaseConn pools warm under cap, acquireConn reuses LIFO" {
+    const gpa = std.testing.allocator;
+
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 4,
+    };
+
+    const conn_a = try gpa.create(UringConn);
+    conn_a.* = .{ .fd = 10, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
+    const conn_b = try gpa.create(UringConn);
+    conn_b.* = .{ .fd = 11, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        gpa.free(conn_a.buf);
+        gpa.free(conn_a.send_buf);
+        gpa.destroy(conn_a);
+        gpa.free(conn_b.buf);
+        gpa.free(conn_b.send_buf);
+        gpa.destroy(conn_b);
+    }
+
+    worker.releaseConn(conn_a);
+    worker.releaseConn(conn_b);
+    try std.testing.expectEqual(@as(usize, 2), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringConn, conn_b), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringConn, conn_a), worker.warm_tail);
+
+    // LIFO: the most recently released connection is reused first off the warm
+    // head, and the count tracks the pool so the release path can spot an
+    // overflow.
+    const first = worker.acquireConn().?;
+    try std.testing.expectEqual(@as(?*UringConn, conn_b), first);
+    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
+
+    const second = worker.acquireConn().?;
+    try std.testing.expectEqual(@as(?*UringConn, conn_a), second);
+    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+}
+
+test "zix http1: URING idleCap holds the floor when idle and tracks live concurrency under load" {
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 8,
+    };
+
+    // Idle: the cap is the floor, so a quiet worker still keeps a small warm pool.
+    try std.testing.expectEqual(@as(usize, 8), worker.idleCap());
+
+    // Under load: the cap rises to the live connection count, so the pool can keep
+    // a full reconnect of the working set warm and never reclaims a buffer it is
+    // about to reuse.
+    worker.live_count = 700;
+    try std.testing.expectEqual(@as(usize, 700), worker.idleCap());
+}
+
+test "zix http1: URING releaseConn shrinks a grown send_buf back to the base size" {
+    const gpa = std.heap.smp_allocator;
+
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+    };
+
+    // A send_buf the grow allocator doubled past the base for an oversized
+    // response. recv_buf stays small so no eviction is involved (cap not reached).
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = 12, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 2 * URING_SEND_BUF_SIZE), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+
+    worker.releaseConn(conn);
+
+    try std.testing.expectEqual(@as(usize, URING_SEND_BUF_SIZE), conn.send_buf.len);
+    try std.testing.expectEqual(@as(?*UringConn, conn), worker.warm_head);
+}
+
+test "zix http1: URING releaseConn past the cap returns buffer pages to the OS" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    const page = std.heap.page_allocator;
+
+    // Cap of 1 (floor 1, no live connections): the second release overflows.
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 1,
+    };
+
+    // Page-aligned, page-sized buffers so MADV_DONTNEED acts on exactly these
+    // pages. Both stay at or under the base size, so the shrink branch is skipped.
+    const lru = try page.create(UringConn);
+    lru.* = .{ .fd = 13, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
+    const mru = try page.create(UringConn);
+    mru.* = .{ .fd = 14, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        page.free(lru.buf);
+        page.free(lru.send_buf);
+        page.destroy(lru);
+        page.free(mru.buf);
+        page.free(mru.send_buf);
+        page.destroy(mru);
+    }
+
+    @memset(lru.buf, 0xAA);
+    @memset(lru.send_buf, 0xAA);
+    @memset(mru.buf, 0xAA);
+    @memset(mru.send_buf, 0xAA);
+
+    // Release lru first, then mru. The second release pushes mru to the warm head
+    // and overflows the cap, so the least-recently-used tail (lru) is evicted to
+    // the cold stack: its pages go back and read as zero, while mru stays warm and
+    // resident. Reclaiming the LRU tail, not the just-released mru, is the point.
+    worker.releaseConn(lru);
+    worker.releaseConn(mru);
+
+    try std.testing.expectEqual(@as(u8, 0xAA), mru.buf[0]);
+    try std.testing.expectEqual(@as(?*UringConn, mru), worker.warm_head);
+    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
+
+    try std.testing.expectEqual(@as(u8, 0), lru.buf[0]);
+    try std.testing.expectEqual(@as(u8, 0), lru.send_buf[0]);
+    try std.testing.expectEqual(@as(?*UringConn, lru), worker.cold_head);
+
+    // Reuse drains the warm head first, then the cold stack, both allocation-free.
+    try std.testing.expectEqual(@as(?*UringConn, mru), worker.acquireConn());
+    try std.testing.expectEqual(@as(?*UringConn, lru), worker.acquireConn());
 }
