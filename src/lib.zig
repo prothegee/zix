@@ -10,9 +10,9 @@ const builtin = @import("builtin");
 /// Note:
 /// - Do not create in other place!
 pub const ZIG_SEMVER = struct {
-    const MINOR: usize = builtin.zig_version.major;
-    const MAJOR: usize = builtin.zig_version.minor;
-    const PATCH: usize = builtin.zig_version.patch;
+    pub const MAJOR: usize = builtin.zig_version.major;
+    pub const MINOR: usize = builtin.zig_version.minor;
+    pub const PATCH: usize = builtin.zig_version.patch;
 };
 
 // --------------------------------------------------------- //

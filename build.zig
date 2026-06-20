@@ -6,9 +6,9 @@ const builtin = @import("builtin");
 /// Note:
 /// - Do not create in other place!
 pub const ZIG_SEMVER = struct {
-    const MINOR: usize = builtin.zig_version.major;
-    const MAJOR: usize = builtin.zig_version.minor;
-    const PATCH: usize = builtin.zig_version.patch;
+    pub const MAJOR: usize = builtin.zig_version.major;
+    pub const MINOR: usize = builtin.zig_version.minor;
+    pub const PATCH: usize = builtin.zig_version.patch;
 };
 
 // --------------------------------------------------------- //
@@ -21,7 +21,7 @@ pub const ZIG_SEMVER = struct {
 ///   dirExists below comptime-branches on the same check. Anything outside this
 ///   range needs its own port first (rnd/roadmap-0.5.x.md, "Zig version decision").
 fn ensureSupportedZig() void {
-    if (ZIG_SEMVER.major == 0 and (ZIG_SEMVER.minor == 16 or ZIG_SEMVER.minor == 17)) return;
+    if (ZIG_SEMVER.MAJOR == 0 and (ZIG_SEMVER.MINOR == 16 or ZIG_SEMVER.MINOR == 17)) return;
 
     @compileError(std.fmt.comptimePrint(
         "zix build requires Zig 0.16.x or 0.17.x, found {d}.{d}.{d}. " ++
@@ -40,7 +40,7 @@ fn ensureSupportedZig() void {
 ///   Io.Dir.access call serves both. It uses the build root, not cwd, so the check
 ///   stays correct when zix is a fetched dependency.
 fn dirExists(b: *std.Build, sub_path: []const u8) bool {
-    const root_handle = if (comptime builtin.zig_version.minor == 16)
+    const root_handle = if (comptime ZIG_SEMVER.MINOR == 16)
         b.build_root.handle
     else
         b.root.root_dir.handle;
@@ -55,7 +55,7 @@ fn dirExists(b: *std.Build, sub_path: []const u8) bool {
 pub fn build(b: *std.Build) void {
     ensureSupportedZig();
 
-    const zon = @import("build.ZIG_SEMVER.zon");
+    const zon = @import("build.zig.zon");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
