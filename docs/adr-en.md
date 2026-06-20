@@ -936,4 +936,24 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-043: split each engine's dispatch models into a per-engine dispatch/ folder
+
+**Status:** Accepted
+
+**Context:** Each engine keeps all of its dispatch models in one `server.zig` (ADR-042). For `zix.Http1` that file was about 2,600 lines, with `.EPOLL` and `.URING` about 900 lines each and barely overlapping, so a change to one model meant scrolling past the other four. The A2 idle-pool variants, which differ only in the `.URING` pool code, were forced to be full-file copies.
+
+**Decision:** Split the models into a per-engine `dispatch/` folder, one file per model named for the `DispatchModel` enum value (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`), with shared dispatch helpers in `dispatch/common.zig`. `server.zig` keeps the public `Server` type and the runtime model switch. `core.zig` (shared request processing) is untouched. Rolled out on `zix.Http1` first, then replicated to the other engines.
+
+**Rationale:** This is file organization, not a behavior or perf change, and it does not introduce a shared or generic dispatch loop, so it complies with ADR-042: no per-event indirection, and each engine still owns its dispatch. Isolating a model makes per-model work and per-model variant comparison (the A2 record) tractable. Moved bodies stay byte-identical because each model file reaches the shared helpers through `const X = common.X;` aliases, so only the `run()` switch is rewritten.
+
+**Config:** none. No code-behavior or API change. `Server.init` / `initRaw` and the config are unchanged.
+
+**Consequences:**
+- Each new file needs its own `std.testing.refAllDecls` line in `src/lib.zig` (refAllDecls is not recursive), else its tests silently never run. Tests move into the file of the model they cover.
+- The `zix.Http1` pilot landed green: `server.zig` shrank from 2,624 lines to 154, the five models live under `dispatch/` (with `common.zig` for the shared helpers), and `zig build`, `test-all`, and `test-runner-all` (all 56 protocols) pass with the 25 http1 tests preserved.
+- The four A2 idle-pool variants are preserved as full-server snapshots in `rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a cross-reference manifest.
+- The other engines (Http, Http2, Grpc, Tcp, Fix, Udp) get the same split next. Each is an independent, equivalent move.
+
+---
+
 ###### end of adr
