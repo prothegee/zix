@@ -1,0 +1,1025 @@
+Isolate: zix_http_uring bench start 2026-06-20 15:50:56:077
+
+# zix isolate bench
+# command:     ./benchmark-httparena-lite-isolate zix_http_uring ../HttpArena --source local --probe --sample-mem --load-threads 12
+# stamp:        20260620-155056
+# framework:    zix_http_uring
+# args:         zix_http_uring ../HttpArena --source local --load-threads 12 (effective, --load-threads injected if absent)
+# server_cpus:  0-1,2-3,4-5
+# loadgen_cpus: 6-7,8-9,10-11
+# quiesce:      1 (governor/boost/freq/cstate/thp/irqbalance/lo-mtu/paranoid)
+# probe_gate:   1  (0.26% (PASS, <=1%))
+# sample_mem:   1  -> isolate-mem-zix_http_uring-20260620-155056.txt
+# settle_s:     5
+
+staging local zix from /mnt/256a1/repo/zix into /mnt/256a1/repo/HttpArena/frameworks/zix_http_uring/vendor/zix
+[info] load-threads override: THREADS=12
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] available cores: 12 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: zix_http_uring (zix, Zig)
+[info] subscribed tests: baseline,pipelined,limited-conn,json,upload,static
+[info] building image: httparena-zix_http_uring
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[1/2] STEP 1/14: FROM alpine:3.20 AS build
+[1/2] STEP 2/14: ARG RETRY=6
+--> Using cache c13a778347542df7984953050ace01ec4444dcec056b391c4db1a1434f32b203
+--> c13a77834754
+[1/2] STEP 3/14: ARG TARGETARCH
+--> Using cache 46a8f2b1359ceeeff0c25f80cd06989d99c7ad3d7b2b2e53f6424fb4ba78aaad
+--> 46a8f2b1359c
+[1/2] STEP 4/14: ARG RETRY_DELAY=3
+--> Using cache afdded9fd6794bca97934157a5e726e591af0c15f660dd4dbd70364b4cf08064
+--> afdded9fd679
+[1/2] STEP 5/14: ARG ZIG_VERSION=0.16.0
+--> Using cache 8d1844e75550cd5cc5b518d6f60c096c02ec3f89f159196b8d8088e324b3e4f2
+--> 8d1844e75550
+[1/2] STEP 6/14: ARG ZIX_VERSION=0.4.x-rc3
+--> Using cache f8b8fc7441106f48a8feda03c2e9b881fd3369b8d8a3b24c20305e622b11b382
+--> f8b8fc744110
+[1/2] STEP 7/14: RUN apk add --no-cache ca-certificates curl git tar xz
+--> Using cache 8631718d88eb6c97c2cc0823367e475437ee1c3453b936ea15b94472275eb481
+--> 8631718d88eb
+[1/2] STEP 8/14: RUN set -eu;     case "${TARGETARCH:-amd64}" in         amd64) ZIG_ARCH=x86_64 ;;         arm64) ZIG_ARCH=aarch64 ;;         *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;;     esac;     curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz"         | tar -xJ -C /opt;     mv "/opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}" /opt/zig
+--> d02493a12311
+[1/2] STEP 9/14: ENV PATH="/opt/zig:${PATH}"
+--> 21476dd4752c
+[1/2] STEP 10/14: COPY vendor/zix /src/vendor/zix
+--> 6ac26befaf88
+[1/2] STEP 11/14: WORKDIR /src
+--> a8a5adf96b7d
+[1/2] STEP 12/14: COPY build.zig build.zig.zon ./
+--> f7f16d415a98
+[1/2] STEP 13/14: COPY src ./src
+--> d922b2c365fa
+[1/2] STEP 14/14: RUN set -eu;     case "${TARGETARCH:-amd64}" in         amd64) ZIG_TARGET=x86_64-linux-musl; ZIG_CPU=x86_64_v3 ;;         arm64) ZIG_TARGET=aarch64-linux-musl; ZIG_CPU=baseline ;;     esac;     zig build -Dtarget="${ZIG_TARGET}" -Dcpu="${ZIG_CPU}" --release=fast
+--> baaa9b0e9594
+[2/2] STEP 1/4: FROM alpine:3.20
+[2/2] STEP 2/4: COPY --from=build /src/zig-out/bin/zix /zix
+--> f58d396e6b1f
+[2/2] STEP 3/4: EXPOSE 8080
+--> 757178042d83
+[2/2] STEP 4/4: ENTRYPOINT ["/zix"]
+[2/2] COMMIT httparena-zix_http_uring
+--> 7de0fff4fe28
+Successfully tagged localhost/httparena-zix_http_uring:latest
+7de0fff4fe28ad4ccbbb8e9a16fa0262661f057159b6e01c57ceb77171d21492
+
+==============================================
+=== zix_http_uring / baseline / 512c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    942us    340us   2.13ms   10.40ms   22.10ms
+
+  2715033 requests in 5.00s, 2715033 responses
+  Throughput: 542.74K req/s
+  Bandwidth:  34.16MB/s
+  Status codes: 2xx=2715033, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2714999 / 2715033 responses (100.0%)
+  Per-template: 902221,934496,878281
+  Per-template-ok: 902221,934497,878281
+[info] CPU 289.6% | Mem 25MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    928us    338us   2.01ms   10.40ms   20.60ms
+
+  2756498 requests in 5.00s, 2756498 responses
+  Throughput: 551.23K req/s
+  Bandwidth:  34.70MB/s
+  Status codes: 2xx=2756498, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2756491 / 2756498 responses (100.0%)
+  Per-template: 927779,912633,916079
+  Per-template-ok: 927779,912633,916079
+[info] CPU 243.2% | Mem 26MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    919us    312us   2.25ms   9.71ms   22.50ms
+
+  2785025 requests in 5.00s, 2785025 responses
+  Throughput: 556.48K req/s
+  Bandwidth:  35.03MB/s
+  Status codes: 2xx=2785025, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2785004 / 2785025 responses (100.0%)
+  Per-template: 936590,928373,920041
+  Per-template-ok: 936590,928373,920041
+[info] CPU 236.2% | Mem 26MiB
+
+=== Best: 557005 req/s (CPU: 236.2%, Mem: 26MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / baseline / 4096c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   9.42ms   8.81ms   15.90ms   26.00ms   88.90ms
+
+  2174270 requests in 5.00s, 2170294 responses
+  Throughput: 433.81K req/s
+  Bandwidth:  27.30MB/s
+  Status codes: 2xx=2170294, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2170294 / 2170294 responses (100.0%)
+  Per-template: 722839,732826,714629
+  Per-template-ok: 722839,732826,714629
+[info] CPU 271.8% | Mem 84MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   9.32ms   7.77ms   18.10ms   27.60ms   39.40ms
+
+  2188507 requests in 5.00s, 2184571 responses
+  Throughput: 436.71K req/s
+  Bandwidth:  27.49MB/s
+  Status codes: 2xx=2184571, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2184571 / 2184571 responses (100.0%)
+  Per-template: 740375,718897,725299
+  Per-template-ok: 740375,718897,725299
+[info] CPU 253.0% | Mem 82MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   9.38ms   8.74ms   17.10ms   25.70ms   36.20ms
+
+  2180000 requests in 5.02s, 2176504 responses
+  Throughput: 433.96K req/s
+  Bandwidth:  27.31MB/s
+  Status codes: 2xx=2176504, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 2176504 / 2176504 responses (100.0%)
+  Per-template: 718849,722648,735007
+  Per-template-ok: 718849,722648,735007
+[info] CPU 245.6% | Mem 83MiB
+
+=== Best: 436914 req/s (CPU: 253.0%, Mem: 82MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / pipelined / 512c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.20ms    467us   3.76ms   9.06ms   15.50ms
+
+  34175312 requests in 5.00s, 34185808 responses
+  Throughput: 6.83M req/s
+  Bandwidth:  429.88MB/s
+  Status codes: 2xx=34185808, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 34175168 / 34185808 responses (100.0%)
+[info] CPU 312.1% | Mem 24MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.20ms    465us   3.70ms   9.31ms   16.20ms
+
+  34087376 requests in 5.00s, 34087376 responses
+  Throughput: 6.82M req/s
+  Bandwidth:  429.03MB/s
+  Status codes: 2xx=34087376, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 34087104 / 34087376 responses (100.0%)
+[info] CPU 285.1% | Mem 25MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.21ms    460us   3.71ms   9.31ms   18.60ms
+
+  33887920 requests in 5.00s, 33887920 responses
+  Throughput: 6.78M req/s
+  Bandwidth:  426.46MB/s
+  Status codes: 2xx=33887920, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 33887856 / 33887920 responses (100.0%)
+[info] CPU 277.9% | Mem 25MiB
+
+=== Best: 6837161 req/s (CPU: 312.1%, Mem: 24MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / pipelined / 4096c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   13.31ms   12.60ms   21.20ms   31.30ms   101.60ms
+
+  24609984 requests in 5.00s, 24545728 responses
+  Throughput: 4.91M req/s
+  Bandwidth:  308.87MB/s
+  Status codes: 2xx=24545728, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 24545728 / 24545728 responses (100.0%)
+[info] CPU 292.2% | Mem 83MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   13.35ms   13.10ms   21.90ms   31.10ms   40.00ms
+
+  24456736 requests in 5.00s, 24391200 responses
+  Throughput: 4.88M req/s
+  Bandwidth:  306.90MB/s
+  Status codes: 2xx=24391200, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 24391200 / 24391200 responses (100.0%)
+[info] CPU 274.8% | Mem 81MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   13.21ms   13.20ms   21.20ms   29.50ms   36.80ms
+
+  24685584 requests in 5.00s, 24620048 responses
+  Throughput: 4.92M req/s
+  Bandwidth:  309.83MB/s
+  Status codes: 2xx=24620048, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 24620048 / 24620048 responses (100.0%)
+[info] CPU 267.4% | Mem 81MiB
+
+=== Best: 4924009 req/s (CPU: 267.4%, Mem: 81MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / limited-conn / 512c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.39ms    425us   3.85ms   12.90ms   27.90ms
+
+  1769782 requests in 5.01s, 1769783 responses
+  Throughput: 353.33K req/s
+  Bandwidth:  22.24MB/s
+  Status codes: 2xx=1769783, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1769763 / 1769783 responses (100.0%)
+  Reconnects: 176969
+  Per-template: 589906,589921,589936
+  Per-template-ok: 589906,589921,589936
+[info] CPU 286.6% | Mem 32MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.42ms    414us   3.83ms   14.00ms   38.10ms
+
+  1727663 requests in 5.00s, 1727646 responses
+  Throughput: 345.38K req/s
+  Bandwidth:  21.74MB/s
+  Status codes: 2xx=1727646, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1727609 / 1727646 responses (100.0%)
+  Reconnects: 172738
+  Per-template: 575890,575836,575883
+  Per-template-ok: 575890,575836,575883
+[info] CPU 246.4% | Mem 33MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.40ms    430us   4.00ms   12.50ms   31.50ms
+
+  1752502 requests in 5.00s, 1752488 responses
+  Throughput: 350.36K req/s
+  Bandwidth:  22.05MB/s
+  Status codes: 2xx=1752488, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1752480 / 1752488 responses (100.0%)
+  Reconnects: 175243
+  Per-template: 584129,584145,584206
+  Per-template-ok: 584129,584145,584206
+[info] CPU 236.2% | Mem 32MiB
+
+=== Best: 353250 req/s (CPU: 286.6%, Mem: 32MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / limited-conn / 4096c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.67ms   8.44ms   28.10ms   78.70ms   154.50ms
+
+  1589686 requests in 5.04s, 1585608 responses
+  Throughput: 314.80K req/s
+  Bandwidth:  19.81MB/s
+  Status codes: 2xx=1585608, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1585608 / 1585608 responses (100.0%)
+  Reconnects: 156822
+  Per-template: 528327,528575,528706
+  Per-template-ok: 528327,528575,528706
+[info] CPU 245.4% | Mem 100MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.47ms   8.73ms   27.90ms   61.40ms   186.80ms
+
+  1595728 requests in 5.01s, 1591632 responses
+  Throughput: 317.98K req/s
+  Bandwidth:  20.01MB/s
+  Status codes: 2xx=1591632, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1591632 / 1591632 responses (100.0%)
+  Reconnects: 157345
+  Per-template: 530606,530392,530634
+  Per-template-ok: 530606,530392,530634
+[info] CPU 237.7% | Mem 108MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   11.98ms   8.13ms   25.50ms   73.60ms   173.50ms
+
+  1640607 requests in 5.01s, 1638258 responses
+  Throughput: 327.10K req/s
+  Bandwidth:  20.59MB/s
+  Status codes: 2xx=1638258, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1638258 / 1638258 responses (100.0%)
+  Reconnects: 162375
+  Per-template: 546014,546037,546207
+  Per-template-ok: 546014,546037,546207
+[info] CPU 232.1% | Mem 111MiB
+
+=== Best: 326997 req/s (CPU: 232.1%, Mem: 111MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / json / 4096c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  25
+  Templates: 7
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.71ms   7.90ms   32.10ms   58.00ms   123.10ms
+
+  1465892 requests in 5.01s, 1461812 responses
+  Throughput: 291.86K req/s
+  Bandwidth:  999.46MB/s
+  Status codes: 2xx=1461812, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1461812 / 1461812 responses (100.0%)
+  Reconnects: 56453
+  Per-template: 209129,209317,208813,208883,208694,208486,208490
+  Per-template-ok: 209129,209317,208813,208883,208694,208486,208490
+[info] CPU 241.7% | Mem 116MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  25
+  Templates: 7
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.46ms   9.45ms   29.60ms   62.10ms   91.80ms
+
+  1507129 requests in 5.01s, 1503043 responses
+  Throughput: 300.02K req/s
+  Bandwidth:  1.00GB/s
+  Status codes: 2xx=1503043, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1503043 / 1503043 responses (100.0%)
+  Reconnects: 58176
+  Per-template: 213926,214790,215274,215336,215480,214612,213625
+  Per-template-ok: 213926,214790,215274,215336,215480,214612,213625
+[info] CPU 242.7% | Mem 128MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     4096 (341/thread)
+  Pipeline:  1
+  Req/conn:  25
+  Templates: 7
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.45ms   9.27ms   31.90ms   56.40ms   72.60ms
+
+  1488871 requests in 5.00s, 1484775 responses
+  Throughput: 296.81K req/s
+  Bandwidth:  1018.39MB/s
+  Status codes: 2xx=1484775, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 1484775 / 1484775 responses (100.0%)
+  Reconnects: 57532
+  Per-template: 211282,211493,211948,212673,212803,212709,211867
+  Per-template-ok: 211282,211493,211948,212673,212803,212709,211867
+[info] CPU 238.1% | Mem 133MiB
+
+=== Best: 300008 req/s (CPU: 242.7%, Mem: 128MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+[info] skip: zix_http_uring does not subscribe to json-comp
+
+==============================================
+=== zix_http_uring / upload / 32c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     32 (3/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.65ms   9.55ms   26.60ms   61.50ms   113.60ms
+
+  10927 requests in 5.01s, 10930 responses
+  Throughput: 2.18K req/s
+  Bandwidth:  151.77KB/s
+  Status codes: 2xx=10930, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10930 / 10930 responses (100.0%)
+  Reconnects: 2190
+  Per-template: 2730,2726,2744,2730
+  Per-template-ok: 2730,2726,2744,2730
+[info] CPU 156.6% | Mem 22MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     32 (3/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.43ms   9.62ms   25.60ms   56.80ms   102.60ms
+
+  11410 requests in 5.01s, 11415 responses
+  Throughput: 2.28K req/s
+  Bandwidth:  158.43KB/s
+  Status codes: 2xx=11415, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11415 / 11415 responses (100.0%)
+  Reconnects: 2283
+  Per-template: 2854,2856,2854,2851
+  Per-template-ok: 2854,2856,2854,2851
+[info] CPU 148.6% | Mem 23MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     32 (3/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   12.45ms   9.87ms   25.30ms   57.30ms   108.20ms
+
+  11223 requests in 5.02s, 11224 responses
+  Throughput: 2.24K req/s
+  Bandwidth:  155.62KB/s
+  Status codes: 2xx=11224, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11224 / 11224 responses (100.0%)
+  Reconnects: 2240
+  Per-template: 2804,2799,2801,2820
+  Per-template-ok: 2804,2799,2801,2820
+[info] CPU 143.6% | Mem 26MiB
+
+=== Best: 2278 req/s (CPU: 148.6%, Mem: 23MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / upload / 256c (tool=gcannon) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     256 (21/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   100.43ms   86.60ms   165.20ms   292.30ms   407.80ms
+
+  11202 requests in 5.05s, 11159 responses
+  Throughput: 2.21K req/s
+  Bandwidth:  153.78KB/s
+  Status codes: 2xx=11159, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11159 / 11159 responses (100.0%)
+  Reconnects: 2163
+  Per-template: 2799,2774,2786,2800
+  Per-template-ok: 2799,2774,2786,2800
+[info] CPU 159.7% | Mem 58MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     256 (21/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   100.41ms   86.70ms   158.50ms   281.70ms   407.10ms
+
+  11419 requests in 5.04s, 11469 responses
+  Throughput: 2.28K req/s
+  Bandwidth:  158.47KB/s
+  Status codes: 2xx=11469, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11469 / 11469 responses (100.0%)
+  Reconnects: 2228
+  Per-template: 2866,2871,2865,2867
+  Per-template-ok: 2866,2871,2865,2867
+[info] CPU 146.6% | Mem 29MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+gcannon v0.5.3
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     256 (21/thread)
+  Pipeline:  1
+  Req/conn:  5
+  Templates: 4
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   101.44ms   87.70ms   159.20ms   296.50ms   426.20ms
+
+  11242 requests in 5.06s, 11266 responses
+  Throughput: 2.23K req/s
+  Bandwidth:  154.96KB/s
+  Status codes: 2xx=11266, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11266 / 11266 responses (100.0%)
+  Reconnects: 2192
+  Per-template: 2812,2809,2822,2823
+  Per-template-ok: 2812,2809,2822,2823
+[info] CPU 142.9% | Mem 26MiB
+
+=== Best: 2275 req/s (CPU: 146.6%, Mem: 29MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / static / 1024c (tool=wrk) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 1024 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.53ms   11.19ms 236.09ms   95.29%
+    Req/Sec    20.29k    10.38k   41.84k    58.59%
+  1193603 requests in 5.11s, 18.18GB read
+Requests/sec: 233680.26
+Transfer/sec:      3.56GB
+[info] CPU 255.1% | Mem 36MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 1024 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.62ms    6.40ms 121.50ms   93.75%
+    Req/Sec    19.85k     9.85k   40.45k    59.35%
+  1178257 requests in 5.10s, 17.95GB read
+Requests/sec: 231160.82
+Transfer/sec:      3.52GB
+[info] CPU 220.0% | Mem 36MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 1024 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.64ms    6.87ms 150.67ms   94.09%
+    Req/Sec    19.81k     9.86k   37.60k    57.29%
+  1179359 requests in 5.10s, 17.97GB read
+Requests/sec: 231314.72
+Transfer/sec:      3.52GB
+[info] CPU 212.8% | Mem 36MiB
+
+=== Best: 233680 req/s (CPU: 255.1%, Mem: 36MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / static / 4096c (tool=wrk) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 4096 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    16.06ms   21.47ms 441.99ms   92.91%
+    Req/Sec    17.53k     6.96k   33.89k    68.37%
+  1028380 requests in 5.10s, 15.67GB read
+Requests/sec: 201616.89
+Transfer/sec:      3.07GB
+[info] CPU 233.9% | Mem 88MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 4096 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    15.48ms   18.51ms 294.52ms   92.73%
+    Req/Sec    17.79k     7.21k   36.07k    66.55%
+  1026403 requests in 5.09s, 15.64GB read
+Requests/sec: 201473.52
+Transfer/sec:      3.07GB
+[info] CPU 208.2% | Mem 92MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 4096 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    13.94ms   14.61ms 252.49ms   90.53%
+    Req/Sec    17.98k     7.99k   35.98k    59.86%
+  1042223 requests in 5.08s, 15.88GB read
+Requests/sec: 205140.65
+Transfer/sec:      3.13GB
+[info] CPU 203.3% | Mem 92MiB
+
+=== Best: 205140 req/s (CPU: 203.3%, Mem: 92MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+
+==============================================
+=== zix_http_uring / static / 6800c (tool=wrk) ===
+==============================================
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 6800 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    28.61ms   33.03ms 405.73ms   90.59%
+    Req/Sec    17.04k     6.59k   32.27k    67.03%
+  982182 requests in 5.09s, 14.96GB read
+Requests/sec: 193111.45
+Transfer/sec:      2.94GB
+[info] CPU 232.1% | Mem 126MiB
+
+[run 2/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 6800 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    29.38ms   30.08ms 468.69ms   91.48%
+    Req/Sec    16.94k     6.34k   35.42k    68.23%
+  982246 requests in 5.11s, 14.96GB read
+Requests/sec: 192285.07
+Transfer/sec:      2.93GB
+[info] CPU 208.6% | Mem 121MiB
+
+[run 3/3]
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+Running 5s test @ http://localhost:8080
+  12 threads and 6800 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    27.58ms   30.49ms 572.00ms   91.82%
+    Req/Sec    17.66k     7.24k   36.54k    67.16%
+  1002017 requests in 5.10s, 15.26GB read
+Requests/sec: 196409.95
+Transfer/sec:      2.99GB
+[info] CPU 203.7% | Mem 125MiB
+
+=== Best: 196409 req/s (CPU: 203.7%, Mem: 125MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-zix_http_uring
+httparena-bench-zix_http_uring
+[info] skip: zix_http_uring does not subscribe to async-db
+[info] skip: zix_http_uring does not subscribe to baseline-h2
+[info] skip: zix_http_uring does not subscribe to static-h2
+[info] skip: zix_http_uring does not subscribe to baseline-h3
+[info] skip: zix_http_uring does not subscribe to static-h3
+[info] skip: zix_http_uring does not subscribe to unary-grpc
+[info] skip: zix_http_uring does not subscribe to unary-grpc-tls
+[info] skip: zix_http_uring does not subscribe to echo-ws
+[info] skip: zix_http_uring does not subscribe to echo-ws-pipeline
+[info] skip: zix_http_uring does not subscribe to stream-grpc
+[info] skip: zix_http_uring does not subscribe to stream-grpc-tls
+[info] restoring loopback MTU to 65536
+
+# memory (from isolate-mem-zix_http_uring-20260620-155056.txt):
+#   total: peak=121.9MiB  steady_median=32.2MiB  samples=190
+#   anon  median=13.5MiB
+#   sock  median=1.2MiB
+#   slab  median=3.2MiB
+#   --- top regions at peak (from isolate-smaps-zix_http_uring-20260620-155056.txt) ---
+#       83.2MiB  [anon]
+#        6.2MiB  anon_inode:[io_uring]
+#        0.4MiB  /zix
+#        0.0MiB  [stack]
+#        0.0MiB  [vdso]
+#        0.0MiB  [vvar_vclock]
+#        0.0MiB  [vvar]
+#        0.0MiB  [vsyscall]
