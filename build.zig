@@ -21,13 +21,12 @@ pub const ZIG_SEMVER = struct {
 ///   dirExists below comptime-branches on the same check. Anything outside this
 ///   range needs its own port first (rnd/roadmap-0.5.x.md, "Zig version decision").
 fn ensureSupportedZig() void {
-    const zig = builtin.zig_version;
-    if (zig.major == 0 and (zig.minor == 16 or zig.minor == 17)) return;
+    if (ZIG_SEMVER.major == 0 and (ZIG_SEMVER.minor == 16 or ZIG_SEMVER.minor == 17)) return;
 
     @compileError(std.fmt.comptimePrint(
         "zix build requires Zig 0.16.x or 0.17.x, found {d}.{d}.{d}. " ++
             "Use zig-0.16 (or a 0.17 toolchain).",
-        .{ zig.major, zig.minor, zig.patch },
+        .{ ZIG_SEMVER.MAJOR, ZIG_SEMVER.MINOR, ZIG_SEMVER.PATCH },
     ));
 }
 
@@ -56,7 +55,7 @@ fn dirExists(b: *std.Build, sub_path: []const u8) bool {
 pub fn build(b: *std.Build) void {
     ensureSupportedZig();
 
-    const zon = @import("build.zig.zon");
+    const zon = @import("build.ZIG_SEMVER.zon");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
