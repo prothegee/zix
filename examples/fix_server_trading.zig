@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9500;
+const PORT: u16 = 9053;
 const COMP_ID: []const u8 = "BROKER_ZIX";
 const LOG_DIR: []const u8 = "./logs";
 const LOG_FILE: []const u8 = "fix_trading";
