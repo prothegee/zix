@@ -1,4 +1,4 @@
-// Test runner for zix.Udp.Server (udp_server, UDP port 9100).
+// Test runner for zix.Udp.Server (udp_server, UDP port 9054).
 // Spawns the server, sends one packet, asserts broadcast echo received, kills server.
 //
 // Invoked by `zig build test-runner-udp`.
@@ -13,7 +13,7 @@ const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 
-const SERVER_PORT: u16 = 9100;
+const SERVER_PORT: u16 = 9054;
 const BIND_PORT: u16 = 9191;
 const WAIT_MS: i64 = 600;
 
@@ -45,7 +45,7 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, server_path: []const u8) !void {
