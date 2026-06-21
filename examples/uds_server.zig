@@ -11,8 +11,8 @@
 //
 // Then Process B in a second terminal:
 // zig build example-uds_http && ./zig-out/bin/example-uds_http
-// curl http://localhost:9200/data
-// curl -N http://localhost:9200/stream
+// curl http://localhost:9055/data
+// curl -N http://localhost:9055/stream
 
 const std = @import("std");
 const zix = @import("zix");
