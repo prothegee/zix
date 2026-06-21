@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9500;
+const PORT: u16 = 9051;
 const COMP_ID: []const u8 = "ZIX";
 const DISPATCH_MODEL: zix.Fix.DispatchModel = .EPOLL;
 const WORKERS: usize = 0; // ignored by EPOLL (single event loop thread handles accept)
