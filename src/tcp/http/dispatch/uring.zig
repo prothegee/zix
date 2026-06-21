@@ -23,6 +23,7 @@ const parser = @import("../parser.zig");
 const rcache = @import("../../../utils/response_cache.zig");
 const resp_mod = @import("../response.zig");
 const setCache = resp_mod.setCache;
+const setCompression = resp_mod.setCompression;
 const RespSink = resp_mod.RespSink;
 const fdWriteAll = resp_mod.fdWriteAll;
 const uring = @import("../../../multiplexers/ring.zig");
@@ -76,6 +77,11 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
         setCache(null, 0);
         response_cache.deinit();
     };
+
+    // Response compression, stateless per worker. Active under .EPOLL and .URING,
+    // like the cache.
+    if (cfg.compression) setCompression(cfg.compression, cfg.compression_min_size, cfg.compression_max_out);
+    defer setCompression(false, 0, 0);
 
     const slots = slab.mapZeroedSlots(?*UringHttpConn, MAX_FD) catch return;
 
@@ -380,8 +386,14 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
+    // std.compress.flate.Compress is about 230 KB and is built on the handler's stack
+    // frame, so a compressing handler (sendNegotiated) needs more than the default
+    // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
+    // almost no RSS, and the bump applies only when compression is enabled.
+    const worker_stack: usize = if (cfg.compression) 2 * 1024 * 1024 else 512 * 1024;
+
     for (threads, 0..) |*t, idx| {
-        t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, uringWorker, .{ server, io, idx });
+        t.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx });
     }
 
     for (threads) |t| t.join();
