@@ -11,6 +11,7 @@ const slab = @import("../../../multiplexers/slab.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
 const common = @import("common.zig");
+const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
 const setNoDelay = common.setNoDelay;
 const pinToCpu = common.pinToCpu;
@@ -952,6 +953,17 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 }
 
 pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) !void {
+    // Runtime probe: io_uring can be unavailable on this host (seccomp/sandbox,
+    // RLIMIT_MEMLOCK, or an old kernel). Without this, every worker would fail
+    // setup, return, and the server would vanish right after binding (a confusing
+    // ServerStartTimeout downstream). Fall back to the EPOLL shared-nothing loop.
+    var probe = initUringRing() catch |err| {
+        logSystem(config, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
+
+        return epoll_model.runEpoll(config, handler_fn, raw_fn);
+    };
+    probe.deinit();
+
     const cpu = getAvailableCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
