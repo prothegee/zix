@@ -18,6 +18,17 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_client_response);
 }
 
+test "zix behaviour: ServerConfig, compression defaults match Http1" {
+    const cfg = zix.Http.ServerConfig{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9000,
+    };
+    try std.testing.expectEqual(false, cfg.compression);
+    try std.testing.expectEqual(@as(usize, 256), cfg.compression_min_size);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.compression_max_out);
+}
+
 test "zix behaviour: ServerConfig, timeout defaults are disabled (zero)" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
