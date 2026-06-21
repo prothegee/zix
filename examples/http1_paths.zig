@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9105;
+const PORT: u16 = 9023;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -45,9 +45,9 @@ fn splitSegments(path: []const u8, out: [][]const u8) usize {
 // ... up to MAX_PATH_SEGMENTS segments after /path
 // More than MAX_PATH_SEGMENTS -> 404
 //
-// curl usage: curl -X GET "http://localhost:9105/path"
-// curl usage: curl -X GET "http://localhost:9105/path/hello"
-// curl usage: curl -X GET "http://localhost:9105/path/hello/world"
+// curl usage: curl -X GET "http://localhost:9023/path"
+// curl usage: curl -X GET "http://localhost:9023/path/hello"
+// curl usage: curl -X GET "http://localhost:9023/path/hello/world"
 fn pathsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -88,8 +88,8 @@ fn pathsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
 
 // GET /path/user/:id
 //
-// curl usage: curl -X GET "http://localhost:9105/path/user/alice"
-// curl usage: curl -X GET "http://localhost:9105/path/user/123"
+// curl usage: curl -X GET "http://localhost:9023/path/user/alice"
+// curl usage: curl -X GET "http://localhost:9023/path/user/123"
 fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -112,9 +112,9 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // GET /path/:tenant-id/:tenant-branch
 // Matches /path/<seg1>/<seg2> where seg1 != "user".
 //
-// curl usage: curl -X GET "http://localhost:9105/path/acme/main"
-// curl usage: curl -X GET "http://localhost:9105/path/acme/dev"
-// curl usage: curl -X GET "http://localhost:9105/path/user/alice"  (-> userHandler)
+// curl usage: curl -X GET "http://localhost:9023/path/acme/main"
+// curl usage: curl -X GET "http://localhost:9023/path/acme/dev"
+// curl usage: curl -X GET "http://localhost:9023/path/user/alice"  (-> userHandler)
 fn tenantHandler(head: *const zix.Http1.ParsedHead, body: []const u8, segs: []const []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
