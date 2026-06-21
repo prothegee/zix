@@ -25,6 +25,24 @@ pub const HttpServerConfig = struct {
     kernel_backlog: u31 = 1024 * 4,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
     max_recv_buf: usize = 1024 * 4,
+    /// Enable response compression with Accept-Encoding negotiation (gzip and
+    /// deflate, brotli later). Default false. Compression spends CPU to shrink the
+    /// body, which only pays off over a real network, so leaving it off keeps the
+    /// perf gate untouched. Same field set and names as Http1, for config consistency.
+    ///
+    /// Note:
+    /// - Active under the .EPOLL and .URING dispatch models (shared-nothing, one owner
+    ///   per worker), like the response cache. A handler opts in by calling
+    ///   resp.sendNegotiated(req, body) instead of resp.send(body).
+    compression: bool = false,
+    /// Minimum response body size in bytes before compression is attempted. A body
+    /// under this floor is sent uncompressed, since the header and CPU cost outweighs
+    /// the saving. Mirrors utils.compression.min_size_default.
+    compression_min_size: usize = 256,
+    /// Max output size in bytes for one compressed response, across ALL codings
+    /// (gzip, deflate, and later brotli). A response whose compressed form would
+    /// exceed this is sent uncompressed instead.
+    compression_max_out: usize = 256 * 1024,
     /// Initial arena capacity in bytes per connection. Grows automatically if exceeded.
     max_allocator_size: usize = 1024 * 4,
     /// Write buffer size in bytes per response.

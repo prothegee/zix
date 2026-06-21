@@ -15,6 +15,13 @@ pub const CHECKSUM_MODULUS: u32 = 256;
 
 /// FIX 4.x standard tag numbers (nonexhaustive).
 /// Use @enumFromInt for custom or extension tags not listed here.
+///
+/// Note:
+/// - Members are PascalCase ON PURPOSE: they mirror the FIX protocol field names
+///   verbatim (ClOrdID, MsgSeqNum, HeartBtInt), exactly as the spec and every FIX
+///   engine spell them. This is the one enum exempt from the project UPPER_CASE
+///   convention. Do NOT rename to UPPER_CASE or otherwise change a member until the
+///   FIX community updates the field name in the spec.
 pub const Tag = enum(u16) {
     Account = 1,
     AvgPx = 6,

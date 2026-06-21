@@ -25,6 +25,8 @@ pub fn addSteps(
         .{ "test-runner-http1-mixed", "tests/runner/http1_runner.zig", "tr-server-http1-mixed", "examples/http1_basic_3_mixed.zig", "9017", "", "", "" },
         .{ "test-runner-http1-epoll", "tests/runner/http1_runner.zig", "tr-server-http1-epoll", "examples/http1_basic_4_epoll.zig", "9018", "", "", "" },
         .{ "test-runner-http1-uring", "tests/runner/http1_runner.zig", "tr-server-http1-uring", "examples/http1_basic_5_uring.zig", "9019", "", "", "" },
+        .{ "test-runner-http1-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http1-compression", "examples/http1_compression.zig", "9058", "", "", "" },
+        .{ "test-runner-http-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http-compression", "examples/http_compression.zig", "9059", "", "", "" },
         .{ "test-runner-grpc-async", "tests/runner/grpc_runner.zig", "tr-server-grpc-async", "examples/grpc_server_1_async.zig", "9032", "", "", "" },
         .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "9033", "", "", "" },
         .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "9034", "", "", "" },

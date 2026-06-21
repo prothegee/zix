@@ -5,6 +5,7 @@ const Status = @import("status.zig");
 const Content = @import("content.zig");
 const Request = @import("request.zig").Request;
 const rc = @import("../../utils/response_cache.zig");
+const compression = @import("../../utils/compression/compression.zig");
 
 // --------------------------------------------------------- //
 
@@ -461,6 +462,56 @@ pub const Response = struct {
 
         return fdWriteAll(self.fd, buf[0..len]);
     }
+
+    /// Send body_data with Accept-Encoding negotiation. Compresses only when the
+    /// worker has compression enabled, the client accepts a producible coding, the
+    /// body clears the size floor and is not an already-compressed media type, and the
+    /// compressed result is both smaller than the original and within the cap. In every
+    /// other case the body is sent uncompressed, identical to send().
+    ///
+    /// Note:
+    /// - Opt-in like sendCached: the handler passes the request for its Accept-Encoding.
+    /// - The compressed path sets Content-Encoding and Vary: Accept-Encoding, then
+    ///   reuses send() so Content-Length and the rest of the header block stay correct.
+    /// - Does not touch the cache. Caching the compressed bytes per (key, encoding) is
+    ///   a separate slice, since the cache key does not yet include the coding.
+    ///
+    /// Param:
+    /// req - *const Request (for the Accept-Encoding header)
+    /// body_data - []const u8 (uncompressed body)
+    ///
+    /// Return:
+    /// - void
+    /// - propagates send() and addHeader errors
+    pub fn sendNegotiated(self: *Response, req: *const Request, body_data: []const u8) !void {
+        if (!tl_compression) return self.send(body_data);
+
+        const accept = req.header("accept-encoding");
+        const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
+            self.setStatus(.NOT_ACCEPTABLE);
+
+            return self.send("");
+        };
+
+        const content_type = if (self.content_type) |ct| ct.asString() else "";
+        if (encoding == .IDENTITY or !compression.shouldCompress(body_data.len, content_type, tl_compression_min_size)) {
+            return self.send(body_data);
+        }
+
+        const encoded = compression.encode(std.heap.smp_allocator, encoding, body_data, .DEFAULT) catch {
+            return self.send(body_data);
+        };
+        defer std.heap.smp_allocator.free(encoded);
+
+        if (encoded.len > tl_compression_max_out or encoded.len >= body_data.len) {
+            return self.send(body_data);
+        }
+
+        try self.addHeader("Content-Encoding", encoding.contentEncoding().?);
+        try self.addHeader("Vary", "Accept-Encoding");
+
+        return self.send(encoded);
+    }
 };
 
 // --------------------------------------------------------- //
@@ -481,6 +532,24 @@ pub fn setCache(cache: ?*rc.ResponseCache, default_ttl_ms: u32) void {
 /// Worker default cache freshness in milliseconds.
 pub fn cacheTtl() u32 {
     return tl_cache_ttl_ms;
+}
+
+/// Whether response compression is enabled for this worker. Off unless the server
+/// installs it from config.compression, in which case sendNegotiated sends uncompressed.
+pub threadlocal var tl_compression: bool = false;
+
+/// Body size floor for compression, installed from config.compression_min_size.
+pub threadlocal var tl_compression_min_size: usize = compression.min_size_default;
+
+/// Compressed-output cap, installed from config.compression_max_out. A compressed
+/// result above this is discarded and the response is sent uncompressed.
+pub threadlocal var tl_compression_max_out: usize = 256 * 1024;
+
+/// Install (or clear) the compression policy for this worker.
+pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
+    tl_compression = enabled;
+    tl_compression_min_size = min_size;
+    tl_compression_max_out = max_out;
 }
 
 /// Cache key for a request: method name, path, and query string.
@@ -765,6 +834,89 @@ test "zix http response cache: sendCached stores then serveCached writes identic
     var second: [256]u8 = undefined;
     const n2 = try std.posix.read(fds[0], &second);
     try std.testing.expectEqualStrings(first[0..n1], second[0..n2]);
+}
+
+fn negotiatedHttpRoundtrip(raw_req: []const u8, ct: Content.Type, body: []const u8, arena: std.mem.Allocator, out: []u8) !usize {
+    var req = try Request.fromRaw(raw_req, arena);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var res = Response.init(fds[1], true, undefined, arena, 16);
+    res.setContentType(ct);
+    try res.sendNegotiated(&req, body);
+
+    return std.posix.read(fds[0], out);
+}
+
+test "zix http response: sendNegotiated compresses when gzip is accepted" {
+    setCompression(true, 256, 256 * 1024);
+    defer setCompression(false, 0, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedHttpRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", .TEXT_PLAIN, &body, arena.allocator(), &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding: gzip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Vary: Accept-Encoding") != null);
+
+    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n").?;
+    const restored = try compression.flate.decompressGzipAlloc(std.testing.allocator, resp[sep + 4 ..], 2048);
+    defer std.testing.allocator.free(restored);
+
+    try std.testing.expectEqualSlices(u8, &body, restored);
+}
+
+test "zix http response: sendNegotiated sends uncompressed when compression is off" {
+    setCompression(false, 0, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedHttpRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", .TEXT_PLAIN, &body, arena.allocator(), &recv);
+
+    try std.testing.expect(std.mem.indexOf(u8, recv[0..n], "Content-Encoding") == null);
+}
+
+test "zix http response: sendNegotiated skips bodies under the floor" {
+    setCompression(true, 256, 256 * 1024);
+    defer setCompression(false, 0, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var recv: [256]u8 = undefined;
+    const n = try negotiatedHttpRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", .TEXT_PLAIN, "hi", arena.allocator(), &recv);
+
+    try std.testing.expect(std.mem.indexOf(u8, recv[0..n], "Content-Encoding") == null);
+}
+
+test "zix http response: sendNegotiated skips already-compressed media types" {
+    setCompression(true, 256, 256 * 1024);
+    defer setCompression(false, 0, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedHttpRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", .IMAGE_JPEG, &body, arena.allocator(), &recv);
+
+    try std.testing.expect(std.mem.indexOf(u8, recv[0..n], "Content-Encoding") == null);
 }
 
 test "zix http response cache: cached bytes match a plain send" {

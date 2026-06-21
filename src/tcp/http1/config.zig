@@ -23,8 +23,29 @@ pub const Http1ServerConfig = struct {
     /// give WS connections more room to accumulate pipelined frames without
     /// forcing a compact+re-read on every fill.
     ws_recv_buf: usize = 0,
-    /// Max output size for gzip-compressed responses.
-    max_gzip_out: usize = 256 * 1024,
+    /// Enable response compression with Accept-Encoding negotiation (gzip and
+    /// deflate, brotli later). Default false. Compression spends CPU to shrink the
+    /// body, which only pays off over a real network: on a loopback benchmark it is
+    /// a pure CPU add, so leaving it off keeps the URING perf gate untouched.
+    ///
+    /// Note:
+    /// - Not yet read at runtime. The engine write-path wiring (negotiate, encode,
+    ///   cache the compressed bytes) lands with the compression integration slice.
+    compression: bool = false,
+    /// Minimum response body size in bytes before compression is attempted. A body
+    /// under this floor is sent uncompressed, since the header and CPU cost outweighs
+    /// the saving. Mirrors utils.compression.min_size_default. Read once compression
+    /// is wired into the engine.
+    compression_min_size: usize = 256,
+    /// Max output size in bytes for one compressed response, across ALL codings
+    /// (gzip, deflate, and later brotli): the codec-agnostic successor to the former
+    /// max_gzip_out. A response whose compressed form would exceed this is sent
+    /// uncompressed instead.
+    ///
+    /// Note:
+    /// - Currently informational. The live cap is the compile-time core.GZIP_OUT_SIZE
+    ///   until the engine reads this field with the compression integration slice.
+    compression_max_out: usize = 256 * 1024,
     /// No-op with the lazy engine. Kept for source compatibility.
     max_headers: u8 = 16,
     /// Accept thread count (0 = cpu_count). Ignored by .ASYNC.

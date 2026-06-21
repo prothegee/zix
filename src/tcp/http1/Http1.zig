@@ -49,6 +49,7 @@ pub const writeSimple = core.writeSimple;
 pub const writeSimpleNoBody = core.writeSimpleNoBody;
 pub const writeJson = core.writeJson;
 pub const writeGzip = core.writeGzip;
+pub const writeNegotiated = core.writeNegotiated;
 pub const writeChunkedStart = core.writeChunkedStart;
 pub const writeChunk = core.writeChunk;
 pub const writeChunkedEnd = core.writeChunkedEnd;

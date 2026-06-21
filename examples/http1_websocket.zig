@@ -13,7 +13,7 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .lean => 4 * 1024,
     .throughput => 16 * 1024,
 };
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0;
 
@@ -73,7 +73,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
     });

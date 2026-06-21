@@ -947,6 +947,11 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 response_cache.deinit();
             };
 
+            // Response compression, stateless per worker (no owned structure). Active
+            // under .EPOLL and .URING, like the cache.
+            if (config.compression) core.setCompression(config.compression, config.compression_min_size, config.compression_max_out);
+            defer core.setCompression(false, 0, 0);
+
             worker.run();
         }
     }.run;
@@ -972,10 +977,16 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
+    // std.compress.flate.Compress is about 230 KB and is built on the handler's stack
+    // frame, so a compressing handler (writeNegotiated) needs more than the default
+    // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
+    // almost no RSS, and the bump applies only when compression is enabled.
+    const worker_stack: usize = if (config.compression) 2 * 1024 * 1024 else 512 * 1024;
+
     const worker = uringWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = worker_stack },
             worker,
             .{UringWorkerCtx{ .config = config, .worker_id = worker_id }},
         );
