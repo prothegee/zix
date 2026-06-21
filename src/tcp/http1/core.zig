@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const cache = @import("../../utils/response_cache.zig");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
@@ -276,7 +277,12 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
             if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
             if (std.ascii.eqlIgnoreCase(value, "keep-alive")) keep_alive = true;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) chunked_request = true;
+            const chunked_pos = if (comptime ZIG_SEMVER.MINOR == 16)
+                std.ascii.indexOfIgnoreCase(value, "chunked")
+            else
+                std.ascii.findIgnoreCase(value, "chunked");
+
+            if (chunked_pos != null) chunked_request = true;
         } else if (std.ascii.eqlIgnoreCase(name, "expect")) {
             if (std.ascii.eqlIgnoreCase(value, "100-continue")) expect_continue = true;
         }
