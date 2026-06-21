@@ -1,6 +1,6 @@
 //! gRPC h2c multi-service server example: ASYNC dispatch model.
 //! One server, one port, two services: each method has its own handler.
-//! Port: 10102
+//! Port: 9042
 //!
 //! Services:
 //! helloworld.Greeter / SayHello            (examples/protobuf/helloworld.proto)
@@ -15,11 +15,11 @@
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//! -d '{"name":"world"}' localhost:10102 helloworld.Greeter/SayHello
+//! -d '{"name":"world"}' localhost:9042 helloworld.Greeter/SayHello
 //!
 //! grpcurl -proto examples/protobuf/location.proto -plaintext \
 //! -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
-//! localhost:10102 location.Location/SendLocationAndSave
+//! localhost:9042 location.Location/SendLocationAndSave
 
 const std = @import("std");
 const zix = @import("zix");
@@ -107,7 +107,7 @@ pub fn main(process: std.process.Init) !void {
         .{
             .io = process.io,
             .ip = "127.0.0.1",
-            .port = 10102,
+            .port = 9042,
             .dispatch_model = .ASYNC,
             .logger = &logger,
         },
