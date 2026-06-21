@@ -1,7 +1,7 @@
 //! gRPC context timeout example.
 //! Demonstrates handler_timeout_ms (global cap), Route.timeout_ms (per-route),
 //! ctx.isExpired() (deadline check), and ctx.deadline_ns override at runtime.
-//! Port: 8084
+//! Port: 9037
 //!
 //! Run:
 //! zig build example-grpc_timeout
@@ -9,11 +9,11 @@
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//! -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
+//! -d '{"name":"world"}' 127.0.0.1:9037 helloworld.Greeter/SayHello
 //!
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
 //! -rpc-header 'grpc-timeout: 1S' \
-//! -d '{"name":"world"}' 127.0.0.1:8084 helloworld.Greeter/SayHello
+//! -d '{"name":"world"}' 127.0.0.1:9037 helloworld.Greeter/SayHello
 
 const std = @import("std");
 const zix = @import("zix");
@@ -95,7 +95,7 @@ pub fn main(process: std.process.Init) !void {
         .{
             .io = process.io,
             .ip = "127.0.0.1",
-            .port = 8084,
+            .port = 9037,
             .dispatch_model = .ASYNC,
             // Global fallback cap: 5s. Applies to any route with timeout_ms = 0.
             // Combined with Route.timeout_ms and the client grpc-timeout header,
