@@ -33,6 +33,8 @@ pub const Logger = @import("logger/logger.zig").Logger;
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const response_cache = @import("utils/response_cache.zig");
+
+    pub const compression = @import("utils/compression/compression.zig");
 };
 
 // --------------------------------------------------------- //
@@ -97,6 +99,8 @@ test "zix tests: unit test" {
     // # zix.Utils
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
+    std.testing.refAllDecls(@import("utils/compression/flate.zig"));
+    std.testing.refAllDecls(@import("utils/compression/compression.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));
