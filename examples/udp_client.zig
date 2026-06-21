@@ -1,6 +1,6 @@
 // Usage:
-// zig run examples/udp_client.zig -- --bind-port 9101 --server-port 9100
-// zig run examples/udp_client.zig -- --bind-port 9102 --server-port 9100
+// zig run examples/udp_client.zig -- --bind-port 9056 --server-port 9054
+// zig run examples/udp_client.zig -- --bind-port 9057 --server-port 9054
 //
 // Run multiple instances with different --bind-port values to observe broadcast.
 // Each client will receive packets relayed from all other connected clients.
@@ -26,8 +26,8 @@ const Packet = extern struct {
 // --------------------------------------------------------- //
 
 const SERVER_IP: []const u8 = "127.0.0.1";
-const SERVER_PORT: u16 = 9100;
-const CLIENT_BIND_PORT: u16 = 9101;
+const SERVER_PORT: u16 = 9054;
+const CLIENT_BIND_PORT: u16 = 9056;
 const SEND_INTERVAL_MS: u64 = 1000;
 
 // --------------------------------------------------------- //
