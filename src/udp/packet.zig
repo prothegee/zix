@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const Endianness = @import("config.zig").Endianness;
+const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
 
@@ -44,8 +45,15 @@ pub fn fromEndian(comptime Packet: type, pkt: Packet, endianness: Endianness) Pa
 // --------------------------------------------------------- //
 
 fn swapFields(comptime T: type, ptr: *T) void {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        swapField(field.type, &@field(ptr.*, field.name));
+    if (comptime ZIG_SEMVER.MINOR == 16) {
+        inline for (@typeInfo(T).@"struct".fields) |field| {
+            swapField(field.type, &@field(ptr.*, field.name));
+        }
+    } else {
+        const struct_info = @typeInfo(T).@"struct";
+        inline for (struct_info.field_names, struct_info.field_types) |field_name, FieldType| {
+            swapField(FieldType, &@field(ptr.*, field_name));
+        }
     }
 }
 
@@ -53,7 +61,10 @@ fn swapField(comptime T: type, ptr: *T) void {
     switch (@typeInfo(T)) {
         .int => ptr.* = @byteSwap(ptr.*),
         .float => |info| {
-            const Int = std.meta.Int(.unsigned, info.bits);
+            const Int = if (comptime ZIG_SEMVER.MINOR == 16)
+                std.meta.Int(.unsigned, info.bits)
+            else
+                @Int(.unsigned, info.bits);
             ptr.* = @bitCast(@byteSwap(@as(Int, @bitCast(ptr.*))));
         },
         .array => |arr| {

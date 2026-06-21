@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9111;
+const PORT: u16 = 9028;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
 const KERNEL_BACKLOG: u31 = 1024;
 // Comptime per-deployment tuning profile (ADR-041): .lean uses a small recv
@@ -13,7 +13,7 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .lean => 4 * 1024,
     .throughput => 16 * 1024,
 };
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0;
 
@@ -35,8 +35,8 @@ fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 // owned WebSocket requires dispatch_model .EPOLL.
 //
 // Connect:
-// wscat    -c "ws://localhost:9111/ws"
-// websocat    "ws://localhost:9111/ws"
+// wscat    -c "ws://localhost:9028/ws"
+// websocat    "ws://localhost:9028/ws"
 fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
 
@@ -73,7 +73,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
     });

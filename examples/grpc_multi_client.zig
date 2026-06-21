@@ -1,7 +1,7 @@
 //! gRPC h2c multi-service client example.
-//! Calls two services on the same server (port 10102), one connection.
+//! Calls two services on the same server (port 9042), one connection.
 //!
-//! Run (grpc_multi_server must be running on port 10102):
+//! Run (grpc_multi_server must be running on port 9042):
 //! zig build example-grpc_multi_client
 //! ./zig-out/bin/example-grpc_multi_client
 
@@ -11,9 +11,9 @@ const zix = @import("zix");
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    std.debug.print("connecting to multi-service server at 127.0.0.1:10102\n", .{});
+    std.debug.print("connecting to multi-service server at 127.0.0.1:9042\n", .{});
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 10102 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 9042 }, io);
     defer client.deinit();
 
     std.debug.print("connected\n", .{});

@@ -2,11 +2,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9106;
+const PORT: u16 = 9024;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
@@ -57,7 +57,7 @@ fn detectContentType(path: []const u8) []const u8 {
 // --------------------------------------------------------- //
 
 // GET /
-// curl usage: curl -X GET "http://localhost:9106/"
+// curl usage: curl -X GET "http://localhost:9024/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -69,7 +69,7 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // Filename comes from query param: /upload?name=file.txt
 //
 // curl usage:
-// curl -X POST "http://localhost:9106/upload?name=file.txt" --data-binary @/path/to/file.txt
+// curl -X POST "http://localhost:9024/upload?name=file.txt" --data-binary @/path/to/file.txt
 //
 // Body-size limit (zix.Http1 has no per-request arena, unlike zix.Http): the body handed to
 // a handler is capped by the dispatch model, NOT by max_recv_buf.
@@ -138,9 +138,9 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 // 3. File found, sec=abc123              -> 200 with MIME type resolved from extension
 //
 // curl usage:
-// curl -X GET "http://localhost:9106/secret/file.txt?sec=abc123"
-// curl -X GET "http://localhost:9106/secret/file.txt"               (-> 403 if file exists)
-// curl -X GET "http://localhost:9106/secret/missing.txt?sec=abc123" (-> 404)
+// curl -X GET "http://localhost:9024/secret/file.txt?sec=abc123"
+// curl -X GET "http://localhost:9024/secret/file.txt"               (-> 403 if file exists)
+// curl -X GET "http://localhost:9024/secret/missing.txt?sec=abc123" (-> 404)
 fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -229,7 +229,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,

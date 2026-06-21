@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const SERVER_IP: []const u8 = "127.0.0.1";
-const SERVER_PORT: u16 = 9500;
+const SERVER_PORT: u16 = 9053;
 const COMP_ID: []const u8 = "TRADER_ALPHA";
 const TARGET_COMP_ID: []const u8 = "BROKER_ZIX";
 

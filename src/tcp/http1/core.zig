@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const cache = @import("../../utils/response_cache.zig");
+const compression = @import("../../utils/compression/compression.zig");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const GZIP_OUT_SIZE: usize = 256 * 1024;
@@ -154,6 +156,25 @@ pub fn cacheTtl() u32 {
     return tl_cache_ttl_ms;
 }
 
+/// Whether response compression is enabled for this worker. Off unless the server
+/// installs it from config.compression. When off, writeNegotiated always writes
+/// uncompressed.
+pub threadlocal var tl_compression: bool = false;
+
+/// Body size floor for compression, installed from config.compression_min_size.
+pub threadlocal var tl_compression_min_size: usize = compression.min_size_default;
+
+/// Compressed-output cap, installed from config.compression_max_out. A compressed
+/// result above this is discarded and the response is sent uncompressed.
+pub threadlocal var tl_compression_max_out: usize = GZIP_OUT_SIZE;
+
+/// Install or clear the compression policy for this worker.
+pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
+    tl_compression = enabled;
+    tl_compression_min_size = min_size;
+    tl_compression_max_out = max_out;
+}
+
 /// Look up a full cached response for this request. Returns the cached bytes
 /// when caching is enabled and a fresh entry exists, else null. The key is
 /// hash(method, path, query). Write the returned bytes with fdWriteAll.
@@ -276,7 +297,12 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
             if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
             if (std.ascii.eqlIgnoreCase(value, "keep-alive")) keep_alive = true;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) chunked_request = true;
+            const chunked_pos = if (comptime ZIG_SEMVER.MINOR == 16)
+                std.ascii.indexOfIgnoreCase(value, "chunked")
+            else
+                std.ascii.findIgnoreCase(value, "chunked");
+
+            if (chunked_pos != null) chunked_request = true;
         } else if (std.ascii.eqlIgnoreCase(name, "expect")) {
             if (std.ascii.eqlIgnoreCase(value, "100-continue")) expect_continue = true;
         }
@@ -399,6 +425,7 @@ fn statusPhrase(code: u16) []const u8 {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        406 => "Not Acceptable",
         408 => "Request Timeout",
         416 => "Range Not Satisfiable",
         431 => "Request Header Fields Too Large",
@@ -846,6 +873,66 @@ pub fn writeGzip(
     );
     try fdWriteAll(fd, h);
     try fdWriteAll(fd, compressed);
+}
+
+/// Response with Accept-Encoding negotiation: the body is compressed only when the
+/// worker has compression enabled, the client accepts a producible coding, the body
+/// clears the size floor and is not an already-compressed media type, and the
+/// compressed result is both smaller than the original and within the cap. In every
+/// other case the body is sent uncompressed, byte-identical to writeSimple.
+///
+/// Note:
+/// - This is the negotiating replacement for a hand-called writeGzip. It does NOT
+///   touch the response cache. Caching the compressed bytes per (key, encoding) is a
+///   separate slice, since the cache key does not yet include the coding.
+/// - The compressed response sets Content-Encoding and Vary: Accept-Encoding.
+///
+/// Param:
+/// fd - std.posix.fd_t (connection)
+/// head - *const ParsedHead (for the Accept-Encoding header)
+/// status - u16 (response status)
+/// content_type - []const u8 (response Content-Type)
+/// body - []const u8 (uncompressed body)
+///
+/// Return:
+/// - void
+/// - error.BrokenPipe on a failed write
+pub fn writeNegotiated(
+    fd: std.posix.fd_t,
+    head: *const ParsedHead,
+    status: u16,
+    content_type: []const u8,
+    body: []const u8,
+) !void {
+    if (!tl_compression) return writeSimple(fd, status, content_type, body);
+
+    const accept = getHeader(head, "accept-encoding");
+    const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
+        return writeSimpleNoBody(fd, 406, content_type, 0);
+    };
+
+    if (encoding == .IDENTITY or !compression.shouldCompress(body.len, content_type, tl_compression_min_size)) {
+        return writeSimple(fd, status, content_type, body);
+    }
+
+    const encoded = compression.encode(std.heap.smp_allocator, encoding, body, .DEFAULT) catch {
+        return writeSimple(fd, status, content_type, body);
+    };
+    defer std.heap.smp_allocator.free(encoded);
+
+    if (encoded.len > tl_compression_max_out or encoded.len >= body.len) {
+        return writeSimple(fd, status, content_type, body);
+    }
+
+    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &hdr,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
+        .{ status, statusPhrase(status), content_type, encoding.contentEncoding().?, encoded.len },
+    );
+
+    try fdWriteAll(fd, header);
+    try fdWriteAll(fd, encoded);
 }
 
 /// Start a chunked response. Call writeChunk for each chunk, then writeChunkedEnd.
@@ -1416,6 +1503,96 @@ test "zix http1: writeWithCache stores then a later lookup hits with identical b
 
     // second request: hit returns the identical cached bytes
     try std.testing.expectEqualStrings(resp, cacheLookup(&head).?);
+}
+
+fn negotiatedRoundtrip(req: []const u8, content_type: []const u8, body: []const u8, out: []u8) !usize {
+    const parsed = try parseHead(req);
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    try writeNegotiated(fds[1], &parsed.head, 200, content_type, body);
+
+    return std.posix.read(fds[0], out);
+}
+
+test "zix http1: writeNegotiated compresses when gzip is accepted" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", "text/plain", &body, &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding: gzip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Vary: Accept-Encoding") != null);
+
+    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n").?;
+    const restored = try compression.flate.decompressGzipAlloc(std.testing.allocator, resp[sep + 4 ..], 2048);
+    defer std.testing.allocator.free(restored);
+
+    try std.testing.expectEqualSlices(u8, &body, restored);
+}
+
+test "zix http1: writeNegotiated sends uncompressed when compression is off" {
+    setCompression(false, 0, 0);
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", "text/plain", &body, &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding") == null);
+
+    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n").?;
+    try std.testing.expectEqualSlices(u8, &body, resp[sep + 4 ..]);
+}
+
+test "zix http1: writeNegotiated does not compress without Accept-Encoding" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedRoundtrip("GET /x HTTP/1.1\r\n\r\n", "text/plain", &body, &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding") == null);
+}
+
+test "zix http1: writeNegotiated skips bodies under the size floor" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    var recv: [256]u8 = undefined;
+    const n = try negotiatedRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", "text/plain", "hi", &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding") == null);
+    try std.testing.expect(std.mem.endsWith(u8, resp, "hi"));
+}
+
+test "zix http1: writeNegotiated skips already-compressed media types" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    var recv: [1024]u8 = undefined;
+    const n = try negotiatedRoundtrip("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", "image/jpeg", &body, &recv);
+    const resp = recv[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding") == null);
 }
 
 test "zix http1: cache keys separate distinct paths and queries" {

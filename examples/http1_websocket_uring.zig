@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9113;
+const PORT: u16 = 9029;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .URING;
 const KERNEL_BACKLOG: u31 = 1024;
 // Comptime per-deployment tuning profile (ADR-041): .lean uses a small recv
@@ -34,8 +34,8 @@ fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 // owned WebSocket is served on both .EPOLL and .URING.
 //
 // Connect:
-// wscat    -c "ws://localhost:9113/ws"
-// websocat    "ws://localhost:9113/ws"
+// wscat    -c "ws://localhost:9029/ws"
+// websocat    "ws://localhost:9029/ws"
 fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
 

@@ -2,6 +2,21 @@
 //! Zero sIX; 06;
 //! A network backend library written in zig
 
+const std = @import("std");
+const builtin = @import("builtin");
+
+/// THE ONLY SOURCE OF TRUTH for Zig SEMVER for zix source code.
+///
+/// Note:
+/// - Do not create in other place!
+pub const ZIG_SEMVER = struct {
+    pub const MAJOR: usize = builtin.zig_version.major;
+    pub const MINOR: usize = builtin.zig_version.minor;
+    pub const PATCH: usize = builtin.zig_version.patch;
+};
+
+// --------------------------------------------------------- //
+
 pub const Tcp = @import("tcp/Tcp.zig");
 pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
@@ -18,11 +33,9 @@ pub const Logger = @import("logger/logger.zig").Logger;
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const response_cache = @import("utils/response_cache.zig");
+
+    pub const compression = @import("utils/compression/compression.zig");
 };
-
-// --------------------------------------------------------- //
-
-const std = @import("std");
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -50,6 +63,12 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/core.zig"));
     std.testing.refAllDecls(@import("tcp/http1/config.zig"));
     std.testing.refAllDecls(@import("tcp/http1/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/async.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/pool.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/mixed.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
     std.testing.refAllDecls(@import("tcp/http1/websocket.zig"));
 
@@ -80,6 +99,8 @@ test "zix tests: unit test" {
     // # zix.Utils
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
+    std.testing.refAllDecls(@import("utils/compression/flate.zig"));
+    std.testing.refAllDecls(@import("utils/compression/compression.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));

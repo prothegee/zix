@@ -936,4 +936,24 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-043: pisahkan dispatch model tiap engine ke folder dispatch/ per-engine
+
+**Status:** Diterima
+
+**Konteks:** Tiap engine menyimpan semua dispatch model-nya dalam satu `server.zig` (ADR-042). Untuk `zix.Http1` file itu sekitar 2.600 baris, dengan `.EPOLL` dan `.URING` masing-masing sekitar 900 baris dan nyaris tidak beririsan, jadi perubahan pada satu model berarti menggulir melewati empat lainnya. Varian idle-pool A2, yang hanya berbeda di kode pool `.URING`, terpaksa menjadi salinan satu file penuh.
+
+**Keputusan:** Pisahkan model ke folder `dispatch/` per-engine, satu file per model dinamai sesuai nilai enum `DispatchModel` (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`), dengan helper dispatch bersama di `dispatch/common.zig`. `server.zig` menyimpan tipe `Server` publik dan switch model runtime. `core.zig` (pemrosesan request bersama) tidak disentuh. Digulirkan di `zix.Http1` lebih dulu, lalu direplikasi ke engine lain.
+
+**Alasan:** Ini adalah organisasi file, bukan perubahan behavior atau perf, dan tidak memperkenalkan dispatch loop bersama atau generik, jadi mematuhi ADR-042: tanpa indireksi per-event, dan tiap engine tetap memiliki dispatch-nya. Mengisolasi satu model membuat pekerjaan per-model dan perbandingan varian per-model (catatan A2) menjadi tractable. Body yang dipindah tetap byte-identical karena tiap file model menjangkau helper bersama lewat alias `const X = common.X;`, jadi hanya switch `run()` yang ditulis ulang.
+
+**Config:** tidak ada. Tanpa perubahan kode-behavior atau API. `Server.init` / `initRaw` dan config tidak berubah.
+
+**Konsekuensi:**
+- Tiap file baru perlu baris `std.testing.refAllDecls`-nya sendiri di `src/lib.zig` (refAllDecls tidak rekursif), jika tidak test-nya diam-diam tidak pernah jalan. Test pindah ke file model yang diujinya.
+- Pilot `zix.Http1` mendarat hijau: `server.zig` menyusut dari 2.624 baris ke 154, kelima model berada di bawah `dispatch/` (dengan `common.zig` untuk helper bersama), dan `zig build`, `test-all`, serta `test-runner-all` (semua 56 protokol) lulus dengan 25 test http1 terjaga.
+- Keempat varian idle-pool A2 disimpan sebagai snapshot server-penuh di `rnd/0.5.x/a2-variants/` (hanya berbeda di kode pool `.URING`) dengan manifest cross-reference.
+- Engine lain (Http, Http2, Grpc, Tcp, Fix, Udp) mendapat pemisahan yang sama berikutnya. Masing-masing adalah pemindahan independen yang setara.
+
+---
+
 ###### end of adr

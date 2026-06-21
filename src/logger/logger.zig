@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
 
@@ -181,7 +182,10 @@ pub const Logger = struct {
 
     fn openFileLocked(self: *Self, date: *const [10]u8) void {
         var dir_buf: [512:0]u8 = undefined;
-        const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return;
+        const dir_z = if (comptime ZIG_SEMVER.MINOR == 16)
+            std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return
+        else
+            std.fmt.bufPrintSentinel(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }, 0) catch return;
         _ = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), dir_z, 0o755);
 
         var file_buf: [600]u8 = undefined;

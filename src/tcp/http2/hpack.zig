@@ -813,7 +813,7 @@ test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
     var dec = HpackDecoder.init();
     // Fill dyn_buf near capacity with one large entry, then evict it and add another.
     // Compaction must run and the surviving entry must remain readable.
-    const large_value: [4000]u8 = [_]u8{'x'} ** 4000;
+    const large_value: [4000]u8 = @splat('x');
     dec.addDynamic("x-big", &large_value);
     try std.testing.expectEqual(@as(usize, 1), dec.dyn_count);
 

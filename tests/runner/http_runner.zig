@@ -36,14 +36,14 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, WAIT_MS);
+    try common.waitForTcpPort(io, &server_child, port, WAIT_MS);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();

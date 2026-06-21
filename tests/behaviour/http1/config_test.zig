@@ -40,7 +40,18 @@ test "zix behaviour: Http1 ServerConfig buffer size defaults" {
         .port = 9200,
     };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.max_recv_buf);
-    try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.max_gzip_out);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.compression_max_out);
+}
+
+test "zix behaviour: Http1 ServerConfig compression defaults" {
+    const cfg = zix.Http1.ServerConfig{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9200,
+    };
+    try std.testing.expectEqual(false, cfg.compression);
+    try std.testing.expectEqual(@as(usize, 256), cfg.compression_min_size);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.compression_max_out);
 }
 
 test "zix behaviour: Http1 DispatchModel integer backing values (ASYNC=0 is zero-value)" {

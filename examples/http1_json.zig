@@ -2,11 +2,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9101;
+const PORT: u16 = 9020;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
@@ -20,7 +20,7 @@ const User = struct {
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9101/status"
+// curl usage: curl -X GET "http://localhost:9020/status"
 fn statusHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -31,7 +31,7 @@ fn statusHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     zix.Http1.writeJson(fd, 200, "{\"ok\":true,\"message\":\"\",\"data\":{\"server\":\"zix\"}}") catch {};
 }
 
-// curl usage: curl -X GET "http://localhost:9101/echo?name=Alice"
+// curl usage: curl -X GET "http://localhost:9020/echo?name=Alice"
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     const name = zix.Http1.queryParam(head, "name") orelse "world";
@@ -41,7 +41,7 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     zix.Http1.writeJson(fd, 200, json) catch {};
 }
 
-// curl usage: curl -X POST "http://localhost:9101/post" -d "hello"
+// curl usage: curl -X POST "http://localhost:9020/post" -d "hello"
 fn postHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
         zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
@@ -53,7 +53,7 @@ fn postHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     zix.Http1.writeJson(fd, 200, json) catch {};
 }
 
-// curl usage: curl -X POST "http://localhost:9101/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
+// curl usage: curl -X POST "http://localhost:9020/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
 fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
         zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
@@ -85,7 +85,7 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     zix.Http1.writeJson(fd, 200, json) catch {};
 }
 
-// curl usage: curl -X GET "http://localhost:9101/users"
+// curl usage: curl -X GET "http://localhost:9020/users"
 fn usersHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -120,7 +120,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,

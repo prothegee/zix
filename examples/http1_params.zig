@@ -2,11 +2,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9104;
+const PORT: u16 = 9022;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
@@ -17,7 +17,7 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 // Echoes all query params as a JSON object.
 // /echo?foo=bar&baz=qux  ->  {"foo":"bar","baz":"qux"}
 // /echo                  ->  null
-// curl usage: curl -X GET "http://localhost:9104/echo?foo=bar&baz=qux"
+// curl usage: curl -X GET "http://localhost:9022/echo?foo=bar&baz=qux"
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -56,7 +56,7 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // GET /greet?name=<value>
 // /greet?name=alice  ->  {"ok":true,"message":"hello, alice"}
 // /greet             ->  {"ok":false,"message":"Error: missing required param: name"}
-// curl usage: curl -X GET "http://localhost:9104/greet?name=alice"
+// curl usage: curl -X GET "http://localhost:9022/greet?name=alice"
 fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -78,7 +78,7 @@ fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
 // /calc?a=3&b=4   ->  {"ok":true,"message":"3 + 4 = 7"}
 // /calc?b=4       ->  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 ->  {"ok":false,"message":"Error: a must be a number"}
-// curl usage: curl -X GET "http://localhost:9104/calc?a=3&b=4"
+// curl usage: curl -X GET "http://localhost:9022/calc?a=3&b=4"
 fn calcHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
@@ -125,7 +125,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,

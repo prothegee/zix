@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9006;
+const PORT: u16 = 9009;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
@@ -33,7 +33,7 @@ fn createInitDirs(io: std.Io) void {
 // --------------------------------------------------------- //
 
 // GET /
-// curl usage: curl -X GET "http://localhost:9006/"
+// curl usage: curl -X GET "http://localhost:9009/"
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -47,7 +47,7 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // data  - JSON string: {"userid": 0, "sessionid": "<uuidv7>"}
 //
 // curl usage:
-// curl -X POST "http://localhost:9006/upload" \
+// curl -X POST "http://localhost:9009/upload" \
 //     -F "file=@/path/to/file.txt" \
 //     -F 'data={"userid":0,"sessionid":"01944f5a-0000-7000-8000-000000000000"}'
 //
@@ -134,9 +134,9 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 //                                           unknown/binary types prompt a download)
 //
 // curl usage:
-// curl -X GET "http://localhost:9006/secret/file.txt?sec=abc123"
-// curl -X GET "http://localhost:9006/secret/file.txt"               (-> 403 if file exists)
-// curl -X GET "http://localhost:9006/secret/missing.txt?sec=abc123" (-> 404)
+// curl -X GET "http://localhost:9009/secret/file.txt?sec=abc123"
+// curl -X GET "http://localhost:9009/secret/file.txt"               (-> 403 if file exists)
+// curl -X GET "http://localhost:9009/secret/missing.txt?sec=abc123" (-> 404)
 pub fn secretHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);

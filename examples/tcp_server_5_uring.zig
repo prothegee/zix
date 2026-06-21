@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9304;
+const PORT: u16 = 9047;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .URING;
 const WORKERS: usize = 0; // 0 = cpu_count ring workers (each owns its own listener + ring)
 const POOL_SIZE: usize = 0; // ignored by .URING
@@ -23,7 +23,7 @@ const POOL_SIZE: usize = 0; // ignored by .URING
 // The engine drives the read/write loop, so this just replies per frame and never
 // owns or blocks the connection (which is why it runs on the io_uring ring).
 //
-// Client usage: zig build example-tcp_client -- --port 9304
+// Client usage: zig build example-tcp_client -- --port 9047
 fn frameHandler(payload: []const u8, fd: std.posix.fd_t) void {
     _ = payload;
 

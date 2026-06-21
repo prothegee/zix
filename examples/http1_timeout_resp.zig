@@ -2,11 +2,11 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9110;
+const PORT: u16 = 9025;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
@@ -25,7 +25,7 @@ var g_io: std.Io = undefined;
 // Simulates a slow two-step handler (3s + 3s = 6s total).
 // With HANDLER_TIMEOUT_MS = 5s, step 2 trips the deadline check.
 //
-// curl usage: curl http://localhost:9110/slow
+// curl usage: curl http://localhost:9025/slow
 fn slowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -50,7 +50,7 @@ fn slowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // Demonstrates zix.Http1.setTimeout(): the handler overrides the server-wide
 // budget to give itself a shorter 2s window regardless of the global 5s.
 //
-// curl usage: curl http://localhost:9110/custom
+// curl usage: curl http://localhost:9025/custom
 fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -68,7 +68,7 @@ fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd:
 
 // Fast handler to confirm unrelated requests are served normally.
 //
-// curl usage: curl http://localhost:9110/ping
+// curl usage: curl http://localhost:9025/ping
 fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -93,7 +93,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,

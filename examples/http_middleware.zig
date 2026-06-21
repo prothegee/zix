@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9003;
+const PORT: u16 = 9006;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -21,9 +21,9 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 // Allowed origins. Extend this list as needed.
 const ALLOWED_ORIGINS = [_][]const u8{
     "http://localhost",
-    "http://localhost:9003",
+    "http://localhost:9006",
     "http://127.0.0.1",
-    "http://127.0.0.1:9003",
+    "http://127.0.0.1:9006",
 };
 
 // Basic auth credentials.
@@ -134,8 +134,8 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 // Protected by origin check only.
 //
 // curl:
-// curl -H "Origin: http://localhost" "http://localhost:9003/public"  # 200
-// curl "http://localhost:9003/public"                                # 403
+// curl -H "Origin: http://localhost" "http://localhost:9006/public"  # 200
+// curl "http://localhost:9006/public"                                # 403
 pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -146,9 +146,9 @@ pub fn publicHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // Protected by origin check then Basic auth (outer wrapper runs first).
 //
 // curl:
-// curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9003/private"  # 200
-// curl -H "Origin: http://localhost" "http://localhost:9003/private"                    # 401
-// curl "http://localhost:9003/private"                                                  # 403
+// curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9006/private"  # 200
+// curl -H "Origin: http://localhost" "http://localhost:9006/private"                    # 401
+// curl "http://localhost:9006/private"                                                  # 403
 pub fn privateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;

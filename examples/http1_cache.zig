@@ -3,8 +3,8 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 // Unique port (feature examples each own one so a test-runner can spawn them
-// without colliding with the basic dispatch-model examples on 9100).
-const PORT: u16 = 9112;
+// without colliding with the basic dispatch-model examples on 9031).
+const PORT: u16 = 9031;
 // Flip to .EPOLL to compare the cache effect across dispatch models.
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .URING;
 const WORKERS: usize = 0; // 0 = cpu_count
@@ -60,7 +60,7 @@ fn buildResponse(body: []const u8) []const u8 {
     return resp_buf[0 .. hdr.len + body.len];
 }
 
-// curl usage: curl "http://localhost:9100/cache?kb=32"
+// curl usage: curl "http://localhost:9031/cache?kb=32"
 fn cacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (zix.Http1.cacheLookup(head)) |cached| {
@@ -73,7 +73,7 @@ fn cacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
     zix.Http1.writeWithCache(fd, head, resp, zix.Http1.cacheTtl()) catch {};
 }
 
-// curl usage: curl "http://localhost:9100/nocache?kb=32"
+// curl usage: curl "http://localhost:9031/nocache?kb=32"
 fn nocacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     const built = buildBody(kbFromQuery(head));
@@ -81,7 +81,7 @@ fn nocacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.p
     zix.Http1.fdWriteAll(fd, resp) catch {};
 }
 
-// curl usage: curl "http://localhost:9100/"
+// curl usage: curl "http://localhost:9031/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

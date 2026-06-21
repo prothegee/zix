@@ -36,7 +36,7 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, ipc_a_path: []const u8, ipc_b_path: []const u8) !void {

@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9007;
+const PORT: u16 = 9010;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -26,7 +26,7 @@ const HANDLER_TIMEOUT_MS: u32 = 5_000;
 // Simulates a slow two-step handler (3s + 3s = 6s total).
 // With HANDLER_TIMEOUT_MS = 5s, step 2 triggers the timeout check.
 //
-// curl usage: curl http://localhost:9007/slow
+// curl usage: curl http://localhost:9010/slow
 pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
@@ -51,7 +51,7 @@ pub fn slowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // to give itself a shorter window. Useful when one route is slower than others
 // but the global HANDLER_TIMEOUT_MS is set for the fast path.
 //
-// curl usage: curl http://localhost:9007/custom
+// curl usage: curl http://localhost:9010/custom
 pub fn customTimeoutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
@@ -69,7 +69,7 @@ pub fn customTimeoutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx
 
 // Fast handler to confirm unrelated requests are served normally.
 //
-// curl usage: curl http://localhost:9007/ping
+// curl usage: curl http://localhost:9010/ping
 pub fn pingHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;

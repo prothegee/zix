@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9100;
+const PORT: u16 = 9018;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
 const KERNEL_BACKLOG: u31 = 1024;
 // Comptime per-deployment tuning profile (ADR-041): .lean uses a small recv
@@ -13,7 +13,7 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .lean => 4 * 1024,
     .throughput => 16 * 1024,
 };
-const MAX_GZIP_OUT: usize = 256 * 1024;
+const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count epoll workers (shared-nothing, one listener + epoll each)
 const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POOL fallback)
@@ -50,7 +50,7 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POO
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9100/"
+// curl usage: curl -X GET "http://localhost:9018/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -66,14 +66,14 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     // }
 }
 
-// curl usage: curl -X GET "http://localhost:9100/echo"
+// curl usage: curl -X GET "http://localhost:9018/echo"
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
     zix.Http1.writeJson(fd, 200, "{\"status\":\"ok\"}") catch {};
 }
 
-// curl usage: curl -X GET "http://localhost:9100/about"
+// curl usage: curl -X GET "http://localhost:9018/about"
 fn aboutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -115,7 +115,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_gzip_out = MAX_GZIP_OUT,
+        .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
