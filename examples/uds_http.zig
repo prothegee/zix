@@ -12,15 +12,15 @@
 //
 // Run:
 // zig build example-uds_http && ./zig-out/bin/example-uds_http
-// curl http://localhost:9200/data
-// curl -N http://localhost:9200/stream
-// browser: http://localhost:9200/
+// curl http://localhost:9055/data
+// curl -N http://localhost:9055/stream
+// browser: http://localhost:9055/
 
 const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9200;
+const PORT: u16 = 9055;
 const SOCK_PATH: []const u8 = "/tmp/zix.sock";
 
 const KERNEL_BACKLOG: usize = 1024;
