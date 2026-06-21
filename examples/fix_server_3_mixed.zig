@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "0.0.0.0";
-const PORT: u16 = 9500;
+const PORT: u16 = 9050;
 const COMP_ID: []const u8 = "ZIX";
 const DISPATCH_MODEL: zix.Fix.DispatchModel = .MIXED;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
