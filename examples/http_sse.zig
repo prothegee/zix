@@ -8,16 +8,16 @@
 //! .ASYNC is preferred for SSE: long-lived connections do not hold pool threads.
 //!
 //! curl usage:
-//! curl -N http://localhost:9010/events
+//! curl -N http://localhost:9012/events
 //!
 //! browser:
-//! http://localhost:9010/
+//! http://localhost:9012/
 
 const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9010;
+const PORT: u16 = 9012;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: usize = 1024;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -28,7 +28,7 @@ const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
-// curl -N http://localhost:9010/events
+// curl -N http://localhost:9012/events
 //
 // Streams "tick N" once per second for 10 ticks.
 // After the loop the handler returns, handleConnection closes the TCP connection
@@ -47,7 +47,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     }
 }
 
-// browser: http://localhost:9010/
+// browser: http://localhost:9012/
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
