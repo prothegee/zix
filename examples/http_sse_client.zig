@@ -17,7 +17,7 @@ pub fn main(process: std.process.Init) !void {
         .connect_timeout_ms = 5000,
     });
 
-    var stream = try sse.open("http://127.0.0.1:9010/events");
+    var stream = try sse.open("http://127.0.0.1:9012/events");
     defer stream.deinit();
     std.debug.print("sse: connected\n", .{});
 
