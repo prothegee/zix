@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9109;
+const PORT: u16 = 9026;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -69,7 +69,7 @@ fn sendWithHeaders(
 
 // GET /info
 // Returns a JSON body with several custom headers attached.
-// curl usage: curl -i "http://localhost:9109/info"
+// curl usage: curl -i "http://localhost:9026/info"
 fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -86,7 +86,7 @@ fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 
 // GET /cors
 // A CORS preflight-style response with multiple headers.
-// curl usage: curl -i "http://localhost:9109/cors"
+// curl usage: curl -i "http://localhost:9026/cors"
 fn corsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -102,7 +102,7 @@ fn corsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 
 // GET /overflow
 // Attempts to send MAX_XTRA_HEADERS + 1 headers, tripping the cap.
-// curl usage: curl -i "http://localhost:9109/overflow"
+// curl usage: curl -i "http://localhost:9026/overflow"
 fn overflowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -122,7 +122,7 @@ fn overflowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.
 
 // GET /inject-guard
 // Demonstrates the CR/LF injection guard rejecting a crafted header value.
-// curl usage: curl -i "http://localhost:9109/inject-guard"
+// curl usage: curl -i "http://localhost:9026/inject-guard"
 fn injectGuardHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
