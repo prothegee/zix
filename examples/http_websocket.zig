@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9008;
+const PORT: u16 = 9013;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 8; // 8 KB read buffer per connection
@@ -31,11 +31,11 @@ var ws_rooms: zix.Http.WebSocket.RoomMap = undefined;
 // close              -> echo close frame, end loop
 //
 // Connect (wscat / websocat):
-// wscat    -c "ws://localhost:9008/ws/lobby?name=alice"
-// websocat    "ws://localhost:9008/ws/lobby?name=alice"
+// wscat    -c "ws://localhost:9013/ws/lobby?name=alice"
+// websocat    "ws://localhost:9013/ws/lobby?name=alice"
 //
 // If ?name is omitted the display name defaults to "anonymous":
-// wscat    -c "ws://localhost:9008/ws/lobby"
+// wscat    -c "ws://localhost:9013/ws/lobby"
 //
 // After connecting, any message you type is broadcast to every other client
 // in the same room, prefixed with the sender's display name.
