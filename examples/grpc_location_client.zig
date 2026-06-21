@@ -1,11 +1,11 @@
 //! gRPC h2c location client example.
-//! Sends a SendLocationAndSave request to the location server on port 10101.
+//! Sends a SendLocationAndSave request to the location server on port 9038.
 //!
 //! Proto schema: examples/protobuf/location.proto
 //! message LocationReq  { double long = 1; double lat = 2; string message = 3; }
 //! message LocationResp { string message = 1; bool ok = 2; }
 //!
-//! Run (server must be running on port 10101):
+//! Run (server must be running on port 9038):
 //! zig build example-grpc_location_client
 //! ./zig-out/bin/example-grpc_location_client
 
@@ -17,9 +17,9 @@ const zix = @import("zix");
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    std.debug.print("connecting to location server at 127.0.0.1:10101\n", .{});
+    std.debug.print("connecting to location server at 127.0.0.1:9038\n", .{});
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 10101 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 9038 }, io);
     defer client.deinit();
 
     std.debug.print("connected\n", .{});
