@@ -21,8 +21,10 @@ A2 idle-pool work showed the value of isolating a model: the four A2 variants
 (`pre_A2`, `flat_256`, `adaptive`, `cold_tail`) differ ONLY in the `.URING`
 idle-pool code, yet today each is a full 2,600-line copy of the whole file.
 
-The other engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`,
-`zix.Udp`) have the same shape: one `server.zig` per engine carrying every model.
+The other connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`,
+`zix.Tcp`, `zix.Fix`) have the same shape: one `server.zig` per engine carrying
+every model. `zix.Udp` is the exception: it is connectionless, with a single
+serve strategy and no `dispatch_model`, so it has no models to split.
 
 ## Decision
 Per engine, split the dispatch models into a `dispatch/` subfolder, one file per
@@ -105,8 +107,9 @@ in `dispatch/uring.zig`. Preserve them as follows:
 - No behavior or API change. `server.zig`'s public `Server.init` / `initRaw` and
   the config are unchanged.
 - Once the http1 pilot is verified, the same partition is applied to the other
-  engines (Http, Http2, Grpc, Tcp, Fix, Udp). Each is an independent, equivalent
-  move.
+  connection-oriented engines (Http, Http2, Grpc, Tcp, Fix). Each is an
+  independent, equivalent move. `zix.Udp` is excluded by design: it is
+  connectionless, so there are no dispatch models to partition.
 
 ## Pilot outcome (http1, landed)
 The `zix.Http1` pilot is done and green. `server.zig` went from 2,624 lines to 154
@@ -117,14 +120,25 @@ aliases the shared helpers (`const setNoDelay = common.setNoDelay;`), and only t
 `run()` switch was rewritten. `zig build`, `test-all`, and `test-runner-all` (all
 56 protocols) pass, with the 25 http1 tests preserved (4 server, 7 common, 6
 epoll, 8 uring). The four A2 variant snapshots were relocated to
-`rnd/0.5.x/a2-variants/` with a README cross-reference manifest. The other engines
-remain on the monolithic layout, to be split next.
+`rnd/0.5.x/a2-variants/` with a README cross-reference manifest.
+
+The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`,
+`zix.Fix`) were then split the same way, each an independent equivalent move, all
+green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). The
+comptime-route engines (`zix.Http2`, `zix.Grpc`, `zix.Http`) thread routes through
+a `common.Dispatch(...)` generic so the moved bodies stay byte-identical, the
+runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
+`zix.Udp` is excluded by design: it is connectionless (one bound datagram socket,
+no per-connection fds, clients tracked as application-level address records,
+concurrency per-datagram via `io.concurrent`), so there are no dispatch models to
+partition. A `dispatch/` split is revisited only if a second datagram serve
+strategy is added (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
 
 ## Final entry (to fold into docs/adr-en.md and docs/adr-id.md)
 
 ## ADR-043: split each engine's dispatch models into a per-engine dispatch/ folder
 
-**Status:** Accepted (0.5.x, http1 pilot landed, other engines pending)
+**Status:** Accepted (0.5.x). Rolled out across the connection-oriented engines (Http1, Http2, Grpc, Tcp, Fix, Http), `zix.Udp` excluded by design.
 
 **Context:** Each engine keeps all of its dispatch models in one `server.zig`
 (ADR-042). For `zix.Http1` that file is about 2,600 lines, with `.EPOLL` and
@@ -137,7 +151,10 @@ model named for the `DispatchModel` enum value (`async.zig`, `pool.zig`,
 `mixed.zig`, `epoll.zig`, `uring.zig`), with shared dispatch helpers in
 `dispatch/common.zig`. `server.zig` keeps the public `Server` type and the
 runtime model switch. `core.zig` (shared request processing) is untouched. Roll
-out on `zix.Http1` first, then replicate.
+out on `zix.Http1` first, then replicate to the other connection-oriented engines
+(`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`). `zix.Udp` is
+excluded by design (see Consequences): it is connectionless, has a single serve
+strategy, and has no `dispatch_model` to switch on.
 
 **Rationale:** This is file organization, not a behavior or perf change, and does
 not introduce a shared or generic dispatch loop, so it complies with ADR-042 (no
@@ -154,5 +171,9 @@ preserved): `server.zig` shrank from 2,624 lines to 154, the models live under
 `const X = common.X;` aliases, only the `run()` switch rewritten). The four A2
 idle-pool variants are preserved as full-server snapshots in
 `rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a
-cross-reference manifest. The other engines (Http, Http2, Grpc, Tcp, Fix, Udp)
-remain on the monolithic layout and get the same split next.
+cross-reference manifest. The connection-oriented engines (`zix.Http`,
+`zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, all green on
+Zig 0.16.x and 0.17.x. `zix.Udp` is excluded by design: it is connectionless, so
+there are no dispatch models to partition (a `dispatch/` split is revisited only
+if a second datagram serve strategy is added, reuseport plus `recvmmsg` /
+`sendmmsg` / io_uring multishot).

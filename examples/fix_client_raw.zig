@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const DEFAULT_IP: []const u8 = "127.0.0.1";
-const DEFAULT_PORT: u16 = 9500;
+const DEFAULT_PORT: u16 = 9048;
 const DEFAULT_TARGET: []const u8 = "ZIX";
 const COMP_ID: []const u8 = "CLIENT";
 
@@ -10,7 +10,7 @@ const COMP_ID: []const u8 = "CLIENT";
 
 // Usage:
 // zig build example-fix_client_raw
-// zig build example-fix_client_raw -- --port 9500 --target ZIX
+// zig build example-fix_client_raw -- --port 9048 --target ZIX
 
 pub fn main(process: std.process.Init) !void {
     var ip: []const u8 = DEFAULT_IP;

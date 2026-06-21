@@ -1,5 +1,5 @@
 //! gRPC h2c server example: URING dispatch model (io_uring). Linux-only.
-//! Port: 9115
+//! Port: 9036
 //!
 //! URING for gRPC runs a shared-nothing io_uring ring per worker: one
 //! SO_REUSEPORT listener and one completion loop per worker thread, each
@@ -13,14 +13,14 @@
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \
-//! -d '{"name":"world"}' 127.0.0.1:9115 helloworld.Greeter/SayHello
+//! -d '{"name":"world"}' 127.0.0.1:9036 helloworld.Greeter/SayHello
 //!
 //! Benchmark with ghz (requires ghz):
 //! ghz --insecure \
 //!   --proto examples/protobuf/helloworld.proto \
 //!   --call helloworld.Greeter/SayHello \
 //!   -d '{"name":"world"}' -c 64 -z 10s \
-//!   127.0.0.1:9115
+//!   127.0.0.1:9036
 
 const std = @import("std");
 const zix = @import("zix");
@@ -59,7 +59,7 @@ pub fn main(process: std.process.Init) !void {
         .{
             .io = process.io,
             .ip = "127.0.0.1",
-            .port = 9115,
+            .port = 9036,
             .dispatch_model = .URING,
             .pool_size = 0,
         },

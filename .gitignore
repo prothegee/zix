@@ -33,6 +33,9 @@ zig-pkg
 /public
 /*poc*
 /orders.jsonl
+/tests/orders.jsonl
+/tests/public
+/tests/logs
 
 ##
 ## extension

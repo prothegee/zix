@@ -1,5 +1,5 @@
 // Usage:
-// zig run examples/udp_server.zig -- --port 9100
+// zig run examples/udp_server.zig -- --port 9054
 //
 // The --port flag is only read when using initArgs() (CONFIGURABLE mode).
 // With init() (REQUIRED mode), the port is taken from SERVER_PORT below.
@@ -26,7 +26,7 @@ const Packet = extern struct {
 // --------------------------------------------------------- //
 
 const SERVER_IP: []const u8 = "127.0.0.1";
-const SERVER_PORT: u16 = 9100;
+const SERVER_PORT: u16 = 9054;
 
 // Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";

@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9100;
+const PORT: u16 = 9015;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -35,7 +35,7 @@ const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9100/"
+// curl usage: curl -X GET "http://localhost:9015/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -51,14 +51,14 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     // }
 }
 
-// curl usage: curl -X GET "http://localhost:9100/echo"
+// curl usage: curl -X GET "http://localhost:9015/echo"
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
     zix.Http1.writeJson(fd, 200, "{\"status\":\"ok\"}") catch {};
 }
 
-// curl usage: curl -X GET "http://localhost:9100/about"
+// curl usage: curl -X GET "http://localhost:9015/about"
 fn aboutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

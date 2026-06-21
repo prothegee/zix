@@ -5,7 +5,7 @@
 // argv[1]: server binary path, argv[2]: label, argv[3]: port.
 //
 // Note:
-// - Each TCP dispatch variant listens on a different port (9300-9303).
+// - Each TCP dispatch variant listens on a different port (9043-9046).
 //   The port is passed as argv[3] by build.zig so one runner file covers all.
 
 const std = @import("std");
@@ -42,14 +42,14 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, WAIT_MS);
+    try common.waitForTcpPort(io, &server_child, port, WAIT_MS);
 
     var client = try zix.Tcp.Client.connect(.{
         .ip = "127.0.0.1",

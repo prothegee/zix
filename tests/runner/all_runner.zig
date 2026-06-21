@@ -62,8 +62,9 @@ fn exitMissing(name: []const u8) noreturn {
 
 fn report(label: []const u8, result: anyerror!void, failed: *usize) void {
     if (result) {
-        std.debug.print("PASS {s}\n", .{label});
+        common.printPass(label);
     } else |err| {
+        _ = common.takeFallbackNote();
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         failed.* += 1;
     }
@@ -158,65 +159,65 @@ pub fn main(process: std.process.Init) void {
     const channel_ipc_b_path = arg_iter.next() orelse exitMissing("channel-ipc-b");
 
     // Basic dispatch-model tests.
-    report("http-async", runHttp(io, http_async_path), &failed);
-    report("http-pool", runHttp(io, http_pool_path), &failed);
-    report("http-mixed", runHttp(io, http_mixed_path), &failed);
-    report("http-epoll", runHttp(io, http_epoll_path), &failed);
+    report("http-async", runHttp(io, http_async_path, 9000), &failed);
+    report("http-pool", runHttp(io, http_pool_path, 9001), &failed);
+    report("http-mixed", runHttp(io, http_mixed_path, 9002), &failed);
+    report("http-epoll", runHttp(io, http_epoll_path, 9003), &failed);
 
-    report("http1-async", runHttp1(io, http1_async_path), &failed);
-    report("http1-pool", runHttp1(io, http1_pool_path), &failed);
-    report("http1-mixed", runHttp1(io, http1_mixed_path), &failed);
-    report("http1-epoll", runHttp1(io, http1_epoll_path), &failed);
-    report("http1-uring", runHttp1(io, http1_uring_path), &failed);
+    report("http1-async", runHttp1(io, http1_async_path, 9015), &failed);
+    report("http1-pool", runHttp1(io, http1_pool_path, 9016), &failed);
+    report("http1-mixed", runHttp1(io, http1_mixed_path, 9017), &failed);
+    report("http1-epoll", runHttp1(io, http1_epoll_path, 9018), &failed);
+    report("http1-uring", runHttp1(io, http1_uring_path, 9019), &failed);
 
-    report("grpc-async", runGrpc(io, grpc_async_path), &failed);
-    report("grpc-pool", runGrpc(io, grpc_pool_path), &failed);
-    report("grpc-mixed", runGrpc(io, grpc_mixed_path), &failed);
-    report("grpc-epoll", runGrpc(io, grpc_epoll_path), &failed);
+    report("grpc-async", runGrpc(io, grpc_async_path, 9032), &failed);
+    report("grpc-pool", runGrpc(io, grpc_pool_path, 9033), &failed);
+    report("grpc-mixed", runGrpc(io, grpc_mixed_path, 9034), &failed);
+    report("grpc-epoll", runGrpc(io, grpc_epoll_path, 9035), &failed);
 
-    report("tcp-async", runTcp(io, tcp_async_path, 9300), &failed);
-    report("tcp-pool", runTcp(io, tcp_pool_path, 9301), &failed);
-    report("tcp-mixed", runTcp(io, tcp_mixed_path, 9302), &failed);
-    report("tcp-epoll", runTcp(io, tcp_epoll_path, 9303), &failed);
+    report("tcp-async", runTcp(io, tcp_async_path, 9043), &failed);
+    report("tcp-pool", runTcp(io, tcp_pool_path, 9044), &failed);
+    report("tcp-mixed", runTcp(io, tcp_mixed_path, 9045), &failed);
+    report("tcp-epoll", runTcp(io, tcp_epoll_path, 9046), &failed);
 
-    report("fix-async", runFix(io, fix_async_path), &failed);
-    report("fix-pool", runFix(io, fix_pool_path), &failed);
-    report("fix-mixed", runFix(io, fix_mixed_path), &failed);
-    report("fix-epoll", runFix(io, fix_epoll_path), &failed);
+    report("fix-async", runFix(io, fix_async_path, 9048), &failed);
+    report("fix-pool", runFix(io, fix_pool_path, 9049), &failed);
+    report("fix-mixed", runFix(io, fix_mixed_path, 9050), &failed);
+    report("fix-epoll", runFix(io, fix_epoll_path, 9051), &failed);
 
     report("udp", runUdp(io, udp_path), &failed);
     report("uds", runUds(io, uds_path), &failed);
 
     // HTTP feature tests.
-    report("http-json", runHttpGet(io, http_json_path, 9001, "/status", "", "server"), &failed);
-    report("http-middleware", runHttpGet(io, http_middleware_path, 9003, "/public", "http://127.0.0.1", "public"), &failed);
-    report("http-params", runHttpGet(io, http_params_path, 9004, "/echo?foo=bar", "", "foo"), &failed);
-    report("http-paths", runHttpGet(io, http_paths_path, 9005, "/path", "", ""), &failed);
-    report("http-timeout-resp", runHttpGet(io, http_timeout_resp_path, 9007, "/ping", "", "pong"), &failed);
-    report("http-xtra-headers", runHttpGet(io, http_xtra_headers_path, 9009, "/info", "", ""), &failed);
-    report("http-manual-concurrent", runHttpGet(io, http_manual_concurrent_path, 9002, "/", "", "hello"), &failed);
-    report("http-static", runHttpStatic(io, http_static_path, 9006, "http_text_file.txt", "this is http text file example."), &failed);
-    report("http-sse", runSse(io, http_sse_path, 9010), &failed);
-    report("http-websocket", runWs(io, http_websocket_path, 9008, "/ws/lobby"), &failed);
+    report("http-json", runHttpGet(io, http_json_path, 9005, "/status", "", "server"), &failed);
+    report("http-middleware", runHttpGet(io, http_middleware_path, 9006, "/public", "http://127.0.0.1", "public"), &failed);
+    report("http-params", runHttpGet(io, http_params_path, 9007, "/echo?foo=bar", "", "foo"), &failed);
+    report("http-paths", runHttpGet(io, http_paths_path, 9008, "/path", "", ""), &failed);
+    report("http-timeout-resp", runHttpGet(io, http_timeout_resp_path, 9010, "/ping", "", "pong"), &failed);
+    report("http-xtra-headers", runHttpGet(io, http_xtra_headers_path, 9011, "/info", "", ""), &failed);
+    report("http-manual-concurrent", runHttpGet(io, http_manual_concurrent_path, 9014, "/", "", "hello"), &failed);
+    report("http-static", runHttpStatic(io, http_static_path, 9009, "http_text_file.txt", "this is http text file example."), &failed);
+    report("http-sse", runSse(io, http_sse_path, 9012), &failed);
+    report("http-websocket", runWs(io, http_websocket_path, 9013, "/ws/lobby"), &failed);
 
     // HTTP1 feature tests.
-    report("http1-json", runHttpGet(io, http1_json_path, 9101, "/status", "", "server"), &failed);
-    report("http1-middleware", runHttpGet(io, http1_middleware_path, 9103, "/public", "http://127.0.0.1", "public"), &failed);
-    report("http1-params", runHttpGet(io, http1_params_path, 9104, "/echo?foo=bar", "", "foo"), &failed);
-    report("http1-paths", runHttpGet(io, http1_paths_path, 9105, "/path", "", ""), &failed);
-    report("http1-timeout-resp", runHttpGet(io, http1_timeout_resp_path, 9110, "/ping", "", "pong"), &failed);
-    report("http1-xtra-headers", runHttpGet(io, http1_xtra_headers_path, 9109, "/info", "", ""), &failed);
-    report("http1-manual-concurrent", runHttpGet(io, http1_manual_concurrent_path, 9107, "/", "", "hello"), &failed);
-    report("http1-static", runHttpStatic(io, http1_static_path, 9106, "http1_text_file.txt", "this is http1 text file example."), &failed);
-    report("http1-sse", runSse(io, http1_sse_path, 9108), &failed);
-    report("http1-websocket", runWs(io, http1_websocket_path, 9111, "/ws"), &failed);
-    report("http1-cache", runHttpGet(io, http1_cache_path, 9112, "/cache?kb=1", "", "ok"), &failed);
+    report("http1-json", runHttpGet(io, http1_json_path, 9020, "/status", "", "server"), &failed);
+    report("http1-middleware", runHttpGet(io, http1_middleware_path, 9021, "/public", "http://127.0.0.1", "public"), &failed);
+    report("http1-params", runHttpGet(io, http1_params_path, 9022, "/echo?foo=bar", "", "foo"), &failed);
+    report("http1-paths", runHttpGet(io, http1_paths_path, 9023, "/path", "", ""), &failed);
+    report("http1-timeout-resp", runHttpGet(io, http1_timeout_resp_path, 9025, "/ping", "", "pong"), &failed);
+    report("http1-xtra-headers", runHttpGet(io, http1_xtra_headers_path, 9026, "/info", "", ""), &failed);
+    report("http1-manual-concurrent", runHttpGet(io, http1_manual_concurrent_path, 9030, "/", "", "hello"), &failed);
+    report("http1-static", runHttpStatic(io, http1_static_path, 9024, "http1_text_file.txt", "this is http1 text file example."), &failed);
+    report("http1-sse", runSse(io, http1_sse_path, 9027), &failed);
+    report("http1-websocket", runWs(io, http1_websocket_path, 9028, "/ws"), &failed);
+    report("http1-cache", runHttpGet(io, http1_cache_path, 9031, "/cache?kb=1", "", "ok"), &failed);
 
     // gRPC feature tests.
-    report("grpc-location-async", runGrpcLocation(io, grpc_location_async_path, 10101), &failed);
-    report("grpc-location-pool", runGrpcLocation(io, grpc_location_pool_path, 10101), &failed);
-    report("grpc-location-mixed", runGrpcLocation(io, grpc_location_mixed_path, 10101), &failed);
-    report("grpc-location-epoll", runGrpcLocation(io, grpc_location_epoll_path, 10101), &failed);
+    report("grpc-location-async", runGrpcLocation(io, grpc_location_async_path, 9038), &failed);
+    report("grpc-location-pool", runGrpcLocation(io, grpc_location_pool_path, 9039), &failed);
+    report("grpc-location-mixed", runGrpcLocation(io, grpc_location_mixed_path, 9040), &failed);
+    report("grpc-location-epoll", runGrpcLocation(io, grpc_location_epoll_path, 9041), &failed);
     report("grpc-multi", runGrpcMulti(io, grpc_multi_path), &failed);
     report("grpc-timeout", runGrpcTimeout(io, grpc_timeout_path), &failed);
 
@@ -235,7 +236,7 @@ pub fn main(process: std.process.Init) void {
     report("channel-ipc", runChannelIpc(io, channel_ipc_a_path, channel_ipc_b_path), &failed);
 
     if (failed > 0) {
-        std.debug.print("{d}/54 protocol(s) failed\n", .{failed});
+        std.debug.print("{d}/56 protocol(s) failed\n", .{failed});
         std.process.exit(1);
     }
 
@@ -244,11 +245,11 @@ pub fn main(process: std.process.Init) void {
 
 // --------------------------------------------------------- //
 
-fn runHttp(io: std.Io, server_path: []const u8) !void {
+fn runHttp(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 9100, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -261,18 +262,21 @@ fn runHttp(io: std.Io, server_path: []const u8) !void {
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9100/", .{});
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+
+    var resp = try client.get(url, .{});
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;
     if (resp.body().len == 0) return error.EmptyBody;
 }
 
-fn runHttp1(io: std.Io, server_path: []const u8) !void {
+fn runHttp1(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 9100, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -285,20 +289,23 @@ fn runHttp1(io: std.Io, server_path: []const u8) !void {
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9100/", .{});
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+
+    var resp = try client.get(url, .{});
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;
     if (!std.mem.eql(u8, resp.body(), "Hello, World!")) return error.UnexpectedBody;
 }
 
-fn runGrpc(io: std.Io, server_path: []const u8) !void {
+fn runGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 8083, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 8083 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = port }, io);
     defer client.deinit();
 
     var resp_buf: [256]u8 = undefined;
@@ -316,7 +323,7 @@ fn runTcp(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var client = try zix.Tcp.Client.connect(.{
         .ip = "127.0.0.1",
@@ -333,15 +340,15 @@ fn runTcp(io: std.Io, server_path: []const u8, port: u16) !void {
     if (!std.mem.eql(u8, reply, "Hello from zix TCP Server")) return error.UnexpectedReply;
 }
 
-fn runFix(io: std.Io, server_path: []const u8) !void {
+fn runFix(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 9500, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var client = try zix.Fix.Client.connect(.{
         .ip = "127.0.0.1",
-        .port = 9500,
+        .port = port,
         .comp_id = "RUNNER",
         .target_comp_id = "ZIX",
     }, io);
@@ -377,7 +384,7 @@ fn runUdp(io: std.Io, server_path: []const u8) !void {
 
     var client = try MyUdpClient.init(.{
         .ip = "127.0.0.1",
-        .server_port = 9100,
+        .server_port = 9054,
         .bind_ip = "127.0.0.1",
         .bind_port = 9191,
         .port_mode = .REQUIRED,
@@ -442,7 +449,7 @@ fn runHttpGet(
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -481,7 +488,7 @@ fn runHttpStatic(
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var file_path_buf: [256]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&file_path_buf, "public/secret/{s}", .{filename});
@@ -515,7 +522,7 @@ fn runSse(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/events", .{port});
@@ -534,7 +541,7 @@ fn runWs(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u8) !
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "ws://127.0.0.1:{d}{s}", .{ port, ws_route });
@@ -557,7 +564,7 @@ fn runGrpcLocation(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, 5000);
+    try common.waitForTcpPort(io, &server_child, port, 5000);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = port }, io);
     defer client.deinit();
@@ -583,9 +590,9 @@ fn runGrpcMulti(io: std.Io, server_path: []const u8) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 10102, 5000);
+    try common.waitForTcpPort(io, &server_child, 9042, 5000);
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 10102 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 9042 }, io);
     defer client.deinit();
 
     var hello_req_buf: [64]u8 = undefined;
@@ -631,9 +638,9 @@ fn runGrpcTimeout(io: std.Io, server_path: []const u8) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 8084, 5000);
+    try common.waitForTcpPort(io, &server_child, 9037, 5000);
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 8084 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 9037 }, io);
     defer client.deinit();
 
     var resp_buf: [256]u8 = undefined;
@@ -653,11 +660,11 @@ fn runFixTrading(io: std.Io, server_path: []const u8) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, 9500, 5000);
+    try common.waitForTcpPort(io, &server_child, 9053, 5000);
 
     var client = try zix.Fix.Client.connect(.{
         .ip = "127.0.0.1",
-        .port = 9500,
+        .port = 9053,
         .comp_id = "RUNNER",
         .target_comp_id = "ZIX",
     }, io);
@@ -698,7 +705,7 @@ fn runUdsHttp(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8
     var http_child = try common.spawnServer(io, uds_http_path);
     defer http_child.kill(io);
 
-    try common.waitForTcpPort(io, 9200, 5000);
+    try common.waitForTcpPort(io, &http_child, 9055, 5000);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -711,7 +718,7 @@ fn runUdsHttp(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9200/data", .{});
+    var resp = try client.get("http://127.0.0.1:9055/data", .{});
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;

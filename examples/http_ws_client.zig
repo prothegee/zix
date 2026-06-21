@@ -17,7 +17,7 @@ pub fn main(process: std.process.Init) !void {
         .connect_timeout_ms = 5000,
     });
 
-    var conn = try wsc.connect("ws://127.0.0.1:9008/ws/lobby");
+    var conn = try wsc.connect("ws://127.0.0.1:9013/ws/lobby");
     defer conn.deinit();
     std.debug.print("ws: connected to /ws/lobby\n", .{});
 

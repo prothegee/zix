@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9103;
+const PORT: u16 = 9021;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -20,9 +20,9 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
 const ALLOWED_ORIGINS = [_][]const u8{
     "http://localhost",
-    "http://localhost:9103",
+    "http://localhost:9021",
     "http://127.0.0.1",
-    "http://127.0.0.1:9103",
+    "http://127.0.0.1:9021",
 };
 
 const AUTH_USER = "admin";
@@ -116,8 +116,8 @@ fn withBasicAuth(comptime next: zix.Http1.HandlerFn) zix.Http1.HandlerFn {
 // Protected by origin check only.
 //
 // curl:
-// curl -H "Origin: http://localhost" "http://localhost:9103/public"  # 200
-// curl "http://localhost:9103/public"                                # 403
+// curl -H "Origin: http://localhost" "http://localhost:9021/public"  # 200
+// curl "http://localhost:9021/public"                                # 403
 fn publicHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -128,9 +128,9 @@ fn publicHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 // Protected by origin check then Basic auth (outer wrapper runs first).
 //
 // curl:
-// curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9103/private"  # 200
-// curl -H "Origin: http://localhost" "http://localhost:9103/private"                    # 401
-// curl "http://localhost:9103/private"                                                  # 403
+// curl -H "Origin: http://localhost" -u "admin:secret" "http://localhost:9021/private"  # 200
+// curl -H "Origin: http://localhost" "http://localhost:9021/private"                    # 401
+// curl "http://localhost:9021/private"                                                  # 403
 fn privateHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

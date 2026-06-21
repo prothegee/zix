@@ -1,7 +1,7 @@
 //! gRPC h2c client example.
 //! Demonstrates unary and streaming calls against the grpc_server_1_async example.
 //!
-//! Run (server must be running on port 8083):
+//! Run (server must be running on port 9032):
 //! zig build example-grpc_client
 
 const std = @import("std");
@@ -12,9 +12,9 @@ const zix = @import("zix");
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    std.debug.print("connecting to grpc server at 127.0.0.1:8083\n", .{});
+    std.debug.print("connecting to grpc server at 127.0.0.1:9032\n", .{});
 
-    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 8083 }, io);
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 9032 }, io);
     defer client.deinit();
 
     std.debug.print("connected\n", .{});

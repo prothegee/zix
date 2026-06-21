@@ -1,14 +1,14 @@
 // Connect to a zix TCP server, send one message, print the reply, then exit.
 //
-// Default target: 127.0.0.1:9300 (tcp_server_1_async).
+// Default target: 127.0.0.1:9043 (tcp_server_1_async).
 // Override at runtime:
-// zig build example-tcp_client -- --ip 127.0.0.1 --port 9301
+// zig build example-tcp_client -- --ip 127.0.0.1 --port 9044
 
 const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9300;
+const PORT: u16 = 9043;
 const MESSAGE: []const u8 = "Hello from zix TCP Client";
 
 // --------------------------------------------------------- //

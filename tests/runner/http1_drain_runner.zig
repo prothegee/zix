@@ -54,14 +54,14 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForTcpPort(io, port, WAIT_MS);
+    try common.waitForTcpPort(io, &server_child, port, WAIT_MS);
 
     const addr = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return error.BadAddress;
     const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });

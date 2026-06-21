@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9301;
+const PORT: u16 = 9044;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .POOL;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
@@ -22,7 +22,7 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 //
 // Frame format (matches zix.Tcp.Client): [u32 big-endian len][payload]
 //
-// Client usage: zig build example-tcp_client -- --port 9301
+// Client usage: zig build example-tcp_client -- --port 9044
 pub fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
 

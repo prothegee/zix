@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9114;
+const PORT: u16 = 9004;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .URING;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -23,14 +23,14 @@ const POOL_SIZE: usize = 0; // 0 = auto. Not used by .URING.
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9114/"
+// curl usage: curl -X GET "http://localhost:9004/"
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
     try res.send("Hello, World!");
 }
 
-// curl usage: curl -X GET "http://localhost:9114/echo"
+// curl usage: curl -X GET "http://localhost:9004/echo"
 pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -39,7 +39,7 @@ pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send("{\"status\":\"ok\"}");
 }
 
-// curl usage: curl -X GET "http://localhost:9114/about"
+// curl usage: curl -X GET "http://localhost:9004/about"
 pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;

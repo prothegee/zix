@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9001;
+const PORT: u16 = 9005;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -31,7 +31,7 @@ fn sendResponse(res: *zix.Http.Response, allocator: std.mem.Allocator, response:
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9001/status"
+// curl usage: curl -X GET "http://localhost:9005/status"
 pub fn statusHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -44,7 +44,7 @@ pub fn statusHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X GET "http://localhost:9001/echo?name=Alice"
+// curl usage: curl -X GET "http://localhost:9005/echo?name=Alice"
 pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const name = req.queryParam("name") orelse "world";
 
@@ -53,7 +53,7 @@ pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X POST "http://localhost:9001/post" -d "hello"
+// curl usage: curl -X POST "http://localhost:9005/post" -d "hello"
 pub fn postHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -68,7 +68,7 @@ pub fn postHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X POST "http://localhost:9001/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
+// curl usage: curl -X POST "http://localhost:9005/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
 pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -100,7 +100,7 @@ pub fn userHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try sendResponse(res, ctx.allocator, .{ .ok = true, .message = "", .data = .{ .object = obj } });
 }
 
-// curl usage: curl -X GET "http://localhost:9001/users"
+// curl usage: curl -X GET "http://localhost:9005/users"
 pub fn usersHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);

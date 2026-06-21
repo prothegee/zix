@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9110;
+const PORT: u16 = 9025;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -25,7 +25,7 @@ var g_io: std.Io = undefined;
 // Simulates a slow two-step handler (3s + 3s = 6s total).
 // With HANDLER_TIMEOUT_MS = 5s, step 2 trips the deadline check.
 //
-// curl usage: curl http://localhost:9110/slow
+// curl usage: curl http://localhost:9025/slow
 fn slowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -50,7 +50,7 @@ fn slowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // Demonstrates zix.Http1.setTimeout(): the handler overrides the server-wide
 // budget to give itself a shorter 2s window regardless of the global 5s.
 //
-// curl usage: curl http://localhost:9110/custom
+// curl usage: curl http://localhost:9025/custom
 fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -68,7 +68,7 @@ fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd:
 
 // Fast handler to confirm unrelated requests are served normally.
 //
-// curl usage: curl http://localhost:9110/ping
+// curl usage: curl http://localhost:9025/ping
 fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

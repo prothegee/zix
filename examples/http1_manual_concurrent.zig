@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9107;
+const PORT: u16 = 9030;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const MAX_GZIP_OUT: usize = 256 * 1024;
@@ -19,14 +19,14 @@ const WORKERS: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9107/"
+// curl usage: curl -X GET "http://localhost:9030/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
     zix.Http1.writeSimple(fd, 200, "text/plain", "hello from zix http1 (manual concurrent)") catch {};
 }
 
-// curl usage: curl -X GET "http://localhost:9107/info"
+// curl usage: curl -X GET "http://localhost:9030/info"
 fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

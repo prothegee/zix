@@ -1,6 +1,6 @@
 //! gRPC h2c location service: ASYNC dispatch model.
 //! Service: location.Location / SendLocationAndSave
-//! Port: 10101
+//! Port: 9038
 //!
 //! Proto schema: examples/protobuf/location.proto
 //! message LocationReq  { double long = 1; double lat = 2; string message = 3; }
@@ -16,21 +16,21 @@
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/location.proto -plaintext \
 //! -d '{"long":106.8,"lat":-6.2,"message":"good"}' \
-//! localhost:10101 location.Location/SendLocationAndSave
+//! localhost:9038 location.Location/SendLocationAndSave
 //!
 //! Benchmark with h2load (requires nghttp2):
 //! h2load -n 999999 -c 256 -t 4 -D 10 \
 //!   --header 'content-type: application/grpc+proto' \
 //!   --header 'te: trailers' \
 //!   --data examples/grpc_location_req.bin \
-//!   http://127.0.0.1:10101/location.Location/SendLocationAndSave
+//!   http://127.0.0.1:9038/location.Location/SendLocationAndSave
 //!
 //! Benchmark with ghz (requires ghz):
 //! ghz --insecure \
 //!   --proto examples/protobuf/location.proto \
 //!   --call location.Location/SendLocationAndSave \
 //!   -d '{"long":106.8,"lat":-6.2,"message":"test"}' -c 64 -z 10s \
-//!   127.0.0.1:10101
+//!   127.0.0.1:9038
 
 const std = @import("std");
 const zix = @import("zix");
@@ -90,7 +90,7 @@ pub fn main(process: std.process.Init) !void {
         .{
             .io = process.io,
             .ip = "127.0.0.1",
-            .port = 10101,
+            .port = 9038,
             .dispatch_model = .ASYNC,
             .logger = &logger,
         },

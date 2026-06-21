@@ -8,16 +8,16 @@
 //! so it does not pin a pool thread.
 //!
 //! curl usage:
-//! curl -N http://localhost:9108/events
+//! curl -N http://localhost:9027/events
 //!
 //! browser:
-//! http://localhost:9108/
+//! http://localhost:9027/
 
 const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9108;
+const PORT: u16 = 9027;
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -36,7 +36,7 @@ var g_io: std.Io = undefined;
 // open stream), then emits "data: tick N" once per second. The loop ends when
 // a write fails, which is how a disconnected client is detected.
 //
-// curl usage: curl -N "http://localhost:9108/events"
+// curl usage: curl -N "http://localhost:9027/events"
 fn eventsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
@@ -57,7 +57,7 @@ fn eventsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     }
 }
 
-// browser: http://localhost:9108/
+// browser: http://localhost:9027/
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;

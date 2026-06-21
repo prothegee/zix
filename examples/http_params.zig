@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9004;
+const PORT: u16 = 9007;
 const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -30,7 +30,7 @@ fn sendResponse(res: *zix.Http.Response, allocator: std.mem.Allocator, response:
 // /echo?foo=bar&baz=qux  ->  {"foo":"bar","baz":"qux"}
 // /echo                  ->  null
 // /echo?flag             ->  {"flag":null}
-// curl usage: curl -X GET "http://localhost:9004/echo?foo=bar&baz=qux"
+// curl usage: curl -X GET "http://localhost:9007/echo?foo=bar&baz=qux"
 pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -66,7 +66,7 @@ pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // GET /greet?name=<value>
 // /greet?name=alice  ->  {"ok":true,"message":"hello, alice"}
 // /greet             ->  {"ok":false,"message":"Error: missing required param: name"}
-// curl usage: curl -X GET "http://localhost:9004/greet?name=alice"
+// curl usage: curl -X GET "http://localhost:9007/greet?name=alice"
 pub fn greetHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -89,7 +89,7 @@ pub fn greetHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.H
 // /calc?a=3&b=4   ->  {"ok":true,"message":"3 + 4 = 7"}
 // /calc?b=4       ->  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 ->  {"ok":false,"message":"Error: a must be a number"}
-// curl usage: curl -X GET "http://localhost:9004/calc?a=3&b=4"
+// curl usage: curl -X GET "http://localhost:9007/calc?a=3&b=4"
 pub fn calcHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);

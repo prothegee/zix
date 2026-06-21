@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9100;
+const PORT: u16 = 9003;
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = .EPOLL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -26,7 +26,7 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) workers). Not us
 
 // --------------------------------------------------------- //
 
-// curl usage: curl -X GET "http://localhost:9100/"
+// curl usage: curl -X GET "http://localhost:9003/"
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -34,7 +34,7 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send("Hello, World!");
 }
 
-// curl usage: curl -X GET "http://localhost:9100/echo"
+// curl usage: curl -X GET "http://localhost:9003/echo"
 pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
@@ -47,7 +47,7 @@ pub fn echoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.send("{\"status\":\"ok\"}");
 }
 
-// curl usage: curl -X GET "http://localhost:9100/about"
+// curl usage: curl -X GET "http://localhost:9003/about"
 pub fn aboutHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
     _ = ctx;
