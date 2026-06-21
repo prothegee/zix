@@ -47,6 +47,7 @@ test "zix edge: HttpClient.requestUds, path too long returns error.InvalidPath" 
     defer client.deinit();
 
     // Unix socket paths are limited to 108 bytes on Linux. Build a path that exceeds that.
-    const long_path = "/tmp/" ++ ("a" ** 108) ++ ".sock";
+    const over_limit: [108]u8 = @splat('a');
+    const long_path = "/tmp/" ++ over_limit ++ ".sock";
     try std.testing.expectError(error.InvalidPath, client.requestUds(.GET, long_path, "/", .{}));
 }
