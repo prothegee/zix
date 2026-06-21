@@ -1,6 +1,6 @@
 //! gRPC h2c location service: EPOLL dispatch model. Linux-only.
 //! Service: location.Location / SendLocationAndSave
-//! Port: 10101
+//! Port: 9041
 //!
 //! EPOLL uses a single epoll accept loop to accept connections and hands each
 //! fd to a worker pool. Workers hold the full gRPC connection lifetime (HTTP/2
@@ -23,14 +23,14 @@
 //!   --header 'content-type: application/grpc+proto' \
 //!   --header 'te: trailers' \
 //!   --data examples/grpc_location_req.bin \
-//!   http://127.0.0.1:10101/location.Location/SendLocationAndSave
+//!   http://127.0.0.1:9041/location.Location/SendLocationAndSave
 //!
 //! Benchmark with ghz (requires ghz):
 //! ghz --insecure \
 //!   --proto examples/protobuf/location.proto \
 //!   --call location.Location/SendLocationAndSave \
 //!   -d '{"long":106.8,"lat":-6.2,"message":"test"}' -c 64 -z 10s \
-//!   127.0.0.1:10101
+//!   127.0.0.1:9041
 
 const std = @import("std");
 const zix = @import("zix");
@@ -84,7 +84,7 @@ pub fn main(process: std.process.Init) !void {
         .{
             .io = process.io,
             .ip = "127.0.0.1",
-            .port = 10101,
+            .port = 9041,
             .dispatch_model = .EPOLL,
             .pool_size = 0,
         },
