@@ -386,7 +386,7 @@ fn runUdp(io: std.Io, server_path: []const u8) !void {
     }, io);
     defer client.deinit();
 
-    var my_id: [16]u8 = [_]u8{0} ** 16;
+    var my_id: [16]u8 = @splat(0);
     _ = std.fmt.bufPrint(&my_id, "runner", .{}) catch {};
 
     const pkt = Packet{
