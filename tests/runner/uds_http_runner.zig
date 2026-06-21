@@ -12,7 +12,7 @@ const zix = @import("zix");
 const common = @import("common.zig");
 
 const UDS_SOCK_PATH: []const u8 = "/tmp/zix.sock";
-const HTTP_PORT: u16 = 9200;
+const HTTP_PORT: u16 = 9055;
 const WAIT_MS: u64 = 5000;
 
 // --------------------------------------------------------- //
@@ -37,7 +37,7 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
-    std.debug.print("PASS {s}\n", .{label});
+    common.printPass(label);
 }
 
 fn run(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void {
@@ -51,7 +51,7 @@ fn run(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void
     var http_child = try common.spawnServer(io, uds_http_path);
     defer http_child.kill(io);
 
-    try common.waitForTcpPort(io, HTTP_PORT, WAIT_MS);
+    try common.waitForTcpPort(io, &http_child, HTTP_PORT, WAIT_MS);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -64,7 +64,7 @@ fn run(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9200/data", .{});
+    var resp = try client.get("http://127.0.0.1:9055/data", .{});
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;
