@@ -34,7 +34,10 @@ fn ensureDirAll(path: []const u8) void {
         const at_sep = i < path.len and path[i] == '/';
         const at_end = i == path.len;
         if ((at_sep or at_end) and i > 0) {
-            const prefix = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..i]}) catch continue;
+            const prefix = if (comptime zix.ZIG_SEMVER.MINOR == 16)
+                std.fmt.bufPrintZ(&buf, "{s}", .{path[0..i]}) catch continue
+            else
+                std.fmt.bufPrintSentinel(&buf, "{s}", .{path[0..i]}, 0) catch continue;
             _ = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), prefix, 0o755);
         }
     }

@@ -2,6 +2,21 @@
 //! Zero sIX; 06;
 //! A network backend library written in zig
 
+const std = @import("std");
+const builtin = @import("builtin");
+
+/// THE ONLY SOURCE OF TRUTH for Zig SEMVER for zix source code.
+///
+/// Note:
+/// - Do not create in other place!
+pub const ZIG_SEMVER = struct {
+    pub const MAJOR: usize = builtin.zig_version.major;
+    pub const MINOR: usize = builtin.zig_version.minor;
+    pub const PATCH: usize = builtin.zig_version.patch;
+};
+
+// --------------------------------------------------------- //
+
 pub const Tcp = @import("tcp/Tcp.zig");
 pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
@@ -19,10 +34,6 @@ pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const response_cache = @import("utils/response_cache.zig");
 };
-
-// --------------------------------------------------------- //
-
-const std = @import("std");
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //

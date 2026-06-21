@@ -112,7 +112,7 @@ pub fn main(process: std.process.Init) !void {
     // The server does not set or modify this field: it is the sender's responsibility.
     // Use a stable, unique value per client (user ID, device serial, session token, etc.).
     // Here we embed the bind port so each running instance is distinguishable in logs.
-    var my_id: [16]u8 = [_]u8{0} ** 16;
+    var my_id: [16]u8 = @splat(0);
     _ = std.fmt.bufPrint(&my_id, "client-{d}", .{client.config.bind_port}) catch {};
 
     while (true) {

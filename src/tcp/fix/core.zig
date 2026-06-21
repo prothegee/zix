@@ -879,7 +879,7 @@ test "zix fix: computeChecksum of empty buf is 0" {
 }
 
 test "zix fix: computeChecksum wraps at 256" {
-    const buf = [_]u8{0x01} ** 256;
+    const buf: [256]u8 = @splat(0x01);
     try std.testing.expectEqual(0, computeChecksum(&buf));
 }
 

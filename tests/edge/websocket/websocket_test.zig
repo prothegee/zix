@@ -47,6 +47,7 @@ test "zix edge: acceptKey, key that exceeds hash_input buffer returns KeyTooLong
     // GUID is 36 bytes, key + GUID must fit in 128 bytes, so max key length is 92.
     // A 93-byte key must be rejected.
     var out: [64]u8 = undefined;
-    const long_key = "A" ** 93;
+    const long_key_buf: [93]u8 = @splat('A');
+    const long_key: []const u8 = &long_key_buf;
     try std.testing.expectError(error.KeyTooLong, WS.acceptKey(long_key, &out));
 }
