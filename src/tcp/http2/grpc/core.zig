@@ -1225,7 +1225,6 @@ fn serveGrpcLoop(
 // resumable h2 state machine. Each connection is owned by a single worker, so dispatch is
 // inline (no per-stream threads, no connection write mutex) and every frame produced in one
 // readable event is coalesced into the connection's ReplyStage and flushed in one write().
-// --------------------------------------------------------- //
 
 pub const GrpcConnOutcome = enum { keep_alive, close };
 
