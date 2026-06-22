@@ -10,7 +10,7 @@ const PORT: u16 = 9060;
 const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
 const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
-// HSTS max-age in SECONDS (RFC 6797). 1 year, above the SSL Labs A+ minimum of 180 days.
+// HSTS max-age in SECONDS (RFC 6797). 1 year, well above the common 180-day minimum.
 const HSTS_MAX_AGE_S: u32 = 31536000;
 
 // --------------------------------------------------------- //
