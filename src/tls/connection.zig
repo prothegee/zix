@@ -17,6 +17,7 @@ const record = @import("record.zig");
 const handshake = @import("handshake.zig");
 const extensions = @import("extensions.zig");
 const certificate = @import("certificate.zig");
+const cert_verify = @import("cert_verify.zig");
 const alert = @import("alert.zig");
 
 const X25519 = std.crypto.dh.X25519;
@@ -31,12 +32,17 @@ const ccs_record = [_]u8{ 20, 0x03, 0x03, 0x00, 0x01, 0x01 };
 /// the ephemeral secret + random are freshly generated per connection (or trace values in tests).
 pub const HandshakeOptions = struct {
     certificate_der: []const u8,
-    signing_key: EcdsaP256.KeyPair,
+    /// ECDSA P-256 or Ed25519 signing identity (certificate.SigningKey). Its scheme must be one the
+    /// client offered in signature_algorithms, else serverHandshake aborts (Layer C selection).
+    signing_key: certificate.SigningKey,
     ephemeral_secret: [32]u8,
     server_random: [32]u8,
     /// Server ALPN preference order (RFC 7301). Empty disables ALPN (no extension emitted).
     /// The first entry that the client also offered is selected and echoed in EncryptedExtensions.
     alpn_prefs: []const extensions.Alpn = &.{},
+    /// mTLS: when true the server emits a CertificateRequest (RFC 8446 4.3.2) in its flight, then
+    /// the caller drives verifyClientCertFlight before verifyClientFinished. Off by default.
+    request_client_cert: bool = false,
 };
 
 /// Post-handshake connection state: the application + handshake keys and per-key sequence
@@ -49,7 +55,13 @@ pub const Connection = struct {
     client_hs_key: [record.key_length]u8,
     client_hs_iv: [record.iv_length]u8,
     client_finished_key: Secret,
-    transcript_through_server_finished: Secret,
+    /// Running transcript captured at the server Finished. Without mTLS its current() is the hash
+    /// the client Finished binds. mTLS folds the client Certificate + CertificateVerify into it
+    /// (verifyClientCertFlight) before the client Finished is checked.
+    handshake_transcript: key_schedule.Transcript,
+    /// Sequence number for the client handshake key. The client Finished (and, under mTLS, the
+    /// client Certificate + CertificateVerify ahead of it) advance it as records are consumed.
+    client_hs_seq: u64 = 0,
     server_app_seq: u64 = 0,
     client_app_seq: u64 = 0,
 
@@ -79,17 +91,136 @@ pub const Connection = struct {
         return rec;
     }
 
-    /// Deprotect + verify the client Finished record (RFC 8446 4.4.4), seq 0 under the client
-    /// handshake key. Mismatch is the decrypt_error condition.
-    pub fn verifyClientFinished(self: *const Connection, rec: []const u8) !void {
+    /// Deprotect + verify the client Finished record (RFC 8446 4.4.4) under the client handshake
+    /// key at the current handshake sequence. Mismatch is the decrypt_error condition. The verify
+    /// data binds handshake_transcript, which mTLS extends past the server Finished.
+    pub fn verifyClientFinished(self: *Connection, rec: []const u8) !void {
         var plain: [512]u8 = undefined;
-        const opened = try record.deprotect(&plain, rec, self.client_hs_key, self.client_hs_iv, 0);
+        const opened = try record.deprotect(&plain, rec, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
+        self.client_hs_seq += 1;
         if (opened.inner_type != .HANDSHAKE or opened.data.len < 4 + key_schedule.hash_length) return error.ClientFinishedMismatch;
 
-        const expected = certificate.finishedVerifyData(self.client_finished_key, self.transcript_through_server_finished);
+        const expected = certificate.finishedVerifyData(self.client_finished_key, self.handshake_transcript.current());
         if (!std.mem.eql(u8, opened.data[4 .. 4 + key_schedule.hash_length], &expected)) return error.ClientFinishedMismatch;
     }
+
+    /// mTLS: process the client's Certificate then CertificateVerify (RFC 8446 4.4.2 / 4.4.3),
+    /// each one encrypted handshake record under the client handshake key, in order, ahead of the
+    /// client Finished. Verifies the CertificateVerify signature against the client cert's public
+    /// key and folds both messages into handshake_transcript so the client Finished then binds
+    /// them. The trust decision (path validation against a store) is the caller's: run
+    /// cert_verify on the returned DER.
+    ///
+    /// Note:
+    /// - Assumes one handshake message per record (the framing zix and common stacks emit for the
+    ///   client auth flight). Coalesced messages in a single record are a separate concern.
+    ///
+    /// Param:
+    /// cert_record - []const u8 (the encrypted client Certificate record)
+    /// cert_verify_record - []const u8 (the encrypted client CertificateVerify record)
+    /// out_der - []u8 (scratch the returned DER is copied into, sized for the client cert)
+    ///
+    /// Return:
+    /// - []const u8 (the client end-entity DER, a sub-slice of out_der)
+    /// - error.ClientCertificateMissing (the client sent an empty certificate_list)
+    /// - error.UnexpectedHandshakeMessage (a record was not the expected message)
+    /// - propagates record / signature / key errors otherwise
+    pub fn verifyClientCertFlight(self: *Connection, cert_record: []const u8, cert_verify_record: []const u8, out_der: []u8) ![]const u8 {
+        var cert_plain: [4096]u8 = undefined;
+        const cert_opened = try record.deprotect(&cert_plain, cert_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
+        self.client_hs_seq += 1;
+        if (cert_opened.inner_type != .HANDSHAKE or cert_opened.data.len < 4) return error.UnexpectedHandshakeMessage;
+        if (cert_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE)) return error.UnexpectedHandshakeMessage;
+
+        const client_der = (try certificate.parseEndEntityCertificate(cert_opened.data[4..])) orelse return error.ClientCertificateMissing;
+        @memcpy(out_der[0..client_der.len], client_der);
+        const der = out_der[0..client_der.len];
+        self.handshake_transcript.update(cert_opened.data);
+
+        // the CertificateVerify signs the transcript through the client Certificate (above).
+        const transcript_through_cert = self.handshake_transcript.current();
+
+        var verify_plain: [2048]u8 = undefined;
+        const verify_opened = try record.deprotect(&verify_plain, cert_verify_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
+        self.client_hs_seq += 1;
+        if (verify_opened.inner_type != .HANDSHAKE or verify_opened.data.len < 4) return error.UnexpectedHandshakeMessage;
+        if (verify_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY)) return error.UnexpectedHandshakeMessage;
+
+        const public_key = try cert_verify.peerEcdsaP256PublicKey(der);
+        try certificate.verifyClientCertificateVerify(verify_opened.data[4..], public_key, transcript_through_cert);
+        self.handshake_transcript.update(verify_opened.data);
+
+        return der;
+    }
+
+    /// mTLS, coalesced framing: the whole client auth flight (Certificate, CertificateVerify,
+    /// Finished) arrives in ONE encrypted handshake record, which is what openssl / boringssl emit.
+    /// Walks the three messages out of the single decrypted record, verifies the CertificateVerify
+    /// signature and the Finished verify_data, and folds each into handshake_transcript. Returns the
+    /// client end-entity DER for the caller to path-validate (cert_verify). The split-record framing
+    /// is verifyClientCertFlight + verifyClientFinished instead.
+    ///
+    /// Param:
+    /// flight_record - []const u8 (one encrypted record holding the three handshake messages)
+    /// out_der - []u8 (scratch the returned DER is copied into)
+    ///
+    /// Return:
+    /// - []const u8 (the client end-entity DER, a sub-slice of out_der)
+    /// - error.ClientCertificateMissing / error.UnexpectedHandshakeMessage / error.ClientFinishedMismatch
+    /// - propagates record / signature / key errors otherwise
+    pub fn verifyClientAuthFlight(self: *Connection, flight_record: []const u8, out_der: []u8) ![]const u8 {
+        var plain: [4096]u8 = undefined;
+        const opened = try record.deprotect(&plain, flight_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
+        self.client_hs_seq += 1;
+        if (opened.inner_type != .HANDSHAKE) return error.UnexpectedHandshakeMessage;
+
+        var reader = wire.Reader{ .buf = opened.data };
+
+        const cert_msg = try readHandshakeMessage(&reader, .CERTIFICATE);
+        const client_der = (try certificate.parseEndEntityCertificate(cert_msg.body)) orelse return error.ClientCertificateMissing;
+        @memcpy(out_der[0..client_der.len], client_der);
+        const der = out_der[0..client_der.len];
+        self.handshake_transcript.update(cert_msg.full);
+
+        // the CertificateVerify signs the transcript through the client Certificate (above).
+        const transcript_through_cert = self.handshake_transcript.current();
+
+        const cert_verify_msg = try readHandshakeMessage(&reader, .CERTIFICATE_VERIFY);
+        const public_key = try cert_verify.peerEcdsaP256PublicKey(der);
+        try certificate.verifyClientCertificateVerify(cert_verify_msg.body, public_key, transcript_through_cert);
+        self.handshake_transcript.update(cert_verify_msg.full);
+
+        // the Finished binds the transcript through the CertificateVerify (above).
+        const finished_msg = try readHandshakeMessage(&reader, .FINISHED);
+        if (finished_msg.body.len < key_schedule.hash_length) return error.ClientFinishedMismatch;
+
+        const expected = certificate.finishedVerifyData(self.client_finished_key, self.handshake_transcript.current());
+        if (!std.mem.eql(u8, finished_msg.body[0..key_schedule.hash_length], &expected)) return error.ClientFinishedMismatch;
+        self.handshake_transcript.update(finished_msg.full);
+
+        return der;
+    }
 };
+
+/// One handshake message inside a decrypted record: the full bytes (type + length + body, what
+/// the transcript hashes) and the body alone (what the message parsers consume).
+const HandshakeMessage = struct {
+    full: []const u8,
+    body: []const u8,
+};
+
+/// Read one length-prefixed handshake message (RFC 8446 4) at the reader's cursor, asserting its
+/// type. The cursor advances past the message.
+fn readHandshakeMessage(reader: *wire.Reader, want: handshake.HandshakeType) !HandshakeMessage {
+    const start = reader.pos;
+    const message_type = try reader.readU8();
+    if (message_type != @intFromEnum(want)) return error.UnexpectedHandshakeMessage;
+
+    const length = try reader.readU24();
+    const body = try reader.readBytes(length);
+
+    return .{ .full = reader.buf[start..reader.pos], .body = body };
+}
 
 pub const HandshakeResult = struct {
     connection: Connection,
@@ -123,6 +254,12 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     // The key schedule is SHA-256 / AES-128-GCM only (server_cipher_prefs). negotiate() cannot
     // pick another suite, this guards that invariant.
     if (negotiated.cipher != .AES_128_GCM_SHA256) return error.UnsupportedCipher;
+
+    // Layer C: the server can only sign CertificateVerify with its key's scheme (ECDSA P-256 or
+    // Ed25519, no SHA-1). The client MUST have offered it, else there is no common scheme and the
+    // handshake aborts (RFC 8446 4.4.2.2 / 4.4.3). The std signature_algorithms list never has
+    // SHA-1 since our SignatureScheme enum carries only ecdsa_secp256r1_sha256 and ed25519.
+    if (!hello.offersSignatureScheme(opts.signing_key.scheme())) return error.NoCommonSignatureScheme;
 
     // ALPN: select one protocol when the server has prefs and the client offered a list.
     // A client offer with no overlap is the no_application_protocol condition (RFC 7301 3.2).
@@ -187,13 +324,20 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     flight.len += ee.len;
     transcript.update(ee);
 
+    // mTLS: prompt the client for a certificate before sending the server's own (RFC 8446 4.3.2).
+    if (opts.request_client_cert) {
+        const cert_request = certificate.buildCertificateRequest(flight.buf[flight.len..]);
+        flight.len += cert_request.len;
+        transcript.update(cert_request);
+    }
+
     const cert_msg = certificate.buildCertificate(flight.buf[flight.len..], opts.certificate_der);
     flight.len += cert_msg.len;
     transcript.update(cert_msg);
 
-    const cert_verify = try certificate.buildCertificateVerify(flight.buf[flight.len..], opts.signing_key, transcript.current());
-    flight.len += cert_verify.len;
-    transcript.update(cert_verify);
+    const server_cert_verify = try certificate.buildCertificateVerify(flight.buf[flight.len..], opts.signing_key, transcript.current());
+    flight.len += server_cert_verify.len;
+    transcript.update(server_cert_verify);
 
     const finished = certificate.buildFinished(flight.buf[flight.len..], server_finished_key, transcript.current());
     flight.len += finished.len;
@@ -203,15 +347,17 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     writer.len += flight_record.len;
 
     // application key schedule from the transcript through the server Finished.
-    connection.transcript_through_server_finished = transcript.current();
+    connection.handshake_transcript = transcript;
+    const transcript_through_server_finished = transcript.current();
     const derived_master = key_schedule.deriveSecret(handshake_secret, "derived", empty_hash);
     const master = key_schedule.HkdfSha256.extract(&derived_master, &zero);
-    const server_ap_traffic = key_schedule.deriveSecret(master, "s ap traffic", connection.transcript_through_server_finished);
-    const client_ap_traffic = key_schedule.deriveSecret(master, "c ap traffic", connection.transcript_through_server_finished);
+    const server_ap_traffic = key_schedule.deriveSecret(master, "s ap traffic", transcript_through_server_finished);
+    const client_ap_traffic = key_schedule.deriveSecret(master, "c ap traffic", transcript_through_server_finished);
     key_schedule.expandLabel(&connection.server_app_key, server_ap_traffic, "key", "");
     key_schedule.expandLabel(&connection.server_app_iv, server_ap_traffic, "iv", "");
     key_schedule.expandLabel(&connection.client_app_key, client_ap_traffic, "key", "");
     key_schedule.expandLabel(&connection.client_app_iv, client_ap_traffic, "iv", "");
+    connection.client_hs_seq = 0;
     connection.server_app_seq = 0;
     connection.client_app_seq = 0;
 
@@ -295,7 +441,7 @@ pub fn alertForError(err: anyerror) ?alert.Alert {
         error.DecodeError => .DECODE_ERROR,
         error.UnsupportedTlsVersion => .PROTOCOL_VERSION,
         error.IllegalParameter, error.MissingKeyShare, error.BadKeyShare => .ILLEGAL_PARAMETER,
-        error.HandshakeFailure, error.UnsupportedCipher, error.UnsupportedGroup, error.HelloRetryRequestUnsupported => .HANDSHAKE_FAILURE,
+        error.HandshakeFailure, error.UnsupportedCipher, error.UnsupportedGroup, error.HelloRetryRequestUnsupported, error.NoCommonSignatureScheme => .HANDSHAKE_FAILURE,
         else => null,
     };
 }
@@ -332,7 +478,7 @@ test "zix test: connection, server flight from RFC 8448 ClientHello" {
     var out: [4096]u8 = undefined;
     const result = try serverHandshake(.{
         .certificate_der = &dummy_der,
-        .signing_key = key_pair,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
     }, &client_hello, &out);
@@ -452,7 +598,7 @@ test "zix test: connection, serverHandshake negotiates secp256r1 from a P-256-on
     var out: [4096]u8 = undefined;
     const result = try serverHandshake(.{
         .certificate_der = &dummy_der,
-        .signing_key = key_pair,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
     }, w.slice(), &out);
@@ -502,10 +648,209 @@ test "zix test: connection, condition -> fatal-alert matrix" {
     try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.HandshakeFailure).?);
     try std.testing.expectEqual(alert.Alert.ILLEGAL_PARAMETER, alertForError(error.MissingKeyShare).?);
     try std.testing.expectEqual(alert.Alert.DECODE_ERROR, alertForError(error.DecodeError).?);
+    try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.NoCommonSignatureScheme).?);
     try std.testing.expect(alertForError(error.OutOfMemory) == null);
 
     // the record builder wires through for a representative condition.
     var buf: [alert.fatal_record_len]u8 = undefined;
     const rec = alertRecordForError(&buf, error.MissingExtension).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 109 }, rec);
+}
+
+// shared fixture: self-signed CN=localhost, SAN DNS:localhost + IP:127.0.0.1, the same cert and
+// scalar the other tls tests use (here it plays both the server cert and the client cert).
+const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914f4a810c1ece713402574300a06082a8648ce3d040302302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f63301e170d3236303632323132353432305a170d3336303631393132353432305a302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f633059301306072a8648ce3d020106082a8648ce3d03010703420004c2a0121b298ac9cd389200e78d94e7bde1cc7cd8074795fab4f919799d40fdc231c5a90990ac8c6166ae472f33f74fced097f2edb7b8a1974be66a4ab07f253ba37f307d301d0603551d0e04160414c34e1d0a36a43947709b539e16dd0213aa4196aa301f0603551d23041830168014c34e1d0a36a43947709b539e16dd0213aa4196aa300f0603551d130101ff040530030101ff301a0603551d110413301182096c6f63616c686f737487047f000001300e0603551d0f0101ff040403020780300a06082a8648ce3d040302034700304402200b012f119db9b95d990bc482cb63e8f81e337a08634904e4caf513dc10c8aa8302202fdfe79ff6d5403e753ddf2aa52671923b8a2c28126bcbf196bd6fb7ecbcb14e";
+
+test "zix test: connection, mTLS server requests + verifies a client certificate (RFC 8446 4.3.2)" {
+    var client_hello: [196]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
+
+    var ephemeral_secret: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ephemeral_secret, "b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e");
+    var server_random: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&server_random, "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928");
+    var scalar: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var out: [4096]u8 = undefined;
+    var result = try serverHandshake(.{
+        .certificate_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
+        .ephemeral_secret = ephemeral_secret,
+        .server_random = server_random,
+        .request_client_cert = true,
+    }, &client_hello, &out);
+
+    // play the client auth flight: Certificate, then CertificateVerify signed over the transcript
+    // through that Certificate, both encrypted under the client handshake key (seq 0, 1).
+    var transcript = result.connection.handshake_transcript;
+
+    var client_cert_msg_buf: [600]u8 = undefined;
+    const client_cert_msg = certificate.buildCertificate(&client_cert_msg_buf, cert_der);
+    transcript.update(client_cert_msg);
+    const transcript_through_cert = transcript.current();
+
+    var cv_content_buf: [160]u8 = undefined;
+    const cv_content = certificate.clientCertificateVerifyContent(&cv_content_buf, transcript_through_cert);
+    const cv_sig = try key_pair.sign(cv_content, null);
+    var cv_der_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
+    const cv_der = cv_sig.toDer(&cv_der_buf);
+
+    var cv_msg_buf: [256]u8 = undefined;
+    var cv_writer = wire.Writer{ .buf = &cv_msg_buf };
+    cv_writer.writeU8(@intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY));
+    const cv_header = cv_writer.placeU24();
+    cv_writer.writeU16(@intFromEnum(handshake.SignatureScheme.ECDSA_SECP256R1_SHA256));
+    const cv_sig_field = cv_writer.placeU16();
+    cv_writer.writeBytes(cv_der);
+    cv_writer.patchU16(cv_sig_field);
+    cv_writer.patchU24(cv_header);
+    const cv_msg = cv_writer.slice();
+
+    var cert_rec_buf: [700]u8 = undefined;
+    const cert_rec = record.protect(&cert_rec_buf, client_cert_msg, .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 0);
+    var cv_rec_buf: [320]u8 = undefined;
+    const cv_rec = record.protect(&cv_rec_buf, cv_msg, .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 1);
+
+    var got_der_buf: [512]u8 = undefined;
+    const got_der = try result.connection.verifyClientCertFlight(cert_rec, cv_rec, &got_der_buf);
+    try std.testing.expectEqualSlices(u8, cert_der, got_der);
+
+    // the trust step (Layer V) composes on the returned DER: self-signed chain + SAN.
+    try cert_verify.verifyCertChain(got_der, got_der, 1_800_000_000);
+    try cert_verify.verifyCertHostname(got_der, "localhost");
+
+    // the client Finished now binds the transcript through the CertificateVerify (seq 2).
+    transcript.update(cv_msg);
+    var fin_msg_buf: [64]u8 = undefined;
+    const fin_msg = certificate.buildFinished(&fin_msg_buf, result.connection.client_finished_key, transcript.current());
+    var fin_rec_buf: [128]u8 = undefined;
+    const fin_rec = record.protect(&fin_rec_buf, fin_msg, .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 2);
+
+    try result.connection.verifyClientFinished(fin_rec);
+}
+
+test "zix test: connection, mTLS rejects a tampered client CertificateVerify" {
+    var client_hello: [196]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
+
+    var ephemeral_secret: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ephemeral_secret, "b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e");
+    var server_random: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&server_random, "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928");
+    var scalar: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var out: [4096]u8 = undefined;
+    var result = try serverHandshake(.{
+        .certificate_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
+        .ephemeral_secret = ephemeral_secret,
+        .server_random = server_random,
+        .request_client_cert = true,
+    }, &client_hello, &out);
+
+    var transcript = result.connection.handshake_transcript;
+    var client_cert_msg_buf: [600]u8 = undefined;
+    const client_cert_msg = certificate.buildCertificate(&client_cert_msg_buf, cert_der);
+    transcript.update(client_cert_msg);
+
+    // sign the WRONG transcript (not folding the client Certificate) so the binding fails.
+    var cv_content_buf: [160]u8 = undefined;
+    const cv_content = certificate.clientCertificateVerifyContent(&cv_content_buf, result.connection.handshake_transcript.current());
+    const cv_sig = try key_pair.sign(cv_content, null);
+    var cv_der_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
+    const cv_der = cv_sig.toDer(&cv_der_buf);
+
+    var cv_msg_buf: [256]u8 = undefined;
+    var cv_writer = wire.Writer{ .buf = &cv_msg_buf };
+    cv_writer.writeU8(@intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY));
+    const cv_header = cv_writer.placeU24();
+    cv_writer.writeU16(@intFromEnum(handshake.SignatureScheme.ECDSA_SECP256R1_SHA256));
+    const cv_sig_field = cv_writer.placeU16();
+    cv_writer.writeBytes(cv_der);
+    cv_writer.patchU16(cv_sig_field);
+    cv_writer.patchU24(cv_header);
+    const cv_msg = cv_writer.slice();
+
+    var cert_rec_buf: [700]u8 = undefined;
+    const cert_rec = record.protect(&cert_rec_buf, client_cert_msg, .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 0);
+    var cv_rec_buf: [320]u8 = undefined;
+    const cv_rec = record.protect(&cv_rec_buf, cv_msg, .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 1);
+
+    var got_der_buf: [512]u8 = undefined;
+    try std.testing.expectError(error.SignatureVerificationFailed, result.connection.verifyClientCertFlight(cert_rec, cv_rec, &got_der_buf));
+}
+
+test "zix test: connection, mTLS verifies a coalesced client auth flight (one record)" {
+    var client_hello: [196]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
+
+    var ephemeral_secret: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ephemeral_secret, "b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e");
+    var server_random: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&server_random, "a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e26928");
+    var scalar: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var out: [4096]u8 = undefined;
+    var result = try serverHandshake(.{
+        .certificate_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
+        .ephemeral_secret = ephemeral_secret,
+        .server_random = server_random,
+        .request_client_cert = true,
+    }, &client_hello, &out);
+
+    // pack Certificate, CertificateVerify, Finished into one plaintext buffer (the openssl framing).
+    var transcript = result.connection.handshake_transcript;
+    var flight_buf: [1024]u8 = undefined;
+    var flight = wire.Writer{ .buf = &flight_buf };
+
+    const client_cert_msg = certificate.buildCertificate(flight.buf[flight.len..], cert_der);
+    flight.len += client_cert_msg.len;
+    transcript.update(client_cert_msg);
+    const transcript_through_cert = transcript.current();
+
+    var cv_content_buf: [160]u8 = undefined;
+    const cv_content = certificate.clientCertificateVerifyContent(&cv_content_buf, transcript_through_cert);
+    const cv_sig = try key_pair.sign(cv_content, null);
+    var cv_der_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
+    const cv_der = cv_sig.toDer(&cv_der_buf);
+
+    var cv_writer = wire.Writer{ .buf = flight.buf[flight.len..] };
+    cv_writer.writeU8(@intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY));
+    const cv_header = cv_writer.placeU24();
+    cv_writer.writeU16(@intFromEnum(handshake.SignatureScheme.ECDSA_SECP256R1_SHA256));
+    const cv_sig_field = cv_writer.placeU16();
+    cv_writer.writeBytes(cv_der);
+    cv_writer.patchU16(cv_sig_field);
+    cv_writer.patchU24(cv_header);
+    const cv_msg = cv_writer.slice();
+    flight.len += cv_msg.len;
+    transcript.update(cv_msg);
+
+    const fin_msg = certificate.buildFinished(flight.buf[flight.len..], result.connection.client_finished_key, transcript.current());
+    flight.len += fin_msg.len;
+
+    var flight_rec_buf: [1100]u8 = undefined;
+    const flight_rec = record.protect(&flight_rec_buf, flight.slice(), .HANDSHAKE, result.connection.client_hs_key, result.connection.client_hs_iv, 0);
+
+    var got_der_buf: [512]u8 = undefined;
+    const got_der = try result.connection.verifyClientAuthFlight(flight_rec, &got_der_buf);
+    try std.testing.expectEqualSlices(u8, cert_der, got_der);
+
+    try cert_verify.verifyCertChain(got_der, got_der, 1_800_000_000);
 }

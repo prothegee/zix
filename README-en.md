@@ -1972,8 +1972,8 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 ## AI Policies
 
-- __*You may use it as your own tool.*__
-- __*But the last decision and judgement it's on our end (you and maintainers).*__
+- __*You can use it as your own tool.*__
+- __*The last decision and judgement it's on our end (you and maintainers).*__
 
 <br>
 

@@ -1973,7 +1973,7 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 ## AI Policies
 
 - __*Anda boleh menggunakannya sebagai alat Anda sendiri.*__
-- __*Namun keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
+- __*Keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
 
 <br>
 

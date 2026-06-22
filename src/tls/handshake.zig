@@ -23,6 +23,7 @@ pub const HandshakeType = enum(u8) {
     CLIENT_HELLO = 1,
     SERVER_HELLO = 2,
     ENCRYPTED_EXTENSIONS = 8,
+    CERTIFICATE_REQUEST = 13,
     CERTIFICATE = 11,
     CERTIFICATE_VERIFY = 15,
     FINISHED = 20,
@@ -80,6 +81,9 @@ pub const ClientHello = struct {
     has_signature_algorithms: bool = false,
     has_supported_groups: bool = false,
     supported_groups: []const u8 = &.{},
+    /// The raw SignatureSchemeList body (RFC 8446 4.2.3), each entry a u16. The server picks its
+    /// CertificateVerify scheme from this via offersSignatureScheme. Empty when not offered.
+    signature_schemes: []const u8 = &.{},
     key_share_groups: [16]NamedGroup = undefined,
     key_share_count: usize = 0,
     x25519_share: ?[]const u8 = null,
@@ -110,6 +114,17 @@ pub const ClientHello = struct {
     pub fn hasKeyShare(self: *const ClientHello, group: NamedGroup) bool {
         for (self.key_share_groups[0..self.key_share_count]) |g| {
             if (g == group) return true;
+        }
+
+        return false;
+    }
+
+    /// Whether the client offered the given signature scheme in signature_algorithms (RFC 8446
+    /// 4.2.3). The server uses this to confirm it can sign CertificateVerify with its key's scheme.
+    pub fn offersSignatureScheme(self: *const ClientHello, scheme: SignatureScheme) bool {
+        var r = Reader{ .buf = self.signature_schemes };
+        while (r.remaining() >= 2) {
+            if ((r.readU16() catch return false) == @intFromEnum(scheme)) return true;
         }
 
         return false;
@@ -189,7 +204,12 @@ fn parseClientExtensions(hello: *ClientHello, extensions: []const u8) ParseError
                 const list_len = try er.readU16();
                 hello.supported_groups = try er.readBytes(list_len);
             },
-            .SIGNATURE_ALGORITHMS => hello.has_signature_algorithms = true,
+            .SIGNATURE_ALGORITHMS => {
+                hello.has_signature_algorithms = true;
+                var er = Reader{ .buf = ext_data };
+                const list_len = try er.readU16();
+                hello.signature_schemes = try er.readBytes(list_len);
+            },
             .APPLICATION_LAYER_PROTOCOL_NEGOTIATION => hello.alpn = ext_data,
             .KEY_SHARE => try parseKeyShare(hello, ext_data),
             .SERVER_NAME => {
@@ -376,6 +396,32 @@ test "zix test: handshake, ClientHello captures the ALPN protocol list" {
     const extensions = @import("extensions.zig");
     const prefs = [_]extensions.Alpn{ .H2, .HTTP_1_1 };
     try std.testing.expectEqual(extensions.Alpn.H2, extensions.negotiateAlpn(parsed.ok.alpn.?, &prefs).?);
+}
+
+test "zix test: handshake, offersSignatureScheme matches the offered list (Layer C)" {
+    // a SignatureSchemeList body: ecdsa_secp256r1_sha256 (0x0403) then ed25519 (0x0807).
+    const schemes = [_]u8{ 0x04, 0x03, 0x08, 0x07 };
+    const hello = ClientHello{
+        .legacy_version = VERSION_TLS_1_2,
+        .random = std.mem.zeroes([32]u8),
+        .session_id = &.{},
+        .cipher_suites = &.{},
+        .signature_schemes = &schemes,
+    };
+
+    try std.testing.expect(hello.offersSignatureScheme(.ECDSA_SECP256R1_SHA256));
+    try std.testing.expect(hello.offersSignatureScheme(.ED25519));
+    try std.testing.expect(!hello.offersSignatureScheme(@enumFromInt(0x0401))); // rsa_pkcs1_sha256, not offered
+    try std.testing.expect(!hello.offersSignatureScheme(@enumFromInt(0x0203))); // ecdsa_sha1, never offered
+
+    // a client that offered no signature_algorithms offers nothing.
+    const none = ClientHello{
+        .legacy_version = VERSION_TLS_1_2,
+        .random = std.mem.zeroes([32]u8),
+        .session_id = &.{},
+        .cipher_suites = &.{},
+    };
+    try std.testing.expect(!none.offersSignatureScheme(.ECDSA_SECP256R1_SHA256));
 }
 
 test "zix test: handshake, negatives (compression, no TLS 1.3)" {

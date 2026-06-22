@@ -28,6 +28,7 @@ pub fn addSteps(
         .{ "test-runner-http1-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http1-compression", "examples/http1_compression.zig", "9058", "", "", "" },
         .{ "test-runner-http-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http-compression", "examples/http_compression.zig", "9059", "", "", "" },
         .{ "test-runner-tls-http1", "tests/runner/tls_http1_basic_runner.zig", "tr-server-tls-http1", "examples/tls/tls_http1_basic.zig", "9060", "", "", "" },
+        .{ "test-runner-tls-http2", "tests/runner/tls_http2_basic_runner.zig", "tr-server-tls-http2", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
         .{ "test-runner-grpc-async", "tests/runner/grpc_runner.zig", "tr-server-grpc-async", "examples/grpc_server_1_async.zig", "9032", "", "", "" },
         .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "9033", "", "", "" },
         .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "9034", "", "", "" },
@@ -284,8 +285,9 @@ pub fn addSteps(
             .{ "tr-all-server-channel-ipc-a", "examples/channel_ipc_a.zig" },
             .{ "tr-all-server-channel-ipc-b", "examples/channel_ipc_b.zig" },
 
-            // tls (https/1.1 over TLS 1.3)
+            // tls (https/1.1 + h2, over TLS 1.3)
             .{ "tr-all-server-tls-http1", "examples/tls/tls_http1_basic.zig" },
+            .{ "tr-all-server-tls-http2", "examples/tls/tls_http2_basic.zig" },
         };
 
         const all_runner_mod = b.createModule(.{
