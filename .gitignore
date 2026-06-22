@@ -51,6 +51,8 @@ zig-pkg
 !/rnd/perf-example-http_basic-perf.md
 !/examples/grpc_hello_req.bin
 !/examples/grpc_location_req.bin
+!/examples/tls/*.pem
+!/examples/tls/**/*.pem
 
 /rnd/0.4.x/*.txt
 
