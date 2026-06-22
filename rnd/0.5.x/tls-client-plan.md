@@ -99,8 +99,13 @@ INT in progress:
 - proven over a REAL socketpair: the sans-I/O client drives a full https/1.1 request (handshake +
   CertVerify + GET + 200) against the zix server over real read/write + record framing.
 
-Next: the h2 runner #15 (the client offering ALPN h2 + zix.Http2 frames, connecting to
-example-tls_http2_basic over a TCP socket), then the broader zix.Http.Client transport wiring.
+h2 runner #15 LANDED: tests/runner/tls_http2_basic_runner.zig drives the native client (ALPN h2) over
+TCP to example-tls_http2_basic, speaks h2 over the ClientConnection (zix.Http2 frames), asserts
+:status 200. test-runner-tls-http2 PASS on Zig 0.16 + 0.17, no curl.
+
+Remaining for the milestone: wire the chain + hostname trust (RFC 5280 / 6125) into the request path
+(today the runner relies on CertVerify + a known fixture cert), and the broader zix.Http.Client
+transport wiring (http_version=2 for general users).
 
 ## Order
 
