@@ -116,7 +116,6 @@
 Saat ini Zix berfokus pada Linux.
 
 Dalam kondisi saat ini, zix tidak akan:
-- Implementasi TLS.
 - Implementasi database driver.
 - Implementasi Http2 (hanya sebagai gRPC dependency).
 - Implementasi Http3.
