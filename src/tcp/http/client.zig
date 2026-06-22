@@ -161,6 +161,19 @@ pub const HttpClient = struct {
             },
         } else .none;
 
+        // https needs the inner std.http.Client's realtime clock + CA bundle set before the
+        // handshake (zix connects directly, so std's own lazy init in its request flow does not
+        // run first). Use std's own clock choice (Io.Clock.real), load the system roots, then add
+        // the configured extra CA (tls_ca_path). Done once.
+        if (protocol == .tls and self.inner.now == null) {
+            const now = std.Io.Clock.real.now(self.config.io);
+            self.inner.ca_bundle.rescan(gpa, self.config.io, now) catch {};
+            if (self.config.tls_ca_path) |ca_path| {
+                self.inner.ca_bundle.addCertsFromFilePath(gpa, self.config.io, now, std.Io.Dir.cwd(), ca_path) catch return error.TlsCaLoadFailed;
+            }
+            self.inner.now = now;
+        }
+
         const conn = try self.inner.connectTcpOptions(.{
             .host = host_name,
             .port = port,
