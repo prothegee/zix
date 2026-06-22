@@ -253,8 +253,7 @@ __*3. Five selectable dispatch models:*__
 - EPOLL (shared-nothing: each worker owns a SO_REUSEPORT listener + epoll instance, level-triggered, no shared queue): Linux-only, best for high connection counts.
 - URING (shared-nothing io_uring: same thread-per-core topology as EPOLL, but completion-based so most syscall transitions are batched away): Linux-only.
 
-> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux.
-Http2 has no native epoll or uring path and folds to POOL.
+> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux. Http2 has no native epoll or uring path and folds to POOL.
 
 <br>
 
@@ -332,6 +331,8 @@ __*12. Protocol-aware logger:*__
 Log types per protocol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc (gRPC), access() is HTTP-only, Channel is system-only.
 
 > The log vocabulary matches the actual unit of work on each protocol.
+
+<br>
 
 __*13. Response Cache Awareness:*__
 
@@ -419,7 +420,7 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 
 - [Zig](https://ziglang.org/):
     - [x] 0.16.x
-    - [ ] ~0.17.x~
+    - [ ] 0.17.x (Experimental)
 
 <br>
 
@@ -772,16 +773,16 @@ __*In the nutshell:*__
 - Looking for consistent latency? Use `.ASYNC`.
 - For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
 
-> In many case for high throughput, URING mostly win for CPU & RAM efficiency,
-depend on your environment system result & behaviour may vary. Decide your dispath model intention, switch if you may.
+> In many cases for high throughput, URING mostly wins for CPU & RAM efficiency,
+> however in some cases its performance can vary, see the benchmark section for reference.
 
 **When to use:** the dispatch model is the one knob that reshapes the whole server. Reach for `.ASYNC` when latency and long-lived connections (SSE, WebSocket) matter, `.POOL` / `.MIXED` for raw throughput on any platform, and `.EPOLL` / `.URING` on Linux for the highest connection counts at the lowest per-request cost. On a loopback dev box the two tie on throughput and `.URING` wins mainly on cache locality. On a many-core box the ring close (ADR-041) lets `.URING` keep its cores busy through connection churn, where it reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 
 **Why per-engine:** each engine implements these models in its own `server.zig`, not behind one shared multiplexer. The split is deliberate and is itself the optimization: it lets every engine tune its own hot path. `zix.Http1` carves connection buffers from a contiguous demand-paged slab (no per-accept heap call), while `zix.Grpc` and `zix.Fix` hold per-connection heap pointers because their connections carry h2 or FIX session state. Only byte-identical primitives are shared (the `.URING` `user_data` codec in `src/multiplexers/ring.zig`): share primitives that must match, keep dispatch loops per-engine. See ADR-042.
 
 > Our workload is not same, what suits you may not suits to someone else.
-Test your workload with 2:4 ratio at least from production environment when possible.
-Zix will not dictate your approach.
+> Test your workload when possible, maybe with a 1:4 ratio from a production environment.
+> Zix will not dictate your approach.
 
 See [`docs/concurrency-en.md`](docs/concurrency-en.md) for architecture details, thread counts, and when to prefer each model.
 
