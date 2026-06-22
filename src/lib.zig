@@ -25,6 +25,7 @@ pub const Http2 = @import("tcp/http2/Http2.zig");
 pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 pub const Fix = @import("tcp/fix/Fix.zig");
 pub const Uds = @import("uds/Uds.zig");
+pub const Tls = @import("tls/Tls.zig");
 pub const Channel = @import("channel/Channel.zig").Channel;
 pub const Logger = @import("logger/logger.zig").Logger;
 
@@ -72,6 +73,18 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
     std.testing.refAllDecls(@import("tcp/http1/websocket.zig"));
 
+    // # zix.Tls (TLS 1.3 layer)
+    std.testing.refAllDecls(@import("tls/wire.zig"));
+    std.testing.refAllDecls(@import("tls/key_schedule.zig"));
+    std.testing.refAllDecls(@import("tls/record.zig"));
+    std.testing.refAllDecls(@import("tls/alert.zig"));
+    std.testing.refAllDecls(@import("tls/handshake.zig"));
+    std.testing.refAllDecls(@import("tls/extensions.zig"));
+    std.testing.refAllDecls(@import("tls/certificate.zig"));
+    std.testing.refAllDecls(@import("tls/connection.zig"));
+    std.testing.refAllDecls(@import("tls/pem.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
+
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
@@ -82,6 +95,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/core.zig"));
     std.testing.refAllDecls(@import("tcp/http2/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/tls_serve.zig"));
 
     // # zix.Grpc
     std.testing.refAllDecls(@import("tcp/http2/grpc/status.zig"));
