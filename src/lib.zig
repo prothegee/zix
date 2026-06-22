@@ -85,6 +85,12 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/pem.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
 
+    // # zix.Tls (TLS 1.2 building blocks: PRF schedule, record, version select)
+    std.testing.refAllDecls(@import("tls/tls12_prf.zig"));
+    std.testing.refAllDecls(@import("tls/tls12_record.zig"));
+    std.testing.refAllDecls(@import("tls/tls12_version.zig"));
+    std.testing.refAllDecls(@import("tls/tls12_connection.zig"));
+
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));

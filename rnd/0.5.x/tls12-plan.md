@@ -29,9 +29,9 @@ graph TD
 | Layer | PoC file | Oracle | Status |
 | :- | :- | :- | :- |
 | P | `tls12_prf_poc.zig` | the canonical TLS 1.2 PRF SHA-256 known-answer vector (100 bytes) | DONE, P_SHA256 + PRF byte-exact vs the 100-byte vector, Zig 0.16 + 0.17 |
-| R12 | `tls12_record_poc.zig` | AES-128-GCM 1.2 AEAD (explicit nonce + 1.2 AAD), openssl cross-check | pending |
-| H12 | `tls12_handshake_poc.zig` | openssl s_client (ECDHE-ECDSA), the master-secret + Finished | pending |
-| N | (in `src/tls`) | openssl `-tls1_2` and `-tls1_3`, downgrade sentinel checked by a 1.3 client | pending |
+| R12 | `tls12_record_poc.zig` | NIST AES-128-GCM KAT + byte-exact 1.2 framing | DONE, protect/deprotect (salt+explicit nonce, 13-byte AAD, explicit-nonce layout), round trip + tamper + NIST case 4, Zig 0.16 + 0.17. openssl wire cross-check at integration |
+| H12 | `tls12_handshake_poc.zig` | deterministic crypto (sign/verify, ECDHE, PRF schedule); openssl wire at integration | DONE, ServerKeyExchange sign/verify + tamper, ECDHE pre_master both-sides-agree, master_secret/key_block/Finished, AEAD round trip on derived keys, Zig 0.16 + 0.17 |
+| N | `tls12_negotiate_poc.zig` | byte-exact sentinel + selection logic; openssl `-tls1_2`/`-tls1_3` at integration | DONE, version select (1.3 pref, 1.2 floor, reject below) + DOWNGRD\x01 sentinel plant + client-side detect, Zig 0.16 + 0.17 |
 
 ## Key differences from 1.3 (what is genuinely new)
 
@@ -59,3 +59,25 @@ cross-version + downgrade-sentinel behavior is checked with both `openssl -tls1_
 P (PRF) first, since both the master secret and the Finished verify_data ride on it. Then R12
 (record), then H12 (handshake), then fold version negotiation + the downgrade sentinel into
 `src/tls`. Each layer green on Zig 0.16 and 0.17 before the next.
+
+## In src/ (additive, 1.3 path untouched, tests via lib.zig)
+
+- `tls12_prf.zig` (PRF + master_secret + key_block + Finished)
+- `tls12_record.zig` (AES-128-GCM record protect/deprotect)
+- `tls12_version.zig` (version select + downgrade sentinel)
+- `tls12_connection.zig` (the sans-I/O handshake ENGINE): `serverFlight1` (ServerHello + Certificate
+  + ServerKeyExchange ECDHE-ECDSA + ServerHelloDone) and `serverFinish` (ClientKeyExchange -> master
+  -> verify client Finished -> ChangeCipherSpec + server Finished), plus a `Connection` for app data.
+  An in-memory self-test plays an honest client end to end (flight, CKE, both Finished, app-data
+  round trip). This proves INTERNAL consistency, not RFC wire-correctness.
+
+Serve-loop wiring DONE for http1 (src/tcp/http1/tls_serve.zig): the TLS path reads the ClientHello,
+tries 1.3, and on error.UnsupportedTlsVersion (no 1.3 offer) branches to serveConnTls12 (the 1.2
+two-phase handshake + one request). It is gated by config.tls_cert_path in server.zig, so the
+cleartext EPOLL / URING path is byte-identical when TLS is off (test-runner-all 57 green, both
+toolchains). The 1.2 branch is dormant for 1.3 clients (std client, curl), so it is not yet
+exercised on the wire.
+
+Still to do: `ServerHello` extensions openssl expects (renegotiation_info / ec_point_formats), the
+openssl `-tls1_2` wire cross-check recorded in verify-tls12.md (the real RFC gate, the in-memory
+test only checks self-consistency), and the http2 1.2 branch if wanted.
