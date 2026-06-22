@@ -1971,9 +1971,11 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 ## AI Policies
 
-- Ini adalah sebuah alat.
-- Keputusan dan penilaian terakhir ada di pihak kita.
-- Jangan membuat pull request dengan atau atas nama mereka.
+- __*Akuntabilitas itu penting.*__
+- __*Anda boleh menggunakannya sebagai alat Anda sendiri.*__
+- __*Namun keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
+
+<!-- Jika anda menyalahkan AI, anda yang salah. -->
 
 <br>
 
