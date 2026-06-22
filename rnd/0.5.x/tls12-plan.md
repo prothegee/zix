@@ -78,6 +78,17 @@ cleartext EPOLL / URING path is byte-identical when TLS is off (test-runner-all 
 toolchains). The 1.2 branch is dormant for 1.3 clients (std client, curl), so it is not yet
 exercised on the wire.
 
-Still to do: `ServerHello` extensions openssl expects (renegotiation_info / ec_point_formats), the
-openssl `-tls1_2` wire cross-check recorded in verify-tls12.md (the real RFC gate, the in-memory
-test only checks self-consistency), and the http2 1.2 branch if wanted.
+`ServerHello` extensions DONE: serverFlight1 now emits renegotiation_info (RFC 5746) + ec_point_
+formats (RFC 8422), what openssl expects for a 1.2 ECDHE handshake (self-test still green). The
+openssl `-tls1_2` command is in verify-tls12.md.
+
+http2 1.2 branch DONE: the 1.2 engine now negotiates + emits ALPN h2 (tls12_connection serverFlight1
++ state.alpn, unit-tested), and src/tcp/http2/tls_serve.zig branches to serveConnTls12H2 (require
+ALPN h2, then the SAME socketpair terminator over the unchanged h2c engine via a generic pump).
+Gated, dormant for 1.3 clients, test-runner-all 57 green both toolchains.
+
+WIRE-VALIDATED (verify-tls12.md, user-run): openssl -tls1_2 completed the http1 handshake (cert
+verified, HTTP/1.1 200 + body), curl --http2 --tls-max 1.2 got h2 ver=2 + 200, and the TLS 1.3
+regression stayed clean. Fixed: the 1.2 Connection now sends close_notify (Connection.closeNotify,
+wired into both serve paths) so the peer sees a clean shutdown, openssl had logged "unexpected eof"
+without it. TLS 1.2 (the minimum) is now wire-proven on both engines.
