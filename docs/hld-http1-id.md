@@ -183,7 +183,9 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
     max_recv_buf:       usize = 16 * 1024,     // buffer per-connection (.EPOLL saja, lihat catatan)
     ws_recv_buf:        usize = 0,             // buffer WebSocket .EPOLL, 0 = max_recv_buf
-    max_gzip_out:       usize = 256 * 1024,    // informasional: writeGzip memakai core.GZIP_OUT_SIZE
+    compression:          bool  = false,        // enable negosiasi gzip, opt-in via core.writeNegotiated (.EPOLL/.URING)
+    compression_min_size: usize = 256,           // lewati body di bawah floor ini
+    compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
     max_headers:        u8    = 16,            // informasional: batas parse adalah core.MAX_HEADERS
     workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL saja
@@ -193,7 +195,7 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. `max_gzip_out` dan `max_headers` saat ini mencerminkan batas compile-time `core.GZIP_OUT_SIZE` dan `core.MAX_HEADERS` dan tidak dibaca saat runtime.
+Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. Field `compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.writeNegotiated` alih-alih `writeSimple`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` tetap informasional, mencerminkan `core.MAX_HEADERS`.
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection untuk koneksi yang dipromosikan ke WebSocket pada `.EPOLL`. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi frame pipelined sebelum engine compact dan re-read saat fill.
 

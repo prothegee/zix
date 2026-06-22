@@ -34,6 +34,26 @@ __*Fix:*__
 
 <br>
 
+## 0.5.0 (TBD)
+
+__*Update:*__
+- Zig 0.17 support.
+- Response compression (gzip / deflate):
+    - Negosiasi `Accept-Encoding` dengan gzip dan deflate. Codec bersama baru `src/utils/compression/flate.zig` (container-parameterized di atas `std.compress.flate`: gzip = RFC 1952, deflate = zlib-wrapped RFC 1950, bukan raw) plus facade `compression.zig` (negosiasi q-value, penanganan `q=0` dan wildcard, size floor, skip media-type yang sudah terkompresi, dispatch encode/decode).
+    - `zix.Http1` menyajikannya via `core.writeNegotiated(fd, head, status, content_type, body)`, `zix.Http` via `Response.sendNegotiated(req, body)`, keduanya menyetel `Content-Encoding` dan `Vary: Accept-Encoding`. Aktif pada `.EPOLL` dan `.URING`, default off. gRPC tetap memakai `grpc-encoding` per-message miliknya, raw transport tidak punya negosiasi HTTP.
+    - `std.compress.flate.Compress` berukuran sekitar 230 KB dan dibangun di stack frame handler, jadi worker yang mengompresi di-spawn dengan stack 2 MiB (demand-paged, RSS mendekati nol) alih-alih default 512 KB.
+    - Example baru `http1_compression` (port 9058) dan `http_compression` (port 9059), dengan step runner `test-runner-http1-compression` dan `test-runner-http-compression` (raw-socket, menguji gzip / deflate / identity / size-floor).
+    ---
+- Server config (knob) ditambahkan:
+    - `compression` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
+
+<br>
+
+__*Fix:*__
+- n/a
+
+<br>
+
 ## 0.4.0 (2026-06-19)
 
 __*Ditambahkan:*__

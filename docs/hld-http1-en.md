@@ -183,7 +183,9 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 16 * 1024,     // per-connection buffer (.EPOLL only, see note)
     ws_recv_buf:        usize = 0,             // .EPOLL WebSocket buffer, 0 = max_recv_buf
-    max_gzip_out:       usize = 256 * 1024,    // informational: writeGzip uses core.GZIP_OUT_SIZE
+    compression:          bool  = false,        // enable gzip negotiation, opt-in via core.writeNegotiated (.EPOLL/.URING)
+    compression_min_size: usize = 256,           // skip bodies under this floor
+    compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
     max_headers:        u8    = 16,            // informational: parse cap is core.MAX_HEADERS
     workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL only
@@ -193,7 +195,7 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. `max_gzip_out` and `max_headers` currently mirror the compile-time caps `core.GZIP_OUT_SIZE` and `core.MAX_HEADERS` and are not read at runtime.
+Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. The `compression`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.writeNegotiated` instead of `writeSimple`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` remains informational, mirroring `core.MAX_HEADERS`.
 
 Note: `ws_recv_buf` sizes the per-connection buffer for a connection promoted to WebSocket under `.EPOLL`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate pipelined frames before the engine compacts and re-reads on a fill.
 
