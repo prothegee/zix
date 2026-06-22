@@ -2,7 +2,7 @@
 // Runs each protocol test sequentially. Exits 0 only when every test passes.
 //
 // Invoked by `zig build test-runner-all`.
-// Server binary paths are passed as argv[1..58] by build.zig in this order:
+// Server binary paths are passed as argv[1..60] by build.zig in this order:
 //
 // Basic dispatch-model servers (argv[1..23]):
 //   http-async, http-pool, http-mixed, http-epoll,
@@ -37,6 +37,9 @@
 //
 // Channel IPC pair (argv[57..58]):
 //   channel-ipc-a, channel-ipc-b
+//
+// TLS servers (argv[59..60]):
+//   tls-http1 (https/1.1), tls-http2 (h2)
 
 const std = @import("std");
 const zix = @import("zix");
@@ -60,20 +63,25 @@ fn exitMissing(name: []const u8) noreturn {
     std.process.exit(1);
 }
 
-fn report(label: []const u8, result: anyerror!void, failed: *usize) void {
+/// Running tally so the final count is derived from the actual number of report() calls, not a
+/// hardcoded total.
+const Tally = struct { total: usize = 0, failed: usize = 0 };
+
+fn report(label: []const u8, result: anyerror!void, tally: *Tally) void {
+    tally.total += 1;
     if (result) {
         common.printPass(label);
     } else |err| {
         _ = common.takeFallbackNote();
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
-        failed.* += 1;
+        tally.failed += 1;
     }
 }
 
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    var failed: usize = 0;
+    var tally: Tally = .{};
     const io = process.io;
 
     var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
@@ -158,95 +166,97 @@ pub fn main(process: std.process.Init) void {
     const channel_ipc_a_path = arg_iter.next() orelse exitMissing("channel-ipc-a");
     const channel_ipc_b_path = arg_iter.next() orelse exitMissing("channel-ipc-b");
 
-    // tls (https/1.1 over TLS 1.3)
+    // tls (https/1.1 over TLS 1.3, and h2 over TLS 1.3)
     const tls_http1_path = arg_iter.next() orelse exitMissing("tls-http1");
+    const tls_http2_path = arg_iter.next() orelse exitMissing("tls-http2");
 
     // Basic dispatch-model tests.
-    report("http-async", runHttp(io, http_async_path, 9000), &failed);
-    report("http-pool", runHttp(io, http_pool_path, 9001), &failed);
-    report("http-mixed", runHttp(io, http_mixed_path, 9002), &failed);
-    report("http-epoll", runHttp(io, http_epoll_path, 9003), &failed);
+    report("http-async", runHttp(io, http_async_path, 9000), &tally);
+    report("http-pool", runHttp(io, http_pool_path, 9001), &tally);
+    report("http-mixed", runHttp(io, http_mixed_path, 9002), &tally);
+    report("http-epoll", runHttp(io, http_epoll_path, 9003), &tally);
 
-    report("http1-async", runHttp1(io, http1_async_path, 9015), &failed);
-    report("http1-pool", runHttp1(io, http1_pool_path, 9016), &failed);
-    report("http1-mixed", runHttp1(io, http1_mixed_path, 9017), &failed);
-    report("http1-epoll", runHttp1(io, http1_epoll_path, 9018), &failed);
-    report("http1-uring", runHttp1(io, http1_uring_path, 9019), &failed);
+    report("http1-async", runHttp1(io, http1_async_path, 9015), &tally);
+    report("http1-pool", runHttp1(io, http1_pool_path, 9016), &tally);
+    report("http1-mixed", runHttp1(io, http1_mixed_path, 9017), &tally);
+    report("http1-epoll", runHttp1(io, http1_epoll_path, 9018), &tally);
+    report("http1-uring", runHttp1(io, http1_uring_path, 9019), &tally);
 
-    report("grpc-async", runGrpc(io, grpc_async_path, 9032), &failed);
-    report("grpc-pool", runGrpc(io, grpc_pool_path, 9033), &failed);
-    report("grpc-mixed", runGrpc(io, grpc_mixed_path, 9034), &failed);
-    report("grpc-epoll", runGrpc(io, grpc_epoll_path, 9035), &failed);
+    report("grpc-async", runGrpc(io, grpc_async_path, 9032), &tally);
+    report("grpc-pool", runGrpc(io, grpc_pool_path, 9033), &tally);
+    report("grpc-mixed", runGrpc(io, grpc_mixed_path, 9034), &tally);
+    report("grpc-epoll", runGrpc(io, grpc_epoll_path, 9035), &tally);
 
-    report("tcp-async", runTcp(io, tcp_async_path, 9043), &failed);
-    report("tcp-pool", runTcp(io, tcp_pool_path, 9044), &failed);
-    report("tcp-mixed", runTcp(io, tcp_mixed_path, 9045), &failed);
-    report("tcp-epoll", runTcp(io, tcp_epoll_path, 9046), &failed);
+    report("tcp-async", runTcp(io, tcp_async_path, 9043), &tally);
+    report("tcp-pool", runTcp(io, tcp_pool_path, 9044), &tally);
+    report("tcp-mixed", runTcp(io, tcp_mixed_path, 9045), &tally);
+    report("tcp-epoll", runTcp(io, tcp_epoll_path, 9046), &tally);
 
-    report("fix-async", runFix(io, fix_async_path, 9048), &failed);
-    report("fix-pool", runFix(io, fix_pool_path, 9049), &failed);
-    report("fix-mixed", runFix(io, fix_mixed_path, 9050), &failed);
-    report("fix-epoll", runFix(io, fix_epoll_path, 9051), &failed);
+    report("fix-async", runFix(io, fix_async_path, 9048), &tally);
+    report("fix-pool", runFix(io, fix_pool_path, 9049), &tally);
+    report("fix-mixed", runFix(io, fix_mixed_path, 9050), &tally);
+    report("fix-epoll", runFix(io, fix_epoll_path, 9051), &tally);
 
-    report("udp", runUdp(io, udp_path), &failed);
-    report("uds", runUds(io, uds_path), &failed);
+    report("udp", runUdp(io, udp_path), &tally);
+    report("uds", runUds(io, uds_path), &tally);
 
     // HTTP feature tests.
-    report("http-json", runHttpGet(io, http_json_path, 9005, "/status", "", "server"), &failed);
-    report("http-middleware", runHttpGet(io, http_middleware_path, 9006, "/public", "http://127.0.0.1", "public"), &failed);
-    report("http-params", runHttpGet(io, http_params_path, 9007, "/echo?foo=bar", "", "foo"), &failed);
-    report("http-paths", runHttpGet(io, http_paths_path, 9008, "/path", "", ""), &failed);
-    report("http-timeout-resp", runHttpGet(io, http_timeout_resp_path, 9010, "/ping", "", "pong"), &failed);
-    report("http-xtra-headers", runHttpGet(io, http_xtra_headers_path, 9011, "/info", "", ""), &failed);
-    report("http-manual-concurrent", runHttpGet(io, http_manual_concurrent_path, 9014, "/", "", "hello"), &failed);
-    report("http-static", runHttpStatic(io, http_static_path, 9009, "http_text_file.txt", "this is http text file example."), &failed);
-    report("http-sse", runSse(io, http_sse_path, 9012), &failed);
-    report("http-websocket", runWs(io, http_websocket_path, 9013, "/ws/lobby"), &failed);
+    report("http-json", runHttpGet(io, http_json_path, 9005, "/status", "", "server"), &tally);
+    report("http-middleware", runHttpGet(io, http_middleware_path, 9006, "/public", "http://127.0.0.1", "public"), &tally);
+    report("http-params", runHttpGet(io, http_params_path, 9007, "/echo?foo=bar", "", "foo"), &tally);
+    report("http-paths", runHttpGet(io, http_paths_path, 9008, "/path", "", ""), &tally);
+    report("http-timeout-resp", runHttpGet(io, http_timeout_resp_path, 9010, "/ping", "", "pong"), &tally);
+    report("http-xtra-headers", runHttpGet(io, http_xtra_headers_path, 9011, "/info", "", ""), &tally);
+    report("http-manual-concurrent", runHttpGet(io, http_manual_concurrent_path, 9014, "/", "", "hello"), &tally);
+    report("http-static", runHttpStatic(io, http_static_path, 9009, "http_text_file.txt", "this is http text file example."), &tally);
+    report("http-sse", runSse(io, http_sse_path, 9012), &tally);
+    report("http-websocket", runWs(io, http_websocket_path, 9013, "/ws/lobby"), &tally);
 
     // HTTP1 feature tests.
-    report("http1-json", runHttpGet(io, http1_json_path, 9020, "/status", "", "server"), &failed);
-    report("http1-middleware", runHttpGet(io, http1_middleware_path, 9021, "/public", "http://127.0.0.1", "public"), &failed);
-    report("http1-params", runHttpGet(io, http1_params_path, 9022, "/echo?foo=bar", "", "foo"), &failed);
-    report("http1-paths", runHttpGet(io, http1_paths_path, 9023, "/path", "", ""), &failed);
-    report("http1-timeout-resp", runHttpGet(io, http1_timeout_resp_path, 9025, "/ping", "", "pong"), &failed);
-    report("http1-xtra-headers", runHttpGet(io, http1_xtra_headers_path, 9026, "/info", "", ""), &failed);
-    report("http1-manual-concurrent", runHttpGet(io, http1_manual_concurrent_path, 9030, "/", "", "hello"), &failed);
-    report("http1-static", runHttpStatic(io, http1_static_path, 9024, "http1_text_file.txt", "this is http1 text file example."), &failed);
-    report("http1-sse", runSse(io, http1_sse_path, 9027), &failed);
-    report("http1-websocket", runWs(io, http1_websocket_path, 9028, "/ws"), &failed);
-    report("http1-cache", runHttpGet(io, http1_cache_path, 9031, "/cache?kb=1", "", "ok"), &failed);
+    report("http1-json", runHttpGet(io, http1_json_path, 9020, "/status", "", "server"), &tally);
+    report("http1-middleware", runHttpGet(io, http1_middleware_path, 9021, "/public", "http://127.0.0.1", "public"), &tally);
+    report("http1-params", runHttpGet(io, http1_params_path, 9022, "/echo?foo=bar", "", "foo"), &tally);
+    report("http1-paths", runHttpGet(io, http1_paths_path, 9023, "/path", "", ""), &tally);
+    report("http1-timeout-resp", runHttpGet(io, http1_timeout_resp_path, 9025, "/ping", "", "pong"), &tally);
+    report("http1-xtra-headers", runHttpGet(io, http1_xtra_headers_path, 9026, "/info", "", ""), &tally);
+    report("http1-manual-concurrent", runHttpGet(io, http1_manual_concurrent_path, 9030, "/", "", "hello"), &tally);
+    report("http1-static", runHttpStatic(io, http1_static_path, 9024, "http1_text_file.txt", "this is http1 text file example."), &tally);
+    report("http1-sse", runSse(io, http1_sse_path, 9027), &tally);
+    report("http1-websocket", runWs(io, http1_websocket_path, 9028, "/ws"), &tally);
+    report("http1-cache", runHttpGet(io, http1_cache_path, 9031, "/cache?kb=1", "", "ok"), &tally);
 
     // gRPC feature tests.
-    report("grpc-location-async", runGrpcLocation(io, grpc_location_async_path, 9038), &failed);
-    report("grpc-location-pool", runGrpcLocation(io, grpc_location_pool_path, 9039), &failed);
-    report("grpc-location-mixed", runGrpcLocation(io, grpc_location_mixed_path, 9040), &failed);
-    report("grpc-location-epoll", runGrpcLocation(io, grpc_location_epoll_path, 9041), &failed);
-    report("grpc-multi", runGrpcMulti(io, grpc_multi_path), &failed);
-    report("grpc-timeout", runGrpcTimeout(io, grpc_timeout_path), &failed);
+    report("grpc-location-async", runGrpcLocation(io, grpc_location_async_path, 9038), &tally);
+    report("grpc-location-pool", runGrpcLocation(io, grpc_location_pool_path, 9039), &tally);
+    report("grpc-location-mixed", runGrpcLocation(io, grpc_location_mixed_path, 9040), &tally);
+    report("grpc-location-epoll", runGrpcLocation(io, grpc_location_epoll_path, 9041), &tally);
+    report("grpc-multi", runGrpcMulti(io, grpc_multi_path), &tally);
+    report("grpc-timeout", runGrpcTimeout(io, grpc_timeout_path), &tally);
 
     // FIX trading test.
-    report("fix-trading", runFixTrading(io, fix_trading_path), &failed);
+    report("fix-trading", runFixTrading(io, fix_trading_path), &tally);
 
     // UDS HTTP test.
-    report("uds-http", runUdsHttp(io, uds_http_a_path, uds_http_b_path), &failed);
+    report("uds-http", runUdsHttp(io, uds_http_a_path, uds_http_b_path), &tally);
 
     // Channel self-terminating tests.
-    report("channel-basic", runChannelSelfterm(io, channel_basic_path), &failed);
-    report("channel-pipeline", runChannelSelfterm(io, channel_pipeline_path), &failed);
-    report("channel-worker-pool", runChannelSelfterm(io, channel_worker_pool_path), &failed);
+    report("channel-basic", runChannelSelfterm(io, channel_basic_path), &tally);
+    report("channel-pipeline", runChannelSelfterm(io, channel_pipeline_path), &tally);
+    report("channel-worker-pool", runChannelSelfterm(io, channel_worker_pool_path), &tally);
 
     // Channel IPC test.
-    report("channel-ipc", runChannelIpc(io, channel_ipc_a_path, channel_ipc_b_path), &failed);
+    report("channel-ipc", runChannelIpc(io, channel_ipc_a_path, channel_ipc_b_path), &tally);
 
-    // TLS test (https/1.1 over TLS 1.3, curl as the client).
-    report("tls-http1", runTls(io, tls_http1_path, 9060), &failed);
+    // TLS tests (native clients, no curl): https/1.1 (std-backed) + h2 (the zix.Tls client).
+    report("tls-http1", runTls(io, tls_http1_path, 9060), &tally);
+    report("tls-http2", runTlsHttp2(io, tls_http2_path, 9061), &tally);
 
-    if (failed > 0) {
-        std.debug.print("{d}/57 protocol(s) failed\n", .{failed});
+    if (tally.failed > 0) {
+        std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });
         std.process.exit(1);
     }
 
-    std.debug.print("all 57 protocols passed\n", .{});
+    std.debug.print("all {d} protocols passed\n", .{tally.total});
 }
 
 /// https/1.1 over TLS 1.3: spawn the server, GET / via the native zix.Http.Client (https,
@@ -278,6 +288,151 @@ fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
     if (resp.status() != 200) return error.UnexpectedStatus;
     if (std.mem.indexOf(u8, resp.body(), "hello over tls 1.3") == null) return error.UnexpectedBody;
     if (resp.header("Strict-Transport-Security") == null) return error.MissingHsts;
+}
+
+/// h2 over TLS 1.3: spawn the server, connect with the native zix.Tls client (ALPN h2), speak h2
+/// over the encrypted ClientConnection (preface + SETTINGS + HEADERS GET /), assert :status 200.
+fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
+    const Tls = zix.Tls;
+    const Http2 = zix.Http2;
+    const linux = std.os.linux;
+
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, 5000);
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    var stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+
+    var rnd: [64]u8 = undefined;
+    _ = linux.getrandom(&rnd, rnd.len, 0);
+    var ch_buf: [600]u8 = undefined;
+    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
+    var state = started.state;
+    try tlsWriteRecord(fd, 22, started.client_hello);
+
+    var flight_buf: [8192]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| flen += try tlsReadRecord(fd, flight_buf[flen..]);
+
+    var fin_buf: [256]u8 = undefined;
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    try tlsWriteAll(fd, finished.client_finished);
+
+    var req: [512]u8 = undefined;
+    var n: usize = 0;
+    @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
+    n += Http2.PREFACE.len;
+    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+
+    var hbuf: [256]u8 = undefined;
+    var enc = Http2.HpackEncoder.init(&hbuf);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader(":scheme", "https");
+    try enc.writeHeader(":authority", "localhost");
+    const hblock = enc.encoded();
+    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+    @memcpy(req[n..][0..hblock.len], hblock);
+    n += hblock.len;
+
+    var send_buf: [1024]u8 = undefined;
+    try tlsWriteAll(fd, finished.connection.writeAppData(req[0..n], &send_buf));
+
+    var acc: [16384]u8 = undefined;
+    var acc_len: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 64) : (rounds += 1) {
+        var rec_buf: [17 * 1024]u8 = undefined;
+        const rec_len = try tlsReadRecord(fd, &rec_buf);
+        if (rec_buf[0] != 23) continue;
+
+        var dec: [17 * 1024]u8 = undefined;
+        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &dec);
+        @memcpy(acc[acc_len..][0..plain.len], plain);
+        acc_len += plain.len;
+
+        var off: usize = 0;
+        while (off + Http2.FRAME_HEADER_LEN <= acc_len) {
+            const frame = Http2.parseFrameHeader(acc[off..][0..Http2.FRAME_HEADER_LEN]);
+            const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
+            if (off + total > acc_len) break;
+
+            const payload = acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
+                var hdec = Http2.HpackDecoder.init();
+                var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
+                var scratch: [4096]u8 = undefined;
+                const cnt = try hdec.decode(payload, &hdrs, &scratch);
+                for (hdrs[0..cnt]) |h| {
+                    if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
+                }
+            }
+            off += total;
+        }
+        if (off >= acc_len) {
+            acc_len = 0;
+        } else if (off > 0) {
+            std.mem.copyForwards(u8, acc[0 .. acc_len - off], acc[off..acc_len]);
+            acc_len -= off;
+        }
+    }
+
+    return error.NoStatus200;
+}
+
+fn tlsWriteRecord(fd: std.posix.fd_t, content_type: u8, msg: []const u8) !void {
+    var header: [5]u8 = undefined;
+    header[0] = content_type;
+    header[1] = 0x03;
+    header[2] = 0x03;
+    std.mem.writeInt(u16, header[3..5], @intCast(msg.len), .big);
+    try tlsWriteAll(fd, &header);
+    try tlsWriteAll(fd, msg);
+}
+
+fn tlsReadRecord(fd: std.posix.fd_t, buf: []u8) !usize {
+    try tlsReadAll(fd, buf[0..5]);
+    const len = std.mem.readInt(u16, buf[3..5], .big);
+    try tlsReadAll(fd, buf[5 .. 5 + len]);
+
+    return 5 + len;
+}
+
+fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
+    var read: usize = 0;
+    while (read < buf.len) {
+        const rc = std.os.linux.read(fd, buf[read..].ptr, buf.len - read);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+        if (rc == 0) return error.ConnectionClosed;
+        read += rc;
+    }
+}
+
+fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const rc = std.os.linux.write(fd, bytes[written..].ptr, bytes.len - written);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+        written += rc;
+    }
 }
 
 // --------------------------------------------------------- //
