@@ -48,6 +48,11 @@ pub const HttpClientConfig = struct {
     /// HTTP protocol version to use for requests. Default: .HTTP_1.
     /// HTTP_2 and HTTP_3 are reserved and currently yield error.UnsupportedVersion.
     version: Version = .HTTP_1,
+    /// PEM path to an extra CA certificate to trust for https requests, in addition to the
+    /// system roots. null = system roots only. Use this to trust a self-signed or private-CA
+    /// server (the https analogue of pointing curl at --cacert). Loaded once on the first https
+    /// request, relative to the process working directory.
+    tls_ca_path: ?[]const u8 = null,
 };
 
 // --------------------------------------------------------- //

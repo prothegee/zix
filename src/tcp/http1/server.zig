@@ -11,6 +11,7 @@ const pool_model = @import("dispatch/pool.zig");
 const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
+const tls_serve = @import("tls_serve.zig");
 
 // --------------------------------------------------------- //
 
@@ -33,6 +34,8 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
         pub fn deinit(_: *Self) void {}
 
         pub fn run(self: *const Self) !void {
+            if (self.config.tls_cert_path != null) return tls_serve.runTls(self.config, handler);
+
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(self.config, handler),
                 .POOL => pool_model.runPool(self.config, handler),

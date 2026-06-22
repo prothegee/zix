@@ -50,6 +50,7 @@ graph TD
 | | 9002 | QUIC Loss Detection and Congestion Control |
 | | 8999 | Version-Independent Properties of QUIC |
 | TLS | 8446 | TLS 1.3 |
+| | 8448 | Example Handshake Traces for TLS 1.3 (byte-level known-answer oracle) |
 | | 5246 | TLS 1.2 (optional fallback) |
 | | 7301 | ALPN |
 | | 6066 | TLS Extensions (SNI) |

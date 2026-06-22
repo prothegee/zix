@@ -1,0 +1,164 @@
+//! TLS 1.3 record protection (RFC 8446 section 5).
+//!
+//! Note:
+//! - AEAD protect / deprotect over the TLS 1.3 record framing: outer opaque_type
+//!   application_data(23), legacy_record_version 0x0303, the per-record nonce (static iv XOR the
+//!   sequence number), the inner content type, and zero padding.
+//! - AES-128-GCM only (the mandatory-to-implement suite, RFC 8446 9.1). AES-256-GCM and
+//!   ChaCha20-Poly1305 are additive later.
+//! - Enforces the record-size limit (record_overflow) and maps AEAD open failure to
+//!   bad_record_mac (RFC 8446 5.2).
+
+const std = @import("std");
+
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+
+pub const key_length = 16;
+pub const iv_length = 12;
+pub const tag_length = Aes128Gcm.tag_length;
+
+/// TLSPlaintext.length ceiling, 2^14 (RFC 8446 5.1).
+pub const max_plaintext = 1 << 14;
+
+/// TLSCiphertext.length ceiling, 2^14 + 256, over which is record_overflow (RFC 8446 5.2).
+pub const max_ciphertext = max_plaintext + 256;
+
+const legacy_record_version: u16 = 0x0303;
+
+/// Record content type (RFC 8446 5.1). The outer type on the wire for protected records is
+/// always application_data(23), the real type travels as the inner content type.
+pub const ContentType = enum(u8) {
+    CHANGE_CIPHER_SPEC = 20,
+    ALERT = 21,
+    HANDSHAKE = 22,
+    APPLICATION_DATA = 23,
+    _,
+};
+
+pub const Error = error{ RecordOverflow, BadRecordMac, Decode };
+
+/// The opened inner of a protected record: the true content type and the data.
+pub const Opened = struct {
+    inner_type: ContentType,
+    data: []const u8,
+};
+
+// --------------------------------------------------------------- //
+
+/// Per-record nonce: the static iv XOR the 64-bit sequence number, right-aligned (RFC 8446 5.3).
+pub fn nonce(iv: [iv_length]u8, sequence: u64) [iv_length]u8 {
+    var out = iv;
+    var sequence_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &sequence_bytes, sequence, .big);
+
+    var i: usize = 0;
+    while (i < 8) : (i += 1) out[iv_length - 8 + i] ^= sequence_bytes[i];
+
+    return out;
+}
+
+/// Protect a plaintext into a TLS 1.3 record: AEAD-seal (plaintext || inner content type) under
+/// the key, write the header + ciphertext + tag into `out`, and return the full record slice.
+///
+/// Param:
+/// out - []u8 (must hold 5 + plaintext.len + 1 + tag_length bytes)
+/// plaintext - the application or handshake bytes to protect
+/// inner_type - the true content type (travels inside the AEAD)
+/// key - the AES-128-GCM key
+/// iv - the static iv
+/// sequence - the record sequence number for this key
+///
+/// Return:
+/// - []const u8 (the wire record)
+pub fn protect(out: []u8, plaintext: []const u8, inner_type: ContentType, key: [key_length]u8, iv: [iv_length]u8, sequence: u64) []const u8 {
+    const inner_length = plaintext.len + 1;
+    const record_length = inner_length + tag_length;
+
+    out[0] = @intFromEnum(ContentType.APPLICATION_DATA);
+    std.mem.writeInt(u16, out[1..3], legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @intCast(record_length), .big);
+
+    var inner: [max_plaintext + 1]u8 = undefined;
+    @memcpy(inner[0..plaintext.len], plaintext);
+    inner[plaintext.len] = @intFromEnum(inner_type);
+
+    var tag: [tag_length]u8 = undefined;
+    Aes128Gcm.encrypt(out[5 .. 5 + inner_length], &tag, inner[0..inner_length], out[0..5], nonce(iv, sequence), key);
+    @memcpy(out[5 + inner_length .. 5 + inner_length + tag_length], &tag);
+
+    return out[0 .. 5 + record_length];
+}
+
+/// Deprotect a wire record: AEAD-open into `out`, strip the zero padding and inner content type,
+/// and return the true type + data. record_overflow and bad_record_mac per RFC 8446 5.2.
+///
+/// Return:
+/// - Opened
+/// - error.RecordOverflow if the ciphertext exceeds 2^14 + 256
+/// - error.BadRecordMac if the AEAD tag does not verify
+/// - error.Decode if the record is truncated or all-zero (no content type)
+pub fn deprotect(out: []u8, record: []const u8, key: [key_length]u8, iv: [iv_length]u8, sequence: u64) Error!Opened {
+    if (record.len < 5 + tag_length) return error.Decode;
+
+    const header = record[0..5];
+    const body = record[5..];
+    if (body.len > max_ciphertext) return error.RecordOverflow;
+
+    const ciphertext = body[0 .. body.len - tag_length];
+    var tag: [tag_length]u8 = undefined;
+    @memcpy(&tag, body[body.len - tag_length ..]);
+
+    const plaintext = out[0..ciphertext.len];
+    Aes128Gcm.decrypt(plaintext, ciphertext, tag, header, nonce(iv, sequence), key) catch return error.BadRecordMac;
+
+    var end = plaintext.len;
+    while (end > 0 and plaintext[end - 1] == 0) end -= 1;
+    if (end == 0) return error.Decode;
+
+    return .{ .inner_type = @enumFromInt(plaintext[end - 1]), .data = plaintext[0 .. end - 1] };
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+test "record protect/deprotect round trip" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    const message = "hello over tls 1.3";
+    var record_buf: [256]u8 = undefined;
+    const record = protect(&record_buf, message, .APPLICATION_DATA, key, iv, 0);
+    try std.testing.expectEqual(@as(u8, 23), record[0]);
+
+    var plain_buf: [256]u8 = undefined;
+    const opened = try deprotect(&plain_buf, record, key, iv, 0);
+    try std.testing.expectEqual(ContentType.APPLICATION_DATA, opened.inner_type);
+    try std.testing.expectEqualSlices(u8, message, opened.data);
+}
+
+test "record deprotect failures: bad tag, wrong seq, overflow" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    var record_buf: [256]u8 = undefined;
+    const record = protect(&record_buf, "data", .APPLICATION_DATA, key, iv, 0);
+
+    var plain_buf: [256]u8 = undefined;
+
+    var tampered: [256]u8 = undefined;
+    @memcpy(tampered[0..record.len], record);
+    tampered[record.len - 1] ^= 0x01;
+    try std.testing.expectError(error.BadRecordMac, deprotect(&plain_buf, tampered[0..record.len], key, iv, 0));
+
+    try std.testing.expectError(error.BadRecordMac, deprotect(&plain_buf, record, key, iv, 1));
+
+    var oversize: [5 + max_ciphertext + 1]u8 = undefined;
+    oversize[0] = 23;
+    std.mem.writeInt(u16, oversize[1..3], legacy_record_version, .big);
+    std.mem.writeInt(u16, oversize[3..5], max_ciphertext + 1, .big);
+    try std.testing.expectError(error.RecordOverflow, deprotect(&plain_buf, &oversize, key, iv, 0));
+}
