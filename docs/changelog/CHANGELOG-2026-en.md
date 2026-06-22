@@ -34,6 +34,26 @@ __*Fix:*__
 
 <br>
 
+## 0.5.0 (TBD)
+
+__*Update:*__
+- Zig 0.17 support.
+- Response compression (gzip / deflate):
+    - `Accept-Encoding` negotiation with gzip and deflate. New shared codec `src/utils/compression/flate.zig` (container-parameterized over `std.compress.flate`: gzip = RFC 1952, deflate = zlib-wrapped RFC 1950, not raw) plus the `compression.zig` facade (q-value negotiation, `q=0` and wildcard handling, size floor, already-compressed media-type skip, encode/decode dispatch).
+    - `zix.Http1` serves it via `core.writeNegotiated(fd, head, status, content_type, body)`, `zix.Http` via `Response.sendNegotiated(req, body)`, both setting `Content-Encoding` and `Vary: Accept-Encoding`. Active under `.EPOLL` and `.URING`, off by default. gRPC keeps its own per-message `grpc-encoding`, the raw transports have no HTTP negotiation.
+    - `std.compress.flate.Compress` is about 230 KB and is built on the handler stack frame, so a compressing worker spawns with a 2 MiB stack (demand-paged, near-zero RSS) instead of the default 512 KB.
+    - New examples `http1_compression` (port 9058) and `http_compression` (port 9059), with runner steps `test-runner-http1-compression` and `test-runner-http-compression` (raw-socket, exercising gzip / deflate / identity / size-floor).
+    ---
+- Server config (knob) added:
+    - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
+
+<br>
+
+__*Fix:*__
+- n/a
+
+<br>
+
 ## 0.4.0 (2026-06-19)
 
 __*Update:*__
