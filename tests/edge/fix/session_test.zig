@@ -88,7 +88,6 @@ fn recvMsg(
 
 // --------------------------------------------------------- //
 // Config edge cases
-// --------------------------------------------------------- //
 
 test "zix edge: FixClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
     const cfg = zix.Fix.ClientConfig{
@@ -113,7 +112,6 @@ test "zix edge: FixClientConfig, large recv_timeout_ms value is stored without o
 
 // --------------------------------------------------------- //
 // Pure-computation edge cases (no I/O)
-// --------------------------------------------------------- //
 
 test "zix edge: parseFields handles maximum number of fields without panic" {
     var msg_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
@@ -150,7 +148,6 @@ test "zix edge: buildMessage with zero extra fields produces valid message" {
 
 // --------------------------------------------------------- //
 // Session edge cases (with I/O)
-// --------------------------------------------------------- //
 
 test "zix edge: message arriving in two TCP segments is reassembled correctly" {
     const gpa = std.testing.allocator;
