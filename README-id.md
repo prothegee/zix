@@ -1970,11 +1970,8 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 ## AI Policies
 
-- __*Akuntabilitas itu penting.*__
 - __*Anda boleh menggunakannya sebagai alat Anda sendiri.*__
 - __*Namun keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
-
-<!-- Jika anda menyalahkan AI, anda yang salah. -->
 
 <br>
 
