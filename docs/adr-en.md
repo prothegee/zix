@@ -921,18 +921,18 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Status:** Accepted
 
-**Context:** When `.URING` (ADR-037) landed across engines, the only piece hoisted into a shared module was `src/multiplexers/ring.zig`: the `OpKind` tag and the `user_data` codec (about 40 lines). Every io_uring engine reuses it because the bits must match exactly (an fd-keyed slot guarded by a generation in one `user_data` layout). The rest stayed per-engine: each engine keeps its own `.EPOLL` and `.URING` connection table, `acceptAll`, and per-event dispatch. A reader can ask whether those loops should be unified the way the codec was.
+**Context:** When `.URING` (ADR-037) landed across engines, the first piece hoisted into a shared module was `src/multiplexers/ring.zig`: the `OpKind` tag and the `user_data` codec (about 40 lines). Every io_uring engine reuses it because the bits must match exactly (an fd-keyed slot guarded by a generation in one `user_data` layout). A second primitive later joined it, `src/multiplexers/slab.zig`: the Linux demand-paging helpers (`mapZeroedSlots`, `unmapSlots`, `releaseSlabPages`) that every per-worker EPOLL / URING connection table uses to mmap zero-filled slots and hand a closed connection's pages back to the OS. Everything else stayed per-engine: each engine keeps its own `.EPOLL` and `.URING` connection table, `acceptAll`, and per-event dispatch. A reader can ask whether those loops should be unified the way the codec and the slab helpers were.
 
-**Decision:** Keep each engine's dispatch loop (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) in its own `server.zig`. Do not build a generic multiplexer interface. Share only byte-identical primitives in `src/multiplexers/` (today, the `.URING` `user_data` codec). The rule: share primitives that must match, keep dispatch loops per-engine.
+**Decision:** Keep each engine's dispatch loop (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) and its connection table in its own `server.zig` (or `dispatch/` folder, ADR-043). Do not build a generic multiplexer interface. Share only byte-identical primitives in `src/multiplexers/`: today the `.URING` `user_data` codec (`ring.zig`) and the demand-paging helpers (`slab.zig`). The rule: share primitives that must match, keep dispatch loops and tables per-engine.
 
-**Rationale:** The split is the optimization. Per-engine ownership lets each engine tune its hot path for its own connection shape: `zix.Http1` carves connection buffers from a contiguous demand-paged slab (no per-accept heap call), while `zix.Grpc` and `zix.Fix` hold per-connection heap pointers because their connection objects carry h2 or FIX session state too large or variable for one fixed slab cell. A single generic loop would force one table shape on every engine (erasing the slab win) and add a callback-per-event indirection on the accept / recv / send path, the hottest path in the library. `ring.zig` deliberately stayed a codec to avoid exactly that indirection.
+**Rationale:** The split is the optimization. Per-engine ownership lets each engine tune its hot path for its own connection shape: `zix.Http1` carves connection buffers from a contiguous demand-paged slab (no per-accept heap call), while `zix.Grpc` and `zix.Fix` hold per-connection heap pointers because their connection objects carry h2 or FIX session state too large or variable for one fixed slab cell. A single generic loop would force one table shape on every engine (erasing the slab win) and add a callback-per-event indirection on the accept / recv / send path, the hottest path in the library. The two shared primitives pass the bar precisely because they are mechanics, not policy: `ring.zig` is a pure bit codec, and `slab.zig` is pure mmap / madvise that works for an inline-struct slot (zero means empty) or a pointer slot (zero means null) without knowing the table shape. Each engine still owns the table that calls them.
 
-**Config:** none. No code or API change. This records existing intent.
+**Config:** none. No API change. This records existing intent.
 
 **Consequences:**
+- `src/multiplexers/` holds shared primitives only, today `ring.zig` (the `user_data` codec) and `slab.zig` (the demand-paging helpers). The bar for adding to it is byte-identical-by-requirement, not merely similar shape.
 - A small amount of boilerplate stays duplicated per engine (the epoll bootstrap and the fd-indexed slot table shape), accepted in exchange for per-engine tunability. A bounds or generation fix in that pattern is applied per engine.
-- `src/multiplexers/` stays the home for shared primitives only. The bar for adding to it is byte-identical-by-requirement, not merely similar shape.
-- The connection tables are intentionally not identical: `zix.Http1` slab versus `zix.Grpc` / `zix.Fix` per-connection heap pointers, each chosen for that engine's connection shape.
+- The connection tables are intentionally not identical: `zix.Http1` inline-struct slab versus `zix.Grpc` / `zix.Fix` per-connection heap pointers, each chosen for that engine's connection shape, but both reach the shared `slab.zig` helpers for the mmap and page-release mechanics.
 
 ---
 
@@ -942,7 +942,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Context:** Each engine keeps all of its dispatch models in one `server.zig` (ADR-042). For `zix.Http1` that file was about 2,600 lines, with `.EPOLL` and `.URING` about 900 lines each and barely overlapping, so a change to one model meant scrolling past the other four. The A2 idle-pool variants, which differ only in the `.URING` pool code, were forced to be full-file copies.
 
-**Decision:** Split the models into a per-engine `dispatch/` folder, one file per model named for the `DispatchModel` enum value (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`), with shared dispatch helpers in `dispatch/common.zig`. `server.zig` keeps the public `Server` type and the runtime model switch. `core.zig` (shared request processing) is untouched. Rolled out on `zix.Http1` first, then replicated to the other engines.
+**Decision:** Split the models into a per-engine `dispatch/` folder, one file per model named for the `DispatchModel` enum value (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`), with shared dispatch helpers in `dispatch/common.zig`. `server.zig` keeps the public `Server` type and the runtime model switch. `core.zig` (shared request processing) is untouched. Rolled out on `zix.Http1` first, then replicated to the other connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`). `zix.Udp` is excluded by design (see Consequences): it is connectionless, has a single serve strategy, and has no `dispatch_model` to switch on.
 
 **Rationale:** This is file organization, not a behavior or perf change, and it does not introduce a shared or generic dispatch loop, so it complies with ADR-042: no per-event indirection, and each engine still owns its dispatch. Isolating a model makes per-model work and per-model variant comparison (the A2 record) tractable. Moved bodies stay byte-identical because each model file reaches the shared helpers through `const X = common.X;` aliases, so only the `run()` switch is rewritten.
 
@@ -952,7 +952,28 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - Each new file needs its own `std.testing.refAllDecls` line in `src/lib.zig` (refAllDecls is not recursive), else its tests silently never run. Tests move into the file of the model they cover.
 - The `zix.Http1` pilot landed green: `server.zig` shrank from 2,624 lines to 154, the five models live under `dispatch/` (with `common.zig` for the shared helpers), and `zig build`, `test-all`, and `test-runner-all` (all 56 protocols) pass with the 25 http1 tests preserved.
 - The four A2 idle-pool variants are preserved as full-server snapshots in `rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a cross-reference manifest.
-- The other engines (Http, Http2, Grpc, Tcp, Fix, Udp) get the same split next. Each is an independent, equivalent move.
+- The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, each an independent equivalent move, all green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). The comptime-route engines (`zix.Http2`, `zix.Grpc`, `zix.Http`) thread routes through a `common.Dispatch(...)` generic so the moved bodies stay byte-identical, the runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
+- `zix.Udp` is excluded by design. The dispatch models abstract connection lifecycle (accept, then per-fd multiplex, then close). UDP is connectionless: one bound datagram socket, no per-connection fds, clients tracked as application-level address records, and concurrency is per-datagram (`io.concurrent`) not per-connection. There are no models to partition. A `dispatch/` split would be revisited only if a second datagram serve strategy is added (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
+
+---
+
+## ADR-044: support Zig 0.16.x and 0.17.x from one tree via comptime ZIG_SEMVER gating
+
+**Status:** Accepted
+
+**Context:** zix is developed on Zig 0.16.0 while the rolling `zig` toolchain has moved to 0.17.0-dev, and the two differ in std and build APIs in ways that break compilation outright. The roadmap framed a version bump as blocking the 0.5.x campaign because it was assumed to force a re-baseline and an io_uring rewrite. Two findings removed that: the feared io_uring rewrite is a non-issue (the raw `std.os.linux.IoUring` is unchanged in 0.17, so the ring engines compile as-is), and every other difference is either a single parse-level operator change or a semantic API change that a comptime branch can carry on both versions at once. The full difference inventory is in `regression-zig-0.16-to-zig-0.17-diff.md`.
+
+**Decision:** Build on BOTH 0.16.x and 0.17.x from one source tree, gated by `ZIG_SEMVER`, a named comptime constant (`MAJOR` / `MINOR` / `PATCH`) over `builtin.zig_version`. It exists in exactly two places, because `build.zig` and the zix module are separate compilation contexts and `build.zig` cannot import the module: a build-only copy in `build.zig` (for the `ensureSupportedZig` guard and the `dirExists` build-root branch) and the public `zix.ZIG_SEMVER` in `src/lib.zig` (for source-code gates and external consumers). Semantic differences are gated `if (comptime ZIG_SEMVER.MINOR == 16) { 0.16 code } else { 0.17 form }`, where the comptime-dead branch is never analyzed so neither version sees the other's API. `ensureSupportedZig` fails fast with a readable message outside the 0.16.x / 0.17.x range.
+
+**Rationale:** Pinning one version would either strand 0.16 users or block adoption of the current toolchain for no benefit, since dual support is mechanical once the io_uring fear is gone. The gate preserves the validated 0.16 code verbatim on its branch and adds the 0.17 form in the `else`, rather than rewriting working code. `ZIG_SEMVER` centralizes the check, so the next port (0.18) is a search for `ZIG_SEMVER.MINOR` plus the parse-level sweep. The one exception is the `**` repeat operator: its 0.17 rejection is a parse (AstGen) error that fires over the whole file before any comptime branch is eliminated, so it cannot be gated and is replaced unconditionally with `@splat`, which is byte-identical on 0.16.
+
+**Config:** none. `ZIG_SEMVER` is a comptime constant, not a runtime field. No engine config or API change.
+
+**Consequences:**
+- One tree serves both the stable 0.16 line and the current 0.17 toolchain, with no fork or per-version branch, and the roadmap's Phase-1-blocking version decision is removed.
+- The seven differences resolved: `b.build_root` -> `b.root.root_dir` (build.zig), `X ** N` -> `@splat` (6 sites, unconditional), `bufPrintZ` -> `bufPrintSentinel(buf, fmt, args, 0)`, `indexOfIgnoreCase` -> `findIgnoreCase` (a rename), `@typeInfo` `.fields` -> `field_names` + `field_types`, `std.meta.Int` -> `@Int`, and io_uring unchanged.
+- Verified green on both 0.16.0 and 0.17.0-dev.902 across `test-all`, `examples`, and the live `test-runner-all` (56 protocols).
+- Two `ZIG_SEMVER` copies (build-only and public) must stay in sync, three trivial lines each over the same `builtin.zig_version`, and the doc comment in each forbids a third copy. A future compiler can add differences not covered here, bounded by `ensureSupportedZig`.
 
 ---
 
