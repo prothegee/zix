@@ -24,6 +24,11 @@ pub const alertRecordForError = connection.alertRecordForError;
 pub const Client = @import("client.zig");
 pub const Client12 = @import("tls12_client.zig");
 
+/// Layer V: peer certificate verification (the trust step of mTLS).
+/// verifyCertChain = chain + validity (RFC 5280). verifyCertHostname = identity (RFC 6125).
+pub const verifyCertChain = @import("cert_verify.zig").verifyCertChain;
+pub const verifyCertHostname = @import("cert_verify.zig").verifyCertHostname;
+
 pub const Alpn = extensions.Alpn;
 pub const Alert = alert.Alert;
 pub const fatal_record_len = alert.fatal_record_len;
