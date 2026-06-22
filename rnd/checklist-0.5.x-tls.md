@@ -94,9 +94,11 @@ with no HRR): test-runner-tls-http1 + test-runner-all stay GREEN on Zig 0.16 and
 LIVE end-to-end proof of the negotiate wiring (a real standards-based TLS 1.3 client,
 std.crypto.tls.Client, through the shared Tls.serverHandshake).
 
-Version policy: TLS 1.3 default and the only required version, TLS 1.2 optional fallback,
-1.1 / 1.0 / SSL never offered (RFC 8996). A+ falls out of TLS-1.3-only plus ECDHE forward
-secrecy plus an ECDSA / Ed25519 cert (no RSA needed).
+Version policy: TLS 1.2 is the MINIMUM (floor), TLS 1.3 is preferred / default. zix offers BOTH and
+never negotiates below 1.2. 1.1 / 1.0 / SSL never offered (RFC 8996). TLS 1.2 is REQUIRED scope but
+NOT yet implemented (the server is currently 1.3-only, so 1.2 is an open milestone, see
+rnd/roadmap-0.5.x.md). A+ holds for 1.2 + 1.3 when the 1.2 suites are restricted to ECDHE-AEAD
+(forward secrecy, AES-GCM), plus an ECDSA / Ed25519 cert (no RSA needed).
 
 Tools: openssl s_client (primary interop, full TLS 1.3), curl (ALPN / h2 negotiation),
 std.crypto.tls Client (independent Zig client). Posture scanners testssl.sh / sslyze /
@@ -133,7 +135,7 @@ Verified against RFC 8448 byte-level traces (deterministic oracle), pure-Zig.
 - [x] server flight order: ServerHello, EncryptedExtensions, [CertReq], Certificate, CertificateVerify, Finished
 - [ ] HelloRetryRequest when group selected but no compatible key_share [DETECTION only: negotiate() returns .hello_retry_request (unit-tested), but serverHandshake does NOT emit an HRR message yet, it returns error.HelloRetryRequestUnsupported. In practice clients offer an X25519 or secp256r1 key_share, so it does not trigger. HRR EMISSION + the second ClientHello flight are future.]
 - [ ] no group overlap -> handshake_failure, no renegotiation -> unexpected_message
-- [ ] downgrade sentinel in ServerHello.random when negotiating 1.2 (DOWNGRD\x01) or lower (\x00) [N/A while 1.3-only: the server has NO downgrade path (negotiate -> .legacy_version -> error.UnsupportedTlsVersion, the connection is dropped), so it never emits the sentinel. Required only if TLS 1.2 fallback is added. No DOWNGRD code exists today.]
+- [ ] downgrade sentinel in ServerHello.random when negotiating 1.2 (DOWNGRD\x01) or lower (\x00) [now REQUIRED: TLS 1.2 is the minimum, so the server will offer both 1.3 and 1.2 and MUST set the DOWNGRD sentinel when negotiating 1.2. Blocked on the TLS 1.2 milestone (1.2 not yet implemented, the server is currently 1.3-only). No DOWNGRD code exists today.]
 - [x] mandatory crypto: TLS_AES_128_GCM_SHA256, secp256r1, ecdsa_secp256r1_sha256 sig
 
 ## Layer X: extensions, ALPN, SNI (RFC 8446 4.2, 7301, 6066)
