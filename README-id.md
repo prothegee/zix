@@ -418,7 +418,9 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 
 ## Persyaratan
 
-- Zig >= 0.16.x
+- [Zig](https://ziglang.org/):
+    - [x] 0.16.x
+    - [ ] 0.17.x (Experimental)
 
 <br>
 
