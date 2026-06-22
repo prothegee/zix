@@ -176,6 +176,9 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_
 
     var encrypt_buf: [70 * 1024]u8 = undefined;
     try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
+
+    var close_buf: [64]u8 = undefined;
+    writeAll(fd, conn.closeNotify(&close_buf)) catch {};
 }
 
 /// Run the fd-handler against a pipe, returning the plaintext response it wrote. The handler

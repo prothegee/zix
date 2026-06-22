@@ -20,6 +20,7 @@ const Route = core.Route;
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const Tls = @import("../../tls/Tls.zig");
+const tls12 = @import("../../tls/tls12_connection.zig");
 const pem = @import("../../tls/pem.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -105,8 +106,13 @@ fn serveConnTls(
         .server_random = server_random,
         .alpn_prefs = config.tls_alpn,
     }, client_hello_rec.body, &handshake_out) catch |err| {
-        // a rejected ClientHello (incl. no_application_protocol): send the fatal alert in the clear,
-        // then close. The handshake keys do not exist yet, so the alert is plaintext.
+        // no 1.3 offer -> the client is TLS 1.2 (the minimum), take the h2-over-1.2 path.
+        if (err == error.UnsupportedTlsVersion) {
+            return serveConnTls12H2(routes, fd, config, opts, cert_der, key_pair, client_hello_rec.body, ephemeral_secret, server_random);
+        }
+
+        // any other rejected ClientHello (incl. no_application_protocol): send the fatal alert in
+        // the clear (no keys yet), then close.
         var alert_buf: [Tls.fatal_record_len]u8 = undefined;
         if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
 
@@ -155,10 +161,88 @@ fn serveConnTls(
     writeAll(fd, conn.closeNotify(&close_buf)) catch {};
 }
 
+/// h2-over-TLS-1.2 (RFC 7540 over RFC 5246): the two-phase 1.2 handshake (tls12_connection) with
+/// ALPN h2, then the SAME socketpair terminator over the unchanged h2c engine. Reached only when
+/// the client did not offer 1.3. The 1.2 ephemeral reuses the random bytes (reduced to a P-256
+/// scalar inside the engine).
+fn serveConnTls12H2(
+    comptime routes: []const Route,
+    fd: posix.fd_t,
+    config: Http2ServerConfig,
+    opts: core.ServeOpts,
+    cert_der: []const u8,
+    key_pair: EcdsaP256.KeyPair,
+    client_hello: []const u8,
+    ephemeral_secret: [32]u8,
+    server_random: [32]u8,
+) !void {
+    var flight_out: [8192]u8 = undefined;
+    const flight = try tls12.serverFlight1(.{
+        .certificate_der = cert_der,
+        .signing_key = key_pair,
+        .server_eph_secret = ephemeral_secret,
+        .server_random = server_random,
+        .alpn_prefs = config.tls_alpn,
+    }, client_hello, &flight_out);
+    try writeAll(fd, flight.to_send);
+    var state = flight.state;
+
+    // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3).
+    if (state.alpn != .H2) return error.AlpnNotH2;
+
+    var record_buf: [17 * 1024]u8 = undefined;
+
+    // ClientKeyExchange (plaintext handshake record), copied out before record_buf is reused.
+    const cke_rec = try readRecord(fd, &record_buf);
+    if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    var cke_buf: [256]u8 = undefined;
+    if (cke_rec.body.len > cke_buf.len) return error.RecordTooLarge;
+    @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
+    const client_key_exchange = cke_buf[0..cke_rec.body.len];
+
+    // skip ChangeCipherSpec, then the encrypted client Finished (a handshake record).
+    const finished_rec = while (true) {
+        const rec = try readRecord(fd, &record_buf);
+        if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+
+        break rec;
+    };
+
+    var finish_out: [256]u8 = undefined;
+    const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
+    try writeAll(fd, finish.to_send);
+    var conn = finish.connection;
+
+    // socketpair terminator over the unchanged h2c engine (same as the 1.3 path, generic pump).
+    var pair: [2]posix.fd_t = undefined;
+    if (posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) != .SUCCESS) return error.SocketpairFailed;
+    const pump_fd = pair[0];
+    const engine_fd = pair[1];
+
+    var engine_thread = std.Thread.spawn(.{ .stack_size = 512 * 1024 }, Terminator(routes).engineEntry, .{
+        Terminator(routes).EngineCtx{ .inner_fd = engine_fd, .opts = opts },
+    }) catch {
+        _ = linux.close(pump_fd);
+        _ = linux.close(engine_fd);
+        return error.SpawnFailed;
+    };
+
+    pump(fd, pump_fd, &conn, &record_buf);
+
+    _ = linux.shutdown(pump_fd, linux.SHUT.WR);
+    drain(pump_fd);
+    engine_thread.join();
+    _ = linux.close(pump_fd);
+
+    var close_buf: [64]u8 = undefined;
+    writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+}
+
 /// Full-duplex relay between the TLS socket (fd) and the plaintext engine end (pump_fd): decrypt
 /// inbound client records to plaintext, encrypt outbound engine bytes into records. Returns when
 /// either side closes (client FIN / close_notify, or the engine closes its end).
-fn pump(fd: posix.fd_t, pump_fd: posix.fd_t, conn: *Tls.Connection, record_buf: []u8) void {
+fn pump(fd: posix.fd_t, pump_fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
     var plain_in: [max_plaintext]u8 = undefined;
     var plain_out: [max_plaintext]u8 = undefined;
     var encrypt_buf: [17 * 1024]u8 = undefined;
