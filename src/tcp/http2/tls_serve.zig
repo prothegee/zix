@@ -101,7 +101,7 @@ fn serveConnTls(
     var handshake_out: [8192]u8 = undefined;
     const result = Tls.serverHandshake(.{
         .certificate_der = cert_der,
-        .signing_key = key_pair,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
         .alpn_prefs = config.tls_alpn,
