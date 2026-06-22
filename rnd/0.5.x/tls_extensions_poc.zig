@@ -1,5 +1,5 @@
 //! TLS 1.3 Layer X PoC (RFC 8446 4.2, 4.3.1, RFC 7301 ALPN, RFC 6066 SNI), the server-side
-//! extension handling step (rnd/checklist-0.5.x-tls.md, Layer X, follows K + H + C).
+//! extension handling step (tls-plan.md, Layer X, follows K + H + C).
 //!
 //! Note:
 //! - Layer H already parses the client extensions. This layer is the server SIDE: building the

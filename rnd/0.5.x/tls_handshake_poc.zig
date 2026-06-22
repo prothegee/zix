@@ -1,5 +1,5 @@
 //! TLS 1.3 Layer H PoC (RFC 8446 sec 4), the handshake-flow + version-negotiation step for the
-//! zix TLS 1.3 server handshake (rnd/checklist-0.5.x-tls.md, Layer H, follows Layer K).
+//! zix TLS 1.3 server handshake (tls-plan.md, Layer H, follows Layer K).
 //!
 //! Note:
 //! - This proves the handshake-message layer, not the crypto (that is Layer K). It parses the

@@ -1,6 +1,6 @@
 //! TLS 1.3 P0 start: server-handshake composition driver (RFC 8446 sec 4), the step that wires
 //! the verified Layer K + H + X + C pieces into one server-side flow
-//! (rnd/checklist-0.5.x-tls.md, P0). This is the bridge from per-layer PoCs to a live socket.
+//! (tls-plan.md, P0). This is the bridge from per-layer PoCs to a live socket.
 //!
 //! Note:
 //! - It runs the whole server first flight in memory: parse the RFC 8448 ClientHello, do a real

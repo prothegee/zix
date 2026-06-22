@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TLS 1.3 conformance + interop driver (Layer K now, P0 pipeline staged).
 #
-# Two gates, mirroring rnd/checklist-0.5.x-tls.md:
+# Two gates, mirroring tls-plan.md:
 #   1. Deterministic oracle (runs today): the Layer K key schedule + record protection PoC
 #      verified byte-for-byte against the RFC 8448 Simple 1-RTT Handshake trace, on both the
 #      Zig 0.16 and 0.17 toolchains (the ADR-044 dual-version gate).
