@@ -116,7 +116,6 @@
 Zix currently is linux-centric.
 
 As current state, zix will not:
-- TLS implementation.
 - Database driver implementation.
 - Http2 implementation (only as gRPC dependency).
 - Http3 implementation.
