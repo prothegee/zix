@@ -101,9 +101,13 @@
 | [`docs/lld-channel-id.md`](docs/lld-channel-id.md) | Channel: internal ring buffer, locking, algoritma send/recv |
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: POOL, ASYNC, MIXED, EPOLL. Jumlah thread, kecocokan protokol. |
+| [`docs/design-considerations-id.md`](docs/design-considerations-id.md) | Pertimbangan desain, design pattern, dan konvensi penamaan |
+| [`docs/coding-guideline-id.md`](docs/coding-guideline-id.md) | Coding style: layout source, naming, anatomi file, doc comment, config, test, aturan prosa |
+| [`docs/systems-thinking-id.md`](docs/systems-thinking-id.md) | Systems thinking: biaya eksplisit, alokasi terbatas, keterlibatan kernel, tooling measurement, gate dua-sisi |
 | [`docs/adr-id.md`](docs/adr-id.md) | Architecture Decision Records |
 | [`docs/headers-id.md`](docs/headers-id.md) | Kapasitas header respons: tingkatan, keamanan, penanganan error |
 | [`docs/tests-id.md`](docs/tests-id.md) | Tingkatan pengujian (unit / integration / behaviour / edge) dan cara menjalankan |
+<!-- | [`rnd/rfc/README.md`](rnd/rfc/README.md) | Checklist conformance MUST / MUST NOT berbasis RFC untuk raw HTTP/1.1, HTTP/2, HTTP/3, dan TLS 1.3 | -->
 
 <br>
 
@@ -134,6 +138,10 @@ Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk TLS, HTTP/2, H
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
+
+[Coding Guideline](docs/coding-guideline-id.md)
+
+[System Thinking Guideline](docs/systems-thinking-id.md)
 
 <br>
 
@@ -364,11 +372,13 @@ Field buffer, timeout, dan cache memakai nama yang sama di mana pun protokol mem
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` dan empat field `cache_*` | lihat [Kesadaran Cache Respons](#kesadaran-cache-respons-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+| `compression`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
 
 Beberapa perbedaan disengaja, bukan drift:
 
 - `zix.Http1` tidak punya `conn_timeout_ms`: ia tidak menjalankan timer thread connection-registry (lihat catatan Timeout di docs LLD HTTP/1).
 - `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
+- Response compression (`compression*`) ada di `zix.Http1` dan `zix.Http`, engine yang melayani respons HTTP dengan negosiasi Accept-Encoding. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
 - `zix.Udp` (datagram) membawa `ip` / `port` / `logger`, dan `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya, masing-masing hanya subset yang berlaku.
 
 <br>
@@ -1954,6 +1964,14 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 > perilaku CPU 8-12 core berbeda dengan 32-64 core. Berkat proyek HttpArena, zix bisa diukur pada beban kerja besar.
 
 > Benchmark historis disimpan di dalam direktori `docs/benchmark`.
+
+<br>
+
+## AI Policies
+
+- Ini adalah sebuah alat.
+- Keputusan dan penilaian terakhir ada di pihak kita.
+- Jangan membuat pull request dengan atau atas nama mereka.
 
 <br>
 
