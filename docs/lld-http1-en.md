@@ -26,7 +26,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
 | `logger` | `logSystem` lifecycle lines |
 
-`max_gzip_out` and `max_headers` are not read at runtime: the live caps are the compile-time constants `core.GZIP_OUT_SIZE` (256 KB) and `core.MAX_HEADERS` (16).
+`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.writeNegotiated`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: its live cap is `core.MAX_HEADERS` (16).
 
 ---
 

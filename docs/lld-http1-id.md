@@ -26,7 +26,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
 | `logger` | baris lifecycle `logSystem` |
 
-`max_gzip_out` dan `max_headers` tidak dibaca saat runtime: batas yang berlaku adalah konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB) dan `core.MAX_HEADERS` (16).
+`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.writeNegotiated`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: batasnya adalah `core.MAX_HEADERS` (16).
 
 ---
 
