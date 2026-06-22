@@ -75,7 +75,7 @@ fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     _ = body;
     const headers = [_]Hdr{
         .{ .name = "X-Server", .value = "zix" },
-        .{ .name = "X-Version", .value = "0.3.0" },
+        .{ .name = "X-Version", .value = "X.Y.Z" },
         .{ .name = "Cache-Control", .value = "no-store" },
         .{ .name = "Vary", .value = "Accept-Encoding" },
         .{ .name = "X-Frame-Options", .value = "DENY" },

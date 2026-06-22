@@ -27,7 +27,6 @@ const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 //   .CUSTOM(N)   - N    explicit non-standard cap
 //
 // This server runs with .LARGE (64) so handlers can add up to 64 headers.
-// --------------------------------------------------------- //
 
 // GET /info
 // Returns a JSON body with several custom headers attached:
@@ -37,7 +36,7 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     _ = ctx;
 
     try res.addHeader("X-Server", "zix");
-    try res.addHeader("X-Version", "0.1.0");
+    try res.addHeader("X-Version", "X.Y.Z");
     try res.addHeader("Cache-Control", "no-store");
     try res.addHeader("Vary", "Accept-Encoding");
     try res.addHeader("X-Frame-Options", "DENY");

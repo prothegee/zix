@@ -101,9 +101,13 @@
 | [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
+| [`docs/design-considerations-en.md`](docs/design-considerations-en.md) | Design considerations, design patterns, and naming conventions |
+| [`docs/coding-guideline-en.md`](docs/coding-guideline-en.md) | Coding style: source layout, naming, file anatomy, doc comments, config, tests, prose rules |
+| [`docs/systems-thinking-en.md`](docs/systems-thinking-en.md) | Systems thinking: explicit cost, bounded allocation, kernel involvement, measurement tooling, the two-sided gate |
 | [`docs/adr-en.md`](docs/adr-en.md) | Architecture Decision Records |
 | [`docs/headers-en.md`](docs/headers-en.md) | Response header cap: tiers, security, error handling |
 | [`docs/tests-en.md`](docs/tests-en.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
+<!-- | [`rnd/rfc/README.md`](rnd/rfc/README.md) | RFC-based MUST / MUST NOT conformance checklists for raw HTTP/1.1, HTTP/2, HTTP/3, and TLS 1.3 | -->
 
 <br>
 
@@ -134,6 +138,10 @@ See [swerver](https://github.com/justinGrosvenor/swerver) for TLS, HTTP/2, HTTP/
 - Always fix from our side first rather than Zig feature/s side.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
 - You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
+
+[Coding Guideline](docs/coding-guideline-en.md)
+
+[System Thinking Guideline](docs/systems-thinking-en.md)
 
 <br>
 
@@ -363,11 +371,13 @@ Buffer, timeout, and cache fields keep the same names wherever a protocol has th
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` and the four `cache_*` fields | see [Response Cache Awareness](#response-cache-awareness-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+| `compression`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
 
 A few differences are by design, not drift:
 
 - `zix.Http1` has no `conn_timeout_ms`: it runs no connection-registry timer thread (see the Timeouts note in the HTTP/1 LLD docs).
 - `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
+- Response compression (`compression*`) lives on `zix.Http1` and `zix.Http`, the engines that serve HTTP responses with Accept-Encoding negotiation. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
 - `zix.Udp` (datagram) carries `ip` / `port` / `logger`, and `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path, each only the subset that applies.
 
 <br>
@@ -1955,6 +1965,14 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 > behaviour of 8-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
 
 > Historical benchmark stored inside `docs/benchmark` directory.
+
+<br>
+
+## AI Policies
+
+- It's a tool.
+- The last decision and judgement it's on our end.
+- Do not create pull-request with or by their behalf.
 
 <br>
 
