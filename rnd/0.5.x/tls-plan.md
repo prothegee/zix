@@ -44,12 +44,15 @@ graph TD
 | P0 | `tls_server_poc.zig` | RFC 8448 + ECDSA fixture, self-deprotect | DONE, in-memory compose of K+H+X+C (real ECDHE, byte-exact SH/EE, AEAD encrypt round trip), Zig 0.16 + 0.17 |
 | P0 | `tls_server_live.zig` | live openssl s_client + curl | DONE, full TLS 1.3 handshake over a socket (fresh ephemeral key, CertificateVerify + Finished accepted, app data), gate 2 |
 | A | `src/tls/alert.zig` | emit-side condition -> alert matrix | DONE (emit): fatal alert record + alertForError map wired into http1/http2 tls_serve, unit-tested. Inbound alert + post-handshake encrypted alert pending |
-| V | `tls_pathval_poc.zig` | crafted chains, RFC 5280 cases | pending (mTLS, the zix.Tls client milestone) |
+| V | `src/tls/cert_verify.zig` | self-signed fixture + std X.509 | DONE (mTLS server side): verifyCertChain (RFC 5280) + verifyCertHostname (RFC 6125) + peerEcdsaP256PublicKey; connection.zig request_client_cert -> CertificateRequest + verifyClientCertFlight (split) / verifyClientAuthFlight (coalesced), round-trip + tamper-reject unit-tested. Remaining: multi-cert chains (std Bundle.verify) + engine tls_serve wiring |
 
-Landed in src/ (no longer PoC-only): K + H + X + C + connection + Tls.zig, the Http1 https path and
-the Http2 h2-over-TLS terminator, plus Layer A emit. serverHandshake routes through negotiate()
-(version / cipher / group selection enforced live), and both X25519 and secp256r1 ECDHE are wired.
-Next required milestone: TLS 1.2 (the minimum floor, ADR-045), see tls12-plan.md.
+Landed in src/ (no longer PoC-only): K + H + X + C + V + connection + Tls.zig + the 1.2 engine, the
+Http1 https path and the Http2 h2-over-TLS terminator, plus Layer A emit. serverHandshake routes
+through negotiate() (version / cipher / group selection enforced live), both X25519 and secp256r1
+ECDHE are wired, and Layer C selects the CertificateVerify signature scheme (ECDSA P-256 / Ed25519)
+from the client signature_algorithms (no-overlap -> handshake_failure). TLS 1.2 (the minimum floor,
+ADR-045) is DONE and wire-validated, see tls12-plan.md. The A+ grade is measured on-box (testssl,
+Final Score 92), see rnd/0.5.x/verify-tls-posture.sh.
 
 ## P0 remaining (live handshake works, src + receive side next)
 
