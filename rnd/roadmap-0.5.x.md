@@ -288,32 +288,35 @@ handshake in the runner that offers ALPN h2 but skips X.509 verification (reusin
 primitives), later swapped for the real verifying client. Recommended path is to build it directly on
 the real client, so there is no throwaway code.
 
-Version policy: TLS 1.3 is the default and the only required version, with TLS 1.2
-as an OPTIONAL non-deprecated fallback for older clients. Everything below 1.2 is
-deprecated or prohibited and is never put on the wire, which is both a security
-stance and the SSL Labs requirement (offering TLS 1.0 or 1.1 caps the grade at B):
+Version policy: TLS 1.2 is the MINIMUM (floor) and TLS 1.3 is the preferred / default. zix offers
+both, prefers 1.3, and never negotiates below 1.2. Everything below 1.2 is deprecated or prohibited
+and is never put on the wire, which is both a security stance and the SSL Labs requirement (offering
+TLS 1.0 or 1.1 caps the grade at B):
 
 | Version | zix policy | Status |
 | :- | :- | :- |
-| TLS 1.3 | default, required | current (RFC 8446) |
-| TLS 1.2 | optional fallback | current (RFC 5246, allowed) |
+| TLS 1.3 | preferred, default | implemented (RFC 8446) |
+| TLS 1.2 | minimum / floor, required | required scope, NOT yet implemented (RFC 5246, current) |
 | TLS 1.1 | never offered | deprecated (RFC 8996, March 2021) |
 | TLS 1.0 | never offered | deprecated (RFC 8996, March 2021) |
 | SSL 3.0 | never offered | deprecated (RFC 7568) |
 | SSL 2.0 | never offered | prohibited (RFC 6176) |
 
-TLS 1.2 support (TRACKED, OPTIONAL, not started): zix is TLS 1.3-only by IMPLEMENTATION scope, NOT
-because 1.2 is obsolete. TLS 1.2 (RFC 5246) is NOT deprecated (only 1.0 / 1.1 are, RFC 8996) and is
-still widely deployed, so supporting it is a product decision driven by the target client population
-(older Android, legacy OpenSSL, some embedded / enterprise stacks need it; modern browsers and
-clients do not). It buys nothing for the A+ grade or RFC 8446 conformance, so it stays deferred until
-a concrete legacy-client need appears. The work, when scheduled, is a separate track, not a small
-add: a SHA-256 / SHA-384 PRF key schedule (distinct from the 1.3 HKDF one), the 1.2 record layer
-(AEAD, plus optionally CBC-HMAC), the 1.2 handshake shape (ServerKeyExchange ECDHE + ServerHelloDone,
-no EncryptedExtensions, the 1.2 Finished / verify_data), cipher-suite negotiation across both
-versions, AND the downgrade-protection sentinel in ServerHello.random (RFC 8446 4.1.3), which only
-becomes REQUIRED once the server offers both 1.3 and 1.2 (see the Layer H checklist box, currently
-N/A while 1.3-only). Tracked here so the decision is explicit, not implicit.
+TLS 1.2 support (REQUIRED MINIMUM, not yet implemented): decision (user, this is policy, not
+optional): TLS 1.2 is the FLOOR. zix offers TLS 1.2 and TLS 1.3, prefers 1.3, and never goes below
+1.2. 1.2 is no longer a deferred "optional fallback", it is required scope, because 1.2 (RFC 5246) is
+NOT deprecated (only 1.0 / 1.1 are, RFC 8996) and remains widely deployed (older Android, legacy
+OpenSSL, embedded / enterprise stacks). The current code is 1.3-only, so this is a real OPEN
+implementation milestone, a separate track, not a small add: a SHA-256 / SHA-384 PRF key schedule
+(distinct from the 1.3 HKDF one), the 1.2 record layer (AEAD, GCM with the explicit nonce), the 1.2
+handshake shape (ServerKeyExchange ECDHE + ServerHelloDone, no EncryptedExtensions, the 1.2 Finished
+/ verify_data over the master secret), cipher-suite negotiation across both versions (ECDHE + AES-GCM
+only, no static-RSA key exchange, to keep forward secrecy and the A+ posture), AND the
+downgrade-protection sentinel in ServerHello.random (RFC 8446 4.1.3), now REQUIRED because the server
+offers both versions (the Layer H checklist box is no longer N/A). A+ is preserved: SSL Labs scores
+the protocol category at 100% for 1.2 + 1.3 just as for 1.3-only, provided the 1.2 suites are
+ECDHE-AEAD with forward secrecy (no weak ciphers, no static RSA). This may warrant an ADR (version
+policy + the dual-version handshake architecture), see the ADR reminder.
 
 Target when TLS does land: an SSL Labs (Qualys) A+ grade, the top of the ladder (A+
 down to F, there is no A++). The A+ requirements fall out of the design already
@@ -321,16 +324,17 @@ chosen, so it is a target, not extra work:
 
 | A+ requirement | How zix meets it |
 | :- | :- |
-| Protocols: TLS 1.3 only (no SSL2/3, no TLS 1.0/1.1) | the TLS 1.3 handshake is the only path written. TLS 1.0/1.1 would cap the grade at B, so they are never offered |
-| Forward secrecy on every suite | TLS 1.3 mandates ECDHE, so it is automatic |
-| AEAD ciphers only (AES-GCM, ChaCha20-Poly1305) | TLS 1.3 mandates AEAD, so it is automatic. std.crypto provides both |
+| Protocols: TLS 1.2 + 1.3 (no SSL2/3, no TLS 1.0/1.1) | both are offered, 1.3 preferred, 1.2 the floor. SSL Labs scores 1.2 + 1.3 at 100% protocol just like 1.3-only. TLS 1.0/1.1 would cap the grade at B, so they are never offered |
+| Forward secrecy on every suite | TLS 1.3 mandates ECDHE. For 1.2 the offered suites are restricted to ECDHE-AEAD (no static-RSA key exchange), so FS holds on both versions |
+| AEAD ciphers only (AES-GCM, ChaCha20-Poly1305) | TLS 1.3 mandates AEAD. The 1.2 suite list is restricted to AES-GCM (and ChaCha20-Poly1305), no CBC, so AEAD holds on both. std.crypto provides them |
 | Trusted certificate, strong key | ECDSA P-256 or Ed25519 cert (the std-supported signing path). Scores identically to RSA 2048 here, so RSA is not needed for A+ |
 | HSTS header, max-age >= 15552000 (180 days) | application-layer: the engine writes one `Strict-Transport-Security` response header. No crypto. This is the single A to A+ bump |
 
-The point: TLS 1.3-only maxes the three numeric SSL Labs categories (protocol, key
-exchange, cipher) by construction, then the HSTS header turns the resulting A into
-A+. The ECDSA / Ed25519 certificate reaches A+ without ever closing the RSA
-std-gap below, which is exactly why RSA signing is marked OPTIONAL.
+The point: offering TLS 1.2 + 1.3 (with the 1.2 suites restricted to ECDHE-AEAD)
+maxes the three numeric SSL Labs categories (protocol, key exchange, cipher) by
+construction, then the HSTS header turns the resulting A into A+. The ECDSA /
+Ed25519 certificate reaches A+ without ever closing the RSA std-gap below, which
+is exactly why RSA signing is marked OPTIONAL.
 
 ### RSA signing (the one crypto std-gap)
 
