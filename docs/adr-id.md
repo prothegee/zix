@@ -977,4 +977,45 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-045: TLS pure-Zig, TLS 1.2 sebagai versi minimum
+
+**Status:** Diterima
+
+**Konteks:** zix membutuhkan TLS untuk https dan h2, serta sebagai prasyarat wajib untuk Http3. std hanya menyediakan TLS client, jadi sebuah server butuh handshake berbasis certificate sendiri. Dua keputusan harus dipastikan: membangun handshake di Zig atau bind ke C library, dan versi protokol mana yang ditaruh di wire.
+
+**Keputusan:** Bangun handshake TLS 1.3 server secara pure-Zig di atas primitive `std.crypto`, tanpa OpenSSL atau BoringSSL. Version policy: tawarkan TLS 1.2 dan TLS 1.3, utamakan 1.3, tidak pernah turun di bawah 1.2. 1.2 adalah floor dan termasuk scope wajib, 1.0 / 1.1 / SSL tidak pernah ditawarkan (RFC 8996). Mandatory-to-implement crypto: `TLS_AES_128_GCM_SHA256`, secp256r1 plus X25519 ECDHE, certificate ECDSA P-256 atau Ed25519. https bersifat opt-in, cleartext tetap default dan tidak diubah, dan https berada di perf band-nya sendiri.
+
+**Alasan:** std sudah menyediakan semua primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), jadi dependency C hanya menambah kompleksitas build dan batas FFI tanpa keuntungan fungsional, sekaligus merusak postur pure-Zig. TLS 1.2 jadi minimum karena RFC 5246 tidak deprecated dan masih banyak dipakai (Android lama, OpenSSL lawas, stack embedded dan enterprise), sedangkan 1.0 / 1.1 sudah deprecated (RFC 8996) dan membatasi SSL Labs di B. A+ tetap tercapai untuk 1.2 plus 1.3 selama suite 1.2 dibatasi ke ECDHE-AEAD. Certificate ECDSA atau Ed25519 mencapai A+ tanpa RSA, itulah kenapa RSA signing tetap opsional.
+
+**Config:** field `tls_*` flat di config server (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` di Http1) dan `tls_ca_path` di config client. Tanpa sub-config bersarang, sesuai aturan flat-config yang ada.
+
+**Konsekuensi:**
+- Server TLS 1.3 sudah diimplementasi dan diverifikasi byte-exact terhadap trace RFC 8448, hijau di Zig 0.16 dan 0.17.
+- TLS 1.2 adalah milestone wajib yang masih TERBUKA (kode yang dikirim baru 1.3-only). Ini track terpisah: key schedule PRF SHA-256 / SHA-384, record layer 1.2, handshake 1.2, dan negosiasi suite lintas-versi yang dibatasi ke ECDHE-AEAD.
+- Downgrade-protection sentinel (RFC 8446 4.1.3) menjadi wajib begitu kedua versi ditawarkan. Belum diimplementasi.
+- Jalur cleartext EPOLL / URING tidak tersentuh, dan https dijaga di perf band-nya sendiri, bukan gate 1 persen.
+- TLS client native yang melakukan verifikasi (penawaran ALPN plus X.509 / RFC 6125) adalah milestone terpisah.
+
+---
+
+## ADR-046: pasang TLS sebagai layer, jalur serve ber-gate di atas engine yang tidak diubah
+
+**Status:** Diterima
+
+**Konteks:** TLS berada di bawah Http1 dan Http2 (https, h2). https harus ditambahkan tanpa mengganggu dispatch model cleartext yang sudah dituning (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) atau hot path-nya.
+
+**Keputusan:** Tambahkan TLS sebagai jalur serve blocking ber-gate per engine, dipilih saat `tls_cert_path` di-set, membiarkan setiap model cleartext tidak tersentuh. Http1: `serveConnTls` menjalankan handshake lewat `zix.Tls`, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang sudah ada lewat sebuah pipe, lalu meng-encrypt response. Http2: sebuah terminator menjalankan engine h2c yang TIDAK DIUBAH (`core.serveConn`) di belakang socketpair, dengan loop `poll` yang men-decrypt record client masuk jadi plaintext dan meng-encrypt frame dari engine kembali, dan ALPN memilih h2. `zix.Tls` bersifat sans-I/O: `serverHandshake` mengembalikan byte yang dikirim plus sebuah `Connection`, jadi engine yang memiliki socket loop.
+
+**Alasan:** Men-terminate TLS di depan engine yang tidak diubah memakai ulang seluruh mesin frame dan request cleartext, sehingga https tidak bisa meregresi hot path cleartext (sifatnya aditif) dan state machine h2c tidak di-fork. Jalur blocking dengan pipe atau socketpair per koneksi dapat diterima karena https bersifat opt-in di perf band-nya sendiri, bukan gate 1 persen. Sans-I/O menjaga `zix.Tls` tetap bisa dipakai dari dispatch blocking maupun non-blocking. Teardown memakai `shutdown(SHUT_WR)` supaya engine melihat EOF tanpa write yang berlomba dengan peer yang sudah ditutup, menghindari SIGPIPE.
+
+**Config:** field `tls_*` flat yang menggate jalur ini. Tanpa dispatch model baru dan tanpa perubahan API cleartext.
+
+**Konsekuensi:**
+- Http1 https/1.1 dan Http2 h2 keduanya melayani over TLS 1.3, contoh di port 9060 dan 9061, hijau di Zig 0.16 dan 0.17.
+- Jalur h2 memakai ulang `core.serveConn` tanpa perubahan. Hanya seleksi ALPN dan terminator yang merupakan kode baru.
+- Satu request per koneksi https Http1 untuk sekarang (keep-alive penyempurnaan nanti), dan terminator adalah satu thread plus satu socketpair per koneksi, diterima di band https.
+- Belum ada runner h2 native: butuh client yang menawarkan ALPN, yaitu milestone `zix.Tls` client.
+
+---
+
 ###### end of adr

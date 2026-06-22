@@ -1,5 +1,5 @@
 //! TLS 1.3 Layer K PoC (RFC 8446 sec 5 + 7), the deterministic-oracle foundation for the
-//! zix TLS 1.3 server handshake (rnd/checklist-0.5.x-tls.md, Layer K).
+//! zix TLS 1.3 server handshake (tls-plan.md, Layer K).
 //!
 //! Note:
 //! - std.crypto ships every primitive this needs (HKDF-SHA256, SHA-256, X25519,

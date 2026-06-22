@@ -1,5 +1,5 @@
 //! TLS 1.3 Layer C PoC (RFC 8446 sec 4.4), the certificate / CertificateVerify / Finished step
-//! for the zix TLS 1.3 server handshake (rnd/checklist-0.5.x-tls.md, Layer C, follows K + H).
+//! for the zix TLS 1.3 server handshake (tls-plan.md, Layer C, follows K + H).
 //!
 //! Note:
 //! - This is the first layer that uses the cert fixtures (rnd/0.5.x/tls-certs) rather than the

@@ -68,12 +68,18 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pa
     _ = linux.getrandom(&server_random, server_random.len, 0);
 
     var handshake_out: [8192]u8 = undefined;
-    const result = try Tls.serverHandshake(.{
+    const result = Tls.serverHandshake(.{
         .certificate_der = cert_der,
         .signing_key = key_pair,
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
-    }, client_hello_rec.body, &handshake_out);
+    }, client_hello_rec.body, &handshake_out) catch |err| {
+        // a rejected ClientHello: send the fatal alert in the clear (no handshake keys yet), then close.
+        var alert_buf: [Tls.fatal_record_len]u8 = undefined;
+        if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+
+        return err;
+    };
     try writeAll(fd, result.to_send);
     var conn = result.connection;
 

@@ -977,4 +977,45 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-045: pure-Zig TLS, TLS 1.2 the minimum version
+
+**Status:** Accepted
+
+**Context:** zix needs TLS for https and h2, and as the hard prerequisite for Http3. std ships a TLS client only, so a server needs its own certificate-based handshake. Two decisions had to be fixed: build the handshake in Zig or bind a C library, and which protocol versions to put on the wire.
+
+**Decision:** Build the TLS 1.3 server handshake in pure Zig on `std.crypto` primitives, no OpenSSL or BoringSSL. Version policy: offer TLS 1.2 and TLS 1.3, prefer 1.3, never negotiate below 1.2. 1.2 is the floor and required scope, 1.0 / 1.1 / SSL are never offered (RFC 8996). Mandatory-to-implement crypto: `TLS_AES_128_GCM_SHA256`, secp256r1 plus X25519 ECDHE, an ECDSA P-256 or Ed25519 certificate. https is opt-in, cleartext stays the default and is left untouched, and https lives on its own perf band.
+
+**Rationale:** std already provides every primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), so a C dependency would add build complexity and an FFI boundary for no functional gain and would break the pure-Zig posture. TLS 1.2 is the minimum because RFC 5246 is not deprecated and is still widely deployed (older Android, legacy OpenSSL, embedded and enterprise stacks), whereas 1.0 / 1.1 are deprecated (RFC 8996) and cap SSL Labs at B. A+ still holds for 1.2 plus 1.3 when the 1.2 suites are restricted to ECDHE-AEAD. An ECDSA or Ed25519 certificate reaches A+ without RSA, which is why RSA signing stays optional.
+
+**Config:** flat `tls_*` fields on the server configs (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` on Http1) and `tls_ca_path` on the client config. No nested sub-config, per the existing flat-config rule.
+
+**Consequences:**
+- The TLS 1.3 server is implemented and verified byte-exact against the RFC 8448 trace, green on Zig 0.16 and 0.17.
+- TLS 1.2 is an OPEN required milestone (the shipped code is 1.3-only). It is a separate track: a SHA-256 / SHA-384 PRF key schedule, the 1.2 record layer, the 1.2 handshake, and cross-version suite negotiation restricted to ECDHE-AEAD.
+- The downgrade-protection sentinel (RFC 8446 4.1.3) becomes required once both versions are offered. It is not yet implemented.
+- The cleartext EPOLL / URING path is untouched, and https is held to its own perf band, not the 1 percent gate.
+- A native verifying TLS client (ALPN offer plus X.509 / RFC 6125) is a separate milestone.
+
+---
+
+## ADR-046: wire TLS as a layer, gated serve paths over the unchanged engines
+
+**Status:** Accepted
+
+**Context:** TLS sits under Http1 and Http2 (https, h2). https had to be added without disturbing the tuned cleartext dispatch models (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) or their hot path.
+
+**Decision:** Add TLS as a gated blocking serve path per engine, selected when `tls_cert_path` is set, leaving every cleartext model untouched. Http1: `serveConnTls` runs the handshake through `zix.Tls`, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe, and encrypts the response. Http2: a terminator runs the UNCHANGED h2c engine (`core.serveConn`) behind a socketpair, with a `poll` loop that decrypts inbound client records to plaintext and encrypts the engine's frames back, and ALPN selects h2. `zix.Tls` is sans-I/O: `serverHandshake` returns the bytes to send plus a `Connection`, so the engine owns the socket loop.
+
+**Rationale:** Terminating TLS in front of the unchanged engines reuses the whole cleartext frame and request machinery, so https cannot regress the cleartext hot path (it is additive) and the h2c state machine is not forked. The blocking path with a per-connection pipe or socketpair is acceptable because https is opt-in on its own perf band, not the 1 percent gate. Sans-I/O keeps `zix.Tls` usable from blocking and non-blocking dispatch alike. Teardown uses `shutdown(SHUT_WR)` so the engine sees EOF without a write racing a closed peer, avoiding SIGPIPE.
+
+**Config:** the flat `tls_*` fields gate the path. No new dispatch model and no change to the cleartext API.
+
+**Consequences:**
+- Http1 https/1.1 and Http2 h2 both serve over TLS 1.3, examples on ports 9060 and 9061, green on Zig 0.16 and 0.17.
+- The h2 path reuses `core.serveConn` unchanged. Only ALPN selection and the terminator are new code.
+- One request per Http1 https connection for now (keep-alive is a later refinement), and the terminator is one thread plus a socketpair per connection, accepted on the https band.
+- No native h2 runner yet: it needs an ALPN-offering client, which is the `zix.Tls` client milestone.
+
+---
+
 ###### end of adr

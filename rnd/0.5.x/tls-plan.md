@@ -1,11 +1,14 @@
 # TLS 1.3 server PoC plan (zix 0.5.x)
 
-Decoder-first de-risking for the std-gap, the analog of `brotli-plan.md`. Tracker is
-`rnd/checklist-0.5.x-tls.md`, RFC MUST detail is `rnd/rfc/tls-conformance-must-checklist.md`.
+Decoder-first de-risking for the std-gap, the analog of `brotli-plan.md`. RFC MUST detail is
+`rnd/rfc/tls-conformance-must-checklist.md`.
 
 ## Decision: pure-Zig, no C bind
 
 zix authors the TLS 1.3 server handshake in pure Zig. No BoringSSL / quictls / OpenSSL.
+
+Formalized as ADR-045 (pure-Zig TLS + version policy, with TLS 1.2 the required minimum) and
+ADR-046 (TLS wired as a layer, gated serve paths over the unchanged engines) in docs/adr-*.md.
 
 | Factor | Finding |
 | :- | :- |
@@ -40,7 +43,13 @@ graph TD
 | C | `tls_cert_poc.zig` | RFC 8448 Finished + ECDSA P-256 fixture | DONE, Certificate msg + CertificateVerify + Finished (byte-exact), Zig 0.16 + 0.17 |
 | P0 | `tls_server_poc.zig` | RFC 8448 + ECDSA fixture, self-deprotect | DONE, in-memory compose of K+H+X+C (real ECDHE, byte-exact SH/EE, AEAD encrypt round trip), Zig 0.16 + 0.17 |
 | P0 | `tls_server_live.zig` | live openssl s_client + curl | DONE, full TLS 1.3 handshake over a socket (fresh ephemeral key, CertificateVerify + Finished accepted, app data), gate 2 |
-| V | `tls_pathval_poc.zig` | crafted chains, RFC 5280 cases | pending (mTLS) |
+| A | `src/tls/alert.zig` | emit-side condition -> alert matrix | DONE (emit): fatal alert record + alertForError map wired into http1/http2 tls_serve, unit-tested. Inbound alert + post-handshake encrypted alert pending |
+| V | `tls_pathval_poc.zig` | crafted chains, RFC 5280 cases | pending (mTLS, the zix.Tls client milestone) |
+
+Landed in src/ (no longer PoC-only): K + H + X + C + connection + Tls.zig, the Http1 https path and
+the Http2 h2-over-TLS terminator, plus Layer A emit. serverHandshake routes through negotiate()
+(version / cipher / group selection enforced live), and both X25519 and secp256r1 ECDHE are wired.
+Next required milestone: TLS 1.2 (the minimum floor, ADR-045), see tls12-plan.md.
 
 ## P0 remaining (live handshake works, src + receive side next)
 
@@ -167,5 +176,5 @@ fixture is self-signed (SSL Labs needs a CA cert + public host), testssl.sh is t
 ## Perf / memory
 
 Per the hard rule, cleartext stays the default and untouched, https is an opt-in parallel
-path held to its own band (`rnd/checklist-0.5.x-tls-perf.md`), not the strict 1% gate. The
+path held to its own band, not the strict 1% gate. The
 levers are session resumption (PSK tickets) and lean per-connection key state.

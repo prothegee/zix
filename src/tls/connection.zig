@@ -275,8 +275,7 @@ fn reduceP256Scalar(seed: [32]u8) [32]u8 {
     return P256.scalar.Scalar.fromBytes48(wide, .big).toBytes(.big);
 }
 
-/// Map a negotiation / parse alert to the error the caller surfaces. Sending the actual alert
-/// record to the peer is Layer A (RFC 8446 sec 6), tracked separately.
+/// Map a negotiation / parse alert to the error the caller surfaces.
 fn alertToError(a: alert.Alert) anyerror {
     return switch (a) {
         .MISSING_EXTENSION => error.MissingExtension,
@@ -285,6 +284,29 @@ fn alertToError(a: alert.Alert) anyerror {
         .DECODE_ERROR => error.DecodeError,
         else => error.HandshakeFailure,
     };
+}
+
+/// The condition -> fatal-alert matrix (RFC 8446 sec 6): map a serverHandshake failure back to the
+/// AlertDescription the server must send before closing. null = no alert defined (close silently).
+pub fn alertForError(err: anyerror) ?alert.Alert {
+    return switch (err) {
+        error.NoApplicationProtocol => .NO_APPLICATION_PROTOCOL,
+        error.MissingExtension => .MISSING_EXTENSION,
+        error.DecodeError => .DECODE_ERROR,
+        error.UnsupportedTlsVersion => .PROTOCOL_VERSION,
+        error.IllegalParameter, error.MissingKeyShare, error.BadKeyShare => .ILLEGAL_PARAMETER,
+        error.HandshakeFailure, error.UnsupportedCipher, error.UnsupportedGroup, error.HelloRetryRequestUnsupported => .HANDSHAKE_FAILURE,
+        else => null,
+    };
+}
+
+/// Build the plaintext fatal alert record for a serverHandshake failure, or null when no alert is
+/// defined. The serve path writes this before closing. These failures all occur at ClientHello
+/// processing, before the handshake keys exist, so the alert is sent in the clear.
+pub fn alertRecordForError(buf: *[alert.fatal_record_len]u8, err: anyerror) ?[]const u8 {
+    const desc = alertForError(err) orelse return null;
+
+    return alert.fatalRecord(buf, desc);
 }
 
 // --------------------------------------------------------------- //
@@ -471,4 +493,19 @@ test "zix test: connection, serverHandshake negotiates secp256r1 from a P-256-on
         }
     }
     try std.testing.expect(found_key_share);
+}
+
+test "zix test: connection, condition -> fatal-alert matrix" {
+    try std.testing.expectEqual(alert.Alert.NO_APPLICATION_PROTOCOL, alertForError(error.NoApplicationProtocol).?);
+    try std.testing.expectEqual(alert.Alert.MISSING_EXTENSION, alertForError(error.MissingExtension).?);
+    try std.testing.expectEqual(alert.Alert.PROTOCOL_VERSION, alertForError(error.UnsupportedTlsVersion).?);
+    try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.HandshakeFailure).?);
+    try std.testing.expectEqual(alert.Alert.ILLEGAL_PARAMETER, alertForError(error.MissingKeyShare).?);
+    try std.testing.expectEqual(alert.Alert.DECODE_ERROR, alertForError(error.DecodeError).?);
+    try std.testing.expect(alertForError(error.OutOfMemory) == null);
+
+    // the record builder wires through for a representative condition.
+    var buf: [alert.fatal_record_len]u8 = undefined;
+    const rec = alertRecordForError(&buf, error.MissingExtension).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 109 }, rec);
 }

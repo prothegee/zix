@@ -1,5 +1,5 @@
 //! TLS 1.3 P0 live server: a real single-connection handshake over a TCP socket, the openssl
-//! s_client interop step of P0 (rnd/checklist-0.5.x-tls.md). This is the in-memory composition
+//! s_client interop step of P0 (tls-plan.md). This is the in-memory composition
 //! driver (tls_server_poc.zig) wired onto a blocking socket with a fresh per-connection
 //! ephemeral key and the real client transcript (not the RFC 8448 trace).
 //!
