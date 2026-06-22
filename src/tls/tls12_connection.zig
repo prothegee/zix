@@ -16,6 +16,9 @@ const handshake = @import("handshake.zig");
 const prf = @import("tls12_prf.zig");
 const record = @import("tls12_record.zig");
 const version = @import("tls12_version.zig");
+const extensions = @import("extensions.zig");
+
+const Alpn = extensions.Alpn;
 
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -41,6 +44,8 @@ pub const HandshakeOptions = struct {
     signing_key: EcdsaP256.KeyPair,
     server_eph_secret: [32]u8,
     server_random: [32]u8,
+    /// Server ALPN prefs (RFC 7301). Empty = no ALPN. h2-over-TLS needs .H2 here (RFC 7540 3.3).
+    alpn_prefs: []const Alpn = &.{},
 };
 
 /// Carried from flight 1 into finish: the randoms, the server ephemeral scalar, and the running
@@ -50,6 +55,9 @@ pub const State = struct {
     server_random: [32]u8,
     server_eph_scalar: [32]u8,
     transcript: Sha256,
+    /// ALPN selected from the client offer + server prefs, null when ALPN was not used. The engine
+    /// dispatches on this (h2 vs http/1.1).
+    alpn: ?Alpn = null,
 };
 
 pub const Flight1 = struct {
@@ -80,6 +88,15 @@ pub const Connection = struct {
         self.client_seq += 1;
 
         return plain;
+    }
+
+    /// Emit an encrypted close_notify alert (level warning(1), close_notify(0)) under the server key
+    /// so the peer sees a clean shutdown (RFC 5246 7.2.1), content_type alert(21).
+    pub fn closeNotify(self: *Connection, out: []u8) []const u8 {
+        const rec = record.protect(out, &[_]u8{ 1, 0 }, 21, self.km.server_write_key, self.km.server_write_iv, self.server_seq);
+        self.server_seq += 1;
+
+        return rec;
     }
 };
 
@@ -114,6 +131,12 @@ pub fn serverFlight1(opts: HandshakeOptions, client_hello: []const u8, out: []u8
     state.transcript = Sha256.init(.{});
     state.transcript.update(client_hello);
 
+    // ALPN: select one protocol when the server has prefs and the client offered a list.
+    state.alpn = null;
+    if (opts.alpn_prefs.len > 0) {
+        if (hello.alpn) |client_alpn| state.alpn = extensions.negotiateAlpn(client_alpn, opts.alpn_prefs);
+    }
+
     const server_point = (try P256.basePoint.mul(state.server_eph_scalar, .big)).toUncompressedSec1();
 
     var w = wire.Writer{ .buf = out };
@@ -122,7 +145,7 @@ pub fn serverFlight1(opts: HandshakeOptions, client_hello: []const u8, out: []u8
     const rec_len = w.placeU16();
     const body_start = w.len;
 
-    writeServerHello(&w, state.server_random, hello.session_id);
+    writeServerHello(&w, state.server_random, hello.session_id, state.alpn);
     writeCertificate(&w, opts.certificate_der);
     try writeServerKeyExchange(&w, opts.signing_key, state.client_random, state.server_random, &server_point);
     w.writeU8(hs_server_hello_done);
@@ -134,7 +157,7 @@ pub fn serverFlight1(opts: HandshakeOptions, client_hello: []const u8, out: []u8
     return .{ .to_send = w.slice(), .state = state };
 }
 
-fn writeServerHello(w: *wire.Writer, server_random: [32]u8, session_id: []const u8) void {
+fn writeServerHello(w: *wire.Writer, server_random: [32]u8, session_id: []const u8, alpn: ?Alpn) void {
     w.writeU8(hs_server_hello);
     const header = w.placeU24();
 
@@ -144,7 +167,30 @@ fn writeServerHello(w: *wire.Writer, server_random: [32]u8, session_id: []const 
     w.writeBytes(session_id);
     w.writeU16(cipher_ecdhe_ecdsa_aes128_gcm);
     w.writeU8(0); // null compression
-    w.writeU16(0); // no extensions (renegotiation_info / ec_point_formats added at integration)
+
+    // ServerHello extensions openssl expects for a 1.2 ECDHE handshake.
+    const exts = w.placeU16();
+    // renegotiation_info (RFC 5746): empty renegotiated_connection on the initial handshake.
+    w.writeU16(0xff01);
+    w.writeU16(1);
+    w.writeU8(0);
+    // ec_point_formats (RFC 8422 5.1.2): uncompressed only.
+    w.writeU16(0x000b);
+    w.writeU16(2);
+    w.writeU8(1);
+    w.writeU8(0);
+    // ALPN (RFC 7301): the one selected protocol, when negotiated (h2 for HTTP/2 over TLS).
+    if (alpn) |protocol| {
+        w.writeU16(0x0010);
+        const ext = w.placeU16();
+        const list = w.placeU16();
+        const token = protocol.token();
+        w.writeU8(@intCast(token.len));
+        w.writeBytes(token);
+        w.patchU16(list);
+        w.patchU16(ext);
+    }
+    w.patchU16(exts);
 
     w.patchU24(header);
 }
@@ -246,6 +292,48 @@ fn transcriptHash(state: *const State) [32]u8 {
 
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
+
+test "zix test: tls12 connection, serverFlight1 negotiates + emits ALPN h2" {
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    const dummy_der = [_]u8{ 0x30, 0x03, 0x01, 0x02, 0x03 };
+
+    // ClientHello offering ALPN ["h2"].
+    var ch_buf: [128]u8 = undefined;
+    var cw = wire.Writer{ .buf = &ch_buf };
+    cw.writeU8(1);
+    const ch_hdr = cw.placeU24();
+    cw.writeU16(version_tls_1_2);
+    const client_random: [32]u8 = @splat(0x11);
+    cw.writeBytes(&client_random);
+    cw.writeU8(0);
+    cw.writeU16(2);
+    cw.writeU16(cipher_ecdhe_ecdsa_aes128_gcm);
+    cw.writeU8(1);
+    cw.writeU8(0);
+    const exts = cw.placeU16();
+    cw.writeU16(0x0010); // ALPN
+    cw.writeU16(5);
+    cw.writeU16(3); // ProtocolNameList length
+    cw.writeU8(2);
+    cw.writeBytes("h2");
+    cw.patchU16(exts);
+    cw.patchU24(ch_hdr);
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight1(.{
+        .certificate_der = &dummy_der,
+        .signing_key = key,
+        .server_eph_secret = @splat(0x22),
+        .server_random = @splat(0x33),
+        .alpn_prefs = &.{.H2},
+    }, cw.slice(), &out);
+
+    try std.testing.expectEqual(Alpn.H2, flight.state.alpn.?);
+    // the ServerHello carries the ALPN extension selecting h2 (00 10 00 05 00 03 02 68 32).
+    try std.testing.expect(std.mem.indexOf(u8, flight.to_send, &[_]u8{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 0x68, 0x32 }) != null);
+}
 
 test "zix test: tls12 connection, in-memory ECDHE-ECDSA handshake round trip" {
     // server identity (fixed scalar for determinism).
