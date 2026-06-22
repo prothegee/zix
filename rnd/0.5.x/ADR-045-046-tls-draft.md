@@ -7,7 +7,8 @@ Canonical full text: `docs/adr-en.md` + `docs/adr-id.md`. This is the short note
 - **Decision:** build the TLS 1.3 handshake in pure Zig (`std.crypto`), no OpenSSL / BoringSSL.
   Offer TLS 1.2 + 1.3, prefer 1.3, floor at 1.2. 1.0 / 1.1 / SSL never offered.
 - **Why:** std has every primitive, so a C lib only adds build + FFI cost. 1.2 is not deprecated
-  (RFC 8996 kills only 1.0 / 1.1). A+ holds for 1.2 + 1.3 with ECDHE-AEAD suites.
+  (RFC 8996 kills only 1.0 / 1.1). The version + ECDHE-AEAD-only suite policy is chosen so the
+  1.2 + 1.3 posture targets the top SSL Labs grade (A+) without RSA, not a measured claim.
 - **Status:** 1.3 done (RFC 8448 byte-exact). 1.2 = open required milestone. The downgrade sentinel
   becomes required once 1.2 is offered.
 
