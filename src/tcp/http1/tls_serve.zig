@@ -1,12 +1,14 @@
 //! zix http1 https serve path (approach A, RFC 8446 + 9112).
 //!
 //! Note:
-//! - Gated on config.tls_cert_path. A blocking accept loop does the TLS 1.3 handshake via
-//!   zix.Tls, then per request decrypts the record, reuses core.parseHeadAt, runs the existing
-//!   fd-handler against a pipe (so the handler writes plaintext unchanged), reads that plaintext
-//!   back, encrypts it, and sends it. close_notify ends the connection.
-//! - The cleartext EPOLL / URING hot path is untouched. https is a separate path on its own perf
-//!   band (not the 1% gate), so the per-request pipe is acceptable here.
+//! - Gated on config.tls_cert_path. A blocking accept loop reads the ClientHello, then branches on
+//!   version: a 1.3-capable client takes the TLS 1.3 path (zix.Tls), a 1.2-only client takes the
+//!   TLS 1.2 path (zix.Tls tls12_connection). Either way it then per request decrypts the record,
+//!   reuses core.parseHead, runs the existing fd-handler against a pipe (so the handler writes
+//!   plaintext unchanged), reads that back, encrypts it, and sends it.
+//! - The cleartext EPOLL / URING hot path is untouched: this whole file is reached only when
+//!   config.tls_cert_path is set (gated in server.zig before the dispatch switch). https is a
+//!   separate path on its own perf band (not the 1% gate), so the per-request pipe is acceptable.
 //! - Single request per connection for now (keep-alive is a later refinement).
 
 const std = @import("std");
@@ -16,6 +18,7 @@ const Config = @import("config.zig").Http1ServerConfig;
 const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
 const Tls = @import("../../tls/Tls.zig");
+const tls12 = @import("../../tls/tls12_connection.zig");
 const pem = @import("../../tls/pem.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -74,7 +77,12 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pa
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
     }, client_hello_rec.body, &handshake_out) catch |err| {
-        // a rejected ClientHello: send the fatal alert in the clear (no handshake keys yet), then close.
+        // no 1.3 offer -> the client is TLS 1.2 (the minimum floor), take the 1.2 path.
+        if (err == error.UnsupportedTlsVersion) {
+            return serveConnTls12(fd, handler, cert_der, key_pair, client_hello_rec.body, ephemeral_secret, server_random);
+        }
+
+        // any other rejected ClientHello: send the fatal alert in the clear (no keys yet), then close.
         var alert_buf: [Tls.fatal_record_len]u8 = undefined;
         if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
 
@@ -112,6 +120,62 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pa
 
     var close_buf: [64]u8 = undefined;
     try writeAll(fd, conn.closeNotify(&close_buf));
+}
+
+/// TLS 1.2 path (RFC 5246 + 5288, ECDHE-ECDSA): the two-phase handshake via tls12_connection, then
+/// one application request like the 1.3 path. Reached only when the client did not offer 1.3. The
+/// 1.2 ephemeral reuses the same random bytes (reduced to a P-256 scalar inside the engine).
+fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8) !void {
+    var flight_out: [8192]u8 = undefined;
+    const flight = try tls12.serverFlight1(.{
+        .certificate_der = cert_der,
+        .signing_key = key_pair,
+        .server_eph_secret = ephemeral_secret,
+        .server_random = server_random,
+    }, client_hello, &flight_out);
+    try writeAll(fd, flight.to_send);
+    var state = flight.state;
+
+    var record_buf: [17 * 1024]u8 = undefined;
+
+    // ClientKeyExchange (plaintext handshake record), copied out before record_buf is reused.
+    const cke_rec = try readRecord(fd, &record_buf);
+    if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    var cke_buf: [256]u8 = undefined;
+    if (cke_rec.body.len > cke_buf.len) return error.RecordTooLarge;
+    @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
+    const client_key_exchange = cke_buf[0..cke_rec.body.len];
+
+    // skip ChangeCipherSpec, then the encrypted client Finished (a handshake record).
+    const finished_rec = while (true) {
+        const rec = try readRecord(fd, &record_buf);
+        if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+
+        break rec;
+    };
+
+    var finish_out: [256]u8 = undefined;
+    const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
+    try writeAll(fd, finish.to_send);
+    var conn = finish.connection;
+
+    // one application request -> decrypt -> parse -> handler (over a pipe) -> encrypt response.
+    const request_rec = try readRecord(fd, &record_buf);
+    if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+
+    var request_plain: [17 * 1024]u8 = undefined;
+    const request = try conn.readAppData(request_rec.full, &request_plain);
+
+    const parsed = core.parseHead(request) catch return error.BadRequest;
+    const head = parsed.head;
+    const body = request[parsed.body_offset..];
+
+    var response_buf: [64 * 1024]u8 = undefined;
+    const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
+
+    var encrypt_buf: [70 * 1024]u8 = undefined;
+    try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
 }
 
 /// Run the fd-handler against a pipe, returning the plaintext response it wrote. The handler
