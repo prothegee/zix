@@ -158,6 +158,9 @@ pub fn main(process: std.process.Init) void {
     const channel_ipc_a_path = arg_iter.next() orelse exitMissing("channel-ipc-a");
     const channel_ipc_b_path = arg_iter.next() orelse exitMissing("channel-ipc-b");
 
+    // tls (https/1.1 over TLS 1.3)
+    const tls_http1_path = arg_iter.next() orelse exitMissing("tls-http1");
+
     // Basic dispatch-model tests.
     report("http-async", runHttp(io, http_async_path, 9000), &failed);
     report("http-pool", runHttp(io, http_pool_path, 9001), &failed);
@@ -235,12 +238,46 @@ pub fn main(process: std.process.Init) void {
     // Channel IPC test.
     report("channel-ipc", runChannelIpc(io, channel_ipc_a_path, channel_ipc_b_path), &failed);
 
+    // TLS test (https/1.1 over TLS 1.3, curl as the client).
+    report("tls-http1", runTls(io, tls_http1_path, 9060), &failed);
+
     if (failed > 0) {
-        std.debug.print("{d}/56 protocol(s) failed\n", .{failed});
+        std.debug.print("{d}/57 protocol(s) failed\n", .{failed});
         std.process.exit(1);
     }
 
-    std.debug.print("all 56 protocols passed\n", .{});
+    std.debug.print("all 57 protocols passed\n", .{});
+}
+
+/// https/1.1 over TLS 1.3: spawn the server, GET / via the native zix.Http.Client (https,
+/// trusting the fixture cert via tls_ca_path), assert 200 + body + the HSTS header. No curl.
+fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, 5000);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    var client = zix.Http.Client.init(.{
+        .allocator = arena.allocator(),
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .max_response_body = 4096,
+        .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+    });
+    defer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://localhost:{d}/", .{port});
+
+    var resp = try client.get(url, .{});
+    defer resp.deinit();
+
+    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, resp.body(), "hello over tls 1.3") == null) return error.UnexpectedBody;
+    if (resp.header("Strict-Transport-Security") == null) return error.MissingHsts;
 }
 
 // --------------------------------------------------------- //
