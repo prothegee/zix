@@ -16,9 +16,12 @@ pub const Connection = connection.Connection;
 pub const HandshakeOptions = connection.HandshakeOptions;
 pub const HandshakeResult = connection.HandshakeResult;
 pub const serverHandshake = connection.serverHandshake;
+pub const alertForError = connection.alertForError;
+pub const alertRecordForError = connection.alertRecordForError;
 
 pub const Alpn = extensions.Alpn;
 pub const Alert = alert.Alert;
+pub const fatal_record_len = alert.fatal_record_len;
 pub const ContentType = record.ContentType;
 pub const CipherSuite = handshake.CipherSuite;
 pub const NamedGroup = handshake.NamedGroup;
