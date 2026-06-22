@@ -139,9 +139,11 @@ Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk TLS, HTTP/2, H
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
 
-[Coding Guideline](docs/coding-guideline-id.md)
+<br>
 
-[System Thinking Guideline](docs/systems-thinking-id.md)
+[Coding Guideline.](docs/coding-guideline-id.md)
+
+[System Thinking Guideline.](docs/systems-thinking-id.md)
 
 <br>
 

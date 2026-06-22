@@ -139,9 +139,11 @@ See [swerver](https://github.com/justinGrosvenor/swerver) for TLS, HTTP/2, HTTP/
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
 - You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
 
-[Coding Guideline](docs/coding-guideline-en.md)
+<br>
 
-[System Thinking Guideline](docs/systems-thinking-en.md)
+[Coding Guideline.](docs/coding-guideline-en.md)
+
+[System Thinking Guideline.](docs/systems-thinking-en.md)
 
 <br>
 
