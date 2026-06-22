@@ -92,6 +92,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/tls12_connection.zig"));
     std.testing.refAllDecls(@import("tls/client.zig"));
     std.testing.refAllDecls(@import("tls/tls12_client.zig"));
+    std.testing.refAllDecls(@import("tls/cert_verify.zig"));
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
