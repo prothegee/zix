@@ -35,6 +35,8 @@ pub fn addSteps(
         .{ "example-http1_timeout_resp", "examples/http1_timeout_resp.zig", "http1" },
         .{ "example-http1_websocket", "examples/http1_websocket.zig", "http1" },
         .{ "example-http1_websocket_uring", "examples/http1_websocket_uring.zig", "http1" },
+        .{ "example-tls_http1_basic", "examples/tls/tls_http1_basic.zig", "tls" },
+        .{ "example-tls_http2_basic", "examples/tls/tls_http2_basic.zig", "tls" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig", "http" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig", "http" },
         .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig", "http" },
@@ -100,6 +102,7 @@ pub fn addSteps(
     const group_channel = b.step("example-channel", "Build all channel examples");
     const group_udp = b.step("example-udp", "Build all udp examples");
     const group_uds = b.step("example-uds", "Build all uds examples");
+    const group_tls = b.step("example-tls", "Build all tls examples");
 
     examples_step.dependOn(group_tcp);
     examples_step.dependOn(group_http1);
@@ -109,6 +112,7 @@ pub fn addSteps(
     examples_step.dependOn(group_channel);
     examples_step.dependOn(group_udp);
     examples_step.dependOn(group_uds);
+    examples_step.dependOn(group_tls);
 
     inline for (examples) |pair| {
         const exe_mod = b.createModule(.{
@@ -139,6 +143,8 @@ pub fn addSteps(
             group_udp
         else if (comptime std.mem.eql(u8, pair[2], "uds"))
             group_uds
+        else if (comptime std.mem.eql(u8, pair[2], "tls"))
+            group_tls
         else
             @compileError("unknown example group tag: " ++ pair[2]);
 
