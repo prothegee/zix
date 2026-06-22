@@ -19,6 +19,11 @@ pub const serverHandshake = connection.serverHandshake;
 pub const alertForError = connection.alertForError;
 pub const alertRecordForError = connection.alertRecordForError;
 
+/// The client-side handshakes (the mirror of the server). zix.Tls.Client = TLS 1.3,
+/// zix.Tls.Client12 = TLS 1.2. Each exposes start / finish + a ClientConnection (sans-I/O).
+pub const Client = @import("client.zig");
+pub const Client12 = @import("tls12_client.zig");
+
 pub const Alpn = extensions.Alpn;
 pub const Alert = alert.Alert;
 pub const fatal_record_len = alert.fatal_record_len;
