@@ -19,6 +19,7 @@ const extensions = @import("extensions.zig");
 const certificate = @import("certificate.zig");
 const cert_verify = @import("cert_verify.zig");
 const alert = @import("alert.zig");
+const rsa = @import("rsa.zig");
 
 const X25519 = std.crypto.dh.X25519;
 const P256 = std.crypto.ecc.P256;
@@ -37,6 +38,9 @@ pub const HandshakeOptions = struct {
     signing_key: certificate.SigningKey,
     ephemeral_secret: [32]u8,
     server_random: [32]u8,
+    /// Random salt for an RSA PSS CertificateVerify (RFC 8017 9.1), supplied per connection like the
+    /// other randoms. Unused by the ECDSA / Ed25519 paths, so it defaults to zero for them.
+    pss_salt: [rsa.pss_salt_len]u8 = std.mem.zeroes([rsa.pss_salt_len]u8),
     /// Server ALPN preference order (RFC 7301). Empty disables ALPN (no extension emitted).
     /// The first entry that the client also offered is selected and echoed in EncryptedExtensions.
     alpn_prefs: []const extensions.Alpn = &.{},
@@ -378,7 +382,7 @@ fn completeHandshake(opts: HandshakeOptions, hello: *const handshake.ClientHello
     flight.len += cert_msg.len;
     transcript.update(cert_msg);
 
-    const server_cert_verify = try certificate.buildCertificateVerify(flight.buf[flight.len..], opts.signing_key, transcript.current());
+    const server_cert_verify = try certificate.buildCertificateVerify(flight.buf[flight.len..], opts.signing_key, transcript.current(), opts.pss_salt);
     flight.len += server_cert_verify.len;
     transcript.update(server_cert_verify);
 
