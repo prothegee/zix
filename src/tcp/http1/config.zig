@@ -78,24 +78,11 @@ pub const Http1ServerConfig = struct {
     /// Optional ceiling on per-worker cache memory. 0 disables the ceiling. When
     /// set, the effective entry count is reduced so entries * value_bytes fits.
     cache_max_total_bytes: usize = 0,
-    /// https - opt-in. When tls_cert_path is non-null the server serves HTTP/1.1 over TLS 1.3
-    /// (zix.Tls), otherwise cleartext, the default, leaving the EPOLL / URING hot path untouched.
-    /// PEM path to the ECDSA P-256 (or Ed25519) end-entity certificate. null = cleartext.
-    ///
-    /// Note:
-    /// - Not yet read at runtime. The https serve path (a gated serveConnTls driving the sans-I/O
-    ///   zix.Tls.Connection over the fd) lands with the TLS integration slice.
-    tls_cert_path: ?[]const u8 = null,
-    /// PEM path to the private key matching tls_cert_path. Required when tls_cert_path is set.
-    tls_key_path: ?[]const u8 = null,
-    /// ALPN protocols offered over TLS, in server preference order. Empty = no ALPN (the client
-    /// falls back to http/1.1). For the Http1 engine the only valid value is .HTTP_1_1.
-    tls_alpn: []const Tls.Alpn = &.{},
-    /// HSTS max-age in SECONDS (RFC 6797), the listener default for the Strict-Transport-Security
-    /// header. 0 = no default. Seconds, not the zix _ms norm, since the spec is in seconds.
-    /// Emitted by the handler (config default, handler may override per response), never
-    /// auto-injected.
-    hsts_max_age_s: u32 = 0,
+    /// https - opt-in. When non-null the server serves HTTP/1.1 over TLS (zix.Tls) on a gated path,
+    /// otherwise cleartext, the default, leaving the EPOLL / URING hot path untouched. The context
+    /// carries the cert / key / alpn / version / curve / cipher / HSTS policy (Tls.Context.Config).
+    /// Caller owns the Context and must ensure it outlives the server.
+    tls: ?*Tls.Context = null,
     /// Optional logger. When non-null, the server logs lifecycle lines (listening,
     /// fallback notices) through it instead of std.debug.print.
     ///
