@@ -44,8 +44,17 @@ __*Update:*__
     - `std.compress.flate.Compress` is about 230 KB and is built on the handler stack frame, so a compressing worker spawns with a 2 MiB stack (demand-paged, near-zero RSS) instead of the default 512 KB.
     - New examples `http1_compression` (port 9058) and `http_compression` (port 9059), with runner steps `test-runner-http1-compression` and `test-runner-http-compression` (raw-socket, exercising gzip / deflate / identity / size-floor).
     ---
+- TLS (https / h2), pure-Zig on `std.crypto`, no OpenSSL:
+    - TLS 1.3 server (RFC 8446) plus a TLS 1.2 floor (RFC 5246 / 5288, ECDHE-ECDSA-AES128-GCM), 1.3 preferred, never below 1.2 (1.0 / 1.1 / SSL never offered, RFC 8996). Sans-I/O handshake in `src/tls`, the HTTP engine owns the socket loop.
+    - Native verifying client `zix.Tls.Client` (1.3) and `zix.Tls.Client12` (1.2): offers ALPN, verifies the server signature and the X.509 chain + hostname (RFC 5280 / 6125).
+    - https is opt-in and additive (ADR-046): `zix.Http1` serves https/1.1 and `zix.Http2` serves h2 over TLS (ALPN h2), both a gated path in front of the unchanged cleartext engines. HelloRetryRequest, inbound-alert handling, and the misdirected-request 421 (RFC 9110 7.4) are wired.
+    - Server TLS is configured by a user-owned `Tls.Context` object (ADR-047), mirroring the logger: `Tls.Context.init(allocator, io, config)` loads the cert / key and validates the policy once. `Tls.Context.Config` exposes `cert_path`, `key_path`, `alpn`, `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`. Curves and ciphers are validated allow-lists (an unsupported value is a startup error). ECDSA P-256 and Ed25519 certificates, ECDHE-only (no dhparam, no RSA signing).
+    - New examples in `examples/tls/`: `tls_http1_basic` (9060), `tls_http2_basic` (9061), `tls_http1_ed25519` (9062), with runner steps folded into `test-runner-all`.
+    - Docs: `docs/hld-tls-en.md` / `docs/lld-tls-en.md` (and -id), ADR-045 / 046 / 047.
+    ---
 - Server config (knob) added:
     - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
+    - `tls` (`?*Tls.Context`) on `zix.Http1` and `zix.Http2`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).
 
 <br>
 
