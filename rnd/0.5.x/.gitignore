@@ -1,2 +1,2 @@
-!/tls-cert/*.der
-!/tls-cert/*.pem
+!tls-certs/*.der
+!tls-certs/*.pem
