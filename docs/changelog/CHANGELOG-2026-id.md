@@ -44,8 +44,17 @@ __*Update:*__
     - `std.compress.flate.Compress` berukuran sekitar 230 KB dan dibangun di stack frame handler, jadi worker yang mengompresi di-spawn dengan stack 2 MiB (demand-paged, RSS mendekati nol) alih-alih default 512 KB.
     - Example baru `http1_compression` (port 9058) dan `http_compression` (port 9059), dengan step runner `test-runner-http1-compression` dan `test-runner-http-compression` (raw-socket, menguji gzip / deflate / identity / size-floor).
     ---
+- TLS (https / h2), pure-Zig di atas `std.crypto`, tanpa OpenSSL:
+    - Server TLS 1.3 (RFC 8446) plus floor TLS 1.2 (RFC 5246 / 5288, ECDHE-ECDSA-AES128-GCM), 1.3 diutamakan, tidak pernah di bawah 1.2 (1.0 / 1.1 / SSL tidak pernah ditawarkan, RFC 8996). Handshake sans-I/O di `src/tls`, engine HTTP memiliki socket loop.
+    - Client native yang memverifikasi `zix.Tls.Client` (1.3) dan `zix.Tls.Client12` (1.2): menawarkan ALPN, memverifikasi signature server dan chain X.509 + hostname (RFC 5280 / 6125).
+    - https bersifat opt-in dan aditif (ADR-046): `zix.Http1` menyajikan https/1.1 dan `zix.Http2` menyajikan h2 over TLS (ALPN h2), keduanya jalur ber-gate di depan engine cleartext yang tidak diubah. HelloRetryRequest, penanganan alert masuk, dan misdirected-request 421 (RFC 9110 7.4) sudah terpasang.
+    - TLS server dikonfigurasi oleh object `Tls.Context` milik pengguna (ADR-047), dimodelkan pada logger: `Tls.Context.init(allocator, io, config)` memuat cert / key dan memvalidasi policy sekali. `Tls.Context.Config` mengekspos `cert_path`, `key_path`, `alpn`, `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`. Curve dan cipher adalah allow-list tervalidasi (value tidak didukung = error saat startup). Certificate ECDSA P-256 dan Ed25519, ECDHE-only (tanpa dhparam, tanpa RSA signing).
+    - Example baru di `examples/tls/`: `tls_http1_basic` (9060), `tls_http2_basic` (9061), `tls_http1_ed25519` (9062), dengan step runner yang dilipat ke `test-runner-all`.
+    - Docs: `docs/hld-tls-id.md` / `docs/lld-tls-id.md` (dan -en), ADR-045 / 046 / 047.
+    ---
 - Server config (knob) ditambahkan:
     - `compression` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
+    - `tls` (`?*Tls.Context`) pada `zix.Http1` dan `zix.Http2`, gate opt-in https. Menggantikan field flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / `hsts_max_age_s` Http1 (ADR-047).
 
 <br>
 
