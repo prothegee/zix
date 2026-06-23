@@ -11,9 +11,10 @@ pub const user_agent: []const u8 = zon_options.user_agent;
 /// HTTP protocol version selector for client requests.
 ///
 /// Note:
-/// - HTTP_1 is implemented today (HTTP/1.1 over std.http.Client).
-/// - HTTP_2 and HTTP_3 are reserved. Requests using them return
-///   error.UnsupportedVersion until a backend is wired.
+/// - HTTP_1 is HTTP/1.1 over std.http.Client.
+/// - HTTP_2 is h2 over TLS 1.3 via the native zix.Tls client (https only). It validates the server
+///   cert against tls_ca_path when tls_verify is set, see the h2_client transport.
+/// - HTTP_3 is reserved and returns error.UnsupportedVersion until a backend is wired.
 pub const Version = enum {
     HTTP_1,
     HTTP_2,
@@ -46,13 +47,21 @@ pub const HttpClientConfig = struct {
     /// Value sent in the User-Agent request header. Empty string omits the header entirely.
     user_agent: []const u8 = zon_options.user_agent,
     /// HTTP protocol version to use for requests. Default: .HTTP_1.
-    /// HTTP_2 and HTTP_3 are reserved and currently yield error.UnsupportedVersion.
+    /// HTTP_2 = h2 over TLS 1.3 (https only). HTTP_3 yields error.UnsupportedVersion.
     version: Version = .HTTP_1,
     /// PEM path to an extra CA certificate to trust for https requests, in addition to the
     /// system roots. null = system roots only. Use this to trust a self-signed or private-CA
     /// server (the https analogue of pointing curl at --cacert). Loaded once on the first https
     /// request, relative to the process working directory.
+    ///
+    /// Note:
+    /// - For HTTP_2 the native client validates against this anchor ALONE (one-link, no system
+    ///   roots yet), so tls_verify with a null tls_ca_path yields error.TlsNoTrustAnchor.
     tls_ca_path: ?[]const u8 = null,
+    /// Verify the server certificate (chain + hostname) on https requests. Default true.
+    /// Set false to skip verification (insecure, e.g. a throwaway self-signed server in a test).
+    /// Applies to the HTTP_2 native path. HTTP_1 (std.http.Client) always verifies.
+    tls_verify: bool = true,
 };
 
 // --------------------------------------------------------- //
@@ -71,4 +80,6 @@ test "zix test: HttpClientConfig defaults" {
     try std.testing.expectEqual(@as(u8, 3), cfg.max_redirects);
     try std.testing.expectEqualStrings(user_agent, cfg.user_agent);
     try std.testing.expectEqual(Version.HTTP_1, cfg.version);
+    try std.testing.expect(cfg.tls_verify);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.tls_ca_path);
 }
