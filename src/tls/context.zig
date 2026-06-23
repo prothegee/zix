@@ -15,6 +15,7 @@ const connection = @import("connection.zig");
 const certificate = @import("certificate.zig");
 const extensions = @import("extensions.zig");
 const pem = @import("pem.zig");
+const rsa = @import("rsa.zig");
 
 const Alpn = extensions.Alpn;
 const NamedGroup = handshake.NamedGroup;
@@ -126,14 +127,23 @@ pub const Context = struct {
 
         const key_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.key_path, allocator, .limited(1 << 20));
         defer allocator.free(key_pem);
-        var key_der_buf: [512]u8 = undefined;
+        var key_der_buf: [4096]u8 = undefined; // RSA PKCS#8 DER is far larger than an EC key
         const key_der = try pem.pemToDer(&key_der_buf, key_pem);
 
-        // The signing key matches the certificate's key type: ECDSA P-256 (SEC1) or Ed25519 (PKCS#8).
+        // The signing key matches the certificate's key type: ECDSA P-256 (SEC1), Ed25519 (PKCS#8),
+        // or RSA (PKCS#1 or PKCS#8). An RSA key signs CertificateVerify with rsa_pss_rsae_sha256, so
+        // it requires TLS 1.3 (the 1.2 ServerKeyExchange path is ECDSA-only).
         const cert_parsed = try (std.crypto.Certificate{ .buffer = cert_der, .index = 0 }).parse();
         const signing_key: SigningKey = switch (cert_parsed.pub_key_algo) {
             .X9_62_id_ecPublicKey => .{ .ecdsa_p256 = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(try pem.ecdsaScalarFromSec1(key_der))) },
             .curveEd25519 => .{ .ed25519 = try Ed25519.KeyPair.generateDeterministic(try pem.ed25519SeedFromPkcs8(key_der)) },
+            .rsaEncryption => blk: {
+                const is_pkcs8 = std.mem.indexOf(u8, key_pem, "BEGIN RSA PRIVATE KEY") == null;
+                const key = try rsa.PrivateKey.fromDer(key_der, is_pkcs8);
+                if (key.size() < 256) return error.RsaKeyTooSmall; // RSA-2048 minimum
+
+                break :blk .{ .rsa = key };
+            },
             else => return error.UnsupportedCertificateKey,
         };
 
@@ -156,14 +166,16 @@ pub const Context = struct {
     }
 
     /// Build the per-connection handshake options from the context plus the freshly generated
-    /// ephemeral secret + server random. The serve path supplies the randoms (they differ per
-    /// connection), the context supplies the cert / key / alpn / curve policy.
-    pub fn handshakeOptions(self: *const Context, ephemeral_secret: [32]u8, server_random: [32]u8) HandshakeOptions {
+    /// ephemeral secret + server random + PSS salt. The serve path supplies the randoms (they differ
+    /// per connection), the context supplies the cert / key / alpn / curve policy. The salt is only
+    /// consumed by an RSA signing key, the ECDSA / Ed25519 paths ignore it.
+    pub fn handshakeOptions(self: *const Context, ephemeral_secret: [32]u8, server_random: [32]u8, pss_salt: [rsa.pss_salt_len]u8) HandshakeOptions {
         return .{
             .certificate_der = self.cert_der,
             .signing_key = self.signing_key,
             .ephemeral_secret = ephemeral_secret,
             .server_random = server_random,
+            .pss_salt = pss_salt,
             .alpn_prefs = self.alpn,
             .group_prefs = self.curves,
         };
