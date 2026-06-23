@@ -4,6 +4,7 @@ const std = @import("std");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
+const h2_client = @import("h2_client.zig");
 
 // --------------------------------------------------------- //
 
@@ -129,16 +130,23 @@ pub const HttpClient = struct {
 
     /// Make an HTTP request and return the parsed response.
     ///
+    /// Note:
+    /// - HTTP_2 (config.version) takes the native h2-over-TLS path (requestHttp2), https only.
+    ///   HTTP_3 returns error.UnsupportedVersion.
+    ///
     /// Errors (named):
     /// error.InvalidUrl          - malformed URL, unsupported scheme, or missing host
     /// error.BodyTooLarge        - response body exceeded config.max_response_body bytes
-    /// error.UnsupportedVersion  - config.version is HTTP_2 or HTTP_3 (not yet implemented)
+    /// error.UnsupportedVersion  - config.version is HTTP_3
+    /// error.UnsupportedScheme   - HTTP_2 was requested for a non-https URL
+    /// error.TlsNoTrustAnchor    - HTTP_2 with tls_verify set but no tls_ca_path
     ///
     /// Other errors propagate from std.http.Client (network failures, protocol errors, OOM).
     pub fn request(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {
         switch (self.config.version) {
             .HTTP_1 => {},
-            .HTTP_2, .HTTP_3 => return error.UnsupportedVersion,
+            .HTTP_2 => return self.requestHttp2(method, url, opts),
+            .HTTP_3 => return error.UnsupportedVersion,
         }
 
         const gpa = self.config.allocator;
@@ -233,6 +241,35 @@ pub const HttpClient = struct {
             .status_code = status_code,
             .body_data = body_bytes,
             .head_bytes = head_copy,
+            .allocator = gpa,
+        };
+    }
+
+    // --------------------------------------------------------- //
+
+    /// HTTP/2 over TLS 1.3 via the native zix.Tls client (the h2_client transport). https only,
+    /// since h2 here is always ALPN-negotiated over TLS. Trust + cert verification follow the config
+    /// (tls_verify / tls_ca_path), see h2_client.fetch.
+    fn requestHttp2(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {
+        const gpa = self.config.allocator;
+
+        const uri = std.Uri.parse(url) catch return error.InvalidUrl;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.UnsupportedScheme;
+
+        var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+        const host_name = uri.getHost(&host_buf) catch return error.InvalidUrl;
+        const port = uri.port orelse 443;
+
+        // origin-form request target (:path), the path plus any query, e.g. "/echo?foo=bar".
+        var path_buf: [2048]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{f}", .{uri.fmt(.{ .path = true, .query = true })}) catch return error.InvalidUrl;
+
+        const parts = try h2_client.fetch(self.config, method, host_name, port, path, opts.headers, opts.body);
+
+        return .{
+            .status_code = parts.status_code,
+            .body_data = parts.body_data,
+            .head_bytes = parts.head_bytes,
             .allocator = gpa,
         };
     }
@@ -455,4 +492,30 @@ fn udsResponseHeader(head: []const u8, name: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+test "zix test: http client, HTTP_2 over a non-https URL is rejected before connecting" {
+    // requestHttp2 checks the scheme up front, so io is never touched (undefined is safe here).
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .version = .HTTP_2,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(error.UnsupportedScheme, client.get("http://localhost:9061/", .{}));
+}
+
+test "zix test: http client, HTTP_3 still yields UnsupportedVersion" {
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .version = .HTTP_3,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(error.UnsupportedVersion, client.get("https://localhost:9061/", .{}));
 }
