@@ -47,6 +47,7 @@ graph TD
 | `extensions.zig` | ALPN (`Alpn`, `negotiateAlpn`), EncryptedExtensions, supported_versions / key_share helpers |
 | `alert.zig` | Alert codes, outbound alert records, inbound alert classification |
 | `pem.zig` | PEM to DER decode, ECDSA SEC1 scalar + Ed25519 PKCS#8 seed extraction |
+| `rsa.zig` | RSA signing (ADR-048): PKCS#1 / PKCS#8 key parse, EMSA-PKCS1-v1_5 + EMSA-PSS, modexp via `std.crypto.ff` |
 | `cert_verify.zig` | Peer cert chain (RFC 5280) + hostname / IP identity (RFC 6125), the misdirected-request check |
 | `client.zig` | TLS 1.3 client handshake (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | TLS 1.2 track: PRF schedule, record layer, version select, server handshake, client |
@@ -67,9 +68,9 @@ TLS 1.2 is the floor because RFC 5246 is not deprecated and is still widely depl
 | :- | :- | :- |
 | Cipher | `TLS_AES_128_GCM_SHA256` | `ECDHE_ECDSA_AES128_GCM_SHA256` (0xC02B) |
 | Key exchange | X25519, secp256r1 ECDHE | secp256r1 ECDHE |
-| Signature | ECDSA P-256 or Ed25519 | ECDSA P-256 |
+| Signature | ECDSA P-256, Ed25519, or RSA (`rsa_pss_rsae_sha256`) | ECDSA P-256 |
 
-There is no finite-field DHE and no RSA signing, so key-exchange strength is governed entirely by the ECDHE curve, not a dhparam file. The certificate is ECDSA P-256 or Ed25519, both on the `std.crypto` signing path, so RSA stays optional.
+There is no finite-field DHE and no RSA key exchange, so key-exchange strength is governed entirely by the ECDHE curve, not a dhparam file. The certificate is ECDSA P-256, Ed25519, or RSA: ECDSA and Ed25519 sign on either version, while an RSA certificate signs the TLS 1.3 CertificateVerify with `rsa_pss_rsae_sha256` and therefore requires TLS 1.3 (the 1.2 path is ECDSA-only). RSA-2048 is the minimum and ECDSA P-256 is the default (ADR-048).
 
 ## Server Configuration: Tls.Context
 
@@ -87,7 +88,7 @@ var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .por
 ```
 
 - `Tls.Context.Config` is the plain settings struct: `cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`.
-- `Tls.Context.init` loads the PEM, detects the key type (ECDSA vs Ed25519), and validates the policy once on the cold path. The per-connection serve path then reads a ready context with no PEM work.
+- `Tls.Context.init` loads the PEM, detects the key type (ECDSA, Ed25519, or RSA), and validates the policy once on the cold path. The per-connection serve path then reads a ready context with no PEM work.
 - `tls: ?*Tls.Context` on the Http1 and Http2 configs. A non-null pointer is the https opt-in gate.
 - Curves and ciphers are typed enum slices validated to the implemented set. An unsupported value (P384, MLKEM768, AES-256, CHACHA20, any RSA suite) is a startup error, never a silent no-op. The set widens with no API change as crypto lands.
 
