@@ -29,6 +29,7 @@ pub fn addSteps(
         .{ "test-runner-http-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http-compression", "examples/http_compression.zig", "9059", "", "", "" },
         .{ "test-runner-tls-http1", "tests/runner/tls_http1_basic_runner.zig", "tr-server-tls-http1", "examples/tls/tls_http1_basic.zig", "9060", "", "", "" },
         .{ "test-runner-tls-http2", "tests/runner/tls_http2_basic_runner.zig", "tr-server-tls-http2", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
+        .{ "test-runner-tls-http2-client", "tests/runner/tls_http2_client_runner.zig", "tr-server-tls-http2-client", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
         .{ "test-runner-grpc-async", "tests/runner/grpc_runner.zig", "tr-server-grpc-async", "examples/grpc_server_1_async.zig", "9032", "", "", "" },
         .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "9033", "", "", "" },
         .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "9034", "", "", "" },
