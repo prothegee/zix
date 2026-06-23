@@ -38,17 +38,13 @@ pub const Http2ServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
-    /// https - opt-in. When tls_cert_path is non-null the server serves HTTP/2 over TLS 1.3
-    /// (zix.Tls, ALPN h2), otherwise h2c cleartext, the default. The TLS path is a gated blocking
-    /// terminator in front of the existing h2c engine, so the cleartext dispatch models are
-    /// untouched. PEM path to the ECDSA P-256 (or Ed25519) end-entity certificate. null = h2c.
-    tls_cert_path: ?[]const u8 = null,
-    /// PEM path to the private key matching tls_cert_path. Required when tls_cert_path is set.
-    tls_key_path: ?[]const u8 = null,
-    /// ALPN protocols offered over TLS, in server preference order. Empty = no ALPN. For the Http2
-    /// engine the meaningful value is .H2 (browsers require ALPN h2 for HTTP/2 over TLS, RFC 7540
-    /// 3.3). Add .HTTP_1_1 only if a downgrade path is wired (not yet).
-    tls_alpn: []const Tls.Alpn = &.{},
+    /// https - opt-in. When non-null the server serves HTTP/2 over TLS (zix.Tls, ALPN h2), otherwise
+    /// h2c cleartext, the default. The TLS path is a gated blocking terminator in front of the
+    /// existing h2c engine, so the cleartext dispatch models are untouched. The context carries the
+    /// cert / key / alpn / version / curve / cipher / HSTS policy (Tls.Context.Config). For the
+    /// Http2 engine alpn should include .H2 (browsers require ALPN h2 for HTTP/2 over TLS, RFC 7540
+    /// 3.3). Caller owns the Context and must ensure it outlives the server.
+    tls: ?*Tls.Context = null,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle
     /// events (listening, fallback notices) instead of std.debug.print. The h2c handler
     /// owns its frame I/O, so per-request access logging is the handler's responsibility.
