@@ -5,13 +5,16 @@
 //! (ClientKeyExchange + ChangeCipherSpec + the encrypted client Finished) + the expected server
 //! Finished verify_data + a ClientConnection. Reuses tls12_prf + tls12_record + std X.509.
 //!
-//! Note: the cert CHAIN + hostname trust (RFC 5280 / 6125) is the caller's job (it owns the trust
-//! store), the same split as the 1.3 client. `finish` does the handshake binding (the SKE signature).
+//! Note: `finish` does the handshake binding (the SKE signature) and surfaces the server end-entity
+//! certificate, the caller chain + hostname validates it (RFC 5280 / 6125) through
+//! FinishResult.verifyServerCert against its trust store, the same split as the 1.3 client.
 
 const std = @import("std");
 const wire = @import("wire.zig");
 const prf = @import("tls12_prf.zig");
 const record = @import("tls12_record.zig");
+const cert_verify = @import("cert_verify.zig");
+const max_server_cert_der = @import("client.zig").max_server_cert_der;
 
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -45,6 +48,38 @@ pub const FinishResult = struct {
     connection: ClientConnection,
     /// the server Finished verify_data the client expects, check it against the server's Finished.
     expected_server_finished: [12]u8,
+    /// the server end-entity certificate (DER), copied out of the flight. Read it through
+    /// serverCertDer(), trust it through verifyServerCert().
+    server_cert: [max_server_cert_der]u8 = undefined,
+    server_cert_len: usize = 0,
+
+    /// The server end-entity certificate DER. Empty when the server sent no Certificate.
+    pub fn serverCertDer(self: *const FinishResult) []const u8 {
+        return self.server_cert[0..self.server_cert_len];
+    }
+
+    /// Trust the server certificate: chain it to `anchor_der` within its validity window (RFC 5280)
+    /// and match `hostname` against its SAN (RFC 6125). finish() already proved the peer holds the
+    /// cert key (the ServerKeyExchange signature), this is the remaining chain + identity step the
+    /// caller owns. See the 1.3 client verifyServerCert for the self-signed anchor note.
+    ///
+    /// Param:
+    /// anchor_der - []const u8 (trust anchor DER the cert must chain to)
+    /// hostname - []const u8 (the host the client intended to reach)
+    /// now_sec - i64 (current UNIX time in seconds, for the validity window)
+    ///
+    /// Return:
+    /// - void on a trusted, hostname-matching certificate
+    /// - error.NoServerCertificate (the server sent no Certificate)
+    /// - error.CertificateExpired / error.CertificateNotYetValid / error.CertificateIssuerMismatch
+    /// - error.CertificateHostMismatch (no SAN/CN entry matches hostname)
+    pub fn verifyServerCert(self: *const FinishResult, anchor_der: []const u8, hostname: []const u8, now_sec: i64) !void {
+        const der = self.serverCertDer();
+        if (der.len == 0) return error.NoServerCertificate;
+
+        try cert_verify.verifyCertChain(der, anchor_der, now_sec);
+        try cert_verify.verifyCertHostname(der, hostname);
+    }
 };
 
 /// Post-handshake keys + sequence numbers (both at 1, after the seq-0 Finished). The client writes
@@ -183,7 +218,14 @@ pub fn finish(state: *State, server_flight1: []const u8, out: []u8) !FinishResul
     const fin_rec = record.protect(out[w.len..], &cf_msg, 22, km.client_write_key, km.client_write_iv, 0);
     const total = w.len + fin_rec.len;
 
-    return .{ .to_send = out[0..total], .connection = .{ .km = km }, .expected_server_finished = expected_server };
+    // surface the server end-entity cert so the caller can chain + hostname validate it (RFC 5280 / 6125).
+    if (parsed.cert_der.len > max_server_cert_der) return error.CertificateTooLarge;
+
+    var result: FinishResult = .{ .to_send = out[0..total], .connection = .{ .km = km }, .expected_server_finished = expected_server };
+    @memcpy(result.server_cert[0..parsed.cert_der.len], parsed.cert_der);
+    result.server_cert_len = parsed.cert_der.len;
+
+    return result;
 }
 
 fn transcriptHash(state: *const State) [32]u8 {
@@ -281,6 +323,12 @@ test "zix test: tls12 client, ECDHE-ECDSA handshake against the zix 1.2 server (
     // client finish: verify SKE, produce CKE + CCS + client Finished.
     var cfin_buf: [512]u8 = undefined;
     const cfin = try finish(&cstate, flight1.to_send, &cfin_buf);
+
+    // finish surfaces the server cert, and the caller trusts it (RFC 5280 / 6125).
+    try std.testing.expectEqualSlices(u8, cert_der, cfin.serverCertDer());
+    const now_sec: i64 = 1_800_000_000; // ~2027-01, inside the fixture validity window
+    try cfin.verifyServerCert(cert_der, "localhost", now_sec); // self-signed: anchor is the leaf
+    try std.testing.expectError(error.CertificateHostMismatch, cfin.verifyServerCert(cert_der, "evil.example", now_sec));
 
     // parse the client's wire output: CKE message + the client Finished record.
     var pr = wire.Reader{ .buf = cfin.to_send };
