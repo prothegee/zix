@@ -985,7 +985,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Keputusan:** Bangun handshake TLS 1.3 server secara pure-Zig di atas primitive `std.crypto`, tanpa OpenSSL atau BoringSSL. Version policy: tawarkan TLS 1.2 dan TLS 1.3, utamakan 1.3, tidak pernah turun di bawah 1.2. 1.2 adalah floor dan termasuk scope wajib, 1.0 / 1.1 / SSL tidak pernah ditawarkan (RFC 8996). Mandatory-to-implement crypto: `TLS_AES_128_GCM_SHA256`, secp256r1 plus X25519 ECDHE, certificate ECDSA P-256 atau Ed25519. https bersifat opt-in, cleartext tetap default dan tidak diubah, dan https berada di perf band-nya sendiri.
 
-**Alasan:** std sudah menyediakan semua primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), jadi dependency C hanya menambah kompleksitas build dan batas FFI tanpa keuntungan fungsional, sekaligus merusak postur pure-Zig. TLS 1.2 jadi minimum karena RFC 5246 tidak deprecated dan masih banyak dipakai (Android lama, OpenSSL lawas, stack embedded dan enterprise), sedangkan 1.0 / 1.1 sudah deprecated (RFC 8996) sehingga tidak pernah ditawarkan. Suite 1.2 dibatasi ke ECDHE-AEAD untuk forward secrecy dan authenticated encryption di kedua versi, dan certificate ECDSA atau Ed25519 menutup autentikasi di jalur signing std, itulah kenapa RSA signing tetap opsional.
+**Alasan:** std sudah menyediakan semua primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), jadi dependency C hanya menambah kompleksitas build dan batas FFI tanpa keuntungan fungsional, sekaligus merusak postur pure-Zig. TLS 1.2 jadi minimum karena RFC 5246 tidak deprecated dan masih banyak dipakai (Android lama, OpenSSL lawas, stack embedded dan enterprise), sedangkan 1.0 / 1.1 sudah deprecated (RFC 8996) sehingga tidak pernah ditawarkan. Suite 1.2 dibatasi ke ECDHE-AEAD untuk forward secrecy dan authenticated encryption di kedua versi, dan certificate ECDSA atau Ed25519 menutup autentikasi di jalur signing std. RSA signing awalnya dibiarkan opsional di sini, lalu diimplementasikan kemudian untuk interop certificate RSA (ADR-048).
 
 **Config:** field `tls_*` flat di config server (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` di Http1) dan `tls_ca_path` di config client. Tanpa sub-config bersarang, sesuai aturan flat-config yang ada. Field flat sisi server digantikan oleh object `Tls.Context` (ADR-047).
 
@@ -1036,6 +1036,26 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Set yang diimplementasi (X25519, secp256r1, AES-128-GCM untuk 1.3, ECDHE-ECDSA-AES128-GCM untuk 1.2) melebar tanpa perubahan API saat crypto mendarat. Value yang tidak didukung ditolak saat init.
 - `Tls.Context` adalah fondasi yang akan di-parse oleh executable `zixer` dari text config-nya.
 - Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 59-protokol).
+
+---
+
+## ADR-048: Signing certificate server RSA
+
+**Status:** Diterima
+
+**Konteks:** ADR-045 membiarkan RSA signing opsional: certificate ECDSA P-256 atau Ed25519 menutup autentikasi di jalur signing std, dan std memverifikasi RSA tetapi tidak bisa menandatangani dengan private key RSA. Sebuah deployment yang harus melayani certificate RSA-2048 yang sudah diterbitkan (bentuk yang umum, misalnya certificate bersama yang di-mount oleh harness eksternal) tidak bisa dilayani, karena zix tidak punya RSA signing.
+
+**Keputusan:** Implementasikan RSA signing secara pure-Zig di atas `std.crypto`, sisi server saja, untuk certificate server RSA. Primitive-nya adalah modular exponentiation `std.crypto.ff.Modulus` (rutin constant-time yang sama dengan yang dipakai RSA verify std, di sini dengan private exponent), zix menulis padding-nya: EMSA-PKCS1-v1_5 (RFC 8017 9.2) dan EMSA-PSS plus MGF1 (RFC 8017 9.1), serta parse DER private-key PKCS#1 / PKCS#8. `Tls.Context.init` mendeteksi certificate `rsaEncryption`, mem-parse key-nya, dan menolak di bawah RSA-2048. RSA mengautentikasi CertificateVerify TLS 1.3 dengan `rsa_pss_rsae_sha256`, sehingga certificate RSA membutuhkan TLS 1.3: jalur ServerKeyExchange 1.2 tetap ECDSA-only, dan context RSA yang bertemu klien 1.2-only mengembalikan error. Tipe certificate default tidak berubah (ECDSA P-256), RSA hanya aktif saat certificate RSA dimuat.
+
+**Alasan:** Bignum bukan gap-nya (`std.crypto.ff` sudah menyediakan modexp constant-time), hanya padding PKCS#1 dan parse DER key yang belum ada, jadi pekerjaannya pure-Zig tanpa dependency baru, menjaga postur ADR-045. PSS (bukan v1.5) di jalur 1.3 karena RFC 8446 hanya mengizinkan `rsa_pss_rsae_sha256` untuk CertificateVerify RSA. Floor 2048-bit adalah minimum modern. Sisi server saja, tanpa RSA di klien (`zix.Tls.Client` tetap menawarkan dan memverifikasi ECDSA plus Ed25519), karena pendorongnya adalah melayani certificate RSA, bukan mengonsumsinya. ECDSA tetap default karena signature-nya lebih kecil dan cepat.
+
+**Config:** tidak ada yang baru. Certificate RSA dipilih dengan mengarahkan `Tls.Context.Config.cert_path` / `key_path` ke certificate dan key RSA, `Tls.Context.init` mendeteksi tipenya. Floor context ke TLS 1.3 untuk certificate RSA (`min_version = .TLS_1_3`).
+
+**Konsekuensi:**
+- `src/tls/rsa.zig` adalah signer-nya (parse key, EMSA-PKCS1-v1_5, EMSA-PSS, salt diinjeksi oleh pemanggil). `certificate.SigningKey` mendapat varian `rsa` dengan `scheme()` mengembalikan `rsa_pss_rsae_sha256`. `handshake.SignatureScheme` mendapat `rsa_pkcs1_sha256` (0x0401) dan `rsa_pss_rsae_sha256` (0x0804).
+- Salt PSS di-thread per koneksi seperti random lainnya: getrandom jalur serve ke `Tls.Context.handshakeOptions`, lalu `HandshakeOptions.pss_salt`, lalu `buildCertificateVerify`.
+- Terverifikasi: byte-exact terhadap `openssl dgst -sign` untuk v1.5, RSA verify std untuk PSS, dan sebuah integration test memuat certificate RSA, menandatangani signature PSS yang terverifikasi std, dan menolak key 1024-bit. Hijau di Zig 0.16 dan 0.17.
+- RSA di atas TLS 1.2 di luar scope: jalur 1.2 ECDSA-only, jadi context RSA melayani 1.3 saja.
 
 ---
 

@@ -58,11 +58,12 @@ Mengembalikan `legacy_version` saat 1.3 tidak ditawarkan (caller turun ke track 
 pub const SigningKey = union(enum) {
     ecdsa_p256: EcdsaP256.KeyPair,
     ed25519: Ed25519.KeyPair,
-    pub fn scheme(self) SignatureScheme  // .ECDSA_SECP256R1_SHA256 atau .ED25519
+    rsa: rsa.PrivateKey,
+    pub fn scheme(self) SignatureScheme  // .ECDSA_SECP256R1_SHA256, .ED25519, atau .RSA_PSS_RSAE_SHA256
 };
 ```
 
-Builder untuk Certificate, CertificateVerify, dan Finished. CertificateVerify menandatangani `0x20 * 64 || context-string || 0x00 || transcript-hash` (RFC 8446 4.4.3) dengan scheme key. `verify_data` Finished adalah `HMAC(finished_key, transcript-hash)`, diverifikasi byte-exact terhadap trace RFC 8448 in-file.
+Builder untuk Certificate, CertificateVerify, dan Finished. CertificateVerify menandatangani `0x20 * 64 || context-string || 0x00 || transcript-hash` (RFC 8446 4.4.3) dengan scheme key: ECDSA mengeluarkan signature DER, Ed25519 64 byte mentah, dan key RSA signature PSS `rsa_pss_rsae_sha256` via `signPss` (`buildCertificateVerify` menerima salt-nya, jalur ECDSA / Ed25519 mengabaikannya). `verify_data` Finished adalah `HMAC(finished_key, transcript-hash)`, diverifikasi byte-exact terhadap trace RFC 8448 in-file.
 
 ## connection.zig
 
@@ -90,7 +91,7 @@ Memegang application key + client-handshake key dan tiga sequence number (`serve
 
 ## context.zig
 
-`Version = enum(u8) { TLS_1_2 = 0x12, TLS_1_3 = 0x13 }` (terurut untuk min <= max). `Context.init` memanggil `validate(config)` yang I/O-free, membaca PEM cert / key, `pemToDer`, menduplikasi DER ke slice milik sendiri, lalu mendeteksi tipe key dari `cert.pub_key_algo` (`.X9_62_id_ecPublicKey` -> ECDSA via `ecdsaScalarFromSec1`, `.curveEd25519` -> Ed25519 via `ed25519SeedFromPkcs8`). `handshakeOptions(ephemeral, random)` mengisi `HandshakeOptions` dari context plus random per-koneksi. `allowsTls13` / `allowsTls12` membaca version range.
+`Version = enum(u8) { TLS_1_2 = 0x12, TLS_1_3 = 0x13 }` (terurut untuk min <= max). `Context.init` memanggil `validate(config)` yang I/O-free, membaca PEM cert / key, `pemToDer`, menduplikasi DER ke slice milik sendiri, lalu mendeteksi tipe key dari `cert.pub_key_algo` (`.X9_62_id_ecPublicKey` -> ECDSA via `ecdsaScalarFromSec1`, `.curveEd25519` -> Ed25519 via `ed25519SeedFromPkcs8`, `.rsaEncryption` -> RSA via `rsa.PrivateKey.fromDer`, menolak di bawah RSA-2048 dengan `RsaKeyTooSmall`). Buffer DER key berukuran untuk key PKCS#8 RSA, lebih besar dari key EC. `handshakeOptions(ephemeral, random, pss_salt)` mengisi `HandshakeOptions` dari context plus random per-koneksi (salt hanya dikonsumsi oleh CertificateVerify RSA). `allowsTls13` / `allowsTls12` membaca version range.
 
 ### validate (honesty boundary)
 
@@ -100,6 +101,10 @@ Menolak list curve / cipher kosong, curve di luar {X25519, SECP256R1}, cipher di
 
 `pemToDer(out, pem)` men-decode base64 satu blok PEM. `ecdsaScalarFromSec1` mengekstrak scalar privat 32-byte dari key EC SEC1. `ed25519SeedFromPkcs8` mengekstrak seed 32-byte setelah prefix PKCS#8 `04 22 04 20`.
 
+## rsa.zig
+
+Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-parse RSAPrivateKey two-prime (RFC 8017 A.1.2): wrapper PKCS#8 dibuka dulu ke OCTET STRING di dalamnya, lalu modulus `n` dan private exponent `d` disalin ke buffer tetap milik sendiri (leading-zero dibuang). `signPkcs1v15(message, out)` adalah jalur EMSA-PKCS1-v1_5 deterministik (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` adalah EMSA-PSS (RFC 8017 9.1) dengan MGF1, salt diinjeksi oleh pemanggil sehingga encoding-nya deterministik dan bisa diuji unit. Keduanya berakhir di RSASP1, `s = m^d mod n` via `std.crypto.ff.Modulus.powWithEncodedExponent` (constant-time, jadi `d` tidak bocor), lalu I2OSP ke `k` byte. Prime CRT di-parse tetapi tidak dipakai (jalur `m^d mod n` polos hanya butuh `n` dan `d`).
+
 ## cert_verify.zig
 
 `verifyChain(chain_der, anchor_der, now_sec)` memverifikasi chain [leaf, intermediate, ...] ke anchor: signature tiap link via std `Parsed.verify`, plus walk extension manual untuk basicConstraints (cA / pathLen), keyUsage (keyCertSign), dan penanganan critical-ext (wrapper extensions `[3]` terbaca sebagai tag `.bitstring` dari `std.crypto.Certificate.der.Element`, dicerminkan di sini). `verifyCertIdentity(end_entity_der, host)` mengecek DNS SAN (std `verifyHostName`) atau IPv4 SAN (`sanHasIp4`, men-scan GeneralName `0x87 0x04 <4 byte>`, karena std hanya DNS).
@@ -108,7 +113,7 @@ Menolak list curve / cipher kosong, curve di luar {X25519, SECP256R1}, cipher di
 
 `runTls` membaca `config.tls.?` (context) dan menjalankan accept loop. `serveConnTls(fd, handler, ctx)`:
 
-1. baca record ClientHello, generate `ephemeral_secret` + `server_random`, bangun `opts = ctx.handshakeOptions(...)`.
+1. baca record ClientHello, generate `ephemeral_secret` + `server_random` + `pss_salt` (getrandom), bangun `opts = ctx.handshakeOptions(...)`.
 2. version policy: jika `!ctx.allowsTls13()`, langsung ke jalur 1.2 (ECDSA saja, jika tidak `Tls12RequiresEcdsa`).
 3. ronde HelloRetryRequest jika `serverHelloRetry` mengembalikan satu, jika tidak `serverHandshake`. Saat `UnsupportedTlsVersion`: jika `!ctx.allowsTls12()` kirim alert `protocol_version`, jika tidak ambil jalur 1.2.
 4. baca (ChangeCipherSpec) + client Finished, lalu satu record aplikasi -> `readAppData` -> `core.parseHead`.

@@ -985,7 +985,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Decision:** Build the TLS 1.3 server handshake in pure Zig on `std.crypto` primitives, no OpenSSL or BoringSSL. Version policy: offer TLS 1.2 and TLS 1.3, prefer 1.3, never negotiate below 1.2. 1.2 is the floor and required scope, 1.0 / 1.1 / SSL are never offered (RFC 8996). Mandatory-to-implement crypto: `TLS_AES_128_GCM_SHA256`, secp256r1 plus X25519 ECDHE, an ECDSA P-256 or Ed25519 certificate. https is opt-in, cleartext stays the default and is left untouched, and https lives on its own perf band.
 
-**Rationale:** std already provides every primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), so a C dependency would add build complexity and an FFI boundary for no functional gain and would break the pure-Zig posture. TLS 1.2 is the minimum because RFC 5246 is not deprecated and is still widely deployed (older Android, legacy OpenSSL, embedded and enterprise stacks), whereas 1.0 / 1.1 are deprecated (RFC 8996) and so are never offered. The 1.2 suites are restricted to ECDHE-AEAD for forward secrecy and authenticated encryption on both versions, and an ECDSA or Ed25519 certificate covers authentication on the std signing path, which is why RSA signing stays optional.
+**Rationale:** std already provides every primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), so a C dependency would add build complexity and an FFI boundary for no functional gain and would break the pure-Zig posture. TLS 1.2 is the minimum because RFC 5246 is not deprecated and is still widely deployed (older Android, legacy OpenSSL, embedded and enterprise stacks), whereas 1.0 / 1.1 are deprecated (RFC 8996) and so are never offered. The 1.2 suites are restricted to ECDHE-AEAD for forward secrecy and authenticated encryption on both versions, and an ECDSA or Ed25519 certificate covers authentication on the std signing path. RSA signing was initially left optional here, then implemented later for RSA-certificate interop (ADR-048).
 
 **Config:** flat `tls_*` fields on the server configs (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` on Http1) and `tls_ca_path` on the client config. No nested sub-config, per the existing flat-config rule. The server-side flat fields are superseded by the `Tls.Context` object (ADR-047).
 
@@ -1036,6 +1036,26 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - The implemented set (X25519, secp256r1, AES-128-GCM for 1.3, ECDHE-ECDSA-AES128-GCM for 1.2) widens with no API change as crypto lands. Unsupported values are rejected at init.
 - The `Tls.Context` is the foundation the planned `zixer` executable parses its text config into.
 - Green on Zig 0.16 and 0.17 (unit-test plus the 59-protocol test-runner-all).
+
+---
+
+## ADR-048: RSA server certificate signing
+
+**Status:** Accepted
+
+**Context:** ADR-045 left RSA signing optional: an ECDSA P-256 or Ed25519 certificate covers authentication on the std signing path, and std verifies RSA but cannot sign with an RSA private key. A deployment that must serve a pre-issued RSA-2048 certificate (a common shape, for example a shared certificate mounted by an external harness) could not be served, since zix had no RSA signing.
+
+**Decision:** Implement RSA signing in pure Zig on `std.crypto`, server-side only, for RSA server certificates. The primitive is `std.crypto.ff.Modulus` modular exponentiation (the same constant-time routine std's RSA verify uses, here with the private exponent), and zix authors the padding: EMSA-PKCS1-v1_5 (RFC 8017 9.2) and EMSA-PSS plus MGF1 (RFC 8017 9.1), plus the PKCS#1 / PKCS#8 private-key DER parse. `Tls.Context.init` detects an `rsaEncryption` certificate, parses the key, and rejects below RSA-2048. RSA authenticates the TLS 1.3 CertificateVerify with `rsa_pss_rsae_sha256`, so an RSA certificate requires TLS 1.3: the 1.2 ServerKeyExchange path stays ECDSA-only, and an RSA context that meets a 1.2-only client returns an error. The default certificate type is unchanged (ECDSA P-256), RSA engages only when an RSA certificate is loaded.
+
+**Rationale:** The bignum was never the gap (`std.crypto.ff` already provides constant-time modexp), only the PKCS#1 padding and the key DER parse were missing, so the work is pure-Zig with no new dependency, holding the ADR-045 posture. PSS (not v1.5) on the 1.3 path because RFC 8446 permits only `rsa_pss_rsae_sha256` for an RSA CertificateVerify. The 2048-bit floor is the modern minimum. Server-side only, with no RSA on the client (`zix.Tls.Client` still offers and verifies ECDSA plus Ed25519), because the driver is serving an RSA certificate, not consuming one. ECDSA stays the default for its smaller, faster signatures.
+
+**Config:** none new. An RSA certificate is selected by pointing `Tls.Context.Config.cert_path` / `key_path` at an RSA certificate and key, `Tls.Context.init` detects the type. Floor the context at TLS 1.3 for an RSA certificate (`min_version = .TLS_1_3`).
+
+**Consequences:**
+- `src/tls/rsa.zig` is the signer (key parse, EMSA-PKCS1-v1_5, EMSA-PSS, salt injected by the caller). `certificate.SigningKey` gains an `rsa` variant with `scheme()` returning `rsa_pss_rsae_sha256`. `handshake.SignatureScheme` gains `rsa_pkcs1_sha256` (0x0401) and `rsa_pss_rsae_sha256` (0x0804).
+- The PSS salt is threaded per connection like the other randoms: serve-path getrandom into `Tls.Context.handshakeOptions`, then `HandshakeOptions.pss_salt`, then `buildCertificateVerify`.
+- Verified: byte-exact against `openssl dgst -sign` for v1.5, std RSA verify for PSS, and an integration test loads an RSA certificate, signs a std-verified PSS signature, and rejects a 1024-bit key. Green on Zig 0.16 and 0.17.
+- RSA over TLS 1.2 is out of scope: the 1.2 path is ECDSA-only, so an RSA context serves 1.3 only.
 
 ---
 

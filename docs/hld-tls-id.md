@@ -47,6 +47,7 @@ graph TD
 | `extensions.zig` | ALPN (`Alpn`, `negotiateAlpn`), EncryptedExtensions, helper supported_versions / key_share |
 | `alert.zig` | Kode alert, record alert keluar, klasifikasi alert masuk |
 | `pem.zig` | Decode PEM ke DER, ekstraksi scalar SEC1 ECDSA + seed PKCS#8 Ed25519 |
+| `rsa.zig` | RSA signing (ADR-048): parse key PKCS#1 / PKCS#8, EMSA-PKCS1-v1_5 + EMSA-PSS, modexp via `std.crypto.ff` |
 | `cert_verify.zig` | Chain cert peer (RFC 5280) + identitas hostname / IP (RFC 6125), cek misdirected-request |
 | `client.zig` | Handshake client TLS 1.3 (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | Track TLS 1.2: PRF schedule, record layer, version select, handshake server, client |
@@ -67,9 +68,9 @@ TLS 1.2 jadi floor karena RFC 5246 tidak deprecated dan masih banyak dipakai. Su
 | :- | :- | :- |
 | Cipher | `TLS_AES_128_GCM_SHA256` | `ECDHE_ECDSA_AES128_GCM_SHA256` (0xC02B) |
 | Key exchange | X25519, secp256r1 ECDHE | secp256r1 ECDHE |
-| Signature | ECDSA P-256 atau Ed25519 | ECDSA P-256 |
+| Signature | ECDSA P-256, Ed25519, atau RSA (`rsa_pss_rsae_sha256`) | ECDSA P-256 |
 
-Tidak ada finite-field DHE dan tidak ada RSA signing, jadi kekuatan key-exchange ditentukan sepenuhnya oleh curve ECDHE, bukan file dhparam. Certificate adalah ECDSA P-256 atau Ed25519, keduanya di jalur signing `std.crypto`, jadi RSA tetap opsional.
+Tidak ada finite-field DHE dan tidak ada RSA key exchange, jadi kekuatan key-exchange ditentukan sepenuhnya oleh curve ECDHE, bukan file dhparam. Certificate adalah ECDSA P-256, Ed25519, atau RSA: ECDSA dan Ed25519 menandatangani di kedua versi, sementara certificate RSA menandatangani CertificateVerify TLS 1.3 dengan `rsa_pss_rsae_sha256` sehingga membutuhkan TLS 1.3 (jalur 1.2 ECDSA-only). RSA-2048 adalah minimum dan ECDSA P-256 tetap default (ADR-048).
 
 ## Server Configuration: Tls.Context
 
@@ -87,7 +88,7 @@ var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .por
 ```
 
 - `Tls.Context.Config` adalah struct setting biasa: `cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`.
-- `Tls.Context.init` memuat PEM, mendeteksi tipe key (ECDSA vs Ed25519), dan memvalidasi policy sekali di cold path. Jalur serve per-koneksi lalu membaca context yang siap tanpa kerja PEM.
+- `Tls.Context.init` memuat PEM, mendeteksi tipe key (ECDSA, Ed25519, atau RSA), dan memvalidasi policy sekali di cold path. Jalur serve per-koneksi lalu membaca context yang siap tanpa kerja PEM.
 - `tls: ?*Tls.Context` di config Http1 dan Http2. Pointer non-null adalah gate opt-in https.
 - Curve dan cipher adalah enum slice bertipe yang divalidasi ke set yang diimplementasi. Value yang tidak didukung (P384, MLKEM768, AES-256, CHACHA20, suite RSA apapun) adalah error saat startup, bukan no-op diam. Set melebar tanpa perubahan API saat crypto mendarat.
 

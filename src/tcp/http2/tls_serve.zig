@@ -92,10 +92,12 @@ fn serveConnTls(
 
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
+    var pss_salt: [32]u8 = undefined;
     _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
     _ = linux.getrandom(&server_random, server_random.len, 0);
+    _ = linux.getrandom(&pss_salt, pss_salt.len, 0);
 
-    const hs_opts = ctx.handshakeOptions(ephemeral_secret, server_random);
+    const hs_opts = ctx.handshakeOptions(ephemeral_secret, server_random, pss_salt);
 
     // Version policy: when the ceiling is TLS 1.2, never take the 1.3 path. The 1.2 path is
     // ECDSA-signed, so an Ed25519 context cannot serve 1.2.

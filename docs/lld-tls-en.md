@@ -58,11 +58,12 @@ Returns `legacy_version` when 1.3 is not offered (the caller drops to the 1.2 tr
 pub const SigningKey = union(enum) {
     ecdsa_p256: EcdsaP256.KeyPair,
     ed25519: Ed25519.KeyPair,
-    pub fn scheme(self) SignatureScheme  // .ECDSA_SECP256R1_SHA256 or .ED25519
+    rsa: rsa.PrivateKey,
+    pub fn scheme(self) SignatureScheme  // .ECDSA_SECP256R1_SHA256, .ED25519, or .RSA_PSS_RSAE_SHA256
 };
 ```
 
-Builders for Certificate, CertificateVerify, and Finished. CertificateVerify signs `0x20 * 64 || context-string || 0x00 || transcript-hash` (RFC 8446 4.4.3) with the key's scheme. Finished `verify_data` is `HMAC(finished_key, transcript-hash)`, verified byte-exact against the RFC 8448 trace in-file.
+Builders for Certificate, CertificateVerify, and Finished. CertificateVerify signs `0x20 * 64 || context-string || 0x00 || transcript-hash` (RFC 8446 4.4.3) with the key's scheme: ECDSA emits a DER signature, Ed25519 the raw 64 bytes, and an RSA key the `rsa_pss_rsae_sha256` PSS signature via `signPss` (`buildCertificateVerify` takes the salt, the ECDSA / Ed25519 paths ignore it). Finished `verify_data` is `HMAC(finished_key, transcript-hash)`, verified byte-exact against the RFC 8448 trace in-file.
 
 ## connection.zig
 
@@ -90,7 +91,7 @@ Holds the application + client-handshake keys and three sequence numbers (`serve
 
 ## context.zig
 
-`Version = enum(u8) { TLS_1_2 = 0x12, TLS_1_3 = 0x13 }` (ordered for min <= max). `Context.init` calls the I/O-free `validate(config)`, reads the cert / key PEM, `pemToDer`, duplicates the DER into an owned slice, then detects the key type from `cert.pub_key_algo` (`.X9_62_id_ecPublicKey` -> ECDSA via `ecdsaScalarFromSec1`, `.curveEd25519` -> Ed25519 via `ed25519SeedFromPkcs8`). `handshakeOptions(ephemeral, random)` fills a `HandshakeOptions` from the context plus the per-connection randoms. `allowsTls13` / `allowsTls12` read the version range.
+`Version = enum(u8) { TLS_1_2 = 0x12, TLS_1_3 = 0x13 }` (ordered for min <= max). `Context.init` calls the I/O-free `validate(config)`, reads the cert / key PEM, `pemToDer`, duplicates the DER into an owned slice, then detects the key type from `cert.pub_key_algo` (`.X9_62_id_ecPublicKey` -> ECDSA via `ecdsaScalarFromSec1`, `.curveEd25519` -> Ed25519 via `ed25519SeedFromPkcs8`, `.rsaEncryption` -> RSA via `rsa.PrivateKey.fromDer`, rejecting below RSA-2048 with `RsaKeyTooSmall`). The key DER buffer is sized for an RSA PKCS#8 key, larger than an EC key. `handshakeOptions(ephemeral, random, pss_salt)` fills a `HandshakeOptions` from the context plus the per-connection randoms (the salt is consumed only by an RSA CertificateVerify). `allowsTls13` / `allowsTls12` read the version range.
 
 ### validate (the honesty boundary)
 
@@ -100,6 +101,10 @@ Rejects empty curve / cipher lists, any curve outside {X25519, SECP256R1}, any c
 
 `pemToDer(out, pem)` base64-decodes a single PEM block. `ecdsaScalarFromSec1` extracts the 32-byte private scalar from a SEC1 EC key. `ed25519SeedFromPkcs8` extracts the 32-byte seed after the `04 22 04 20` PKCS#8 prefix.
 
+## rsa.zig
+
+The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` parses a two-prime RSAPrivateKey (RFC 8017 A.1.2): a PKCS#8 wrapper is unwrapped to its inner OCTET STRING first, then the modulus `n` and private exponent `d` are copied into owned fixed buffers (leading-zero stripped). `signPkcs1v15(message, out)` is the deterministic EMSA-PKCS1-v1_5 path (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` is EMSA-PSS (RFC 8017 9.1) with MGF1, the salt injected by the caller so the encoding is deterministic and unit-testable. Both end in RSASP1, `s = m^d mod n` via `std.crypto.ff.Modulus.powWithEncodedExponent` (constant-time, so `d` does not leak), then I2OSP to `k` bytes. The CRT primes are parsed but unused (the plain `m^d mod n` path needs only `n` and `d`).
+
 ## cert_verify.zig
 
 `verifyChain(chain_der, anchor_der, now_sec)` verifies a [leaf, intermediate, ...] chain to an anchor: each link's signature via std `Parsed.verify`, plus a manual extension walk for basicConstraints (cA / pathLen), keyUsage (keyCertSign), and critical-ext handling (the `[3]` extensions wrapper reads as tag `.bitstring` from `std.crypto.Certificate.der.Element`, mirrored here). `verifyCertIdentity(end_entity_der, host)` checks a DNS SAN (std `verifyHostName`) or an IPv4 SAN (`sanHasIp4`, scanning for the `0x87 0x04 <4 bytes>` GeneralName, since std is DNS-only).
@@ -108,7 +113,7 @@ Rejects empty curve / cipher lists, any curve outside {X25519, SECP256R1}, any c
 
 `runTls` reads `config.tls.?` (the context) and runs the accept loop. `serveConnTls(fd, handler, ctx)`:
 
-1. read the ClientHello record, generate `ephemeral_secret` + `server_random`, build `opts = ctx.handshakeOptions(...)`.
+1. read the ClientHello record, generate `ephemeral_secret` + `server_random` + `pss_salt` (getrandom), build `opts = ctx.handshakeOptions(...)`.
 2. version policy: if `!ctx.allowsTls13()`, go straight to the 1.2 path (ECDSA only, else `Tls12RequiresEcdsa`).
 3. HelloRetryRequest round if `serverHelloRetry` returns one, else `serverHandshake`. On `UnsupportedTlsVersion`: if `!ctx.allowsTls12()` send a `protocol_version` alert, else take the 1.2 path.
 4. read (ChangeCipherSpec) + client Finished, then one application record -> `readAppData` -> `core.parseHead`.
