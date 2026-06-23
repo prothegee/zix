@@ -166,8 +166,9 @@ pub fn main(process: std.process.Init) void {
     const channel_ipc_a_path = arg_iter.next() orelse exitMissing("channel-ipc-a");
     const channel_ipc_b_path = arg_iter.next() orelse exitMissing("channel-ipc-b");
 
-    // tls (https/1.1 over TLS 1.3, and h2 over TLS 1.3)
+    // tls (https/1.1 over TLS 1.3, the ed25519-cert variant, and h2 over TLS 1.3)
     const tls_http1_path = arg_iter.next() orelse exitMissing("tls-http1");
+    const tls_http1_ed25519_path = arg_iter.next() orelse exitMissing("tls-http1-ed25519");
     const tls_http2_path = arg_iter.next() orelse exitMissing("tls-http2");
 
     // Basic dispatch-model tests.
@@ -247,8 +248,10 @@ pub fn main(process: std.process.Init) void {
     // Channel IPC test.
     report("channel-ipc", runChannelIpc(io, channel_ipc_a_path, channel_ipc_b_path), &tally);
 
-    // TLS tests (native clients, no curl): https/1.1 (std-backed) + h2 (the zix.Tls client).
+    // TLS tests (native clients, no curl): https/1.1 (std-backed), https/1.1 ed25519 (zix.Tls
+    // client), h2 (zix.Tls client).
     report("tls-http1", runTls(io, tls_http1_path, 9060), &tally);
+    report("tls-http1-ed25519", runTlsHttp1Ed25519(io, tls_http1_ed25519_path, 9062), &tally);
     report("tls-http2", runTlsHttp2(io, tls_http2_path, 9061), &tally);
 
     if (tally.failed > 0) {
@@ -388,6 +391,76 @@ fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     }
 
     return error.NoStatus200;
+}
+
+/// https/1.1 over TLS 1.3 with an Ed25519 server cert. The std-backed client cannot verify ed25519,
+/// so drive the native zix.Tls client (offers + verifies ed25519), trust the fixture cert (chain +
+/// hostname), GET / over the encrypted connection, assert 200 + body + the HSTS header. No curl.
+fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void {
+    const Tls = zix.Tls;
+    const linux = std.os.linux;
+
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, 5000);
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    var stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+
+    var rnd: [64]u8 = undefined;
+    _ = linux.getrandom(&rnd, rnd.len, 0);
+    var ch_buf: [600]u8 = undefined;
+    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].* }, &ch_buf);
+    var state = started.state;
+    try tlsWriteRecord(fd, 22, started.client_hello);
+
+    var flight_buf: [8192]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| flen += try tlsReadRecord(fd, flight_buf[flen..]);
+
+    var fin_buf: [256]u8 = undefined;
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+
+    // trust the Ed25519 server cert (chain + hostname) against the fixture anchor.
+    var pem_buf: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/tls/certs/ed25519_cert.pem", fba.allocator(), .limited(8192));
+    var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
+    const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.REALTIME, &ts);
+    try finished.verifyServerCert(anchor_der, "localhost", ts.sec);
+
+    try tlsWriteAll(fd, finished.client_finished);
+
+    const req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    var send_buf: [512]u8 = undefined;
+    try tlsWriteAll(fd, finished.connection.writeAppData(req, &send_buf));
+
+    var acc: [8192]u8 = undefined;
+    var acc_len: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 32) : (rounds += 1) {
+        var rec_buf: [17 * 1024]u8 = undefined;
+        const rec_len = tlsReadRecord(fd, &rec_buf) catch break;
+        if (rec_buf[0] != 23) continue;
+
+        var dec: [17 * 1024]u8 = undefined;
+        const plain = finished.connection.readAppData(rec_buf[0..rec_len], &dec) catch break;
+        if (acc_len + plain.len > acc.len) break;
+        @memcpy(acc[acc_len..][0..plain.len], plain);
+        acc_len += plain.len;
+
+        if (std.mem.indexOf(u8, acc[0..acc_len], "hello over tls 1.3 (ed25519)") != null) break;
+    }
+
+    const response = acc[0..acc_len];
+    if (std.mem.indexOf(u8, response, " 200 ") == null) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, response, "hello over tls 1.3 (ed25519)") == null) return error.UnexpectedBody;
+    if (std.mem.indexOf(u8, response, "Strict-Transport-Security") == null) return error.MissingHsts;
 }
 
 fn tlsWriteRecord(fd: std.posix.fd_t, content_type: u8, msg: []const u8) !void {
