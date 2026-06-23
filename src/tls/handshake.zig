@@ -328,6 +328,48 @@ pub fn serializeServerHello(buf: []u8, random: []const u8, session_id: []const u
     return w.slice();
 }
 
+/// The fixed HelloRetryRequest sentinel placed in ServerHello.random (RFC 8446 4.1.3): the SHA-256
+/// of the string "HelloRetryRequest". A ServerHello carrying this random IS a HelloRetryRequest.
+pub const hello_retry_request_random = [32]u8{
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+};
+
+/// Serialize a HelloRetryRequest (RFC 8446 4.1.4): a ServerHello carrying the HRR random sentinel,
+/// supported_versions (0x0304), and a key_share extension naming ONLY the group the client must
+/// retry with (a KeyShareHelloRetryRequest, no key bytes). Sent when the server picked a group the
+/// client supports but did not provide a key_share for.
+pub fn serializeHelloRetryRequest(buf: []u8, session_id: []const u8, cipher: CipherSuite, group: NamedGroup) []const u8 {
+    var w = Writer{ .buf = buf };
+
+    w.writeU8(@intFromEnum(HandshakeType.SERVER_HELLO));
+    const header = w.placeU24();
+
+    w.writeU16(VERSION_TLS_1_2);
+    w.writeBytes(&hello_retry_request_random);
+    w.writeU8(@intCast(session_id.len));
+    w.writeBytes(session_id);
+    w.writeU16(@intFromEnum(cipher));
+    w.writeU8(0);
+
+    const extensions = w.placeU16();
+
+    w.writeU16(@intFromEnum(ExtensionType.SUPPORTED_VERSIONS));
+    const supported_versions = w.placeU16();
+    w.writeU16(VERSION_TLS_1_3);
+    w.patchU16(supported_versions);
+
+    w.writeU16(@intFromEnum(ExtensionType.KEY_SHARE));
+    const key_share = w.placeU16();
+    w.writeU16(@intFromEnum(group)); // KeyShareHelloRetryRequest: the selected group only
+    w.patchU16(key_share);
+
+    w.patchU16(extensions);
+    w.patchU24(header);
+
+    return w.slice();
+}
+
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
@@ -396,6 +438,56 @@ test "zix test: handshake, ClientHello captures the ALPN protocol list" {
     const extensions = @import("extensions.zig");
     const prefs = [_]extensions.Alpn{ .H2, .HTTP_1_1 };
     try std.testing.expectEqual(extensions.Alpn.H2, extensions.negotiateAlpn(parsed.ok.alpn.?, &prefs).?);
+}
+
+test "zix test: handshake, an unknown extension (cookie 0x002c) is parsed past, not rejected" {
+    // A server that never emits HelloRetryRequest never asks for a cookie, so a cookie in the
+    // initial ClientHello is ignored (RFC 8446 4.2.2). It must not break parsing of the rest.
+    var buf: [256]u8 = undefined;
+    var w = Writer{ .buf = &buf };
+
+    w.writeU8(@intFromEnum(HandshakeType.CLIENT_HELLO));
+    const header = w.placeU24();
+    w.writeU16(VERSION_TLS_1_2);
+    const zero_random = std.mem.zeroes([32]u8);
+    w.writeBytes(&zero_random);
+    w.writeU8(0); // empty session_id
+    w.writeU16(2); // cipher_suites length
+    w.writeU16(@intFromEnum(CipherSuite.AES_128_GCM_SHA256));
+    w.writeU8(1); // compression length
+    w.writeU8(0); // null compression
+
+    const exts = w.placeU16();
+    // cookie (0x002c): an opaque cookie<1..2^16-1>, here 3 bytes. Comes BEFORE a known extension.
+    w.writeU16(0x002c);
+    const cookie_ext = w.placeU16();
+    const cookie_body = w.placeU16();
+    w.writeBytes(&[_]u8{ 0xAA, 0xBB, 0xCC });
+    w.patchU16(cookie_body);
+    w.patchU16(cookie_ext);
+    // supported_versions advertising TLS 1.3, parsed AFTER the ignored cookie.
+    w.writeU16(@intFromEnum(ExtensionType.SUPPORTED_VERSIONS));
+    w.writeU16(3);
+    w.writeU8(2);
+    w.writeU16(VERSION_TLS_1_3);
+    w.patchU16(exts);
+    w.patchU24(header);
+
+    const parsed = parseClientHello(w.slice());
+    try std.testing.expect(parsed == .ok);
+    try std.testing.expect(parsed.ok.offers_tls13); // the post-cookie extension was still reached
+}
+
+test "zix test: handshake, serializeHelloRetryRequest carries the HRR random + selected group" {
+    var buf: [128]u8 = undefined;
+    const hrr = serializeHelloRetryRequest(&buf, &.{}, .AES_128_GCM_SHA256, .X25519);
+
+    // ServerHello message type, then (after type[1] + len[3] + legacy_version[2]) the 32-byte random.
+    try std.testing.expectEqual(@intFromEnum(HandshakeType.SERVER_HELLO), hrr[0]);
+    try std.testing.expectEqualSlices(u8, &hello_retry_request_random, hrr[6..38]);
+
+    // the key_share extension must name the group the client has to retry with (x25519, 0x001d).
+    try std.testing.expect(std.mem.indexOf(u8, hrr, &[_]u8{ 0x00, 0x33, 0x00, 0x02, 0x00, 0x1d }) != null);
 }
 
 test "zix test: handshake, offersSignatureScheme matches the offered list (Layer C)" {
