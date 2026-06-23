@@ -1,11 +1,12 @@
 //! zix http2 https serve path (h2 over TLS 1.3, RFC 8446 + 7540 + 7301 ALPN).
 //!
 //! Note:
-//! - Gated on config.tls_cert_path. A blocking accept loop does the TLS 1.3 handshake via zix.Tls,
-//!   negotiating ALPN from config.tls_alpn (h2 for HTTP/2 over TLS). It then terminates TLS in
-//!   front of the EXISTING h2c engine: a socketpair carries plaintext, the engine runs unchanged
-//!   on one end (core.serveConn, it thinks it speaks h2c to a socket), and a poll loop pumps
-//!   inbound (decrypt the client record -> plaintext) and outbound (engine frames -> encrypt).
+//! - Gated on config.tls (a *Tls.Context). A blocking accept loop does the TLS handshake via zix.Tls
+//!   (version subject to the context's min_version / max_version), negotiating ALPN from the context
+//!   (h2 for HTTP/2 over TLS). It then terminates TLS in front of the EXISTING h2c engine: a
+//!   socketpair carries plaintext, the engine runs unchanged on one end (core.serveConn, it thinks
+//!   it speaks h2c to a socket), and a poll loop pumps inbound (decrypt the client record ->
+//!   plaintext) and outbound (engine frames -> encrypt).
 //! - This reuses the whole h2c frame state machine, so the cleartext dispatch models (ASYNC /
 //!   POOL / MIXED) are untouched. https is a separate path on its own perf band (not the 1% gate),
 //!   so the per-connection terminator thread + socketpair are acceptable here.
@@ -21,7 +22,6 @@ const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
-const pem = @import("../../tls/pem.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -40,28 +40,17 @@ fn peerAlert(body: []const u8) anyerror {
 
 const max_plaintext: usize = 16 * 1024;
 
-/// Load the cert + key, listen, and serve h2 over TLS 1.3 (blocking accept loop). Routes are baked
-/// in at compile time, so the per-connection engine thread is generated per route table.
+/// Listen and serve h2 over TLS (blocking accept loop). The cert / key / policy are loaded and
+/// validated once in the context (config.tls), so the accept loop reads a ready context. Routes are
+/// baked in at compile time, so the per-connection engine thread is generated per route table.
 pub fn runTls(comptime routes: []const Route, config: Http2ServerConfig) !void {
     const io = config.io;
-    const allocator = std.heap.smp_allocator;
-
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.tls_cert_path.?, allocator, .limited(1 << 20));
-    defer allocator.free(cert_pem);
-    var cert_der_buf: [4096]u8 = undefined;
-    const cert_der = try pem.pemToDer(&cert_der_buf, cert_pem);
-
-    const key_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.tls_key_path.?, allocator, .limited(1 << 20));
-    defer allocator.free(key_pem);
-    var key_der_buf: [512]u8 = undefined;
-    const key_der = try pem.pemToDer(&key_der_buf, key_pem);
-    const scalar = try pem.ecdsaScalarFromSec1(key_der);
-    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+    const ctx = config.tls.?;
 
     const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
     var srv = try addr.listen(io, .{ .reuse_address = true });
 
-    common.logSystem(config, "listening on {s}:{d} (h2, TLS 1.3)", .{ config.ip, config.port });
+    common.logSystem(config, "listening on {s}:{d} (h2, TLS)", .{ config.ip, config.port });
 
     const opts = common.serveOpts(config);
 
@@ -69,7 +58,7 @@ pub fn runTls(comptime routes: []const Route, config: Http2ServerConfig) !void {
         var stream = srv.accept(io) catch continue;
         defer stream.close(io);
 
-        serveConnTls(routes, stream.socket.handle, config, opts, cert_der, key_pair) catch {};
+        serveConnTls(routes, stream.socket.handle, config, opts, ctx) catch {};
     }
 }
 
@@ -93,8 +82,7 @@ fn serveConnTls(
     fd: posix.fd_t,
     config: Http2ServerConfig,
     opts: core.ServeOpts,
-    cert_der: []const u8,
-    key_pair: EcdsaP256.KeyPair,
+    ctx: *const Tls.Context,
 ) !void {
     var record_buf: [17 * 1024]u8 = undefined;
 
@@ -107,17 +95,37 @@ fn serveConnTls(
     _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
     _ = linux.getrandom(&server_random, server_random.len, 0);
 
+    const hs_opts = ctx.handshakeOptions(ephemeral_secret, server_random);
+
+    // Version policy: when the ceiling is TLS 1.2, never take the 1.3 path. The 1.2 path is
+    // ECDSA-signed, so an Ed25519 context cannot serve 1.2.
+    if (!ctx.allowsTls13()) {
+        const ecdsa_key = switch (ctx.signing_key) {
+            .ecdsa_p256 => |kp| kp,
+            else => return error.Tls12RequiresEcdsa,
+        };
+
+        return serveConnTls12H2(routes, fd, config, opts, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
+    }
+
     var handshake_out: [8192]u8 = undefined;
-    const result = Tls.serverHandshake(.{
-        .certificate_der = cert_der,
-        .signing_key = .{ .ecdsa_p256 = key_pair },
-        .ephemeral_secret = ephemeral_secret,
-        .server_random = server_random,
-        .alpn_prefs = config.tls_alpn,
-    }, client_hello_rec.body, &handshake_out) catch |err| {
-        // no 1.3 offer -> the client is TLS 1.2 (the minimum), take the h2-over-1.2 path.
+    const result = Tls.serverHandshake(hs_opts, client_hello_rec.body, &handshake_out) catch |err| {
+        // no 1.3 offer -> the client is TLS 1.2 only. Honor the floor: refuse when min_version is
+        // 1.3, else take the h2-over-1.2 path.
         if (err == error.UnsupportedTlsVersion) {
-            return serveConnTls12H2(routes, fd, config, opts, cert_der, key_pair, client_hello_rec.body, ephemeral_secret, server_random);
+            if (!ctx.allowsTls12()) {
+                var ver_alert: [Tls.fatal_record_len]u8 = undefined;
+                if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAll(fd, rec) catch {};
+
+                return err;
+            }
+
+            const ecdsa_key = switch (ctx.signing_key) {
+                .ecdsa_p256 => |kp| kp,
+                else => return error.Tls12RequiresEcdsa,
+            };
+
+            return serveConnTls12H2(routes, fd, config, opts, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
         }
 
         // any other rejected ClientHello (incl. no_application_protocol): send the fatal alert in
@@ -180,19 +188,21 @@ fn serveConnTls12H2(
     fd: posix.fd_t,
     config: Http2ServerConfig,
     opts: core.ServeOpts,
-    cert_der: []const u8,
+    ctx: *const Tls.Context,
     key_pair: EcdsaP256.KeyPair,
     client_hello: []const u8,
     ephemeral_secret: [32]u8,
     server_random: [32]u8,
 ) !void {
+    _ = config;
+
     var flight_out: [8192]u8 = undefined;
     const flight = try tls12.serverFlight1(.{
-        .certificate_der = cert_der,
+        .certificate_der = ctx.cert_der,
         .signing_key = key_pair,
         .server_eph_secret = ephemeral_secret,
         .server_random = server_random,
-        .alpn_prefs = config.tls_alpn,
+        .alpn_prefs = ctx.alpn,
     }, client_hello, &flight_out);
     try writeAll(fd, flight.to_send);
     var state = flight.state;
