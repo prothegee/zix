@@ -11,6 +11,7 @@ const std = @import("std");
 const wire = @import("wire.zig");
 const handshake = @import("handshake.zig");
 const key_schedule = @import("key_schedule.zig");
+const rsa = @import("rsa.zig");
 
 const Reader = wire.Reader;
 const Writer = wire.Writer;
@@ -20,17 +21,20 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
 
-/// The server's CertificateVerify signing identity (RFC 8446 4.4.3). zix signs with ECDSA P-256 or
-/// Ed25519 (no RSA), matching the certificate's key type. scheme() is the SignatureScheme written
-/// on the wire, which the client must have offered in signature_algorithms (Layer C selection).
+/// The server's CertificateVerify signing identity (RFC 8446 4.4.3), matching the certificate's key
+/// type. scheme() is the TLS 1.3 SignatureScheme written on the wire, which the client must have
+/// offered in signature_algorithms (Layer C selection). An RSA key signs CertificateVerify with
+/// rsa_pss_rsae_sha256 (the only RSA scheme TLS 1.3 permits there).
 pub const SigningKey = union(enum) {
     ecdsa_p256: EcdsaP256.KeyPair,
     ed25519: Ed25519.KeyPair,
+    rsa: rsa.PrivateKey,
 
     pub fn scheme(self: SigningKey) handshake.SignatureScheme {
         return switch (self) {
             .ecdsa_p256 => .ECDSA_SECP256R1_SHA256,
             .ed25519 => .ED25519,
+            .rsa => .RSA_PSS_RSAE_SHA256,
         };
     }
 };
@@ -126,8 +130,16 @@ pub fn certificateVerifyContent(buf: []u8, transcript_hash: Secret) []const u8 {
 
 /// Sign the CertificateVerify content with the server's key and emit the message (RFC 8446 4.4.3).
 /// The wire SignatureScheme is the key's own scheme (ECDSA P-256 -> DER signature, Ed25519 -> raw
-/// 64-byte signature). The caller selects the key so its scheme is one the client offered.
-pub fn buildCertificateVerify(buf: []u8, signing_key: SigningKey, transcript_hash: Secret) ![]const u8 {
+/// 64-byte signature, RSA -> rsa_pss_rsae_sha256). The caller selects the key so its scheme is one
+/// the client offered.
+///
+/// Note:
+/// - pss_salt is consumed only by the RSA path (EMSA-PSS needs a random salt, RFC 8017 9.1). The
+///   serve path sources it from getrandom, the ECDSA / Ed25519 paths ignore it.
+///
+/// Param:
+/// pss_salt - [rsa.pss_salt_len]u8 (the random salt for an RSA PSS signature, ignored otherwise)
+pub fn buildCertificateVerify(buf: []u8, signing_key: SigningKey, transcript_hash: Secret, pss_salt: [rsa.pss_salt_len]u8) ![]const u8 {
     var content_buf: [certificate_verify_content_len]u8 = undefined;
     const content = certificateVerifyContent(&content_buf, transcript_hash);
 
@@ -146,6 +158,11 @@ pub fn buildCertificateVerify(buf: []u8, signing_key: SigningKey, transcript_has
         .ed25519 => |key_pair| {
             const signature = try key_pair.sign(content, null);
             w.writeBytes(&signature.toBytes());
+        },
+        .rsa => |key| {
+            var sig_buf: [rsa.max_modulus_len]u8 = undefined;
+            const signature = try key.signPss(content, pss_salt, &sig_buf);
+            w.writeBytes(signature);
         },
     }
 
@@ -228,6 +245,41 @@ pub fn buildFinished(buf: []u8, finished_key: Secret, transcript_hash: Secret) [
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
+/// An all-zero salt, used by the ECDSA / Ed25519 tests where pss_salt is ignored.
+const zero_salt = std.mem.zeroes([rsa.pss_salt_len]u8);
+
+/// A deterministic RSA-2048 PKCS#8 key (openssl genpkey), for the RSA CertificateVerify test.
+const rsa_fixture_pkcs8_pem =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDiK/ullhGBT/Mj
+    \\s1cQ3b7xqIAtHwMjuTxnUne42qU3cUrEeH2/jWjXjEeBMBqt8TYp1FVpDg+u2DGU
+    \\Jada+rtFsPVZkD/07HUGXYfya6hwdwOqwjm+fdI+jIIpM+N1t6Ln+eV75GIu8KEr
+    \\uRQVTsR3Rz8uMcIN/apvXP1Tus2Y2ZIhAKX9vk2DvL6+7gCLzK0wJmdQ34aGEw89
+    \\MRfQLVmTpFvZSJ2B81dxY+IdgbshiZbbn76pzdH4TvxIOwDpUxW16qY7VXZErMtR
+    \\S9jnavMpIB1sTkZLKZyIkowWqeeVWIQG85RreOwiEYywRUYnhI44YBxf0Xmgr1x6
+    \\CnJ3atxDAgMBAAECggEACaafz9KF/7MWKG1UJ0OXDL/IbGR44VLbqXsC4c/uod2D
+    \\N7v+fah+k0gImxIe6VI0IffOBzQS5j6SawRqTj8Js7EX3xEBMaXPXoyqKuV+JAJo
+    \\FSbBiQfca0/alACDUbgayvRGXxGBQQiCkBePLFOWnZJcN0/nPGqZFbRtmN+NO1rk
+    \\zTD46uKfBAFMKZLbWrK8plECMfea5h+/ysnfhpZXv5nAXuPY6cvwgDTZvphQdB4l
+    \\4mjAtuI6oEYUL4CVga1NE57vC02RxJBwylmxznJyJcRdLl52kSgOMU3xV9isrrZT
+    \\88s9Ds5ZxtGqaWUmbF+pHW1wxzTmJhrCXxEGtsrmAQKBgQD5u1KiuTlPnnVgIRfT
+    \\thzF5pBp6Ynwbw/Q0SMkF/E7yxkPDdLWMY43WIikRj9IyfDnIRxdGEBkprF7/Sm/
+    \\ehGVGRDNNT3eRaZ04jLP/EbksO9hF49ro/FlHSaaVrDSAsW3F8HBp8NQC9Sgpdlf
+    \\XwnxZsP35wpISF1hWV5be0yWAQKBgQDn2UYCjGCRFdBNdsqxbgGemPBu60/U0leE
+    \\T8xg42jN6tO2j0vesKp83NFcAl71NYh7rl8G+WnFJ3DgrjrFAPbTa6VJdnNnpjV+
+    \\3o2CSqSTAReFM2khRIZodCbQ3Ad/6P00RnahpciBemQsQKeyGRMrhrkBZbiPIWch
+    \\LgBIniOaQwKBgGcmxsVL+K44Z4cjZDIgoNXlnHUC7+UOGtxH5ln8QbpO87TSIuoy
+    \\YeneeeJQ2cb5EraFaK/TWpW4fMsYEOx0QVrylYwNl9Z9snnJDO/35liD9PyHvMfb
+    \\WdRILC/H6xVz67Lq7y9MWlJv8I3Cs3y/Rt4dcoitOAQPT/Lr9RuYXFQBAoGBAM0U
+    \\QXsrlJeBRhnfQ/eiKMiS28ohVyIXVNZyh4QEY8YRO2g2ZJP8jTGZWY8bgcdArRNJ
+    \\8ECJCegctRnow49TBQGKLFBI+Ffsi1FHpsBjKiPmSVnHWezVYlaut07z8aZQ/vfo
+    \\hDMEI9Fz43vJTQyaZXyQ1MDJq3DfyQtuV03ko/VlAoGBAJiRuT9T8EQO0gJoaS6g
+    \\W/+g7A+JUZnqIrCiL9JAaWzOy4TdKtEgbDQsLH1NfVclcnti5C/6wlCqvPcSQtF/
+    \\ZGgEuI4ajyq60Un5tOiB1rbJ5sahSLgpM21Ph6kkC6nxTuKfRPpu1+L92SFZBFrX
+    \\sIWllpzoV5pFqYoMGir8MZfp
+    \\-----END PRIVATE KEY-----
+;
+
 test "zix test: certificate, Certificate message wraps the DER (4.4.2)" {
     const der = [_]u8{ 0x30, 0x03, 0x01, 0x02, 0x03 };
 
@@ -260,7 +312,7 @@ test "zix test: certificate, CertificateVerify content + ECDSA P-256 sign/verify
     const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
 
     var msg_buf: [256]u8 = undefined;
-    const msg = try buildCertificateVerify(&msg_buf, .{ .ecdsa_p256 = key_pair }, transcript);
+    const msg = try buildCertificateVerify(&msg_buf, .{ .ecdsa_p256 = key_pair }, transcript, zero_salt);
 
     var r = Reader{ .buf = msg };
     try std.testing.expectEqual(@as(u8, 15), try r.readU8());
@@ -290,7 +342,7 @@ test "zix test: certificate, CertificateVerify with an Ed25519 key emits scheme 
     try std.testing.expectEqual(handshake.SignatureScheme.ED25519, signing_key.scheme());
 
     var msg_buf: [256]u8 = undefined;
-    const msg = try buildCertificateVerify(&msg_buf, signing_key, transcript);
+    const msg = try buildCertificateVerify(&msg_buf, signing_key, transcript, zero_salt);
 
     var r = Reader{ .buf = msg };
     try std.testing.expectEqual(@as(u8, 15), try r.readU8());
@@ -303,6 +355,46 @@ test "zix test: certificate, CertificateVerify with an Ed25519 key emits scheme 
     var content_buf: [certificate_verify_content_len]u8 = undefined;
     const content = certificateVerifyContent(&content_buf, transcript);
     try signature.verify(content, key_pair.public_key);
+}
+
+test "zix test: certificate, CertificateVerify with an RSA key emits scheme 0x0804 + PSS verifies (4.4.3)" {
+    const pem = @import("pem.zig");
+    const StdRsa = std.crypto.Certificate.rsa;
+
+    var transcript: Secret = undefined;
+    @memset(&transcript, 0x33);
+
+    var der_buf: [4096]u8 = undefined;
+    const der = try pem.pemToDer(&der_buf, rsa_fixture_pkcs8_pem);
+    const key = try rsa.PrivateKey.fromDer(der, true);
+
+    const signing_key: SigningKey = .{ .rsa = key };
+    try std.testing.expectEqual(handshake.SignatureScheme.RSA_PSS_RSAE_SHA256, signing_key.scheme());
+
+    var salt: [rsa.pss_salt_len]u8 = undefined;
+    @memset(&salt, 0x5a);
+
+    var msg_buf: [512]u8 = undefined;
+    const msg = try buildCertificateVerify(&msg_buf, signing_key, transcript, salt);
+
+    var r = Reader{ .buf = msg };
+    try std.testing.expectEqual(@as(u8, 15), try r.readU8());
+    _ = try r.readU24();
+    try std.testing.expectEqual(@as(u16, 0x0804), try r.readU16()); // rsa_pss_rsae_sha256
+
+    const sig_len = try r.readU16();
+    const signature = try r.readBytes(sig_len);
+    try std.testing.expectEqual(@as(usize, 256), sig_len);
+
+    // the PSS signature must verify over the signed content through std's RSA verify.
+    var content_buf: [certificate_verify_content_len]u8 = undefined;
+    const content = certificateVerifyContent(&content_buf, transcript);
+
+    var n_bytes: [256]u8 = undefined;
+    @memcpy(&n_bytes, key.modulus());
+    const e_bytes = [_]u8{ 0x01, 0x00, 0x01 };
+    const public_key = try StdRsa.PublicKey.fromBytes(&e_bytes, &n_bytes);
+    try StdRsa.PSSSignature.verify(256, signature[0..256].*, content, public_key, std.crypto.hash.sha2.Sha256);
 }
 
 test "zix test: certificate, Finished verify_data byte-exact vs RFC 8448 (4.4.4)" {
