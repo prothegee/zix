@@ -29,6 +29,9 @@ pub const Client12 = @import("tls12_client.zig");
 pub const verifyCertChain = @import("cert_verify.zig").verifyCertChain;
 pub const verifyCertHostname = @import("cert_verify.zig").verifyCertHostname;
 
+/// PEM to DER decode (a single block), for loading a cert / trust anchor from a .pem file.
+pub const pemToDer = @import("pem.zig").pemToDer;
+
 pub const Alpn = extensions.Alpn;
 pub const Alert = alert.Alert;
 pub const fatal_record_len = alert.fatal_record_len;

@@ -74,6 +74,12 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var fin_buf: [256]u8 = undefined;
     var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
     if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+
+    // trust the server cert: chain it to the fixture anchor (loaded out-of-band from disk) and
+    // match the hostname (RFC 5280 / 6125). finish proved the peer holds the cert key, this is the
+    // chain + identity step the request path owns.
+    try verifyServerTrust(io, &finished);
+
     try writeAll(fd, finished.client_finished);
 
     // build the h2 request (preface + empty SETTINGS + HEADERS GET /) as one plaintext buffer.
@@ -148,6 +154,28 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 }
 
 // --------------------------------------------------------------- //
+
+// the fixture cert the example server presents, loaded as the trust anchor (out-of-band, from disk,
+// not from the cert the server sent). The example runs from the repo root, so the path is relative.
+const CERT_ANCHOR_PATH = "examples/tls/certs/ecdsa_p256_cert.pem";
+
+fn verifyServerTrust(io: std.Io, finished: *const Tls.Client.FinishResult) !void {
+    var pem_buf: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, CERT_ANCHOR_PATH, fba.allocator(), .limited(8192));
+
+    var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
+    const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
+
+    try finished.verifyServerCert(anchor_der, "localhost", nowSec());
+}
+
+fn nowSec() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.REALTIME, &ts);
+
+    return ts.sec;
+}
 
 fn writeRecord(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
     var header: [5]u8 = undefined;

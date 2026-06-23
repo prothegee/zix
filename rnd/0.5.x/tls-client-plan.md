@@ -103,9 +103,28 @@ h2 runner #15 LANDED: tests/runner/tls_http2_basic_runner.zig drives the native 
 TCP to example-tls_http2_basic, speaks h2 over the ClientConnection (zix.Http2 frames), asserts
 :status 200. test-runner-tls-http2 PASS on Zig 0.16 + 0.17, no curl.
 
-Remaining for the milestone: wire the chain + hostname trust (RFC 5280 / 6125) into the request path
-(today the runner relies on CertVerify + a known fixture cert), and the broader zix.Http.Client
-transport wiring (http_version=2 for general users).
+Chain + hostname trust is now WIRED into the request path. finish() surfaces the server end-entity
+cert (FinishResult.serverCertDer), and FinishResult.verifyServerCert chains it to a caller-supplied
+anchor (RFC 5280) + matches the hostname (RFC 6125) via cert_verify. Mirrored on the 1.2 client. The
+h2 runner (tls_http2_basic_runner.zig) loads the fixture cert from disk as the out-of-band anchor and
+calls verifyServerCert before sending the client Finished, so the runner no longer trusts the cert the
+server sent. zix.Tls.pemToDer is exported for loading an anchor PEM. Unit-tested (good cert, wrong
+host, outside validity window, missing cert), green Zig 0.16 + 0.17 (unit-test + test-runner-all).
+
+INT is COMPLETE: zix.Http.Client now speaks h2 over TLS for general users. config.version = .HTTP_2
+routes request() through the native transport src/tcp/http/h2_client.zig (HostName.connect for DNS,
+TLS 1.3 handshake offering ALPN h2, FinishResult.verifyServerCert against config.tls_ca_path when
+config.tls_verify, then one request/response over a single h2 stream: preface + SETTINGS + WINDOW_UPDATE
++ HEADERS [+ DATA], reply SETTINGS/PING ACKs, parse HEADERS :status + DATA body, stop at END_STREAM).
+New flat config field tls_verify (default true), tls_ca_path reused as the one-link anchor. zix.Tls.pemToDer
+exported. https only (http:// + HTTP_2 -> error.UnsupportedScheme), HTTP_3 still UnsupportedVersion.
+Proven by tests/runner/tls_http2_client_runner.zig (zix.Http.Client.get over h2 -> 200 + body, no curl)
+and unit tests (scheme guard, frame builders, PADDED/PRIORITY strip). Green Zig 0.16 + 0.17 (unit-test +
+test-runner-all 58 + the new runner).
+
+Known scope edges (later levers, not blockers): public-CA system roots (multi-link chain, today one
+anchor only), response headers spanning CONTINUATION (-> error.UnsupportedH2), connection pooling /
+multiple streams per connection (one request per connection today).
 
 ## Order
 

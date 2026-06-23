@@ -5,11 +5,12 @@
 //! Finished, and produces the client Finished + a ClientConnection for application data.
 //!
 //! Note:
-//! - This is the CH + SH + FIN layers (tls-client-plan.md). It offers x25519 + the mandatory
-//!   extensions. Certificate chain validation (RFC 5280) + identity (RFC 6125) is the NEXT layer
-//!   (VER): the server Certificate is parsed past, not yet validated.
-//! - Reuses the shared layers (wire, key_schedule, record, certificate), so no crypto is
-//!   re-implemented. The oracle in tests is connection.serverHandshake (byte-exact vs RFC 8448).
+//! - It offers x25519 + the mandatory extensions, completes the handshake, and verifies the peer.
+//!   finish() verifies the server CertificateVerify (the peer holds the cert key) and
+//!   surfaces the server end-entity certificate so the caller can chain-validate it (RFC 5280) +
+//!   match the hostname (RFC 6125) through FinishResult.verifyServerCert against its trust store.
+//! - Reuses the shared layers (wire, key_schedule, record, certificate, cert_verify), so no crypto
+//!   is re-implemented. The oracle in tests is connection.serverHandshake (byte-exact vs RFC 8448).
 
 const std = @import("std");
 const wire = @import("wire.zig");
@@ -17,12 +18,17 @@ const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
 const certificate = @import("certificate.zig");
 const extensions = @import("extensions.zig");
+const cert_verify = @import("cert_verify.zig");
 
 const X25519 = std.crypto.dh.X25519;
 const Secret = key_schedule.Secret;
 const Alpn = extensions.Alpn;
 
 const named_group_x25519: u16 = 0x001d;
+
+/// Max DER size for the server end-entity cert copied out of the decrypted flight. A P-256 leaf is
+/// ~470 bytes, 2 KiB covers larger SAN lists and RSA leaves. A bigger cert fails handshake.
+pub const max_server_cert_der = 2048;
 
 pub const HandshakeOptions = struct {
     client_random: [32]u8,
@@ -48,6 +54,43 @@ pub const FinishResult = struct {
     connection: ClientConnection,
     /// the ALPN protocol the server selected (from EncryptedExtensions), null when none.
     alpn: ?Alpn = null,
+    /// the server end-entity certificate (DER), copied out of the decrypted flight so it outlives
+    /// finish(). Read it through serverCertDer(), trust it through verifyServerCert().
+    server_cert: [max_server_cert_der]u8 = undefined,
+    server_cert_len: usize = 0,
+
+    /// The server end-entity certificate DER. Empty when the server sent no Certificate.
+    pub fn serverCertDer(self: *const FinishResult) []const u8 {
+        return self.server_cert[0..self.server_cert_len];
+    }
+
+    /// Trust the server certificate: chain it to `anchor_der` within its validity window (RFC 5280)
+    /// and match `hostname` against its SAN (RFC 6125). finish() already proved the peer holds the
+    /// cert key (CertificateVerify), this is the remaining chain + identity step that the caller
+    /// owns, since only the caller knows its trust anchor and the host it meant to reach.
+    ///
+    /// Note:
+    /// - For a self-signed server, `anchor_der` is the server certificate itself (out-of-band).
+    ///   Do NOT pass serverCertDer() as the anchor: that only checks the cert signed itself, not
+    ///   that it is trusted.
+    ///
+    /// Param:
+    /// anchor_der - []const u8 (trust anchor DER the cert must chain to)
+    /// hostname - []const u8 (the host the client intended to reach)
+    /// now_sec - i64 (current UNIX time in seconds, for the validity window)
+    ///
+    /// Return:
+    /// - void on a trusted, hostname-matching certificate
+    /// - error.NoServerCertificate (the server sent no Certificate)
+    /// - error.CertificateExpired / error.CertificateNotYetValid / error.CertificateIssuerMismatch
+    /// - error.CertificateHostMismatch (no SAN/CN entry matches hostname)
+    pub fn verifyServerCert(self: *const FinishResult, anchor_der: []const u8, hostname: []const u8, now_sec: i64) !void {
+        const der = self.serverCertDer();
+        if (der.len == 0) return error.NoServerCertificate;
+
+        try cert_verify.verifyCertChain(der, anchor_der, now_sec);
+        try cert_verify.verifyCertHostname(der, hostname);
+    }
 };
 
 /// Post-handshake client keys + per-direction sequence numbers. The client writes under the client
@@ -211,7 +254,28 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
 
     const client_finished = record.protect(out, &fin_msg, .HANDSHAKE, client_hs_key, client_hs_iv, 0);
 
-    return .{ .client_finished = client_finished, .connection = conn, .alpn = parseSelectedAlpn(ee_msg) };
+    // surface the server end-entity cert so the caller can chain + hostname validate it. Copy it
+    // out of the decrypted flight (a stack buffer that dies with finish), the caller owns the trust.
+    const leaf = try leafCertDer(cert_msg);
+    if (leaf.len > max_server_cert_der) return error.CertificateTooLarge;
+
+    var result: FinishResult = .{ .client_finished = client_finished, .connection = conn, .alpn = parseSelectedAlpn(ee_msg) };
+    @memcpy(result.server_cert[0..leaf.len], leaf);
+    result.server_cert_len = leaf.len;
+
+    return result;
+}
+
+/// Parse the end-entity (leaf) certificate DER out of a TLS 1.3 Certificate message (RFC 8446 4.4.2):
+/// certificate_request_context, then the certificate_list whose first entry is the end-entity cert.
+fn leafCertDer(cert_msg: []const u8) ![]const u8 {
+    var cr = wire.Reader{ .buf = cert_msg };
+    const ctx_len = try cr.readU8();
+    _ = try cr.readBytes(ctx_len); // certificate_request_context (empty from the server)
+    _ = try cr.readU24(); // certificate_list length
+    const cert_len = try cr.readU24();
+
+    return cr.readBytes(cert_len);
 }
 
 /// The single ALPN protocol the server selected in EncryptedExtensions (RFC 7301), null when none.
@@ -307,12 +371,7 @@ fn verifyCertificateVerify(cert_msg: []const u8, certverify_msg: []const u8, tra
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
     // end-entity cert DER from the TLS 1.3 Certificate message (RFC 8446 4.4.2).
-    var cr = wire.Reader{ .buf = cert_msg };
-    const ctx_len = try cr.readU8();
-    _ = try cr.readBytes(ctx_len); // certificate_request_context (empty from the server)
-    _ = try cr.readU24(); // certificate_list length
-    const cert_len = try cr.readU24();
-    const cert_der = try cr.readBytes(cert_len);
+    const cert_der = try leafCertDer(cert_msg);
 
     // signature: SignatureScheme + opaque<0..2^16-1>.
     var vr = wire.Reader{ .buf = certverify_msg };
@@ -403,6 +462,11 @@ test "zix test: tls client, 1.3 handshake against the zix server (in-memory roun
     var finished = try finish(&state, server.to_send, &fin_buf);
     try std.testing.expectEqual(Alpn.H2, finished.alpn.?);
 
+    // finish surfaces the server end-entity cert, and the caller trusts it (RFC 5280 / 6125).
+    try std.testing.expectEqualSlices(u8, cert_der, finished.serverCertDer());
+    const now_sec: i64 = 1_800_000_000; // ~2027-01, inside the fixture validity window
+    try finished.verifyServerCert(cert_der, "localhost", now_sec); // self-signed: anchor is the leaf
+
     // the server must accept the client Finished.
     try server.connection.verifyClientFinished(finished.client_finished);
 
@@ -418,17 +482,25 @@ test "zix test: tls client, 1.3 handshake against the zix server (in-memory roun
     try std.testing.expectEqualSlices(u8, "pong from server", try finished.connection.readAppData(s2c, &c_in));
 }
 
-test "zix test: tls client, server cert chain + hostname (RFC 5280 / 6125) via std X.509" {
-    // The trust step the caller (INT layer) runs against its trust store. The fixture is self-signed
-    // (CA:TRUE), so it verifies against itself inside its validity window.
+test "zix test: tls client, verifyServerCert trusts a good cert and rejects bad host / expiry / anchor" {
+    // Drive the trust step through FinishResult.verifyServerCert, the API the request path uses.
+    // The fixture is self-signed (CA:TRUE), so the anchor is the leaf itself, out-of-band.
     var cert_buf: [512]u8 = undefined;
     const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
-    const cert = std.crypto.Certificate{ .buffer = cert_der, .index = 0 };
-    const parsed = try cert.parse();
+
+    var result: FinishResult = .{ .client_finished = &.{}, .connection = undefined };
+    @memcpy(result.server_cert[0..cert_der.len], cert_der);
+    result.server_cert_len = cert_der.len;
 
     const now_sec: i64 = 1_800_000_000; // ~2027-01, inside notBefore (Jun 2026) .. notAfter (Jun 2036)
-    try parsed.verify(parsed, now_sec); // self-signature + validity window (RFC 5280)
-    try parsed.verifyHostName("localhost"); // SAN DNS:localhost (RFC 6125)
+    try result.verifyServerCert(cert_der, "localhost", now_sec); // trusted + SAN DNS:localhost
+
+    // wrong hostname (RFC 6125), outside the validity window (RFC 5280), and an empty cert all reject.
+    try std.testing.expectError(error.CertificateHostMismatch, result.verifyServerCert(cert_der, "evil.example", now_sec));
+    try std.testing.expectError(error.CertificateNotYetValid, result.verifyServerCert(cert_der, "localhost", 1_700_000_000));
+
+    var empty: FinishResult = .{ .client_finished = &.{}, .connection = undefined };
+    try std.testing.expectError(error.NoServerCertificate, empty.verifyServerCert(cert_der, "localhost", now_sec));
 }
 
 // --------------------------------------------------------------- //
