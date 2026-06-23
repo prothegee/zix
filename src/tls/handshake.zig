@@ -59,7 +59,9 @@ pub const NamedGroup = enum(u16) {
 };
 
 pub const SignatureScheme = enum(u16) {
+    RSA_PKCS1_SHA256 = 0x0401,
     ECDSA_SECP256R1_SHA256 = 0x0403,
+    RSA_PSS_RSAE_SHA256 = 0x0804,
     ED25519 = 0x0807,
     _,
 };
