@@ -48,6 +48,8 @@ pub fn addSteps(
         "tests/integration/channel/channel_test.zig",
         // logger
         "tests/integration/logger/logger_test.zig",
+        // tls
+        "tests/integration/tls/rsa_test.zig",
     };
 
     var prev_integ: ?*std.Build.Step = null;
