@@ -84,6 +84,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/certificate.zig"));
     std.testing.refAllDecls(@import("tls/connection.zig"));
     std.testing.refAllDecls(@import("tls/pem.zig"));
+    std.testing.refAllDecls(@import("tls/rsa.zig"));
     std.testing.refAllDecls(@import("tls/context.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
 
