@@ -92,6 +92,7 @@
 | [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) | gRPC h2c: tujuan, arsitektur, API, 4 tipe RPC, codec, model dispatch |
 | [`docs/hld-grpc-proxy-id.md`](docs/hld-grpc-proxy-id.md) | gRPC terminasi TLS via nginx dan haproxy |
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
+| [`docs/hld-tls-id.md`](docs/hld-tls-id.md) | TLS: tujuan, version policy, Tls.Context, alur handshake, integrasi engine, client |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
 | [`docs/lld-tcp-id.md`](docs/lld-tcp-id.md) | TCP: struktur data internal dan algoritma |
@@ -100,6 +101,7 @@
 | [`docs/lld-fix-id.md`](docs/lld-fix-id.md) | FIX: struktur data internal dan algoritma serveConn |
 | [`docs/lld-channel-id.md`](docs/lld-channel-id.md) | Channel: internal ring buffer, locking, algoritma send/recv |
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
+| [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: POOL, ASYNC, MIXED, EPOLL. Jumlah thread, kecocokan protokol. |
 | [`docs/design-considerations-id.md`](docs/design-considerations-id.md) | Pertimbangan desain, design pattern, dan konvensi penamaan |
 | [`docs/coding-guideline-id.md`](docs/coding-guideline-id.md) | Coding style: layout source, naming, anatomi file, doc comment, config, test, aturan prosa |
@@ -117,10 +119,9 @@ Saat ini Zix berfokus pada Linux.
 
 Dalam kondisi saat ini, zix tidak akan:
 - Implementasi database driver.
-- Implementasi Http2 (hanya sebagai gRPC dependency).
 - Implementasi Http3.
 
-Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk TLS, HTTP/2, HTTP/3 untuk pendekatan lengkap terkait topik tersebut.
+Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk HTTP/3 untuk pendekatan lengkap terkait topik tersebut.
 
 <br>
 
@@ -1335,11 +1336,11 @@ Lihat ADR-036 untuk rasional desain dan angka terukur.
 
 <br>
 
-### HTTP/2 h2c
+### HTTP/2
 
-HTTP/2 hanya sebagai persyaratan untuk pendekatan gRPC h2c.
+`zix.Http2` adalah server HTTP/2 yang berdiri sendiri: h2c (cleartext) secara default, atau h2 over TLS saat sebuah `Tls.Context` dipasang (ALPN menegosiasikan h2, yang diwajibkan browser untuk HTTP/2). Ia juga merupakan transport h2c yang dijalankan oleh `zix.Grpc`.
 
-**Kapan digunakan:** kamu jarang menjangkau `zix.Http2` secara langsung. Ia ada sebagai transport h2c di bawah `zix.Grpc`. Pakai hanya jika kamu butuh framing HTTP/2 mentah tanpa semantik gRPC. Untuk trafik web biasa pakai `zix.Http1` / `zix.Http`, dan untuk RPC pakai `zix.Grpc`.
+**Kapan digunakan:** jangkau `zix.Http2` secara langsung saat kamu butuh framing HTTP/2 mentah (h2c atau h2-over-TLS) tanpa semantik gRPC, misalnya endpoint h2 untuk browser atau client h2. Untuk trafik web biasa `zix.Http1` / `zix.Http` memimpin benchmark, dan untuk RPC pakai `zix.Grpc` (yang berjalan di atas engine ini).
 
 <br>
 
@@ -1467,6 +1468,29 @@ Handler memeriksa `ctx.isExpired()` di antara langkah-langkah. Timpa `ctx.deadli
 **Kapan digunakan:** pakai `zix.Grpc` untuk RPC antar-service internal saat kamu ingin metode bertipe, streaming, dan deadline tanpa mendirikan TLS terminator atau sidecar (h2c berbicara plaintext di jaringan tepercaya). Keempat bentuk RPC dimultipleks melalui satu koneksi, jadi pilih ini daripada framing TCP buatan tangan untuk request/response terstruktur antar service-mu sendiri. Pasang proxy di depan (lihat dokumen proxy TLS) saat ia harus melintasi batas tak tepercaya.
 
 Lihat [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) untuk dokumentasi lengkap termasuk semua 4 pola tipe RPC dan setup proxy TLS.
+
+<br>
+
+### TLS (https / h2)
+
+Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu server membacanya per koneksi.
+
+```zig
+var tls = try zix.Tls.Context.init(allocator, io, .{
+    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .alpn      = &.{ .HTTP_1_1 }, // .H2 untuk server Http2
+});
+defer tls.deinit();
+
+var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
+```
+
+Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `Tls.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup.
+
+- [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
+- [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
+- [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - server cert Ed25519
 
 <br>
 
