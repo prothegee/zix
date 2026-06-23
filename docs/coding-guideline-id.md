@@ -274,7 +274,7 @@ Arena adalah pilihan yang salah, pakai `smp_allocator`, ketika salah satu ini be
 - Lifetime tidak punya titik reset tunggal, misal sebuah connection atau stream yang hidup tak terbatas dan membebaskan objek satu per satu (idle-conn pool me-reuse, bukan bulk-reset).
 - Objek direklamasi satu per satu alih-alih sekaligus.
 
-Jadi aturan CLAUDE "prefer arena if applicable" bergantung pada "if applicable": di server shared-nothing, long-lived-connection, thread-per-core, itu adalah minoritas dari situs alokasi, itulah kenapa `smp_allocator` mendominasi tree dan slab membawa hot path.
+Jadi "prefer arena if applicable" bergantung pada "if applicable": di server shared-nothing, long-lived-connection, thread-per-core, itu adalah minoritas dari situs alokasi, itulah kenapa `smp_allocator` mendominasi tree dan slab membawa hot path.
 
 Type yang memiliki buffer membebaskan di `deinit`. Apa pun yang disediakan caller (`io`, `logger`) dipinjam, didokumentasikan sebagai "caller owns, must outlive", dan tidak pernah dibebaskan oleh zix.
 

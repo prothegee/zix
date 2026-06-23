@@ -339,7 +339,7 @@ The router is wired automatically when routes are passed to `Server.init`. Use i
 
 ## Framing
 
-FIX uses delimiter-based framing (SOH = 0x01), not length-prefix framing. The receive loop accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message. This avoids the `readSliceShort` deadlock that occurs when a large buffer is passed but the message is shorter than the buffer capacity (see CLAUDE.md pitfall section).
+FIX uses delimiter-based framing (SOH = 0x01), not length-prefix framing. The receive loop accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message. This avoids the `readSliceShort` deadlock that occurs when a large buffer is passed but the message is shorter than the buffer capacity (the buffer-larger-than-message deadlock).
 
 ```
 recv_buf:  [complete message][leftover bytes][free]

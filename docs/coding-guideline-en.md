@@ -274,7 +274,7 @@ Arena is the wrong choice, use `smp_allocator`, when any of these hold:
 - The lifetime has no single reset point, for example a connection or stream that lives indefinitely and frees objects individually (the idle-conn pool reuses, it does not bulk-reset).
 - Objects are reclaimed one at a time rather than all at once.
 
-So the CLAUDE rule "prefer arena if applicable" turns on "if applicable": in a shared-nothing, long-lived-connection, thread-per-core server that is the minority of allocation sites, which is why `smp_allocator` dominates the tree and the slab carries the hot path.
+So "prefer arena if applicable" turns on "if applicable": in a shared-nothing, long-lived-connection, thread-per-core server that is the minority of allocation sites, which is why `smp_allocator` dominates the tree and the slab carries the hot path.
 
 A buffer-owning type frees in `deinit`. Anything caller-provided (`io`, `logger`) is borrowed, documented as "caller owns, must outlive", and never freed by zix.
 
