@@ -34,7 +34,10 @@ one piece zix already wrote.
   `rnd/0.5.x/quic_initial_poc.zig` against RFC 9001 Appendix A: 15 vectors byte-exact (A.1 secrets +
   key / iv / hp for both directions, A.2 sample / mask / protected header / packet head / tag). Gate
   `verify-quic-initial.sh` (doc `verify-quic-initial.md`).
-- [ ] C2: Retry integrity tag (AES-128-GCM, fixed v1 key + nonce, RFC 9001 5.8), against Appendix A.4
+- [x] C2: Retry integrity tag (AES-128-GCM, fixed v1 key + nonce, RFC 9001 5.8). Proven in
+  `rnd/0.5.x/quic_retry_poc.zig` against Appendix A.4: 4 vectors byte-exact (key + nonce derived from
+  the published secret, tag over the pseudo-packet, full reconstructed Retry packet). Gate
+  `verify-quic-retry.sh` (doc `verify-quic-retry.md`).
 - [ ] C3: key update (retain old + two receive-key sets), ChaCha20 short-header sample (Appendix A.5)
 - [ ] C4: AEAD confidentiality / integrity limits + constant-time send / receive paths (9001 6.6, 9.5)
 
