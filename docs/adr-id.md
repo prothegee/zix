@@ -504,7 +504,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - `takeByte` dalam loop menghindari deadlock `readSliceShort`: buffer internal reader menyerap segmen TCP penuh, panggilan `takeByte` berikutnya mengurasnya tanpa syscall ekstra.
 - `serveConn` hanya memakai buffer stack (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). Tanpa alokasi per request.
 - `buildMessage` menghitung dan menyematkan checksum. `verifyChecksum` memvalidasi pesan masuk. Checksum buruk menutup koneksi tanpa balasan.
-- `std.debug.print` absen dari semua fungsi entry thread, dipelajari dari panic IPC test runner `std.Options.debug_io` yang dijelaskan di CLAUDE.md.
+- `std.debug.print` absen dari semua fungsi entry thread, dipelajari dari panic IPC test runner `std.Options.debug_io`.
 - `FixClient` menyediakan client bertipe (`logon`, `logout`, `sendMessage`, `recvMessage`) untuk test dan contoh.
 
 ---
@@ -987,7 +987,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Alasan:** std sudah menyediakan semua primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), jadi dependency C hanya menambah kompleksitas build dan batas FFI tanpa keuntungan fungsional, sekaligus merusak postur pure-Zig. TLS 1.2 jadi minimum karena RFC 5246 tidak deprecated dan masih banyak dipakai (Android lama, OpenSSL lawas, stack embedded dan enterprise), sedangkan 1.0 / 1.1 sudah deprecated (RFC 8996) sehingga tidak pernah ditawarkan. Suite 1.2 dibatasi ke ECDHE-AEAD untuk forward secrecy dan authenticated encryption di kedua versi, dan certificate ECDSA atau Ed25519 menutup autentikasi di jalur signing std, itulah kenapa RSA signing tetap opsional.
 
-**Config:** field `tls_*` flat di config server (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` di Http1) dan `tls_ca_path` di config client. Tanpa sub-config bersarang, sesuai aturan flat-config yang ada.
+**Config:** field `tls_*` flat di config server (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` di Http1) dan `tls_ca_path` di config client. Tanpa sub-config bersarang, sesuai aturan flat-config yang ada. Field flat sisi server digantikan oleh object `Tls.Context` (ADR-047).
 
 **Konsekuensi:**
 - Server TLS 1.3 sudah diimplementasi dan diverifikasi byte-exact terhadap trace RFC 8448, hijau di Zig 0.16 dan 0.17.
@@ -1004,17 +1004,38 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Konteks:** TLS berada di bawah Http1 dan Http2 (https, h2). https harus ditambahkan tanpa mengganggu dispatch model cleartext yang sudah dituning (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) atau hot path-nya.
 
-**Keputusan:** Tambahkan TLS sebagai jalur serve blocking ber-gate per engine, dipilih saat `tls_cert_path` di-set, membiarkan setiap model cleartext tidak tersentuh. Http1: `serveConnTls` menjalankan handshake lewat `zix.Tls`, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang sudah ada lewat sebuah pipe, lalu meng-encrypt response. Http2: sebuah terminator menjalankan engine h2c yang TIDAK DIUBAH (`core.serveConn`) di belakang socketpair, dengan loop `poll` yang men-decrypt record client masuk jadi plaintext dan meng-encrypt frame dari engine kembali, dan ALPN memilih h2. `zix.Tls` bersifat sans-I/O: `serverHandshake` mengembalikan byte yang dikirim plus sebuah `Connection`, jadi engine yang memiliki socket loop.
+**Keputusan:** Tambahkan TLS sebagai jalur serve blocking ber-gate per engine, dipilih saat `config.tls` di-set (object `Tls.Context`, ADR-047), membiarkan setiap model cleartext tidak tersentuh. Http1: `serveConnTls` menjalankan handshake lewat `zix.Tls`, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang sudah ada lewat sebuah pipe, lalu meng-encrypt response. Http2: sebuah terminator menjalankan engine h2c yang TIDAK DIUBAH (`core.serveConn`) di belakang socketpair, dengan loop `poll` yang men-decrypt record client masuk jadi plaintext dan meng-encrypt frame dari engine kembali, dan ALPN memilih h2. `zix.Tls` bersifat sans-I/O: `serverHandshake` mengembalikan byte yang dikirim plus sebuah `Connection`, jadi engine yang memiliki socket loop.
 
 **Alasan:** Men-terminate TLS di depan engine yang tidak diubah memakai ulang seluruh mesin frame dan request cleartext, sehingga https tidak bisa meregresi hot path cleartext (sifatnya aditif) dan state machine h2c tidak di-fork. Jalur blocking dengan pipe atau socketpair per koneksi dapat diterima karena https bersifat opt-in di perf band-nya sendiri, bukan gate 1 persen. Sans-I/O menjaga `zix.Tls` tetap bisa dipakai dari dispatch blocking maupun non-blocking. Teardown memakai `shutdown(SHUT_WR)` supaya engine melihat EOF tanpa write yang berlomba dengan peer yang sudah ditutup, menghindari SIGPIPE.
 
-**Config:** field `tls_*` flat yang menggate jalur ini. Tanpa dispatch model baru dan tanpa perubahan API cleartext.
+**Config:** `config.tls` (sebuah `*Tls.Context`, ADR-047) yang menggate jalur ini. Tanpa dispatch model baru dan tanpa perubahan API cleartext.
 
 **Konsekuensi:**
 - Http1 https/1.1 dan Http2 h2 keduanya melayani over TLS 1.3, contoh di port 9060 dan 9061, hijau di Zig 0.16 dan 0.17.
 - Jalur h2 memakai ulang `core.serveConn` tanpa perubahan. Hanya seleksi ALPN dan terminator yang merupakan kode baru.
 - Satu request per koneksi https Http1 untuk sekarang (keep-alive penyempurnaan nanti), dan terminator adalah satu thread plus satu socketpair per koneksi, diterima di band https.
 - Belum ada runner h2 native: butuh client yang menawarkan ALPN, yaitu milestone `zix.Tls` client.
+
+---
+
+## ADR-047: TLS bind options sebagai object Tls.Context
+
+**Status:** Diterima
+
+**Konteks:** TLS dikirim dengan field `tls_*` flat (cert, key, alpn, HSTS) di tiap config server HTTP (ADR-045 / 046), subset minimal. Mengekspos seluruh permukaan bind (floor / ceiling versi, curve ECDHE, cipher suite, preferensi server-cipher) sebagai lebih banyak field flat akan membengkakkan tiap config HTTP, dan parser file config runtime (executable `zixer` yang direncanakan) tidak bisa menghasilkan enum literal compile-time: ia butuh value yang dibangun saat runtime.
+
+**Keputusan:** Ekspos TLS server sebagai object milik pengguna, `zix.Tls.Context`, dimodelkan pada logger (`logger: ?*Logger`). `Tls.Context.Config` adalah struct setting biasa (`cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`). `Tls.Context.init(allocator, io, config)` memuat PEM, mendeteksi tipe key, dan memvalidasi policy sekali di cold path. Config HTTP membawa `tls: ?*Tls.Context = null`, dan pointer non-null adalah gate opt-in https (menggantikan gate `tls_cert_path != null`). Curve dan cipher adalah enum slice bertipe yang divalidasi ke set yang diimplementasi: value yang tidak didukung adalah error saat startup, bukan no-op diam. zix bersifat ECDHE-only, jadi tidak ada knob dhparam. Session resumption ditunda: ia menyentuh data path dan di-gate pada bench perf.
+
+**Alasan:** Logger sudah menetapkan bahwa object yang dibangun pengguna dan dilewatkan via pointer adalah bentuk yang tepat untuk state lintas-lapisan, dan ini menjaga `HttpServerConfig` tetap flat (banyak knob TLS hidup di dalam `Tls.Context.Config`, bukan di config HTTP). `Context` adalah nama yang jujur: `zix.Tls` bersifat sans-I/O tanpa listener (accept loop adalah milik engine HTTP), jadi object ini adalah context state-termuat (analog `SSL_CTX`), bukan server. Satu tipe config melayani dua front-end: jalur library bertipe dan parser teks-config `zixer` nanti sama-sama menghasilkan `Tls.Context.Config`. Validate-or-reject menjaga tiap field yang diekspos tetap dihormati atau ditolak, tidak pernah diabaikan diam, dan memuat / memvalidasi sekali menjaga jalur serve per-koneksi bebas dari kerja PEM. Forward secrecy (ECDHE) dan AEAD berlaku di 1.2 maupun 1.3 by construction.
+
+**Config:** `tls: ?*Tls.Context` di config server Http1 dan Http2. `Tls.Context.Config` memegang bind options. Field `tls_*` flat sisi server dari ADR-045 / 046 dihapus.
+
+**Konsekuensi:**
+- Empat field flat (`tls_cert_path`, `tls_key_path`, `tls_alpn`, `hsts_max_age_s` Http1) menyatu jadi satu pointer `tls`. HSTS jadi tersedia untuk Http2 juga, karena hidup di context bersama.
+- Curve yang dikonfigurasi diteruskan ke negosiasi TLS 1.3 (reorder / subset dihormati), dan floor / ceiling versi menggate jalur serve: ceiling TLS 1.2 memaksa jalur 1.2, floor TLS 1.3 menolak client 1.2 dengan alert protocol_version.
+- Set yang diimplementasi (X25519, secp256r1, AES-128-GCM untuk 1.3, ECDHE-ECDSA-AES128-GCM untuk 1.2) melebar tanpa perubahan API saat crypto mendarat. Value yang tidak didukung ditolak saat init.
+- `Tls.Context` adalah fondasi yang akan di-parse oleh executable `zixer` dari text config-nya.
+- Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 59-protokol).
 
 ---
 

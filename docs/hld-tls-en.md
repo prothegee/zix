@@ -1,0 +1,148 @@
+# TLS High-Level Design: zix.Tls
+
+## Goals
+
+- Pure-Zig TLS on `std.crypto` primitives, no OpenSSL or BoringSSL, no C FFI (ADR-045).
+- TLS 1.3 (RFC 8446) plus a TLS 1.2 floor (RFC 5246 / 5288). 1.3 preferred, never below 1.2, 1.0 / 1.1 / SSL never offered (RFC 8996).
+- Sans-I/O: the handshake produces bytes to send and consumes bytes received. The HTTP engine owns the socket loop, so the same code serves blocking and non-blocking dispatch.
+- https is opt-in and additive: cleartext stays the default and its hot path is untouched. The TLS path runs on its own perf band (ADR-046).
+- Server-side configuration as a user-owned `Tls.Context` object (the loaded cert / key + validated policy), mirroring the logger (ADR-047).
+- Forward secrecy (ECDHE) and AEAD on both versions by construction.
+- A native verifying client (ALPN offer, X.509 chain + hostname per RFC 5280 / 6125).
+
+## Architecture
+
+```mermaid
+graph TD
+    APP[Http1 / Http2 server] --> CTX[Tls.Context]
+    APP --> SRV[tls_serve.zig per engine]
+    SRV --> CONN[connection.zig serverHandshake]
+    CONN --> HS[handshake.zig]
+    CONN --> KS[key_schedule.zig]
+    CONN --> REC[record.zig]
+    CONN --> CERT[certificate.zig]
+    CONN --> EXT[extensions.zig]
+    CONN --> AL[alert.zig]
+    CTX --> PEM[pem.zig]
+    CLI[Tls.Client / Client12] --> CV[cert_verify.zig]
+    HS --> WIRE[wire.zig]
+    KS --> STD[std.crypto]
+    REC --> STD
+    CERT --> STD
+```
+
+`zix.Tls` is sans-I/O: it has no listener and no socket loop. The accept loop lives in each HTTP engine's `tls_serve.zig`. The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
+
+## Source Layout
+
+| File | Role |
+| :- | :- |
+| `Tls.zig` | Public namespace: re-exports the server, client, context, and verify surface |
+| `context.zig` | `Tls.Context` (loaded cert / key + validated policy) and `Tls.Context.Config` (ADR-047) |
+| `connection.zig` | Server handshake driver (`serverHandshake`, HelloRetryRequest), the post-handshake `Connection` (record read / write) |
+| `handshake.zig` | ClientHello parse, version / cipher / curve negotiation, ServerHello + HelloRetryRequest serialization, the wire enums |
+| `key_schedule.zig` | HKDF-SHA256 key schedule, the running transcript hash |
+| `record.zig` | TLS 1.3 AEAD record protect / deprotect, content-type framing |
+| `certificate.zig` | Certificate / CertificateVerify / Finished builders, the `SigningKey` identity |
+| `extensions.zig` | ALPN (`Alpn`, `negotiateAlpn`), EncryptedExtensions, supported_versions / key_share helpers |
+| `alert.zig` | Alert codes, outbound alert records, inbound alert classification |
+| `pem.zig` | PEM to DER decode, ECDSA SEC1 scalar + Ed25519 PKCS#8 seed extraction |
+| `cert_verify.zig` | Peer cert chain (RFC 5280) + hostname / IP identity (RFC 6125), the misdirected-request check |
+| `client.zig` | TLS 1.3 client handshake (start / finish, `ClientConnection`) |
+| `tls12_*.zig` | TLS 1.2 track: PRF schedule, record layer, version select, server handshake, client |
+
+## Version Policy
+
+| Version | zix policy | Status |
+| :- | :- | :- |
+| TLS 1.3 | preferred, default | implemented (RFC 8446) |
+| TLS 1.2 | minimum / floor, required | implemented (RFC 5246 / 5288) |
+| TLS 1.1, 1.0, SSL | never offered | deprecated / prohibited (RFC 8996, 7568, 6176) |
+
+TLS 1.2 is the floor because RFC 5246 is not deprecated and is still widely deployed. The 1.2 suites are restricted to ECDHE-AEAD so forward secrecy and authenticated encryption hold on both versions. A `Tls.Context` narrows this range with `min_version` / `max_version`: the serve path forces the 1.2 path when the ceiling is 1.2, and refuses a 1.2-only client with a `protocol_version` alert when the floor is 1.3.
+
+## Implemented Crypto
+
+| Axis | TLS 1.3 | TLS 1.2 |
+| :- | :- | :- |
+| Cipher | `TLS_AES_128_GCM_SHA256` | `ECDHE_ECDSA_AES128_GCM_SHA256` (0xC02B) |
+| Key exchange | X25519, secp256r1 ECDHE | secp256r1 ECDHE |
+| Signature | ECDSA P-256 or Ed25519 | ECDSA P-256 |
+
+There is no finite-field DHE and no RSA signing, so key-exchange strength is governed entirely by the ECDHE curve, not a dhparam file. The certificate is ECDSA P-256 or Ed25519, both on the `std.crypto` signing path, so RSA stays optional.
+
+## Server Configuration: Tls.Context
+
+The server attaches TLS by pointer, exactly like the logger:
+
+```zig
+var tls = try zix.Tls.Context.init(allocator, io, .{
+    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .alpn      = &.{ .HTTP_1_1 }, // .H2 for the Http2 server
+});
+defer tls.deinit();
+
+var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
+```
+
+- `Tls.Context.Config` is the plain settings struct: `cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`.
+- `Tls.Context.init` loads the PEM, detects the key type (ECDSA vs Ed25519), and validates the policy once on the cold path. The per-connection serve path then reads a ready context with no PEM work.
+- `tls: ?*Tls.Context` on the Http1 and Http2 configs. A non-null pointer is the https opt-in gate.
+- Curves and ciphers are typed enum slices validated to the implemented set. An unsupported value (P384, MLKEM768, AES-256, CHACHA20, any RSA suite) is a startup error, never a silent no-op. The set widens with no API change as crypto lands.
+
+## Handshake Flow (server, TLS 1.3)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant E as tls_serve (engine)
+    participant T as zix.Tls
+    C->>E: ClientHello
+    E->>T: serverHelloRetry / serverHandshake(opts, ClientHello)
+    Note over T: negotiate version, cipher, curve (configured prefs)
+    T-->>E: flight (ServerHello..Finished) + Connection
+    E->>C: flight
+    C->>E: (ChangeCipherSpec) + Finished
+    E->>T: verifyClientFinished
+    C->>E: encrypted application_data
+    E->>T: readAppData -> plaintext
+    Note over E: run the cleartext engine on the plaintext
+    E->>C: writeAppData(response) + close_notify
+```
+
+`serverHandshake` is sans-I/O: it returns the bytes to send plus a `Connection`. A HelloRetryRequest (when the client's chosen curve has no key_share) is a two-round variant via `serverHelloRetry` then `serverHandshakeAfterRetry`. A 1.2-only client surfaces as `UnsupportedTlsVersion`, which the serve path routes to the 1.2 track (subject to the version policy).
+
+## Engine Integration (ADR-046)
+
+TLS is a gated blocking serve path per engine, selected by `config.tls`, leaving every cleartext dispatch model untouched.
+
+- Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe (the handler writes plaintext unchanged), and encrypts the response.
+- Http2: a terminator runs the unchanged h2c engine (`core.serveConn`) behind a socketpair, with a `poll` loop that decrypts inbound client records and encrypts the engine's frames. ALPN selects h2.
+
+Because the engines are reused unchanged, https cannot regress the cleartext hot path. The blocking pipe / socketpair is acceptable on the https band, which is not the 1 percent perf gate.
+
+## Misdirected Request (RFC 9110 7.4)
+
+On the Http1 https path, the request Host (port stripped) is matched against the certificate identity through `verifyCertIdentity`: a DNS SAN (std `verifyHostName`) or an IP SAN (matched by scanning the SAN for the iPAddress GeneralName, since std is DNS-only). A mismatch returns `421 Misdirected Request` plus a `close_notify`.
+
+## Client
+
+`zix.Tls.Client` (1.3) and `zix.Tls.Client12` (1.2) are the sans-I/O mirror of the server: `start` builds the ClientHello (offering ALPN and a signature_algorithms list of ecdsa_secp256r1_sha256 and ed25519), `finish` consumes the server flight, verifies the server signature (CertificateVerify for 1.3, ServerKeyExchange for 1.2) through `std.crypto.Certificate`, and returns a `ClientConnection`. Chain and hostname validation use `cert_verify.zig` (RFC 5280 / 6125).
+
+## Inbound Alerts (RFC 8446 6)
+
+`parseInboundAlert` classifies a received alert: `close_notify` (description 0) is a clean teardown, any other is fatal. The serve paths read post-handshake alerts and close cleanly rather than misreading an alert as a record.
+
+## Memory Model
+
+- No per-request allocator is exposed. The handshake works in caller-provided fixed buffers, and the application path reuses the engine's existing buffers.
+- `Tls.Context` owns one heap allocation: the duplicated DER certificate, freed by `deinit`. The signing key and the validated policy slices are values or borrowed slices.
+- The handshake transcript and key schedule are fixed-size (`Secret = [32]u8`, SHA-256 throughout).
+
+## References
+
+- ADR-045: pure-Zig TLS, TLS 1.2 the minimum version.
+- ADR-046: wire TLS as a layer, gated serve paths over the unchanged engines.
+- ADR-047: TLS bind options as a Tls.Context object.
+- LLD: [`docs/lld-tls-en.md`](lld-tls-en.md).

@@ -1,10 +1,10 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// https/1.1 over TLS 1.3 with an Ed25519 server certificate (RFC 8410 / 8446 4.4.3, scheme
+// https/1.1 over TLS with an Ed25519 server certificate (RFC 8410 / 8446 4.4.3, scheme
 // ed25519 = 0x0807). Same gated TLS path as tls_http1_basic, but the cert + key are Ed25519:
-// the engine detects the key type from the certificate and signs CertificateVerify accordingly.
-// Ed25519 is TLS 1.3 only here (the 1.2 ServerKeyExchange path is ECDSA-signed).
+// Tls.Context.init detects the key type from the certificate and signs CertificateVerify
+// accordingly. Ed25519 is TLS 1.3 only here (the 1.2 ServerKeyExchange path is ECDSA-signed).
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9062;
@@ -30,14 +30,19 @@ fn handler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) vo
 }
 
 pub fn main(process: std.process.Init) !void {
+    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+        .cert_path = CERT,
+        .key_path = KEY,
+        .alpn = &.{.HTTP_1_1},
+        .hsts_max_age_s = HSTS_MAX_AGE_S,
+    });
+    defer tls.deinit();
+
     var server = zix.Http1.Server.init(handler, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
-        .tls_cert_path = CERT,
-        .tls_key_path = KEY,
-        .tls_alpn = &.{.HTTP_1_1},
-        .hsts_max_age_s = HSTS_MAX_AGE_S,
+        .tls = &tls,
     });
     defer server.deinit();
 

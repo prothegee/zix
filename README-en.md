@@ -92,6 +92,7 @@
 | [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) | gRPC h2c: goals, architecture, API, all 4 RPC types, codec, dispatch models |
 | [`docs/hld-grpc-proxy-en.md`](docs/hld-grpc-proxy-en.md) | gRPC TLS termination via nginx and haproxy |
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
+| [`docs/hld-tls-en.md`](docs/hld-tls-en.md) | TLS: goals, version policy, Tls.Context, handshake flow, engine integration, client |
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
 | [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
 | [`docs/lld-tcp-en.md`](docs/lld-tcp-en.md) | TCP: internal data structures and algorithms |
@@ -100,6 +101,7 @@
 | [`docs/lld-fix-en.md`](docs/lld-fix-en.md) | FIX: internal data structures and serveConn algorithm |
 | [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
+| [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
 | [`docs/design-considerations-en.md`](docs/design-considerations-en.md) | Design considerations, design patterns, and naming conventions |
 | [`docs/coding-guideline-en.md`](docs/coding-guideline-en.md) | Coding style: source layout, naming, file anatomy, doc comments, config, tests, prose rules |
@@ -117,10 +119,9 @@ Zix currently is linux-centric.
 
 As current state, zix will not:
 - Database driver implementation.
-- Http2 implementation (only as gRPC dependency).
 - Http3 implementation.
 
-See [swerver](https://github.com/justinGrosvenor/swerver) for TLS, HTTP/2, HTTP/3 for complete approach for those subject.
+See [swerver](https://github.com/justinGrosvenor/swerver) for HTTP/3 for complete approach for that subject.
 
 <br>
 
@@ -1337,9 +1338,9 @@ See ADR-036 for the design rationale and measured numbers.
 
 ### HTTP/2
 
-HTTP/2 only requirement for gRPC h2c approach.
+`zix.Http2` is an HTTP/2 server in its own right: h2c (cleartext) by default, or h2 over TLS when a `Tls.Context` is attached (ALPN negotiates h2, which browsers require for HTTP/2). It is also the h2c transport that `zix.Grpc` runs on.
 
-**When to use:** you rarely reach for `zix.Http2` directly. It exists as the h2c transport under `zix.Grpc`. Use it only if you need raw HTTP/2 framing without gRPC semantics. For ordinary web traffic use `zix.Http1` / `zix.Http`, and for RPC use `zix.Grpc`.
+**When to use:** reach for `zix.Http2` directly when you need raw HTTP/2 framing (h2c or h2-over-TLS) without gRPC semantics, for example an h2 endpoint for a browser or an h2 client. For ordinary web traffic `zix.Http1` / `zix.Http` lead the benchmarks, and for RPC use `zix.Grpc` (which rides this engine).
 
 <br>
 
@@ -1467,6 +1468,29 @@ Handlers check `ctx.isExpired()` between steps. Override `ctx.deadline_ns` direc
 **When to use:** use `zix.Grpc` for internal service-to-service RPC where you want typed methods, streaming, and deadlines without standing up a TLS terminator or sidecar (h2c speaks plaintext on a trusted network). All four RPC shapes multiplex over one connection, so prefer it over hand-rolled TCP framing for structured request/response between your own services. Put a proxy in front (see the TLS proxy doc) when it must cross an untrusted boundary.
 
 See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation including all 4 RPC type patterns and TLS proxy setup.
+
+<br>
+
+### TLS (https / h2)
+
+The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then the server reads it per connection.
+
+```zig
+var tls = try zix.Tls.Context.init(allocator, io, .{
+    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .alpn      = &.{ .HTTP_1_1 }, // .H2 for the Http2 server
+});
+defer tls.deinit();
+
+var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
+```
+
+The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `Tls.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error.
+
+- [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
+- [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
+- [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - Ed25519 server cert
 
 <br>
 

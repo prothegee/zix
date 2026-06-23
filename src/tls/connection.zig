@@ -40,6 +40,10 @@ pub const HandshakeOptions = struct {
     /// Server ALPN preference order (RFC 7301). Empty disables ALPN (no extension emitted).
     /// The first entry that the client also offered is selected and echoed in EncryptedExtensions.
     alpn_prefs: []const extensions.Alpn = &.{},
+    /// Server curve preference order (Tls.Context.curves). Defaults to the built-in order so callers
+    /// that do not configure curves keep the prior behavior. negotiate picks the first the client
+    /// also offered.
+    group_prefs: []const handshake.NamedGroup = &handshake.server_group_prefs,
     /// mTLS: when true the server emits a CertificateRequest (RFC 8446 4.3.2) in its flight, then
     /// the caller drives verifyClientCertFlight before verifyClientFinished. Off by default.
     request_client_cert: bool = false,
@@ -267,7 +271,7 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
 
     // Negotiate version, cipher, and group (RFC 8446 4.1.1, 9.1). The key_exchange material is
     // computed after the group is known, so pass an empty placeholder here.
-    const negotiated = switch (handshake.negotiate(&hello, &.{})) {
+    const negotiated = switch (handshake.negotiate(&hello, &.{}, opts.group_prefs)) {
         .server_hello => |params| params,
         // Single-flight only for now: emitting a HelloRetryRequest (RFC 8446 4.1.4) and sending
         // alert records (Layer A) are tracked separately. In practice clients offer an X25519 or
@@ -431,7 +435,7 @@ pub fn serverHelloRetry(opts: HandshakeOptions, client_hello1: []const u8, out: 
     if (parsed != .ok) return alertToError(parsed.alert);
     const hello = parsed.ok;
 
-    const group = switch (handshake.negotiate(&hello, &.{})) {
+    const group = switch (handshake.negotiate(&hello, &.{}, opts.group_prefs)) {
         .hello_retry_request => |g| g,
         .server_hello => return null,
         .legacy_version => return error.UnsupportedTlsVersion,
@@ -473,7 +477,7 @@ pub fn serverHandshakeAfterRetry(state: RetryState, client_hello2: []const u8, o
     if (parsed != .ok) return alertToError(parsed.alert);
     const hello = parsed.ok;
 
-    const negotiated = switch (handshake.negotiate(&hello, &.{})) {
+    const negotiated = switch (handshake.negotiate(&hello, &.{}, state.opts.group_prefs)) {
         .server_hello => |params| params,
         .hello_retry_request => return error.HelloRetryRequestUnsupported, // one retry only
         .legacy_version => return error.UnsupportedTlsVersion,

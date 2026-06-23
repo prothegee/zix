@@ -332,7 +332,7 @@ Routes kosong (`&.{}`) melewati router sepenuhnya: semua pesan aplikasi di-echo.
 
 ## Format Frame
 
-FIX menggunakan framing berbasis delimiter (SOH = 0x01), bukan framing length-prefix. Receive loop mengumpulkan byte melalui `takeByte` sampai `findMessageEnd` mendeteksi pesan yang lengkap. Cara ini menghindari deadlock `readSliceShort` yang terjadi ketika buffer besar diteruskan tetapi pesan lebih pendek dari kapasitas buffer (lihat bagian peringatan di CLAUDE.md).
+FIX menggunakan framing berbasis delimiter (SOH = 0x01), bukan framing length-prefix. Receive loop mengumpulkan byte melalui `takeByte` sampai `findMessageEnd` mendeteksi pesan yang lengkap. Cara ini menghindari deadlock `readSliceShort` yang terjadi ketika buffer besar diteruskan tetapi pesan lebih pendek dari kapasitas buffer (deadlock buffer-lebih-besar-dari-pesan).
 
 ```
 recv_buf:  [complete message][leftover bytes][free]

@@ -368,7 +368,7 @@ test "zix test: tls12 connection, in-memory ECDHE-ECDSA handshake round trip" {
     }, client_hello, &flight_buf);
     var state = flight.state;
 
-    // --- play an honest client: parse the flight for the server ECDHE point + server_random ---
+    // Parse the flight for the server ECDHE point + server_random
     const body = flight.to_send[5..];
     var br = wire.Reader{ .buf = body };
     var server_point: []const u8 = &.{};
@@ -424,7 +424,7 @@ test "zix test: tls12 connection, in-memory ECDHE-ECDSA handshake round trip" {
     var cf_rec_buf: [128]u8 = undefined;
     const cf_rec = record.protect(&cf_rec_buf, &cf_msg, content_handshake, km.client_write_key, km.client_write_iv, 0);
 
-    // --- server finishes ---
+    // Server finishes
     var out_buf: [256]u8 = undefined;
     var fin = try serverFinish(&state, &cke, cf_rec, &out_buf);
 

@@ -45,6 +45,10 @@ pub const CipherSuite = enum(u16) {
     AES_128_GCM_SHA256 = 0x1301,
     AES_256_GCM_SHA384 = 0x1302,
     CHACHA20_POLY1305_SHA256 = 0x1303,
+    /// TLS 1.2 ECDHE-ECDSA-AES128-GCM-SHA256 (RFC 5289). Carried in this enum so a single config
+    /// cipher list can span 1.2 and 1.3. It is the 1.2 floor suite, not part of the 1.3 negotiate
+    /// (server_cipher_prefs), where only the 0x13xx suites apply.
+    ECDHE_ECDSA_AES128_GCM_SHA256 = 0xc02b,
     _,
 };
 
@@ -261,14 +265,16 @@ pub const Outcome = union(enum) {
     alert: Alert,
 };
 
-/// Negotiate version, cipher, and group from a parsed ClientHello (RFC 8446 4.1.1, 9.1).
-pub fn negotiate(hello: *const ClientHello, key_exchange: []const u8) Outcome {
+/// Negotiate version, cipher, and group from a parsed ClientHello (RFC 8446 4.1.1, 9.1). group_prefs
+/// is the configured curve preference order (Tls.Context.curves), so a server that restricts or
+/// reorders its curves is honored here rather than always using the built-in default order.
+pub fn negotiate(hello: *const ClientHello, key_exchange: []const u8, group_prefs: []const NamedGroup) Outcome {
     if (!hello.offers_tls13) return .legacy_version;
 
     if (!hello.has_signature_algorithms or !hello.has_supported_groups) return .{ .alert = .MISSING_EXTENSION };
 
     const cipher = pickCipher(hello) orelse return .{ .alert = .HANDSHAKE_FAILURE };
-    const group = pickGroup(hello) orelse return .{ .alert = .HANDSHAKE_FAILURE };
+    const group = pickGroup(hello, group_prefs) orelse return .{ .alert = .HANDSHAKE_FAILURE };
 
     if (!hello.hasKeyShare(group)) return .{ .hello_retry_request = group };
 
@@ -283,8 +289,10 @@ fn pickCipher(hello: *const ClientHello) ?CipherSuite {
     return null;
 }
 
-fn pickGroup(hello: *const ClientHello) ?NamedGroup {
-    for (server_group_prefs) |group| {
+/// Pick the first configured curve the client also offered (server-preference order). group_prefs is
+/// the server's curve list, already validated to the implemented set (X25519 / secp256r1).
+fn pickGroup(hello: *const ClientHello, group_prefs: []const NamedGroup) ?NamedGroup {
+    for (group_prefs) |group| {
         if (hello.offersGroup(group)) return group;
     }
 
@@ -393,7 +401,7 @@ test "zix test: handshake, RFC 8448 ClientHello parse + negotiate + ServerHello 
     try std.testing.expect(hello.hasKeyShare(.X25519));
     try std.testing.expectEqualStrings("server", hello.sni orelse "");
 
-    const outcome = negotiate(&hello, &server_public);
+    const outcome = negotiate(&hello, &server_public, &server_group_prefs);
     try std.testing.expect(outcome == .server_hello);
     try std.testing.expectEqual(CipherSuite.AES_128_GCM_SHA256, outcome.server_hello.cipher);
     try std.testing.expectEqual(NamedGroup.X25519, outcome.server_hello.group);
@@ -401,6 +409,34 @@ test "zix test: handshake, RFC 8448 ClientHello parse + negotiate + ServerHello 
     var sh_buf: [256]u8 = undefined;
     const sh = serializeServerHello(&sh_buf, &server_random, hello.session_id, outcome.server_hello);
     try std.testing.expectEqualSlices(u8, &server_hello, sh);
+}
+
+test "zix test: handshake, negotiate honors the configured curve preference order" {
+    // The RFC 8448 ClientHello offers x25519 + secp256r1 in supported_groups but sends a key_share
+    // only for x25519. Changing the server curve order must change the outcome (the Tls.Context.curves
+    // honesty boundary), proving group_prefs is threaded into negotiation rather than hardcoded.
+    var client_hello: [196]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
+
+    const parsed = parseClientHello(&client_hello);
+    try std.testing.expect(parsed == .ok);
+    const hello = parsed.ok;
+
+    // default order prefers X25519, for which the client sent a key_share -> direct ServerHello.
+    const default_pick = negotiate(&hello, &.{}, &server_group_prefs);
+    try std.testing.expect(default_pick == .server_hello);
+    try std.testing.expectEqual(NamedGroup.X25519, default_pick.server_hello.group);
+
+    // reordering to prefer secp256r1 is honored: the client offered it but sent no key_share, so the
+    // server asks for a HelloRetryRequest on that group instead of falling back to x25519.
+    const reordered = negotiate(&hello, &.{}, &[_]NamedGroup{ .SECP256R1, .X25519 });
+    try std.testing.expect(reordered == .hello_retry_request);
+    try std.testing.expectEqual(NamedGroup.SECP256R1, reordered.hello_retry_request);
+
+    // restricting the server to only x25519 still selects it.
+    const restricted = negotiate(&hello, &.{}, &[_]NamedGroup{.X25519});
+    try std.testing.expect(restricted == .server_hello);
+    try std.testing.expectEqual(NamedGroup.X25519, restricted.server_hello.group);
 }
 
 test "zix test: handshake, ClientHello captures the ALPN protocol list" {
@@ -532,5 +568,5 @@ test "zix test: handshake, negatives (compression, no TLS 1.3)" {
     no_tls13[147] = 0x03;
     const r2 = parseClientHello(&no_tls13);
     try std.testing.expect(r2 == .ok and !r2.ok.offers_tls13);
-    try std.testing.expect(negotiate(&r2.ok, &[_]u8{}) == .legacy_version);
+    try std.testing.expect(negotiate(&r2.ok, &[_]u8{}, &server_group_prefs) == .legacy_version);
 }

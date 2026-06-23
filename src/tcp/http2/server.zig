@@ -42,7 +42,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
         pub fn run(self: *Self) !void {
             const cfg = self.config;
 
-            if (cfg.tls_cert_path != null) return tls_serve.runTls(routes, cfg);
+            if (cfg.tls != null) return tls_serve.runTls(routes, cfg);
 
             return switch (cfg.dispatch_model) {
                 .ASYNC => async_model.runAsync(routes, cfg),

@@ -16,6 +16,15 @@ pub const Connection = connection.Connection;
 pub const HandshakeOptions = connection.HandshakeOptions;
 /// The server signing key (ECDSA P-256 or Ed25519), matching the certificate's key type.
 pub const SigningKey = @import("certificate.zig").SigningKey;
+
+/// Server-side TLS context (the loaded cert/key + validated policy, the SSL_CTX analog). Built once
+/// with Context.init, attached to the HTTP server config by pointer (tls: ?*Tls.Context), the https
+/// opt-in gate. Context.Config is the plain settings struct, mirroring Logger / Logger.Config.
+pub const Context = @import("context.zig").Context;
+pub const Version = @import("context.zig").Version;
+/// The curve / cipher sets zix implements, the secure defaults for Context.Config.
+pub const default_curves = @import("context.zig").default_curves;
+pub const default_ciphers = @import("context.zig").default_ciphers;
 pub const HandshakeResult = connection.HandshakeResult;
 pub const serverHandshake = connection.serverHandshake;
 
