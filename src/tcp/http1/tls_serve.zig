@@ -1,14 +1,17 @@
 //! zix http1 https serve path (approach A, RFC 8446 + 9112).
 //!
 //! Note:
-//! - Gated on config.tls_cert_path. A blocking accept loop reads the ClientHello, then branches on
-//!   version: a 1.3-capable client takes the TLS 1.3 path (zix.Tls), a 1.2-only client takes the
-//!   TLS 1.2 path (zix.Tls tls12_connection). Either way it then per request decrypts the record,
+//! - Gated on config.tls (a *Tls.Context). A blocking accept loop reads the ClientHello, then
+//!   branches on the version policy: a 1.3-capable client takes the TLS 1.3 path (zix.Tls), a
+//!   1.2-only client takes the TLS 1.2 path (zix.Tls tls12_connection), each subject to the
+//!   context's min_version / max_version. Either way it then per request decrypts the record,
 //!   reuses core.parseHead, runs the existing fd-handler against a pipe (so the handler writes
 //!   plaintext unchanged), reads that back, encrypts it, and sends it.
 //! - The cleartext EPOLL / URING hot path is untouched: this whole file is reached only when
-//!   config.tls_cert_path is set (gated in server.zig before the dispatch switch). https is a
-//!   separate path on its own perf band (not the 1% gate), so the per-request pipe is acceptable.
+//!   config.tls is set (gated in server.zig before the dispatch switch). https is a separate path
+//!   on its own perf band (not the 1% gate), so the per-request pipe is acceptable.
+//! - The cert / key are loaded and validated once in Tls.Context.init (the cold path), so the
+//!   accept loop reads a ready context with no per-connection PEM work.
 //! - Single request per connection for now (keep-alive is a later refinement).
 
 const std = @import("std");
@@ -19,7 +22,6 @@ const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
-const pem = @import("../../tls/pem.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const HandlerFn = core.HandlerFn;
@@ -37,43 +39,26 @@ fn peerAlert(body: []const u8) anyerror {
     return error.PeerAlert;
 }
 
-/// Load the cert + key, listen, and serve https/1.1 over TLS 1.3 (blocking accept loop).
+/// Listen and serve https/1.1 (blocking accept loop). The cert / key / policy are already loaded and
+/// validated in the context (config.tls), so this only accepts and drives per-connection handshakes.
 pub fn runTls(config: Config, handler: HandlerFn) !void {
     const io = config.io;
-    const allocator = std.heap.smp_allocator;
-
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.tls_cert_path.?, allocator, .limited(1 << 20));
-    defer allocator.free(cert_pem);
-    var cert_der_buf: [4096]u8 = undefined;
-    const cert_der = try pem.pemToDer(&cert_der_buf, cert_pem);
-
-    const key_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.tls_key_path.?, allocator, .limited(1 << 20));
-    defer allocator.free(key_pem);
-    var key_der_buf: [512]u8 = undefined;
-    const key_der = try pem.pemToDer(&key_der_buf, key_pem);
-
-    // the signing key matches the certificate's key type: ECDSA P-256 (SEC1) or Ed25519 (PKCS#8).
-    const cert_parsed = try (std.crypto.Certificate{ .buffer = cert_der, .index = 0 }).parse();
-    const signing_key: Tls.SigningKey = switch (cert_parsed.pub_key_algo) {
-        .X9_62_id_ecPublicKey => .{ .ecdsa_p256 = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(try pem.ecdsaScalarFromSec1(key_der))) },
-        .curveEd25519 => .{ .ed25519 = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(try pem.ed25519SeedFromPkcs8(key_der)) },
-        else => return error.UnsupportedCertificateKey,
-    };
+    const ctx = config.tls.?;
 
     const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
     var srv = try addr.listen(io, .{ .reuse_address = true });
 
-    common.logSystem(config, "listening on {s}:{d} (https/1.1, TLS 1.3)", .{ config.ip, config.port });
+    common.logSystem(config, "listening on {s}:{d} (https/1.1)", .{ config.ip, config.port });
 
     while (true) {
         var stream = srv.accept(io) catch continue;
         defer stream.close(io);
 
-        serveConnTls(stream.socket.handle, handler, cert_der, signing_key, config.tls_alpn) catch {};
+        serveConnTls(stream.socket.handle, handler, ctx) catch {};
     }
 }
 
-fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, signing_key: Tls.SigningKey, alpn_prefs: []const Tls.Alpn) !void {
+fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !void {
     var record_buf: [17 * 1024]u8 = undefined;
 
     // ClientHello (a plaintext handshake record carries the message in its body).
@@ -85,13 +70,18 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, signin
     _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
     _ = linux.getrandom(&server_random, server_random.len, 0);
 
-    const opts: Tls.HandshakeOptions = .{
-        .certificate_der = cert_der,
-        .signing_key = signing_key,
-        .ephemeral_secret = ephemeral_secret,
-        .server_random = server_random,
-        .alpn_prefs = alpn_prefs,
-    };
+    const opts = ctx.handshakeOptions(ephemeral_secret, server_random);
+
+    // Version policy: when the ceiling is TLS 1.2, never take the 1.3 path. The 1.2 ServerKeyExchange
+    // is ECDSA-signed, so an Ed25519 context cannot serve 1.2.
+    if (!ctx.allowsTls13()) {
+        const ecdsa_key = switch (ctx.signing_key) {
+            .ecdsa_p256 => |kp| kp,
+            else => return error.Tls12RequiresEcdsa,
+        };
+
+        return serveConnTls12(fd, handler, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
+    }
 
     // HelloRetryRequest (RFC 8446 4.1.4): if the 1.3 client picked a group it gave no key_share for,
     // send the HRR and read a second ClientHello before completing. null = no retry needed. A 1.2
@@ -124,15 +114,23 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, signin
         try Tls.serverHandshakeAfterRetry(state, second_hello, &handshake_out)
     else
         Tls.serverHandshake(opts, client_hello_rec.body, &handshake_out) catch |err| {
-            // no 1.3 offer -> the client is TLS 1.2 (the minimum floor), take the 1.2 path. The 1.2
-            // ServerKeyExchange is ECDSA-signed, so an Ed25519 server is TLS 1.3 only.
+            // no 1.3 offer -> the client is TLS 1.2 only. Honor the floor: refuse when min_version
+            // is 1.3, else take the 1.2 path. The 1.2 ServerKeyExchange is ECDSA-signed, so an
+            // Ed25519 context is TLS 1.3 only.
             if (err == error.UnsupportedTlsVersion) {
-                const ecdsa_key = switch (signing_key) {
+                if (!ctx.allowsTls12()) {
+                    var ver_alert: [Tls.fatal_record_len]u8 = undefined;
+                    if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAll(fd, rec) catch {};
+
+                    return err;
+                }
+
+                const ecdsa_key = switch (ctx.signing_key) {
                     .ecdsa_p256 => |kp| kp,
                     else => return error.Tls12RequiresEcdsa,
                 };
 
-                return serveConnTls12(fd, handler, cert_der, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, alpn_prefs);
+                return serveConnTls12(fd, handler, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
             }
 
             // any other rejected ClientHello: send the fatal alert in the clear (no keys yet), then close.
@@ -181,7 +179,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, signin
     // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
     if (hostFromHead(request[0..parsed.body_offset])) |host_raw| {
         const host = stripPort(host_raw);
-        Tls.verifyCertIdentity(cert_der, host) catch {
+        Tls.verifyCertIdentity(ctx.cert_der, host) catch {
             const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
             writeAll(fd, conn.closeNotify(&close_buf)) catch {};
@@ -234,14 +232,14 @@ fn stripPort(host: []const u8) []const u8 {
 /// TLS 1.2 path (RFC 5246 + 5288, ECDHE-ECDSA): the two-phase handshake via tls12_connection, then
 /// one application request like the 1.3 path. Reached only when the client did not offer 1.3. The
 /// 1.2 ephemeral reuses the same random bytes (reduced to a P-256 scalar inside the engine).
-fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8, alpn_prefs: []const Tls.Alpn) !void {
+fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8) !void {
     var flight_out: [8192]u8 = undefined;
     const flight = try tls12.serverFlight1(.{
-        .certificate_der = cert_der,
+        .certificate_der = ctx.cert_der,
         .signing_key = key_pair,
         .server_eph_secret = ephemeral_secret,
         .server_random = server_random,
-        .alpn_prefs = alpn_prefs,
+        .alpn_prefs = ctx.alpn,
     }, client_hello, &flight_out);
     try writeAll(fd, flight.to_send);
     var state = flight.state;
