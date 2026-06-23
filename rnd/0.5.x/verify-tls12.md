@@ -1,8 +1,8 @@
 # verify-tls12: openssl TLS 1.2 wire check
 
 The RFC wire gate for the zix TLS 1.2 server path. The in-code self-test only checks
-self-consistency, this proves a real client (openssl) completes the 1.2 handshake. Run OUTSIDE the
-AI sandbox (the sandbox signal-kills live servers).
+self-consistency, this proves a real client (openssl) completes the 1.2 handshake. Run in a real
+terminal (a restricted sandbox signal-kills live servers).
 
 Server: the existing https example (examples/tls/tls_http1_basic.zig, port 9060). `openssl -tls1_2`
 sends a ClientHello with no 1.3 offer, so the server takes the 1.2 branch (serveConnTls12).

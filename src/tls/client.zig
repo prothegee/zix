@@ -325,11 +325,12 @@ fn buildClientHello(out: []u8, client_random: [32]u8, client_public: [32]u8, alp
     w.writeU16(3);
     w.writeU8(2);
     w.writeU16(0x0304);
-    // signature_algorithms: [ecdsa_secp256r1_sha256]
+    // signature_algorithms: [ecdsa_secp256r1_sha256, ed25519]
     w.writeU16(0x000d);
+    w.writeU16(6);
     w.writeU16(4);
-    w.writeU16(2);
     w.writeU16(0x0403);
+    w.writeU16(0x0807);
     // supported_groups: [x25519]
     w.writeU16(0x000a);
     w.writeU16(4);
@@ -364,30 +365,45 @@ fn buildClientHello(out: []u8, client_random: [32]u8, client_public: [32]u8, alp
     return w.slice();
 }
 
-/// Verify the server CertificateVerify (RFC 8446 4.4.3): the signature over the 4.4.3 content,
-/// made with the end-entity certificate's private key. Today only ecdsa_secp256r1_sha256 (the cert
-/// is parsed with std.crypto.Certificate to lift the public key).
+/// Verify the server CertificateVerify (RFC 8446 4.4.3): the signature over the 4.4.3 content, made
+/// with the end-entity certificate's private key. Supports ecdsa_secp256r1_sha256 (0x0403, DER sig)
+/// and ed25519 (0x0807, 64-byte raw sig), matching the schemes the ClientHello offers. The cert is
+/// parsed with std.crypto.Certificate to lift the public key.
 fn verifyCertificateVerify(cert_msg: []const u8, certverify_msg: []const u8, transcript_hash: Secret) !void {
-    const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
-
     // end-entity cert DER from the TLS 1.3 Certificate message (RFC 8446 4.4.2).
     const cert_der = try leafCertDer(cert_msg);
 
     // signature: SignatureScheme + opaque<0..2^16-1>.
     var vr = wire.Reader{ .buf = certverify_msg };
     const scheme = try vr.readU16();
-    if (scheme != 0x0403) return error.UnsupportedSignatureScheme; // ecdsa_secp256r1_sha256
     const sig_len = try vr.readU16();
     const sig_bytes = try vr.readBytes(sig_len);
 
     const cert = std.crypto.Certificate{ .buffer = cert_der, .index = 0 };
     const parsed = try cert.parse();
-    const pub_key = try EcdsaP256.PublicKey.fromSec1(parsed.pubKey());
 
     var content_buf: [256]u8 = undefined;
     const content = certificate.certificateVerifyContent(&content_buf, transcript_hash);
-    const sig = try EcdsaP256.Signature.fromDer(sig_bytes);
-    try sig.verify(content, pub_key);
+
+    switch (scheme) {
+        0x0403 => { // ecdsa_secp256r1_sha256
+            const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+            const pub_key = try EcdsaP256.PublicKey.fromSec1(parsed.pubKey());
+            const sig = try EcdsaP256.Signature.fromDer(sig_bytes);
+            try sig.verify(content, pub_key);
+        },
+        0x0807 => { // ed25519
+            const Ed25519 = std.crypto.sign.Ed25519;
+            if (sig_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidSignature;
+            const pub_raw = parsed.pubKey();
+            if (pub_raw.len != 32) return error.UnsupportedSignatureScheme;
+
+            const pub_key = try Ed25519.PublicKey.fromBytes(pub_raw[0..32].*);
+            const sig = Ed25519.Signature.fromBytes(sig_bytes[0..64].*);
+            try sig.verify(content, pub_key);
+        },
+        else => return error.UnsupportedSignatureScheme,
+    }
 }
 
 const ServerHelloParsed = struct { server_random: [32]u8, server_public: [32]u8 };

@@ -26,8 +26,17 @@ const pem = @import("../../tls/pem.zig");
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 const content_type_change_cipher_spec: u8 = 20;
+const content_type_alert: u8 = 21;
 const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
+
+/// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
+/// clean teardown so the accept loop closes the connection rather than misreading it as a record.
+fn peerAlert(body: []const u8) anyerror {
+    _ = Tls.parseInboundAlert(body) catch {};
+
+    return error.PeerAlert;
+}
 
 const max_plaintext: usize = 16 * 1024;
 
@@ -125,10 +134,11 @@ fn serveConnTls(
     // rather than guess the application protocol.
     if (result.alpn != .H2) return error.AlpnNotH2;
 
-    // client ChangeCipherSpec (skipped) + Finished.
+    // client ChangeCipherSpec (skipped) + Finished. A plaintext alert here means the peer aborted.
     while (true) {
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type == content_type_alert) return peerAlert(rec.body);
         if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
 
         try conn.verifyClientFinished(rec.full);
@@ -204,6 +214,7 @@ fn serveConnTls12H2(
     const finished_rec = while (true) {
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type == content_type_alert) return peerAlert(rec.body);
         if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
 
         break rec;

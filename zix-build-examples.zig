@@ -36,6 +36,7 @@ pub fn addSteps(
         .{ "example-http1_websocket", "examples/http1_websocket.zig", "http1" },
         .{ "example-http1_websocket_uring", "examples/http1_websocket_uring.zig", "http1" },
         .{ "example-tls_http1_basic", "examples/tls/tls_http1_basic.zig", "tls" },
+        .{ "example-tls_http1_ed25519", "examples/tls/tls_http1_ed25519.zig", "tls" },
         .{ "example-tls_http2_basic", "examples/tls/tls_http2_basic.zig", "tls" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig", "http" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig", "http" },

@@ -25,8 +25,17 @@ const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const HandlerFn = core.HandlerFn;
 
 const content_type_change_cipher_spec: u8 = 20;
+const content_type_alert: u8 = 21;
 const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
+
+/// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
+/// clean teardown so the accept loop closes the connection rather than misreading it as a record.
+fn peerAlert(body: []const u8) anyerror {
+    _ = Tls.parseInboundAlert(body) catch {};
+
+    return error.PeerAlert;
+}
 
 /// Load the cert + key, listen, and serve https/1.1 over TLS 1.3 (blocking accept loop).
 pub fn runTls(config: Config, handler: HandlerFn) !void {
@@ -42,8 +51,14 @@ pub fn runTls(config: Config, handler: HandlerFn) !void {
     defer allocator.free(key_pem);
     var key_der_buf: [512]u8 = undefined;
     const key_der = try pem.pemToDer(&key_der_buf, key_pem);
-    const scalar = try pem.ecdsaScalarFromSec1(key_der);
-    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+
+    // the signing key matches the certificate's key type: ECDSA P-256 (SEC1) or Ed25519 (PKCS#8).
+    const cert_parsed = try (std.crypto.Certificate{ .buffer = cert_der, .index = 0 }).parse();
+    const signing_key: Tls.SigningKey = switch (cert_parsed.pub_key_algo) {
+        .X9_62_id_ecPublicKey => .{ .ecdsa_p256 = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(try pem.ecdsaScalarFromSec1(key_der))) },
+        .curveEd25519 => .{ .ed25519 = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(try pem.ed25519SeedFromPkcs8(key_der)) },
+        else => return error.UnsupportedCertificateKey,
+    };
 
     const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
     var srv = try addr.listen(io, .{ .reuse_address = true });
@@ -54,11 +69,11 @@ pub fn runTls(config: Config, handler: HandlerFn) !void {
         var stream = srv.accept(io) catch continue;
         defer stream.close(io);
 
-        serveConnTls(stream.socket.handle, handler, cert_der, key_pair) catch {};
+        serveConnTls(stream.socket.handle, handler, cert_der, signing_key, config.tls_alpn) catch {};
     }
 }
 
-fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pair: EcdsaP256.KeyPair) !void {
+fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, signing_key: Tls.SigningKey, alpn_prefs: []const Tls.Alpn) !void {
     var record_buf: [17 * 1024]u8 = undefined;
 
     // ClientHello (a plaintext handshake record carries the message in its body).
@@ -70,31 +85,70 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pa
     _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
     _ = linux.getrandom(&server_random, server_random.len, 0);
 
-    var handshake_out: [8192]u8 = undefined;
-    const result = Tls.serverHandshake(.{
+    const opts: Tls.HandshakeOptions = .{
         .certificate_der = cert_der,
-        .signing_key = .{ .ecdsa_p256 = key_pair },
+        .signing_key = signing_key,
         .ephemeral_secret = ephemeral_secret,
         .server_random = server_random,
-    }, client_hello_rec.body, &handshake_out) catch |err| {
-        // no 1.3 offer -> the client is TLS 1.2 (the minimum floor), take the 1.2 path.
-        if (err == error.UnsupportedTlsVersion) {
-            return serveConnTls12(fd, handler, cert_der, key_pair, client_hello_rec.body, ephemeral_secret, server_random);
-        }
-
-        // any other rejected ClientHello: send the fatal alert in the clear (no keys yet), then close.
-        var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-        if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
-
-        return err;
+        .alpn_prefs = alpn_prefs,
     };
+
+    // HelloRetryRequest (RFC 8446 4.1.4): if the 1.3 client picked a group it gave no key_share for,
+    // send the HRR and read a second ClientHello before completing. null = no retry needed. A 1.2
+    // client surfaces as UnsupportedTlsVersion here and is handled by the serverHandshake path below.
+    var handshake_out: [8192]u8 = undefined;
+    var hrr_out: [1024]u8 = undefined;
+    var retry_state: ?Tls.RetryState = null;
+    var second_hello: []const u8 = &.{};
+    if (Tls.serverHelloRetry(opts, client_hello_rec.body, &hrr_out)) |maybe_retry| {
+        if (maybe_retry) |retry| {
+            try writeAll(fd, retry.to_send);
+
+            const ch2_rec = try readRecord(fd, &record_buf);
+            if (ch2_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+
+            retry_state = retry.state;
+            second_hello = ch2_rec.body;
+        }
+    } else |err| {
+        // a malformed / non-1.3 ClientHello: 1.2 falls through to serverHandshake, else alert + close.
+        if (err != error.UnsupportedTlsVersion) {
+            var alert_buf: [Tls.fatal_record_len]u8 = undefined;
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+
+            return err;
+        }
+    }
+
+    const result = if (retry_state) |state|
+        try Tls.serverHandshakeAfterRetry(state, second_hello, &handshake_out)
+    else
+        Tls.serverHandshake(opts, client_hello_rec.body, &handshake_out) catch |err| {
+            // no 1.3 offer -> the client is TLS 1.2 (the minimum floor), take the 1.2 path. The 1.2
+            // ServerKeyExchange is ECDSA-signed, so an Ed25519 server is TLS 1.3 only.
+            if (err == error.UnsupportedTlsVersion) {
+                const ecdsa_key = switch (signing_key) {
+                    .ecdsa_p256 => |kp| kp,
+                    else => return error.Tls12RequiresEcdsa,
+                };
+
+                return serveConnTls12(fd, handler, cert_der, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, alpn_prefs);
+            }
+
+            // any other rejected ClientHello: send the fatal alert in the clear (no keys yet), then close.
+            var alert_buf: [Tls.fatal_record_len]u8 = undefined;
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+
+            return err;
+        };
     try writeAll(fd, result.to_send);
     var conn = result.connection;
 
-    // client ChangeCipherSpec (skipped) + Finished.
+    // client ChangeCipherSpec (skipped) + Finished. A plaintext alert here means the peer aborted.
     while (true) {
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type == content_type_alert) return peerAlert(rec.body);
         if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
 
         try conn.verifyClientFinished(rec.full);
@@ -106,32 +160,88 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pa
     if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
 
     var request_plain: [17 * 1024]u8 = undefined;
-    const request = try conn.readAppData(request_rec.full, &request_plain);
+    const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
+        // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
+        if (err == error.UnexpectedMessage) {
+            var alert_buf: [64]u8 = undefined;
+            writeAll(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
+        }
+
+        return err;
+    };
 
     const parsed = core.parseHead(request) catch return error.BadRequest;
     const head = parsed.head;
     const body = request[parsed.body_offset..];
 
+    var encrypt_buf: [70 * 1024]u8 = undefined;
+    var close_buf: [64]u8 = undefined;
+
+    // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
+    // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
+    if (hostFromHead(request[0..parsed.body_offset])) |host_raw| {
+        const host = stripPort(host_raw);
+        Tls.verifyCertIdentity(cert_der, host) catch {
+            const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+
+            return;
+        };
+    }
+
     var response_buf: [64 * 1024]u8 = undefined;
     const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
 
-    var encrypt_buf: [70 * 1024]u8 = undefined;
     try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
 
-    var close_buf: [64]u8 = undefined;
     try writeAll(fd, conn.closeNotify(&close_buf));
+}
+
+/// The Host header value (RFC 9112 3.2) from a request head, or null when absent.
+fn hostFromHead(head: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next(); // request line
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "host")) {
+            return std.mem.trim(u8, line[colon + 1 ..], " \t");
+        }
+    }
+
+    return null;
+}
+
+/// Strip the ":port" suffix from a Host value, leaving the authority host. Handles a bracketed IPv6
+/// literal ([::1]:443 -> ::1) and host:port (localhost:443 -> localhost), leaves bare hosts as-is.
+fn stripPort(host: []const u8) []const u8 {
+    if (host.len == 0) return host;
+
+    if (host[0] == '[') {
+        if (std.mem.indexOfScalar(u8, host, ']')) |close| return host[1..close];
+
+        return host;
+    }
+
+    // a single colon means host:port (a bare IPv6 literal has several colons, leave it intact).
+    if (std.mem.indexOfScalar(u8, host, ':')) |first| {
+        if (std.mem.lastIndexOfScalar(u8, host, ':').? == first) return host[0..first];
+    }
+
+    return host;
 }
 
 /// TLS 1.2 path (RFC 5246 + 5288, ECDHE-ECDSA): the two-phase handshake via tls12_connection, then
 /// one application request like the 1.3 path. Reached only when the client did not offer 1.3. The
 /// 1.2 ephemeral reuses the same random bytes (reduced to a P-256 scalar inside the engine).
-fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8) !void {
+fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8, alpn_prefs: []const Tls.Alpn) !void {
     var flight_out: [8192]u8 = undefined;
     const flight = try tls12.serverFlight1(.{
         .certificate_der = cert_der,
         .signing_key = key_pair,
         .server_eph_secret = ephemeral_secret,
         .server_random = server_random,
+        .alpn_prefs = alpn_prefs,
     }, client_hello, &flight_out);
     try writeAll(fd, flight.to_send);
     var state = flight.state;
@@ -150,6 +260,7 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, cert_der: []const u8, key_
     const finished_rec = while (true) {
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
+        if (rec.content_type == content_type_alert) return peerAlert(rec.body);
         if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
 
         break rec;
@@ -252,4 +363,23 @@ fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
         }
         written += rc;
     }
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+test "zix test: tls_serve, stripPort strips host:port and bracketed ipv6" {
+    try std.testing.expectEqualStrings("localhost", stripPort("localhost:9060"));
+    try std.testing.expectEqualStrings("localhost", stripPort("localhost"));
+    try std.testing.expectEqualStrings("127.0.0.1", stripPort("127.0.0.1:443"));
+    try std.testing.expectEqualStrings("::1", stripPort("[::1]:443")); // bracketed ipv6 -> inside
+    try std.testing.expectEqualStrings("::1", stripPort("::1")); // bare ipv6 left intact
+}
+
+test "zix test: tls_serve, hostFromHead extracts the Host header" {
+    const head = "GET / HTTP/1.1\r\nUser-Agent: x\r\nHost: localhost:9060\r\nAccept: */*\r\n\r\n";
+    try std.testing.expectEqualStrings("localhost:9060", hostFromHead(head).?);
+
+    const no_host = "GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
+    try std.testing.expect(hostFromHead(no_host) == null);
 }

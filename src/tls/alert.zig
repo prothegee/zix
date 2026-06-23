@@ -51,6 +51,47 @@ pub fn fatalRecord(buf: *[fatal_record_len]u8, desc: Alert) []const u8 {
 }
 
 // --------------------------------------------------------------- //
+
+/// Inbound alert descriptions that need their own handling but are not in the outbound subset.
+/// close_notify (0) is a clean closure, user_canceled (90) is a warning the peer may send before it.
+pub const desc_close_notify: u8 = 0;
+pub const desc_user_canceled: u8 = 90;
+
+/// A parsed inbound alert (RFC 8446 6): the legacy level byte plus the description. In TLS 1.3 the
+/// level is advisory (the description decides the action), so classification keys on the description.
+pub const Inbound = struct {
+    level: u8,
+    description: u8,
+
+    /// close_notify (RFC 8446 6.1): the peer closed its write side. No more data follows from it,
+    /// the receiver MUST stop reading application data and tear the connection down.
+    pub fn isCloseNotify(self: Inbound) bool {
+        return self.description == desc_close_notify;
+    }
+
+    /// Every alert except close_notify / user_canceled is fatal in TLS 1.3, the connection MUST be
+    /// closed and its keys dropped (RFC 8446 6). user_canceled is a warning that precedes close_notify.
+    pub fn isFatal(self: Inbound) bool {
+        return self.description != desc_close_notify and self.description != desc_user_canceled;
+    }
+};
+
+/// Parse an inbound alert body: the 2 bytes [level, description] that follow a plaintext alert
+/// record header, or the decrypted inner content of a post-handshake alert (RFC 8446 6).
+///
+/// Param:
+/// body - []const u8 (exactly the 2 alert bytes, level then description)
+///
+/// Return:
+/// - Inbound
+/// - error.DecodeError (the body is not exactly 2 bytes, RFC 8446 6 malformed alert)
+pub fn parseInbound(body: []const u8) error{DecodeError}!Inbound {
+    if (body.len != 2) return error.DecodeError;
+
+    return .{ .level = body[0], .description = body[1] };
+}
+
+// --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
 test "zix test: Alert, wire values" {
@@ -65,4 +106,24 @@ test "zix test: Alert, fatalRecord plaintext bytes" {
 
     // 15 03 03 00 02 02 78: alert(21), 0x0303, len 2, fatal(2), no_application_protocol(120).
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x78 }, rec);
+}
+
+test "zix test: Alert, parseInbound classifies close_notify vs fatal" {
+    // close_notify (warning level 1, desc 0): clean closure, not fatal.
+    const cn = try parseInbound(&[_]u8{ level_warning, desc_close_notify });
+    try std.testing.expect(cn.isCloseNotify());
+    try std.testing.expect(!cn.isFatal());
+
+    // handshake_failure (fatal level 2, desc 40): fatal, not a clean closure.
+    const hf = try parseInbound(&[_]u8{ level_fatal, @intFromEnum(Alert.HANDSHAKE_FAILURE) });
+    try std.testing.expect(!hf.isCloseNotify());
+    try std.testing.expect(hf.isFatal());
+
+    // user_canceled (warning, desc 90): a warning that precedes close_notify, not fatal.
+    const uc = try parseInbound(&[_]u8{ level_warning, desc_user_canceled });
+    try std.testing.expect(!uc.isFatal());
+
+    // a malformed alert body (not 2 bytes) -> decode_error.
+    try std.testing.expectError(error.DecodeError, parseInbound(&[_]u8{0x01}));
+    try std.testing.expectError(error.DecodeError, parseInbound(&[_]u8{ 1, 2, 3 }));
 }
