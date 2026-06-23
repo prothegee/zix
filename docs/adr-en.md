@@ -277,7 +277,7 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4× higher latency than a comparable blocking-thread HTTP server (334 us vs ~88 us) despite matching throughput (~145K req/s). A blocking-thread architecture (dedicated accept thread + OS thread pool + synchronous I/O) eliminates the fiber scheduler from the hot path entirely.
+**Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4x higher latency than a comparable blocking-thread HTTP server (334 us vs ~88 us) despite matching throughput (~145K req/s). A blocking-thread architecture (dedicated accept thread + OS thread pool + synchronous I/O) eliminates the fiber scheduler from the hot path entirely.
 
 **Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` (they never handle I/O). Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives. `std.Thread.Mutex` does not exist in this version).
 
@@ -504,7 +504,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment, subsequent `takeByte` calls drain it with no extra syscalls.
 - `serveConn` uses only stack buffers (`recv_buf[MAX_MSG_SIZE * 2]`, `fields[MAX_FIELDS]`). No per-request allocation.
 - `buildMessage` computes and embeds the checksum. `verifyChecksum` validates incoming messages. Bad checksum closes the connection without a reply.
-- `std.debug.print` is absent from all thread entry functions, learned from the `std.Options.debug_io` test runner IPC panic described in CLAUDE.md.
+- `std.debug.print` is absent from all thread entry functions, learned from the `std.Options.debug_io` test runner IPC panic.
 - `FixClient` provides a typed client (`logon`, `logout`, `sendMessage`, `recvMessage`) for tests and examples.
 
 ---
@@ -987,7 +987,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Rationale:** std already provides every primitive (AES-GCM, HKDF, X25519, P-256, ECDSA, Ed25519), so a C dependency would add build complexity and an FFI boundary for no functional gain and would break the pure-Zig posture. TLS 1.2 is the minimum because RFC 5246 is not deprecated and is still widely deployed (older Android, legacy OpenSSL, embedded and enterprise stacks), whereas 1.0 / 1.1 are deprecated (RFC 8996) and so are never offered. The 1.2 suites are restricted to ECDHE-AEAD for forward secrecy and authenticated encryption on both versions, and an ECDSA or Ed25519 certificate covers authentication on the std signing path, which is why RSA signing stays optional.
 
-**Config:** flat `tls_*` fields on the server configs (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` on Http1) and `tls_ca_path` on the client config. No nested sub-config, per the existing flat-config rule.
+**Config:** flat `tls_*` fields on the server configs (`tls_cert_path`, `tls_key_path`, `tls_alpn`, plus `hsts_max_age_s` on Http1) and `tls_ca_path` on the client config. No nested sub-config, per the existing flat-config rule. The server-side flat fields are superseded by the `Tls.Context` object (ADR-047).
 
 **Consequences:**
 - The TLS 1.3 server is implemented and verified byte-exact against the RFC 8448 trace, green on Zig 0.16 and 0.17.
@@ -1004,17 +1004,38 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Context:** TLS sits under Http1 and Http2 (https, h2). https had to be added without disturbing the tuned cleartext dispatch models (`.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL` / `.URING`) or their hot path.
 
-**Decision:** Add TLS as a gated blocking serve path per engine, selected when `tls_cert_path` is set, leaving every cleartext model untouched. Http1: `serveConnTls` runs the handshake through `zix.Tls`, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe, and encrypts the response. Http2: a terminator runs the UNCHANGED h2c engine (`core.serveConn`) behind a socketpair, with a `poll` loop that decrypts inbound client records to plaintext and encrypts the engine's frames back, and ALPN selects h2. `zix.Tls` is sans-I/O: `serverHandshake` returns the bytes to send plus a `Connection`, so the engine owns the socket loop.
+**Decision:** Add TLS as a gated blocking serve path per engine, selected when `config.tls` is set (the `Tls.Context`, ADR-047), leaving every cleartext model untouched. Http1: `serveConnTls` runs the handshake through `zix.Tls`, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe, and encrypts the response. Http2: a terminator runs the UNCHANGED h2c engine (`core.serveConn`) behind a socketpair, with a `poll` loop that decrypts inbound client records to plaintext and encrypts the engine's frames back, and ALPN selects h2. `zix.Tls` is sans-I/O: `serverHandshake` returns the bytes to send plus a `Connection`, so the engine owns the socket loop.
 
 **Rationale:** Terminating TLS in front of the unchanged engines reuses the whole cleartext frame and request machinery, so https cannot regress the cleartext hot path (it is additive) and the h2c state machine is not forked. The blocking path with a per-connection pipe or socketpair is acceptable because https is opt-in on its own perf band, not the 1 percent gate. Sans-I/O keeps `zix.Tls` usable from blocking and non-blocking dispatch alike. Teardown uses `shutdown(SHUT_WR)` so the engine sees EOF without a write racing a closed peer, avoiding SIGPIPE.
 
-**Config:** the flat `tls_*` fields gate the path. No new dispatch model and no change to the cleartext API.
+**Config:** `config.tls` (a `*Tls.Context`, ADR-047) gates the path. No new dispatch model and no change to the cleartext API.
 
 **Consequences:**
 - Http1 https/1.1 and Http2 h2 both serve over TLS 1.3, examples on ports 9060 and 9061, green on Zig 0.16 and 0.17.
 - The h2 path reuses `core.serveConn` unchanged. Only ALPN selection and the terminator are new code.
 - One request per Http1 https connection for now (keep-alive is a later refinement), and the terminator is one thread plus a socketpair per connection, accepted on the https band.
 - No native h2 runner yet: it needs an ALPN-offering client, which is the `zix.Tls` client milestone.
+
+---
+
+## ADR-047: TLS bind options as a Tls.Context object
+
+**Status:** Accepted
+
+**Context:** TLS shipped with flat `tls_*` fields (cert, key, alpn, HSTS) on each HTTP server config (ADR-045 / 046), the minimal subset. Exposing the full bind surface (version floor / ceiling, ECDHE curves, cipher suites, server-cipher preference) as more flat fields would bloat every HTTP config, and a runtime config-file parser (the planned `zixer` executable) cannot produce compile-time enum literals: it needs a value it builds at runtime.
+
+**Decision:** Expose server TLS as a user-owned object, `zix.Tls.Context`, modeled on the logger (`logger: ?*Logger`). `Tls.Context.Config` is the plain settings struct (`cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`). `Tls.Context.init(allocator, io, config)` loads the PEM, detects the key type, and validates the policy once on the cold path. The HTTP configs carry `tls: ?*Tls.Context = null`, and a non-null pointer is the https opt-in gate (replacing the `tls_cert_path != null` gate). Curves and ciphers are typed enum slices validated to the implemented set: an unsupported value is a startup error, never a silent no-op. zix is ECDHE-only, so there is no dhparam knob. Session resumption is deferred: it touches the data path and is gated on the perf bench.
+
+**Rationale:** The logger already established that a user-constructed object passed by pointer is the right shape for cross-cutting state, and it keeps `HttpServerConfig` flat (the many TLS knobs live inside `Tls.Context.Config`, not on the HTTP config). `Context` is the honest name: `zix.Tls` is sans-I/O with no listener (the accept loop is the HTTP engine's), so the object is the loaded-state context (the `SSL_CTX` analog), not a server. One config type serves two front-ends: the typed library path and the future `zixer` text-config parser both produce a `Tls.Context.Config`. Validate-or-reject keeps every exposed field honored or refused, never silently ignored, and loading / validating once keeps the per-connection serve path free of PEM work. Forward secrecy (ECDHE) and AEAD hold on both 1.2 and 1.3 by construction.
+
+**Config:** `tls: ?*Tls.Context` on the Http1 and Http2 server configs. `Tls.Context.Config` holds the bind options. The flat `tls_*` server fields of ADR-045 / 046 are removed.
+
+**Consequences:**
+- The four flat fields (`tls_cert_path`, `tls_key_path`, `tls_alpn`, Http1 `hsts_max_age_s`) collapse to one `tls` pointer. HSTS becomes available to Http2 too, since it lives in the shared context.
+- Configured curves are threaded into TLS 1.3 negotiation (reorder / subset is honored), and the version floor / ceiling gates the serve path: a ceiling of TLS 1.2 forces the 1.2 path, a floor of TLS 1.3 refuses 1.2 clients with a protocol_version alert.
+- The implemented set (X25519, secp256r1, AES-128-GCM for 1.3, ECDHE-ECDSA-AES128-GCM for 1.2) widens with no API change as crypto lands. Unsupported values are rejected at init.
+- The `Tls.Context` is the foundation the planned `zixer` executable parses its text config into.
+- Green on Zig 0.16 and 0.17 (unit-test plus the 59-protocol test-runner-all).
 
 ---
 
