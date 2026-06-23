@@ -34,7 +34,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
         pub fn deinit(_: *Self) void {}
 
         pub fn run(self: *const Self) !void {
-            if (self.config.tls_cert_path != null) return tls_serve.runTls(self.config, handler);
+            if (self.config.tls != null) return tls_serve.runTls(self.config, handler);
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(self.config, handler),
