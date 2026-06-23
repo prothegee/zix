@@ -53,6 +53,29 @@ pub fn ecdsaScalarFromSec1(der: []const u8) ![32]u8 {
     return out;
 }
 
+/// Extract the 32-byte Ed25519 seed from a PKCS#8 PrivateKeyInfo DER (RFC 8410): SEQUENCE {
+/// INTEGER version, SEQUENCE { OID 1.3.101.112 }, OCTET STRING { OCTET STRING privateKey(32) } }.
+/// This is the form `openssl genpkey -algorithm ed25519` emits.
+pub fn ed25519SeedFromPkcs8(der: []const u8) ![32]u8 {
+    var r = DerReader{ .buf = der };
+
+    try r.expectTag(0x30); // SEQUENCE PrivateKeyInfo
+    _ = try r.readLen();
+    try r.expectTag(0x02); // INTEGER version
+    try r.skip(try r.readLen());
+    try r.expectTag(0x30); // SEQUENCE AlgorithmIdentifier
+    try r.skip(try r.readLen());
+    try r.expectTag(0x04); // OCTET STRING privateKey
+    _ = try r.readLen();
+    try r.expectTag(0x04); // inner OCTET STRING CurvePrivateKey
+    if (try r.readLen() != 32) return error.InvalidKey;
+
+    var out: [32]u8 = undefined;
+    @memcpy(&out, try r.read(32));
+
+    return out;
+}
+
 const DerReader = struct {
     buf: []const u8,
     pos: usize = 0,
@@ -118,4 +141,24 @@ test "zix test: pem, SEC1 ECDSA key -> 32-byte scalar (fixture)" {
     var expected: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
     try std.testing.expectEqualSlices(u8, &expected, &scalar);
+}
+
+test "zix test: pem, PKCS#8 Ed25519 key -> 32-byte seed (fixture)" {
+    const key_pem =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MC4CAQAwBQYDK2VwBCIEIFwpJTm6t3wxIBTGVqlD12tSAhCajuDznWINyTQWWiiM
+        \\-----END PRIVATE KEY-----
+    ;
+
+    var der_buf: [128]u8 = undefined;
+    const der = try pemToDer(&der_buf, key_pem);
+    const seed = try ed25519SeedFromPkcs8(der);
+
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "5c292539bab77c312014c656a943d76b5202109a8ee0f39d620dc934165a288c");
+    try std.testing.expectEqualSlices(u8, &expected, &seed);
+
+    // the seed must reconstruct a valid Ed25519 key pair.
+    const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+    _ = kp;
 }
