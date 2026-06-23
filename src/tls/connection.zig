@@ -73,19 +73,45 @@ pub const Connection = struct {
         return rec;
     }
 
-    /// Decrypt one client application record. Returns the plaintext (the inner content type is
-    /// stripped). A non-application inner type surfaces as decode_error to the caller.
-    pub fn readAppData(self: *Connection, rec: []const u8, out: []u8) record.Error![]const u8 {
+    /// readAppData error set: record-layer failures plus the two post-handshake inner-type
+    /// conditions a TLS 1.3 server must distinguish (RFC 8446 6, 5.1).
+    pub const ReadError = record.Error || error{ PeerClosed, UnexpectedMessage };
+
+    /// Decrypt one client application record and classify its inner content type (RFC 8446 5.1):
+    /// - application_data: the plaintext is returned.
+    /// - alert: a post-handshake alert (close_notify or fatal) ends the connection -> PeerClosed.
+    ///   The body is parsed for classification, then read stops (data after a closure is ignored).
+    /// - handshake: post-handshake handshake (renegotiation / KeyUpdate, neither supported) is the
+    ///   unexpected_message condition -> UnexpectedMessage, so the caller sends that alert.
+    pub fn readAppData(self: *Connection, rec: []const u8, out: []u8) ReadError![]const u8 {
         const opened = try record.deprotect(out, rec, self.client_app_key, self.client_app_iv, self.client_app_seq);
         self.client_app_seq += 1;
-        if (opened.inner_type != .APPLICATION_DATA) return error.Decode;
 
-        return opened.data;
+        switch (opened.inner_type) {
+            .APPLICATION_DATA => return opened.data,
+            .ALERT => {
+                _ = alert.parseInbound(opened.data) catch {};
+
+                return error.PeerClosed;
+            },
+            .HANDSHAKE => return error.UnexpectedMessage,
+            else => return error.Decode,
+        }
     }
 
     /// Emit an encrypted close_notify alert (level warning, description 0) under the server key.
     pub fn closeNotify(self: *Connection, out: []u8) []const u8 {
         const rec = record.protect(out, &[_]u8{ 1, 0 }, .ALERT, self.server_app_key, self.server_app_iv, self.server_app_seq);
+        self.server_app_seq += 1;
+
+        return rec;
+    }
+
+    /// Emit an encrypted FATAL alert under the server application key (RFC 8446 6), e.g. to reject a
+    /// post-handshake renegotiation with unexpected_message. closeNotify is the clean-shutdown variant.
+    pub fn encryptedAlert(self: *Connection, desc: alert.Alert, out: []u8) []const u8 {
+        const body = [_]u8{ alert.level_fatal, @intFromEnum(desc) };
+        const rec = record.protect(out, &body, .ALERT, self.server_app_key, self.server_app_iv, self.server_app_seq);
         self.server_app_seq += 1;
 
         return rec;
@@ -251,6 +277,22 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
         .alert => |a| return alertToError(a),
     };
 
+    var transcript = key_schedule.Transcript.init();
+    transcript.update(client_hello);
+
+    return completeHandshake(opts, &hello, negotiated, &transcript, out);
+}
+
+// --------------------------------------------------------------- //
+// HelloRetryRequest (RFC 8446 4.1.4): the two-round path for when the client's preferred group has
+// no key_share. serverHelloRetry emits the HRR + resume state, serverHandshakeAfterRetry processes
+// the second ClientHello. completeHandshake is the shared tail (ServerHello + flight + key schedule),
+// fed a transcript already seeded with the ClientHello(s).
+
+/// Build the server flight + post-handshake Connection from a transcript already seeded with the
+/// ClientHello(s). Shared by serverHandshake (one ClientHello) and serverHandshakeAfterRetry
+/// (synthetic ClientHello1 + HelloRetryRequest + ClientHello2).
+fn completeHandshake(opts: HandshakeOptions, hello: *const handshake.ClientHello, negotiated: handshake.ServerHelloParams, transcript: *key_schedule.Transcript, out: []u8) !HandshakeResult {
     // The key schedule is SHA-256 / AES-128-GCM only (server_cipher_prefs). negotiate() cannot
     // pick another suite, this guards that invariant.
     if (negotiated.cipher != .AES_128_GCM_SHA256) return error.UnsupportedCipher;
@@ -277,9 +319,6 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     };
     const kex = try computeKeyExchange(negotiated.group, opts.ephemeral_secret, client_share);
     const ecdhe = kex.shared;
-
-    var transcript = key_schedule.Transcript.init();
-    transcript.update(client_hello);
 
     var writer = wire.Writer{ .buf = out };
 
@@ -347,7 +386,7 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     writer.len += flight_record.len;
 
     // application key schedule from the transcript through the server Finished.
-    connection.handshake_transcript = transcript;
+    connection.handshake_transcript = transcript.*;
     const transcript_through_server_finished = transcript.current();
     const derived_master = key_schedule.deriveSecret(handshake_secret, "derived", empty_hash);
     const master = key_schedule.HkdfSha256.extract(&derived_master, &zero);
@@ -362,6 +401,90 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
     connection.client_app_seq = 0;
 
     return .{ .connection = connection, .to_send = writer.slice(), .alpn = selected_alpn };
+}
+
+/// Resume state carried between a HelloRetryRequest and the client's second ClientHello.
+pub const RetryState = struct {
+    opts: HandshakeOptions,
+    /// transcript seeded with the synthetic message_hash(ClientHello1) + the HelloRetryRequest.
+    transcript: key_schedule.Transcript,
+    /// the group the client must send a key_share for in its second ClientHello.
+    group: handshake.NamedGroup,
+};
+
+/// A HelloRetryRequest flight plus the state to resume from.
+pub const RetryFlight = struct {
+    to_send: []const u8,
+    state: RetryState,
+};
+
+/// Emit a HelloRetryRequest (RFC 8446 4.1.4) when the ClientHello selected a supported group it gave
+/// no key_share for: returns the HRR record + ChangeCipherSpec to send, plus the resume state.
+/// Returns null when no retry is needed (the client already sent a usable key_share, so the caller
+/// runs serverHandshake instead).
+///
+/// Note:
+/// - The transcript follows RFC 8446 4.4.1: with an HRR, ClientHello1 is replaced in the running
+///   hash by a synthetic message_hash message wrapping Hash(ClientHello1).
+pub fn serverHelloRetry(opts: HandshakeOptions, client_hello1: []const u8, out: []u8) !?RetryFlight {
+    const parsed = handshake.parseClientHello(client_hello1);
+    if (parsed != .ok) return alertToError(parsed.alert);
+    const hello = parsed.ok;
+
+    const group = switch (handshake.negotiate(&hello, &.{})) {
+        .hello_retry_request => |g| g,
+        .server_hello => return null,
+        .legacy_version => return error.UnsupportedTlsVersion,
+        .alert => |a| return alertToError(a),
+    };
+
+    var hrr_buf: [256]u8 = undefined;
+    const hrr = handshake.serializeHelloRetryRequest(&hrr_buf, hello.session_id, .AES_128_GCM_SHA256, group);
+
+    var writer = wire.Writer{ .buf = out };
+    writeRecordHeader(&writer, 22, hrr.len);
+    writer.writeBytes(hrr);
+    writer.writeBytes(&ccs_record);
+
+    // synthetic message_hash(ClientHello1) (RFC 8446 4.4.1), then the HelloRetryRequest.
+    var ch1 = key_schedule.Transcript.init();
+    ch1.update(client_hello1);
+    const ch1_hash = ch1.current();
+
+    var synthetic: [4 + key_schedule.hash_length]u8 = undefined;
+    synthetic[0] = 0xfe; // handshake type message_hash (254)
+    synthetic[1] = 0;
+    synthetic[2] = 0;
+    synthetic[3] = @intCast(key_schedule.hash_length);
+    @memcpy(synthetic[4..], &ch1_hash);
+
+    var transcript = key_schedule.Transcript.init();
+    transcript.update(&synthetic);
+    transcript.update(hrr);
+
+    return .{ .to_send = writer.slice(), .state = .{ .opts = opts, .transcript = transcript, .group = group } };
+}
+
+/// Resume the handshake on the client's second ClientHello after a HelloRetryRequest. The retry is
+/// allowed only once (RFC 8446 4.1.4): if the second ClientHello still lacks the key_share, or uses
+/// a different group than the one requested, the handshake aborts.
+pub fn serverHandshakeAfterRetry(state: RetryState, client_hello2: []const u8, out: []u8) !HandshakeResult {
+    const parsed = handshake.parseClientHello(client_hello2);
+    if (parsed != .ok) return alertToError(parsed.alert);
+    const hello = parsed.ok;
+
+    const negotiated = switch (handshake.negotiate(&hello, &.{})) {
+        .server_hello => |params| params,
+        .hello_retry_request => return error.HelloRetryRequestUnsupported, // one retry only
+        .legacy_version => return error.UnsupportedTlsVersion,
+        .alert => |a| return alertToError(a),
+    };
+    if (negotiated.group != state.group) return error.HelloRetryGroupMismatch;
+
+    var transcript = state.transcript;
+    transcript.update(client_hello2);
+
+    return completeHandshake(state.opts, &hello, negotiated, &transcript, out);
 }
 
 fn writeRecordHeader(writer: *wire.Writer, content_type: u8, length: usize) void {
@@ -853,4 +976,150 @@ test "zix test: connection, mTLS verifies a coalesced client auth flight (one re
     try std.testing.expectEqualSlices(u8, cert_der, got_der);
 
     try cert_verify.verifyCertChain(got_der, got_der, 1_800_000_000);
+}
+
+test "zix test: connection, readAppData classifies post-handshake inner types (RFC 8446 5.1)" {
+    // Only the application-key fields matter here, set them to a known key and leave the rest undefined.
+    var conn: Connection = undefined;
+    conn.client_app_key = @splat(0xAB);
+    conn.client_app_iv = @splat(0xCD);
+    conn.client_app_seq = 0;
+
+    const key: [record.key_length]u8 = @splat(0xAB);
+    const iv: [record.iv_length]u8 = @splat(0xCD);
+
+    // application_data inner type -> the plaintext is returned.
+    var rec_buf: [256]u8 = undefined;
+    const app_rec = record.protect(&rec_buf, "hello", .APPLICATION_DATA, key, iv, 0);
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "hello", try conn.readAppData(app_rec, &out));
+
+    // handshake inner type (post-handshake renegotiation / KeyUpdate) -> unexpected_message.
+    conn.client_app_seq = 1;
+    const hs_rec = record.protect(&rec_buf, &[_]u8{ 1, 0, 0, 0 }, .HANDSHAKE, key, iv, 1);
+    try std.testing.expectError(error.UnexpectedMessage, conn.readAppData(hs_rec, &out));
+
+    // alert inner type (a post-handshake closure / fatal alert) -> peer closed.
+    conn.client_app_seq = 2;
+    const alert_rec = record.protect(&rec_buf, &[_]u8{ 1, 0 }, .ALERT, key, iv, 2);
+    try std.testing.expectError(error.PeerClosed, conn.readAppData(alert_rec, &out));
+}
+
+test "zix test: connection, encryptedAlert emits a fatal alert decryptable as an ALERT record" {
+    var conn: Connection = undefined;
+    conn.server_app_key = @splat(0x11);
+    conn.server_app_iv = @splat(0x22);
+    conn.server_app_seq = 0;
+
+    var out: [64]u8 = undefined;
+    const rec = conn.encryptedAlert(.UNEXPECTED_MESSAGE, &out);
+
+    const key: [record.key_length]u8 = @splat(0x11);
+    const iv: [record.iv_length]u8 = @splat(0x22);
+    var plain: [64]u8 = undefined;
+    const opened = try record.deprotect(&plain, rec, key, iv, 0);
+    try std.testing.expectEqual(record.ContentType.ALERT, opened.inner_type);
+
+    const parsed = try alert.parseInbound(opened.data);
+    try std.testing.expect(parsed.isFatal());
+    try std.testing.expectEqual(@as(u8, @intFromEnum(alert.Alert.UNEXPECTED_MESSAGE)), parsed.description);
+}
+
+/// Test helper: build a ClientHello offering x25519 + secp256r1 groups, with key_shares only for the
+/// groups passed in (null = offered in supported_groups but no key_share, the HRR trigger).
+fn buildHrrClientHello(buf: []u8, x25519_share: ?[]const u8, secp_share: ?[]const u8) []const u8 {
+    var w = wire.Writer{ .buf = buf };
+    w.writeU8(@intFromEnum(handshake.HandshakeType.CLIENT_HELLO));
+    const header = w.placeU24();
+    w.writeU16(0x0303); // legacy_version
+    const zero_random: [32]u8 = @splat(0);
+    w.writeBytes(&zero_random); // random
+    w.writeU8(0); // empty session_id
+    w.writeU16(2); // cipher_suites length
+    w.writeU16(0x1301); // TLS_AES_128_GCM_SHA256
+    w.writeU8(1); // compression methods length
+    w.writeU8(0); // null
+
+    const exts = w.placeU16();
+    // supported_versions: 0x0304
+    w.writeU16(0x002b);
+    w.writeU16(3);
+    w.writeU8(2);
+    w.writeU16(0x0304);
+    // signature_algorithms: ecdsa_secp256r1_sha256
+    w.writeU16(0x000d);
+    w.writeU16(4);
+    w.writeU16(2);
+    w.writeU16(0x0403);
+    // supported_groups: x25519, secp256r1
+    w.writeU16(0x000a);
+    w.writeU16(6);
+    w.writeU16(4);
+    w.writeU16(0x001d);
+    w.writeU16(0x0017);
+    // key_share
+    w.writeU16(0x0033);
+    const ks_ext = w.placeU16();
+    const ks_list = w.placeU16();
+    if (x25519_share) |s| {
+        w.writeU16(0x001d);
+        w.writeU16(@intCast(s.len));
+        w.writeBytes(s);
+    }
+    if (secp_share) |s| {
+        w.writeU16(0x0017);
+        w.writeU16(@intCast(s.len));
+        w.writeBytes(s);
+    }
+    w.patchU16(ks_list);
+    w.patchU16(ks_ext);
+    w.patchU16(exts);
+    w.patchU24(header);
+
+    return w.slice();
+}
+
+test "zix test: connection, HelloRetryRequest round trip (RFC 8446 4.1.4)" {
+    var scalar: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));
+    const dummy_der = [_]u8{ 0x30, 0x03, 0x01, 0x02, 0x03 };
+    const opts = HandshakeOptions{
+        .certificate_der = &dummy_der,
+        .signing_key = .{ .ecdsa_p256 = key_pair },
+        .ephemeral_secret = @splat(0x99),
+        .server_random = @splat(0x55),
+    };
+
+    const client_x25519 = try X25519.recoverPublicKey(@splat(0x42));
+    var dummy_secp: [65]u8 = @splat(0xAB); // 65-byte point, content unused (HRR precedes ECDHE)
+    dummy_secp[0] = 0x04;
+
+    // ClientHello 1: offers x25519 but only a secp256r1 key_share -> the server asks it to retry.
+    var ch1_buf: [512]u8 = undefined;
+    const ch1 = buildHrrClientHello(&ch1_buf, null, &dummy_secp);
+
+    var out1: [1024]u8 = undefined;
+    const retry = (try serverHelloRetry(opts, ch1, &out1)) orelse return error.ExpectedRetry;
+
+    // the emitted record is a ServerHello carrying the HelloRetryRequest random sentinel.
+    try std.testing.expectEqual(@as(u8, 22), retry.to_send[0]);
+    try std.testing.expectEqual(@as(u8, 0x02), retry.to_send[5]);
+    try std.testing.expectEqualSlices(u8, &handshake.hello_retry_request_random, retry.to_send[11..43]);
+
+    // ClientHello 2: now carries the requested x25519 key_share -> the handshake completes.
+    var ch2_buf: [512]u8 = undefined;
+    const ch2 = buildHrrClientHello(&ch2_buf, &client_x25519, null);
+
+    var out2: [4096]u8 = undefined;
+    const result = try serverHandshakeAfterRetry(retry.state, ch2, &out2);
+    try std.testing.expect(result.to_send.len > 0);
+    try std.testing.expectEqual(@as(u8, 0x02), result.to_send[5]); // a real ServerHello
+    try std.testing.expect(!std.mem.eql(u8, &handshake.hello_retry_request_random, result.to_send[11..43]));
+
+    // a ClientHello that already has the x25519 key_share needs no retry.
+    var ch3_buf: [512]u8 = undefined;
+    const ch3 = buildHrrClientHello(&ch3_buf, &client_x25519, null);
+    var out3: [1024]u8 = undefined;
+    try std.testing.expect((try serverHelloRetry(opts, ch3, &out3)) == null);
 }
