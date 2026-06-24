@@ -70,6 +70,7 @@ pub fn addSteps(
         .{ "example-udp_server", "examples/udp_server.zig", "udp" },
         .{ "example-udp_client", "examples/udp_client.zig", "udp" },
         .{ "example-udp_raw_echo", "examples/udp_raw_echo.zig", "udp" },
+        .{ "example-http3_basic", "examples/http3_basic.zig", "http3" },
         .{ "example-uds_server", "examples/uds_server.zig", "uds" },
         .{ "example-uds_client", "examples/uds_client.zig", "uds" },
         .{ "example-uds_http", "examples/uds_http.zig", "uds" },
@@ -111,6 +112,7 @@ pub fn addSteps(
     const group_udp = b.step("example-udp", "Build all udp examples");
     const group_uds = b.step("example-uds", "Build all uds examples");
     const group_tls = b.step("example-tls", "Build all tls examples");
+    const group_http3 = b.step("example-http3", "Build all http3 examples");
 
     examples_step.dependOn(group_tcp);
     examples_step.dependOn(group_http1);
@@ -122,6 +124,7 @@ pub fn addSteps(
     examples_step.dependOn(group_udp);
     examples_step.dependOn(group_uds);
     examples_step.dependOn(group_tls);
+    examples_step.dependOn(group_http3);
 
     inline for (examples) |pair| {
         const exe_mod = b.createModule(.{
@@ -156,6 +159,8 @@ pub fn addSteps(
             group_uds
         else if (comptime std.mem.eql(u8, pair[2], "tls"))
             group_tls
+        else if (comptime std.mem.eql(u8, pair[2], "http3"))
+            group_http3
         else
             @compileError("unknown example group tag: " ++ pair[2]);
 
