@@ -196,4 +196,15 @@ Stabilitas penting karena enum ini dapat muncul dalam config yang diserialisasi 
 
 ---
 
+## Jalur raw-bytes (ADR-049)
+
+Server datagram raw-bytes (`zix.Udp.Raw`) terpisah dari engine typed di atas dan mengikuti layout `zix.Http1` (`core.zig` + `dispatch/` + `run()` switch tipis). Lihat ADR-049 untuk desainnya.
+
+- `datagram.zig`: primitive raw-fd. `open` memakai syscall `std.os.linux` mentah (`socket` / `bind`, karena `std.posix` tidak lagi membungkusnya setelah migrasi std.Io) plus safe wrapper `std.posix.setsockopt` untuk SO_REUSEADDR / SO_REUSEPORT. `RecvBatch` membagi satu backing buffer jadi `recv_batch` slot MTU yang disambungkan ke array `mmsghdr` / `iovec` / name untuk `recvmmsg`, dipanggil dengan `MSG_WAITFORONE` agar kembali pada datagram pertama ketimbang menunggu seluruh batch. `SendBatch.queue` menyalin tiap balasan ke backing buffer-nya sendiri (jadi balasan yang menunjuk ke receive buffer tetap valid), dan `flush` menguras antrian dengan `sendmmsg`, menangani partial send. `errno` dibaca dari return syscall mentah via `std.posix.errno`.
+- `core.zig`: `HandlerFn` dan `Sink`. `Sink.reply` memakai ulang `sockaddr.in` pengirim yang diisi kernel tanpa konversi, `Sink.replyTo` mengonversi `std.Io.net.IpAddress`. Batch yang penuh di-flush di tengah handler lalu di-queue ulang.
+- `dispatch/common.zig`: `workerLoop` (recvmmsg masuk, handler per datagram, sendmmsg keluar), `runSingle` (satu worker di thread pemanggil), `runPerCore` (satu `std.Thread` per CPU, masing-masing dengan socket SO_REUSEPORT sendiri), dan `runFallback` (non-Linux, satu loop `std.Io.net`). `dispatch/{async,pool,mixed}.zig` mendelegasikan ke `runSingle`, `dispatch/{epoll,uring}.zig` ke `runPerCore` (uring mencatat notice fold).
+- `raw.zig`: `Raw(comptime handler)` dengan `init` / `initArgs` / `deinit` dan `run()` yang switch atas `config.dispatch_model`.
+
+---
+
 ###### end of lld-udp
