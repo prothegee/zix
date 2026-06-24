@@ -164,11 +164,23 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
 /// Return:
 /// - []const u8 (the protected packet, a slice into `out`)
 pub fn sealInitial(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
+    return sealLongHeader(out, keys, 0xc0, dcid, scid, packet_number, payload, true);
+}
+
+/// Seal an outgoing long-header Handshake packet (RFC 9001 5.3 / 5.4). Like `sealInitial` but with
+/// the Handshake type (0x02) and no Token field. `keys` are the server Handshake keys.
+pub fn sealHandshake(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
+    return sealLongHeader(out, keys, 0xe0, dcid, scid, packet_number, payload, false);
+}
+
+/// Build and protect a long-header packet. `first_base` is the long-header first byte with the type
+/// bits already set (0xc0 Initial, 0xe0 Handshake), `with_token` writes the empty Token Length field
+/// that only Initial packets carry.
+fn sealLongHeader(out: []u8, keys: crypto.AesKeys, first_base: u8, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8, with_token: bool) OpenError![]const u8 {
     const pn_len: usize = if (packet_number <= 0xff) 1 else if (packet_number <= 0xffff) 2 else 4;
 
     var pos: usize = 0;
-    // First byte: long form (0x80) | fixed bit (0x40) | Initial type (0x00 << 4) | pn length - 1.
-    out[pos] = 0xc0 | @as(u8, @intCast(pn_len - 1));
+    out[pos] = first_base | @as(u8, @intCast(pn_len - 1));
     pos += 1;
     std.mem.writeInt(u32, out[pos..][0..4], 1, .big);
     pos += 4;
@@ -180,8 +192,8 @@ pub fn sealInitial(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []co
     pos += 1;
     @memcpy(out[pos..][0..scid.len], scid);
     pos += scid.len;
-    pos += varint.write(out[pos..], 0); // empty Token Length
-    pos += varint.write(out[pos..], pn_len + payload.len + Aes128Gcm.tag_length); // Length
+    if (with_token) pos += varint.write(out[pos..], 0);
+    pos += varint.write(out[pos..], pn_len + payload.len + Aes128Gcm.tag_length);
 
     const pn_offset = pos;
     var pn_bytes: [4]u8 = undefined;
@@ -287,6 +299,25 @@ test "zix test: sealInitial then openInitial round-trips the payload" {
 
     var recovered: [256]u8 = undefined;
     const opened = try openInitial(sealed, server_keys, &recovered);
+
+    try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
+}
+
+test "zix test: sealHandshake then openHandshake round-trips the payload" {
+    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const keys = crypto.AesKeys.fromSecret(secret);
+
+    var payload: [64]u8 = undefined;
+    @memset(&payload, 0);
+    const frame_bytes = h("080041020800000e") ++ h("aabbccdd");
+    @memcpy(payload[0..frame_bytes.len], &frame_bytes);
+
+    var out: [256]u8 = undefined;
+    const sealed = try sealHandshake(&out, keys, &h("c0ffee00"), &h("1234"), 0, &payload);
+
+    var recovered: [256]u8 = undefined;
+    const opened = try openHandshake(sealed, keys, &recovered);
 
     try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
