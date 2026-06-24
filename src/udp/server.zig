@@ -110,6 +110,11 @@ pub fn UdpServer(comptime Packet: type) type {
 
             logSystem(self.config, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
+            // The typed messaging path runs a single async receive loop. The per-core dispatch models
+            // are a property of the raw path (zix.Udp.Raw), so a non-ASYNC value folds here with a
+            // notice rather than silently doing nothing.
+            if (self.config.dispatch_model != .ASYNC) logSystem(self.config, "typed UDP uses the ASYNC receive loop, {s} applies only to zix.Udp.Raw", .{@tagName(self.config.dispatch_model)});
+
             // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect). The broadcast peer
             //       snapshot is allocated and freed per packet. ArenaAllocator.free() is a no-op,
@@ -229,7 +234,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
             if (task.config.broadcast) {
                 // SECURITY: no sender validation, spoofed IPs can trigger broadcast to all peers
-                // PERF: N sequential send() syscalls per packet, consider sendmmsg batching for large client counts
+                // PERF: N sequential send() syscalls per broadcast. sendmmsg batching lives in the raw path (zix.Udp.Raw), not this typed broadcast loop.
                 for (task.peers) |*peer_addr| {
                     task.socket.send(task.io, peer_addr, &task.buf) catch |err| {
                         if (task.logger) |lg| lg.system(.WARN, "udp", "broadcast error: {}", .{err});

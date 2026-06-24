@@ -6,6 +6,10 @@ const std = @import("std");
 
 const Logger = @import("../logger/logger.zig").Logger;
 
+/// The dispatch model, shared with the TCP engines (`src/tcp/config.zig`). Reused so the UDP engine
+/// names concurrency the same way the rest of the family does.
+pub const DispatchModel = @import("../tcp/config.zig").DispatchModel;
+
 /// Port binding mode: governs how the port is sourced at init time.
 /// Validation happens at init(), not at run(). Enforces "explicit over implicit."
 pub const PortMode = enum(u8) {
@@ -36,7 +40,9 @@ pub const Endianness = enum(u8) {
 pub const UdpServerConfig = struct {
     /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
-    /// Backing allocator for client list and broadcast peer snapshots. Caller owns must outlive the server.
+    /// Backing allocator. Typed path: the client list and broadcast peer snapshots. Raw path
+    /// (`zix.Udp.Raw`): the recv / send batches and the worker-thread array. Caller owns, must
+    /// outlive the server.
     /// Note:
     /// - must be a general-purpose allocator (e.g. std.heap.smp_allocator).
     ///   ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
@@ -65,6 +71,27 @@ pub const UdpServerConfig = struct {
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.packet() for each received datagram. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
+
+    // Datagram-transport knobs (ADR-049), used by the raw-bytes path (`zix.Udp.Raw`). The typed
+    // messaging path runs a single async receive loop: it folds a non-ASYNC `dispatch_model` with a
+    // notice and does not use the batch / worker knobs.
+
+    /// Concurrency model for the raw path. `.EPOLL` / `.URING` run per-core SO_REUSEPORT workers
+    /// (the recvmmsg loop). `.ASYNC` / `.POOL` / `.MIXED` run a single worker. URING currently folds
+    /// to the recvmmsg loop (true io_uring submission is a later phase). Same enum as the TCP engines.
+    dispatch_model: DispatchModel = .ASYNC,
+    /// Worker count for the per-core models. 0 means one per available CPU.
+    workers: usize = 0,
+    /// Set SO_REUSEADDR + SO_REUSEPORT so multiple workers can bind the same port and the kernel
+    /// load-balances datagrams across them.
+    reuse_address: bool = false,
+    /// recvmmsg batch size: datagrams received per syscall on the raw path.
+    recv_batch: usize = 32,
+    /// sendmmsg batch size: replies coalesced per flush on the raw path.
+    send_batch: usize = 32,
+    /// Maximum datagram size for the raw path, the receive buffer per slot. The typed path uses
+    /// `@sizeOf(Packet)` instead. 1500 is the common Ethernet MTU.
+    max_recv_buf: usize = 1500,
 };
 
 // --------------------------------------------------------- //
@@ -118,6 +145,24 @@ test "zix test: UdpServerConfig, default field values" {
     try std.testing.expect(!cfg.error_report);
     try std.testing.expect(!cfg.auto_echo);
     try std.testing.expect(!cfg.broadcast);
+}
+
+test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = UdpServerConfig{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .ip = "127.0.0.1",
+        .port = 9100,
+    };
+    try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
+    try std.testing.expectEqual(@as(usize, 0), cfg.workers);
+    try std.testing.expect(!cfg.reuse_address);
+    try std.testing.expectEqual(@as(usize, 32), cfg.recv_batch);
+    try std.testing.expectEqual(@as(usize, 32), cfg.send_batch);
+    try std.testing.expectEqual(@as(usize, 1500), cfg.max_recv_buf);
 }
 
 test "zix test: UdpClientConfig, default field values" {

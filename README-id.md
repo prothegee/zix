@@ -381,7 +381,7 @@ Beberapa perbedaan disengaja, bukan drift:
 - `zix.Http1` tidak punya `conn_timeout_ms`: ia tidak menjalankan timer thread connection-registry (lihat catatan Timeout di docs LLD HTTP/1).
 - `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
 - Response compression (`compression*`) ada di `zix.Http1` dan `zix.Http`, engine yang melayani respons HTTP dengan negosiasi Accept-Encoding. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
-- `zix.Udp` (datagram) membawa `ip` / `port` / `logger`, dan `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya, masing-masing hanya subset yang berlaku.
+- `zix.Udp` (datagram) membawa `ip` / `port` / `logger` untuk jalur typed, plus knob jalur raw `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, dipakai `zix.Udp.Raw`). `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya. Tiap engine hanya mengambil subset yang berlaku.
 
 <br>
 
@@ -408,6 +408,8 @@ Rute dibuat dalam tipe server pada waktu kompilasi: tidak diperlukan allocator u
 | Buffer terima | Stack | Satu iterasi loop terima |
 
 `config.allocator` harus berupa general-purpose allocator (misalnya `std.heap.smp_allocator`). `ArenaAllocator` tidak cocok: snapshot peer broadcast dialokasikan dan dibebaskan per paket: `ArenaAllocator.free()` adalah no-op, sehingga snapshot menumpuk tanpa batas hingga server berhenti. Lihat [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk penjelasan lengkap dan PoC.
+
+Jalur raw (`zix.Udp.Raw`, ADR-049) mengalokasikan recv / send batch dan array worker-thread-nya dari `config.allocator` sekali saat startup, bukan per paket, jadi caveat arena tidak berlaku di sana.
 
 ### HTTP/2 dan gRPC
 
@@ -1801,7 +1803,7 @@ Untuk detail desain lihat [`docs/hld-channel-id.md`](docs/hld-channel-id.md).
 
 ### UDP
 
-Server dan client UDP yang aman tipe. Pengguna mendefinisikan `extern struct` paket mereka sendiri. Zix menangani endianness, validasi ukuran, dan konkurensi.
+Dua mode. Typed `zix.Udp.Server(Packet)` adalah server messaging yang aman tipe: pengguna mendefinisikan `extern struct` paket mereka sendiri, dan zix menangani endianness, validasi ukuran, dan konkurensi. Raw `zix.Udp.Raw(handler)` (ADR-049) melayani datagram variable-length tanpa struct tetap, dengan batching `recvmmsg` / `sendmmsg` dan worker SO_REUSEPORT per-core.
 
 ```zig
 const std = @import("std");
@@ -1862,11 +1864,34 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-**Kapan digunakan:** pakai UDP saat kamu ingin datagram fire-and-forget latensi rendah dengan `extern struct` paketmu sendiri: telemetri, state game, discovery, heartbeat, atau broadcast/relay ke banyak peer, menerima pengiriman best-effort. Jika kamu butuh urutan, retransmisi, atau payload besar, pakai `zix.Tcp`.
+Mode raw-bytes (datagram variable-length, tanpa struct tetap):
+
+```zig
+fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
+    sink.reply(dg); // echo back to the sender
+}
+
+const Echo = zix.Udp.Raw(handler);
+
+pub fn main(process: std.process.Init) !void {
+    var server = try Echo.init(.{
+        .io        = process.io,
+        .allocator = std.heap.smp_allocator,
+        .ip        = "0.0.0.0",
+        .port      = 9064,
+        .dispatch_model = .EPOLL, // worker SO_REUSEPORT per-core (.ASYNC = satu worker)
+    });
+    defer server.deinit();
+    try server.run();
+}
+```
+
+**Kapan digunakan:** pakai UDP saat kamu ingin datagram fire-and-forget latensi rendah: telemetri, state game, discovery, heartbeat, atau broadcast/relay ke banyak peer, menerima pengiriman best-effort. Pakai typed `Server(Packet)` untuk kontrak `extern struct` tetap, raw `Raw(handler)` untuk payload byte sembarang dan jalur batched per-core. Jika kamu butuh urutan, retransmisi, atau payload besar, pakai `zix.Tcp`.
 
 **Contoh:**
-- [examples/udp_server.zig](examples/udp_server.zig) - contoh lengkap yang berfungsi dengan broadcast dan port yang dapat dikonfigurasi
+- [examples/udp_server.zig](examples/udp_server.zig) - server typed, contoh lengkap dengan broadcast dan port yang dapat dikonfigurasi
 - [examples/udp_client.zig](examples/udp_client.zig) - client yang cocok
+- [examples/udp_raw_echo.zig](examples/udp_raw_echo.zig) - server echo raw-bytes (batching recvmmsg / sendmmsg, dispatch model)
 
 [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk detail.
 

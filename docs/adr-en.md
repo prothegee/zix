@@ -1059,4 +1059,26 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-049: raw-bytes UDP datagram mode
+
+**Status:** Accepted
+
+**Context:** `zix.Udp` shipped as a typed messaging engine: `Server(comptime Packet)`, where every datagram is exactly one `extern struct`, received and sent one syscall at a time, with no dispatch model. That fits fixed-shape messaging but is not a datagram transport: it cannot carry variable-length payloads, batch syscalls, or run per-core. A throughput-oriented UDP workload (and a future QUIC / HTTP3 engine) needs a variable-length, batched, per-core datagram substrate, and that substrate is independently useful for echo, DNS-style, and telemetry servers.
+
+**Decision:** Add a raw-bytes mode, `zix.Udp.Raw(handler)`, alongside the unchanged typed `Server(Packet)`. The handler receives the datagram bytes (variable length up to `max_recv_buf`), the peer address, and a `Sink` to reply through. On Linux it receives in `recvmmsg` batches and sends in `sendmmsg` batches, replies coalescing into one send per received batch. `dispatch_model` (the same enum as the TCP engines) selects the worker shape: `.EPOLL` / `.URING` run one `SO_REUSEPORT` worker per CPU (per-core shared-nothing, the kernel load-balances datagrams), and `.ASYNC` / `.POOL` / `.MIXED` run a single worker. Dispatch is partitioned per ADR-043: a `src/udp/dispatch/` folder with one file per model plus `common.zig` and a thin `run()` switch, the same layout as `zix.Http1`. The typed path is unchanged and keeps its single async receive loop, and a non-ASYNC `dispatch_model` on the typed path folds with a logged notice rather than a silent no-op. QUIC-specific machinery (connection-ID demux, packet protection, transport state) stays out of `zix.Udp` and is reserved for a later `src/udp/http3/`.
+
+**Rationale:** Batched syscalls (`recvmmsg` / `sendmmsg`) and per-core `SO_REUSEPORT` workers are the real datagram-throughput levers, so building them as a first-class `zix.Udp` capability earns its keep beyond QUIC and keeps a future QUIC layer focused on transport semantics rather than reaching around a fixed-struct messaging engine. The handler-plus-`Sink` shape keeps batching invisible: a reply queues into the send batch and the whole batch leaves as one `sendmmsg`, and a reply to the sender reuses the kernel-filled address with no conversion. Reusing the TCP `DispatchModel` enum and the ADR-043 dispatch folder keeps the engine family consistent. GSO (`UDP_SEGMENT`), GRO (`UDP_GRO`), ECN, and a dedicated io_uring submission path behind `.URING` are deferred: the offloads need per-message control-data paths whose correctness depends on hardware (GRO coalesces several datagrams into one buffer, so enabling it without a splitter would hand the handler a wrong super-datagram), so `.URING` folds to the `recvmmsg` per-core loop for now.
+
+**Config:** new `UdpServerConfig` fields, all additive with safe defaults, used by the raw path: `dispatch_model` (default `.ASYNC`), `workers` (0 = one per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (the mmsg batch sizes), and `max_recv_buf` (the per-datagram buffer, the typed path keeps `@sizeOf(Packet)`). There is no `kernel_backlog`: UDP has no `listen` backlog.
+
+**Consequences:**
+- New `src/udp/datagram.zig` (raw-fd socket, `recvmmsg` with `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, address conversion), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus one file per model), and `src/udp/raw.zig` (the `Raw` facade and `run()` switch). Sockets are raw `std.os.linux` syscalls, since `std.posix` no longer wraps `socket` / `bind` / `close`.
+- `zix.Udp` exports `Raw`, `Sink`, `HandlerFn`, and `DispatchModel`. The typed `Server(Packet)` is unchanged except for the fold notice.
+- New example `examples/udp_raw_echo.zig` (port 9064) and runner `tests/runner/udp_raw_runner.zig`, plus a `udp-raw` case folded into `test-runner-all`.
+- Non-Linux targets fall back to a single `std.Io.net` receive loop (no `recvmmsg` / `sendmmsg`).
+- Phase two: a dedicated io_uring submission path behind `.URING`, and GSO / GRO / ECN.
+- Green on Zig 0.16 and 0.17 (unit-test plus the 60-protocol test-runner-all).
+
+---
+
 ###### end of adr

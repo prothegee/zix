@@ -77,10 +77,14 @@ flowchart TD
 graph TD
     zix["src/lib.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
 
-    Udp --> config["config.zig\nPortMode, Endianness\nUdpServerConfig, UdpClientConfig"]
+    Udp --> config["config.zig\nPortMode, Endianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
     Udp --> packet["packet.zig\nFeedbackResult\ntoEndian, fromEndian"]
-    Udp --> server["server.zig\nUdpServer(Packet)"]
+    Udp --> server["server.zig\nUdpServer(Packet) (typed)"]
     Udp --> client["client.zig\nUdpClient(Packet)"]
+    Udp --> core["core.zig\nHandlerFn, Sink (raw)"]
+    Udp --> datagram["datagram.zig\nraw-fd socket\nrecvmmsg / sendmmsg"]
+    Udp --> raw["raw.zig\nRaw(handler) facade\nrun() switch"]
+    raw --> dispatch["dispatch/\ncommon + async / pool /\nmixed / epoll / uring"]
 ```
 
 ---
@@ -91,8 +95,12 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Udp.Server(Packet)` | generic fn | Returns `UdpServer(Packet)` type |
+| `zix.Udp.Server(Packet)` | generic fn | Returns `UdpServer(Packet)` type (typed messaging) |
 | `zix.Udp.Client(Packet)` | generic fn | Returns `UdpClient(Packet)` type |
+| `zix.Udp.Raw(handler)` | generic fn | Returns the raw-bytes datagram server type (ADR-049) |
+| `zix.Udp.Sink` | struct | Reply queue handed to a raw handler (`reply`, `replyTo`) |
+| `zix.Udp.HandlerFn` | fn type | Raw handler: `fn([]const u8, *const IpAddress, *Sink) void` |
+| `zix.Udp.DispatchModel` | enum(u8) | Shared with the TCP engines, selects the raw worker shape |
 | `zix.Udp.ServerConfig` | struct | Server configuration |
 | `zix.Udp.ClientConfig` | struct | Client configuration |
 | `zix.Udp.PortMode` | enum(u8) | `CONFIGURABLE` or `REQUIRED` |
@@ -126,7 +134,8 @@ Access via `const zix = @import("zix");`
 
 ```zig
 pub const UdpServerConfig = struct {
-    allocator:             std.mem.Allocator,          // caller-owned, used for client list and broadcast snapshots
+    io:                    std.Io,                     // caller-owned, must outlive the server
+    allocator:             std.mem.Allocator,          // caller-owned (client list + broadcast snapshots, raw batches)
     ip:                    []const u8,                 // bind address
     port:                  u16,                        // bind port & must be non-zero
     port_mode:             PortMode   = .REQUIRED,
@@ -137,10 +146,21 @@ pub const UdpServerConfig = struct {
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
     auto_echo:             bool       = false, // send received packet back to sender only
     broadcast:             bool       = false, // relay received packet to all connected clients
+    logger:                ?*Logger   = null,  // lifecycle + per-packet logging when set
+
+    // Datagram-transport knobs (ADR-049), used by the raw-bytes path (zix.Udp.Raw). The typed
+    // path runs a single async loop: it folds a non-ASYNC dispatch_model with a notice and does
+    // not use the batch / worker knobs.
+    dispatch_model:        DispatchModel = .ASYNC, // .EPOLL / .URING = per-core workers
+    workers:               usize         = 0,      // 0 = one worker per CPU
+    reuse_address:         bool          = false,  // SO_REUSEADDR + SO_REUSEPORT
+    recv_batch:            usize         = 32,     // recvmmsg batch size
+    send_batch:            usize         = 32,     // sendmmsg batch size
+    max_recv_buf:          usize         = 1500,   // raw datagram buffer (typed uses @sizeOf(Packet))
 };
 ```
 
-`allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent: both can be true simultaneously (ACK then echo). `broadcast` sends to all clients, `auto_echo` sends only to the sender.
+`io`, `allocator`, `ip`, and `port` are required (no defaults). `auto_ack` and `auto_echo` are independent: both can be true simultaneously (ACK then echo). `broadcast` sends to all clients, `auto_echo` sends only to the sender. The datagram-transport fields apply to the raw-bytes path (`zix.Udp.Raw`, see [Raw-bytes Mode](#raw-bytes-mode-adr-049)), the typed `Server(Packet)` leaves them unused beyond folding a non-ASYNC `dispatch_model`.
 
 ---
 
@@ -323,14 +343,37 @@ See `docs/hld-logger.md` for log line format and config details.
 
 ---
 
+## Raw-bytes Mode (ADR-049)
+
+Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-length datagrams with no fixed packet struct. It is the datagram-transport substrate (and the base a future QUIC / HTTP3 engine sits on), useful on its own for echo, DNS-style, and telemetry servers.
+
+- Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. It gets the bytes as received (up to `max_recv_buf`), the peer, and a `Sink`. `sink.reply(bytes)` answers the sender with no address conversion, `sink.replyTo(peer, bytes)` answers an explicit peer.
+- Batched I/O (Linux): receive in `recvmmsg` batches (`recv_batch`), send in `sendmmsg` batches (`send_batch`). Replies coalesce into one `sendmmsg` per received batch. Non-Linux falls back to a single `std.Io.net` receive loop.
+- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing), `.ASYNC` / `.POOL` / `.MIXED` run a single worker. `.URING` folds to the recvmmsg per-core loop for now.
+
+```zig
+fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
+    sink.reply(dg); // echo back to the sender
+}
+
+const Echo = zix.Udp.Raw(handler);
+var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064 });
+try server.run();
+```
+
+See `examples/udp_raw_echo.zig` and ADR-049 (`docs/adr-en.md`).
+
+---
+
 ## Not Yet Implemented
 
 | Feature | Note |
 | :- | :- |
-| `sendmmsg` batching | N sequential `send()` per broadcast, `sendmmsg` would reduce to 1 syscall |
+| `sendmmsg` batching in the typed broadcast loop | Done in the raw path (`zix.Udp.Raw`). The typed broadcast still does N sequential `send()` |
+| Raw GSO / GRO / ECN | Deferred (ADR-049 phase 2): need hardware-validated cmsg paths (GRO coalescing needs a splitter) |
+| Dedicated io_uring submission for raw `.URING` | Deferred: `.URING` folds to the recvmmsg per-core loop for now |
 | Sub-millisecond send interval | `send_every` is in milliseconds, rename to nanoseconds if needed |
-| Arena-allocated peers cap removal | PoC used `MAX_BROADCAST_CLIENTS=64`. Current src uses heap slice with no cap |
-| Configurable feedback struct | Currently echo sends the raw packet back. Production could use a tagged result |
+| Configurable feedback struct | Typed echo sends the raw packet back. Production could use a tagged result |
 
 <!-- tickrate 64 vs 128 -->
 
