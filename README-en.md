@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network backend library/engine written in zig.</i>
+    <i>A network backend library & engine written in zig.</i>
 </p>
 
 <div align="center">
@@ -1991,6 +1991,15 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 > behaviour of 8-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
 
 > Historical benchmark stored inside `docs/benchmark` directory.
+
+<br>
+
+## Summary
+
+```
+A surgical backend library & engine with a wiring tools.
+That will bring you performance, efficiency, & transparency. Not a framework.
+```
 
 <br>
 

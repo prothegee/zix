@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>Jaringan backend library/engine yang ditulis dalam zig.</i>
+    <i>Jaringan backend library & engine yang ditulis dalam zig.</i>
 </p>
 
 <div align="center">
@@ -1991,6 +1991,15 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 > perilaku CPU 8-12 core berbeda dengan 32-64 core. Berkat proyek HttpArena, zix bisa diukur pada beban kerja besar.
 
 > Benchmark historis disimpan di dalam direktori `docs/benchmark`.
+
+<br>
+
+## Rangkuman
+
+```
+Sebuah pustaka dan mesin backend bedah dengan alat penghubung.
+Yang akan memberikan Anda kinerja, efisiensi, dan transparansi. Bukan framework.
+```
 
 <br>
 
