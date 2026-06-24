@@ -38,7 +38,11 @@ one piece zix already wrote.
   `rnd/0.5.x/quic_retry_poc.zig` against Appendix A.4: 4 vectors byte-exact (key + nonce derived from
   the published secret, tag over the pseudo-packet, full reconstructed Retry packet). Gate
   `verify-quic-retry.sh` (doc `verify-quic-retry.md`).
-- [ ] C3: key update (retain old + two receive-key sets), ChaCha20 short-header sample (Appendix A.5)
+- [x] C3: ChaCha20-Poly1305 short-header protection + key-update secret. Proven in
+  `rnd/0.5.x/quic_keyupdate_poc.zig` against RFC 9001 5.4.4 / 6.1 / Appendix A.5: 10 vectors
+  byte-exact (key / iv / hp / ku derivation, ChaCha20-based header mask, protected short-header
+  packet). Gate `verify-quic-keyupdate.sh` (doc `verify-quic-keyupdate.md`). Retaining old keys +
+  two receive-key sets across a phase flip is connection state, deferred to Layer Q.
 - [ ] C4: AEAD confidentiality / integrity limits + constant-time send / receive paths (9001 6.6, 9.5)
 
 ## Layer Q: QUIC transport (RFC 9000, in-process tests on crafted packets)
@@ -90,6 +94,6 @@ one piece zix already wrote.
 
 ## Order and effort
 
-C -> Q -> T -> P -> H -> L, then integration. Layer C (done at C1) is the self-contained deterministic
+C -> Q -> T -> P -> H -> L, then integration. Layer C (C1-C3 done) is the self-contained deterministic
 half and de-risks the rest. Layer T is the first live gate (curl --http3). The transport state machine
 (Q) and QPACK synchronization (P 2.2) are the long poles. None of this is benchmark-gated until I4.
