@@ -7,6 +7,7 @@
 const server = @import("server.zig");
 const core = @import("core.zig");
 const Config = @import("config.zig");
+const router = @import("router.zig");
 
 /// The HTTP/3 server type, bound to a comptime handler.
 pub const Http3 = server.Http3;
@@ -20,3 +21,9 @@ pub const Response = core.Response;
 pub const ServerConfig = Config.Http3ServerConfig;
 /// The dispatch model, shared with the rest of the engine family (ADR-050).
 pub const DispatchModel = Config.DispatchModel;
+/// The comptime router, mirroring zix.Http1 / zix.Http2.
+pub const Router = router.Router;
+/// A single route entry for the router.
+pub const Route = router.Route;
+/// Look up a path parameter captured by a PARAM route.
+pub const pathParam = router.pathParam;
