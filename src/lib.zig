@@ -105,8 +105,11 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));
     std.testing.refAllDecls(@import("tcp/http2/hpack.zig"));
     std.testing.refAllDecls(@import("tcp/http2/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/mux.zig"));
     std.testing.refAllDecls(@import("tcp/http2/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/dispatch/epoll.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http2/tls_serve.zig"));
 
     // # zix.Grpc
