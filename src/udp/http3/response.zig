@@ -70,6 +70,22 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) usize {
     return p;
 }
 
+/// Build an ACK-only 1-RTT payload acknowledging packets 0..largest (RFC 9000 19.3): one contiguous
+/// range. Returns 0 when there is nothing to acknowledge.
+pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
+    const largest = ack_largest orelse return 0;
+
+    var p: usize = 0;
+    out[p] = 0x02; // ACK frame type
+    p += 1;
+    p += varint.write(out[p..], largest); // Largest Acknowledged
+    p += varint.write(out[p..], 0); // ACK Delay
+    p += varint.write(out[p..], 0); // ACK Range Count
+    p += varint.write(out[p..], largest); // First ACK Range (largest down to 0)
+
+    return p;
+}
+
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response.
 ///
 /// Param:
@@ -80,8 +96,9 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) usize {
 ///
 /// Return:
 /// - usize (the number of bytes written)
-pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []const u8) usize {
-    var p: usize = 0;
+pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []const u8, ack_largest: ?u64, close: bool) usize {
+    // ACK the client's 1-RTT packets so it stops retransmitting (RFC 9000 19.3).
+    var p: usize = buildAck(out, ack_largest);
 
     // HANDSHAKE_DONE (RFC 9001 7.5): confirm the handshake to the client so it finalizes the
     // connection rather than waiting.
@@ -97,6 +114,15 @@ pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []con
     const content_len = buildRequestStreamContent(&content, status, body);
     writeStreamFrame(out, &p, request_stream_id, true, content[0..content_len]);
 
+    // Application CONNECTION_CLOSE (RFC 9000 19.19, type 0x1d): H3_NO_ERROR with an empty reason, so
+    // the client finalizes the connection after the response instead of waiting.
+    if (close) {
+        out[p] = 0x1d; // CONNECTION_CLOSE (application)
+        p += 1;
+        p += varint.write(out[p..], 0x0100); // H3_NO_ERROR
+        p += varint.write(out[p..], 0); // Reason Phrase Length
+    }
+
     return p;
 }
 
@@ -105,7 +131,7 @@ pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []con
 
 test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
     var out: [1024]u8 = undefined;
-    const len = buildResponse(&out, 0, 200, "hi");
+    const len = buildResponse(&out, 0, 200, "hi", null, false);
     const payload = out[0..len];
 
     // HANDSHAKE_DONE, then a STREAM frame on the server control stream (id 3) carrying the control
@@ -120,4 +146,16 @@ test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
     try std.testing.expectEqual(@as(u8, 0x0b), payload[7]); // STREAM, LEN, FIN
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x01, 0x03, 0x00, 0x00, 0xd9 }) != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "hi") != null);
+}
+
+test "zix test: response with ack and close carries both frames" {
+    var out: [1024]u8 = undefined;
+    const len = buildResponse(&out, 0, 200, "hi", 3, true);
+    const payload = out[0..len];
+
+    // Leads with an ACK frame: type 0x02, largest 3, delay 0, range count 0, first range 3.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x03, 0x00, 0x00, 0x03 }, payload[0..5]);
+
+    // Ends with an application CONNECTION_CLOSE (0x1d) carrying H3_NO_ERROR (0x0100 = varint 4100).
+    try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x1d, 0x41, 0x00, 0x00 }) != null);
 }
