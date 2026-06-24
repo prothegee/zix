@@ -86,6 +86,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/pem.zig"));
     std.testing.refAllDecls(@import("tls/rsa.zig"));
     std.testing.refAllDecls(@import("tls/context.zig"));
+    std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
 
     // # zix.Tls (TLS 1.2 building blocks: PRF schedule, record, version select)
@@ -120,6 +121,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/grpc/core.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/tls_serve.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/client.zig"));
 
     // # zix.Logger
