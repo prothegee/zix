@@ -432,19 +432,18 @@ Ambil zix ke proyekmu:
 Tambahkan ke `build.zig.zon`:
 ```zig
 .{
-    .name = .backend_api,
+    .name = .my_project,
     .version = "0.1.0",
-    .dependencies = .{
-        .zix = .{
-            .url = "https://codeberg.org/prothegee/zix/archive/0.3.x.tar.gz",
-            // .hash will be filled in by `zig fetch --save`
-        },
-    },
+    .fingerprint = 0x0, // required, zig prints a suggested value on first init
+    .dependencies = .{},
     .paths = .{""},
 }
 ```
 
-Lalu lakukan `zig fetch --save`.
+Lalu lakukan:
+```sh
+zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"`.
+```
 
 <br>
 
@@ -458,7 +457,8 @@ zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
 atau
 
 ```sh
-zig fetch --save "git+https://codeberg.org/prothegee/zix#0.2.x" # upstream v0.2.x
+# upstream vMAJOR.MINOR.x
+zig fetch --save "git+https://codeberg.org/prothegee/zix#MAJOR.MINOR.x"
 ```
 
 > Kamu juga bisa menggunakan mirror di `github.com/prothegee/zix`
