@@ -53,14 +53,16 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UdpClient(Packet).init(config, io)"] --> B["bind 127.0.0.1:bind_port"]
+    A["UdpClient(Packet).init(config, io)"] --> B["bind config.bind_ip:bind_port"]
     B --> C["resolve server IpAddress"]
     C --> D["client ready"]
     D --> E["send(packet)"]
     E --> F["toEndian(packet, config.endianness)"]
     F --> G["socket.send(io, dest, bytes)"]
     D --> H["receiveFeedback()"]
-    H --> I["socket.receive(io, buf)"]
+    H --> P{"recv_timeout_ms > 0 and poll times out?"}
+    P -->|yes| Q["error.RecvTimeout"]
+    P -->|no| I["socket.receive(io, buf)"]
     I --> J{"len == 1?"}
     J -->|0x06| K[".ack"]
     J -->|other| L[".nack"]
@@ -168,17 +170,19 @@ pub const UdpServerConfig = struct {
 
 ```zig
 pub const UdpClientConfig = struct {
-    server_ip:   []const u8, // server address to send packets to
+    ip:          []const u8, // server address to send packets to
     server_port: u16,        // server port & must be non-zero
+    bind_ip:     []const u8 = "127.0.0.1", // local bind address, "0.0.0.0" for all interfaces
     bind_port:   u16,        // local port: server uses this to send responses back
     port_mode:   PortMode   = .REQUIRED,
     endianness:  Endianness = .LITTLE, // must match server
     send_once:   bool       = false,
     send_every:  u64        = 99, // milliseconds between sends in run loop
+    recv_timeout_ms: u32    = 0,  // receive timeout via poll, 0 = blocking
 };
 ```
 
-`server_ip`, `server_port`, and `bind_port` are required (no defaults). `UdpClient` makes no heap allocations (all buffers are stack-allocated), so no `allocator` field is needed.
+`ip`, `server_port`, and `bind_port` are required (no defaults). `bind_ip` defaults to loopback (override with `--bind-ip` in CONFIGURABLE mode), and `recv_timeout_ms` defaults to a blocking receive. `UdpClient` makes no heap allocations (all buffers are stack-allocated), so no `allocator` field is needed.
 
 ---
 
