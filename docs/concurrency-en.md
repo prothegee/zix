@@ -345,6 +345,33 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 
 ---
 
+## Cross-Platform Backends (planned)
+
+Each model names two things at once: a concurrency shape (single or multi-core) and, for the per-core models, an I/O backend. The backend is OS-specific. The contract: the OS swaps the backend, never the single-or-multi nature of the model.
+
+| Model | Core behavior | OS | Status |
+| :- | :- | :- | :- |
+| `.ASYNC` | single | all | now |
+| `.POOL` | multi (thread pool) | all | now |
+| `.MIXED` | multi (hybrid) | all | now |
+| `.EPOLL` | multi (per-core) | Linux | now |
+| `.URING` | multi (per-core) | Linux | now |
+| `.KQUEUE` | multi (per-core) | macOS / BSD | planned |
+| `.IOCP` | multi (per-core) | Windows | planned |
+
+`.EPOLL`, `.KQUEUE`, and `.IOCP` are the same multi-core per-core idea, one per operating system. Each lives in its own `dispatch/<model>.zig` file, so the folder is self-documenting: open it, see every model, each header line states its core behavior and OS.
+
+Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine that selects a `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) gets its platform's backend through the same enum.
+
+There is no auto-select keyword. Portable code picks a portable shape (`.POOL` / `.MIXED`) or names the exact backend with a one-line comptime switch on `builtin.os.tag`. Two mismatches are handled differently:
+
+- A backend that cannot exist on the target OS (for example `.IOCP` on Linux) is a compile-time error (a category error), caught at build.
+- A backend that exists but the machine cannot use at runtime (for example `.URING` on an old kernel) folds to a working model with a logged notice (a capability gap).
+
+Today, before the macOS and Windows backends land, `.EPOLL` on a non-Linux build folds to `.POOL` as an interim. `.KQUEUE` and `.IOCP` are reserved names only, not yet implemented and not present as source files. See ADR-050.
+
+---
+
 ## Channel
 
 `zix.Channel` is **not** a concurrency model. It is an in-process message-passing primitive

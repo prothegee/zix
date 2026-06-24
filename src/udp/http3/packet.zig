@@ -1,0 +1,172 @@
+//! zix HTTP/3 QUIC packet headers and packet numbers (RFC 9000 17, Layer Q).
+//!
+//! What:
+//! - The truncated packet-number encode length and decode (17.1), and the long / short header parse
+//!   (17.2 / 17.3) that splits a datagram into its fields. Everything above (frames, streams) reads
+//!   through these.
+//! - Validates the version-1 invariants: Fixed Bit MUST be 1 (else discard) and a long header
+//!   connection ID length MUST NOT exceed 20 (else drop). Proven against RFC 9000 Appendix A.2 / A.3
+//!   plus crafted headers in the tests below.
+
+const std = @import("std");
+
+/// Select the packet-number encoding length in bytes (RFC 9000 17.1, Appendix A.2): the sender MUST
+/// use a size able to represent more than twice the range of unacknowledged packet numbers.
+pub fn packetNumberLength(full_pn: u64, largest_acked: ?u64) usize {
+    const num_unacked = if (largest_acked) |acked| full_pn - acked else full_pn + 1;
+
+    var bytes: usize = 1;
+    while (bytes < 4) : (bytes += 1) {
+        const range = @as(u128, 1) << @intCast(8 * bytes);
+        if (range > 2 * @as(u128, num_unacked)) break;
+    }
+
+    return bytes;
+}
+
+/// Recover the full packet number from the truncated wire value (RFC 9000 17.1, Appendix A.3):
+/// pick the candidate closest to the next expected packet number.
+pub fn decodePacketNumber(largest_pn: u64, truncated_pn: u64, pn_nbits: u6) u64 {
+    const expected_pn = largest_pn + 1;
+    const pn_win: u64 = @as(u64, 1) << pn_nbits;
+    const pn_hwin = pn_win / 2;
+    const pn_mask = pn_win - 1;
+
+    const candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
+    if (candidate_pn <= expected_pn - pn_hwin and candidate_pn < (@as(u64, 1) << 62) - pn_win) {
+        return candidate_pn + pn_win;
+    }
+    if (candidate_pn > expected_pn + pn_hwin and candidate_pn >= pn_win) {
+        return candidate_pn - pn_win;
+    }
+
+    return candidate_pn;
+}
+
+// --------------------------------------------------------------- //
+
+/// The errors a version-1 header parse can raise (RFC 9000 17.2 / 17.3 invariants).
+pub const ParseError = error{
+    Truncated,
+    /// Header Form bit says this is not the expected header shape.
+    WrongHeaderForm,
+    /// Fixed Bit is 0: not a valid version-1 packet, MUST be discarded.
+    FixedBitZero,
+    /// A connection ID length exceeds the 20-byte version-1 maximum, MUST drop the packet.
+    ConnectionIdTooLong,
+};
+
+/// A version-1 long header packet split into its fields (RFC 9000 17.2).
+pub const LongHeader = struct {
+    packet_type: u2,
+    version: u32,
+    dcid: []const u8,
+    scid: []const u8,
+    rest: []const u8,
+};
+
+/// Parse a version-1 long header (RFC 9000 17.2). Validates Header Form, Fixed Bit, and the 20-byte
+/// connection ID ceiling.
+pub fn parseLongHeader(data: []const u8) ParseError!LongHeader {
+    if (data.len < 6) return error.Truncated;
+
+    const first = data[0];
+    if (first & 0x80 == 0) return error.WrongHeaderForm;
+    if (first & 0x40 == 0) return error.FixedBitZero;
+
+    const version = std.mem.readInt(u32, data[1..5], .big);
+
+    var pos: usize = 5;
+    const dcid_len = data[pos];
+    if (dcid_len > 20) return error.ConnectionIdTooLong;
+    pos += 1;
+    if (data.len < pos + dcid_len) return error.Truncated;
+    const dcid = data[pos .. pos + dcid_len];
+    pos += dcid_len;
+
+    if (data.len < pos + 1) return error.Truncated;
+    const scid_len = data[pos];
+    if (scid_len > 20) return error.ConnectionIdTooLong;
+    pos += 1;
+    if (data.len < pos + scid_len) return error.Truncated;
+    const scid = data[pos .. pos + scid_len];
+    pos += scid_len;
+
+    return .{
+        .packet_type = @intCast((first & 0x30) >> 4),
+        .version = version,
+        .dcid = dcid,
+        .scid = scid,
+        .rest = data[pos..],
+    };
+}
+
+/// A version-1 short header (1-RTT) packet split into its fields (RFC 9000 17.3). The Destination
+/// Connection ID length is not on the wire, the receiver knows the length it issued.
+pub const ShortHeader = struct {
+    spin_bit: bool,
+    key_phase: bool,
+    pn_length: usize,
+    dcid: []const u8,
+    rest: []const u8,
+};
+
+/// Parse a version-1 short header (RFC 9000 17.3) given the locally issued connection ID length.
+/// Validates Header Form and Fixed Bit.
+pub fn parseShortHeader(data: []const u8, dcid_len: usize) ParseError!ShortHeader {
+    if (data.len < 1 + dcid_len) return error.Truncated;
+
+    const first = data[0];
+    if (first & 0x80 != 0) return error.WrongHeaderForm;
+    if (first & 0x40 == 0) return error.FixedBitZero;
+
+    return .{
+        .spin_bit = first & 0x20 != 0,
+        .key_phase = first & 0x04 != 0,
+        .pn_length = @as(usize, first & 0x03) + 1,
+        .dcid = data[1 .. 1 + dcid_len],
+        .rest = data[1 + dcid_len ..],
+    };
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+fn h(comptime text: []const u8) [text.len / 2]u8 {
+    var out: [text.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, text) catch unreachable;
+
+    return out;
+}
+
+test "zix test: RFC 9000 A.2 / A.3 packet number encode length and decode" {
+    try std.testing.expectEqual(@as(usize, 2), packetNumberLength(0xac5c02, 0xabe8b3));
+    try std.testing.expectEqual(@as(usize, 3), packetNumberLength(0xace8fe, 0xabe8b3));
+
+    try std.testing.expectEqual(@as(u64, 0xa82f9b32), decodePacketNumber(0xa82f30ea, 0x9b32, 16));
+}
+
+test "zix test: RFC 9000 17.2 long header parse and invariants" {
+    const long = h("c300000001088394c8f03e515708041122334400");
+    const header = try parseLongHeader(&long);
+    try std.testing.expectEqual(@as(u2, 0), header.packet_type);
+    try std.testing.expectEqual(@as(u32, 1), header.version);
+    try std.testing.expectEqualSlices(u8, &h("8394c8f03e515708"), header.dcid);
+    try std.testing.expectEqualSlices(u8, &h("11223344"), header.scid);
+    try std.testing.expectEqualSlices(u8, &h("00"), header.rest);
+
+    try std.testing.expectError(error.FixedBitZero, parseLongHeader(&h("830000000100")));
+    try std.testing.expectError(error.ConnectionIdTooLong, parseLongHeader(&h("c30000000115")));
+}
+
+test "zix test: RFC 9000 17.3 short header parse and invariants" {
+    const short = h("43cafebabe11223344aabbcc");
+    const sh = try parseShortHeader(&short, 8);
+    try std.testing.expect(!sh.spin_bit);
+    try std.testing.expect(!sh.key_phase);
+    try std.testing.expectEqual(@as(usize, 4), sh.pn_length);
+    try std.testing.expectEqualSlices(u8, &h("cafebabe11223344"), sh.dcid);
+    try std.testing.expectEqualSlices(u8, &h("aabbcc"), sh.rest);
+
+    try std.testing.expectError(error.FixedBitZero, parseShortHeader(&h("03cafebabe11223344"), 8));
+}

@@ -1077,7 +1077,26 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Example baru `examples/udp_raw_echo.zig` (port 9064) dan runner `tests/runner/udp_raw_runner.zig`, plus kasus `udp-raw` yang dilipat ke `test-runner-all`.
 - Target non-Linux jatuh ke satu loop receive `std.Io.net` (tanpa `recvmmsg` / `sendmmsg`).
 - Fase dua: jalur submission io_uring khusus di balik `.URING`, dan GSO / GRO / ECN.
+- Fase tiga: connection-affinity steering opsional. Pemetaan per-core `.EPOLL` / `.URING` adalah stateless fan-out (kernel meng-hash datagram berdasarkan 4-tuple), benar untuk echo / DNS / telemetry tapi tidak untuk protokol connection-oriented yang butuh affinity datagram-ke-owner, karena QUIC connection migration mengubah 4-tuple dan bisa sampai ke worker tanpa state koneksinya. Protokol seperti itu menjalankan bentuk single-worker dan mendemux secara internal, atau menyetel knob `steering` opsional yang me-route berdasarkan byte-range key dari protokol (program eBPF `SO_REUSEPORT` yang diparameter offset dan length), `zix.Udp` tetap protocol-agnostic. Di tempat steering tak tersedia, model per-core jatuh ke jalur single-demux.
 - Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 60 protokol).
+
+---
+
+## ADR-050: taksonomi model dispatch dan matriks backend lintas-platform
+
+**Status:** Proposed
+
+**Konteks:** Enum `DispatchModel` dipakai bersama di seluruh keluarga engine, tapi nilainya mencampur dua sumbu: bentuk konkurensi (single atau multi-core) dan, untuk model per-core, sebuah I/O backend OS-specific (`.EPOLL` dan `.URING` hanya Linux). Saat ini sebagian nilai beralias (di mode raw `zix.Udp`, `.POOL` dan `.MIXED` sama-sama menjalankan satu worker), dan pemilihan di luar platform diam-diam fallback ke `.POOL`. Saat dukungan macOS (`kqueue`) dan Windows (IOCP) mendekat, keluarga ini butuh satu aturan yang bisa diprediksi tentang arti tiap model dan OS mana yang menjalankannya, sehingga developer tidak pernah perlu menebak perilaku core atau mencari backend-nya.
+
+**Keputusan:** Tetapkan arti tiap model: OS menukar backend, bukan sifat single-atau-multi. `.ASYNC` single-core di mana saja. `.POOL` (thread pool) dan `.MIXED` (hybrid) multi-core di mana saja. `.EPOLL`, `.KQUEUE`, dan `.IOCP` adalah ide multi-core per-core yang sama, satu per sistem operasi (`.EPOLL` Linux, `.KQUEUE` macOS / BSD, `.IOCP` Windows), dan `.URING` adalah completion ring Linux. Folder `dispatch/` tiap engine membawa satu file per model, sehingga folder-nya self-documenting dan tiap model bisa dituning mandiri. Dua ketidakcocokan dibedakan: category error (backend yang tidak mungkin ada di OS target, misalnya `.IOCP` di Linux) adalah compile-time reject via `builtin.os.tag`, dan capability gap (backend yang ada tapi tak bisa dipakai mesin, misalnya `.URING` di kernel lama) di-fold ke model yang bekerja dengan notice yang dicatat. Tidak ada keyword auto-select: kode portable memilih bentuk portable (`.POOL` / `.MIXED`) atau satu baris comptime switch.
+
+**Alasan:** Kontrak yang tetap menghapus tebak-tebakan yang ditimbulkan aliasing dan silent fallback. Menjaga OS backend sebagai entri bernama, file-per-model (ketimbang menyembunyikannya di balik satu nilai per-core abstrak) membuat developer bisa melihat dan menuning jalur yang tepat untuk platform-nya, dan cocok dengan folder dispatch per-engine ADR-043. Compile-time category error menangkap pilihan OS yang salah saat build, tempat paling awal, sementara runtime capability fold menjaga pilihan yang benar-tapi-tak-tersedia tetap berjalan. Menolak keyword auto-select menjaga pemilihan tetap eksplisit: satu nilai menamai persis satu perilaku, bukan kejutan per-mesin.
+
+**Konsekuensi:**
+- `.KQUEUE` dan `.IOCP` adalah nama yang dipesan, didokumentasikan tapi belum diimplementasikan. Keduanya tidak dibuat sebagai file source kosong: pemesanannya ada di ADR ini dan referensi concurrency.
+- Aliasing `.POOL` / `.MIXED` ke satu worker di mode raw `zix.Udp` saat ini jadi gap yang harus ditutup: keduanya harus multi-core di bawah kontrak.
+- Silent fallback non-Linux `.EPOLL` ke `.POOL` yang ada sekarang digantikan, begitu OS backend hadir, oleh backend OS-native plus aturan category-error.
+- Taksonomi ini whole-family. `zix.Udp` dan pekerjaan HTTP/3 (ADR-049 dan `src/udp/http3/`) adalah salah satu consumer.
 
 ---
 

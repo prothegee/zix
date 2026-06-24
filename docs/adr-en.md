@@ -1077,7 +1077,26 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - New example `examples/udp_raw_echo.zig` (port 9064) and runner `tests/runner/udp_raw_runner.zig`, plus a `udp-raw` case folded into `test-runner-all`.
 - Non-Linux targets fall back to a single `std.Io.net` receive loop (no `recvmmsg` / `sendmmsg`).
 - Phase two: a dedicated io_uring submission path behind `.URING`, and GSO / GRO / ECN.
+- Phase three: optional connection-affinity steering. The `.EPOLL` / `.URING` per-core mapping is stateless fan-out (the kernel hashes datagrams by 4-tuple), correct for echo / DNS / telemetry but not for a connection-oriented protocol that needs datagram-to-owner affinity, since a QUIC connection migration changes the 4-tuple and can reach a worker without the connection state. Such a protocol runs the single-worker shape and demuxes internally, or sets an optional `steering` knob that routes by a protocol-supplied byte-range key (an `SO_REUSEPORT` eBPF program parameterized by offset and length), `zix.Udp` staying protocol-agnostic. Where steering is unavailable the per-core models fall back to the single-demux path.
 - Green on Zig 0.16 and 0.17 (unit-test plus the 60-protocol test-runner-all).
+
+---
+
+## ADR-050: dispatch-model taxonomy and cross-platform backend matrix
+
+**Status:** Proposed
+
+**Context:** The `DispatchModel` enum is shared across the engine family, but its values mix two axes: a concurrency shape (single or multi-core) and, for the per-core models, an OS-specific I/O backend (`.EPOLL` and `.URING` are Linux-only). Today some values alias (in `zix.Udp` raw mode `.POOL` and `.MIXED` both run a single worker), and an off-platform selection silently falls back to `.POOL`. As macOS (`kqueue`) and Windows (IOCP) support approaches, the family needs one predictable rule for what each model means and which OS runs it, so a developer never has to guess the core behavior or hunt for the backend.
+
+**Decision:** Fix the meaning of each model: the OS swaps the backend, never the single-or-multi nature. `.ASYNC` is single-core everywhere. `.POOL` (thread pool) and `.MIXED` (hybrid) are multi-core everywhere. `.EPOLL`, `.KQUEUE`, and `.IOCP` are the same multi-core per-core idea, one per operating system (`.EPOLL` Linux, `.KQUEUE` macOS / BSD, `.IOCP` Windows), and `.URING` is the Linux completion ring. Every engine's `dispatch/` folder carries one file per model, so the folder is self-documenting and each model is independently tunable. Two mismatches are distinguished: a category error (a backend that cannot exist on the target OS, for example `.IOCP` on Linux) is a compile-time reject via `builtin.os.tag`, and a capability gap (a backend that exists but the machine cannot use, for example `.URING` on an old kernel) folds to a working model with a logged notice. There is no auto-select keyword: portable code picks a portable shape (`.POOL` / `.MIXED`) or a one-line comptime switch.
+
+**Rationale:** A fixed contract removes the guess-work the aliasing and the silent fallback introduced. Keeping the OS backends as named, file-per-model entries (rather than hiding them behind one abstract per-core value) lets a developer see and tune the exact path for their platform, and matches the per-engine dispatch folder of ADR-043. The compile-time category error catches a wrong-OS pick at build, the earliest place, while the runtime capability fold keeps a correct-but-unavailable pick running. Rejecting an auto-select keyword keeps selection explicit: a value names exactly one behavior, never a per-machine surprise.
+
+**Consequences:**
+- `.KQUEUE` and `.IOCP` are reserved names, documented but not yet implemented. They are not created as empty source files: the reservation lives in this ADR and the concurrency reference.
+- `zix.Udp` raw mode's current `.POOL` / `.MIXED` aliasing to a single worker becomes a gap to close: both must be multi-core under the contract.
+- The existing non-Linux silent fallback of `.EPOLL` to `.POOL` is replaced, once the OS backends land, by the OS-native backend plus the category-error rule.
+- The taxonomy is whole-family. `zix.Udp` and the HTTP/3 work (ADR-049 and `src/udp/http3/`) are one consumer.
 
 ---
 

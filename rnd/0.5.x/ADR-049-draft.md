@@ -97,6 +97,15 @@ fixed-struct messaging toy. This is the honest reading of "src/udp/http3 on zix.
 EPOLL / URING to POOL. A dedicated io_uring submission path (multishot recv, registered buffers)
 replaces that fold in a later phase.
 
+### Per-core model is stateless fan-out
+The `.EPOLL` / `.URING` per-core mapping uses plain SO_REUSEPORT, so the kernel routes datagrams by
+4-tuple hash. This is correct only when any worker can handle any datagram (echo, DNS-style,
+telemetry). It is not safe for connection-oriented protocols that need datagram-to-owner affinity: a
+QUIC connection migration changes the 4-tuple, so a migrated datagram can hash to a worker that does
+not hold the connection state. Such protocols either run the single-worker shape and demux internally
+(HTTP/3 v1), or use the phase 3 steering hook. The per-core model never inspects the payload, the
+affinity policy lives in the upper layer.
+
 ## Phase 2 (deferred)
 - A dedicated io_uring submission path behind `.URING` (today it folds to the recvmmsg loop).
 - GSO (`UDP_SEGMENT`), GRO (`UDP_GRO`), and ECN (`IP_TOS` / `IP_RECVTOS`). They need per-send /
@@ -104,6 +113,16 @@ replaces that fold in a later phase.
   validate. GRO in particular coalesces several datagrams into one buffer, so enabling it without a
   correct splitter would hand a datagram handler a wrong super-datagram. Added once a cmsg path can
   be hardware-tested.
+
+## Phase 3 (deferred): connection-affinity steering
+Adds an optional `steering` knob to `UdpServerConfig` so the per-core models route by a
+protocol-supplied byte-range key instead of the 4-tuple hash. The mechanism is an SO_REUSEPORT eBPF
+program parameterized by `(key_offset, key_len)`. `zix.Udp` stays protocol-agnostic: it hashes an
+opaque byte range, it never learns what a Connection ID is. HTTP/3 supplies the range pointing at its
+fixed-length DCID, which keeps the existing boundary that CID demux lives in `src/udp/http3/`.
+No-eBPF fallback: per-core workers forward a non-owned datagram to the owner worker over an
+in-process queue (one extra hop per misroute). On macOS, Windows, or Linux without eBPF the per-core
+models fold to the v1 demux path with a logged notice. Independent of phase 2.
 
 ## Status: phase 1 landed (2026-06-24)
 - `src/udp/datagram.zig`: raw-fd socket, recvmmsg (MSG_WAITFORONE) + sendmmsg batches, SO_REUSEPORT,

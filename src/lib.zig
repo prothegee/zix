@@ -22,6 +22,7 @@ pub const Udp = @import("udp/Udp.zig");
 pub const Http = @import("tcp/http/Http.zig");
 pub const Http1 = @import("tcp/http1/Http1.zig");
 pub const Http2 = @import("tcp/http2/Http2.zig");
+pub const Http3 = @import("udp/http3/Http3.zig");
 pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 pub const Fix = @import("tcp/fix/Fix.zig");
 pub const Uds = @import("uds/Uds.zig");
@@ -147,6 +148,35 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("udp/dispatch/mixed.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/epoll.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/uring.zig"));
+
+    // # zix.Http3
+    std.testing.refAllDecls(@import("udp/http3/crypto.zig"));
+    std.testing.refAllDecls(@import("udp/http3/varint.zig"));
+    std.testing.refAllDecls(@import("udp/http3/packet.zig"));
+    std.testing.refAllDecls(@import("udp/http3/frame.zig"));
+    std.testing.refAllDecls(@import("udp/http3/stream.zig"));
+    std.testing.refAllDecls(@import("udp/http3/flow.zig"));
+    std.testing.refAllDecls(@import("udp/http3/close.zig"));
+    std.testing.refAllDecls(@import("udp/http3/recovery.zig"));
+    std.testing.refAllDecls(@import("udp/http3/h3.zig"));
+    std.testing.refAllDecls(@import("udp/http3/qpack.zig"));
+    std.testing.refAllDecls(@import("udp/http3/qpack_dynamic.zig"));
+    std.testing.refAllDecls(@import("udp/http3/tls.zig"));
+    std.testing.refAllDecls(@import("udp/http3/protection.zig"));
+    std.testing.refAllDecls(@import("udp/http3/serverhello.zig"));
+    std.testing.refAllDecls(@import("udp/http3/keyschedule.zig"));
+    std.testing.refAllDecls(@import("udp/http3/config.zig"));
+    std.testing.refAllDecls(@import("udp/http3/core.zig"));
+    std.testing.refAllDecls(@import("udp/http3/demux.zig"));
+    std.testing.refAllDecls(@import("udp/http3/connection.zig"));
+    std.testing.refAllDecls(@import("udp/http3/server.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/async.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/pool.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/mixed.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/epoll.zig"));
+    std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
+    std.testing.refAllDecls(@import("udp/http3/Http3.zig"));
 
     // # zix.Tcp (raw)
     std.testing.refAllDecls(@import("tcp/config.zig"));
