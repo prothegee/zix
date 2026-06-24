@@ -175,6 +175,27 @@ Ready-made runners live in the repo so the method is reproducible, not improvise
 
 > Pick the tool by the axis the change moves. Derive a per-request metric as counter / RPS with the perf window inside a steady `wrk` load. `perf stat` runs in-sandbox at paranoid=2, `perf record` is hand-run with sudo. Clear the correctness and leak gate before making any perf claim, and quiesce before trusting a sub-1% number.
 
+### Driving the engines over their wire protocol
+
+`wrk` and `perf` answer the cost questions, but a protocol engine also has to be driven over the protocol it actually serves. One load generator fits each protocol shape: pick the tool that speaks the engine's wire protocol and match the invocation to what the engine expects, otherwise the result measures the wrong thing.
+
+| Engine surface | Tool | Invocation shape | Caveat |
+| :- | :- | :- | :- |
+| HTTP/1 plaintext, upload, SSE | `gcannon` | `gcannon http://host:8080/path -c <conns> -d <dur>` | needs `ulimit -l unlimited` for its ring (the `RLIMIT_MEMLOCK` cap). The catch-all driver for the h1 shapes |
+| HTTP/2 over TLS (baseline, static) | `h2load` | `h2load https://host:8443/path -c <conns> -m <streams> -t <threads> -D <dur>` | ALPN must negotiate h2. Counts a request done only on a 2xx, so a broken path serving 404 cannot inflate the number |
+| HTTP/2 h2c cleartext | `h2load` | `h2load http://host:8082/path -p h2c -c .. -m .. -D ..` | `-p h2c` forces cleartext HTTP/2 framing from the first byte, so a silent HTTP/1.1 downgrade cannot pass |
+| gRPC unary, h2c | `h2load` | `h2load http://host:8080/pkg.Svc/Method -d req.bin -H 'content-type: application/grpc' -H 'te: trailers' -c .. -m .. -D ..` | plain `http://`, no `-p h2c`. The body is a length-prefixed gRPC frame read from a file |
+| gRPC unary, TLS | `h2load` | as above but `https://host:8443/...` | the TLS gRPC port, ALPN h2 |
+| gRPC server-streaming (h2c or TLS) | `ghz` | `ghz --proto bench.proto --call pkg.Svc/Method -d '{...}' --connections <c> -c <workers> -z <dur> host:port` | `--insecure` for h2c, `--skipTLS` for the TLS port. h2load ships raw frames and cannot drive a real streaming RPC |
+| HTTP/3 (baseline, static) | `h2load-h3` | `h2load` built with ngtcp2, `https://host:8443/path` over QUIC | a separate binary from the h2 `h2load` |
+
+Two caveats decide whether a run measures the engine rather than its setup:
+
+- Measure under a `-D` / `-z` duration, not a small `-n` request count. A short fixed-count run is dominated by connection setup (a TLS handshake costs hundreds of microseconds, an RSA-2048 one much more on a contended box), so it surfaces setup races that a sustained run amortizes away.
+- Read the 2xx count, not the tool's headline req/s. `h2load`'s own req/s counts every completed request including 4xx and 5xx, so a server answering errors quickly looks like a throughput win. Compute RPS as 2xx divided by the wall duration instead.
+
+> Drive each engine with the tool that speaks its wire protocol, matching what the engine expects (`-p h2c` for cleartext HTTP/2, `application/grpc` plus `te: trailers` for gRPC, `ghz` for streaming). Always measure over a duration, and score on 2xx, not the headline req/s.
+
 ---
 
 ## 11. The checklist

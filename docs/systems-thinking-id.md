@@ -175,6 +175,27 @@ Runner siap-pakai ada di repo supaya metode-nya reproducible, bukan dadakan: `pe
 
 > Pilih tool berdasarkan axis yang digerakkan perubahan. Turunkan metrik per-request sebagai counter / RPS dengan window perf di dalam beban `wrk` yang steady. `perf stat` jalan in-sandbox pada paranoid=2, `perf record` hand-run dengan sudo. Lewati gate correctness dan leak sebelum membuat klaim perf apa pun, dan quiesce sebelum mempercayai angka sub-1%.
 
+### Menggerakkan engine lewat wire protocol-nya
+
+`wrk` dan `perf` menjawab pertanyaan cost, tapi engine protokol juga harus digerakkan lewat protokol yang benar-benar ia layani. Satu load generator cocok untuk tiap bentuk protokol: pilih tool yang bicara wire protocol engine itu dan cocokkan invocation dengan yang engine harapkan, kalau tidak hasilnya mengukur hal yang salah.
+
+| Permukaan engine | Tool | Bentuk invocation | Caveat |
+| :- | :- | :- | :- |
+| HTTP/1 plaintext, upload, SSE | `gcannon` | `gcannon http://host:8080/path -c <conns> -d <dur>` | butuh `ulimit -l unlimited` untuk ring-nya (cap `RLIMIT_MEMLOCK`). Driver catch-all untuk bentuk h1 |
+| HTTP/2 over TLS (baseline, static) | `h2load` | `h2load https://host:8443/path -c <conns> -m <streams> -t <threads> -D <dur>` | ALPN harus menegosiasi h2. Menghitung request selesai hanya pada 2xx, jadi path rusak yang melayani 404 tidak bisa menggelembungkan angka |
+| HTTP/2 h2c cleartext | `h2load` | `h2load http://host:8082/path -p h2c -c .. -m .. -D ..` | `-p h2c` memaksa framing HTTP/2 cleartext dari byte pertama, jadi downgrade diam-diam ke HTTP/1.1 tidak bisa lolos |
+| gRPC unary, h2c | `h2load` | `h2load http://host:8080/pkg.Svc/Method -d req.bin -H 'content-type: application/grpc' -H 'te: trailers' -c .. -m .. -D ..` | `http://` biasa, tanpa `-p h2c`. Body-nya frame gRPC length-prefixed yang dibaca dari file |
+| gRPC unary, TLS | `h2load` | sama seperti di atas tapi `https://host:8443/...` | port gRPC TLS, ALPN h2 |
+| gRPC server-streaming (h2c atau TLS) | `ghz` | `ghz --proto bench.proto --call pkg.Svc/Method -d '{...}' --connections <c> -c <workers> -z <dur> host:port` | `--insecure` untuk h2c, `--skipTLS` untuk port TLS. h2load mengirim frame mentah dan tidak bisa menggerakkan streaming RPC sungguhan |
+| HTTP/3 (baseline, static) | `h2load-h3` | `h2load` yang dibangun dengan ngtcp2, `https://host:8443/path` di atas QUIC | binary terpisah dari `h2load` h2 |
+
+Dua caveat menentukan apakah satu run mengukur engine, bukan setup-nya:
+
+- Ukur di bawah duration `-D` / `-z`, bukan request count `-n` kecil. Run fixed-count yang pendek didominasi connection setup (satu TLS handshake makan ratusan mikrodetik, yang RSA-2048 jauh lebih lama pada box yang contended), jadi ia memunculkan race setup yang justru di-amortize oleh run yang sustained.
+- Baca jumlah 2xx, bukan headline req/s tool-nya. Angka req/s `h2load` sendiri menghitung setiap request yang selesai termasuk 4xx dan 5xx, jadi server yang menjawab error dengan cepat terlihat seperti menang throughput. Hitung RPS sebagai 2xx dibagi durasi wall.
+
+> Gerakkan tiap engine dengan tool yang bicara wire protocol-nya, cocokkan dengan yang engine harapkan (`-p h2c` untuk HTTP/2 cleartext, `application/grpc` plus `te: trailers` untuk gRPC, `ghz` untuk streaming). Selalu ukur di atas duration, dan nilai dari 2xx, bukan headline req/s.
+
 ---
 
 ## 11. Checklist
