@@ -1,11 +1,13 @@
-const std = @import("std");
-const zix = @import("zix");
-
 // HTTP/3 (QUIC) over the zix.Udp datagram substrate. QUIC requires TLS 1.3, so a Tls.Context
 // (cert + key) is mandatory: the server rejects a null context at init. The v1 engine runs a
 // single-worker recv with internal connection-id demux (ADR-049 / ADR-050), so connection
 // migration needs no cross-core routing. EPOLL / URING fold to the v1 worker with a logged
 // notice until per-core CID steering lands (ADR-049 phase 3).
+
+const std = @import("std");
+const zix = @import("zix");
+
+// --------------------------------------------------------- //
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9063;
