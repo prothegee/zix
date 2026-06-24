@@ -16,8 +16,11 @@ pub const Http2ServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Selects between .ASYNC, .POOL, and .MIXED.
-    /// This engine has no native .EPOLL or .URING path, both fall back to .POOL.
+    /// Connection dispatch model. .ASYNC, .POOL, .MIXED are the cleartext blocking models. .EPOLL
+    /// and .URING are the Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener
+    /// plus epoll or io_uring per worker), driving the resumable h2 state machine. .URING probes the
+    /// ring at startup and falls back to .EPOLL when io_uring is unavailable. Off Linux both fold to
+    /// .POOL. Ignored on the TLS path (the https terminator runs the blocking engine).
     /// Default: .ASYNC (single accept thread, io.async() per connection).
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog.
