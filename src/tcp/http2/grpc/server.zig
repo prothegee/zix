@@ -10,6 +10,7 @@ const pool_model = @import("dispatch/pool.zig");
 const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
+const tls_serve = @import("tls_serve.zig");
 
 pub const Route = core.Route;
 
@@ -42,6 +43,8 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         /// - !void
         pub fn run(self: *Self) !void {
             const cfg = self.config;
+
+            if (cfg.tls != null) return tls_serve.runTls(routes, cfg);
 
             return switch (cfg.dispatch_model) {
                 .ASYNC => async_model.runAsync(routes, cfg),

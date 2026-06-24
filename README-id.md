@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>Jaringan backend library & engine yang ditulis dalam zig.</i>
+    <i>Jaringan backend library & engine yang ditulis dalam Zig.</i>
 </p>
 
 <div align="center">
@@ -2022,7 +2022,7 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 ## Rangkuman
 
 ```
-Sebuah pustaka dan mesin backend bedah dengan alat penghubung.
+Sebuah surgical backend library & engine dengan wiring tools.
 Yang akan memberikan Anda kinerja, efisiensi, dan transparansi. Bukan framework.
 ```
 

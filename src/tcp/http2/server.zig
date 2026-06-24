@@ -2,13 +2,18 @@
 //! dispatch model lives in its own file under dispatch/ (ADR-043).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core.zig");
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
 const pool_model = @import("dispatch/pool.zig");
 const mixed_model = @import("dispatch/mixed.zig");
+const epoll_model = @import("dispatch/epoll.zig");
+const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
+
+const is_linux = builtin.target.os.tag == .linux;
 
 pub const Route = core.Route;
 
@@ -48,10 +53,16 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 .ASYNC => async_model.runAsync(routes, cfg),
                 .POOL => pool_model.runPool(routes, cfg),
                 .MIXED => mixed_model.runMixed(routes, cfg),
-                // .URING has no native ring path in zix.Http2, so it follows .EPOLL
-                // and falls back to POOL (ADR-037 implements .URING in zix.Http1 first).
-                .EPOLL, .URING => blk: {
-                    common.logSystem(cfg, "EPOLL is HTTP-only. Falling back to POOL.", .{});
+                // .EPOLL is the shared-nothing multiplexed h2 event loop (Linux-only).
+                .EPOLL => if (is_linux) epoll_model.runEpoll(routes, cfg) else blk: {
+                    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+
+                    break :blk pool_model.runPool(routes, cfg);
+                },
+                // .URING is the native io_uring shared-nothing loop (Linux-only). It probes the ring
+                // at startup and falls back to .EPOLL when io_uring is unavailable.
+                .URING => if (is_linux) uring_model.runUring(routes, cfg) else blk: {
+                    common.logSystem(cfg, "URING is Linux-only. Falling back to POOL.", .{});
 
                     break :blk pool_model.runPool(routes, cfg);
                 },

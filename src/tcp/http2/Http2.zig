@@ -12,6 +12,7 @@ pub const ServerConfig = config_mod.Http2ServerConfig;
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 pub const HandlerFn = core_mod.HandlerFn;
 pub const Route = core_mod.Route;
+pub const RouteKind = core_mod.RouteKind;
 pub const Router = core_mod.Router;
 pub const ServeOpts = core_mod.ServeOpts;
 pub const serveConn = core_mod.serveConn;

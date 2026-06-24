@@ -14,7 +14,7 @@
 
 ```mermaid
 graph TD
-    APP[Http1 / Http2 server] --> CTX[Tls.Context]
+    APP[Http1 / Http2 / Grpc server] --> CTX[Tls.Context]
     APP --> SRV[tls_serve.zig per engine]
     SRV --> CONN[connection.zig serverHandshake]
     CONN --> HS[handshake.zig]
@@ -31,7 +31,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Accept loop berada di `tls_serve.zig` tiap engine HTTP. Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
+`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Accept loop berada di `tls_serve.zig` tiap engine, dan engine h2 (Http2, Grpc) berbagi satu terminator di `tcp/tls/h2_terminator.zig`. Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
 
 ## Source Layout
 
@@ -89,7 +89,7 @@ var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .por
 
 - `Tls.Context.Config` adalah struct setting biasa: `cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`.
 - `Tls.Context.init` memuat PEM, mendeteksi tipe key (ECDSA, Ed25519, atau RSA), dan memvalidasi policy sekali di cold path. Jalur serve per-koneksi lalu membaca context yang siap tanpa kerja PEM.
-- `tls: ?*Tls.Context` di config Http1 dan Http2. Pointer non-null adalah gate opt-in https.
+- `tls: ?*Tls.Context` di config Http1, Http2, dan Grpc. Pointer non-null adalah gate opt-in https.
 - Curve dan cipher adalah enum slice bertipe yang divalidasi ke set yang diimplementasi. Value yang tidak didukung (P384, MLKEM768, AES-256, CHACHA20, suite RSA apapun) adalah error saat startup, bukan no-op diam. Set melebar tanpa perubahan API saat crypto mendarat.
 
 ## Handshake Flow (server, TLS 1.3)
@@ -119,7 +119,7 @@ sequenceDiagram
 TLS adalah jalur serve blocking ber-gate per engine, dipilih oleh `config.tls`, membiarkan setiap dispatch model cleartext tidak tersentuh.
 
 - Http1: `serveConnTls` menjalankan handshake, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang ada lewat sebuah pipe (handler menulis plaintext tanpa perubahan), lalu meng-encrypt response.
-- Http2: terminator menjalankan engine h2c yang tidak diubah (`core.serveConn`) di belakang socketpair, dengan loop `poll` yang men-decrypt record client masuk dan meng-encrypt frame engine. ALPN memilih h2.
+- Http2 dan Grpc: terminator bersama (`tcp/tls/h2_terminator.zig`) menjalankan engine h2c yang tidak diubah di belakang socketpair, dengan loop `poll` yang men-decrypt record client masuk dan meng-encrypt frame engine. ALPN memilih h2. Http2 menjalankan `core.serveConn`, Grpc menggerakkan mux state machine-nya (`grpcMuxOnReadable`). Keduanya menancap ke terminator yang sama sebagai engine entry. Accept loop menyerahkan tiap koneksi ke worker thread-nya sendiri, jadi terminator blocking tidak pernah menahan accept dan koneksi berjalan konkuren.
 
 Karena engine dipakai ulang tanpa perubahan, https tidak bisa meregresi hot path cleartext. Pipe / socketpair blocking dapat diterima di band https, yang bukan gate perf 1 persen.
 

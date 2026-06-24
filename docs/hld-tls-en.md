@@ -14,7 +14,7 @@
 
 ```mermaid
 graph TD
-    APP[Http1 / Http2 server] --> CTX[Tls.Context]
+    APP[Http1 / Http2 / Grpc server] --> CTX[Tls.Context]
     APP --> SRV[tls_serve.zig per engine]
     SRV --> CONN[connection.zig serverHandshake]
     CONN --> HS[handshake.zig]
@@ -31,7 +31,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` is sans-I/O: it has no listener and no socket loop. The accept loop lives in each HTTP engine's `tls_serve.zig`. The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
+`zix.Tls` is sans-I/O: it has no listener and no socket loop. The accept loop lives in each engine's `tls_serve.zig`, and the h2 engines (Http2, Grpc) share one terminator in `tcp/tls/h2_terminator.zig`. The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
 
 ## Source Layout
 
@@ -89,7 +89,7 @@ var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .por
 
 - `Tls.Context.Config` is the plain settings struct: `cert_path`, `key_path`, `alpn`, `min_version`, `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, `hsts_max_age_s`.
 - `Tls.Context.init` loads the PEM, detects the key type (ECDSA, Ed25519, or RSA), and validates the policy once on the cold path. The per-connection serve path then reads a ready context with no PEM work.
-- `tls: ?*Tls.Context` on the Http1 and Http2 configs. A non-null pointer is the https opt-in gate.
+- `tls: ?*Tls.Context` on the Http1, Http2, and Grpc configs. A non-null pointer is the https opt-in gate.
 - Curves and ciphers are typed enum slices validated to the implemented set. An unsupported value (P384, MLKEM768, AES-256, CHACHA20, any RSA suite) is a startup error, never a silent no-op. The set widens with no API change as crypto lands.
 
 ## Handshake Flow (server, TLS 1.3)
@@ -119,7 +119,7 @@ sequenceDiagram
 TLS is a gated blocking serve path per engine, selected by `config.tls`, leaving every cleartext dispatch model untouched.
 
 - Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe (the handler writes plaintext unchanged), and encrypts the response.
-- Http2: a terminator runs the unchanged h2c engine (`core.serveConn`) behind a socketpair, with a `poll` loop that decrypts inbound client records and encrypts the engine's frames. ALPN selects h2.
+- Http2 and Grpc: a shared terminator (`tcp/tls/h2_terminator.zig`) runs the unchanged h2c engine behind a socketpair, with a `poll` loop that decrypts inbound client records and encrypts the engine's frames. ALPN selects h2. Http2 runs `core.serveConn`, Grpc drives its mux state machine (`grpcMuxOnReadable`). Both plug into the same terminator as the engine entry. The accept loop hands each connection to its own worker thread, so the blocking terminator never stalls accepts and connections proceed concurrently.
 
 Because the engines are reused unchanged, https cannot regress the cleartext hot path. The blocking pipe / socketpair is acceptable on the https band, which is not the 1 percent perf gate.
 

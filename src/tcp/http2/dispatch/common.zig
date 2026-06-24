@@ -32,6 +32,22 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
     };
 }
 
+/// Highest fd a worker's mux table can index (EPOLL / URING models). Linux hands out the lowest
+/// free fd, so the table stays sparse. Connections on fds at or above this are refused.
+pub const MAX_FD: usize = 1 << 16;
+
+/// Disable Nagle on a TCP socket so small h2 frames leave promptly.
+pub fn setNoDelay(fd: std.posix.fd_t) void {
+    if (comptime builtin.target.os.tag != .windows) {
+        std.posix.setsockopt(
+            fd,
+            std.posix.IPPROTO.TCP,
+            std.posix.TCP.NODELAY,
+            std.mem.asBytes(&@as(c_int, 1)),
+        ) catch {};
+    }
+}
+
 // --------------------------------------------------------- //
 
 pub const ConnQueue = struct {

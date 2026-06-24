@@ -7,7 +7,7 @@
 - Semua 5 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux).
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
-- TLS didelegasikan ke reverse proxy (nginx, haproxy). Backend berbicara h2c saja.
+- TLS native (TLS 1.3 / 1.2, ALPN h2) via `Tls.Context`, aditif di atas default h2c. Reverse proxy (nginx, haproxy) tetap opsi untuk offloading.
 
 ## Arsitektur
 
@@ -375,15 +375,14 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` hanya berbicara h2c. Untuk TLS pada lingkungan produksi, tempatkan nginx atau haproxy di depan:
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS 1.3 (ALPN h2): sebuah terminator per-koneksi menjalankan engine h2c yang sama di belakang socketpair terdekripsi (terminator bersama `tcp/tls/h2_terminator.zig`, dipakai juga oleh Http2), menggerakkan mux state machine gRPC di atas plaintext. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
 
 ```mermaid
 graph LR
-    C[gRPC client\nTLS/port 443] -->|grpc over tls| P[nginx atau haproxy\nTLS termination]
-    P -->|grpc h2c/port 8083| Z[zix.Grpc server\ncleartext]
+    C[gRPC client\nTLS/port 8443] -->|grpc over tls| Z[zix.Grpc server\nTLS terminator + engine h2c]
 ```
 
-Lihat [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) untuk contoh konfigurasi nginx dan haproxy.
+Reverse proxy tetap alternatif ketika TLS offload, routing, atau berbagi port dengan service lain diinginkan. Lihat [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) untuk contoh konfigurasi nginx dan haproxy.
 
 ## Contoh
 
