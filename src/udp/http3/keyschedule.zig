@@ -55,6 +55,35 @@ pub fn handshakeKeys(shared: [32]u8, transcript_hash: crypto.Secret) HandshakeKe
     };
 }
 
+/// The 1-RTT application keys for both directions.
+pub const AppKeys = struct {
+    /// QUIC 1-RTT keys for sealing server packets (from the server application-traffic secret).
+    server: crypto.AesKeys,
+    /// QUIC 1-RTT keys for opening client packets (from the client application-traffic secret).
+    client: crypto.AesKeys,
+};
+
+/// Derive the 1-RTT application keys from the handshake secret and the transcript hash through the
+/// server Finished (RFC 8446 7.1, RFC 9001 5).
+///
+/// Param:
+/// handshake_secret - crypto.Secret (from handshakeKeys)
+/// transcript_through_finished - crypto.Secret (SHA-256 of the transcript through the server Finished)
+///
+/// Return:
+/// - AppKeys
+pub fn applicationKeys(handshake_secret: crypto.Secret, transcript_through_finished: crypto.Secret) AppKeys {
+    const zero = std.mem.zeroes(crypto.Secret);
+    const empty_hash = ks.Transcript.init().current();
+    const derived_master = ks.deriveSecret(handshake_secret, "derived", empty_hash);
+    const master = ks.HkdfSha256.extract(&derived_master, &zero);
+
+    const server_ap = ks.deriveSecret(master, "s ap traffic", transcript_through_finished);
+    const client_ap = ks.deriveSecret(master, "c ap traffic", transcript_through_finished);
+
+    return .{ .server = crypto.AesKeys.fromSecret(server_ap), .client = crypto.AesKeys.fromSecret(client_ap) };
+}
+
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
