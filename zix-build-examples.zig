@@ -78,6 +78,11 @@ pub fn addSteps(
         .{ "example-channel_pipeline", "examples/channel_pipeline.zig", "channel" },
         .{ "example-channel_ipc_a", "examples/channel_ipc_a.zig", "channel" },
         .{ "example-channel_ipc_b", "examples/channel_ipc_b.zig", "channel" },
+        .{ "example-http2_basic_1_async", "examples/http2_basic_1_async.zig", "http2" },
+        .{ "example-http2_basic_2_pool", "examples/http2_basic_2_pool.zig", "http2" },
+        .{ "example-http2_basic_3_mixed", "examples/http2_basic_3_mixed.zig", "http2" },
+        .{ "example-http2_basic_4_epoll", "examples/http2_basic_4_epoll.zig", "http2" },
+        .{ "example-http2_basic_5_uring", "examples/http2_basic_5_uring.zig", "http2" },
         .{ "example-grpc_server_1_async", "examples/grpc_server_1_async.zig", "grpc" },
         .{ "example-grpc_server_2_pool", "examples/grpc_server_2_pool.zig", "grpc" },
         .{ "example-grpc_server_3_mixed", "examples/grpc_server_3_mixed.zig", "grpc" },
@@ -99,6 +104,7 @@ pub fn addSteps(
     const group_tcp = b.step("example-tcp", "Build all tcp examples");
     const group_http1 = b.step("example-http1", "Build all http1 examples");
     const group_http = b.step("example-http", "Build all http examples");
+    const group_http2 = b.step("example-http2", "Build all http2 examples");
     const group_fix = b.step("example-fix", "Build all fix examples");
     const group_grpc = b.step("example-grpc", "Build all grpc examples");
     const group_channel = b.step("example-channel", "Build all channel examples");
@@ -109,6 +115,7 @@ pub fn addSteps(
     examples_step.dependOn(group_tcp);
     examples_step.dependOn(group_http1);
     examples_step.dependOn(group_http);
+    examples_step.dependOn(group_http2);
     examples_step.dependOn(group_fix);
     examples_step.dependOn(group_grpc);
     examples_step.dependOn(group_channel);
@@ -135,6 +142,8 @@ pub fn addSteps(
             group_http1
         else if (comptime std.mem.eql(u8, pair[2], "http"))
             group_http
+        else if (comptime std.mem.eql(u8, pair[2], "http2"))
+            group_http2
         else if (comptime std.mem.eql(u8, pair[2], "fix"))
             group_fix
         else if (comptime std.mem.eql(u8, pair[2], "grpc"))
