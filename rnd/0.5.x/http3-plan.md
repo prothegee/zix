@@ -129,8 +129,15 @@ one piece zix already wrote.
 
 ## Layer L: loss detection + congestion (RFC 9002)
 
-- [ ] L1: RTT sampling, min_rtt, ack_delay; loss declaration (packet + time threshold)
-- [ ] L2: PTO (anti-deadlock, ack-eliciting probes); congestion (cwnd, recovery, persistent, pacing)
+- [x] L1: RTT sampling, min_rtt, ack_delay; loss declaration (packet + time threshold). Proven in
+  `rnd/0.5.x/quic_loss_l1_poc.zig` against RFC 9002 5 / 6.1: 17 checks (first-sample reset, 7/8
+  smoothed + 3/4 rttvar, min_rtt, ack-delay subtract + cap, kPacketThreshold 3, 9/8 time threshold +
+  granularity floor). Gate `verify-quic-loss-l1.sh` (doc `verify-quic-loss-l1.md`).
+- [x] L2: PTO (anti-deadlock, ack-eliciting probes); congestion (cwnd, recovery, persistent, pacing).
+  Proven in `rnd/0.5.x/quic_loss_l2_poc.zig` against RFC 9002 6.2 / 7: 20 checks (PTO formula +
+  Initial-space + granularity floor + doubling backoff, initial / minimum window, NewReno slow start
+  + congestion event + avoidance + persistent congestion). Gate `verify-quic-loss-l2.sh` (doc
+  `verify-quic-loss-l2.md`). Layer L complete.
 
 ## Integration (into zix)
 
@@ -151,6 +158,6 @@ one piece zix already wrote.
 
 C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4), Q (Q1-Q5), T1 / T2, and P1-P4 are
 done: the self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the
-rest. Two live / cross-impl gates wait on the assembled engine: T3 (curl --http3 handshake) and P4's
-cross-impl QPACK interop. Layer L (loss / congestion) is the remaining deterministic work; then Layer
-I assembles the engine and clears both pending gates. None of this is benchmark-gated until I4.
+rest. Every deterministic layer (C, Q, T1 / T2, P self half, H, L) is now complete. What remains is
+Layer I: assembling `src/udp/http3/` into a running engine, which is also what clears the two pending
+gates (T3 curl --http3 handshake, P4 cross-impl QPACK interop). Benchmark-gated at I4.
