@@ -2023,7 +2023,7 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 ```
 A surgical backend library & engine with wiring tools.
-That will bring you performance, efficiency, & transparency. Not a framework.
+That will bring you performance, efficiency, & transparency.
 ```
 
 <br>
