@@ -45,6 +45,13 @@ pub const Connection = struct {
     handshake_ready: bool = false,
     hs_keys: keyschedule.HandshakeKeys = undefined,
     handshake_transcript: ks.Transcript = undefined,
+    // 1-RTT application keys + the client's Source Connection ID, ready once the flight is sent.
+    app_ready: bool = false,
+    app_keys: keyschedule.AppKeys = undefined,
+    peer_scid: demux.ConnId = .{},
+    // 1-RTT response state.
+    response_sent: bool = false,
+    app_pn: u32 = 0,
 
     /// Initialize a server-side connection from the client's Destination Connection ID
     /// (RFC 9001 5.2): derive the Initial secrets and the per-direction AES-128-GCM packet keys, and
