@@ -114,9 +114,18 @@ one piece zix already wrote.
 
 ## Layer H: HTTP/3 application (RFC 9114)
 
-- [ ] H1: stream mapping (control stream uni 0x00), SETTINGS first, frame-per-stream matrix
-- [ ] H2: request / response semantics (lowercase, pseudo-headers, content-length), malformed -> H3_MESSAGE_ERROR
-- [ ] H3: GOAWAY monotonic id, server MUST NOT send MAX_PUSH_ID, all H3 error codes on trigger
+- [x] H1: stream mapping (control stream uni 0x00), SETTINGS first, frame-per-stream matrix.
+  Proven in `rnd/0.5.x/http3_h1_poc.zig` against RFC 9114 6.2 / 7.2: 24 checks (seven frame type
+  values, stream types, control-stream SETTINGS-first + second-stream rejects, frame-per-stream
+  matrix, request frame sequence). Gate `verify-http3-h1.sh` (doc `verify-http3-h1.md`).
+- [x] H2: request / response semantics (lowercase, pseudo-headers, content-length), malformed -> H3_MESSAGE_ERROR.
+  Proven in `rnd/0.5.x/http3_h2_poc.zig` against RFC 9114 4.1.2 / 4.2 / 4.3: 16 checks (well-formed
+  request / CONNECT / response, mandatory pseudo-headers, lowercase + prohibited + ordering, content
+  length vs DATA sum). Gate `verify-http3-h2.sh` (doc `verify-http3-h2.md`).
+- [x] H3: GOAWAY monotonic id, server MUST NOT send MAX_PUSH_ID, all H3 error codes on trigger.
+  Proven in `rnd/0.5.x/http3_h3_poc.zig` against RFC 9114 5.2 / 7.2.7 / 8.1: 30 checks (GOAWAY
+  monotonicity + H3_ID_ERROR, MAX_PUSH_ID client-only + monotonic, PUSH_PROMISE server-only, all 17
+  error code values + grease range). Gate `verify-http3-h3.sh` (doc `verify-http3-h3.md`). Layer H complete.
 
 ## Layer L: loss detection + congestion (RFC 9002)
 
@@ -143,5 +152,5 @@ one piece zix already wrote.
 C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4), Q (Q1-Q5), T1 / T2, and P1-P4 are
 done: the self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the
 rest. Two live / cross-impl gates wait on the assembled engine: T3 (curl --http3 handshake) and P4's
-cross-impl QPACK interop. Layer H (HTTP/3 framing) is the remaining deterministic work; then Layer I
-assembles the engine and clears both pending gates. None of this is benchmark-gated until I4.
+cross-impl QPACK interop. Layer L (loss / congestion) is the remaining deterministic work; then Layer
+I assembles the engine and clears both pending gates. None of this is benchmark-gated until I4.
