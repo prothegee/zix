@@ -54,6 +54,22 @@ pub const Connection = struct {
     app_pn: u32 = 0,
     // Largest 1-RTT packet number received from the client (for the response ACK).
     app_largest_received: ?u64 = null,
+    // The decoded request line, copied off the decrypted payload so it outlives the recv buffer.
+    req_ready: bool = false,
+    req_method_buf: [16]u8 = undefined,
+    req_method_len: usize = 0,
+    req_path_buf: [1024]u8 = undefined,
+    req_path_len: usize = 0,
+
+    /// The decoded request method (empty until a request HEADERS is captured).
+    pub fn reqMethod(self: *const Connection) []const u8 {
+        return self.req_method_buf[0..self.req_method_len];
+    }
+
+    /// The decoded request path (empty until a request HEADERS is captured).
+    pub fn reqPath(self: *const Connection) []const u8 {
+        return self.req_path_buf[0..self.req_path_len];
+    }
 
     /// Initialize a server-side connection from the client's Destination Connection ID
     /// (RFC 9001 5.2): derive the Initial secrets and the per-direction AES-128-GCM packet keys, and
