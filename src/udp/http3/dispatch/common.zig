@@ -23,6 +23,8 @@ const protection = @import("../protection.zig");
 const frame = @import("../frame.zig");
 const serverhello = @import("../serverhello.zig");
 const flight = @import("../flight.zig");
+const response = @import("../response.zig");
+const keyschedule = @import("../keyschedule.zig");
 const demux = @import("../demux.zig");
 const Connection = @import("../connection.zig").Connection;
 const tls_handshake = @import("../../../tls/handshake.zig");
@@ -60,56 +62,74 @@ pub const Event = union(enum) {
     /// A client Handshake-level packet decrypted with the derived Handshake keys (proves the
     /// handshake-secret derivation is correct against the client).
     handshake_opened,
+    /// A client 1-RTT packet decrypted with the derived application keys (proves the 1-RTT key
+    /// derivation is correct against the client, the request is now readable).
+    request_opened,
 };
 
-/// Process one received datagram: parse the QUIC header, demux by Destination Connection ID, create a
-/// connection for a new Initial, account anti-amplification, and (step 1) decrypt a client Initial and
-/// reassemble its CRYPTO stream into a ClientHello.
+/// Process one received datagram: demux it to a connection and decrypt by encryption level. A new
+/// Initial opens a connection (keyed by the client's chosen DCID), Handshake / 1-RTT packets address
+/// the connection by the Source Connection ID we issued (our_scid).
 pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Event {
     if (data.len == 0) return .ignored;
 
-    const is_long = data[0] & 0x80 != 0;
-    const dcid_slice = if (is_long) blk: {
+    if (data[0] & 0x80 != 0) {
         const hdr = packet.parseLongHeader(data) catch return .ignored;
-        break :blk hdr.dcid;
-    } else blk: {
-        const hdr = packet.parseShortHeader(data, cid_len) catch return .ignored;
-        break :blk hdr.dcid;
-    };
+        const dcid = demux.ConnId.fromSlice(hdr.dcid);
 
-    const dcid = demux.ConnId.fromSlice(dcid_slice);
-    const conn = table.find(&dcid) orelse table.put(dcid, Connection.init(dcid_slice, 1200)) orelse return .ignored;
-    conn.anti_amplification.onReceive(data.len);
+        const conn = findConn(table, &dcid) orelse blk: {
+            if (hdr.packet_type != 0) return .demuxed;
+            break :blk table.put(dcid, Connection.init(hdr.dcid, 1200)) orelse return .ignored;
+        };
+        conn.anti_amplification.onReceive(data.len);
 
-    if (!is_long) return .demuxed;
+        if (hdr.packet_type == 0) return openClientInitial(conn, data);
 
-    const hdr = packet.parseLongHeader(data) catch return .demuxed;
-
-    // A client Handshake packet: decrypt with the derived client Handshake keys. Success proves the
-    // handshake-secret derivation (transcript + ECDHE + key schedule) matches the client byte-exact.
-    if (hdr.packet_type == 2) {
-        if (conn.handshake_ready) {
+        // A client Handshake packet: decrypt with the derived client Handshake keys. Success proves
+        // the handshake-secret derivation (transcript + ECDHE + key schedule) matches byte-exact.
+        if (hdr.packet_type == 2 and conn.handshake_ready) {
             var hbuf: [2048]u8 = undefined;
-            if (protection.openHandshake(data, conn.hs_keys.client, &hbuf)) |_| {
-                return .handshake_opened;
-            } else |_| {}
+            if (protection.openHandshake(data, conn.hs_keys.client, &hbuf)) |_| return .handshake_opened else |_| {}
         }
 
         return .demuxed;
     }
 
-    if (hdr.packet_type != 0) return .demuxed;
+    // Short header (1-RTT): the Destination CID is the connection id we issued (cid_len bytes).
+    if (data.len < 1 + cid_len) return .ignored;
+    const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
+    const conn = findConn(table, &dcid) orelse return .demuxed;
+    conn.anti_amplification.onReceive(data.len);
 
-    // Step 1: decrypt the client Initial with the DCID-derived client keys, feed its CRYPTO frames
-    // into the Initial-level reassembly stream, and parse the ClientHello once it is contiguous.
+    if (conn.app_ready) {
+        var sbuf: [2048]u8 = undefined;
+        if (protection.openShort(data, conn.app_keys.client, conn.our_scid.len, &sbuf)) |_| return .request_opened else |_| {}
+    }
+
+    return .demuxed;
+}
+
+/// Find a connection by the Destination Connection ID, falling back to the Source CID we issued
+/// (our_scid) that the client uses as its Destination CID after ServerHello.
+fn findConn(table: *ConnTable, dcid: *const demux.ConnId) ?*Connection {
+    if (table.find(dcid)) |conn| return conn;
+
+    for (0..table.count) |i| {
+        if (table.values[i].server_hello_sent and table.values[i].our_scid.eql(dcid)) return &table.values[i];
+    }
+
+    return null;
+}
+
+/// Decrypt a client Initial with the DCID-derived client keys, feed its CRYPTO frames into the
+/// Initial-level reassembly stream, and parse the ClientHello once it is contiguous (it spans two
+/// Initials, so the prefix is incomplete until the second CRYPTO fragment arrives).
+fn openClientInitial(conn: *Connection, data: []const u8) Event {
     var buf: [2048]u8 = undefined;
     const opened = protection.openInitial(data, conn.initial_client, &buf) catch return .decrypt_failed;
 
     feedInitialFrames(conn, opened.payload);
 
-    // Parse only once the full ClientHello handshake message is contiguous: byte 0 is the
-    // CLIENT_HELLO type (0x01) and bytes 1..4 are its 24-bit length. curl's ClientHello spans two
-    // Initials, so the prefix is incomplete until the second CRYPTO fragment arrives.
     const handshake_bytes = conn.crypto_initial.readable();
     if (handshake_bytes.len >= 4 and handshake_bytes[0] == 0x01) {
         const declared = (@as(usize, handshake_bytes[1]) << 16) | (@as(usize, handshake_bytes[2]) << 8) | handshake_bytes[3];
@@ -143,8 +163,6 @@ fn feedInitialFrames(conn: *Connection, payload: []const u8) void {
 
 /// The v1 single-worker recv loop on the calling thread (ASYNC / POOL / MIXED).
 pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
-    _ = handler;
-
     if (!datagram.is_linux) {
         logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
         return;
@@ -182,6 +200,10 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !v
                 .parse_alert => logSystem(config, "decrypted client Initial but ClientHello parse raised an alert", .{}),
                 .decrypt_failed => logSystem(config, "long-header Initial failed to decrypt under the Initial keys", .{}),
                 .handshake_opened => logSystem(config, "decrypted client Handshake packet (handshake keys correct, validated live)", .{}),
+                .request_opened => {
+                    logSystem(config, "decrypted client 1-RTT request (application keys correct, validated live)", .{});
+                    sendResponse(handler, table, dg.data, &tx, fd, dg.from, config.cid_len, config);
+                },
                 else => {},
             }
         }
@@ -265,6 +287,40 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
     _ = tx.queue(peer, flight_packet);
     tx.flush(fd) catch {};
     logSystem(config, "sent Handshake flight ({d} bytes): EE + Cert + CertVerify + Finished", .{flight_packet.len});
+
+    // 1-RTT application keys, derived from the transcript through the server Finished (which the
+    // flight just appended). The client addresses us by our_scid from here on.
+    conn.app_keys = keyschedule.applicationKeys(conn.hs_keys.handshake_secret, conn.handshake_transcript.current());
+    conn.peer_scid = demux.ConnId.fromSlice(hdr.scid);
+    conn.app_ready = true;
+}
+
+/// Build and send the HTTP/3 response to a decrypted 1-RTT request (the final round-trip step).
+/// Idempotent per connection: sent once.
+fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in, cid_len: usize, config: Http3ServerConfig) void {
+    if (data.len < 1 + cid_len) return;
+
+    const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
+    const conn = findConn(table, &dcid) orelse return;
+    if (!conn.app_ready or conn.response_sent) return;
+
+    // The example handler ignores the request, so a minimal request suffices for the first round
+    // trip. Parsing the client's HEADERS for the real method / path is a follow-up.
+    var req = core.Request{ .method = "GET", .path = "/" };
+    var res = core.Response{};
+    handler(&req, &res);
+
+    var payload: [2048]u8 = undefined;
+    const payload_len = response.buildResponse(&payload, 0, res.status, res.body);
+
+    var out: [2048]u8 = undefined;
+    const reply = protection.sealShort(&out, conn.app_keys.server, conn.peer_scid.slice(), conn.app_pn, payload[0..payload_len]) catch return;
+    conn.app_pn += 1;
+    conn.response_sent = true;
+
+    _ = tx.queue(peer, reply);
+    tx.flush(fd) catch {};
+    logSystem(config, "sent 1-RTT response ({d} bytes): HTTP/3 status {d}", .{ reply.len, res.status });
 }
 
 /// EPOLL / URING fold to the v1 single worker with a logged notice. Per-core SO_REUSEPORT CID
