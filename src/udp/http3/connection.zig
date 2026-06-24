@@ -52,6 +52,8 @@ pub const Connection = struct {
     // 1-RTT response state.
     response_sent: bool = false,
     app_pn: u32 = 0,
+    // Largest 1-RTT packet number received from the client (for the response ACK).
+    app_largest_received: ?u64 = null,
 
     /// Initialize a server-side connection from the client's Destination Connection ID
     /// (RFC 9001 5.2): derive the Initial secrets and the per-direction AES-128-GCM packet keys, and
