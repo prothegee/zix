@@ -141,12 +141,27 @@ one piece zix already wrote.
 
 ## Integration (into zix)
 
-- [ ] I1: `src/udp/http3/` engine on zix.Udp (recvmmsg / sendmmsg batching, GSO / GRO if available)
-- [ ] I2: http3 example with a unique UDP port + runner driving curl --http3-only, wired into the build
-- [ ] I3: green under `zig build examples` + `test-runner-all` on Zig 0.16 and 0.17
+- [x] I1: `src/udp/http3/` engine on zix.Udp, v1 single-worker recv + internal CID demux
+  (migration-safe, per-core SO_REUSEPORT steering is v2 per ADR-049 phase 3). All deterministic
+  layers (C / Q / L / H / P / T) ported as 12 tested library modules from the rnd PoCs (RFC vectors
+  moved into `test {}` blocks), plus the engine layer: config, core, demux (CID table), connection
+  (state wiring), server facade + `dispatch/` (per-model files, run() switch). 50 tests green on
+  Zig 0.16 + 0.17. recvmmsg recv loop binds, parses the QUIC header, and demuxes by DCID.
+- [~] I2: example `examples/http3_basic.zig` (port 9063) builds + binds + runs, wired into
+  `zix-build-examples.zig` (new `http3` group). The curl --http3 runner is PENDING the live
+  handshake (T3 gate): the recv / demux substrate is in place but the TLS-over-QUIC handshake driver
+  that decrypts the Initial and answers through `handler` is the remaining step.
+- [~] I3: `zig build` + `zig build examples` + `unit-test` green on Zig 0.16 and 0.17. The
+  `test-runner-all` curl round trip stays PENDING with the live handshake (same blocker as I2 / T3).
 - [ ] I4: gate. Lean per-connection state (no unbounded buffers / tables), 64c UDP throughput within
   the 1% URING gate, steady-state RSS / cgroup-peak neutral. QUIC is crypto-per-packet heavy, so this
-  constraint bites hardest here.
+  constraint bites hardest here. Not reached: gated behind the live handshake.
+
+Remaining for a curl-interoperable server (the live-handshake step, on top of the recv / demux
+substrate): drive the src/tls TLS 1.3 handshake over the Initial CRYPTO stream, install Handshake /
+1-RTT keys, decrypt and protect packets per RFC 9001, generate ACKs, and answer requests through the
+HTTP/3 + QPACK layers. The deterministic pieces for all of this exist and are tested, the work is the
+stateful connection driver that sequences them against a live client.
 
 ## Interop and conformance
 
