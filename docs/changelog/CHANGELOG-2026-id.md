@@ -37,7 +37,18 @@ __*Fix:*__
 ## 0.5.0 (TBD)
 
 __*Update:*__
-- Zig 0.17 support.
+- Zig 0.17 (eksperimental) support.
+- Dispatch `.EPOLL` / `.URING` native untuk `zix.Http2` (ADR-043):
+    - `zix.Http2` h2c memperoleh loop multiplexed shared-nothing yang sebelumnya dilipat ke `.POOL`. Sebuah mux state machine h2 yang resumable (`src/tcp/http2/mux.zig`, satu `MuxConn` per fd, akumulator baca bertahan lintas event readable) digerakkan oleh `dispatch/epoll.zig` (satu listener `SO_REUSEPORT` plus epoll plus slab `ConnTable` per worker) dan `dispatch/uring.zig` (satu ring io_uring per worker, multishot accept, `user_data` ber-tag generation). Di ring, worker memegang accept plus recv dan handler menulis reply langsung ke fd non-blocking (tanpa cork per-stream). `.URING` memprobe ring saat startup dan jatuh ke `.EPOLL` ketika io_uring tidak tersedia, keduanya dilipat ke `.POOL` di luar Linux.
+    - `zix.Http2.Router` memperoleh query-stripping dan `.kind = .PREFIX`, meniru `zix.Http1`: query di-strip sebelum matching, route EXACT memakai `StaticStringMap`, PREFIX mencocokkan prefix terdaftar terpanjang pada batas segment. `RouteKind` diekspor.
+    - Keluarga example baru `examples/http2_basic_{1_async,2_pool,3_mixed,4_epoll,5_uring}.zig` (port 9065-9069) dengan step runner `test-runner-http2-{async,pool,mixed,epoll,uring}`, dilipat ke `test-runner-all`.
+    ---
+- gRPC over TLS dan terminator h2-over-TLS bersama:
+    - `zix.Grpc` melayani TLS native (TLS 1.3, ALPN h2) via `tls: ?*Tls.Context`, aditif di atas default h2c. Jalur TLS menjalankan mux state machine gRPC (`grpcMuxOnReadable`) di atas socketpair terdekripsi, engine single-owner yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak punya race write per-stream.
+    - Terminator h2-over-TLS difaktorkan ke `src/tcp/tls/h2_terminator.zig` yang bersama dan engine-agnostic (handshake 1.3 / 1.2, ALPN h2, pump socketpair yang diparameterkan oleh engine entry). `tls_serve.zig` `zix.Http2` dan `zix.Grpc` adalah wrapper tipis, Http2 menyuplai `core.serveConn` dan Grpc loop mux-nya.
+    - Accept loop TLS menyerahkan tiap koneksi ke worker thread-nya sendiri, jadi terminator blocking tidak lagi men-serialisasi koneksi. Http2 https dan gRPC TLS keduanya melayani koneksi secara konkuren.
+    - Docs `hld-grpc`, `hld-tls`, `lld-tls`, dan `hld-grpc-proxy` (en dan -id) diperbarui untuk gRPC TLS native.
+    ---
 - Response compression (gzip / deflate):
     - Negosiasi `Accept-Encoding` dengan gzip dan deflate. Codec bersama baru `src/utils/compression/flate.zig` (container-parameterized di atas `std.compress.flate`: gzip = RFC 1952, deflate = zlib-wrapped RFC 1950, bukan raw) plus facade `compression.zig` (negosiasi q-value, penanganan `q=0` dan wildcard, size floor, skip media-type yang sudah terkompresi, dispatch encode/decode).
     - `zix.Http1` menyajikannya via `core.writeNegotiated(fd, head, status, content_type, body)`, `zix.Http` via `Response.sendNegotiated(req, body)`, keduanya menyetel `Content-Encoding` dan `Vary: Accept-Encoding`. Aktif pada `.EPOLL` dan `.URING`, default off. gRPC tetap memakai `grpc-encoding` per-message miliknya, raw transport tidak punya negosiasi HTTP.
@@ -60,7 +71,7 @@ __*Update:*__
     ---
 - Server config (knob) ditambahkan:
     - `compression` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
-    - `tls` (`?*Tls.Context`) pada `zix.Http1` dan `zix.Http2`, gate opt-in https. Menggantikan field flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / `hsts_max_age_s` Http1 (ADR-047).
+    - `tls` (`?*Tls.Context`) pada `zix.Http1`, `zix.Http2`, dan `zix.Grpc`, gate opt-in https. Menggantikan field flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / `hsts_max_age_s` Http1 (ADR-047).
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` pada `zix.Udp` (`UdpServerConfig`), dipakai jalur raw (`zix.Udp.Raw`, ADR-049). Additive, typed `Server(Packet)` tidak berubah.
 
 <br>

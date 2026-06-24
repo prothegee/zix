@@ -37,7 +37,18 @@ __*Fix:*__
 ## 0.5.0 (TBD)
 
 __*Update:*__
-- Zig 0.17 support.
+- Zig 0.17 (experimental) support.
+- `zix.Http2` native `.EPOLL` / `.URING` dispatch (ADR-043):
+    - `zix.Http2` h2c gains the shared-nothing multiplexed loops it previously folded to `.POOL`. A resumable h2 mux state machine (`src/tcp/http2/mux.zig`, one `MuxConn` per fd, the read accumulator persists across readable events) is driven by `dispatch/epoll.zig` (one `SO_REUSEPORT` listener plus epoll plus a slab `ConnTable` per worker) and `dispatch/uring.zig` (one io_uring ring per worker, multishot accept, generation-tagged `user_data`). On the ring the worker owns accept plus recv and the handler writes the reply straight to the non-blocking fd (no per-stream cork). `.URING` probes the ring at startup and falls back to `.EPOLL` when io_uring is unavailable, both fold to `.POOL` off Linux.
+    - `zix.Http2.Router` gains query-stripping and `.kind = .PREFIX`, mirroring `zix.Http1`: the query is stripped before matching, EXACT routes use a `StaticStringMap`, PREFIX matches the longest registered prefix on a segment boundary. `RouteKind` is exported.
+    - New example family `examples/http2_basic_{1_async,2_pool,3_mixed,4_epoll,5_uring}.zig` (ports 9065-9069) with runner steps `test-runner-http2-{async,pool,mixed,epoll,uring}`, folded into `test-runner-all`.
+    ---
+- gRPC over TLS and a shared h2-over-TLS terminator:
+    - `zix.Grpc` serves native TLS (TLS 1.3, ALPN h2) via `tls: ?*Tls.Context`, additive over the h2c default. The TLS path runs the gRPC mux state machine (`grpcMuxOnReadable`) over the decrypted socketpair, the same single-owner engine as the cleartext `.EPOLL` / `.URING` models, so it has no per-stream write races.
+    - The h2-over-TLS terminator is factored into a shared, engine-agnostic `src/tcp/tls/h2_terminator.zig` (handshake 1.3 / 1.2, ALPN h2, socketpair pump parameterized by the engine entry). `zix.Http2` and `zix.Grpc` `tls_serve.zig` are thin wrappers, Http2 supplying `core.serveConn` and Grpc the mux loop.
+    - The TLS accept loop hands each connection to its own worker thread, so the blocking terminator no longer serializes connections. Http2 https and gRPC TLS both serve connections concurrently.
+    - Docs `hld-grpc`, `hld-tls`, `lld-tls`, and `hld-grpc-proxy` (en and -id) updated for native gRPC TLS.
+    ---
 - Response compression (gzip / deflate):
     - `Accept-Encoding` negotiation with gzip and deflate. New shared codec `src/utils/compression/flate.zig` (container-parameterized over `std.compress.flate`: gzip = RFC 1952, deflate = zlib-wrapped RFC 1950, not raw) plus the `compression.zig` facade (q-value negotiation, `q=0` and wildcard handling, size floor, already-compressed media-type skip, encode/decode dispatch).
     - `zix.Http1` serves it via `core.writeNegotiated(fd, head, status, content_type, body)`, `zix.Http` via `Response.sendNegotiated(req, body)`, both setting `Content-Encoding` and `Vary: Accept-Encoding`. Active under `.EPOLL` and `.URING`, off by default. gRPC keeps its own per-message `grpc-encoding`, the raw transports have no HTTP negotiation.
@@ -60,7 +71,7 @@ __*Update:*__
     ---
 - Server config (knob) added:
     - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
-    - `tls` (`?*Tls.Context`) on `zix.Http1` and `zix.Http2`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).
+    - `tls` (`?*Tls.Context`) on `zix.Http1`, `zix.Http2`, and `zix.Grpc`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` on `zix.Udp` (`UdpServerConfig`), used by the raw path (`zix.Udp.Raw`, ADR-049). Additive, the typed `Server(Packet)` is unchanged.
 
 <br>
