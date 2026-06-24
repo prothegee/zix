@@ -147,8 +147,9 @@ pub fn encodeStaticIndexedFieldLine(out: []u8, index: u64) usize {
     return encodePrefixedInt(out, 6, 0x80 | 0x40, index);
 }
 
-/// A decoded Literal Field Line with Name Reference (RFC 9204 4.5.4).
-pub const LiteralNameRef = struct { static: bool, name_index: u64, value: []const u8, huffman: bool };
+/// A decoded Literal Field Line with Name Reference (RFC 9204 4.5.4). `len` is the total bytes the
+/// representation consumed, for walking a field section.
+pub const LiteralNameRef = struct { static: bool, name_index: u64, value: []const u8, huffman: bool, len: usize };
 
 /// Decode a Literal Field Line with Name Reference (RFC 9204 4.5.4): leading '01', the 'N' and 'T'
 /// bits, a 4-bit prefix name index, then an 8-bit prefix string literal value.
@@ -167,7 +168,7 @@ pub fn decodeLiteralNameRef(data: []const u8) error{ Truncated, NotLiteralNameRe
     pos += length.len;
     if (data.len < pos + length.value) return error.Truncated;
 
-    return .{ .static = is_static, .name_index = name.value, .value = data[pos .. pos + length.value], .huffman = huffman };
+    return .{ .static = is_static, .name_index = name.value, .value = data[pos .. pos + length.value], .huffman = huffman, .len = pos + @as(usize, @intCast(length.value)) };
 }
 
 /// Look up a static-table entry by index, or null if out of range.
