@@ -53,9 +53,15 @@ __*Update:*__
     - New examples in `examples/tls/`: `tls_http1_basic` (9060), `tls_http2_basic` (9061), `tls_http1_ed25519` (9062), with runner steps folded into `test-runner-all`.
     - Docs: `docs/hld-tls-en.md` / `docs/lld-tls-en.md` (and -id), ADR-045 / 046 / 047 / 048.
     ---
+- Raw-bytes UDP datagram mode `zix.Udp.Raw` (ADR-049):
+    - `zix.Udp.Raw(handler)` serves variable-length datagrams (up to `max_recv_buf`) alongside the typed `zix.Udp.Server(Packet)`. The handler takes the datagram bytes, the peer, and a `Sink` to reply through. On Linux it batches receive / send via `recvmmsg` / `sendmmsg`, replies coalescing into one `sendmmsg` per received batch, with per-core `SO_REUSEPORT` workers under `.EPOLL` / `.URING` (a single worker under `.ASYNC` / `.POOL` / `.MIXED`).
+    - Dispatch is partitioned per ADR-043: `src/udp/dispatch/` (one file per model plus `common.zig`) with a thin `run()` switch, plus `src/udp/datagram.zig` (raw-fd socket + `recvmmsg` / `sendmmsg` primitives) and `src/udp/core.zig` (`HandlerFn`, `Sink`). The typed `Server(Packet)` is unchanged, a non-ASYNC `dispatch_model` on it folds with a logged notice. Non-Linux falls back to a single `std.Io.net` loop.
+    - New example `examples/udp_raw_echo.zig` (port 9064) with runner step `test-runner-udp-raw`, folded into `test-runner-all`. GSO / GRO / ECN and a dedicated io_uring submission path behind `.URING` are deferred (`.URING` folds to the recvmmsg per-core loop).
+    ---
 - Server config (knob) added:
     - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
     - `tls` (`?*Tls.Context`) on `zix.Http1` and `zix.Http2`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).
+    - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` on `zix.Udp` (`UdpServerConfig`), used by the raw path (`zix.Udp.Raw`, ADR-049). Additive, the typed `Server(Packet)` is unchanged.
 
 <br>
 
