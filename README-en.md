@@ -381,7 +381,7 @@ A few differences are by design, not drift:
 - `zix.Http1` has no `conn_timeout_ms`: it runs no connection-registry timer thread (see the Timeouts note in the HTTP/1 LLD docs).
 - `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
 - Response compression (`compression*`) lives on `zix.Http1` and `zix.Http`, the engines that serve HTTP responses with Accept-Encoding negotiation. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
-- `zix.Udp` (datagram) carries `ip` / `port` / `logger`, and `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path, each only the subset that applies.
+- `zix.Udp` (datagram) carries `ip` / `port` / `logger` for the typed path, plus the raw-path knobs `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, used by `zix.Udp.Raw`). `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path. Each engine takes only the subset that applies.
 
 <br>
 
@@ -408,6 +408,8 @@ Routes are baked into the server type at compile time: no allocator is needed fo
 | Receive buffer | Stack | Single receive loop iteration |
 
 `config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet: `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for the full explanation and PoC.
+
+The raw path (`zix.Udp.Raw`, ADR-049) allocates its recv / send batches and worker-thread array from `config.allocator` once at startup, not per packet, so the arena caveat does not bind there.
 
 ### HTTP/2 and gRPC
 
@@ -1801,7 +1803,7 @@ For design details see [`docs/hld-channel-en.md`](docs/hld-channel-en.md).
 
 ### UDP
 
-Type-safe UDP server and client. The user defines their own `extern struct` packet. Zix handles endianness, size validation, and concurrency.
+Two modes. The typed `zix.Udp.Server(Packet)` is a type-safe messaging server: the user defines their own `extern struct` packet, and zix handles endianness, size validation, and concurrency. The raw `zix.Udp.Raw(handler)` (ADR-049) serves variable-length datagrams with no fixed struct, with `recvmmsg` / `sendmmsg` batching and per-core SO_REUSEPORT workers.
 
 ```zig
 const std = @import("std");
@@ -1862,11 +1864,34 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-**When to use:** reach for UDP when you want low-latency, fire-and-forget datagrams with your own `extern struct` packet: telemetry, game state, discovery, heartbeats, or broadcast/relay to many peers, accepting best-effort delivery. If you need ordering, retransmission, or large payloads, use `zix.Tcp` instead.
+Raw-bytes mode (variable-length datagrams, no fixed struct):
+
+```zig
+fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
+    sink.reply(dg); // echo back to the sender
+}
+
+const Echo = zix.Udp.Raw(handler);
+
+pub fn main(process: std.process.Init) !void {
+    var server = try Echo.init(.{
+        .io        = process.io,
+        .allocator = std.heap.smp_allocator,
+        .ip        = "0.0.0.0",
+        .port      = 9064,
+        .dispatch_model = .EPOLL, // per-core SO_REUSEPORT workers (.ASYNC = single worker)
+    });
+    defer server.deinit();
+    try server.run();
+}
+```
+
+**When to use:** reach for UDP when you want low-latency, fire-and-forget datagrams: telemetry, game state, discovery, heartbeats, or broadcast/relay to many peers, accepting best-effort delivery. Use the typed `Server(Packet)` for a fixed `extern struct` contract, the raw `Raw(handler)` for arbitrary byte payloads and the batched per-core path. If you need ordering, retransmission, or large payloads, use `zix.Tcp` instead.
 
 **Examples:**
-- [examples/udp_server.zig](examples/udp_server.zig) - full working example with broadcast and configurable ports
+- [examples/udp_server.zig](examples/udp_server.zig) - typed server, full working example with broadcast and configurable ports
 - [examples/udp_client.zig](examples/udp_client.zig) - matching client
+- [examples/udp_raw_echo.zig](examples/udp_raw_echo.zig) - raw-bytes echo server (recvmmsg / sendmmsg batching, dispatch models)
 
 [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for details.
 
