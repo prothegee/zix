@@ -7,7 +7,7 @@
 - All 5 dispatch models: ASYNC (default), POOL, MIXED, EPOLL (Linux-only), URING (Linux-only).
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
 - grpc-timeout header parsing, grpc-status trailer serialization.
-- TLS delegated to a reverse proxy (nginx, haproxy). Backend speaks h2c only.
+- Native TLS (TLS 1.3 / 1.2, ALPN h2) via a `Tls.Context`, additive over the h2c default. A reverse proxy (nginx, haproxy) stays an option for offloading.
 
 ## Architecture
 
@@ -376,15 +376,14 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` speaks h2c only. For production TLS, place nginx or haproxy in front:
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS 1.3 (ALPN h2): a per-connection terminator runs the same h2c engine behind a decrypted socketpair (the shared `tcp/tls/h2_terminator.zig`, also used by Http2), driving the gRPC mux state machine over the plaintext. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
 
 ```mermaid
 graph LR
-    C[gRPC client\nTLS/port 443] -->|grpc over tls| P[nginx or haproxy\nTLS termination]
-    P -->|grpc h2c/port 8083| Z[zix.Grpc server\ncleartext]
+    C[gRPC client\nTLS/port 8443] -->|grpc over tls| Z[zix.Grpc server\nTLS terminator + h2c engine]
 ```
 
-See [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) for nginx and haproxy configuration examples.
+A reverse proxy stays an alternative when TLS offload, routing, or sharing a port with other services is wanted. See [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) for nginx and haproxy configuration examples.
 
 ## Examples
 
