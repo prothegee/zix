@@ -10,6 +10,7 @@
 //   grpc-async, grpc-pool, grpc-mixed, grpc-epoll,
 //   tcp-async, tcp-pool, tcp-mixed, tcp-epoll,
 //   fix-async, fix-pool, fix-mixed, fix-epoll,
+//   http2-async, http2-pool, http2-mixed, http2-epoll, http2-uring,
 //   udp, udp-raw, uds
 //
 // HTTP feature servers (argv[24..33]):
@@ -114,6 +115,11 @@ pub fn main(process: std.process.Init) void {
     const fix_mixed_path = arg_iter.next() orelse exitMissing("fix-mixed");
     const fix_epoll_path = arg_iter.next() orelse exitMissing("fix-epoll");
 
+    const http2_async_path = arg_iter.next() orelse exitMissing("http2-async");
+    const http2_pool_path = arg_iter.next() orelse exitMissing("http2-pool");
+    const http2_mixed_path = arg_iter.next() orelse exitMissing("http2-mixed");
+    const http2_epoll_path = arg_iter.next() orelse exitMissing("http2-epoll");
+    const http2_uring_path = arg_iter.next() orelse exitMissing("http2-uring");
     const udp_path = arg_iter.next() orelse exitMissing("udp");
     const udp_raw_path = arg_iter.next() orelse exitMissing("udp-raw");
     const uds_path = arg_iter.next() orelse exitMissing("uds");
@@ -199,6 +205,11 @@ pub fn main(process: std.process.Init) void {
     report("fix-mixed", runFix(io, fix_mixed_path, 9050), &tally);
     report("fix-epoll", runFix(io, fix_epoll_path, 9051), &tally);
 
+    report("http2-async", runHttp2(io, http2_async_path, 9065), &tally);
+    report("http2-pool", runHttp2(io, http2_pool_path, 9066), &tally);
+    report("http2-mixed", runHttp2(io, http2_mixed_path, 9067), &tally);
+    report("http2-epoll", runHttp2(io, http2_epoll_path, 9068), &tally);
+    report("http2-uring", runHttp2(io, http2_uring_path, 9069), &tally);
     report("udp", runUdp(io, udp_path), &tally);
     report("udp-raw", runUdpRaw(io, udp_raw_path), &tally);
     report("uds", runUds(io, uds_path), &tally);
@@ -703,6 +714,87 @@ fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
     var buf: [64]u8 = undefined;
     const msg = try sock.receiveTimeout(io, &buf, timeout);
     if (!std.mem.eql(u8, msg.data, "raw-echo-ping")) return error.EchoMismatch;
+}
+
+fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
+    const Http2 = zix.Http2;
+
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, 5000);
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    var stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+
+    // Prior-knowledge h2c: preface, empty SETTINGS, then HEADERS GET / on stream 1.
+    var req: [512]u8 = undefined;
+    var n: usize = 0;
+    @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
+    n += Http2.PREFACE.len;
+
+    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+
+    var hbuf: [256]u8 = undefined;
+    var enc = Http2.HpackEncoder.init(&hbuf);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader(":scheme", "http");
+    try enc.writeHeader(":authority", "localhost");
+    const hblock = enc.encoded();
+    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+    @memcpy(req[n..][0..hblock.len], hblock);
+    n += hblock.len;
+
+    try tlsWriteAll(fd, req[0..n]);
+
+    var acc: [16384]u8 = undefined;
+    var acc_len: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 64) : (rounds += 1) {
+        const rc = std.os.linux.read(fd, acc[acc_len..].ptr, acc.len - acc_len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+        if (rc == 0) return error.ConnectionClosed;
+        acc_len += rc;
+
+        var off: usize = 0;
+        while (off + Http2.FRAME_HEADER_LEN <= acc_len) {
+            const frame = Http2.parseFrameHeader(acc[off..][0..Http2.FRAME_HEADER_LEN]);
+            const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
+            if (off + total > acc_len) break;
+
+            const payload = acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
+                var hdec = Http2.HpackDecoder.init();
+                var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
+                var scratch: [4096]u8 = undefined;
+                const cnt = try hdec.decode(payload, &hdrs, &scratch);
+                for (hdrs[0..cnt]) |h| {
+                    if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
+                }
+            }
+            off += total;
+        }
+        if (off >= acc_len) {
+            acc_len = 0;
+        } else if (off > 0) {
+            std.mem.copyForwards(u8, acc[0 .. acc_len - off], acc[off..acc_len]);
+            acc_len -= off;
+        }
+    }
+
+    return error.NoStatus200;
 }
 
 fn runUds(io: std.Io, server_path: []const u8) !void {
