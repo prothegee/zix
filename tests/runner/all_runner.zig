@@ -10,7 +10,7 @@
 //   grpc-async, grpc-pool, grpc-mixed, grpc-epoll,
 //   tcp-async, tcp-pool, tcp-mixed, tcp-epoll,
 //   fix-async, fix-pool, fix-mixed, fix-epoll,
-//   udp, uds
+//   udp, udp-raw, uds
 //
 // HTTP feature servers (argv[24..33]):
 //   http-json, http-middleware, http-params, http-paths,
@@ -115,6 +115,7 @@ pub fn main(process: std.process.Init) void {
     const fix_epoll_path = arg_iter.next() orelse exitMissing("fix-epoll");
 
     const udp_path = arg_iter.next() orelse exitMissing("udp");
+    const udp_raw_path = arg_iter.next() orelse exitMissing("udp-raw");
     const uds_path = arg_iter.next() orelse exitMissing("uds");
 
     // HTTP feature servers.
@@ -199,6 +200,7 @@ pub fn main(process: std.process.Init) void {
     report("fix-epoll", runFix(io, fix_epoll_path, 9051), &tally);
 
     report("udp", runUdp(io, udp_path), &tally);
+    report("udp-raw", runUdpRaw(io, udp_raw_path), &tally);
     report("uds", runUds(io, uds_path), &tally);
 
     // HTTP feature tests.
@@ -677,6 +679,30 @@ fn runUdp(io: std.Io, server_path: []const u8) !void {
         .ack => {},
         .nack => return error.UnexpectedNack,
     }
+}
+
+fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    // UDP has no connection handshake, give the server time to bind.
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(600), .awake);
+
+    const local = try std.Io.net.IpAddress.parse("127.0.0.1", 9193);
+    const sock = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer sock.close(io);
+
+    const server = try std.Io.net.IpAddress.parse("127.0.0.1", 9064);
+    try sock.send(io, &server, "raw-echo-ping");
+
+    const timeout: std.Io.Timeout = .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(3000),
+        .clock = .awake,
+    } };
+
+    var buf: [64]u8 = undefined;
+    const msg = try sock.receiveTimeout(io, &buf, timeout);
+    if (!std.mem.eql(u8, msg.data, "raw-echo-ping")) return error.EchoMismatch;
 }
 
 fn runUds(io: std.Io, server_path: []const u8) !void {
