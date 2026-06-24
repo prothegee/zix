@@ -103,7 +103,13 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Even
 
     if (conn.app_ready) {
         var sbuf: [2048]u8 = undefined;
-        if (protection.openShort(data, conn.app_keys.client, conn.our_scid.len, &sbuf)) |_| return .request_opened else |_| {}
+        if (protection.openShort(data, conn.app_keys.client, conn.our_scid.len, &sbuf)) |opened| {
+            if (conn.app_largest_received == null or opened.packet_number > conn.app_largest_received.?) {
+                conn.app_largest_received = opened.packet_number;
+            }
+
+            return .request_opened;
+        } else |_| {}
     }
 
     return .demuxed;
@@ -302,25 +308,34 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
 
     const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
     const conn = findConn(table, &dcid) orelse return;
-    if (!conn.app_ready or conn.response_sent) return;
-
-    // The example handler ignores the request, so a minimal request suffices for the first round
-    // trip. Parsing the client's HEADERS for the real method / path is a follow-up.
-    var req = core.Request{ .method = "GET", .path = "/" };
-    var res = core.Response{};
-    handler(&req, &res);
+    if (!conn.app_ready) return;
 
     var payload: [2048]u8 = undefined;
-    const payload_len = response.buildResponse(&payload, 0, res.status, res.body);
+    var payload_len: usize = 0;
+
+    if (!conn.response_sent) {
+        // First request: the full response, acknowledging the request. The example handler ignores
+        // the request, so a minimal one suffices. Parsing the real method / path is a follow-up.
+        var req = core.Request{ .method = "GET", .path = "/" };
+        var res = core.Response{};
+        handler(&req, &res);
+
+        payload_len = response.buildResponse(&payload, 0, res.status, res.body, conn.app_largest_received, false);
+        conn.response_sent = true;
+        logSystem(config, "sent 1-RTT response: HTTP/3 status {d}", .{res.status});
+    } else {
+        // A retransmit after the response: acknowledge it so the client stops retransmitting and
+        // finalizes the connection on its own.
+        payload_len = response.buildAck(&payload, conn.app_largest_received);
+        if (payload_len == 0) return;
+    }
 
     var out: [2048]u8 = undefined;
     const reply = protection.sealShort(&out, conn.app_keys.server, conn.peer_scid.slice(), conn.app_pn, payload[0..payload_len]) catch return;
     conn.app_pn += 1;
-    conn.response_sent = true;
 
     _ = tx.queue(peer, reply);
     tx.flush(fd) catch {};
-    logSystem(config, "sent 1-RTT response ({d} bytes): HTTP/3 status {d}", .{ reply.len, res.status });
 }
 
 /// EPOLL / URING fold to the v1 single worker with a logged notice. Per-core SO_REUSEPORT CID
