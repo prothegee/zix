@@ -93,10 +93,24 @@ one piece zix already wrote.
 
 ## Layer P: QPACK header compression (RFC 9204)
 
-- [ ] P1: encoder stream 0x02 + decoder stream 0x03 (at most one each), static table, prefix integers
-- [ ] P2: dynamic table (entry size name+value+32, capacity, eviction), Required Insert Count / Base
-- [ ] P3: decoder feedback (Section Ack, Stream Cancellation, Insert Count Increment), error codes
-- [ ] P4: cross-impl QPACK interop (.qif encoded files, decode-and-compare)
+- [x] P1: encoder stream 0x02 + decoder stream 0x03 (at most one each), static table, prefix integers.
+  Proven in `rnd/0.5.x/qpack_p1_poc.zig` against RFC 9204 4.1.1 / 4.2 / 4.5 / Appendix A + RFC 7541
+  C.1: 24 checks (prefixed integer C.1 vectors + 62-bit round trip, static table lookup, stream
+  at-most-one-each, static field line representations). Gate `verify-qpack-p1.sh` (doc `verify-qpack-p1.md`).
+- [x] P2: dynamic table (entry size name+value+32, capacity, eviction), Required Insert Count / Base.
+  Proven in `rnd/0.5.x/qpack_p2_poc.zig` against RFC 9204 3.2 / 4.5.1: 20 checks (entry size,
+  eviction-from-oldest + oversized reject + capacity reduce/clear, RIC transform both worked examples
+  + out-of-range reject, Base resolution). Gate `verify-qpack-p2.sh` (doc `verify-qpack-p2.md`).
+- [x] P3: decoder feedback (Section Ack, Stream Cancellation, Insert Count Increment), error codes.
+  Proven in `rnd/0.5.x/qpack_p3_poc.zig` against RFC 9204 4.4 / section 6: 12 checks (three decoder
+  instructions encode + decode + leading-bit discrimination, zero-increment reject, the three QPACK
+  error code values). Gate `verify-qpack-p3.sh` (doc `verify-qpack-p3.md`).
+- [~] P4: cross-impl QPACK interop (.qif encoded files, decode-and-compare). Self-consistency half
+  DONE: `rnd/0.5.x/qpack_p4_poc.zig` encodes a field list and decodes it back byte-identical (11
+  checks, three representations, pinned wire bytes). Cross-impl half PENDING the qpack-interop
+  fixtures (.qif / .out from another implementation, exercise dynamic table + Huffman); gate
+  `verify-qpack-p4.sh` (doc `verify-qpack-p4.md`) runs the self round trip and marks cross-impl
+  PENDING, not faked. Re-run with `QPACK_INTEROP_DIR` once fixtures exist.
 
 ## Layer H: HTTP/3 application (RFC 9114)
 
@@ -126,7 +140,8 @@ one piece zix already wrote.
 
 ## Order and effort
 
-C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4) and Q (Q1-Q5) are done: the
-self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the rest.
-Layer T is the first live gate (curl --http3). QPACK synchronization (P 2.2) is the next long pole.
-None of this is benchmark-gated until I4.
+C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4), Q (Q1-Q5), T1 / T2, and P1-P4 are
+done: the self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the
+rest. Two live / cross-impl gates wait on the assembled engine: T3 (curl --http3 handshake) and P4's
+cross-impl QPACK interop. Layer H (HTTP/3 framing) is the remaining deterministic work; then Layer I
+assembles the engine and clears both pending gates. None of this is benchmark-gated until I4.
