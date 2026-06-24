@@ -76,6 +76,11 @@ pub fn main(process: std.process.Init) !void {
         .port = SERVER_PORT,
         .port_mode = .REQUIRED,
 
+        // Dispatch model. The typed Server runs a single async receive loop (each packet handled via
+        // io.concurrent), so only .ASYNC applies here, shown explicitly even though it is the default.
+        // The selectable per-core models (.EPOLL / .URING) are a property of the raw path, zix.Udp.Raw.
+        .dispatch_model = .ASYNC,
+
         // Endianness must match all clients.
         // LITTLE is recommended for cross-language use (Go, C++, Rust).
         // Change to .BIG for network byte order (legacy/internet protocols).
