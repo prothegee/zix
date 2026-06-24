@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-tls-id.md`](hld-tls-id.md) dan ADR-045 / 046 / 047.
 
-`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine HTTP memiliki socket loop di `tcp/http1/tls_serve.zig` dan `tcp/http2/tls_serve.zig`.
+`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine memiliki socket loop: `tcp/http1/tls_serve.zig` untuk Http1, dan terminator h2-over-TLS bersama di `tcp/tls/h2_terminator.zig` yang dibungkus `tcp/http2/tls_serve.zig` dan `tcp/http2/grpc/tls_serve.zig`.
 
 ---
 
@@ -121,9 +121,13 @@ Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-
 
 `readRecord` / `readAll` / `writeAll` memakai `std.os.linux.read` / `write` dengan switch errno (tanpa wrapper std.posix demi portabilitas lintas 0.16 / 0.17).
 
-## tcp/http2/tls_serve.zig
+## tcp/tls/h2_terminator.zig (terminator h2-over-TLS bersama)
 
-`serveConnTls(routes, fd, config, opts, ctx)` menjalankan handshake dengan cara sama (version policy + fallback 1.2 ke `serveConnTls12H2`), memastikan ALPN memilih h2 (`AlpnNotH2` jika tidak), lalu menyiapkan socketpair: engine h2c yang tidak diubah (`core.serveConn`) berjalan di satu ujung dalam thread yang di-spawn, dan `pump` men-decrypt record masuk jadi plaintext untuk engine dan meng-encrypt frame engine kembali. Teardown memakai `shutdown(SHUT_WR)` supaya engine melihat EOF tanpa write yang berlomba dengan peer yang sudah ditutup.
+`serveConnTls(fd, ctx, EngineCtx, engine_ctx, engineEntry)` adalah terminator engine-agnostic yang dipakai Http2 dan Grpc. Ia menjalankan handshake (version policy + fallback 1.2 ke `serveConnTls12`), memastikan ALPN memilih h2 (`AlpnNotH2` jika tidak), lalu menyiapkan socketpair: `engineEntry` dari pemanggil menjalankan engine cleartext di satu ujung dalam thread yang di-spawn, dan `pump` men-decrypt record masuk jadi plaintext untuk engine dan meng-encrypt frame engine kembali. Teardown memakai `shutdown(SHUT_WR)` supaya engine melihat EOF tanpa write yang berlomba dengan peer yang sudah ditutup.
+
+## tcp/http2/tls_serve.zig dan tcp/http2/grpc/tls_serve.zig
+
+Keduanya wrapper tipis di atas terminator bersama. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri (jadi terminator blocking tidak pernah menahan accept). Yang berbeda adalah `engineEntry`. Http2 menjalankan `core.serveConn` blocking. Grpc menyetel ujung socketpair non-blocking dan menggerakkan mux single-owner (`core.grpcMuxOnReadable`) di bawah loop `poll`, state machine yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi jalur gRPC TLS tidak punya race write per-stream.
 
 ## tls12_*.zig
 

@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-tls-en.md`](hld-tls-en.md) and ADR-045 / 046 / 047.
 
-`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The HTTP engines own the socket loop in `tcp/http1/tls_serve.zig` and `tcp/http2/tls_serve.zig`.
+`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop: `tcp/http1/tls_serve.zig` for Http1, and a shared h2-over-TLS terminator in `tcp/tls/h2_terminator.zig` that `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` wrap.
 
 ---
 
@@ -121,9 +121,13 @@ The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` 
 
 `readRecord` / `readAll` / `writeAll` use `std.os.linux.read` / `write` with an errno switch (no std.posix wrapper for portability across 0.16 / 0.17).
 
-## tcp/http2/tls_serve.zig
+## tcp/tls/h2_terminator.zig (shared h2-over-TLS terminator)
 
-`serveConnTls(routes, fd, config, opts, ctx)` runs the handshake the same way (version policy + 1.2 fallback to `serveConnTls12H2`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), then sets up a socketpair: the unchanged h2c engine (`core.serveConn`) runs on one end in a spawned thread, and `pump` decrypts inbound records to plaintext for the engine and encrypts the engine's frames back. Teardown uses `shutdown(SHUT_WR)` so the engine sees EOF without a write racing a closed peer.
+`serveConnTls(fd, ctx, EngineCtx, engine_ctx, engineEntry)` is the engine-agnostic terminator used by both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), then sets up a socketpair: the caller-supplied `engineEntry` runs the cleartext engine on one end in a spawned thread, and `pump` decrypts inbound records to plaintext for the engine and encrypts the engine's frames back. Teardown uses `shutdown(SHUT_WR)` so the engine sees EOF without a write racing a closed peer.
+
+## tcp/http2/tls_serve.zig and tcp/http2/grpc/tls_serve.zig
+
+Both are thin wrappers over the shared terminator. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread (so the blocking terminator never stalls accepts). The `engineEntry` is what differs. Http2 runs the blocking `core.serveConn`. Grpc sets the socketpair end non-blocking and drives the single-owner mux (`core.grpcMuxOnReadable`) under a `poll` loop, the same state machine as the cleartext `.EPOLL` / `.URING` models, so the gRPC TLS path has no per-stream write races.
 
 ## tls12_*.zig
 
