@@ -24,6 +24,7 @@ const frame = @import("../frame.zig");
 const serverhello = @import("../serverhello.zig");
 const flight = @import("../flight.zig");
 const response = @import("../response.zig");
+const request = @import("../request.zig");
 const keyschedule = @import("../keyschedule.zig");
 const demux = @import("../demux.zig");
 const Connection = @import("../connection.zig").Connection;
@@ -107,6 +108,8 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Even
             if (conn.app_largest_received == null or opened.packet_number > conn.app_largest_received.?) {
                 conn.app_largest_received = opened.packet_number;
             }
+
+            captureRequest(conn, opened.payload);
 
             return .request_opened;
         } else |_| {}
@@ -301,6 +304,26 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
     conn.app_ready = true;
 }
 
+/// Decode the request from a decrypted 1-RTT payload and copy its method / path onto the connection
+/// so they outlive the recv buffer. A Huffman-encoded path is not yet decoded, so it is left for the
+/// default route until the QPACK Huffman decoder lands.
+fn captureRequest(conn: *Connection, payload: []const u8) void {
+    if (conn.req_ready) return;
+
+    const decoded = request.parseRequest(payload) orelse return;
+    if (decoded.path_huffman) return;
+
+    const method_len = @min(decoded.method.len, conn.req_method_buf.len);
+    @memcpy(conn.req_method_buf[0..method_len], decoded.method[0..method_len]);
+    conn.req_method_len = method_len;
+
+    const path_len = @min(decoded.path.len, conn.req_path_buf.len);
+    @memcpy(conn.req_path_buf[0..path_len], decoded.path[0..path_len]);
+    conn.req_path_len = path_len;
+
+    conn.req_ready = true;
+}
+
 /// Build and send the HTTP/3 response to a decrypted 1-RTT request (the final round-trip step).
 /// Idempotent per connection: sent once.
 fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in, cid_len: usize, config: Http3ServerConfig) void {
@@ -314,9 +337,12 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
     var payload_len: usize = 0;
 
     if (!conn.response_sent) {
-        // First request: the full response, acknowledging the request. The example handler ignores
-        // the request, so a minimal one suffices. Parsing the real method / path is a follow-up.
-        var req = core.Request{ .method = "GET", .path = "/" };
+        // First request: the full response, acknowledging the request. Use the decoded request line
+        // when available, falling back to GET / (for example a Huffman-encoded path not yet decoded).
+        var req = core.Request{
+            .method = if (conn.req_ready) conn.reqMethod() else "GET",
+            .path = if (conn.req_ready) conn.reqPath() else "/",
+        };
         var res = core.Response{};
         handler(&req, &res);
 
