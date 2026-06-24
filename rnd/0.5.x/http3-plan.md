@@ -51,17 +51,45 @@ one piece zix already wrote.
 
 ## Layer Q: QUIC transport (RFC 9000, in-process tests on crafted packets)
 
-- [ ] Q1: varint codec + sample encodings (Appendix A), long / short header parse (Fixed Bit, CID <= 20)
-- [ ] Q2: frame parse / encode, unknown -> FRAME_ENCODING_ERROR, disallowed -> PROTOCOL_VIOLATION
-- [ ] Q3: connection IDs (NEW / RETIRE, active_connection_id_limit), stream state machine + 62-bit ids
-- [ ] Q4: flow control (per-stream + connection) -> FLOW_CONTROL_ERROR, ACK, PATH_CHALLENGE / RESPONSE
-- [ ] Q5: CONNECTION_CLOSE spaces, draining, stateless reset, 3x anti-amplification + 1200-byte floor
+- [x] Q1: varint codec + sample encodings (Appendix A), long / short header parse (Fixed Bit, CID <= 20).
+  Proven in `rnd/0.5.x/quic_transport_q1_poc.zig` against RFC 9000 16 / 17 / Appendix A: 34 checks
+  (A.1 varint decode + encode + Table 4 boundaries, A.2 / A.3 packet number, long / short header
+  parse + invariant rejects). Gate `verify-quic-transport-q1.sh` (doc `verify-quic-transport-q1.md`).
+- [x] Q2: frame parse / encode, unknown -> FRAME_ENCODING_ERROR, disallowed -> PROTOCOL_VIOLATION.
+  Proven in `rnd/0.5.x/quic_transport_q2_poc.zig` against RFC 9000 12.4 / 12.5 / 19: 32 checks
+  (PADDING / PING / CRYPTO / STREAM parse with OFF / LEN / FIN bits, unknown + non-minimal type
+  rejects, Table 3 number-space permission matrix). Gate `verify-quic-transport-q2.sh` (doc
+  `verify-quic-transport-q2.md`).
+- [x] Q3: connection IDs (NEW / RETIRE, active_connection_id_limit), stream state machine + 62-bit ids.
+  Proven in `rnd/0.5.x/quic_transport_q3_poc.zig` against RFC 9000 2.1 / 3 / 5.1.1 / 19.15: 29 checks
+  (Table 1 stream types, Figure 2 / 3 send + receive state machines, NEW_CONNECTION_ID validation +
+  CONNECTION_ID_LIMIT_ERROR + retire-floor monotonic). Gate `verify-quic-transport-q3.sh` (doc
+  `verify-quic-transport-q3.md`).
+- [x] Q4: flow control (per-stream + connection) -> FLOW_CONTROL_ERROR, ACK, PATH_CHALLENGE / RESPONSE.
+  Proven in `rnd/0.5.x/quic_transport_q4_poc.zig` against RFC 9000 4 / 19.3 / 19.17 / 19.18: 20 checks
+  (two-level flow control + only-increasing limits, ACK range arithmetic + ECN + delay decode +
+  negative-range reject, path challenge echo). Gate `verify-quic-transport-q4.sh` (doc
+  `verify-quic-transport-q4.md`).
+- [x] Q5: CONNECTION_CLOSE spaces, draining, stateless reset, 3x anti-amplification + 1200-byte floor.
+  Proven in `rnd/0.5.x/quic_transport_q5_poc.zig` against RFC 9000 8.1 / 10.2 / 10.3 / 19.19: 25
+  checks (CONNECTION_CLOSE 0x1c / 0x1d layout, closing / draining states, stateless reset detection +
+  size caps, 3x amplification limit + 1200-byte Initial floor). Gate `verify-quic-transport-q5.sh`
+  (doc `verify-quic-transport-q5.md`). Layer Q complete.
 
 ## Layer T: TLS 1.3 over QUIC (RFC 9001 + 8446, end-to-end gate = curl --http3)
 
-- [ ] T1: handshake data only in CRYPTO frames, no TLS record protection, derive the "quic" keys per level
-- [ ] T2: terminate if TLS < 1.3, discard Initial keys after first Handshake packet, reject 0-RTT
-- [ ] T3: full handshake completes with curl --http3 (the first live oracle)
+- [x] T1: handshake data only in CRYPTO frames, no TLS record protection, derive the "quic" keys per level.
+  Proven in `rnd/0.5.x/quic_tls_t1_poc.zig` against RFC 9001 4 / 5.1: 11 checks (CRYPTO reassembly
+  in-order / gap / out-of-order / overlap, handshake-layer not record-layer, per-level key derivation
+  Initial-from-DCID + application-from-secret). Gate `verify-quic-tls-t1.sh` (doc `verify-quic-tls-t1.md`).
+- [x] T2: terminate if TLS < 1.3, discard Initial keys after first Handshake packet, reject 0-RTT.
+  Proven in `rnd/0.5.x/quic_tls_t2_poc.zig` against RFC 9001 4.2 / 4.9.1 / 4.6.2: 15 checks (TLS 1.3
+  floor, role-split Initial-key discard + no-Initial-after, 0-RTT accept / reject signaling, zix
+  default reject). Gate `verify-quic-tls-t2.sh` (doc `verify-quic-tls-t2.md`).
+- [~] T3: full handshake completes with curl --http3 (the first live oracle). Gate harness in place
+  (`verify-quic-tls-t3.sh`, doc `verify-quic-tls-t3.md`): curl HTTP/3 capability confirmed (8.20.0,
+  ngtcp2 / nghttp3). The live handshake is PENDING the assembled server (Layer I), not faked. Re-run
+  with `ZIX_HTTP3_SERVER` set once `src/udp/http3/` + an example exist.
 
 ## Layer P: QPACK header compression (RFC 9204)
 
@@ -98,6 +126,7 @@ one piece zix already wrote.
 
 ## Order and effort
 
-C -> Q -> T -> P -> H -> L, then integration. Layer C (done, C1-C4) is the self-contained deterministic
-half and de-risks the rest. Layer T is the first live gate (curl --http3). The transport state machine
-(Q) and QPACK synchronization (P 2.2) are the long poles. None of this is benchmark-gated until I4.
+C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4) and Q (Q1-Q5) are done: the
+self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the rest.
+Layer T is the first live gate (curl --http3). QPACK synchronization (P 2.2) is the next long pole.
+None of this is benchmark-gated until I4.
