@@ -22,6 +22,7 @@ const packet = @import("../packet.zig");
 const protection = @import("../protection.zig");
 const frame = @import("../frame.zig");
 const serverhello = @import("../serverhello.zig");
+const flight = @import("../flight.zig");
 const demux = @import("../demux.zig");
 const Connection = @import("../connection.zig").Connection;
 const tls_handshake = @import("../../../tls/handshake.zig");
@@ -236,6 +237,34 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
     _ = tx.queue(peer, built.packet);
     tx.flush(fd) catch {};
     logSystem(config, "sent ServerHello Initial ({d} bytes), Handshake keys derived", .{built.packet.len});
+
+    // Handshake flight: EncryptedExtensions (ALPN h3 + transport params) + Certificate +
+    // CertificateVerify + Finished, sealed into a Handshake packet with the server Handshake keys.
+    const tls_ctx = config.tls orelse return;
+    const opts = tls_ctx.handshakeOptions(ephemeral, server_random, @splat(0));
+
+    var flight_out: [1500]u8 = undefined;
+    const flight_packet = flight.buildHandshakeFlight(
+        &flight_out,
+        conn.hs_keys.server,
+        conn.hs_keys.server_traffic,
+        hdr.scid,
+        conn.our_scid.slice(),
+        &conn.handshake_transcript,
+        opts.certificate_der,
+        opts.signing_key,
+        conn.dcid.slice(),
+        conn.our_scid.slice(),
+        config.max_idle_ms,
+        config.max_streams,
+    ) orelse {
+        logSystem(config, "Handshake flight not built", .{});
+        return;
+    };
+
+    _ = tx.queue(peer, flight_packet);
+    tx.flush(fd) catch {};
+    logSystem(config, "sent Handshake flight ({d} bytes): EE + Cert + CertVerify + Finished", .{flight_packet.len});
 }
 
 /// EPOLL / URING fold to the v1 single worker with a logged notice. Per-core SO_REUSEPORT CID
