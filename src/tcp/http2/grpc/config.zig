@@ -3,6 +3,7 @@
 const std = @import("std");
 const DispatchModel = @import("../../config.zig").DispatchModel;
 const Logger = @import("../../../logger/logger.zig").Logger;
+const Tls = @import("../../../tls/Tls.zig");
 
 // --------------------------------------------------------- //
 
@@ -38,6 +39,12 @@ pub const GrpcServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
+    /// https - opt-in. When non-null the server serves gRPC over TLS (zix.Tls, ALPN h2) instead of
+    /// h2c cleartext. The TLS path is a gated per-connection terminator in front of the existing h2c
+    /// gRPC engine, so the cleartext dispatch models are untouched. The context carries the cert /
+    /// key / alpn / version policy (Tls.Context.Config); alpn should include .H2 (gRPC runs on
+    /// HTTP/2, RFC 7540 3.3). Caller owns the Context and must ensure it outlives the server.
+    tls: ?*Tls.Context = null,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.rpc() for each gRPC stream dispatched. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
