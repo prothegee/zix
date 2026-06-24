@@ -336,6 +336,33 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 
 ---
 
+## Backend Lintas-Platform (rencana)
+
+Setiap model menamai dua hal sekaligus: bentuk konkurensi (single atau multi-core) dan, untuk model per-core, sebuah I/O backend. Backend bersifat OS-specific. Kontraknya: OS menukar backend, bukan sifat single-atau-multi dari model.
+
+| Model | Perilaku core | OS | Status |
+| :- | :- | :- | :- |
+| `.ASYNC` | single | semua | sekarang |
+| `.POOL` | multi (thread pool) | semua | sekarang |
+| `.MIXED` | multi (hybrid) | semua | sekarang |
+| `.EPOLL` | multi (per-core) | Linux | sekarang |
+| `.URING` | multi (per-core) | Linux | sekarang |
+| `.KQUEUE` | multi (per-core) | macOS / BSD | rencana |
+| `.IOCP` | multi (per-core) | Windows | rencana |
+
+`.EPOLL`, `.KQUEUE`, dan `.IOCP` adalah ide multi-core per-core yang sama, satu per sistem operasi. Masing-masing berada di file `dispatch/<model>.zig` sendiri, sehingga folder-nya self-documenting: buka, lihat setiap model, tiap baris header menyatakan perilaku core dan OS-nya.
+
+Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
+
+Tidak ada keyword auto-select. Kode portable memilih bentuk portable (`.POOL` / `.MIXED`) atau menamai backend yang tepat dengan satu baris comptime switch pada `builtin.os.tag`. Dua ketidakcocokan ditangani berbeda:
+
+- Backend yang tidak mungkin ada di OS target (misalnya `.IOCP` di Linux) adalah compile-time error (category error), tertangkap saat build.
+- Backend yang ada tapi tidak bisa dipakai mesin saat runtime (misalnya `.URING` di kernel lama) di-fold ke model yang bekerja dengan notice yang dicatat (capability gap).
+
+Saat ini, sebelum backend macOS dan Windows hadir, `.EPOLL` di build non-Linux di-fold ke `.POOL` sebagai interim. `.KQUEUE` dan `.IOCP` hanya nama yang dipesan, belum diimplementasikan dan tidak hadir sebagai file source. Lihat ADR-050.
+
+---
+
 ## Channel
 
 `zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan kelima model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
