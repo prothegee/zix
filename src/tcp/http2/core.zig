@@ -22,22 +22,74 @@ pub const HandlerFn = *const fn (
     sid: u31,
 ) void;
 
-/// HTTP/2 route: exact path to handler mapping.
+/// Route match strategy. EXACT matches the whole path, PREFIX matches a leading path segment
+/// (longest registered prefix wins), mirroring the zix.Http1 router.
+pub const RouteKind = enum(u8) { EXACT, PREFIX };
+
+/// HTTP/2 route: path to handler mapping.
 ///
 /// Param:
-/// path - []const u8 (e.g. "/", "/echo")
+/// path - []const u8 (e.g. "/", "/json", "/static")
 /// handler - HandlerFn
+/// kind - RouteKind (EXACT by default, PREFIX for a path subtree)
 pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
+    kind: RouteKind = .EXACT,
 };
 
-/// Comptime path router. Dispatches by exact match on path. Sends 404 if no route matches.
+/// Comptime path router. The query string is stripped before matching, so a route on "/json"
+/// matches ":path" values like "/json/5?m=7". EXACT routes use a StaticStringMap (O(1) lookup),
+/// PREFIX routes match the longest registered prefix on a path-segment boundary. Sends 404 when no
+/// route matches. Mirrors the zix.Http1 router.
 ///
 /// Return:
 /// - type (zero-size, with a dispatch function)
 pub fn Router(comptime routes: []const Route) type {
+    const exact_count = blk: {
+        var n: usize = 0;
+        for (routes) |r| if (r.kind == .EXACT) {
+            n += 1;
+        };
+        break :blk n;
+    };
+    const prefix_count = blk: {
+        var n: usize = 0;
+        for (routes) |r| if (r.kind == .PREFIX) {
+            n += 1;
+        };
+        break :blk n;
+    };
+
+    const exact_pairs: [exact_count]struct { []const u8, HandlerFn } = blk: {
+        var arr: [exact_count]struct { []const u8, HandlerFn } = undefined;
+        var i: usize = 0;
+        for (routes) |r| {
+            if (r.kind == .EXACT) {
+                arr[i] = .{ r.path, r.handler };
+                i += 1;
+            }
+        }
+        break :blk arr;
+    };
+
+    const prefix_routes: [prefix_count]Route = blk: {
+        var arr: [prefix_count]Route = undefined;
+        var i: usize = 0;
+        for (routes) |r| {
+            if (r.kind == .PREFIX) {
+                arr[i] = r;
+                i += 1;
+            }
+        }
+        break :blk arr;
+    };
+
+    const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
+
     return struct {
+        /// Dispatch the request to the best matching route. The query string is stripped first, then
+        /// EXACT is tried (O(1) hash lookup) before PREFIX (longest match wins).
         pub fn dispatch(
             method: []const u8,
             path: []const u8,
@@ -46,12 +98,30 @@ pub fn Router(comptime routes: []const Route) type {
             fd: std.posix.fd_t,
             sid: u31,
         ) void {
-            inline for (routes) |r| {
-                if (std.mem.eql(u8, r.path, path)) {
-                    r.handler(method, headers, body, fd, sid);
-                    return;
+            const p = if (std.mem.indexOfScalar(u8, path, '?')) |q| path[0..q] else path;
+
+            if (exact_map.get(p)) |handler| {
+                handler(method, headers, body, fd, sid);
+                return;
+            }
+
+            var best_len: usize = 0;
+            var best_handler: ?HandlerFn = null;
+            inline for (prefix_routes) |route| {
+                if (std.mem.startsWith(u8, p, route.path)) {
+                    const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
+                    if (at_boundary and route.path.len > best_len) {
+                        best_len = route.path.len;
+                        best_handler = route.handler;
+                    }
                 }
             }
+
+            if (best_handler) |h| {
+                h(method, headers, body, fd, sid);
+                return;
+            }
+
             frame.sendResponse(fd, sid, 404, "text/plain", "Not Found") catch {};
         }
     };
@@ -475,4 +545,77 @@ test "zix test: HandlerFn is a function pointer type" {
         }
     }.f;
     _ = h;
+}
+
+// Router test scaffolding: each handler records which route fired so a dispatch can be asserted
+// without inspecting the on-wire frames.
+var tl_router_hit: u8 = 0;
+
+fn routeHandler(comptime id: u8) HandlerFn {
+    return struct {
+        fn f(_: []const u8, _: []const hpack.Header, _: []const u8, _: std.posix.fd_t, _: u31) void {
+            tl_router_hit = id;
+        }
+    }.f;
+}
+
+test "zix test: Router strips the query before matching" {
+    const R = Router(&[_]Route{
+        .{ .path = "/baseline2", .handler = routeHandler(1) },
+    });
+
+    tl_router_hit = 0;
+    R.dispatch("GET", "/baseline2?a=1&b=1", &.{}, "", -1, 1);
+
+    try std.testing.expectEqual(@as(u8, 1), tl_router_hit);
+}
+
+test "zix test: Router PREFIX matches a path subtree on a boundary" {
+    const R = Router(&[_]Route{
+        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
+        .{ .path = "/static", .handler = routeHandler(3), .kind = .PREFIX },
+    });
+
+    tl_router_hit = 0;
+    R.dispatch("GET", "/json/5?m=7", &.{}, "", -1, 1);
+    try std.testing.expectEqual(@as(u8, 2), tl_router_hit);
+
+    tl_router_hit = 0;
+    R.dispatch("GET", "/static/app.js", &.{}, "", -1, 1);
+    try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
+}
+
+test "zix test: Router EXACT wins over PREFIX and longest prefix wins" {
+    const R = Router(&[_]Route{
+        .{ .path = "/json", .handler = routeHandler(1) },
+        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
+        .{ .path = "/json/special", .handler = routeHandler(3), .kind = .PREFIX },
+    });
+
+    // EXACT "/json" beats the "/json" PREFIX for the bare path.
+    tl_router_hit = 0;
+    R.dispatch("GET", "/json", &.{}, "", -1, 1);
+    try std.testing.expectEqual(@as(u8, 1), tl_router_hit);
+
+    // Longest matching prefix wins for a deeper path.
+    tl_router_hit = 0;
+    R.dispatch("GET", "/json/special/x", &.{}, "", -1, 1);
+    try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
+}
+
+test "zix test: Router PREFIX respects the segment boundary" {
+    const R = Router(&[_]Route{
+        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
+    });
+
+    // "/jsonx" is not under the "/json" subtree (no boundary), so it 404s. The fallback writes to a
+    // pipe so no real socket is needed.
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    tl_router_hit = 0;
+    R.dispatch("GET", "/jsonx", &.{}, "", fds[1], 1);
+
+    try std.testing.expectEqual(@as(u8, 0), tl_router_hit);
 }

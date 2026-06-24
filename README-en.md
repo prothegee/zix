@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network backend library & engine written in zig.</i>
+    <i>A network backend library & engine written in Zig.</i>
 </p>
 
 <div align="center">
@@ -2022,7 +2022,7 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 ## Summary
 
 ```
-A surgical backend library & engine with a wiring tools.
+A surgical backend library & engine with wiring tools.
 That will bring you performance, efficiency, & transparency. Not a framework.
 ```
 
