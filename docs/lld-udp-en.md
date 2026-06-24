@@ -196,4 +196,15 @@ Stability matters because these enums may appear in serialized configs or be com
 
 ---
 
+## Raw-bytes path (ADR-049)
+
+The raw-bytes datagram server (`zix.Udp.Raw`) is separate from the typed engine above and mirrors the `zix.Http1` layout (`core.zig` + `dispatch/` + a thin `run()` switch). See ADR-049 for the design.
+
+- `datagram.zig`: the raw-fd primitives. `open` uses raw `std.os.linux` syscalls (`socket` / `bind`, since `std.posix` no longer wraps them after the std.Io migration) plus the `std.posix.setsockopt` safe wrapper for SO_REUSEADDR / SO_REUSEPORT. `RecvBatch` carves one backing buffer into `recv_batch` MTU slots wired into the `mmsghdr` / `iovec` / name arrays for `recvmmsg`, called with `MSG_WAITFORONE` so it returns on the first datagram instead of blocking for the whole batch. `SendBatch.queue` copies each reply into its own backing buffer (so a reply that points into the receive buffer stays valid), and `flush` drains the queue with `sendmmsg`, handling partial sends. `errno` is read from the raw syscall return via `std.posix.errno`.
+- `core.zig`: `HandlerFn` and `Sink`. `Sink.reply` reuses the kernel-filled sender `sockaddr.in` with no conversion, `Sink.replyTo` converts a `std.Io.net.IpAddress`. A full batch flushes mid-handler then re-queues.
+- `dispatch/common.zig`: `workerLoop` (recvmmsg in, handler per datagram, sendmmsg out), `runSingle` (one worker on the calling thread), `runPerCore` (one `std.Thread` per CPU, each with its own SO_REUSEPORT socket), and `runFallback` (non-Linux, single `std.Io.net` loop). `dispatch/{async,pool,mixed}.zig` delegate to `runSingle`, `dispatch/{epoll,uring}.zig` to `runPerCore` (uring logs a fold notice).
+- `raw.zig`: `Raw(comptime handler)` with `init` / `initArgs` / `deinit` and a `run()` that switches on `config.dispatch_model`.
+
+---
+
 ###### end of lld-udp

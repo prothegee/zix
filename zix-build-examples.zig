@@ -69,6 +69,7 @@ pub fn addSteps(
         .{ "example-fix_client_trading", "examples/fix_client_trading.zig", "fix" },
         .{ "example-udp_server", "examples/udp_server.zig", "udp" },
         .{ "example-udp_client", "examples/udp_client.zig", "udp" },
+        .{ "example-udp_raw_echo", "examples/udp_raw_echo.zig", "udp" },
         .{ "example-uds_server", "examples/uds_server.zig", "uds" },
         .{ "example-uds_client", "examples/uds_client.zig", "uds" },
         .{ "example-uds_http", "examples/uds_http.zig", "uds" },

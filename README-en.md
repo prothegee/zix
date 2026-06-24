@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network backend library/engine written in zig.</i>
+    <i>A network backend library & engine written in zig.</i>
 </p>
 
 <div align="center">
@@ -381,7 +381,7 @@ A few differences are by design, not drift:
 - `zix.Http1` has no `conn_timeout_ms`: it runs no connection-registry timer thread (see the Timeouts note in the HTTP/1 LLD docs).
 - `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
 - Response compression (`compression*`) lives on `zix.Http1` and `zix.Http`, the engines that serve HTTP responses with Accept-Encoding negotiation. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
-- `zix.Udp` (datagram) carries `ip` / `port` / `logger`, and `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path, each only the subset that applies.
+- `zix.Udp` (datagram) carries `ip` / `port` / `logger` for the typed path, plus the raw-path knobs `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, used by `zix.Udp.Raw`). `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path. Each engine takes only the subset that applies.
 
 <br>
 
@@ -409,6 +409,8 @@ Routes are baked into the server type at compile time: no allocator is needed fo
 
 `config.allocator` must be a general-purpose allocator (e.g. `std.heap.smp_allocator`). `ArenaAllocator` is not suitable: the broadcast peer snapshot is allocated and freed per packet: `ArenaAllocator.free()` is a no-op, so snapshots accumulate unboundedly until the server stops. See [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for the full explanation and PoC.
 
+The raw path (`zix.Udp.Raw`, ADR-049) allocates its recv / send batches and worker-thread array from `config.allocator` once at startup, not per packet, so the arena caveat does not bind there.
+
 ### HTTP/2 and gRPC
 
 Both use heap-allocated per-connection stream arrays (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed: handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
@@ -432,19 +434,18 @@ Fetch zix to your project:
 Add to `build.zig.zon`:
 ```zig
 .{
-    .name = .backend_api,
+    .name = .my_project,
     .version = "0.1.0",
-    .dependencies = .{
-        .zix = .{
-            .url = "https://codeberg.org/prothegee/zix/archive/0.3.x.tar.gz",
-            // .hash will be filled in by `zig fetch --save`
-        },
-    },
+    .fingerprint = 0x0, // required, zig prints a suggested value on first init
+    .dependencies = .{},
     .paths = .{""},
 }
 ```
 
-Then do `zig fetch --save`.
+Then do:
+```sh
+zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"`.
+```
 
 <br>
 
@@ -458,7 +459,8 @@ zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
 or
 
 ```sh
-zig fetch --save "git+https://codeberg.org/prothegee/zix#0.2.x" # upstream v0.2.x
+# upstream vMAJOR.MINOR.x
+zig fetch --save "git+https://codeberg.org/prothegee/zix#MAJOR.MINOR.x"
 ```
 
 > You can change to mirror too as `github.com/prothegee/zix`
@@ -1801,7 +1803,7 @@ For design details see [`docs/hld-channel-en.md`](docs/hld-channel-en.md).
 
 ### UDP
 
-Type-safe UDP server and client. The user defines their own `extern struct` packet. Zix handles endianness, size validation, and concurrency.
+Two modes. The typed `zix.Udp.Server(Packet)` is a type-safe messaging server: the user defines their own `extern struct` packet, and zix handles endianness, size validation, and concurrency. The raw `zix.Udp.Raw(handler)` (ADR-049) serves variable-length datagrams with no fixed struct, with `recvmmsg` / `sendmmsg` batching and per-core SO_REUSEPORT workers.
 
 ```zig
 const std = @import("std");
@@ -1862,11 +1864,34 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-**When to use:** reach for UDP when you want low-latency, fire-and-forget datagrams with your own `extern struct` packet: telemetry, game state, discovery, heartbeats, or broadcast/relay to many peers, accepting best-effort delivery. If you need ordering, retransmission, or large payloads, use `zix.Tcp` instead.
+Raw-bytes mode (variable-length datagrams, no fixed struct):
+
+```zig
+fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
+    sink.reply(dg); // echo back to the sender
+}
+
+const Echo = zix.Udp.Raw(handler);
+
+pub fn main(process: std.process.Init) !void {
+    var server = try Echo.init(.{
+        .io        = process.io,
+        .allocator = std.heap.smp_allocator,
+        .ip        = "0.0.0.0",
+        .port      = 9064,
+        .dispatch_model = .EPOLL, // per-core SO_REUSEPORT workers (.ASYNC = single worker)
+    });
+    defer server.deinit();
+    try server.run();
+}
+```
+
+**When to use:** reach for UDP when you want low-latency, fire-and-forget datagrams: telemetry, game state, discovery, heartbeats, or broadcast/relay to many peers, accepting best-effort delivery. Use the typed `Server(Packet)` for a fixed `extern struct` contract, the raw `Raw(handler)` for arbitrary byte payloads and the batched per-core path. If you need ordering, retransmission, or large payloads, use `zix.Tcp` instead.
 
 **Examples:**
-- [examples/udp_server.zig](examples/udp_server.zig) - full working example with broadcast and configurable ports
+- [examples/udp_server.zig](examples/udp_server.zig) - typed server, full working example with broadcast and configurable ports
 - [examples/udp_client.zig](examples/udp_client.zig) - matching client
+- [examples/udp_raw_echo.zig](examples/udp_raw_echo.zig) - raw-bytes echo server (recvmmsg / sendmmsg batching, dispatch models)
 
 [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for details.
 
@@ -1991,6 +2016,15 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 > behaviour of 8-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
 
 > Historical benchmark stored inside `docs/benchmark` directory.
+
+<br>
+
+## Summary
+
+```
+A surgical backend library & engine with a wiring tools.
+That will bring you performance, efficiency, & transparency. Not a framework.
+```
 
 <br>
 

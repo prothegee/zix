@@ -1059,4 +1059,26 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-049: mode datagram UDP raw-bytes
+
+**Status:** Accepted
+
+**Konteks:** `zix.Udp` rilis sebagai engine messaging bertipe: `Server(comptime Packet)`, dengan setiap datagram tepat satu `extern struct`, diterima dan dikirim satu syscall per datagram, tanpa dispatch model. Itu cocok untuk messaging berbentuk tetap tapi bukan datagram transport: tidak bisa membawa payload variable-length, mem-batch syscall, atau jalan per-core. Workload UDP berorientasi throughput (dan engine QUIC / HTTP3 mendatang) butuh substrate datagram yang variable-length, batched, dan per-core, dan substrate itu berguna mandiri untuk server echo, DNS-style, dan telemetry.
+
+**Keputusan:** Tambah mode raw-bytes, `zix.Udp.Raw(handler)`, berdampingan dengan typed `Server(Packet)` yang tidak berubah. Handler menerima byte datagram (variable-length hingga `max_recv_buf`), address peer, dan `Sink` untuk membalas. Di Linux ia menerima dalam batch `recvmmsg` dan mengirim dalam batch `sendmmsg`, balasan digabung jadi satu kirim per batch yang diterima. `dispatch_model` (enum yang sama dengan engine TCP) memilih bentuk worker: `.EPOLL` / `.URING` menjalankan satu worker `SO_REUSEPORT` per CPU (per-core shared-nothing, kernel me-load-balance datagram), dan `.ASYNC` / `.POOL` / `.MIXED` menjalankan satu worker. Dispatch dipartisi sesuai ADR-043: folder `src/udp/dispatch/` dengan satu file per model plus `common.zig` dan `run()` switch tipis, layout yang sama dengan `zix.Http1`. Jalur typed tidak berubah dan tetap memakai satu loop receive async, dan `dispatch_model` non-ASYNC di jalur typed di-fold dengan notice yang dicatat ketimbang no-op diam. Mesin khusus QUIC (connection-ID demux, packet protection, transport state) tetap di luar `zix.Udp` dan disediakan untuk `src/udp/http3/` nanti.
+
+**Alasan:** Batched syscall (`recvmmsg` / `sendmmsg`) dan worker `SO_REUSEPORT` per-core adalah pengungkit throughput datagram yang sebenarnya, jadi membangunnya sebagai kapabilitas `zix.Udp` kelas-satu berguna di luar QUIC dan menjaga lapisan QUIC mendatang fokus ke semantik transport ketimbang mengakali engine messaging berstruktur-tetap. Bentuk handler-plus-`Sink` membuat batching tak terlihat: balasan masuk antrian ke send batch dan seluruh batch keluar sebagai satu `sendmmsg`, dan balasan ke pengirim memakai ulang address yang diisi kernel tanpa konversi. Memakai ulang enum `DispatchModel` TCP dan folder dispatch ADR-043 menjaga konsistensi keluarga engine. GSO (`UDP_SEGMENT`), GRO (`UDP_GRO`), ECN, dan jalur submission io_uring khusus di balik `.URING` ditunda: offload itu butuh jalur control-data per-message yang kebenarannya bergantung hardware (GRO menggabungkan beberapa datagram jadi satu buffer, jadi mengaktifkannya tanpa splitter akan menyerahkan super-datagram salah ke handler), maka `.URING` di-fold ke loop per-core `recvmmsg` untuk sekarang.
+
+**Config:** field `UdpServerConfig` baru, semua additive dengan default aman, dipakai jalur raw: `dispatch_model` (default `.ASYNC`), `workers` (0 = satu per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (ukuran batch mmsg), dan `max_recv_buf` (buffer per-datagram, jalur typed tetap `@sizeOf(Packet)`). Tidak ada `kernel_backlog`: UDP tidak punya backlog `listen`.
+
+**Konsekuensi:**
+- `src/udp/datagram.zig` baru (socket raw-fd, `recvmmsg` dengan `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, konversi address), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus satu file per model), dan `src/udp/raw.zig` (facade `Raw` dan `run()` switch). Socket memakai syscall `std.os.linux` mentah, karena `std.posix` tidak lagi membungkus `socket` / `bind` / `close`.
+- `zix.Udp` meng-export `Raw`, `Sink`, `HandlerFn`, dan `DispatchModel`. Typed `Server(Packet)` tidak berubah selain notice fold.
+- Example baru `examples/udp_raw_echo.zig` (port 9064) dan runner `tests/runner/udp_raw_runner.zig`, plus kasus `udp-raw` yang dilipat ke `test-runner-all`.
+- Target non-Linux jatuh ke satu loop receive `std.Io.net` (tanpa `recvmmsg` / `sendmmsg`).
+- Fase dua: jalur submission io_uring khusus di balik `.URING`, dan GSO / GRO / ECN.
+- Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 60 protokol).
+
+---
+
 ###### end of adr

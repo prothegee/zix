@@ -77,10 +77,14 @@ flowchart TD
 graph TD
     zix["src/lib.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
 
-    Udp --> config["config.zig\nPortMode, Endianness\nUdpServerConfig, UdpClientConfig"]
+    Udp --> config["config.zig\nPortMode, Endianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
     Udp --> packet["packet.zig\nFeedbackResult\ntoEndian, fromEndian"]
-    Udp --> server["server.zig\nUdpServer(Packet)"]
+    Udp --> server["server.zig\nUdpServer(Packet) (typed)"]
     Udp --> client["client.zig\nUdpClient(Packet)"]
+    Udp --> core["core.zig\nHandlerFn, Sink (raw)"]
+    Udp --> datagram["datagram.zig\nsocket raw-fd\nrecvmmsg / sendmmsg"]
+    Udp --> raw["raw.zig\nfacade Raw(handler)\nrun() switch"]
+    raw --> dispatch["dispatch/\ncommon + async / pool /\nmixed / epoll / uring"]
 ```
 
 ---
@@ -91,8 +95,12 @@ Akses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Udp.Server(Packet)` | generic fn | Mengembalikan tipe `UdpServer(Packet)` |
+| `zix.Udp.Server(Packet)` | generic fn | Mengembalikan tipe `UdpServer(Packet)` (typed messaging) |
 | `zix.Udp.Client(Packet)` | generic fn | Mengembalikan tipe `UdpClient(Packet)` |
+| `zix.Udp.Raw(handler)` | generic fn | Mengembalikan tipe server datagram raw-bytes (ADR-049) |
+| `zix.Udp.Sink` | struct | Antrian balasan untuk handler raw (`reply`, `replyTo`) |
+| `zix.Udp.HandlerFn` | fn type | Handler raw: `fn([]const u8, *const IpAddress, *Sink) void` |
+| `zix.Udp.DispatchModel` | enum(u8) | Sama dengan engine TCP, memilih bentuk worker jalur raw |
 | `zix.Udp.ServerConfig` | struct | Konfigurasi server |
 | `zix.Udp.ClientConfig` | struct | Konfigurasi client |
 | `zix.Udp.PortMode` | enum(u8) | `CONFIGURABLE` atau `REQUIRED` |
@@ -126,7 +134,8 @@ Akses melalui `const zix = @import("zix");`
 
 ```zig
 pub const UdpServerConfig = struct {
-    allocator:             std.mem.Allocator,          // caller-owned, used for client list and broadcast snapshots
+    io:                    std.Io,                     // caller-owned, must outlive the server
+    allocator:             std.mem.Allocator,          // caller-owned (client list + broadcast snapshots, raw batches)
     ip:                    []const u8,                 // bind address
     port:                  u16,                        // bind port & must be non-zero
     port_mode:             PortMode   = .REQUIRED,
@@ -137,10 +146,21 @@ pub const UdpServerConfig = struct {
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
     auto_echo:             bool       = false, // send received packet back to sender only
     broadcast:             bool       = false, // relay received packet to all connected clients
+    logger:                ?*Logger   = null,  // lifecycle + per-packet logging when set
+
+    // Knob datagram-transport (ADR-049), dipakai jalur raw-bytes (zix.Udp.Raw). Jalur typed jalan
+    // satu loop async: ia mem-fold dispatch_model non-ASYNC dengan notice dan tidak memakai knob
+    // batch / worker.
+    dispatch_model:        DispatchModel = .ASYNC, // .EPOLL / .URING = worker per-core
+    workers:               usize         = 0,      // 0 = satu worker per CPU
+    reuse_address:         bool          = false,  // SO_REUSEADDR + SO_REUSEPORT
+    recv_batch:            usize         = 32,     // ukuran batch recvmmsg
+    send_batch:            usize         = 32,     // ukuran batch sendmmsg
+    max_recv_buf:          usize         = 1500,   // buffer datagram raw (typed pakai @sizeOf(Packet))
 };
 ```
 
-`allocator`, `ip`, dan `port` wajib diisi (tidak ada nilai default). `auto_ack` dan `auto_echo` bersifat independen: keduanya dapat bernilai true secara bersamaan (ACK lalu echo). `broadcast` mengirim ke semua client, `auto_echo` hanya mengirim ke pengirim.
+`io`, `allocator`, `ip`, dan `port` wajib diisi (tidak ada nilai default). `auto_ack` dan `auto_echo` bersifat independen: keduanya dapat bernilai true secara bersamaan (ACK lalu echo). `broadcast` mengirim ke semua client, `auto_echo` hanya mengirim ke pengirim. Field datagram-transport berlaku untuk jalur raw-bytes (`zix.Udp.Raw`, lihat [Mode Raw-bytes](#mode-raw-bytes-adr-049)), typed `Server(Packet)` tidak memakainya selain mem-fold `dispatch_model` non-ASYNC.
 
 ---
 
@@ -323,13 +343,36 @@ Lihat `docs/hld-logger-id.md` untuk format baris log dan detail konfigurasi.
 
 ---
 
+## Mode Raw-bytes (ADR-049)
+
+Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa packet struct tetap. Ia adalah substrate datagram-transport (dan basis yang ditumpangi engine QUIC / HTTP3 mendatang), berguna mandiri untuk server echo, DNS-style, dan telemetry.
+
+- Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
+- I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
+- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing), `.ASYNC` / `.POOL` / `.MIXED` menjalankan satu worker. `.URING` di-fold ke loop per-core recvmmsg untuk sekarang.
+
+```zig
+fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
+    sink.reply(dg); // echo back to the sender
+}
+
+const Echo = zix.Udp.Raw(handler);
+var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064 });
+try server.run();
+```
+
+Lihat `examples/udp_raw_echo.zig` dan ADR-049 (`docs/adr-id.md`).
+
+---
+
 ## Belum Diimplementasikan
 
 | Fitur | Catatan |
 | :- | :- |
-| Batching `sendmmsg` | N `send()` berurutan per broadcast, `sendmmsg` akan mereduksi menjadi 1 syscall |
+| Batching `sendmmsg` di loop broadcast typed | Sudah ada di jalur raw (`zix.Udp.Raw`). Broadcast typed masih melakukan N `send()` berurutan |
+| GSO / GRO / ECN raw | Ditunda (ADR-049 fase 2): butuh jalur cmsg yang divalidasi hardware (GRO coalescing butuh splitter) |
+| Submission io_uring khusus untuk `.URING` raw | Ditunda: `.URING` di-fold ke loop per-core recvmmsg untuk sekarang |
 | Interval pengiriman sub-milidetik | `send_every` dalam milidetik, ganti nama ke nanodetik jika diperlukan |
-| Penghapusan batas peer yang dialokasikan arena | PoC menggunakan `MAX_BROADCAST_CLIENTS=64`. Implementasi src saat ini menggunakan heap slice tanpa batas |
 | Struct feedback yang dapat dikonfigurasi | Saat ini echo mengirimkan kembali packet mentah. Produksi dapat menggunakan tagged result |
 
 <!-- tickrate 64 vs 128 -->

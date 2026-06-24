@@ -133,6 +133,15 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("udp/packet.zig"));
     std.testing.refAllDecls(@import("udp/server.zig"));
     std.testing.refAllDecls(@import("udp/client.zig"));
+    std.testing.refAllDecls(@import("udp/datagram.zig"));
+    std.testing.refAllDecls(@import("udp/core.zig"));
+    std.testing.refAllDecls(@import("udp/raw.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/async.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/pool.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/mixed.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/epoll.zig"));
+    std.testing.refAllDecls(@import("udp/dispatch/uring.zig"));
 
     // # zix.Tcp (raw)
     std.testing.refAllDecls(@import("tcp/config.zig"));
