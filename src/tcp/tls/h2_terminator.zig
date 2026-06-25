@@ -35,15 +35,14 @@ fn peerAlert(body: []const u8) anyerror {
 /// Param:
 /// fd - posix.fd_t (the accepted TLS socket, owned by the caller)
 /// ctx - *const Tls.Context (loaded cert / key / alpn / version policy)
-/// EngineCtx - type (the runtime context the engine entry needs, e.g. serve options)
-/// engine_ctx - EngineCtx (passed through to engineEntry on the engine thread)
-/// engineEntry - fn (EngineCtx, posix.fd_t) void (runs the cleartext h2 engine over the socketpair)
+/// driver - anytype (its drive(fd, conn, record_buf) owns the connection until close)
 ///
 /// Return:
 /// - !void (errors on a rejected handshake or non-h2 ALPN)
-/// `driver` runs the decrypted h2 stream after the handshake: its `drive(fd, conn, record_buf)` owns
-/// the connection until close. The Http2 and gRPC engines pass an inline-mux driver that drives their
-/// resumable h2 state machine directly over the records (no socketpair, no second thread).
+///
+/// driver runs the decrypted h2 stream after the handshake. The Http2 and gRPC engines pass an
+/// inline-mux driver that drives their resumable h2 state machine directly over the records (no
+/// socketpair, no second thread).
 pub fn serveConnTls(
     fd: posix.fd_t,
     ctx: *const Tls.Context,
