@@ -10,13 +10,12 @@ It has two halves, and they are honestly different in what they can prove right 
   Encoded Field Section Prefix and three representations together (Indexed, Literal with Name
   Reference, Literal with Literal Name), and pins the wire bytes the static representations must
   produce (e.g. :method GET is 0xd1). Proven in `qpack_p4_poc.zig`.
-- **Cross-implementation (pending fixtures).** Decode encoded streams produced by *another* QPACK
-  implementation and compare the decode to the original header list. This is the real interop signal,
-  and it needs the qpack-interop test data: `.qif` files (the decoded header lists) and the `.out` /
-  `.enc` encoded streams various implementations produced at various dynamic-table settings. Those
-  fixtures are not in the tree, and the streams exercise the dynamic table and Huffman, so the full
-  decode-and-compare driver lands with the integrated QPACK decoder. Until then this half is reported
-  PENDING, not faked.
+- **Cross-implementation (now live via curl).** A real third-party QPACK on both directions exercises
+  interop against the assembled engine: curl --http3 Huffman-encodes the request `:path` (RFC 7541
+  Appendix B) and the server decodes it (`huffman.zig` + `qpack.zig`), and curl decodes the server's
+  QPACK-encoded `:status`. That is encode-and-decode-and-compare against another implementation on the
+  live wire (HTTP/3 200). The static `.qif` corpus sweep (dynamic table + Huffman at varied settings)
+  is still an optional follow-up, since the live engine uses the static table only.
 
 ## Oracle
 
@@ -38,6 +37,6 @@ QPACK_INTEROP_DIR=/path/to/qifs bash rnd/0.5.x/verify-qpack-p4.sh
 ## Expect
 
 - Step 1 prints `PASS` for the zix encode -> decode self round trip.
-- Step 2 reports `PENDING` with no fixtures (self consistency proven, cross-impl not run, not faked),
-  or notes the fixtures and defers the full driver to Layer P integration when `QPACK_INTEROP_DIR`
-  is set.
+- Cross-impl is covered live by `zig build test-runner-http3` (and the curl --http3 round trip): the
+  server decodes curl's Huffman `:path` and curl decodes the server's QPACK `:status`. The static
+  `.qif` corpus sweep stays an optional follow-up when `QPACK_INTEROP_DIR` is set.
