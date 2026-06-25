@@ -1,8 +1,8 @@
 // HTTP/3 (QUIC) over the zix.Udp datagram substrate. QUIC requires TLS 1.3, so a Tls.Context
 // (cert + key) is mandatory: the server rejects a null context at init. Routes are a comptime table
 // (zix.Http3.Router), the same shape as zix.Http1 / zix.Http2, dispatched on the decoded request
-// path. The v1 engine runs a single-worker recv with internal connection-id demux (ADR-049 /
-// ADR-050). EPOLL / URING fold to the v1 worker until per-core CID steering lands (ADR-049 phase 3).
+// path. ASYNC / POOL / MIXED run a single-worker recv with internal connection-id demux (ADR-049 /
+// ADR-050). EPOLL / URING run one SO_REUSEPORT worker per core, the kernel load-balancing by 4-tuple.
 
 const std = @import("std");
 const zix = @import("zix");
