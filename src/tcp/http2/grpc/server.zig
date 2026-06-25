@@ -11,6 +11,7 @@ const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
+const tls_epoll = @import("tls_epoll.zig");
 
 pub const Route = core.Route;
 
@@ -44,7 +45,16 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         pub fn run(self: *Self) !void {
             const cfg = self.config;
 
-            if (cfg.tls != null) return tls_serve.runTls(routes, cfg);
+            if (cfg.tls != null) {
+                // Multiplexed TLS for the event-loop models (no thread-per-conn): one epoll worker per
+                // core terminates TLS in place and serves the resumable grpc mux. ASYNC / POOL / MIXED
+                // keep the thread-per-conn terminator (which also serves TLS 1.2).
+                const is_linux = @import("builtin").target.os.tag == .linux;
+                if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
+                    return tls_epoll.runTlsEpoll(routes, cfg);
+
+                return tls_serve.runTls(routes, cfg);
+            }
 
             return switch (cfg.dispatch_model) {
                 .ASYNC => async_model.runAsync(routes, cfg),
