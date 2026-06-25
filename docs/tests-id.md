@@ -129,6 +129,23 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/grpc/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
 | `tcp/http2/grpc/client.zig` | `refAllDecls` + perilaku: `GrpcClient.connect` port nol menghasilkan `error.PortNotConfigured` |
 
+### zix.Http3
+
+Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked example dari spec-nya sendiri sebagai test in-file. `zix.Http3` juga mengekspor ini sebagai primitive (mengikuti `zix.Http2`), dan round trip live digerakkan oleh client native yang hand-rolled dari primitive itu di `test-runner-http3` / `test-runner-all`.
+
+| Modul | Cakupan |
+| :- | :- |
+| `udp/http3/crypto.zig` | `refAllDecls` + perilaku: Initial secret / key AES-128-GCM dari connection id cocok dengan worked example RFC 9001 Appendix A.1, helper AEAD nonce dan header-mask |
+| `udp/http3/protection.zig` | `refAllDecls` + perilaku: round-trip seal-lalu-open untuk packet Initial / Handshake / 1-RTT, header protection diterapkan dan dilepas, satu byte yang di-flip gagal AEAD |
+| `udp/http3/keyschedule.zig` | `refAllDecls` + perilaku: handshake key dari ECDHE + transcript, application key 1-RTT dari handshake secret + transcript sampai Finished |
+| `udp/http3/qpack.zig` | `refAllDecls` + perilaku: encode / decode prefixed-integer, indexed field line, literal-with-name-reference, entri static table |
+| `udp/http3/huffman.zig` | `refAllDecls` + perilaku: decode vector `www.example.com` RFC 7541 Appendix C.4 dan sebuah request path dengan digit dan simbol |
+| `udp/http3/varint.zig` / `packet.zig` / `frame.zig` | `refAllDecls` + perilaku: round-trip read / write varint, parse long / short header, parse frame CRYPTO dan STREAM |
+| `udp/http3/request.zig` / `response.zig` | `refAllDecls` + perilaku: `parseRequest` memulihkan `:method` / `:path` melewati ACK di depan, `buildResponse` membawa control SETTINGS plus balasan HEADERS / DATA |
+| `udp/http3/connection.zig` | `refAllDecls` + perilaku: `init` menurunkan Initial key dari connection id (RFC 9001 A.1), cap anti-amplification 3x |
+| `udp/http3/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, query di-strip sebelum matching, tidak ada match mengembalikan 404 |
+| `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat init |
+
 ### zix.Logger
 
 | Modul | Cakupan |
