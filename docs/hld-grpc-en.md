@@ -376,7 +376,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS 1.3 (ALPN h2): a per-connection terminator runs the same h2c engine behind a decrypted socketpair (the shared `tcp/tls/h2_terminator.zig`, also used by Http2), driving the gRPC mux state machine over the plaintext. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_epoll.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
 
 ```mermaid
 graph LR

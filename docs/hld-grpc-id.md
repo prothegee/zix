@@ -375,7 +375,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS 1.3 (ALPN h2): sebuah terminator per-koneksi menjalankan engine h2c yang sama di belakang socketpair terdekripsi (terminator bersama `tcp/tls/h2_terminator.zig`, dipakai juga oleh Http2), menggerakkan mux state machine gRPC di atas plaintext. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_epoll.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
 
 ```mermaid
 graph LR
