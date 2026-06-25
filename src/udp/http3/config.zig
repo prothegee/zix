@@ -11,8 +11,8 @@ const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
 
 /// The dispatch model, shared with the TCP engines and the UDP raw path (ADR-050). For HTTP/3,
-/// `.ASYNC` / `.POOL` / `.MIXED` run the v1 single-worker recv with internal CID demux, and
-/// `.EPOLL` / `.URING` fold to that path until per-core CID steering lands (ADR-049 phase 3).
+/// `.ASYNC` / `.POOL` / `.MIXED` run a single-worker recv with internal CID demux, and `.EPOLL` /
+/// `.URING` run one SO_REUSEPORT worker per core, the kernel load-balancing connections by 4-tuple.
 pub const DispatchModel = @import("../../tcp/config.zig").DispatchModel;
 
 pub const Http3ServerConfig = struct {
@@ -27,9 +27,10 @@ pub const Http3ServerConfig = struct {
 
     // UDP substrate knobs (ADR-049), restated flat. Used by the recv path.
 
-    /// Concurrency model. v1 runs a single worker, EPOLL / URING fold to it with a logged notice.
+    /// Concurrency model. ASYNC / POOL / MIXED run a single worker, EPOLL / URING run one
+    /// SO_REUSEPORT worker per core (RC3 multicore), the kernel load-balancing by 4-tuple.
     dispatch_model: DispatchModel = .ASYNC,
-    /// Worker count for the per-core models. 0 means one per available CPU.
+    /// Worker count for the per-core models (EPOLL / URING). 0 means one per available CPU.
     workers: usize = 0,
     /// recvmmsg batch size: datagrams received per syscall.
     recv_batch: usize = 32,

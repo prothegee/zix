@@ -30,6 +30,15 @@ fn run(io: std.Io, server_path: []const u8) !void {
     const body = try http3_client.fetch(io, SERVER_IP, SERVER_PORT, "/baseline2?a=20&b=22", &body_buf);
 
     if (!std.mem.eql(u8, body, "42")) return error.UnexpectedBody;
+
+    // Multiplexing (RC2): two requests on ONE connection, on streams 0 and 4, must both be answered
+    // with their own summed result (a=20&b=22 -> 42, a=1&b=2 -> 3).
+    var body0_buf: [256]u8 = undefined;
+    var body1_buf: [256]u8 = undefined;
+    const both = try http3_client.fetchTwo(io, SERVER_IP, SERVER_PORT, "/baseline2?a=20&b=22", "/baseline2?a=1&b=2", &body0_buf, &body1_buf);
+
+    if (!std.mem.eql(u8, both[0], "42")) return error.UnexpectedBody;
+    if (!std.mem.eql(u8, both[1], "3")) return error.UnexpectedBody;
 }
 
 // --------------------------------------------------------- //

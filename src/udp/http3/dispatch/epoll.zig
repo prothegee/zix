@@ -1,11 +1,11 @@
-//! zix HTTP/3 EPOLL dispatch: per-core SO_REUSEPORT CID steering is v2 (ADR-049 phase 3), so this
-//! folds to the v1 single worker with a logged notice.
+//! zix HTTP/3 EPOLL dispatch: one SO_REUSEPORT worker per core, the kernel load-balancing connections
+//! by 4-tuple (RC3 multicore).
 
 const Config = @import("../config.zig");
 const core = @import("../core.zig");
 const common = @import("common.zig");
 
-/// Run the HTTP/3 server. Folds to the v1 single worker until per-core CID steering lands.
+/// Run the HTTP/3 server with one SO_REUSEPORT worker per core.
 pub fn runEpoll(comptime handler: core.HandlerFn, config: Config.Http3ServerConfig) !void {
     return common.runPerCore(handler, config);
 }

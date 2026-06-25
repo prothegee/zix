@@ -1,17 +1,13 @@
 //! Shared h2-over-TLS terminator (RFC 8446 + 7540 + 7301 ALPN), engine-agnostic.
 //!
 //! Note:
-//! - Terminates TLS in front of an existing cleartext h2 engine: the handshake runs via zix.Tls
-//!   (version subject to the context min_version / max_version), ALPN must select h2, then a
-//!   socketpair carries plaintext. The engine runs unchanged on one end (it thinks it speaks h2c to
-//!   a socket), and a poll loop pumps inbound (decrypt the client record -> plaintext) and outbound
-//!   (engine frames -> encrypt).
-//! - The engine is supplied by the caller as a comptime entry function plus a runtime context, so
-//!   the same terminator serves zix.Http2 (core.serveConn) and zix.Grpc (serveGrpcConn) without
-//!   duplicating the handshake or pump. https is a separate path on its own perf band, so the
-//!   per-connection engine thread plus socketpair are acceptable here.
-//! - Teardown uses shutdown(SHUT_WR) on our socketpair end rather than an abrupt close, so the
-//!   engine sees EOF on its read and finishes without a write racing a closed peer (no SIGPIPE).
+//! - Terminates TLS in front of an h2 engine: the handshake runs via zix.Tls (version subject to the
+//!   context min_version / max_version) and ALPN must select h2, then a caller-supplied `driver` runs
+//!   the decrypted h2 stream. The Http2 and gRPC engines pass an inline-mux driver that drives their
+//!   resumable h2 state machine directly over the decrypted records (no socketpair, no second thread),
+//!   sealing the engine's frames into TLS records through a thread-local write hook.
+//! - The handshake (1.3 and the 1.2 fallback) is engine-agnostic, so the same terminator serves both
+//!   zix.Http2 and zix.Grpc without duplicating it.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -21,12 +17,10 @@ const tls12 = @import("../../tls/tls12_connection.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
-const content_type_change_cipher_spec: u8 = 20;
-const content_type_alert: u8 = 21;
-const content_type_handshake: u8 = 22;
-const content_type_application_data: u8 = 23;
-
-const max_plaintext: usize = 16 * 1024;
+pub const content_type_change_cipher_spec: u8 = 20;
+pub const content_type_alert: u8 = 21;
+pub const content_type_handshake: u8 = 22;
+pub const content_type_application_data: u8 = 23;
 
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the caller closes the connection rather than misreading it as a record.
@@ -47,12 +41,13 @@ fn peerAlert(body: []const u8) anyerror {
 ///
 /// Return:
 /// - !void (errors on a rejected handshake or non-h2 ALPN)
+/// `driver` runs the decrypted h2 stream after the handshake: its `drive(fd, conn, record_buf)` owns
+/// the connection until close. The Http2 and gRPC engines pass an inline-mux driver that drives their
+/// resumable h2 state machine directly over the records (no socketpair, no second thread).
 pub fn serveConnTls(
     fd: posix.fd_t,
     ctx: *const Tls.Context,
-    comptime EngineCtx: type,
-    engine_ctx: EngineCtx,
-    comptime engineEntry: fn (EngineCtx, posix.fd_t) void,
+    driver: anytype,
 ) !void {
     var record_buf: [17 * 1024]u8 = undefined;
 
@@ -77,7 +72,7 @@ pub fn serveConnTls(
             else => return error.Tls12RequiresEcdsa,
         };
 
-        return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, EngineCtx, engine_ctx, engineEntry);
+        return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, driver);
     }
 
     var handshake_out: [8192]u8 = undefined;
@@ -97,7 +92,7 @@ pub fn serveConnTls(
                 else => return error.Tls12RequiresEcdsa,
             };
 
-            return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, EngineCtx, engine_ctx, engineEntry);
+            return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, driver);
         }
 
         // any other rejected ClientHello (incl. no_application_protocol): send the fatal alert in
@@ -125,13 +120,12 @@ pub fn serveConnTls(
         break;
     }
 
-    try runEngine(fd, &conn, &record_buf, EngineCtx, engine_ctx, engineEntry);
+    driver.drive(fd, &conn, &record_buf);
 }
 
 /// h2-over-TLS-1.2 (RFC 7540 over RFC 5246): the two-phase 1.2 handshake (tls12_connection) with
-/// ALPN h2, then the same socketpair terminator over the engine. Reached only when the client did
-/// not offer 1.3. The 1.2 ephemeral reuses the random bytes (reduced to a P-256 scalar inside the
-/// engine).
+/// ALPN h2, then the caller-supplied driver over the engine. Reached only when the client did not
+/// offer 1.3. The 1.2 ephemeral reuses the random bytes (reduced to a P-256 scalar inside the engine).
 fn serveConnTls12(
     fd: posix.fd_t,
     ctx: *const Tls.Context,
@@ -139,9 +133,7 @@ fn serveConnTls12(
     client_hello: []const u8,
     ephemeral_secret: [32]u8,
     server_random: [32]u8,
-    comptime EngineCtx: type,
-    engine_ctx: EngineCtx,
-    comptime engineEntry: fn (EngineCtx, posix.fd_t) void,
+    driver: anytype,
 ) !void {
     var flight_out: [8192]u8 = undefined;
     const flight = try tls12.serverFlight1(.{
@@ -182,123 +174,18 @@ fn serveConnTls12(
     try writeAll(fd, finish.to_send);
     var conn = finish.connection;
 
-    try runEngine(fd, &conn, &record_buf, EngineCtx, engine_ctx, engineEntry);
-}
-
-/// Spawn the engine thread on a socketpair, pump the TLS stream both ways until either side closes,
-/// then tear down cleanly. `conn` is the live TLS connection (1.3 or 1.2); `record_buf` is reused
-/// for inbound records.
-fn runEngine(
-    fd: posix.fd_t,
-    conn: anytype,
-    record_buf: []u8,
-    comptime EngineCtx: type,
-    engine_ctx: EngineCtx,
-    comptime engineEntry: fn (EngineCtx, posix.fd_t) void,
-) !void {
-    // socketpair: the engine runs on inner_fd[1], the pump owns inner_fd[0].
-    var pair: [2]posix.fd_t = undefined;
-    if (posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) != .SUCCESS) return error.SocketpairFailed;
-    const pump_fd = pair[0];
-    const engine_fd = pair[1];
-
-    const ThreadCtx = struct {
-        engine_ctx: EngineCtx,
-        inner_fd: posix.fd_t,
-
-        fn run(tc: @This()) void {
-            engineEntry(tc.engine_ctx, tc.inner_fd);
-        }
-    };
-
-    var engine_thread = std.Thread.spawn(.{ .stack_size = 512 * 1024 }, ThreadCtx.run, .{
-        ThreadCtx{ .engine_ctx = engine_ctx, .inner_fd = engine_fd },
-    }) catch {
-        _ = linux.close(pump_fd);
-        _ = linux.close(engine_fd);
-        return error.SpawnFailed;
-    };
-
-    pump(fd, pump_fd, conn, record_buf);
-
-    // EOF the engine's read side so it finishes, drain its remaining output, then join + close.
-    _ = linux.shutdown(pump_fd, linux.SHUT.WR);
-    drain(pump_fd);
-    engine_thread.join();
-    _ = linux.close(pump_fd);
-
-    var close_buf: [64]u8 = undefined;
-    writeAll(fd, conn.closeNotify(&close_buf)) catch {};
-}
-
-/// Full-duplex relay between the TLS socket (fd) and the plaintext engine end (pump_fd): decrypt
-/// inbound client records to plaintext, encrypt outbound engine bytes into records. Returns when
-/// either side closes (client FIN / close_notify, or the engine closes its end).
-fn pump(fd: posix.fd_t, pump_fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
-    var plain_in: [max_plaintext]u8 = undefined;
-    var plain_out: [max_plaintext]u8 = undefined;
-    var encrypt_buf: [17 * 1024]u8 = undefined;
-
-    var fds = [2]linux.pollfd{
-        .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 },
-        .{ .fd = pump_fd, .events = linux.POLL.IN, .revents = 0 },
-    };
-
-    while (true) {
-        fds[0].revents = 0;
-        fds[1].revents = 0;
-        if (posix.errno(linux.poll(&fds, fds.len, -1)) != .SUCCESS) return;
-
-        // inbound: one client record -> decrypt -> plaintext to the engine.
-        if (fds[0].revents & linux.POLL.IN != 0) {
-            const rec = readRecord(fd, record_buf) catch return;
-            if (rec.content_type == content_type_change_cipher_spec) {
-                // ignore a stray mid-stream ChangeCipherSpec
-            } else if (rec.content_type == content_type_application_data) {
-                const plain = conn.readAppData(rec.full, &plain_in) catch return;
-                writeAll(pump_fd, plain) catch return;
-            } else return;
-        }
-        if (fds[0].revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) return;
-
-        // outbound: engine bytes -> encrypt into a record -> the TLS socket.
-        if (fds[1].revents & linux.POLL.IN != 0) {
-            const rc = linux.read(pump_fd, &plain_out, plain_out.len);
-            switch (posix.errno(rc)) {
-                .SUCCESS => {},
-                .INTR => continue,
-                else => return,
-            }
-            if (rc == 0) return;
-            writeAll(fd, conn.writeAppData(plain_out[0..rc], &encrypt_buf)) catch return;
-        }
-        if (fds[1].revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) return;
-    }
-}
-
-/// Discard whatever the engine still writes after we shut its read side, until it closes (EOF).
-fn drain(pump_fd: posix.fd_t) void {
-    var scratch: [4096]u8 = undefined;
-    while (true) {
-        const rc = linux.read(pump_fd, &scratch, scratch.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return,
-        }
-        if (rc == 0) return;
-    }
+    driver.drive(fd, &conn, &record_buf);
 }
 
 // --------------------------------------------------------------- //
 
-const Record = struct {
+pub const Record = struct {
     content_type: u8,
     full: []const u8,
     body: []const u8,
 };
 
-fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
+pub fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     try readAll(fd, buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
@@ -324,7 +211,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     }
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+pub fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];

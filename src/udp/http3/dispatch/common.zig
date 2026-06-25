@@ -21,14 +21,17 @@ const datagram = @import("../../datagram.zig");
 const packet = @import("../packet.zig");
 const protection = @import("../protection.zig");
 const frame = @import("../frame.zig");
+const varint = @import("../varint.zig");
 const serverhello = @import("../serverhello.zig");
 const flight = @import("../flight.zig");
 const response = @import("../response.zig");
 const request = @import("../request.zig");
 const huffman = @import("../huffman.zig");
+const transport_params = @import("../transport_params.zig");
 const keyschedule = @import("../keyschedule.zig");
 const demux = @import("../demux.zig");
 const Connection = @import("../connection.zig").Connection;
+const SendStream = @import("../connection.zig").SendStream;
 const tls_handshake = @import("../../../tls/handshake.zig");
 
 /// Maximum connections one v1 worker tracks. The table is heap-allocated, each Connection is large.
@@ -110,7 +113,11 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Even
                 conn.app_largest_received = opened.packet_number;
             }
 
-            captureRequest(conn, opened.payload);
+            // Copy the decrypted payload onto the connection so sendResponse walks every request stream
+            // it carries without decrypting again. sbuf is stack-local to this call.
+            const copied = @min(opened.payload.len, conn.app_payload_buf.len);
+            @memcpy(conn.app_payload_buf[0..copied], opened.payload[0..copied]);
+            conn.app_payload_len = copied;
 
             return .request_opened;
         } else |_| {}
@@ -171,14 +178,19 @@ fn feedInitialFrames(conn: *Connection, payload: []const u8) void {
     }
 }
 
-/// The v1 single-worker recv loop on the calling thread (ASYNC / POOL / MIXED).
-pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
-    if (!datagram.is_linux) {
-        logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
-        return;
-    }
+/// Effective worker count: the configured value, or one per CPU when 0.
+pub fn effectiveWorkers(config: Http3ServerConfig) usize {
+    if (config.workers != 0) return config.workers;
 
-    const fd = datagram.open(config.ip, config.port, false) catch |err| {
+    return std.Thread.getCpuCount() catch 1;
+}
+
+/// One HTTP/3 worker: bind a UDP socket, own a CID table, and run the recv / demux / respond loop.
+/// `reuse` sets SO_REUSEADDR + SO_REUSEPORT so several workers can bind the same port and the kernel
+/// load-balances connections across them by 4-tuple (RC3 multicore). Each worker is shared-nothing:
+/// its own socket, CID table, and send / recv batches, so no lock is taken on the hot path.
+pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, reuse: bool) void {
+    const fd = datagram.open(config.ip, config.port, reuse) catch |err| {
         logSystem(config, "bind error: {}", .{err});
         return;
     };
@@ -193,8 +205,6 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !v
 
     var tx = datagram.SendBatch.init(config.allocator, config.send_batch, config.send_batch * config.max_recv_buf) catch return;
     defer tx.deinit();
-
-    logSystem(config, "listening on {s}:{d} (v1 single worker)", .{ config.ip, config.port });
 
     while (true) {
         const count = rx.recv(fd) catch continue;
@@ -220,6 +230,17 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !v
     }
 }
 
+/// The v1 single-worker recv loop on the calling thread (ASYNC / POOL / MIXED).
+pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
+    if (!datagram.is_linux) {
+        logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
+        return;
+    }
+
+    logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
+    workerLoop(handler, config, false);
+}
+
 /// Build and send the server's ServerHello Initial in reply to a decrypted ClientHello (handshake
 /// step 2). Idempotent per connection: sent once, skipped on retransmits.
 fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, config: Http3ServerConfig) void {
@@ -241,6 +262,13 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
         .ok => |parsed| parsed,
         .alert => return,
     };
+
+    // Record the client's flow control limits so the response path can serve bodies larger than one
+    // packet without overrunning them (RFC 9000 4.1). Absent (a minimal client) leaves them at 0.
+    if (transport_params.fromClientHello(client_hello)) |tp| {
+        conn.client_max_data = tp.initial_max_data;
+        conn.client_max_stream_data = tp.initial_max_stream_data_bidi_local;
+    }
 
     // Choose our Source Connection ID (the client will use it as its Destination CID) and the fresh
     // per-connection randoms.
@@ -305,31 +333,187 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
     conn.app_ready = true;
 }
 
-/// Decode the request from a decrypted 1-RTT payload and copy its method / path onto the connection
-/// so they outlive the recv buffer. A Huffman-encoded path (the common case, curl encodes :path) is
-/// expanded through the QPACK Huffman decoder into the connection's path buffer.
-fn captureRequest(conn: *Connection, payload: []const u8) void {
-    if (conn.req_ready) return;
+/// Expand a request :path into a stable slice: Huffman-decoded into the connection scratch when the
+/// client encoded it (the common case, curl / h2load encode :path), otherwise the literal slice into
+/// the captured payload. Returns an empty path on a malformed Huffman code.
+fn decodePath(conn: *Connection, req: request.DecodedRequest) []const u8 {
+    if (req.path_huffman) {
+        const len = huffman.decode(&conn.path_scratch, req.path) orelse return "";
 
-    const decoded = request.parseRequest(payload) orelse return;
-
-    const method_len = @min(decoded.method.len, conn.req_method_buf.len);
-    @memcpy(conn.req_method_buf[0..method_len], decoded.method[0..method_len]);
-    conn.req_method_len = method_len;
-
-    if (decoded.path_huffman) {
-        conn.req_path_len = huffman.decode(&conn.req_path_buf, decoded.path) orelse return;
-    } else {
-        const path_len = @min(decoded.path.len, conn.req_path_buf.len);
-        @memcpy(conn.req_path_buf[0..path_len], decoded.path[0..path_len]);
-        conn.req_path_len = path_len;
+        return conn.path_scratch[0..len];
     }
 
-    conn.req_ready = true;
+    return req.path;
 }
 
-/// Build and send the HTTP/3 response to a decrypted 1-RTT request (the final round-trip step).
-/// Idempotent per connection: sent once.
+/// The most stream-data bytes one 1-RTT packet carries. Kept well under the 1500 path MTU once the
+/// short header, packet number, STREAM frame header, and AEAD tag are accounted for.
+const max_stream_chunk: usize = 1200;
+
+/// Copy `dst.len` bytes of the logical response stream (the HTTP/3 prefix followed by the body) into
+/// `dst`, starting at stream offset `off`. The prefix and body stay separate, so a large body is
+/// never concatenated into one buffer.
+fn copyStreamSlice(prefix: []const u8, body: []const u8, off: usize, dst: []u8) void {
+    var written: usize = 0;
+    var pos = off;
+
+    if (pos < prefix.len) {
+        const n = @min(dst.len, prefix.len - pos);
+        @memcpy(dst[0..n], prefix[pos..][0..n]);
+        written += n;
+        pos += n;
+    }
+
+    if (written < dst.len) {
+        const body_pos = pos - prefix.len;
+        @memcpy(dst[written..], body[body_pos..][0 .. dst.len - written]);
+    }
+}
+
+/// The total HTTP/3 stream length for a response: the prefix (HEADERS + DATA header) plus the body.
+fn streamContentLen(status: u16, body: []const u8) usize {
+    var buf: [32]u8 = undefined;
+    const prefix_len = response.buildStreamPrefix(&buf, status, body.len) orelse 0;
+
+    return prefix_len + body.len;
+}
+
+/// Take the pending ACK (consume it so only the first packet of a call carries it).
+fn ackTake(ack_pending: *?u64) ?u64 {
+    const value = ack_pending.*;
+    ack_pending.* = null;
+
+    return value;
+}
+
+/// Apply the flow control advertisements in a decrypted 1-RTT payload: MAX_DATA (0x10) raises the
+/// connection-wide send limit, MAX_STREAM_DATA (0x11) raises a tracked stream's limit. A limit only
+/// ever increases (RFC 9000 4.1), so a smaller value is ignored. Every other frame is walked past.
+fn applyFlowControl(conn: *Connection, payload: []const u8) void {
+    var pos: usize = 0;
+    while (pos < payload.len) {
+        const type_vi = varint.read(payload[pos..]) catch break;
+        const frame_type = type_vi.value;
+
+        if (request.isStreamFrameType(frame_type)) {
+            const stream = request.parseStreamFrame(payload[pos..]) orelse break;
+            pos += stream.consumed;
+            continue;
+        }
+
+        if (frame_type == 0x10) {
+            var p = pos + type_vi.len;
+            const max = varint.read(payload[p..]) catch break;
+            p += max.len;
+            if (max.value > conn.client_max_data) conn.client_max_data = max.value;
+            pos = p;
+            continue;
+        }
+
+        if (frame_type == 0x11) {
+            var p = pos + type_vi.len;
+            const sid = varint.read(payload[p..]) catch break;
+            p += sid.len;
+            const max = varint.read(payload[p..]) catch break;
+            p += max.len;
+            if (conn.findSendStream(sid.value)) |stream| {
+                if (max.value > stream.stream_limit) stream.stream_limit = max.value;
+            }
+            pos = p;
+            continue;
+        }
+
+        const skipped = request.skipFrame(payload[pos..]) orelse break;
+        pos += skipped;
+    }
+}
+
+/// Send as much of a large response stream as the client's flow control now permits, fragmenting it
+/// into STREAM frames across 1-RTT packets (RFC 9000 19.8) and advancing the stream's sent offset.
+/// The connection's first response packet carries HANDSHAKE_DONE + the server control SETTINGS, and
+/// the first packet sent this call carries the pending ACK. A completed stream frees its slot. Returns
+/// true when at least one packet was sent.
+fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, config: Http3ServerConfig) bool {
+    var prefix_buf: [32]u8 = undefined;
+    const prefix_len = response.buildStreamPrefix(&prefix_buf, stream.status, stream.body.len) orelse {
+        stream.active = false;
+        return false;
+    };
+    const prefix = prefix_buf[0..prefix_len];
+
+    // The reachable offset: the stream's own flow limit, capped by the connection-wide remaining credit.
+    const conn_remaining = if (conn.client_max_data > conn.conn_data_sent) conn.client_max_data - conn.conn_data_sent else 0;
+    const limit = @min(stream.content_len, @min(stream.stream_limit, stream.sent + conn_remaining));
+    if (limit <= stream.sent) return false;
+
+    var sent_any = false;
+    while (stream.sent < limit) {
+        const chunk = @min(max_stream_chunk, limit - stream.sent);
+        const is_last = (stream.sent + chunk == stream.content_len); // FIN only when fully sent
+
+        var payload: [1500]u8 = undefined;
+        var p: usize = 0;
+
+        if (!conn.first_response_sent) {
+            payload[p] = 0x1e; // HANDSHAKE_DONE
+            p += 1;
+
+            // Server control stream (id 3): stream type 0x00 then an empty SETTINGS frame.
+            payload[p] = 0x0a; // STREAM | LEN
+            p += 1;
+            p += varint.write(payload[p..], 3);
+            p += varint.write(payload[p..], 3);
+            payload[p] = 0x00;
+            payload[p + 1] = 0x04;
+            payload[p + 2] = 0x00;
+            p += 3;
+
+            conn.first_response_sent = true;
+        }
+
+        if (ackTake(ack_pending)) |largest| p += response.buildAck(payload[p..], largest);
+
+        // STREAM frame on the request stream: type OFF | LEN (| FIN), id, offset, length, then data.
+        payload[p] = 0x0e | @as(u8, if (is_last) 0x01 else 0x00);
+        p += 1;
+        p += varint.write(payload[p..], stream.stream_id);
+        p += varint.write(payload[p..], stream.sent);
+        p += varint.write(payload[p..], chunk);
+        copyStreamSlice(prefix, stream.body, stream.sent, payload[p..][0..chunk]);
+        p += chunk;
+
+        sealAndQueue(conn, tx, fd, peer, payload[0..p]);
+        stream.sent += chunk;
+        conn.conn_data_sent += chunk;
+        sent_any = true;
+    }
+
+    if (stream.complete()) {
+        stream.active = false;
+        logSystem(config, "stream {d} fully sent ({d} bytes)", .{ stream.stream_id, stream.content_len });
+    }
+
+    return sent_any;
+}
+
+/// Seal a 1-RTT payload into a short packet and queue it for sending, flushing the batch first when
+/// it is full so the reply is never dropped.
+fn sealAndQueue(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, payload: []const u8) void {
+    var out: [2048]u8 = undefined;
+    const reply = protection.sealShort(&out, conn.app_keys.server, conn.peer_scid.slice(), conn.app_pn, payload) catch return;
+    conn.app_pn += 1;
+
+    if (tx.queue(peer, reply)) return;
+
+    tx.flush(fd) catch return;
+    _ = tx.queue(peer, reply);
+}
+
+/// Build and send the HTTP/3 responses for the 1-RTT payload captured on the connection. A connection
+/// multiplexes many requests, each on its own client bidi stream, and one packet can coalesce several:
+/// a small response goes out in one packet, a large one is registered as a send stream and fragmented
+/// across packets within the client's flow control, resumed as MAX_STREAM_DATA / MAX_DATA arrive. A
+/// packet carrying no work is acknowledged so the client stops retransmitting.
 fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig) void {
     if (data.len < 1 + cid_len) return;
 
@@ -337,45 +521,96 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
     const conn = findConn(table, &dcid) orelse return;
     if (!conn.app_ready) return;
 
-    var payload: [2048]u8 = undefined;
-    var payload_len: usize = 0;
+    const payload_view = conn.app_payload_buf[0..conn.app_payload_len];
 
-    if (!conn.response_sent and conn.req_ready) {
-        // The request HEADERS has been decoded: send the full response, acknowledging the packet. A
-        // client request can trail an earlier 1-RTT packet (a leading PING), so the response waits for
-        // the captured request rather than firing on the first 1-RTT packet.
-        var req = core.Request{
-            .method = conn.reqMethod(),
-            .path = conn.reqPath(),
-        };
+    // The ACK rides the first packet sent this call (a response, a stream chunk, or a bare ACK).
+    var ack_pending: ?u64 = conn.app_largest_received;
+
+    var reqs: [request.max_requests_per_packet]request.StreamRequest = undefined;
+    const count = request.parseRequests(payload_view, &reqs);
+    for (reqs[0..count]) |stream_req| {
+        // A retransmit of a request already being streamed: leave its progress, the pump continues it.
+        if (conn.findSendStream(stream_req.stream_id) != null) continue;
+
+        var req = core.Request{ .method = stream_req.request.method, .path = decodePath(conn, stream_req.request) };
         var res = core.Response{};
         handler(&req, &res);
 
-        payload_len = response.buildResponse(&payload, 0, res.status, res.body, conn.app_largest_received, false);
-        conn.response_sent = true;
-        logSystem(config, "sent 1-RTT response: HTTP/3 status {d}", .{res.status});
-    } else {
-        // A retransmit after the response: acknowledge it so the client stops retransmitting and
-        // finalizes the connection on its own.
-        payload_len = response.buildAck(&payload, conn.app_largest_received);
-        if (payload_len == 0) return;
+        // HANDSHAKE_DONE + the server control SETTINGS ride the connection's first response only.
+        const framing = response.Framing{
+            .handshake_done = !conn.first_response_sent,
+            .control = !conn.first_response_sent,
+        };
+
+        var payload: [2048]u8 = undefined;
+        if (response.buildResponse(&payload, stream_req.stream_id, res.status, res.body, ackTake(&ack_pending), framing)) |payload_len| {
+            // The whole response fits one packet (the common small-body case).
+            sealAndQueue(conn, tx, fd, peer, payload[0..payload_len]);
+            conn.first_response_sent = true;
+            logSystem(config, "sent 1-RTT response on stream {d}: HTTP/3 status {d}", .{ stream_req.stream_id, res.status });
+        } else if (conn.reserveSendStream(stream_req.stream_id)) |slot| {
+            // The body spans more than one packet: register it, the pump below sends within flow control.
+            slot.* = .{
+                .active = true,
+                .stream_id = stream_req.stream_id,
+                .status = res.status,
+                .body = res.body,
+                .content_len = streamContentLen(res.status, res.body),
+                .sent = 0,
+                .stream_limit = conn.client_max_stream_data,
+            };
+        } else {
+            // No free send slot: answer 500 so the stream completes rather than stalling.
+            const len = response.buildResponse(&payload, stream_req.stream_id, 500, "", ackTake(&ack_pending), framing) orelse continue;
+            sealAndQueue(conn, tx, fd, peer, payload[0..len]);
+            conn.first_response_sent = true;
+        }
     }
 
-    var out: [2048]u8 = undefined;
-    const reply = protection.sealShort(&out, conn.app_keys.server, conn.peer_scid.slice(), conn.app_pn, payload[0..payload_len]) catch return;
-    conn.app_pn += 1;
+    // Apply this packet's flow control advertisements after registering requests, so a MAX_STREAM_DATA
+    // that rides the same packet as the request it unblocks is applied to the just-registered stream.
+    applyFlowControl(conn, payload_view);
 
-    _ = tx.queue(peer, reply);
+    // Pump every active large stream: new ones, and ones this packet's MAX_STREAM_DATA just unblocked.
+    for (&conn.send_streams) |*stream| {
+        if (stream.active) _ = pumpStream(conn, stream, tx, fd, peer, &ack_pending, config);
+    }
+
+    // Nothing carried the ACK (a bare ACK / flow-control packet that made no progress): acknowledge so
+    // the client stops retransmitting and keeps extending flow control.
+    if (ackTake(&ack_pending)) |largest| {
+        var payload: [64]u8 = undefined;
+        const ack_len = response.buildAck(&payload, largest);
+        if (ack_len != 0) sealAndQueue(conn, tx, fd, peer, payload[0..ack_len]);
+    }
+
     tx.flush(fd) catch {};
 }
 
-/// EPOLL / URING fold to the v1 single worker with a logged notice. Per-core SO_REUSEPORT CID
-/// steering is v2 (ADR-049 phase 3): plain SO_REUSEPORT routes by 4-tuple and breaks under
-/// connection migration, so it is not used until CID-aware steering lands.
+/// One SO_REUSEPORT worker per core (EPOLL / URING). Each worker binds the same UDP port and owns a
+/// CID table, so the kernel load-balances connections across cores by 4-tuple. A client keeps a
+/// stable 4-tuple per connection (no active migration), so every packet of a connection lands on the
+/// same worker, no cross-core routing needed. CID-aware steering (for connection migration) is a
+/// later phase (ADR-049 phase 3): plain 4-tuple routing breaks only when a peer migrates address.
 pub fn runPerCore(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
-    logSystem(config, "EPOLL/URING per-core CID steering is v2 (ADR-049 phase 3), folding to the v1 single worker", .{});
+    if (!datagram.is_linux) {
+        logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
+        return;
+    }
 
-    return runSingle(handler, config);
+    const want = effectiveWorkers(config);
+    logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT)", .{ config.ip, config.port, want });
+
+    const threads = try config.allocator.alloc(std.Thread, want);
+    defer config.allocator.free(threads);
+
+    var spawned: usize = 0;
+    for (0..want) |i| {
+        threads[i] = std.Thread.spawn(.{}, workerLoop, .{ handler, config, true }) catch break;
+        spawned += 1;
+    }
+
+    for (threads[0..spawned]) |t| t.join();
 }
 
 // --------------------------------------------------------------- //
@@ -400,4 +635,37 @@ test "zix test: processDatagram demuxes a long-header Initial by DCID" {
 
     // The anti-amplification budget reflects both received datagrams.
     try std.testing.expectEqual(@as(u64, 40), table.find(&dcid).?.anti_amplification.received);
+}
+
+test "zix test: copyStreamSlice spans the prefix and body boundary" {
+    const prefix = "PRE"; // 3 bytes of HTTP/3 prefix
+    const body = "0123456789";
+
+    // A slice from offset 1 across the prefix end into the body: "RE0123".
+    var dst: [6]u8 = undefined;
+    copyStreamSlice(prefix, body, 1, &dst);
+    try std.testing.expectEqualStrings("RE0123", &dst);
+
+    // A slice fully inside the body (offset past the prefix).
+    var dst2: [4]u8 = undefined;
+    copyStreamSlice(prefix, body, 5, &dst2);
+    try std.testing.expectEqualStrings("2345", &dst2);
+}
+
+test "zix test: applyFlowControl raises the connection and stream limits" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var conn = Connection.init(&dcid, 1200);
+    conn.send_streams[0] = .{ .active = true, .stream_id = 0, .stream_limit = 1000 };
+
+    // MAX_DATA (0x10) = 5000 then MAX_STREAM_DATA (0x11) for stream 0 = 9000.
+    const payload = [_]u8{ 0x10, 0x53, 0x88, 0x11, 0x00, 0x63, 0x28 };
+    applyFlowControl(&conn, &payload);
+
+    try std.testing.expectEqual(@as(u64, 5000), conn.client_max_data);
+    try std.testing.expectEqual(@as(u64, 9000), conn.send_streams[0].stream_limit);
+
+    // A smaller advertisement never lowers an existing limit (RFC 9000 4.1).
+    const lower = [_]u8{ 0x11, 0x00, 0x40, 0x64 }; // MAX_STREAM_DATA stream 0 = 100
+    applyFlowControl(&conn, &lower);
+    try std.testing.expectEqual(@as(u64, 9000), conn.send_streams[0].stream_limit);
 }

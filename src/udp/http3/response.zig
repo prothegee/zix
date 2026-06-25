@@ -16,13 +16,22 @@ const qpack = @import("qpack.zig");
 const server_control_stream: u64 = 3;
 
 /// Write a STREAM frame (RFC 9000 19.8) at offset 0 with an explicit length. `fin` sets the FIN bit.
-fn writeStreamFrame(out: []u8, pos: *usize, stream_id: u64, fin: bool, data: []const u8) void {
+///
+/// Return:
+/// - true when the frame was written
+/// - false when it does not fit in `out` from `pos` (nothing is written, `pos` is unchanged)
+fn writeStreamFrame(out: []u8, pos: *usize, stream_id: u64, fin: bool, data: []const u8) bool {
+    const frame_len = 1 + varint.encodedLen(stream_id) + varint.encodedLen(data.len) + data.len;
+    if (pos.* + frame_len > out.len) return false;
+
     out[pos.*] = 0x0a | @as(u8, if (fin) 0x01 else 0); // STREAM (0x08) | LEN (0x02) | optional FIN
     pos.* += 1;
     pos.* += varint.write(out[pos.*..], stream_id);
     pos.* += varint.write(out[pos.*..], data.len);
     @memcpy(out[pos.*..][0..data.len], data);
     pos.* += data.len;
+
+    return true;
 }
 
 /// The QPACK indexed field line for a `:status` value from the static table (RFC 9204 Appendix A
@@ -42,9 +51,11 @@ fn statusIndexedFieldLine(out: []u8, status: u16) usize {
 
 /// Build the response content for the request stream: a HEADERS frame carrying `:status`, then a DATA
 /// frame carrying the body (RFC 9114 7.2.1 / 7.2.2).
-fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) usize {
-    var p: usize = 0;
-
+///
+/// Return:
+/// - usize (the number of bytes written)
+/// - null when the content does not fit in `out` (nothing is written)
+fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
     // HEADERS frame: type 0x01, length, then the field section (RIC 0, Base 0, indexed :status).
     var fields: [16]u8 = undefined;
     var fp: usize = 0;
@@ -54,6 +65,11 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) usize {
     fp += 1;
     fp += statusIndexedFieldLine(fields[fp..], status);
 
+    const headers_len = 1 + varint.encodedLen(fp) + fp;
+    const data_len = 1 + varint.encodedLen(body.len) + body.len;
+    if (headers_len + data_len > out.len) return null;
+
+    var p: usize = 0;
     out[p] = 0x01; // HEADERS frame type
     p += 1;
     p += varint.write(out[p..], fp);
@@ -70,10 +86,47 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) usize {
     return p;
 }
 
+/// Build the HTTP/3 response stream prefix: the HEADERS frame (`:status`) plus the DATA frame header
+/// (type + body length) that the body bytes follow. The body itself is not copied here: a large body
+/// is streamed straight out of the handler's slice, so only this short prefix is materialized.
+///
+/// Return:
+/// - usize (the prefix length written into `out`)
+/// - null when the prefix does not fit in `out`
+pub fn buildStreamPrefix(out: []u8, status: u16, body_len: usize) ?usize {
+    var fields: [16]u8 = undefined;
+    var fp: usize = 0;
+    fields[fp] = 0x00; // Required Insert Count 0
+    fp += 1;
+    fields[fp] = 0x00; // Base 0
+    fp += 1;
+    fp += statusIndexedFieldLine(fields[fp..], status);
+
+    const headers_len = 1 + varint.encodedLen(fp) + fp;
+    const data_header_len = 1 + varint.encodedLen(body_len);
+    if (headers_len + data_header_len > out.len) return null;
+
+    var p: usize = 0;
+    out[p] = 0x01; // HEADERS frame type
+    p += 1;
+    p += varint.write(out[p..], fp);
+    @memcpy(out[p..][0..fp], fields[0..fp]);
+    p += fp;
+
+    out[p] = 0x00; // DATA frame type
+    p += 1;
+    p += varint.write(out[p..], body_len);
+
+    return p;
+}
+
 /// Build an ACK-only 1-RTT payload acknowledging packets 0..largest (RFC 9000 19.3): one contiguous
 /// range. Returns 0 when there is nothing to acknowledge.
 pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
     const largest = ack_largest orelse return 0;
+
+    const ack_len = 1 + varint.encodedLen(largest) + 1 + 1 + varint.encodedLen(largest);
+    if (ack_len > out.len) return 0;
 
     var p: usize = 0;
     out[p] = 0x02; // ACK frame type
@@ -94,29 +147,60 @@ pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
 /// status - u16 (the HTTP status code)
 /// body - []const u8 (the response body)
 ///
+/// The one-shot and terminal frames a response packet may carry around the request-stream content.
+///
+/// Note:
+/// - `handshake_done` and `control` belong on the first 1-RTT response of a connection only. The
+///   server control stream (SETTINGS) and HANDSHAKE_DONE are sent once. Later per-stream responses
+///   leave both false so they carry just the ACK and the request-stream HEADERS / DATA.
+pub const Framing = struct {
+    handshake_done: bool = true,
+    control: bool = true,
+    close: bool = false,
+};
+
+/// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response on `stream_id`.
+///
+/// Param:
+/// out - []u8 (destination for the frame payload, sealed into a 1-RTT packet by the caller)
+/// stream_id - u64 (the client bidi stream the request arrived on, the response uses the same id)
+/// status - u16 (the HTTP status code)
+/// body - []const u8 (the response body)
+/// ack_largest - ?u64 (largest client 1-RTT packet number to acknowledge, or null for no ACK)
+/// framing - Framing (which one-shot / terminal frames to include)
+///
 /// Return:
 /// - usize (the number of bytes written)
-pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []const u8, ack_largest: ?u64, close: bool) usize {
+/// - null when the response does not fit in `out` (the v1 single-packet limit, caller falls back)
+pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, ack_largest: ?u64, framing: Framing) ?usize {
     // ACK the client's 1-RTT packets so it stops retransmitting (RFC 9000 19.3).
     var p: usize = buildAck(out, ack_largest);
 
     // HANDSHAKE_DONE (RFC 9001 7.5): confirm the handshake to the client so it finalizes the
-    // connection rather than waiting.
-    out[p] = 0x1e;
-    p += 1;
+    // connection rather than waiting. First response of the connection only.
+    if (framing.handshake_done) {
+        if (p + 1 > out.len) return null;
+        out[p] = 0x1e;
+        p += 1;
+    }
 
     // Server control stream: the stream type (0x00) followed by an empty SETTINGS frame (0x04, 0).
-    const control_content = [_]u8{ 0x00, 0x04, 0x00 };
-    writeStreamFrame(out, &p, server_control_stream, false, &control_content);
+    if (framing.control) {
+        const control_content = [_]u8{ 0x00, 0x04, 0x00 };
+        if (!writeStreamFrame(out, &p, server_control_stream, false, &control_content)) return null;
+    }
 
     // The response on the request stream, with FIN.
     var content: [1024]u8 = undefined;
-    const content_len = buildRequestStreamContent(&content, status, body);
-    writeStreamFrame(out, &p, request_stream_id, true, content[0..content_len]);
+    const content_len = buildRequestStreamContent(&content, status, body) orelse return null;
+    if (!writeStreamFrame(out, &p, stream_id, true, content[0..content_len])) return null;
 
     // Application CONNECTION_CLOSE (RFC 9000 19.19, type 0x1d): H3_NO_ERROR with an empty reason, so
     // the client finalizes the connection after the response instead of waiting.
-    if (close) {
+    if (framing.close) {
+        const close_len = 1 + varint.encodedLen(0x0100) + varint.encodedLen(0);
+        if (p + close_len > out.len) return null;
+
         out[p] = 0x1d; // CONNECTION_CLOSE (application)
         p += 1;
         p += varint.write(out[p..], 0x0100); // H3_NO_ERROR
@@ -131,7 +215,7 @@ pub fn buildResponse(out: []u8, request_stream_id: u64, status: u16, body: []con
 
 test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
     var out: [1024]u8 = undefined;
-    const len = buildResponse(&out, 0, 200, "hi", null, false);
+    const len = buildResponse(&out, 0, 200, "hi", null, .{}).?;
     const payload = out[0..len];
 
     // HANDSHAKE_DONE, then a STREAM frame on the server control stream (id 3) carrying the control
@@ -150,7 +234,7 @@ test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
 
 test "zix test: response with ack and close carries both frames" {
     var out: [1024]u8 = undefined;
-    const len = buildResponse(&out, 0, 200, "hi", 3, true);
+    const len = buildResponse(&out, 0, 200, "hi", 3, .{ .close = true }).?;
     const payload = out[0..len];
 
     // Leads with an ACK frame: type 0x02, largest 3, delay 0, range count 0, first range 3.
@@ -158,4 +242,56 @@ test "zix test: response with ack and close carries both frames" {
 
     // Ends with an application CONNECTION_CLOSE (0x1d) carrying H3_NO_ERROR (0x0100 = varint 4100).
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x1d, 0x41, 0x00, 0x00 }) != null);
+}
+
+test "zix test: a body larger than the buffer returns null, never overflows" {
+    // A body that cannot fit the single-packet buffer must report null, not write past `out`.
+    var big: [4096]u8 = undefined;
+    @memset(&big, 'x');
+
+    var out: [2048]u8 = undefined;
+    try std.testing.expect(buildResponse(&out, 0, 200, &big, null, .{}) == null);
+
+    // The content builder reports the same overflow against its own destination.
+    var content: [1024]u8 = undefined;
+    try std.testing.expect(buildRequestStreamContent(&content, 200, &big) == null);
+
+    // A body that just fits is still built.
+    var small: [16]u8 = undefined;
+    @memset(&small, 'y');
+    try std.testing.expect(buildResponse(&out, 0, 200, &small, null, .{}) != null);
+}
+
+test "zix test: lean framing carries only the request stream, no HANDSHAKE_DONE or control" {
+    var out: [1024]u8 = undefined;
+    const len = buildResponse(&out, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
+    const payload = out[0..len];
+
+    // No HANDSHAKE_DONE (0x1e) and no control stream (id 3) frame: the first byte is the request
+    // STREAM frame with FIN (0x0b) on stream 4.
+    try std.testing.expectEqual(@as(u8, 0x0b), payload[0]); // STREAM, LEN, FIN
+    try std.testing.expectEqual(@as(u8, 4), payload[1]); // stream id 4
+    try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{0x1e}) == null);
+}
+
+test "zix test: buildStreamPrefix emits HEADERS then a DATA header sized to the body" {
+    var out: [32]u8 = undefined;
+    const len = buildStreamPrefix(&out, 200, 200000).?;
+    const prefix = out[0..len];
+
+    // HEADERS frame: type 0x01, length 3, RIC 0, Base 0, :status 200 (0xd9).
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x03, 0x00, 0x00, 0xd9 }, prefix[0..5]);
+
+    // DATA frame header: type 0x00 then the body length as a varint (200000 = 0x80030d40).
+    try std.testing.expectEqual(@as(u8, 0x00), prefix[5]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0x03, 0x0d, 0x40 }, prefix[6..10]);
+}
+
+test "zix test: writeStreamFrame refuses a frame that would overflow the buffer" {
+    var out: [8]u8 = undefined;
+    var pos: usize = 0;
+    const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+
+    try std.testing.expect(!writeStreamFrame(&out, &pos, 0, true, &data));
+    try std.testing.expectEqual(@as(usize, 0), pos); // nothing written, pos unchanged
 }

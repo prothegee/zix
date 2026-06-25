@@ -23,6 +23,31 @@ const demux = @import("demux.zig");
 const keyschedule = @import("keyschedule.zig");
 const ks = @import("../../tls/key_schedule.zig");
 
+/// The most concurrent large (multi-packet) response streams one connection tracks for resumption.
+pub const max_send_streams = 32;
+
+/// A response body being sent across multiple packets, resumed as the client extends flow control
+/// (RFC 9000 4.1). The body is a zero-copy slice into handler-owned memory that MUST outlive the
+/// stream (the static file cache satisfies this): the engine never copies it. The HTTP/3 prefix
+/// (HEADERS + DATA header) is rebuilt on demand from status + body length, so it is not stored.
+pub const SendStream = struct {
+    active: bool = false,
+    stream_id: u64 = 0,
+    status: u16 = 200,
+    body: []const u8 = "",
+    /// Total HTTP/3 stream length: the prefix length plus the body length.
+    content_len: usize = 0,
+    /// Stream offset already sent.
+    sent: usize = 0,
+    /// The client's current per-stream flow control limit, raised by MAX_STREAM_DATA.
+    stream_limit: u64 = 0,
+
+    /// Whether every byte of the stream content has been sent (the FIN went out).
+    pub fn complete(self: *const SendStream) bool {
+        return self.sent >= self.content_len;
+    }
+};
+
 /// One QUIC / HTTP-3 connection's state, keyed in the demux table by its Destination Connection ID.
 pub const Connection = struct {
     dcid: demux.ConnId,
@@ -49,27 +74,28 @@ pub const Connection = struct {
     app_ready: bool = false,
     app_keys: keyschedule.AppKeys = undefined,
     peer_scid: demux.ConnId = .{},
-    // 1-RTT response state.
-    response_sent: bool = false,
+    // 1-RTT request / response state.
     app_pn: u32 = 0,
     // Largest 1-RTT packet number received from the client (for the response ACK).
     app_largest_received: ?u64 = null,
-    // The decoded request line, copied off the decrypted payload so it outlives the recv buffer.
-    req_ready: bool = false,
-    req_method_buf: [16]u8 = undefined,
-    req_method_len: usize = 0,
-    req_path_buf: [1024]u8 = undefined,
-    req_path_len: usize = 0,
-
-    /// The decoded request method (empty until a request HEADERS is captured).
-    pub fn reqMethod(self: *const Connection) []const u8 {
-        return self.req_method_buf[0..self.req_method_len];
-    }
-
-    /// The decoded request path (empty until a request HEADERS is captured).
-    pub fn reqPath(self: *const Connection) []const u8 {
-        return self.req_path_buf[0..self.req_path_len];
-    }
+    // Whether the first 1-RTT response has been sent. The server control stream (SETTINGS) and
+    // HANDSHAKE_DONE ride that first response only, later per-stream responses omit them.
+    first_response_sent: bool = false,
+    // The most recent decrypted 1-RTT payload, copied off the recv buffer so the response builder can
+    // walk every request stream it carries (a connection multiplexes many) without a second decrypt.
+    app_payload_buf: [2048]u8 = undefined,
+    app_payload_len: usize = 0,
+    // Reusable scratch for a Huffman-encoded :path (curl / h2load encode it), expanded per request.
+    path_scratch: [1024]u8 = undefined,
+    // Client-advertised flow control limits (RFC 9000 4.1), parsed from the ClientHello transport
+    // parameters. The server must not send response stream data past these. Zero until the handshake
+    // parses them (a minimal client that sends no transport parameters grants no large-body credit).
+    client_max_stream_data: u64 = 0,
+    client_max_data: u64 = 0,
+    // Running total of stream bytes the server has sent on this connection, against client_max_data.
+    conn_data_sent: u64 = 0,
+    // Large responses still being sent across packets, resumed as the client extends flow control.
+    send_streams: [max_send_streams]SendStream = @splat(.{}),
 
     /// Initialize a server-side connection from the client's Destination Connection ID
     /// (RFC 9001 5.2): derive the Initial secrets and the per-direction AES-128-GCM packet keys, and
@@ -96,6 +122,27 @@ pub const Connection = struct {
     /// (RFC 9000 8.1): the 3x anti-amplification cap.
     pub fn maySend(self: *const Connection, bytes: u64) bool {
         return self.anti_amplification.maySend(bytes);
+    }
+
+    /// The in-flight large-response send stream for `stream_id`, or null when none is tracked.
+    pub fn findSendStream(self: *Connection, stream_id: u64) ?*SendStream {
+        for (&self.send_streams) |*stream| {
+            if (stream.active and stream.stream_id == stream_id) return stream;
+        }
+
+        return null;
+    }
+
+    /// Reserve a send-stream slot for `stream_id`: the existing slot if one is tracked, otherwise a
+    /// free slot. Returns null when every slot is busy with another in-flight stream.
+    pub fn reserveSendStream(self: *Connection, stream_id: u64) ?*SendStream {
+        if (self.findSendStream(stream_id)) |stream| return stream;
+
+        for (&self.send_streams) |*stream| {
+            if (!stream.active) return stream;
+        }
+
+        return null;
     }
 };
 

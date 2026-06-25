@@ -19,6 +19,18 @@ pub const DecodedRequest = struct {
     path_huffman: bool = false,
 };
 
+/// A decoded request paired with the client bidi stream it arrived on, so the response goes back on
+/// the same stream (RFC 9114 6.1).
+pub const StreamRequest = struct {
+    stream_id: u64,
+    request: DecodedRequest,
+};
+
+/// The most request streams one decrypted packet can carry that the server answers in a single pass.
+/// A minimal request stream frame is ~20 bytes, so a path-MTU 1-RTT packet (under ~1500 bytes) cannot
+/// coalesce more than this. Anything beyond is left unacknowledged and the client retransmits it.
+pub const max_requests_per_packet = 32;
+
 /// Find and decode the request from a decrypted 1-RTT payload. Returns null if no request HEADERS are
 /// present (for example a packet that only carries ACK / control-stream frames).
 ///
@@ -27,21 +39,41 @@ pub const DecodedRequest = struct {
 ///   client's control / QPACK stream setup). It walks past every frame it does not model, scanning
 ///   only for the client request stream, so an unmodeled frame is skipped rather than fatal.
 pub fn parseRequest(payload: []const u8) ?DecodedRequest {
+    var one: [1]StreamRequest = undefined;
+    if (parseRequests(payload, &one) == 0) return null;
+
+    return one[0].request;
+}
+
+/// Decode every client request stream in a decrypted 1-RTT payload, in arrival order, capturing the
+/// stream id of each. A connection multiplexes many requests, each on its own client-initiated bidi
+/// stream, and one packet can coalesce several. The scan walks past every non-request frame.
+///
+/// Param:
+/// payload - []const u8 (the decrypted 1-RTT payload)
+/// out - []StreamRequest (destination, decoding stops once it is full)
+///
+/// Return:
+/// - usize (the number of request streams decoded into `out`)
+pub fn parseRequests(payload: []const u8, out: []StreamRequest) usize {
+    var count: usize = 0;
     var pos: usize = 0;
-    while (pos < payload.len) {
+    while (pos < payload.len and count < out.len) {
         const type_vi = varint.read(payload[pos..]) catch break;
 
         if (isStreamFrameType(type_vi.value)) {
-            if (parseStreamFrame(payload[pos..])) |stream| {
-                if (stream.id & 0x03 == 0) {
-                    if (decodeRequestStream(stream.data)) |req| return req;
-                }
+            const stream = parseStreamFrame(payload[pos..]) orelse break;
 
-                pos += stream.consumed;
-                continue;
+            // A client-initiated bidi stream (id mod 4 == 0) carries a request (RFC 9000 2.1).
+            if (stream.id & 0x03 == 0) {
+                if (decodeRequestStream(stream.data)) |req| {
+                    out[count] = .{ .stream_id = stream.id, .request = req };
+                    count += 1;
+                }
             }
 
-            break;
+            pos += stream.consumed;
+            continue;
         }
 
         // A frame this module does not need (ACK, MAX_DATA, NEW_CONNECTION_ID, ...). Skip it.
@@ -49,18 +81,18 @@ pub fn parseRequest(payload: []const u8) ?DecodedRequest {
         pos += skipped;
     }
 
-    return null;
+    return count;
 }
 
 /// Whether a frame type is a STREAM frame (RFC 9000 19.8): 0x08..0x0f, OFF / LEN / FIN in the low bits.
-fn isStreamFrameType(frame_type: u64) bool {
+pub fn isStreamFrameType(frame_type: u64) bool {
     return frame_type >= 0x08 and frame_type <= 0x0f;
 }
 
-const ParsedStream = struct { id: u64, data: []const u8, consumed: usize };
+pub const ParsedStream = struct { id: u64, data: []const u8, consumed: usize };
 
 /// Parse a STREAM frame, returning the stream id, the stream bytes, and how much of `buf` it used.
-fn parseStreamFrame(buf: []const u8) ?ParsedStream {
+pub fn parseStreamFrame(buf: []const u8) ?ParsedStream {
     const frame_type = buf[0];
     var pos: usize = 1;
 
@@ -108,7 +140,7 @@ fn skipLenBlob(buf: []const u8, start: usize) ?usize {
 /// Skip any non-STREAM QUIC frame (RFC 9000 19), returning the bytes it occupied or null on a
 /// truncated / unknown frame. The scan needs this to walk past everything a request packet coalesces
 /// ahead of the request stream (ACK, NEW_CONNECTION_ID, MAX_STREAMS, and the rest).
-fn skipFrame(buf: []const u8) ?usize {
+pub fn skipFrame(buf: []const u8) ?usize {
     const type_vi = varint.read(buf) catch return null;
     const pos = type_vi.len;
 
@@ -260,4 +292,21 @@ test "zix test: parseRequest decodes method and path past a leading ACK" {
 test "zix test: parseRequest returns null when no request stream is present" {
     // A packet with only an ACK frame: nothing to decode.
     try std.testing.expect(parseRequest(&h("0200000000")) == null);
+}
+
+test "zix test: parseRequests decodes two coalesced requests with their stream ids" {
+    // Two STREAM frames in one packet: stream 0 (GET /baseline2) then stream 4 (GET /baseline2),
+    // each a HEADERS frame with field section prefix 0000, :method GET (0xd1), :path literal.
+    const one = "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532";
+    const two = "0a0411" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532";
+    const payload = h("0200000000" ++ one ++ two);
+
+    var reqs: [4]StreamRequest = undefined;
+    const count = parseRequests(&payload, &reqs);
+
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(u64, 0), reqs[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 4), reqs[1].stream_id);
+    try std.testing.expectEqualSlices(u8, "GET", reqs[1].request.method);
+    try std.testing.expectEqualSlices(u8, "/baseline2", reqs[1].request.path);
 }
