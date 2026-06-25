@@ -169,6 +169,7 @@ The two-sided gate is only as honest as the measurement behind it. A small, spec
 | Symbol attribution (which function stalls) | `perf record -e L1-dcache-load-misses -c 2000 -p <pid>` then `perf report --stdio` / `perf annotate` | needs sudo, and the agent sandbox kills `perf record` (signal), so a human runs it in a real terminal |
 | Memory footprint (RSS, anon, MADV effect) | `/proc/<pid>/smaps` anon breakdown, cgroup RSS peak and steady | the memory axis of the gate. Watch anon RSS track live connections after close, proving `MADV_DONTNEED` returned the pages |
 | Low-noise environment | `taskset` or cpuset pinning plus quiesce | a development box with 2-3% whole-run variance cannot resolve a sub-1% change, so quiesce first (the isolate bench, `rnd/isolate_benchmark.md`) |
+| Protocol conformance and handshake inspection | `curl -v`, and `curl --http3-only -v` for QUIC | the live behavioral oracle: `-v` narrates each step, so for HTTP/3 it pinpoints each handshake stage (Initial, ServerHello, certificate, 1-RTT, request) when a step regresses. needs curl built with an HTTP/3 backend (ngtcp2 / nghttp3), confirm with `curl --version` |
 | Correctness and leaks | `zig build`, then `test-all` / `examples` / `test-runner-all`, and `std.testing.allocator` | the discovery and leak gate every change clears before any perf claim |
 
 Ready-made runners live in the repo so the method is reproducible, not improvised: `perf-localize-http1.sh` (symbol attribution, hand-run), `perf-per-request-cell.sh` and `perf-per-request-matrix.sh` (per-request `perf stat` tables), `perf-http-epoll.sh` and `perf-http-uring.sh` (per-engine).
@@ -198,7 +199,33 @@ Two caveats decide whether a run measures the engine rather than its setup:
 
 ---
 
-## 11. The checklist
+## 11. Test in layers, vector to live client
+
+A protocol engine is proven by a ladder of tests, each with its own oracle, climbed lowest first so a failure localizes to the rung just added rather than the whole stack.
+
+| Layer | Proves | Oracle | How it ran here |
+| :- | :- | :- | :- |
+| Unit | one function is correct | the spec's published worked example | RFC vectors as in-file `test {}`, run by `zig build unit-test` |
+| Edge | the reject paths hold | the spec's MUST-reject rules | negative tests: a flipped bit fails AEAD, truncation, wrong type, the length boundary |
+| Round-trip | a codec is its own inverse | self-consistency | encode then decode, seal then open, assert the bytes return |
+| Integration | composed modules agree | a known derived value | `init` derives the published Initial key from a connection id, the demux routes a crafted packet |
+| Configuration | the config surface is honest | the documented defaults and rejects | default-field tests, `init` rejects a zero port and a missing certificate |
+| Smoke | the binary launches and binds | the process and the socket | run the built example, confirm the UDP port is bound, kill it |
+| Runner, live | the whole engine serves | a real client over the real wire | a native client in `test-runner-all` (for HTTP/3, one hand-rolled from `zix.Http3` primitives, the same way the HTTP/2 runner hand-rolls one from `zix.Http2`), asserting the response |
+
+The vectors prove the pieces, the live client proves the whole. Only a real client catches an integration where every part is correct but the sequence is wrong: during HTTP/3 bring-up a live `curl --http3` surfaced that the handshake completed yet the connection never closed, because nothing acknowledged the client's packets. Once that was fixed, the round trip moved into a hermetic native client so the runner needs no external tool.
+
+Three rules keep the ladder honest:
+
+- Green on every supported toolchain, not just the default. Every change here was checked on Zig 0.16 and 0.17, because an API that exists in one and was renamed in the other is a build break a single-version run never sees.
+- Build the shippable artifact, not only the test binary. `unit-test` does not compile a private or generic path until something instantiates it, so a `std.crypto.random` that does not exist on this toolchain compiled clean under `unit-test` and only failed the example build. The binary you ship is part of the gate.
+- Climb the ladder and gate each rung. The work went vectors, then integration, then smoke (it binds), then live (handshake decrypt, then full round trip, then a clean exit). Each rung was green before the next, so every live failure pointed at one new thing.
+
+> Prove each layer against its own oracle, lowest first: a published vector for a function, the reject paths for a parser, a round trip for a codec, a derived value for the wiring, the documented defaults for the config, a bound socket for the binary, and a real client over the real wire for the whole. Build the shippable artifact, not only the test binary, and keep every rung green on every toolchain before climbing the next.
+
+---
+
+## 12. The checklist
 
 Before landing code that touches the runtime or memory, walk these:
 

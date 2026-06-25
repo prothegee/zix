@@ -119,9 +119,6 @@ Zix currently is linux-centric.
 
 As current state, zix will not:
 - Database driver implementation.
-- Http3 implementation.
-
-See [swerver](https://github.com/justinGrosvenor/swerver) for HTTP/3 for complete approach for that subject.
 
 <br>
 
@@ -230,7 +227,8 @@ __*6. Predictable, Transparent Memory Management.*__
 __*1. Full protocol stack under one roof:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (hot-path-optimized
-variant), Http2 (h2c), Grpc (gRPC over h2c), Fix (FIX 4.x), plus Channel and Logger.
+variant), Http2 (h2c), Http3 (HTTP/3 over QUIC), Grpc (gRPC over h2c), Fix (FIX 4.x), plus
+Channel and Logger.
 
 > One coherent memory/threading model across monolith, micro-service, and
 modular-micro-service backends, instead of stitching together separate libraries with
@@ -2023,7 +2021,7 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 ```
 A surgical backend library & engine with wiring tools.
-That will bring you performance, efficiency, & transparency. Not a framework.
+That will bring you performance, efficiency, & transparency.
 ```
 
 <br>

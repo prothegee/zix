@@ -2,8 +2,8 @@
 
 HTTP/3 is authored pure-Zig from the RFCs, no external library. The five layers are fully specified
 and all vendored under `rnd/rfc/`: 9000 (QUIC transport), 9001 (QUIC-TLS, packet protection), 9002
-(loss / congestion), 9114 (HTTP/3), 9204 (QPACK). RFC MUST / MUST NOT detail and the running tracker
-live in `rnd/checklist-0.5.x-http3.md` and `rnd/rfc/http3-conformance-must-checklist.md`.
+(loss / congestion), 9114 (HTTP/3), 9204 (QPACK). RFC MUST / MUST NOT detail lives in
+`rnd/rfc/http3-conformance-must-checklist.md`.
 
 Bottom-up, like the brotli decoder-first order: you cannot test H3 framing without QUIC streams,
 which need the handshake, which needs packet protection, which needs the crypto. So Layer C first,
@@ -26,7 +26,9 @@ one piece zix already wrote.
 - [x] pure-Zig TLS 1.3 server handshake exists (`src/tls`), so no C library. QUIC reuses the
   handshake messages + `key_schedule` secrets, adding the RFC 9001 "quic" labels and CRYPTO-frame
   carriage. ECDSA / Ed25519 / RSA signing already land.
-- [ ] ALPN "h3", SNI, and the `quic_transport_parameters` extension (0x39) over the existing handshake
+- [x] ALPN "h3" and the `quic_transport_parameters` extension (0x39) over the existing handshake:
+  the server EncryptedExtensions (`flight.zig`) carries ALPN h3 + the transport params, validated live
+  against curl --http3.
 
 ## Layer C: crypto + packet protection (RFC 9001, deterministic oracle = Appendix A vectors)
 
@@ -86,10 +88,11 @@ one piece zix already wrote.
   Proven in `rnd/0.5.x/quic_tls_t2_poc.zig` against RFC 9001 4.2 / 4.9.1 / 4.6.2: 15 checks (TLS 1.3
   floor, role-split Initial-key discard + no-Initial-after, 0-RTT accept / reject signaling, zix
   default reject). Gate `verify-quic-tls-t2.sh` (doc `verify-quic-tls-t2.md`).
-- [~] T3: full handshake completes with curl --http3 (the first live oracle). Gate harness in place
-  (`verify-quic-tls-t3.sh`, doc `verify-quic-tls-t3.md`): curl HTTP/3 capability confirmed (8.20.0,
-  ngtcp2 / nghttp3). The live handshake is PENDING the assembled server (Layer I), not faked. Re-run
-  with `ZIX_HTTP3_SERVER` set once `src/udp/http3/` + an example exist.
+- [x] T3: full handshake completes with curl --http3 (the first live oracle). DONE against the
+  assembled server (`examples/http3_basic.zig`, port 9063): curl --http3-only (8.20.0, ngtcp2 /
+  nghttp3) completes the TLS 1.3 handshake, validates the ECDSA P-256 cert, and gets HTTP/3 200 with a
+  clean exit. The same round trip is now also driven by a hermetic native client (no external tool) in
+  `test-runner-http3` / `test-runner-all`. Gate `verify-quic-tls-t3.sh` (doc `verify-quic-tls-t3.md`).
 
 ## Layer P: QPACK header compression (RFC 9204)
 
@@ -105,12 +108,13 @@ one piece zix already wrote.
   Proven in `rnd/0.5.x/qpack_p3_poc.zig` against RFC 9204 4.4 / section 6: 12 checks (three decoder
   instructions encode + decode + leading-bit discrimination, zero-increment reject, the three QPACK
   error code values). Gate `verify-qpack-p3.sh` (doc `verify-qpack-p3.md`).
-- [~] P4: cross-impl QPACK interop (.qif encoded files, decode-and-compare). Self-consistency half
-  DONE: `rnd/0.5.x/qpack_p4_poc.zig` encodes a field list and decodes it back byte-identical (11
-  checks, three representations, pinned wire bytes). Cross-impl half PENDING the qpack-interop
-  fixtures (.qif / .out from another implementation, exercise dynamic table + Huffman); gate
-  `verify-qpack-p4.sh` (doc `verify-qpack-p4.md`) runs the self round trip and marks cross-impl
-  PENDING, not faked. Re-run with `QPACK_INTEROP_DIR` once fixtures exist.
+- [x] P4: cross-impl QPACK interop. Self-consistency half DONE: `rnd/0.5.x/qpack_p4_poc.zig` encodes
+  a field list and decodes it back byte-identical (11 checks, three representations, pinned wire
+  bytes). Cross-impl half now exercised LIVE by curl --http3: curl Huffman-encodes the request `:path`
+  (RFC 7541 Appendix B), the server decodes it (`huffman.zig` + `qpack.zig`), and curl decodes the
+  server's QPACK-encoded `:status`. A third-party encoder / decoder on both directions is the cross-impl
+  oracle. The static QIF-fixture sweep (dynamic table + Huffman corpus) is still optional follow-up;
+  gate `verify-qpack-p4.sh` (doc `verify-qpack-p4.md`).
 
 ## Layer H: HTTP/3 application (RFC 9114)
 
@@ -141,23 +145,41 @@ one piece zix already wrote.
 
 ## Integration (into zix)
 
-- [ ] I1: `src/udp/http3/` engine on zix.Udp (recvmmsg / sendmmsg batching, GSO / GRO if available)
-- [ ] I2: http3 example with a unique UDP port + runner driving curl --http3-only, wired into the build
-- [ ] I3: green under `zig build examples` + `test-runner-all` on Zig 0.16 and 0.17
+- [x] I1: `src/udp/http3/` engine on zix.Udp, v1 single-worker recv + internal CID demux
+  (migration-safe, per-core SO_REUSEPORT steering is v2 per ADR-049 phase 3). All deterministic
+  layers (C / Q / L / H / P / T) ported as tested library modules from the rnd PoCs (RFC vectors
+  moved into `test {}` blocks), plus the engine layer: config, core, demux (CID table), connection
+  (state wiring), server facade + `dispatch/` (per-model files, run() switch), and the live-handshake
+  driver (serverhello / flight / keyschedule / protection / response / request / huffman) with a
+  comptime `Router`. Green on Zig 0.16 + 0.17.
+- [x] I2: example `examples/http3_basic.zig` (port 9063) builds + binds + serves, wired into
+  `zix-build-examples.zig` (`http3` group). The live handshake driver decrypts the Initial, runs the
+  TLS 1.3 handshake over CRYPTO frames, installs Handshake / 1-RTT keys, and answers routed requests.
+  `test-runner-http3` drives a hermetic native QUIC client (hand-rolled from the exported `zix.Http3`
+  primitives, no external tool) and asserts the `/baseline2` handler summed the query.
+- [x] I3: `zig build` + `zig build examples` + `unit-test` + `test-all` + `test-runner-all` green on
+  Zig 0.16 and 0.17. `test-runner-all` is 66 protocols with http3 included; the round trip is native,
+  no external tool.
 - [ ] I4: gate. Lean per-connection state (no unbounded buffers / tables), 64c UDP throughput within
   the 1% URING gate, steady-state RSS / cgroup-peak neutral. QUIC is crypto-per-packet heavy, so this
-  constraint bites hardest here.
+  constraint bites hardest here. Not reached: the engine is complete, only the HttpArena bench remains
+  (baseline-h3 / static-h3 on the 64c box).
+
+The live-handshake step is DONE: the driver runs the src/tls TLS 1.3 handshake over the Initial CRYPTO
+stream, installs Handshake / 1-RTT keys, decrypts and protects packets per RFC 9001, ACKs every
+received packet so the client exits cleanly, and answers requests through the HTTP/3 + QPACK layers
+with comptime routing. Validated live (curl --http3, exit 0, HTTP/3 200) and by the native client.
 
 ## Interop and conformance
 
-- [ ] curl --http3-only end-to-end round trip with correct H3 semantics
+- [x] curl --http3-only end-to-end round trip with correct H3 semantics (HTTP/3 200, clean exit)
 - [ ] QUIC Interop Runner: handshake, transfer, retry, resumption, 0-RTT, multiplexing, keyupdate, http3
 - [ ] emit qlog traces, inspect with qvis
 
 ## Order and effort
 
-C -> Q -> T -> P -> H -> L, then integration. Layers C (C1-C4), Q (Q1-Q5), T1 / T2, and P1-P4 are
-done: the self-contained deterministic half, RFC-vector and crafted-packet proven, which de-risks the
-rest. Every deterministic layer (C, Q, T1 / T2, P self half, H, L) is now complete. What remains is
-Layer I: assembling `src/udp/http3/` into a running engine, which is also what clears the two pending
-gates (T3 curl --http3 handshake, P4 cross-impl QPACK interop). Benchmark-gated at I4.
+C -> Q -> T -> P -> H -> L, then integration. Every deterministic layer (C, Q, T1 / T2, P, H, L) and
+Layer I (the assembled `src/udp/http3/` engine, the live handshake driver, the example, and the native
+test-runner client) are now done, which cleared the two previously-pending gates (T3 curl --http3
+handshake, P4 cross-impl QPACK interop via curl). What remains is I4 (the 64c HttpArena bench) and the
+broader interop / qlog follow-ups.

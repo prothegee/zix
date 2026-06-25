@@ -39,12 +39,16 @@
 // Channel IPC pair (argv[57..58]):
 //   channel-ipc-a, channel-ipc-b
 //
-// TLS servers (argv[59..60]):
-//   tls-http1 (https/1.1), tls-http2 (h2)
+// TLS servers (argv[59..61]):
+//   tls-http1 (https/1.1), tls-http1-ed25519, tls-http2 (h2)
+//
+// HTTP/3 server (argv[62]):
+//   http3 (QUIC over TLS 1.3, native hand-rolled client)
 
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
+const http3_client = @import("http3_client.zig");
 
 // --------------------------------------------------------- //
 
@@ -178,6 +182,9 @@ pub fn main(process: std.process.Init) void {
     const tls_http1_ed25519_path = arg_iter.next() orelse exitMissing("tls-http1-ed25519");
     const tls_http2_path = arg_iter.next() orelse exitMissing("tls-http2");
 
+    // http3 (QUIC over TLS 1.3, exercised by the hand-rolled native client)
+    const http3_path = arg_iter.next() orelse exitMissing("http3");
+
     // Basic dispatch-model tests.
     report("http-async", runHttp(io, http_async_path, 9000), &tally);
     report("http-pool", runHttp(io, http_pool_path, 9001), &tally);
@@ -266,6 +273,9 @@ pub fn main(process: std.process.Init) void {
     report("tls-http1", runTls(io, tls_http1_path, 9060), &tally);
     report("tls-http1-ed25519", runTlsHttp1Ed25519(io, tls_http1_ed25519_path, 9062), &tally);
     report("tls-http2", runTlsHttp2(io, tls_http2_path, 9061), &tally);
+
+    // HTTP/3 test (QUIC over TLS 1.3, native hand-rolled client, no external tool).
+    report("http3", runHttp3(io, http3_path, 9063), &tally);
 
     if (tally.failed > 0) {
         std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });
@@ -817,6 +827,22 @@ fn runUds(io: std.Io, server_path: []const u8) !void {
     const reply = try client.recvMsg(io, &recv_buf);
 
     if (reply.len == 0) return error.EmptyReply;
+}
+
+/// HTTP/3 over QUIC: spawn the server, then drive one native round trip with the hand-rolled QUIC
+/// client (zix.Http3 primitives, no external tool). QUIC binds a UDP socket with no TCP accept to
+/// poll, so the server gets a short fixed moment to bind. Asserts the /baseline2 handler summed the
+/// query (a=20 + b=22 = 42).
+fn runHttp3(io: std.Io, server_path: []const u8, port: u16) !void {
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(600), .awake);
+
+    var body_buf: [256]u8 = undefined;
+    const body = try http3_client.fetch(io, "127.0.0.1", port, "/baseline2?a=20&b=22", &body_buf);
+
+    if (!std.mem.eql(u8, body, "42")) return error.UnexpectedBody;
 }
 
 // --------------------------------------------------------- //

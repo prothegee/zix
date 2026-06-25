@@ -169,6 +169,7 @@ Gate dua-sisi hanya sejujur measurement di belakangnya. Toolset kecil yang spesi
 | Atribusi simbol (function mana yang stall) | `perf record -e L1-dcache-load-misses -c 2000 -p <pid>` lalu `perf report --stdio` / `perf annotate` | butuh sudo, dan sandbox agent mematikan `perf record` (signal), jadi manusia menjalankannya di terminal nyata |
 | Footprint memory (RSS, anon, efek MADV) | `/proc/<pid>/smaps` anon breakdown, cgroup RSS peak dan steady | axis memory dari gate. Perhatikan anon RSS melacak koneksi hidup setelah close, membuktikan `MADV_DONTNEED` mengembalikan page-nya |
 | Environment low-noise | `taskset` atau cpuset pinning plus quiesce | development box dengan variance 2-3% per-run tidak bisa meresolusi perubahan sub-1%, jadi quiesce dulu (isolate bench, `rnd/isolate_benchmark.md`) |
+| Conformance protokol dan inspeksi handshake | `curl -v`, dan `curl --http3-only -v` untuk QUIC | live behavioral oracle: `-v` menarasikan tiap langkah, jadi untuk HTTP/3 ia menunjukkan tiap tahap handshake (Initial, ServerHello, certificate, 1-RTT, request) saat sebuah langkah regresi. butuh curl yang dibangun dengan backend HTTP/3 (ngtcp2 / nghttp3), cek dengan `curl --version` |
 | Correctness dan leak | `zig build`, lalu `test-all` / `examples` / `test-runner-all`, dan `std.testing.allocator` | gate discovery dan leak yang dilewati setiap perubahan sebelum klaim perf apa pun |
 
 Runner siap-pakai ada di repo supaya metode-nya reproducible, bukan dadakan: `perf-localize-http1.sh` (atribusi simbol, hand-run), `perf-per-request-cell.sh` dan `perf-per-request-matrix.sh` (tabel `perf stat` per-request), `perf-http-epoll.sh` dan `perf-http-uring.sh` (per-engine).
@@ -198,7 +199,33 @@ Dua caveat menentukan apakah satu run mengukur engine, bukan setup-nya:
 
 ---
 
-## 11. Checklist
+## 11. Test berlapis, dari vector ke live client
+
+Sebuah protocol engine dibuktikan oleh tangga test, tiap lapis dengan oracle-nya sendiri, dinaiki dari yang paling bawah agar sebuah kegagalan ter-localize ke rung yang baru ditambah, bukan ke seluruh stack.
+
+| Lapis | Membuktikan | Oracle | Cara jalannya di sini |
+| :- | :- | :- | :- |
+| Unit | satu function benar | worked example yang dipublikasi spec | RFC vector sebagai `test {}` in-file, dijalankan `zig build unit-test` |
+| Edge | jalur reject berlaku | aturan MUST-reject dari spec | negative test: bit yang dibalik gagal AEAD, truncation, type salah, batas length |
+| Round-trip | sebuah codec adalah inverse-nya sendiri | self-consistency | encode lalu decode, seal lalu open, assert byte-nya kembali |
+| Integration | modul yang dikomposisi sepakat | sebuah derived value yang diketahui | `init` menurunkan Initial key terpublikasi dari connection id, demux me-route packet buatan |
+| Configuration | permukaan config jujur | default dan reject yang didokumentasikan | test default-field, `init` menolak port nol dan certificate yang hilang |
+| Smoke | binary launch dan bind | process dan socket | jalankan example yang sudah dibuild, pastikan UDP port ter-bind, kill |
+| Runner, live | seluruh engine melayani | client nyata di atas wire nyata | client native di `test-runner-all` (untuk HTTP/3, satu yang hand-rolled dari primitive `zix.Http3`, cara yang sama runner HTTP/2 hand-roll satu dari `zix.Http2`), assert response |
+
+Vector membuktikan bagian-bagiannya, live client membuktikan keseluruhannya. Hanya client nyata yang menangkap integration di mana tiap bagian benar tapi urutannya salah: saat bring-up HTTP/3 sebuah `curl --http3` live memunculkan bahwa handshake selesai tapi koneksi tidak pernah close, karena tidak ada yang meng-acknowledge packet client. Setelah itu diperbaiki, round trip-nya dipindah ke client native yang hermetic sehingga runner tidak butuh tool eksternal.
+
+Tiga aturan menjaga tangga ini jujur:
+
+- Hijau di tiap toolchain yang didukung, bukan hanya default. Tiap perubahan di sini dicek di Zig 0.16 dan 0.17, karena sebuah API yang ada di satu versi dan di-rename di versi lain adalah build break yang run satu-versi tidak pernah lihat.
+- Build artifact yang dikirim, bukan hanya test binary. `unit-test` tidak meng-compile jalur private atau generic sampai sesuatu meng-instantiate-nya, jadi sebuah `std.crypto.random` yang tidak ada di toolchain ini compile bersih di bawah `unit-test` dan baru gagal di build example. Binary yang kamu kirim adalah bagian dari gate.
+- Naiki tangga dan gate tiap rung. Pekerjaannya berjalan vector, lalu integration, lalu smoke (ter-bind), lalu live (decrypt handshake, lalu full round trip, lalu exit yang bersih). Tiap rung hijau sebelum yang berikutnya, jadi tiap kegagalan live menunjuk ke satu hal baru.
+
+> Buktikan tiap lapis terhadap oracle-nya sendiri, dari yang paling bawah: vector terpublikasi untuk function, jalur reject untuk parser, round trip untuk codec, derived value untuk wiring, default terdokumentasi untuk config, socket ter-bind untuk binary, dan client nyata di atas wire nyata untuk keseluruhan. Build artifact yang dikirim, bukan hanya test binary, dan jaga tiap rung hijau di tiap toolchain sebelum menaiki yang berikutnya.
+
+---
+
+## 12. Checklist
 
 Sebelum mendaratkan kode yang menyentuh runtime atau memory, telusuri ini:
 

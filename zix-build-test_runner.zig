@@ -54,6 +54,7 @@ pub fn addSteps(
         .{ "test-runner-fix-uring", "tests/runner/fix_runner.zig", "tr-server-fix-uring", "examples/fix_server_5_uring.zig", "9052", "", "", "" },
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9054", "", "", "" },
         .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_raw_echo.zig", "9064", "", "", "" },
+        .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/http3_basic.zig", "9063", "", "", "" },
         .{ "test-runner-uds", "tests/runner/uds_runner.zig", "tr-server-uds", "examples/uds_server.zig", "0", "", "", "" },
         // http feature runners (http_get_runner: arg4=route, arg5=origin, arg6=expected)
         .{ "test-runner-http-json", "tests/runner/http_get_runner.zig", "tr-server-http-json", "examples/http_json.zig", "9005", "/status", "", "server" },
@@ -303,6 +304,9 @@ pub fn addSteps(
             .{ "tr-all-server-tls-http1", "examples/tls/tls_http1_basic.zig" },
             .{ "tr-all-server-tls-http1-ed25519", "examples/tls/tls_http1_ed25519.zig" },
             .{ "tr-all-server-tls-http2", "examples/tls/tls_http2_basic.zig" },
+
+            // http3 (QUIC over TLS 1.3, driven by the hand-rolled native client)
+            .{ "tr-all-server-http3", "examples/http3_basic.zig" },
         };
 
         const all_runner_mod = b.createModule(.{

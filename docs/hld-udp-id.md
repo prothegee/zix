@@ -53,14 +53,16 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UdpClient(Packet).init(config, io)"] --> B["bind 127.0.0.1:bind_port"]
+    A["UdpClient(Packet).init(config, io)"] --> B["bind config.bind_ip:bind_port"]
     B --> C["resolve server IpAddress"]
     C --> D["client ready"]
     D --> E["send(packet)"]
     E --> F["toEndian(packet, config.endianness)"]
     F --> G["socket.send(io, dest, bytes)"]
     D --> H["receiveFeedback()"]
-    H --> I["socket.receive(io, buf)"]
+    H --> P{"recv_timeout_ms > 0 and poll times out?"}
+    P -->|yes| Q["error.RecvTimeout"]
+    P -->|no| I["socket.receive(io, buf)"]
     I --> J{"len == 1?"}
     J -->|0x06| K[".ack"]
     J -->|other| L[".nack"]
@@ -168,17 +170,19 @@ pub const UdpServerConfig = struct {
 
 ```zig
 pub const UdpClientConfig = struct {
-    server_ip:   []const u8, // server address to send packets to
+    ip:          []const u8, // server address to send packets to
     server_port: u16,        // server port & must be non-zero
+    bind_ip:     []const u8 = "127.0.0.1", // local bind address, "0.0.0.0" for all interfaces
     bind_port:   u16,        // local port: server uses this to send responses back
     port_mode:   PortMode   = .REQUIRED,
     endianness:  Endianness = .LITTLE, // must match server
     send_once:   bool       = false,
     send_every:  u64        = 99, // milliseconds between sends in run loop
+    recv_timeout_ms: u32    = 0,  // receive timeout via poll, 0 = blocking
 };
 ```
 
-`server_ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `UdpClient` tidak melakukan heap allocation (semua buffer dialokasikan di stack), sehingga tidak dibutuhkan field `allocator`.
+`ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `bind_ip` default ke loopback (override dengan `--bind-ip` di mode CONFIGURABLE), dan `recv_timeout_ms` default ke receive blocking. `UdpClient` tidak melakukan heap allocation (semua buffer dialokasikan di stack), sehingga tidak dibutuhkan field `allocator`.
 
 ---
 
@@ -345,7 +349,7 @@ Lihat `docs/hld-logger-id.md` untuk format baris log dan detail konfigurasi.
 
 ## Mode Raw-bytes (ADR-049)
 
-Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa packet struct tetap. Ia adalah substrate datagram-transport (dan basis yang ditumpangi engine QUIC / HTTP3 mendatang), berguna mandiri untuk server echo, DNS-style, dan telemetry.
+Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa packet struct tetap. Ia adalah substrate datagram-transport yang ditumpangi engine `zix.Http3` (QUIC), berguna mandiri untuk server echo, DNS-style, dan telemetry.
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
 - I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
