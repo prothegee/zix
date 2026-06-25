@@ -27,3 +27,19 @@ pub const Router = router.Router;
 pub const Route = router.Route;
 /// Look up a path parameter captured by a PARAM route.
 pub const pathParam = router.pathParam;
+
+// Low-level QUIC / TLS / QPACK primitives, exposed so a peer (a hand-rolled client, a test harness)
+// can build the other side of the wire. This mirrors how zix.Http2 exposes its frame / HPACK
+// primitives: the server is the product, these are the building blocks under it.
+pub const crypto = @import("crypto.zig");
+pub const protection = @import("protection.zig");
+pub const keyschedule = @import("keyschedule.zig");
+pub const qpack = @import("qpack.zig");
+pub const huffman = @import("huffman.zig");
+pub const packet = @import("packet.zig");
+pub const varint = @import("varint.zig");
+pub const frame = @import("frame.zig");
+/// TLS 1.3 handshake bytes the QUIC handshake reuses (ClientHello / ServerHello layout, enums).
+pub const tls_handshake = @import("../../tls/handshake.zig");
+/// TLS 1.3 key schedule the QUIC handshake reuses (transcript hash, HKDF derive).
+pub const tls_key_schedule = @import("../../tls/key_schedule.zig");
