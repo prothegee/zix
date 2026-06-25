@@ -1340,6 +1340,12 @@ pub const GrpcMuxConn = struct {
         std.heap.smp_allocator.free(self.rbuf);
         std.heap.smp_allocator.destroy(self);
     }
+
+    /// Flush the staged reply through `h2.fdWriteAll` (the URING / EPOLL loops send `stage.buf`
+    /// directly, but the inline TLS path drains it through the frame write hook to be encrypted).
+    pub fn flushStage(self: *GrpcMuxConn) void {
+        self.stage.flush();
+    }
 };
 
 /// Append a complete frame (9-byte header + payload) to the connection reply cork.
