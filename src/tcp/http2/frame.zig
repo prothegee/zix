@@ -104,7 +104,19 @@ pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
 
 // --------------------------------------------------------- //
 
+/// Thread-local output redirect. When set, `fdWriteAll` hands the plaintext to the hook instead of
+/// writing it to the fd. The h2-over-TLS path uses this to encrypt the engine's frames before they
+/// reach the socket, so the resumable mux runs unchanged over a TLS connection (no socketpair, no
+/// second thread). Null on the cleartext path, where writes go straight to the fd.
+pub threadlocal var write_hook: ?*const fn (ctx: *anyopaque, bytes: []const u8) void = null;
+pub threadlocal var write_hook_ctx: ?*anyopaque = null;
+
 pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (write_hook) |hook| {
+        hook(write_hook_ctx.?, data);
+        return;
+    }
+
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
