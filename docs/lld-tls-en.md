@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-tls-en.md`](hld-tls-en.md) and ADR-045 / 046 / 047.
 
-`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop: `tcp/http1/tls_serve.zig` for Http1, and a shared h2-over-TLS terminator in `tcp/tls/h2_terminator.zig` that `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` wrap.
+`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop. Http1 is thread-per-connection in `tcp/http1/tls_serve.zig`. Http2 and Grpc select between two paths by `dispatch_model` (ADR-052): `.EPOLL` / `.URING` use the per-core multiplexed `tcp/http2/tls_epoll.zig` and `tcp/http2/grpc/tls_epoll.zig` over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig`.
 
 ---
 
@@ -123,11 +123,19 @@ The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` 
 
 ## tcp/tls/h2_terminator.zig (shared h2-over-TLS terminator)
 
-`serveConnTls(fd, ctx, EngineCtx, engine_ctx, engineEntry)` is the engine-agnostic terminator used by both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), then sets up a socketpair: the caller-supplied `engineEntry` runs the cleartext engine on one end in a spawned thread, and `pump` decrypts inbound records to plaintext for the engine and encrypts the engine's frames back. Teardown uses `shutdown(SHUT_WR)` so the engine sees EOF without a write racing a closed peer.
+`serveConnTls(fd, ctx, driver)` is the engine-agnostic terminator used by the `.ASYNC` / `.POOL` / `.MIXED` path of both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`, which takes the same `driver`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), verifies the client Finished, then calls `driver.drive(fd, &conn, &record_buf)`. The driver owns the connection until close: it runs the resumable h2 mux inline over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook. No socketpair, no second thread.
 
 ## tcp/http2/tls_serve.zig and tcp/http2/grpc/tls_serve.zig
 
-Both are thin wrappers over the shared terminator. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread (so the blocking terminator never stalls accepts). The `engineEntry` is what differs. Http2 runs the blocking `core.serveConn`. Grpc sets the socketpair end non-blocking and drives the single-owner mux (`core.grpcMuxOnReadable`) under a `poll` loop, the same state machine as the cleartext `.EPOLL` / `.URING` models, so the gRPC TLS path has no per-stream write races.
+These are the `.ASYNC` / `.POOL` / `.MIXED` path. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread, which calls `serveConnTls` with a `MuxDriver(routes)`. The driver's `drive` is what differs: Http2 runs `mux.processRing` over a `mux.MuxConn`, Grpc runs `core.grpcMuxProcessRing` over a `GrpcMuxConn` then `flushStage` to cork the staged reply. Both seal frames into TLS records through `frame.write_hook`, the same resumable state machine as the cleartext `.EPOLL` / `.URING` models, so there are no per-stream write races. The `.EPOLL` / `.URING` dispatch models instead use the multiplexed `tls_epoll.zig` below.
+
+## tcp/tls/tls_session.zig (resumable TLS 1.3 server session)
+
+The linchpin of the multiplexed path (ADR-052). A sans-blocking-I/O TLS 1.3 server session that one epoll worker drives for many connections at once. `Session.init(cert_der, signing_key, alpn_prefs)` seeds the randoms. `feed(input, to_send_buf, plain_buf)` accumulates ciphertext in an internal `rbuf`, processes each complete record, and returns a `FeedResult{ to_send, plaintext, outcome }`. The `Phase` state machine runs `hello -> finished -> established -> closed`: in `hello` it calls `serverHandshake` and emits the flight, in `finished` it verifies the client Finished, in `established` it decrypts application data. `encrypt` seals plaintext into a record, `closeNotify` emits the close alert. TLS 1.3 only: a 1.2-only ClientHello is refused with a fatal alert (the 1.2 fallback stays on `tls_serve.zig`).
+
+## tcp/http2/tls_epoll.zig and tcp/http2/grpc/tls_epoll.zig (multiplexed dispatch)
+
+The `.EPOLL` / `.URING` path (ADR-052). `runTlsEpoll` spawns one worker per core, each with its own `SO_REUSEPORT` listener and epoll instance. A `TlsConn` slab (indexed by fd) holds the `tls_session.Session`, the h2 / gRPC mux, and a staged outbound-ciphertext buffer that arms `EPOLLOUT` on `EAGAIN` for backpressure. `onReadable` reads ciphertext, calls `session.feed`, sends the handshake flight, and on the established outcome feeds the decrypted plaintext into the mux (`processRing` / `grpcMuxProcessRing`), whose frames are sealed back into records via `frame.write_hook` pointed at `hookWrite`. One worker multiplexes many connections, so high concurrency does not spawn a thread per connection.
 
 ## tls12_*.zig
 
