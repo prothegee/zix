@@ -222,7 +222,7 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !v
 
 /// Build and send the server's ServerHello Initial in reply to a decrypted ClientHello (handshake
 /// step 2). Idempotent per connection: sent once, skipped on retransmits.
-fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in, config: Http3ServerConfig) void {
+fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, config: Http3ServerConfig) void {
     const hdr = packet.parseLongHeader(data) catch return;
     if (hdr.packet_type != 0) return;
 
@@ -330,7 +330,7 @@ fn captureRequest(conn: *Connection, payload: []const u8) void {
 
 /// Build and send the HTTP/3 response to a decrypted 1-RTT request (the final round-trip step).
 /// Idempotent per connection: sent once.
-fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in, cid_len: usize, config: Http3ServerConfig) void {
+fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig) void {
     if (data.len < 1 + cid_len) return;
 
     const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
