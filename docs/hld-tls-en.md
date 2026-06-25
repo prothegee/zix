@@ -9,6 +9,7 @@
 - Server-side configuration as a user-owned `Tls.Context` object (the loaded cert / key + validated policy), mirroring the logger (ADR-047).
 - Forward secrecy (ECDHE) and AEAD on both versions by construction.
 - A native verifying client (ALPN offer, X.509 chain + hostname per RFC 5280 / 6125).
+- The 1.3 handshake primitives (key schedule, certificate, hello serialization) also back `zix.Http3` over QUIC, where QUIC CRYPTO frames carry the handshake in place of the TLS record layer (`zix.Http3.tls_handshake` / `tls_key_schedule`).
 
 ## Architecture
 

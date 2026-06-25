@@ -45,6 +45,31 @@ pub const Connection = struct {
     handshake_ready: bool = false,
     hs_keys: keyschedule.HandshakeKeys = undefined,
     handshake_transcript: ks.Transcript = undefined,
+    // 1-RTT application keys + the client's Source Connection ID, ready once the flight is sent.
+    app_ready: bool = false,
+    app_keys: keyschedule.AppKeys = undefined,
+    peer_scid: demux.ConnId = .{},
+    // 1-RTT response state.
+    response_sent: bool = false,
+    app_pn: u32 = 0,
+    // Largest 1-RTT packet number received from the client (for the response ACK).
+    app_largest_received: ?u64 = null,
+    // The decoded request line, copied off the decrypted payload so it outlives the recv buffer.
+    req_ready: bool = false,
+    req_method_buf: [16]u8 = undefined,
+    req_method_len: usize = 0,
+    req_path_buf: [1024]u8 = undefined,
+    req_path_len: usize = 0,
+
+    /// The decoded request method (empty until a request HEADERS is captured).
+    pub fn reqMethod(self: *const Connection) []const u8 {
+        return self.req_method_buf[0..self.req_method_len];
+    }
+
+    /// The decoded request path (empty until a request HEADERS is captured).
+    pub fn reqPath(self: *const Connection) []const u8 {
+        return self.req_path_buf[0..self.req_path_len];
+    }
 
     /// Initialize a server-side connection from the client's Destination Connection ID
     /// (RFC 9001 5.2): derive the Initial secrets and the per-direction AES-128-GCM packet keys, and

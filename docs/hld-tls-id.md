@@ -9,6 +9,7 @@
 - Konfigurasi sisi server sebagai object `Tls.Context` milik pengguna (cert / key termuat + policy tervalidasi), dimodelkan pada logger (ADR-047).
 - Forward secrecy (ECDHE) dan AEAD di kedua versi by construction.
 - Client native yang melakukan verifikasi (penawaran ALPN, chain X.509 + hostname per RFC 5280 / 6125).
+- Primitive handshake 1.3 (key schedule, certificate, serialisasi hello) juga menopang `zix.Http3` melalui QUIC, di mana QUIC CRYPTO frame membawa handshake menggantikan TLS record layer (`zix.Http3.tls_handshake` / `tls_key_schedule`).
 
 ## Architecture
 

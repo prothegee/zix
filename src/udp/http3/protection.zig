@@ -30,6 +30,8 @@ pub const OpenError = error{
     NotInitial,
     /// Not a long-header Handshake packet.
     NotHandshake,
+    /// Not a short-header (1-RTT) packet.
+    NotShort,
     /// The unprotected header did not fit the working buffer (an implausibly long token).
     HeaderTooLong,
     /// AEAD authentication failed: a forged, corrupted, or wrong-key packet.
@@ -147,6 +149,54 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
     return .{ .packet_number = full_pn, .payload = out[0..ciphertext.len] };
 }
 
+/// Open a short-header (1-RTT) packet (RFC 9001 5.3 / 5.4). The Destination Connection ID length is
+/// not on the wire, the receiver knows the length it issued. `keys` are the 1-RTT keys for the
+/// sending direction (the client 1-RTT keys when a server opens a client request).
+pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, out: []u8) OpenError!Opened {
+    if (data.len < 1 + dcid_len) return error.Truncated;
+    if (data[0] & 0x80 != 0) return error.NotShort;
+
+    const pn_offset = 1 + dcid_len;
+    const sample_offset = pn_offset + 4;
+    if (data.len < sample_offset + 16) return error.Truncated;
+
+    var sample: [16]u8 = undefined;
+    @memcpy(&sample, data[sample_offset .. sample_offset + 16]);
+    const mask = crypto.headerMaskAes(keys.hp, sample);
+
+    // Short header: header protection masks the low 5 bits of the first byte (RFC 9001 5.4.1).
+    const first = data[0] ^ (mask[0] & 0x1f);
+    const pn_len: usize = @as(usize, first & 0x03) + 1;
+
+    const header_len = pn_offset + pn_len;
+    if (data.len < header_len + Aes128Gcm.tag_length) return error.Truncated;
+
+    var hdr_buf: [64]u8 = undefined;
+    if (header_len > hdr_buf.len) return error.HeaderTooLong;
+    @memcpy(hdr_buf[0..header_len], data[0..header_len]);
+    hdr_buf[0] = first;
+
+    var truncated_pn: u64 = 0;
+    for (0..pn_len) |i| {
+        const b = data[pn_offset + i] ^ mask[1 + i];
+        hdr_buf[pn_offset + i] = b;
+        truncated_pn = (truncated_pn << 8) | b;
+    }
+
+    const full_pn = truncated_pn;
+
+    const nonce = crypto.aeadNonce(keys.iv, full_pn);
+    const ciphertext = data[header_len .. data.len - Aes128Gcm.tag_length];
+    if (ciphertext.len > out.len) return error.Truncated;
+
+    var tag: [Aes128Gcm.tag_length]u8 = undefined;
+    @memcpy(&tag, data[data.len - Aes128Gcm.tag_length ..]);
+
+    Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, hdr_buf[0..header_len], nonce, keys.key) catch return error.Decrypt;
+
+    return .{ .packet_number = full_pn, .payload = out[0..ciphertext.len] };
+}
+
 /// Seal an outgoing long-header Initial packet (RFC 9001 5.3 / 5.4, the send path). Builds the
 /// unprotected long header (Initial, version 1, the given DCID / SCID, empty token), AEAD-encrypts
 /// `payload` (the frames) with the unprotected header as associated data, then applies header
@@ -164,11 +214,23 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
 /// Return:
 /// - []const u8 (the protected packet, a slice into `out`)
 pub fn sealInitial(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
+    return sealLongHeader(out, keys, 0xc0, dcid, scid, packet_number, payload, true);
+}
+
+/// Seal an outgoing long-header Handshake packet (RFC 9001 5.3 / 5.4). Like `sealInitial` but with
+/// the Handshake type (0x02) and no Token field. `keys` are the server Handshake keys.
+pub fn sealHandshake(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
+    return sealLongHeader(out, keys, 0xe0, dcid, scid, packet_number, payload, false);
+}
+
+/// Build and protect a long-header packet. `first_base` is the long-header first byte with the type
+/// bits already set (0xc0 Initial, 0xe0 Handshake), `with_token` writes the empty Token Length field
+/// that only Initial packets carry.
+fn sealLongHeader(out: []u8, keys: crypto.AesKeys, first_base: u8, dcid: []const u8, scid: []const u8, packet_number: u32, payload: []const u8, with_token: bool) OpenError![]const u8 {
     const pn_len: usize = if (packet_number <= 0xff) 1 else if (packet_number <= 0xffff) 2 else 4;
 
     var pos: usize = 0;
-    // First byte: long form (0x80) | fixed bit (0x40) | Initial type (0x00 << 4) | pn length - 1.
-    out[pos] = 0xc0 | @as(u8, @intCast(pn_len - 1));
+    out[pos] = first_base | @as(u8, @intCast(pn_len - 1));
     pos += 1;
     std.mem.writeInt(u32, out[pos..][0..4], 1, .big);
     pos += 4;
@@ -180,8 +242,8 @@ pub fn sealInitial(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []co
     pos += 1;
     @memcpy(out[pos..][0..scid.len], scid);
     pos += scid.len;
-    pos += varint.write(out[pos..], 0); // empty Token Length
-    pos += varint.write(out[pos..], pn_len + payload.len + Aes128Gcm.tag_length); // Length
+    if (with_token) pos += varint.write(out[pos..], 0);
+    pos += varint.write(out[pos..], pn_len + payload.len + Aes128Gcm.tag_length);
 
     const pn_offset = pos;
     var pn_bytes: [4]u8 = undefined;
@@ -208,6 +270,46 @@ pub fn sealInitial(out: []u8, keys: crypto.AesKeys, dcid: []const u8, scid: []co
     @memcpy(&sample, out[sample_offset .. sample_offset + 16]);
     const mask = crypto.headerMaskAes(keys.hp, sample);
     out[0] ^= mask[0] & 0x0f;
+    for (0..pn_len) |i| out[pn_offset + i] ^= mask[1 + i];
+
+    return out[0..packet_len];
+}
+
+/// Seal an outgoing short-header (1-RTT) packet (RFC 9001 5.3 / 5.4). `dcid` is the peer's connection
+/// id, placed raw with no length prefix. `keys` are the server 1-RTT keys.
+pub fn sealShort(out: []u8, keys: crypto.AesKeys, dcid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
+    const pn_len: usize = if (packet_number <= 0xff) 1 else if (packet_number <= 0xffff) 2 else 4;
+
+    var pos: usize = 0;
+    // First byte: short form (0x00) | fixed bit (0x40) | spin 0 | key phase 0 | pn length - 1.
+    out[pos] = 0x40 | @as(u8, @intCast(pn_len - 1));
+    pos += 1;
+    @memcpy(out[pos..][0..dcid.len], dcid);
+    pos += dcid.len;
+
+    const pn_offset = pos;
+    var pn_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &pn_bytes, packet_number, .big);
+    @memcpy(out[pos..][0..pn_len], pn_bytes[4 - pn_len ..]);
+    pos += pn_len;
+
+    const header_len = pos;
+    if (header_len + payload.len + Aes128Gcm.tag_length > out.len) return error.Truncated;
+
+    const nonce = crypto.aeadNonce(keys.iv, packet_number);
+    var tag: [Aes128Gcm.tag_length]u8 = undefined;
+    Aes128Gcm.encrypt(out[header_len .. header_len + payload.len], &tag, payload, out[0..header_len], nonce, keys.key);
+    @memcpy(out[header_len + payload.len ..][0..Aes128Gcm.tag_length], &tag);
+
+    const packet_len = header_len + payload.len + Aes128Gcm.tag_length;
+
+    const sample_offset = pn_offset + 4;
+    if (packet_len < sample_offset + 16) return error.Truncated;
+
+    var sample: [16]u8 = undefined;
+    @memcpy(&sample, out[sample_offset .. sample_offset + 16]);
+    const mask = crypto.headerMaskAes(keys.hp, sample);
+    out[0] ^= mask[0] & 0x1f; // short header: low 5 bits
     for (0..pn_len) |i| out[pn_offset + i] ^= mask[1 + i];
 
     return out[0..packet_len];
@@ -287,6 +389,45 @@ test "zix test: sealInitial then openInitial round-trips the payload" {
 
     var recovered: [256]u8 = undefined;
     const opened = try openInitial(sealed, server_keys, &recovered);
+
+    try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
+}
+
+test "zix test: sealHandshake then openHandshake round-trips the payload" {
+    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const keys = crypto.AesKeys.fromSecret(secret);
+
+    var payload: [64]u8 = undefined;
+    @memset(&payload, 0);
+    const frame_bytes = h("080041020800000e") ++ h("aabbccdd");
+    @memcpy(payload[0..frame_bytes.len], &frame_bytes);
+
+    var out: [256]u8 = undefined;
+    const sealed = try sealHandshake(&out, keys, &h("c0ffee00"), &h("1234"), 0, &payload);
+
+    var recovered: [256]u8 = undefined;
+    const opened = try openHandshake(sealed, keys, &recovered);
+
+    try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
+}
+
+test "zix test: sealShort then openShort round-trips the payload" {
+    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const keys = crypto.AesKeys.fromSecret(secret);
+    const dcid = h("c0ffee0011223344");
+
+    var payload: [64]u8 = undefined;
+    @memset(&payload, 0);
+    const stream_frame = h("0800") ++ h("0102030405");
+    @memcpy(payload[0..stream_frame.len], &stream_frame);
+
+    var out: [256]u8 = undefined;
+    const sealed = try sealShort(&out, keys, &dcid, 0, &payload);
+
+    var recovered: [256]u8 = undefined;
+    const opened = try openShort(sealed, keys, dcid.len, &recovered);
 
     try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);

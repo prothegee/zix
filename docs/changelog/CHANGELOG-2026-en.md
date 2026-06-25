@@ -69,6 +69,13 @@ __*Update:*__
     - Dispatch is partitioned per ADR-043: `src/udp/dispatch/` (one file per model plus `common.zig`) with a thin `run()` switch, plus `src/udp/datagram.zig` (raw-fd socket + `recvmmsg` / `sendmmsg` primitives) and `src/udp/core.zig` (`HandlerFn`, `Sink`). The typed `Server(Packet)` is unchanged, a non-ASYNC `dispatch_model` on it folds with a logged notice. Non-Linux falls back to a single `std.Io.net` loop.
     - New example `examples/udp_raw_echo.zig` (port 9064) with runner step `test-runner-udp-raw`, folded into `test-runner-all`. GSO / GRO / ECN and a dedicated io_uring submission path behind `.URING` are deferred (`.URING` folds to the recvmmsg per-core loop).
     ---
+- HTTP/3 over QUIC engine `zix.Http3`, pure-Zig on `std.crypto`, on the `zix.Udp` substrate:
+    - `zix.Http3.Http3(handler)` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), with a comptime `zix.Http3.Router` mirroring `zix.Http1` / `zix.Http2` (EXACT / PARAM / PREFIX, query stripped before matching). TLS 1.3 is mandatory, configured by the same user-owned `Tls.Context` as the TCP engines.
+    - The deterministic QUIC / TLS / QPACK layers are pure-Zig from the RFCs: packet protection (header protection plus AEAD), the key schedule (Initial / Handshake / 1-RTT), CRYPTO-stream TLS 1.3 handshake (ServerHello plus the EE / Certificate / CertificateVerify / Finished flight), QPACK static-table field lines, and the RFC 7541 Huffman decoder for request paths.
+    - The v1 engine runs one single-worker recv loop with internal connection-id demux (migration-safe). `.EPOLL` / `.URING` fold to the v1 worker until per-core CID steering lands (ADR-049 phase 3, ADR-050).
+    - `zix.Http3` exports its low-level primitives (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`), the same way `zix.Http2` exports its frame / HPACK primitives, so a peer can build the other side of the wire.
+    - New example `examples/http3_basic.zig` (port 9063). The runner drives a hermetic native QUIC client hand-rolled from those primitives (no external tool), with runner step `test-runner-http3` folded into `test-runner-all`.
+    ---
 - Server config (knob) added:
     - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
     - `tls` (`?*Tls.Context`) on `zix.Http1`, `zix.Http2`, and `zix.Grpc`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).

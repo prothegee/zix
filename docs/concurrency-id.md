@@ -328,6 +328,7 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 | SSE | tidak direkomendasikan (menghabiskan pool thread) | ya, direkomendasikan | ya | n/a |
 | WebSocket | tidak direkomendasikan (koneksi berumur panjang) | ya, direkomendasikan | ya | n/a |
 | HTTP/2 (h2c) | ya | ya (default) | ya | n/a |
+| HTTP/3 (QUIC) | v1 single worker | v1 single worker (default) | v1 single worker | folds ke v1 worker |
 | gRPC (h2c) | ya | ya (default) | ya | ya, Linux-only |
 | TCP (raw stream) | ya | ya (default) | ya | ya, Linux-only |
 | FIX 4.x | ya | ya (default) | ya | ya, Linux-only |
@@ -352,7 +353,7 @@ Setiap model menamai dua hal sekaligus: bentuk konkurensi (single atau multi-cor
 
 `.EPOLL`, `.KQUEUE`, dan `.IOCP` adalah ide multi-core per-core yang sama, satu per sistem operasi. Masing-masing berada di file `dispatch/<model>.zig` sendiri, sehingga folder-nya self-documenting: buka, lihat setiap model, tiap baris header menyatakan perilaku core dan OS-nya.
 
-Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
+Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
 
 Tidak ada keyword auto-select. Kode portable memilih bentuk portable (`.POOL` / `.MIXED`) atau menamai backend yang tepat dengan satu baris comptime switch pada `builtin.os.tag`. Dua ketidakcocokan ditangani berbeda:
 

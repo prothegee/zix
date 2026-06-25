@@ -106,9 +106,9 @@ Same as server, fires at build time.
 
 ```
 1. if bind_port == 0 or server_port == 0: return error.PortNotConfigured
-2. bind_addr = IpAddress.parse("127.0.0.1", bind_port)
+2. bind_addr = IpAddress.parse(config.bind_ip, bind_port)
 3. socket = bind_addr.bind(io, .dgram .udp)  // one socket for both send and receive
-4. dest = IpAddress.parse(server_ip, server_port)
+4. dest = IpAddress.parse(config.ip, server_port)
 5. return Self { config, socket, dest, io }
 ```
 
@@ -124,8 +124,10 @@ socket.send(io, &dest, std.mem.asBytes(&wire))
 ### receiveFeedback()
 
 ```
+if config.recv_timeout_ms > 0:
+    if poll(socket, recv_timeout_ms) not ready: return error.RecvTimeout  // poll, not SO_RCVTIMEO
 buf: [@sizeOf(Packet)]u8 = undefined
-msg = socket.receive(io, &buf)         // blocking
+msg = socket.receive(io, &buf)         // blocking unless the poll above timed out
 if msg.data.len == 1:
     if data[0] == 0x06: return .ack
     else:               return .nack
