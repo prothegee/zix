@@ -44,9 +44,9 @@ __*Update:*__
     - Keluarga example baru `examples/http2_basic_{1_async,2_pool,3_mixed,4_epoll,5_uring}.zig` (port 9065-9069) dengan step runner `test-runner-http2-{async,pool,mixed,epoll,uring}`, dilipat ke `test-runner-all`.
     ---
 - gRPC over TLS dan terminator h2-over-TLS bersama:
-    - `zix.Grpc` melayani TLS native (TLS 1.3, ALPN h2) via `tls: ?*Tls.Context`, aditif di atas default h2c. Jalur TLS menjalankan mux state machine gRPC (`grpcMuxOnReadable`) di atas socketpair terdekripsi, engine single-owner yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak punya race write per-stream.
-    - Terminator h2-over-TLS difaktorkan ke `src/tcp/tls/h2_terminator.zig` yang bersama dan engine-agnostic (handshake 1.3 / 1.2, ALPN h2, pump socketpair yang diparameterkan oleh engine entry). `tls_serve.zig` `zix.Http2` dan `zix.Grpc` adalah wrapper tipis, Http2 menyuplai `core.serveConn` dan Grpc loop mux-nya.
-    - Accept loop TLS menyerahkan tiap koneksi ke worker thread-nya sendiri, jadi terminator blocking tidak lagi men-serialisasi koneksi. Http2 https dan gRPC TLS keduanya melayani koneksi secara konkuren.
+    - `zix.Grpc` melayani TLS native (TLS 1.3, dengan fallback 1.2, ALPN h2) via `tls: ?*Tls.Context`, aditif di atas default h2c. Jalur TLS menggerakkan mux state machine gRPC resumable (`grpcMuxProcessRing`) langsung di atas record terdekripsi, engine single-owner yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak punya race write per-stream.
+    - Terminator h2-over-TLS difaktorkan ke `src/tcp/tls/h2_terminator.zig` yang bersama dan engine-agnostic (handshake 1.3 / 1.2, ALPN h2). Ia menjalankan driver inline-mux dari pemanggil di atas record terdekripsi dan menyegel frame engine kembali ke record TLS lewat write hook thread-local, tanpa socketpair dan tanpa thread kedua. `tls_serve.zig` `zix.Http2` dan `zix.Grpc` adalah wrapper tipis yang menyuplai driver.
+    - Dispatch TLS multipleks (ADR-052): untuk `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session TLS 1.3 resumable (`src/tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`tls_epoll.zig`), jadi Http2 https dan gRPC TLS tidak lagi men-spawn thread per koneksi di konkurensi tinggi. `.ASYNC` / `.POOL` / `.MIXED` tetap memakai terminator thread-per-koneksi, yang juga melayani fallback 1.2.
     - Docs `hld-grpc`, `hld-tls`, `lld-tls`, dan `hld-grpc-proxy` (en dan -id) diperbarui untuk gRPC TLS native.
     ---
 - Response compression (gzip / deflate):

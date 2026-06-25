@@ -44,9 +44,9 @@ __*Update:*__
     - New example family `examples/http2_basic_{1_async,2_pool,3_mixed,4_epoll,5_uring}.zig` (ports 9065-9069) with runner steps `test-runner-http2-{async,pool,mixed,epoll,uring}`, folded into `test-runner-all`.
     ---
 - gRPC over TLS and a shared h2-over-TLS terminator:
-    - `zix.Grpc` serves native TLS (TLS 1.3, ALPN h2) via `tls: ?*Tls.Context`, additive over the h2c default. The TLS path runs the gRPC mux state machine (`grpcMuxOnReadable`) over the decrypted socketpair, the same single-owner engine as the cleartext `.EPOLL` / `.URING` models, so it has no per-stream write races.
-    - The h2-over-TLS terminator is factored into a shared, engine-agnostic `src/tcp/tls/h2_terminator.zig` (handshake 1.3 / 1.2, ALPN h2, socketpair pump parameterized by the engine entry). `zix.Http2` and `zix.Grpc` `tls_serve.zig` are thin wrappers, Http2 supplying `core.serveConn` and Grpc the mux loop.
-    - The TLS accept loop hands each connection to its own worker thread, so the blocking terminator no longer serializes connections. Http2 https and gRPC TLS both serve connections concurrently.
+    - `zix.Grpc` serves native TLS (TLS 1.3, with a 1.2 fallback, ALPN h2) via `tls: ?*Tls.Context`, additive over the h2c default. The TLS path drives the resumable gRPC mux state machine (`grpcMuxProcessRing`) directly over the decrypted records, the same single-owner engine as the cleartext `.EPOLL` / `.URING` models, so it has no per-stream write races.
+    - The h2-over-TLS terminator is factored into a shared, engine-agnostic `src/tcp/tls/h2_terminator.zig` (handshake 1.3 / 1.2, ALPN h2). It runs a caller-supplied inline-mux driver over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook, with no socketpair and no second thread. `zix.Http2` and `zix.Grpc` `tls_serve.zig` are thin wrappers supplying the driver.
+    - Multiplexed TLS dispatch (ADR-052): for `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable TLS 1.3 session (`src/tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`tls_epoll.zig`), so Http2 https and gRPC TLS no longer spawn a thread per connection at high concurrency. `.ASYNC` / `.POOL` / `.MIXED` keep the thread-per-connection terminator, which also serves the 1.2 fallback.
     - Docs `hld-grpc`, `hld-tls`, `lld-tls`, and `hld-grpc-proxy` (en and -id) updated for native gRPC TLS.
     ---
 - Response compression (gzip / deflate):
