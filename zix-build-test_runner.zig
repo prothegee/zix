@@ -31,6 +31,7 @@ pub fn addSteps(
         .{ "test-runner-tls-http1-ed25519", "tests/runner/tls_http1_ed25519_runner.zig", "tr-server-tls-http1-ed25519", "examples/tls/tls_http1_ed25519.zig", "9062", "", "", "" },
         .{ "test-runner-tls-http2", "tests/runner/tls_http2_basic_runner.zig", "tr-server-tls-http2", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
         .{ "test-runner-tls-http2-client", "tests/runner/tls_http2_client_runner.zig", "tr-server-tls-http2-client", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
+        .{ "test-runner-tls-grpc", "tests/runner/tls_grpc_basic_runner.zig", "tr-server-tls-grpc", "examples/tls/tls_grpc_basic.zig", "9070", "", "", "" },
         .{ "test-runner-http2-async", "tests/runner/http2_runner.zig", "tr-server-http2-async", "examples/http2_basic_1_async.zig", "9065", "", "", "" },
         .{ "test-runner-http2-pool", "tests/runner/http2_runner.zig", "tr-server-http2-pool", "examples/http2_basic_2_pool.zig", "9066", "", "", "" },
         .{ "test-runner-http2-mixed", "tests/runner/http2_runner.zig", "tr-server-http2-mixed", "examples/http2_basic_3_mixed.zig", "9067", "", "", "" },
@@ -304,6 +305,7 @@ pub fn addSteps(
             .{ "tr-all-server-tls-http1", "examples/tls/tls_http1_basic.zig" },
             .{ "tr-all-server-tls-http1-ed25519", "examples/tls/tls_http1_ed25519.zig" },
             .{ "tr-all-server-tls-http2", "examples/tls/tls_http2_basic.zig" },
+            .{ "tr-all-server-tls-grpc", "examples/tls/tls_grpc_basic.zig" },
 
             // http3 (QUIC over TLS 1.3, driven by the hand-rolled native client)
             .{ "tr-all-server-http3", "examples/http3_basic.zig" },
