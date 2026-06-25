@@ -69,6 +69,13 @@ __*Update:*__
     - Dispatch dipartisi sesuai ADR-043: `src/udp/dispatch/` (satu file per model plus `common.zig`) dengan `run()` switch tipis, plus `src/udp/datagram.zig` (socket raw-fd + primitive `recvmmsg` / `sendmmsg`) dan `src/udp/core.zig` (`HandlerFn`, `Sink`). Typed `Server(Packet)` tidak berubah, `dispatch_model` non-ASYNC padanya di-fold dengan notice yang dicatat. Non-Linux jatuh ke satu loop `std.Io.net`.
     - Example baru `examples/udp_raw_echo.zig` (port 9064) dengan runner step `test-runner-udp-raw`, dilipat ke `test-runner-all`. GSO / GRO / ECN dan jalur submission io_uring khusus di balik `.URING` ditunda (`.URING` di-fold ke loop per-core recvmmsg).
     ---
+- Engine HTTP/3 melalui QUIC `zix.Http3`, pure-Zig di atas `std.crypto`, di substrate `zix.Udp`:
+    - `zix.Http3.Http3(handler)` melayani HTTP/3 (RFC 9114) melalui QUIC (RFC 9000 / 9001 / 9002), dengan comptime `zix.Http3.Router` yang mengikuti `zix.Http1` / `zix.Http2` (EXACT / PARAM / PREFIX, query di-strip sebelum matching). TLS 1.3 wajib, dikonfigurasi oleh `Tls.Context` user-owned yang sama dengan engine TCP.
+    - Layer QUIC / TLS / QPACK yang deterministik adalah pure-Zig dari RFC: packet protection (header protection plus AEAD), key schedule (Initial / Handshake / 1-RTT), handshake TLS 1.3 di atas CRYPTO-stream (ServerHello plus flight EE / Certificate / CertificateVerify / Finished), QPACK static-table field line, dan decoder Huffman RFC 7541 untuk request path.
+    - Engine v1 menjalankan satu recv loop single-worker dengan demux connection-id internal (migration-safe). `.EPOLL` / `.URING` di-fold ke worker v1 sampai per-core CID steering hadir (ADR-049 phase 3, ADR-050).
+    - `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`), cara yang sama `zix.Http2` mengekspor primitive frame / HPACK-nya, sehingga sebuah peer bisa membangun sisi lain dari wire.
+    - Example baru `examples/http3_basic.zig` (port 9063). Runner menggerakkan client QUIC native yang hermetic, hand-rolled dari primitive itu (tanpa tool eksternal), dengan runner step `test-runner-http3` dilipat ke `test-runner-all`.
+    ---
 - Server config (knob) ditambahkan:
     - `compression` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
     - `tls` (`?*Tls.Context`) pada `zix.Http1`, `zix.Http2`, dan `zix.Grpc`, gate opt-in https. Menggantikan field flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / `hsts_max_age_s` Http1 (ADR-047).
