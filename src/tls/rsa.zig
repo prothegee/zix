@@ -25,6 +25,9 @@ pub const pss_salt_len = hash_len;
 pub const max_modulus_bits = 4096;
 pub const max_modulus_len = max_modulus_bits / 8;
 
+/// Largest CRT factor (a prime, half the modulus width). p, q, dP, dQ, qInv all fit here.
+pub const max_prime_len = max_modulus_len / 2;
+
 const Modulus = std.crypto.ff.Modulus(max_modulus_bits);
 
 pub const Error = error{ InvalidKey, MessageTooLong };
@@ -38,13 +41,28 @@ const sha256_digestinfo_prefix = [_]u8{
 
 // --------------------------------------------------------------- //
 
-/// A parsed RSA private key: the modulus and private exponent, each big-endian with leading zeros
-/// stripped, copied into owned fixed buffers.
+/// A parsed RSA private key: the modulus and private exponent, plus the CRT factors when present,
+/// each big-endian with leading zeros stripped, copied into owned fixed buffers.
 pub const PrivateKey = struct {
     n_buf: [max_modulus_len]u8 = undefined,
     n_len: usize = 0,
     d_buf: [max_modulus_len]u8 = undefined,
     d_len: usize = 0,
+
+    /// CRT factors (RFC 8017 3.2 second form): p, q, dP, dQ, qInv. Present for any two-prime
+    /// RSAPrivateKey, which is every key openssl emits. has_crt gates the fast signing path. When
+    /// false (a key form without them), signing falls back to the plain m ^ d mod n path.
+    has_crt: bool = false,
+    p_buf: [max_prime_len]u8 = undefined,
+    p_len: usize = 0,
+    q_buf: [max_prime_len]u8 = undefined,
+    q_len: usize = 0,
+    dp_buf: [max_prime_len]u8 = undefined,
+    dp_len: usize = 0,
+    dq_buf: [max_prime_len]u8 = undefined,
+    dq_len: usize = 0,
+    qinv_buf: [max_prime_len]u8 = undefined,
+    qinv_len: usize = 0,
 
     /// The modulus n, big-endian.
     pub fn modulus(self: *const PrivateKey) []const u8 {
@@ -54,6 +72,31 @@ pub const PrivateKey = struct {
     /// The private exponent d, big-endian.
     pub fn privateExponent(self: *const PrivateKey) []const u8 {
         return self.d_buf[0..self.d_len];
+    }
+
+    /// The CRT prime p, big-endian.
+    pub fn primeP(self: *const PrivateKey) []const u8 {
+        return self.p_buf[0..self.p_len];
+    }
+
+    /// The CRT prime q, big-endian.
+    pub fn primeQ(self: *const PrivateKey) []const u8 {
+        return self.q_buf[0..self.q_len];
+    }
+
+    /// The CRT exponent dP = d mod (p - 1), big-endian.
+    pub fn expDp(self: *const PrivateKey) []const u8 {
+        return self.dp_buf[0..self.dp_len];
+    }
+
+    /// The CRT exponent dQ = d mod (q - 1), big-endian.
+    pub fn expDq(self: *const PrivateKey) []const u8 {
+        return self.dq_buf[0..self.dq_len];
+    }
+
+    /// The CRT coefficient qInv = q^-1 mod p, big-endian.
+    pub fn coeffQinv(self: *const PrivateKey) []const u8 {
+        return self.qinv_buf[0..self.qinv_len];
     }
 
     /// The modulus byte length k, which is also the signature length.
@@ -66,8 +109,9 @@ pub const PrivateKey = struct {
     /// Note:
     /// - PKCS#8 (RFC 5208): SEQUENCE { INTEGER version, SEQUENCE AlgorithmIdentifier, OCTET STRING }.
     ///   The OCTET STRING content is the inner RSAPrivateKey, then parsed as PKCS#1.
-    /// - PKCS#1 (RFC 8017 A.1.2): SEQUENCE { version, n, e, d, p, q, dp, dq, qinv }. Only n and d
-    ///   are retained, the CRT primes are skipped (the plain m ^ d mod n path does not use them).
+    /// - PKCS#1 (RFC 8017 A.1.2): SEQUENCE { version, n, e, d, p, q, dp, dq, qinv }. n and d are
+    ///   retained, and the CRT factors p, q, dp, dq, qinv when present (they drive the fast signing
+    ///   path). A key without them still parses and signs via the plain m ^ d mod n path.
     ///
     /// Param:
     /// der - []const u8 (the decoded key DER)
@@ -109,7 +153,36 @@ pub const PrivateKey = struct {
         @memcpy(key.n_buf[0..n.len], n);
         @memcpy(key.d_buf[0..d.len], d);
 
+        key.loadCrt(&r);
+
         return key;
+    }
+
+    /// Read the optional CRT factors (p, q, dp, dq, qinv) that follow d in a two-prime
+    /// RSAPrivateKey. On any miss (absent, malformed, or wider than a supported prime) the key keeps
+    /// has_crt false and signs via the plain m ^ d mod n path. The reader is at end-of-key after.
+    fn loadCrt(self: *PrivateKey, r: *DerReader) void {
+        const p = r.readInteger() catch return;
+        const q = r.readInteger() catch return;
+        const dp = r.readInteger() catch return;
+        const dq = r.readInteger() catch return;
+        const qinv = r.readInteger() catch return;
+
+        if (p.len > max_prime_len or q.len > max_prime_len or dp.len > max_prime_len or
+            dq.len > max_prime_len or qinv.len > max_prime_len) return;
+
+        @memcpy(self.p_buf[0..p.len], p);
+        self.p_len = p.len;
+        @memcpy(self.q_buf[0..q.len], q);
+        self.q_len = q.len;
+        @memcpy(self.dp_buf[0..dp.len], dp);
+        self.dp_len = dp.len;
+        @memcpy(self.dq_buf[0..dq.len], dq);
+        self.dq_len = dq.len;
+        @memcpy(self.qinv_buf[0..qinv.len], qinv);
+        self.qinv_len = qinv.len;
+
+        self.has_crt = true;
     }
 
     /// Sign a message with EMSA-PKCS1-v1_5 over SHA-256 (RFC 8017 8.2.1). Deterministic.
@@ -130,6 +203,11 @@ pub const PrivateKey = struct {
         var em_buf: [max_modulus_len]u8 = undefined;
         const em = em_buf[0..k];
         try emsaPkcs1V15(digest, em);
+
+        if (self.has_crt) {
+            const mod_n = Modulus.fromBytes(self.modulus(), .big) catch return error.InvalidKey;
+            return self.rsaspCrt(mod_n, em, out[0..k]);
+        }
 
         return rsasp1(self.modulus(), self.privateExponent(), em, out[0..k]);
     }
@@ -158,7 +236,58 @@ pub const PrivateKey = struct {
         const em = em_buf[0..em_len];
         try emsaPssEncode(message, salt, em_bits, em);
 
+        if (self.has_crt) return self.rsaspCrt(parsed_modulus, em, out[0..k]);
+
         return rsasp1WithModulus(parsed_modulus, self.privateExponent(), em, out[0..k]);
+    }
+
+    /// RSASP1 via the Chinese Remainder Theorem (RFC 8017 5.1.2 second form, applied to the signing
+    /// primitive). About 4x the plain m ^ d mod n path: two half-width modexps over p and q (whose
+    /// runtime limb count is half the modulus) instead of one full-width modexp with the 2048-bit
+    /// private exponent. Constant-time, the std.crypto.ff routines are constant-time per prime.
+    ///
+    /// Param:
+    /// mod_n - Modulus (the already-parsed public modulus n, reused so it is not parsed twice)
+    /// em - []const u8 (the encoded message, an integer below n)
+    /// sig - []u8 (the signature buffer, exactly size() bytes)
+    ///
+    /// Return:
+    /// - []const u8 (the signature, sig)
+    /// - error.InvalidKey if a factor is malformed
+    fn rsaspCrt(self: *const PrivateKey, mod_n: Modulus, em: []const u8, sig: []u8) Error![]const u8 {
+        const k = sig.len;
+        const mod_p = Modulus.fromBytes(self.primeP(), .big) catch return error.InvalidKey;
+        const mod_q = Modulus.fromBytes(self.primeQ(), .big) catch return error.InvalidKey;
+
+        // m reduced into each prime field, then m1 = m^dP mod p, m2 = m^dQ mod q.
+        const m_n = Modulus.Fe.fromBytes(mod_n, em, .big) catch return error.InvalidKey;
+        const m_p = mod_p.reduce(m_n.v);
+        const m_q = mod_q.reduce(m_n.v);
+
+        const s_p = mod_p.powWithEncodedExponent(m_p, self.expDp(), .big) catch return error.InvalidKey;
+        const s_q = mod_q.powWithEncodedExponent(m_q, self.expDq(), .big) catch return error.InvalidKey;
+
+        // h = (s_p - s_q) * qInv mod p.
+        const s_q_mod_p = mod_p.reduce(s_q.v);
+        const diff = mod_p.sub(s_p, s_q_mod_p);
+        const qinv = Modulus.Fe.fromBytes(mod_p, self.coeffQinv(), .big) catch return error.InvalidKey;
+        const h = mod_p.mul(diff, qinv);
+
+        // s = s_q + q * h. Both q * h and s are below n, so the n-field arithmetic is exact.
+        var h_buf: [max_modulus_len]u8 = undefined;
+        h.toBytes(h_buf[0..k], .big) catch return error.InvalidKey;
+        var sq_buf: [max_modulus_len]u8 = undefined;
+        s_q.toBytes(sq_buf[0..k], .big) catch return error.InvalidKey;
+
+        const h_n = Modulus.Fe.fromBytes(mod_n, h_buf[0..k], .big) catch return error.InvalidKey;
+        const s_q_n = Modulus.Fe.fromBytes(mod_n, sq_buf[0..k], .big) catch return error.InvalidKey;
+        const q_n = Modulus.Fe.fromBytes(mod_n, self.primeQ(), .big) catch return error.InvalidKey;
+
+        const qh = mod_n.mul(q_n, h_n);
+        const s = mod_n.add(s_q_n, qh);
+        s.toBytes(sig, .big) catch return error.InvalidKey;
+
+        return sig;
     }
 };
 
@@ -413,6 +542,34 @@ test "zix test: rsa, PSS signature verifies with std RSA verify (rsa_pss_rsae_sh
     const sig = try key.signPss(fixture_message, salt, &sig_buf);
 
     try StdRsa.PSSSignature.verify(256, sig[0..256].*, fixture_message, public_key, Sha256);
+}
+
+test "zix test: rsa, CRT sign equals the plain m^d path (and has_crt is set)" {
+    const key = try loadFixtureKey();
+    try std.testing.expect(key.has_crt);
+
+    var salt: [pss_salt_len]u8 = undefined;
+    @memset(&salt, 0x5a);
+
+    // the CRT path (has_crt true)
+    var crt_buf: [max_modulus_len]u8 = undefined;
+    const crt_sig = try key.signPss(fixture_message, salt, &crt_buf);
+
+    // the same key forced onto the plain m ^ d mod n path
+    var plain_key = key;
+    plain_key.has_crt = false;
+    var plain_buf: [max_modulus_len]u8 = undefined;
+    const plain_sig = try plain_key.signPss(fixture_message, salt, &plain_buf);
+
+    try std.testing.expectEqualSlices(u8, plain_sig, crt_sig);
+
+    // and the v1.5 path agrees too
+    var crt_v15: [max_modulus_len]u8 = undefined;
+    const crt_v15_sig = try key.signPkcs1v15(fixture_message, &crt_v15);
+    var plain_v15: [max_modulus_len]u8 = undefined;
+    const plain_v15_sig = try plain_key.signPkcs1v15(fixture_message, &plain_v15);
+
+    try std.testing.expectEqualSlices(u8, plain_v15_sig, crt_v15_sig);
 }
 
 test "zix test: rsa, a tampered message fails std verify" {
