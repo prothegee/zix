@@ -58,7 +58,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
 
         for (0..count) |i| {
             const dg = rx.get(i);
-            const peer = datagram.sockaddrToIp4(dg.from);
+            const peer = datagram.sockaddr6ToIp(dg.from);
             var sink = core.Sink{ .batch = &tx, .fd = fd, .sender = dg.from };
             handler(dg.data, &peer, &sink);
         }
@@ -118,13 +118,13 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
     while (true) {
         const msg = socket.receive(io, buf) catch continue;
 
-        const sender = datagram.ip4ToSockaddr(msg.from);
+        const sender = datagram.ipToSockaddr6(msg.from);
         const peer = msg.from;
         var sink = core.Sink{ .batch = &tx, .fd = undefined, .sender = sender };
         handler(msg.data, &peer, &sink);
 
         for (0..tx.count) |i| {
-            const dest = datagram.sockaddrToIp4(tx.names[i]);
+            const dest = datagram.sockaddr6ToIp(tx.names[i]);
             socket.send(io, &dest, tx.iovs[i].base[0..tx.iovs[i].len]) catch {};
         }
         tx.reset();

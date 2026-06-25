@@ -1,8 +1,9 @@
 //! zix udp raw datagram I/O primitives (ADR-049).
 //!
 //! What:
-//! - A bound IPv4 UDP socket plus batched receive / send over recvmmsg / sendmmsg, the building
-//!   blocks for the raw-bytes datagram path (`zix.Udp.Raw`). Address conversion helpers are portable
+//! - A bound dual-stack (AF_INET6, IPV6_V6ONLY off) UDP socket plus batched receive / send over
+//!   recvmmsg / sendmmsg, the building blocks for the raw-bytes datagram path (`zix.Udp.Raw`). One
+//!   listener serves IPv4 (as IPv4-mapped) and IPv6 clients. Address conversion helpers are portable
 //!   and unit-tested. The batched syscalls are Linux-only (the raw server falls back elsewhere).
 //!
 //! Note:
@@ -21,37 +22,60 @@ const IpAddress = std.Io.net.IpAddress;
 /// Whether the batched-syscall path is available on this target.
 pub const is_linux = builtin.os.tag == .linux;
 
-const sockaddr_in_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+const sockaddr_in6_len: posix.socklen_t = @sizeOf(posix.sockaddr.in6);
+
+/// The IPv4-mapped IPv6 prefix (::ffff:0:0 / 96): the first 12 bytes of an IPv4-mapped address.
+const v4_mapped_prefix = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
 
 // --------------------------------------------------------- //
 
-/// Build a `sockaddr.in` from a parsed IPv4 address. The 4 address bytes map directly to the
-/// network-order `addr` field, and the port is stored big-endian.
-pub fn ip4ToSockaddr(ip: IpAddress) posix.sockaddr.in {
-    return switch (ip) {
-        .ip4 => |a| .{ .port = std.mem.nativeToBig(u16, a.port), .addr = @bitCast(a.bytes) },
-        .ip6 => unreachable,
-    };
+/// Build a dual-stack `sockaddr.in6` from a parsed address. An IPv4 address is stored in its
+/// IPv4-mapped form (::ffff:a.b.c.d), so one AF_INET6 socket with IPV6_V6ONLY off serves both
+/// families. The port is stored big-endian.
+pub fn ipToSockaddr6(ip: IpAddress) posix.sockaddr.in6 {
+    var addr: [16]u8 = @splat(0);
+    var port: u16 = undefined;
+
+    switch (ip) {
+        .ip4 => |a| {
+            @memcpy(addr[0..12], &v4_mapped_prefix);
+            @memcpy(addr[12..16], &a.bytes);
+            port = a.port;
+        },
+        .ip6 => |a| {
+            @memcpy(&addr, &a.bytes);
+            port = a.port;
+        },
+    }
+
+    return .{ .port = std.mem.nativeToBig(u16, port), .flowinfo = 0, .addr = addr, .scope_id = 0 };
 }
 
-/// Recover an IPv4 `std.Io.net.IpAddress` from a `sockaddr.in` the kernel filled in.
-pub fn sockaddrToIp4(sa: posix.sockaddr.in) IpAddress {
-    return .{ .ip4 = .{ .bytes = @bitCast(sa.addr), .port = std.mem.bigToNative(u16, sa.port) } };
+/// Recover a `std.Io.net.IpAddress` from a `sockaddr.in6` the kernel filled in. An IPv4-mapped
+/// address (::ffff:a.b.c.d) returns as IPv4, a native IPv6 address as IPv6.
+pub fn sockaddr6ToIp(sa: posix.sockaddr.in6) IpAddress {
+    const port = std.mem.bigToNative(u16, sa.port);
+    if (std.mem.eql(u8, sa.addr[0..12], &v4_mapped_prefix)) {
+        return .{ .ip4 = .{ .bytes = sa.addr[12..16].*, .port = port } };
+    }
+
+    return .{ .ip6 = .{ .bytes = sa.addr, .port = port } };
 }
 
-/// Parse a bind address string ("0.0.0.0", "127.0.0.1") into a `sockaddr.in`.
-pub fn parseBind(ip: []const u8, port: u16) !posix.sockaddr.in {
+/// Parse a bind address string ("::", "0.0.0.0", "127.0.0.1") into a dual-stack `sockaddr.in6`.
+pub fn parseBind(ip: []const u8, port: u16) !posix.sockaddr.in6 {
     const parsed = try IpAddress.parse(ip, port);
 
-    return ip4ToSockaddr(parsed);
+    return ipToSockaddr6(parsed);
 }
 
-/// Open a bound IPv4 UDP socket. When `reuse` is set, SO_REUSEADDR + SO_REUSEPORT let many workers
+/// Open a bound dual-stack UDP socket (AF_INET6 with IPV6_V6ONLY off, so "::" also accepts IPv4).
+/// When `reuse` is set, SO_REUSEADDR + SO_REUSEPORT let many workers
 /// bind the same port and the kernel load-balances datagrams across them. Socket / bind are raw
 /// Linux syscalls (std.posix no longer wraps them since the std.Io migration). setsockopt is the
 /// std.posix safe wrapper which remains.
 pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
-    const srv = linux.socket(linux.AF.INET, linux.SOCK.DGRAM, linux.IPPROTO.UDP);
+    const srv = linux.socket(linux.AF.INET6, linux.SOCK.DGRAM, linux.IPPROTO.UDP);
     switch (posix.errno(srv)) {
         .SUCCESS => {},
         else => return error.SocketFailed,
@@ -60,6 +84,12 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
     const fd: posix.socket_t = @intCast(srv);
     errdefer close(fd);
 
+    // Dual-stack: clear IPV6_V6ONLY so an AF_INET6 socket bound to "::" also accepts IPv4 (as
+    // IPv4-mapped ::ffff:a.b.c.d). This lets one listener serve clients reaching it over either
+    // family, regardless of how the peer resolved the host.
+    const off = std.mem.toBytes(@as(c_int, 0));
+    posix.setsockopt(fd, linux.IPPROTO.IPV6, linux.IPV6.V6ONLY, &off) catch {};
+
     if (reuse) {
         const one = std.mem.toBytes(@as(c_int, 1));
         posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, &one) catch {};
@@ -67,7 +97,7 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
     }
 
     var addr = try parseBind(ip, port);
-    const brv = linux.bind(fd, @ptrCast(&addr), sockaddr_in_len);
+    const brv = linux.bind(fd, @ptrCast(&addr), sockaddr_in6_len);
     switch (posix.errno(brv)) {
         .SUCCESS => {},
         else => return error.BindFailed,
@@ -84,14 +114,14 @@ pub fn close(fd: posix.socket_t) void {
 // --------------------------------------------------------- //
 
 /// A received datagram: the payload bytes plus the sender address as the kernel reported it.
-pub const Datagram = struct { data: []const u8, from: posix.sockaddr.in };
+pub const Datagram = struct { data: []const u8, from: posix.sockaddr.in6 };
 
 /// A reusable receive batch: one backing buffer carved into `count` MTU-sized slots, wired into the
 /// mmsghdr / iovec / name arrays recvmmsg writes into.
 pub const RecvBatch = struct {
     allocator: std.mem.Allocator,
     data: []u8,
-    names: []posix.sockaddr.in,
+    names: []posix.sockaddr.in6,
     iovs: []posix.iovec,
     hdrs: []linux.mmsghdr,
     slot_size: usize,
@@ -102,7 +132,7 @@ pub const RecvBatch = struct {
         const data = try allocator.alloc(u8, count * slot_size);
         errdefer allocator.free(data);
 
-        const names = try allocator.alloc(posix.sockaddr.in, count);
+        const names = try allocator.alloc(posix.sockaddr.in6, count);
         errdefer allocator.free(names);
 
         const iovs = try allocator.alloc(posix.iovec, count);
@@ -116,7 +146,7 @@ pub const RecvBatch = struct {
             hdrs[i] = .{
                 .hdr = .{
                     .name = @ptrCast(&names[i]),
-                    .namelen = sockaddr_in_len,
+                    .namelen = sockaddr_in6_len,
                     .iov = @ptrCast(&iovs[i]),
                     .iovlen = 1,
                     .control = null,
@@ -164,7 +194,7 @@ pub const RecvBatch = struct {
 pub const SendBatch = struct {
     allocator: std.mem.Allocator,
     data: []u8,
-    names: []posix.sockaddr.in,
+    names: []posix.sockaddr.in6,
     iovs: []posix.iovec,
     hdrs: []linux.mmsghdr,
     cap: usize,
@@ -176,7 +206,7 @@ pub const SendBatch = struct {
         const data = try allocator.alloc(u8, buf_bytes);
         errdefer allocator.free(data);
 
-        const names = try allocator.alloc(posix.sockaddr.in, count);
+        const names = try allocator.alloc(posix.sockaddr.in6, count);
         errdefer allocator.free(names);
 
         const iovs = try allocator.alloc(posix.iovec, count);
@@ -197,7 +227,7 @@ pub const SendBatch = struct {
 
     /// Queue one reply to `dest`. Returns false when the batch is full (by count or by payload
     /// bytes), signalling the caller to flush and retry.
-    pub fn queue(self: *SendBatch, dest: posix.sockaddr.in, bytes: []const u8) bool {
+    pub fn queue(self: *SendBatch, dest: posix.sockaddr.in6, bytes: []const u8) bool {
         if (self.count >= self.cap) return false;
         if (self.used + bytes.len > self.data.len) return false;
 
@@ -207,7 +237,7 @@ pub const SendBatch = struct {
         self.hdrs[self.count] = .{
             .hdr = .{
                 .name = @ptrCast(&self.names[self.count]),
-                .namelen = sockaddr_in_len,
+                .namelen = sockaddr_in6_len,
                 .iov = @ptrCast(&self.iovs[self.count]),
                 .iovlen = 1,
                 .control = null,
@@ -250,21 +280,36 @@ pub const SendBatch = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: datagram, ip4 address round trips through sockaddr.in" {
+test "zix test: datagram, ip4 round trips through sockaddr.in6 as IPv4-mapped" {
     const ip = try std.Io.net.IpAddress.parse("127.0.0.1", 9070);
-    const sa = ip4ToSockaddr(ip);
+    const sa = ipToSockaddr6(ip);
 
     try std.testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 9070)), sa.port);
+    // The 4 IPv4 bytes sit after the ::ffff: prefix.
+    try std.testing.expectEqualSlices(u8, &v4_mapped_prefix, sa.addr[0..12]);
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, sa.addr[12..16]);
 
-    const back = sockaddrToIp4(sa);
+    const back = sockaddr6ToIp(sa);
     try std.testing.expectEqual(@as(u16, 9070), back.ip4.port);
     try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &back.ip4.bytes);
 }
 
-test "zix test: datagram, parseBind accepts dotted-quad" {
-    const sa = try parseBind("10.0.0.1", 53);
-    try std.testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 53)), sa.port);
-    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, &@as([4]u8, @bitCast(sa.addr)));
+test "zix test: datagram, native IPv6 round trips through sockaddr.in6" {
+    const ip = try std.Io.net.IpAddress.parse("::1", 9071);
+    const sa = ipToSockaddr6(ip);
+
+    const back = sockaddr6ToIp(sa);
+    try std.testing.expectEqual(@as(u16, 9071), back.ip6.port);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, &back.ip6.bytes);
+}
+
+test "zix test: datagram, parseBind accepts dotted-quad and ::" {
+    const sa4 = try parseBind("10.0.0.1", 53);
+    try std.testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 53)), sa4.port);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, sa4.addr[12..16]);
+
+    const sa6 = try parseBind("::", 53);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &sa6.addr);
 }
 
 test "zix test: SendBatch queues replies and reports full" {

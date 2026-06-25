@@ -13,7 +13,7 @@ const IpAddress = std.Io.net.IpAddress;
 pub const Sink = struct {
     batch: *datagram.SendBatch,
     fd: posix.socket_t,
-    sender: posix.sockaddr.in,
+    sender: posix.sockaddr.in6,
 
     /// Reply to the sender of the datagram currently being handled (no address conversion).
     pub fn reply(self: *Sink, bytes: []const u8) void {
@@ -22,10 +22,10 @@ pub const Sink = struct {
 
     /// Reply to an explicit peer.
     pub fn replyTo(self: *Sink, peer: *const IpAddress, bytes: []const u8) void {
-        self.enqueue(datagram.ip4ToSockaddr(peer.*), bytes);
+        self.enqueue(datagram.ipToSockaddr6(peer.*), bytes);
     }
 
-    fn enqueue(self: *Sink, dest: posix.sockaddr.in, bytes: []const u8) void {
+    fn enqueue(self: *Sink, dest: posix.sockaddr.in6, bytes: []const u8) void {
         if (self.batch.queue(dest, bytes)) return;
 
         // The batch is full: flush what is queued, then queue this reply into the empty batch.
