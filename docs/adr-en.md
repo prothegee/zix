@@ -1100,4 +1100,23 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-051: HTTP/3 over QUIC engine
+
+**Status:** Accepted
+
+**Context:** zix served HTTP/1.1, HTTP/2 (h2c and h2-over-TLS), and gRPC over TCP, but not HTTP/3, which runs over QUIC on UDP. QUIC is a large surface: packet protection, a transport state machine, loss recovery, QPACK header compression, the HTTP/3 framing layer, and a TLS 1.3 handshake that QUIC mandates and carries inside CRYPTO frames rather than TLS records. `std` provides the cryptographic primitives but none of the QUIC / HTTP-3 wiring, and the substrate (variable-length batched datagrams) only arrived with `zix.Udp` raw mode (ADR-049). The standing constraint also applies: a new engine must not need a C library, and must not regress the perf / memory gate.
+
+**Decision:** Author HTTP/3 pure-Zig from the RFCs (9000 transport, 9001 QUIC-TLS, 9002 recovery, 9114 HTTP/3, 9204 QPACK) as `zix.Http3`, on the `zix.Udp` datagram substrate. The TLS 1.3 handshake reuses `src/tls` (key schedule, handshake messages, certificate), carried over QUIC CRYPTO frames in place of the TLS record layer, so there is one handshake implementation across TCP and QUIC. The deterministic layers are built and proven bottom-up against the RFCs' own worked-example vectors before assembly. The engine ships as v1: one single-worker recv loop with internal connection-id demux (keyed by the client's Destination Connection ID, with a Source-CID fallback for post-handshake packets), which is migration-safe by construction. `.EPOLL` / `.URING` fold to the v1 worker until per-core `SO_REUSEPORT` CID steering lands (v2, ADR-049 phase 3). Routing is a comptime `Router`, the same shape as `zix.Http1` / `zix.Http2`. The live path uses the QPACK static table and the RFC 7541 Huffman decoder for request paths. TLS 1.3 is mandatory, configured by the same user-owned `Tls.Context` as the TCP engines (ADR-047).
+
+**Rationale:** Pure-Zig keeps the no-C-library rule and the single-handshake reuse, since QUIC-TLS differs from TLS-over-TCP only in record framing. Building and vector-proving each deterministic layer (crypto, transport, QPACK, HTTP/3, recovery) before assembly de-risks the largest protocol surface in the project and localizes any failure to the layer under test. The v1 single-worker shape is correct under connection migration without an eBPF steering asset, so it ships first and per-core scaling is a later, isolated change (the same fold pattern `zix.Http2` and `zix.Udp` raw mode already use). Mirroring the `zix.Http2` precedent, `zix.Http3` exports its low-level primitives (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`) so a peer can build the other side of the wire, which is what lets the test runner drive a hermetic native QUIC client with no external tool.
+
+**Consequences:**
+- New `src/udp/http3/`: the deterministic layers as tested library modules (crypto, protection, keyschedule, qpack, huffman, packet, varint, frame, recovery, h3), plus the engine layer (config, core, demux, connection, server, `dispatch/` per model) and the live-handshake driver (serverhello, flight, response, request, router). RFC vectors live in `test {}` blocks.
+- `zix.Http3` exports the server type, the comptime `Router` / `Route`, and the low-level QUIC / TLS / QPACK primitives.
+- New example `examples/http3_basic.zig` (port 9063, ECDSA P-256). The round trip is validated by `curl --http3` (HTTP/3 200, clean exit) during development and, hermetically, by a native QUIC client hand-rolled from the exported primitives in `tests/runner/http3_client.zig`, wired as `test-runner-http3` and folded into `test-runner-all`.
+- Green on Zig 0.16 and 0.17 (unit-test plus the 66-protocol test-runner-all).
+- Deferred: per-core CID steering (v2, ADR-049 phase 3), dynamic-table QPACK / loss-and-congestion in the hot path / key update / connection migration beyond the v1 demux, the QUIC Interop Runner and qlog traces, and the 64-core HttpArena throughput / memory gate.
+
+---
+
 ###### end of adr
