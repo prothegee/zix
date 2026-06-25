@@ -349,7 +349,7 @@ See `docs/hld-logger.md` for log line format and config details.
 
 ## Raw-bytes Mode (ADR-049)
 
-Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-length datagrams with no fixed packet struct. It is the datagram-transport substrate (and the base a future QUIC / HTTP3 engine sits on), useful on its own for echo, DNS-style, and telemetry servers.
+Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-length datagrams with no fixed packet struct. It is the datagram-transport substrate the `zix.Http3` (QUIC) engine sits on, useful on its own for echo, DNS-style, and telemetry servers.
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. It gets the bytes as received (up to `max_recv_buf`), the peer, and a `Sink`. `sink.reply(bytes)` answers the sender with no address conversion, `sink.replyTo(peer, bytes)` answers an explicit peer.
 - Batched I/O (Linux): receive in `recvmmsg` batches (`recv_batch`), send in `sendmmsg` batches (`send_batch`). Replies coalesce into one `sendmmsg` per received batch. Non-Linux falls back to a single `std.Io.net` receive loop.

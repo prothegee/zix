@@ -349,7 +349,7 @@ Lihat `docs/hld-logger-id.md` untuk format baris log dan detail konfigurasi.
 
 ## Mode Raw-bytes (ADR-049)
 
-Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa packet struct tetap. Ia adalah substrate datagram-transport (dan basis yang ditumpangi engine QUIC / HTTP3 mendatang), berguna mandiri untuk server echo, DNS-style, dan telemetry.
+Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa packet struct tetap. Ia adalah substrate datagram-transport yang ditumpangi engine `zix.Http3` (QUIC), berguna mandiri untuk server echo, DNS-style, dan telemetry.
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
 - I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
