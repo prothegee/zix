@@ -38,6 +38,7 @@ pub fn addSteps(
         .{ "example-tls_http1_basic", "examples/tls/tls_http1_basic.zig", "tls" },
         .{ "example-tls_http1_ed25519", "examples/tls/tls_http1_ed25519.zig", "tls" },
         .{ "example-tls_http2_basic", "examples/tls/tls_http2_basic.zig", "tls" },
+        .{ "example-tls_grpc_basic", "examples/tls/tls_grpc_basic.zig", "tls" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig", "http" },
         .{ "example-http_basic_2_pool", "examples/http_basic_2_pool.zig", "http" },
         .{ "example-http_basic_3_mixed", "examples/http_basic_3_mixed.zig", "http" },
