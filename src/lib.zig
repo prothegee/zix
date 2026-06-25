@@ -170,6 +170,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("udp/http3/router.zig"));
     std.testing.refAllDecls(@import("udp/http3/huffman.zig"));
     std.testing.refAllDecls(@import("udp/http3/request.zig"));
+    std.testing.refAllDecls(@import("udp/http3/transport_params.zig"));
     std.testing.refAllDecls(@import("udp/http3/config.zig"));
     std.testing.refAllDecls(@import("udp/http3/core.zig"));
     std.testing.refAllDecls(@import("udp/http3/demux.zig"));
