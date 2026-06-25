@@ -84,44 +84,76 @@ fn parseStreamFrame(buf: []const u8) ?ParsedStream {
     return .{ .id = id.value, .data = buf[pos .. pos + length], .consumed = pos + length };
 }
 
-/// Skip a non-STREAM frame, returning how many bytes it occupied, or null if it cannot be parsed.
-/// Covers the frames a request packet realistically coalesces ahead of the request stream.
+/// Read `n` consecutive varints from `start`, returning the position after them, or null if any is
+/// truncated.
+fn skipVarints(buf: []const u8, start: usize, n: usize) ?usize {
+    var pos = start;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = varint.read(buf[pos..]) catch return null;
+        pos += v.len;
+    }
+
+    return pos;
+}
+
+/// Skip a varint length followed by that many bytes (CRYPTO data, NEW_TOKEN token, close reason).
+fn skipLenBlob(buf: []const u8, start: usize) ?usize {
+    const len = varint.read(buf[start..]) catch return null;
+    const end = start + len.len + @as(usize, @intCast(len.value));
+
+    return if (end <= buf.len) end else null;
+}
+
+/// Skip any non-STREAM QUIC frame (RFC 9000 19), returning the bytes it occupied or null on a
+/// truncated / unknown frame. The scan needs this to walk past everything a request packet coalesces
+/// ahead of the request stream (ACK, NEW_CONNECTION_ID, MAX_STREAMS, and the rest).
 fn skipFrame(buf: []const u8) ?usize {
     const type_vi = varint.read(buf) catch return null;
-    var pos = type_vi.len;
+    const pos = type_vi.len;
 
     switch (type_vi.value) {
-        0x00, 0x01 => return pos, // PADDING (one byte), PING
-        0x02, 0x03 => { // ACK
-            // Largest, Delay, Range Count, First Range, then Range Count gap/length pairs.
-            const largest = varint.read(buf[pos..]) catch return null;
-            pos += largest.len;
-            const delay = varint.read(buf[pos..]) catch return null;
-            pos += delay.len;
-            const range_count = varint.read(buf[pos..]) catch return null;
-            pos += range_count.len;
-            const first = varint.read(buf[pos..]) catch return null;
-            pos += first.len;
+        0x00, 0x01, 0x1e => return pos, // PADDING, PING, HANDSHAKE_DONE
+        0x02, 0x03 => { // ACK (0x03 adds ECN counts)
+            var p = pos;
+            const largest = varint.read(buf[p..]) catch return null;
+            p += largest.len;
+            const delay = varint.read(buf[p..]) catch return null;
+            p += delay.len;
+            const range_count = varint.read(buf[p..]) catch return null;
+            p += range_count.len;
+            const first = varint.read(buf[p..]) catch return null;
+            p += first.len;
+
             var i: u64 = 0;
             while (i < range_count.value) : (i += 1) {
-                const gap = varint.read(buf[pos..]) catch return null;
-                pos += gap.len;
-                const len = varint.read(buf[pos..]) catch return null;
-                pos += len.len;
+                p = skipVarints(buf, p, 2) orelse return null; // Gap, Range Length
             }
-            if (type_vi.value == 0x03) {
-                for (0..3) |_| {
-                    const ecn = varint.read(buf[pos..]) catch return null;
-                    pos += ecn.len;
-                }
-            }
-            return pos;
+            if (type_vi.value == 0x03) p = skipVarints(buf, p, 3) orelse return null; // ECT0, ECT1, CE
+
+            return p;
         },
-        else => {
-            // A single-field or fieldless control frame (MAX_DATA, NEW_CONNECTION_ID body, ...). The
-            // request stream is what matters, so a frame that does not parse cleanly stops the scan.
-            return null;
+        0x04 => return skipVarints(buf, pos, 3), // RESET_STREAM
+        0x05, 0x11, 0x15 => return skipVarints(buf, pos, 2), // STOP_SENDING, MAX_STREAM_DATA, STREAM_DATA_BLOCKED
+        0x10, 0x12, 0x13, 0x14, 0x16, 0x17, 0x19 => return skipVarints(buf, pos, 1), // MAX_DATA, MAX_STREAMS, *_BLOCKED, RETIRE_CONNECTION_ID
+        0x06 => return skipLenBlob(buf, skipVarints(buf, pos, 1) orelse return null), // CRYPTO: offset then length + data
+        0x07 => return skipLenBlob(buf, pos), // NEW_TOKEN: length + token
+        0x18 => { // NEW_CONNECTION_ID: seq, retire, len(1), cid, reset token(16)
+            const after = skipVarints(buf, pos, 2) orelse return null;
+            if (after >= buf.len) return null;
+            const cid_len = buf[after];
+            const end = after + 1 + cid_len + 16;
+
+            return if (end <= buf.len) end else null;
         },
+        0x1a, 0x1b => return if (pos + 8 <= buf.len) pos + 8 else null, // PATH_CHALLENGE / PATH_RESPONSE
+        0x1c, 0x1d => { // CONNECTION_CLOSE: error code, [frame type if 0x1c], reason length + reason
+            var p = skipVarints(buf, pos, 1) orelse return null;
+            if (type_vi.value == 0x1c) p = skipVarints(buf, p, 1) orelse return null;
+
+            return skipLenBlob(buf, p);
+        },
+        else => return null, // STREAM is handled by the caller, an unknown / grease frame stops the scan
     }
 }
 
