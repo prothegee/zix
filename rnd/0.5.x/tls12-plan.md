@@ -83,9 +83,11 @@ formats (RFC 8422), what openssl expects for a 1.2 ECDHE handshake (self-test st
 openssl `-tls1_2` command is in verify-tls12.md.
 
 http2 1.2 branch DONE: the 1.2 engine now negotiates + emits ALPN h2 (tls12_connection serverFlight1
-+ state.alpn, unit-tested), and src/tcp/http2/tls_serve.zig branches to serveConnTls12H2 (require
-ALPN h2, then the SAME socketpair terminator over the unchanged h2c engine via a generic pump).
-Gated, dormant for 1.3 clients, test-runner-all 57 green both toolchains.
++ state.alpn, unit-tested), and src/tcp/http2/tls_serve.zig branches to serveConnTls12 (require
+ALPN h2, then the SAME inline-mux driver over the resumable h2 state machine, no socketpair, per
+ADR-052). Gated, dormant for 1.3 clients, test-runner-all 57 green both toolchains.
+Note: the multiplexed `.EPOLL` / `.URING` path (tls_epoll.zig) is TLS 1.3 only, so the 1.2 h2
+fallback is served by the thread-per-conn `.ASYNC` / `.POOL` / `.MIXED` path.
 
 WIRE-VALIDATED (verify-tls12.md, user-run): openssl -tls1_2 completed the http1 handshake (cert
 verified, HTTP/1.1 200 + body), curl --http2 --tls-max 1.2 got h2 ver=2 + 200, and the TLS 1.3

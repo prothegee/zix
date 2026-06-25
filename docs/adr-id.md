@@ -1015,6 +1015,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Jalur h2 memakai ulang `core.serveConn` tanpa perubahan. Hanya seleksi ALPN dan terminator yang merupakan kode baru.
 - Satu request per koneksi https Http1 untuk sekarang (keep-alive penyempurnaan nanti), dan terminator adalah satu thread plus satu socketpair per koneksi, diterima di band https.
 - Belum ada runner h2 native: butuh client yang menawarkan ALPN, yaitu milestone `zix.Tls` client.
+- Digantikan untuk terminator h2 / gRPC oleh ADR-052: desain socketpair plus thread-per-koneksi pindah ke dispatch per-core multipleks di `.EPOLL` / `.URING` dan ke driver inline-mux di `.ASYNC` / `.POOL` / `.MIXED`. Socketpair yang dijelaskan di atas sudah hilang. Http1 https tidak berubah oleh ADR itu.
 
 ---
 
@@ -1116,6 +1117,25 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Example baru `examples/http3_basic.zig` (port 9063, ECDSA P-256). Round trip divalidasi oleh `curl --http3` (HTTP/3 200, exit bersih) saat pengembangan dan, secara hermetic, oleh client QUIC native yang hand-rolled dari primitive yang diekspor di `tests/runner/http3_client.zig`, di-wire sebagai `test-runner-http3` dan dilipat ke `test-runner-all`.
 - Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 66-protokol).
 - Ditunda: per-core CID steering (v2, ADR-049 phase 3), QPACK dynamic-table / loss-and-congestion di hot path / key update / connection migration di luar demux v1, QUIC Interop Runner dan qlog trace, serta gate throughput / memory HttpArena 64-core.
+
+---
+
+## ADR-052: dispatch TLS multipleks untuk Http2 dan gRPC
+
+**Status:** Accepted
+
+**Context:** TLS untuk Http2 dan gRPC dilayani oleh terminator ADR-046: jalankan handshake, lalu jalankan engine h2 di belakang socketpair dengan worker thread kedua, satu thread per koneksi. Bentuk itu thrash di konkurensi tinggi. Pada 512 atau 1024 koneksi dengan core count jauh di bawahnya, scheduler churn satu thread per koneksi dan throughput kolaps (engine cleartext EPOLL dan URING sudah memultipleks banyak koneksi per core, tapi jalur TLS belum). Socketpair plus thread kedua adalah biayanya, bukan kriptonya.
+
+**Decision:** Untuk dispatch model `.EPOLL` dan `.URING`, terminasi TLS di tempat pada event loop multipleks. Satu listener `SO_REUSEPORT` plus satu instance epoll per worker (jumlah worker adalah core count), tiap worker memegang banyak koneksi TLS lewat session TLS 1.3 resumable (`src/tcp/tls/tls_session.zig`): ia mengakumulasi ciphertext, memproses tiap record lengkap, menggerakkan mux h2 / gRPC resumable di atas plaintext terdekripsi, dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. File baru adalah `src/tcp/http2/tls_epoll.zig` dan `src/tcp/http2/grpc/tls_epoll.zig`. Socketpair dan thread kedua per koneksi dihapus di semua tempat: jalur `.ASYNC` / `.POOL` / `.MIXED` tetap memakai accept loop thread-per-koneksi tapi menjalankan driver inline-mux yang sama di `tcp/tls/h2_terminator.zig` (juga tanpa socketpair), dan jalur itu juga melayani fallback TLS 1.2. `server.run` mengarahkan `.EPOLL` / `.URING` dengan `config.tls` ke `runTlsEpoll`, kasus lainnya ke `runTls`.
+
+**Rationale:** Terminator thread-per-koneksi benar tapi tidak scale, jadi https adalah latency-by-construction di konkurensi tinggi. Memultipleks TLS dengan cara yang sama seperti engine cleartext sudah memultipleks cocok dengan bentuk yang terbukti, jadi satu worker per core memegang ribuan handshake setengah-terbuka dan koneksi established tanpa satu thread tiap-tiap. Session sans-I/O resumable adalah linchpin yang memungkinkannya. Menjaga kasus konkurensi-rendah dan 1.2 pada driver inline-mux menghindari fork state machine mux. Terbukti lokal di 6 core (worst case terhadap box 64-core): Http2 RSA pada 512 koneksi dan gRPC pada 512 dan 1024 koneksi melayani dengan satu worker thread per core, bukan per koneksi, dan tanpa hang, di mana jalur lama thrash (load average ratusan, butuh menit untuk selesai).
+
+**Konsekuensi:**
+- Terminator socketpair plus thread-per-koneksi h2 / gRPC milik ADR-046 digantikan: oleh dispatch multipleks ini untuk `.EPOLL` / `.URING`, dan oleh driver inline-mux untuk `.ASYNC` / `.POOL` / `.MIXED`. Socketpair sudah hilang.
+- Jalur multipleks hanya TLS 1.3. ClientHello 1.2-saja pada port https `.EPOLL` / `.URING` ditolak dengan fatal alert. Fallback 1.2 ada di jalur thread-per-koneksi.
+- `.URING` dengan `config.tls` saat ini diarahkan ke loop epoll-multipleks yang sama. Loop TLS io_uring native adalah optimasi berikutnya.
+- TLS Http1 masih thread-per-koneksi (`tcp/http1/tls_serve.zig`), yang dipakai json-tls. Mem-port dispatch yang sama ke Http1 adalah langkah tersisa.
+- Example baru `examples/tls/tls_grpc_basic.zig` (port 9070, ECDSA P-256) dan runner `tests/runner/tls_grpc_basic_runner.zig` (panggilan unary gRPC nyata melalui TLS), hijau di Zig 0.16 dan 0.17.
 
 ---
 
