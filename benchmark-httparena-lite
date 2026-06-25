@@ -2,9 +2,12 @@
 # zix-bench-lite.sh - lite benchmark launcher with a widened profile set.
 #
 # Wraps scripts/benchmark-lite.sh and patches its PROFILES so a run:
-#   - widens the HTTP conn sweep up to 4096 (stock lite stops at 512), and
+#   - widens the HTTP conn sweep up to 4096 (stock lite stops at 512),
 #   - enables the ws + gRPC profiles lite normally omits
-#     (echo-ws-pipeline, stream-grpc, stream-grpc-tls).
+#     (echo-ws-pipeline, stream-grpc, stream-grpc-tls), and
+#   - adds json-tls (the h1 https /json cell lite skips), so the TLS JSON
+#     profile can be measured locally. The shared cert is already mounted by
+#     framework.sh (-v certs:/certs:ro), only the schedule was missing.
 # The tracked script is left untouched: a patched copy is generated under
 # scripts/, run, then removed on exit. common.sh anchors ROOT_DIR/SCRIPT_DIR
 # to scripts/lib/, so the renamed copy resolves all paths the same way.
@@ -217,20 +220,25 @@ sed -E \
 # so HTTP rules rewrite only the connections field (between the empty cpu_limit
 # and the endpoint). The echo-ws rule also appends the three profiles lite omits
 # (echo-ws-pipeline, stream-grpc, stream-grpc-tls), and the PROFILE_ORDER rule
-# adds them to the run order so the loop actually reaches them. Values mirror
-# the full benchmark host sweep, trimmed for a laptop (ws caps at 4096, not
-# 16384). gRPC streaming endpoints are grpc-stream / grpc-stream-tls (ghz).
+# adds them to the run order so the loop actually reaches them. The json-comp
+# rule appends the json-tls profile (lite has no json-tls line at all) with an
+# empty cpu_limit (the isolate wrapper pins the server externally) and a 512,4096
+# sweep, and the json-order rule adds it to the run order. Values mirror the full
+# benchmark host sweep, trimmed for a laptop (ws caps at 4096, not 16384). gRPC
+# streaming endpoints are grpc-stream / grpc-stream-tls (ghz).
 sed -E \
     -e 's/(\[baseline\]="1\|0\|\|)512(\|")/\1512,4096\2/' \
     -e 's/(\[pipelined\]="16\|0\|\|)512(\|pipeline")/\1512,4096\2/' \
     -e 's/(\[limited-conn\]="1\|10\|\|)512(\|")/\1512,4096\2/' \
     -e 's/(\[json\]="1\|0\|\|)512(\|json")/\14096\2/' \
+    -e 's/(\[json-comp\]="1\|0\|\|512\|json-compressed")/\1\n    [json-tls]="1|0||512,4096|json-tls"/' \
     -e 's/(\[upload\]="1\|0\|\|)128(\|upload")/\132,256\2/' \
     -e 's/(\[static\]="1\|10\|\|)512(\|static")/\11024,4096,6800\2/' \
     -e 's/(\[unary-grpc\]="1\|0\|\|)512(\|grpc")/\1256,1024\2/' \
     -e 's/(\[unary-grpc-tls\]="1\|0\|\|)512(\|grpc-tls")/\1256,1024\2/' \
     -e 's/(\[echo-ws\]="1\|0\|\|)512(\|ws-echo")/\1512,4096\2\n    [echo-ws-pipeline]="16|0||512,4096|ws-echo"\n    [stream-grpc]="1|0||64|grpc-stream"\n    [stream-grpc-tls]="1|0||64|grpc-stream-tls"/' \
     -e 's/^([[:space:]]*)echo-ws$/\1echo-ws echo-ws-pipeline\n\1stream-grpc stream-grpc-tls/' \
+    -e 's/^([[:space:]]*)json json-comp$/\1json json-comp json-tls/' \
     "$SRC" > "$PATCHED"
 
 # Redirect the benchmark-lite copy to source the patched framework.sh above.
