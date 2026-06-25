@@ -25,6 +25,7 @@ const serverhello = @import("../serverhello.zig");
 const flight = @import("../flight.zig");
 const response = @import("../response.zig");
 const request = @import("../request.zig");
+const huffman = @import("../huffman.zig");
 const keyschedule = @import("../keyschedule.zig");
 const demux = @import("../demux.zig");
 const Connection = @import("../connection.zig").Connection;
@@ -305,21 +306,24 @@ fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch,
 }
 
 /// Decode the request from a decrypted 1-RTT payload and copy its method / path onto the connection
-/// so they outlive the recv buffer. A Huffman-encoded path is not yet decoded, so it is left for the
-/// default route until the QPACK Huffman decoder lands.
+/// so they outlive the recv buffer. A Huffman-encoded path (the common case, curl encodes :path) is
+/// expanded through the QPACK Huffman decoder into the connection's path buffer.
 fn captureRequest(conn: *Connection, payload: []const u8) void {
     if (conn.req_ready) return;
 
     const decoded = request.parseRequest(payload) orelse return;
-    if (decoded.path_huffman) return;
 
     const method_len = @min(decoded.method.len, conn.req_method_buf.len);
     @memcpy(conn.req_method_buf[0..method_len], decoded.method[0..method_len]);
     conn.req_method_len = method_len;
 
-    const path_len = @min(decoded.path.len, conn.req_path_buf.len);
-    @memcpy(conn.req_path_buf[0..path_len], decoded.path[0..path_len]);
-    conn.req_path_len = path_len;
+    if (decoded.path_huffman) {
+        conn.req_path_len = huffman.decode(&conn.req_path_buf, decoded.path) orelse return;
+    } else {
+        const path_len = @min(decoded.path.len, conn.req_path_buf.len);
+        @memcpy(conn.req_path_buf[0..path_len], decoded.path[0..path_len]);
+        conn.req_path_len = path_len;
+    }
 
     conn.req_ready = true;
 }
@@ -336,12 +340,13 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
     var payload: [2048]u8 = undefined;
     var payload_len: usize = 0;
 
-    if (!conn.response_sent) {
-        // First request: the full response, acknowledging the request. Use the decoded request line
-        // when available, falling back to GET / (for example a Huffman-encoded path not yet decoded).
+    if (!conn.response_sent and conn.req_ready) {
+        // The request HEADERS has been decoded: send the full response, acknowledging the packet. A
+        // client request can trail an earlier 1-RTT packet (a leading PING), so the response waits for
+        // the captured request rather than firing on the first 1-RTT packet.
         var req = core.Request{
-            .method = if (conn.req_ready) conn.reqMethod() else "GET",
-            .path = if (conn.req_ready) conn.reqPath() else "/",
+            .method = conn.reqMethod(),
+            .path = conn.reqPath(),
         };
         var res = core.Response{};
         handler(&req, &res);
