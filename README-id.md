@@ -1473,7 +1473,7 @@ Lihat [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) untuk dokumentasi lengkap ter
 
 ### TLS (https / h2)
 
-Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu server membacanya per koneksi.
+Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Untuk Http2 dan gRPC, model `.EPOLL` / `.URING` menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core (ADR-052), jadi https tidak men-spawn thread per koneksi.
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{

@@ -1473,7 +1473,7 @@ See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation includin
 
 ### TLS (https / h2)
 
-The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then the server reads it per connection.
+The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then every connection reuses it. For Http2 and gRPC the `.EPOLL` / `.URING` models terminate TLS in the dispatch worker and multiplex many connections per core (ADR-052), so https does not spawn a thread per connection.
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{
