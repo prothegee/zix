@@ -1015,6 +1015,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - The h2 path reuses `core.serveConn` unchanged. Only ALPN selection and the terminator are new code.
 - One request per Http1 https connection for now (keep-alive is a later refinement), and the terminator is one thread plus a socketpair per connection, accepted on the https band.
 - No native h2 runner yet: it needs an ALPN-offering client, which is the `zix.Tls` client milestone.
+- Superseded for the h2 / gRPC terminator by ADR-052: the socketpair plus thread-per-connection design moved to a multiplexed per-core dispatch under `.EPOLL` / `.URING` and to an inline-mux driver under `.ASYNC` / `.POOL` / `.MIXED`. The socketpair described above is gone. Http1 https is unchanged by that ADR.
 
 ---
 
@@ -1116,6 +1117,25 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - New example `examples/http3_basic.zig` (port 9063, ECDSA P-256). The round trip is validated by `curl --http3` (HTTP/3 200, clean exit) during development and, hermetically, by a native QUIC client hand-rolled from the exported primitives in `tests/runner/http3_client.zig`, wired as `test-runner-http3` and folded into `test-runner-all`.
 - Green on Zig 0.16 and 0.17 (unit-test plus the 66-protocol test-runner-all).
 - Deferred: per-core CID steering (v2, ADR-049 phase 3), dynamic-table QPACK / loss-and-congestion in the hot path / key update / connection migration beyond the v1 demux, the QUIC Interop Runner and qlog traces, and the 64-core HttpArena throughput / memory gate.
+
+---
+
+## ADR-052: multiplexed TLS dispatch for Http2 and gRPC
+
+**Status:** Accepted
+
+**Context:** TLS for Http2 and gRPC was served by the ADR-046 terminator: run the handshake, then run the h2 engine behind a socketpair with a second worker thread, one thread per connection. That shape thrashes at high concurrency. At 512 or 1024 connections on a core count far below that, the scheduler churns one thread per connection and throughput collapses (the cleartext EPOLL and URING engines already multiplex many connections per core, but the TLS path did not). The socketpair plus the second thread were the cost, not the crypto.
+
+**Decision:** For the `.EPOLL` and `.URING` dispatch models, terminate TLS in place on a multiplexed event loop. One `SO_REUSEPORT` listener plus one epoll instance per worker (worker count is the core count), each worker holding many TLS connections through a resumable TLS 1.3 session (`src/tcp/tls/tls_session.zig`): it accumulates ciphertext, processes each complete record, drives the resumable h2 / gRPC mux over the decrypted plaintext, and seals the engine's frames back into TLS records through a thread-local write hook. The new files are `src/tcp/http2/tls_epoll.zig` and `src/tcp/http2/grpc/tls_epoll.zig`. The socketpair and the per-connection second thread are removed everywhere: the `.ASYNC` / `.POOL` / `.MIXED` path keeps a thread-per-connection accept loop but runs the same inline-mux driver in `tcp/tls/h2_terminator.zig` (also no socketpair), and that path also serves the TLS 1.2 fallback. `server.run` routes `.EPOLL` / `.URING` with `config.tls` to `runTlsEpoll`, every other case to `runTls`.
+
+**Rationale:** The thread-per-connection terminator was correct but did not scale, so https was latency-by-construction at high concurrency. Multiplexing TLS the same way the cleartext engines already multiplex matches the proven shape, so one worker per core holds thousands of half-open handshakes and established connections with no thread each. The resumable sans-I/O session is the linchpin that makes that possible. Keeping the low-concurrency and 1.2 cases on the inline-mux driver avoids forking the mux state machine. Proven locally on 6 cores (the worst case against the 64-core box): Http2 RSA at 512 connections and gRPC at 512 and 1024 connections serve with one worker thread per core, not per connection, and no hang, where the old path thrashed (load average in the hundreds, minutes to finish).
+
+**Consequences:**
+- ADR-046's socketpair plus thread-per-connection h2 / gRPC terminator is superseded: by this multiplexed dispatch for `.EPOLL` / `.URING`, and by the inline-mux driver for `.ASYNC` / `.POOL` / `.MIXED`. The socketpair is gone.
+- The multiplexed path is TLS 1.3 only. A 1.2-only ClientHello on an `.EPOLL` / `.URING` https port is refused with a fatal alert. The 1.2 fallback lives on the thread-per-connection path.
+- `.URING` with `config.tls` currently routes to the same epoll-multiplexed loop. A native io_uring TLS loop is a later optimization.
+- Http1 TLS is still thread-per-connection (`tcp/http1/tls_serve.zig`), which json-tls rides. Porting the same dispatch to Http1 is the remaining step.
+- New example `examples/tls/tls_grpc_basic.zig` (port 9070, ECDSA P-256) and runner `tests/runner/tls_grpc_basic_runner.zig` (a real unary gRPC call over TLS), green on Zig 0.16 and 0.17.
 
 ---
 
