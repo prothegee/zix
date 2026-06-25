@@ -6,19 +6,18 @@ is a real curl --http3 handshake against a running zix server, the same oracle t
 Runner uses. It is the point where the stack stops being proven piece by piece and starts being
 proven end to end.
 
-## Status: capability ready, live handshake pending Layer I
+## Status: PASS (2026-06-25)
 
-The live handshake requires an assembled zix HTTP/3 server: UDP I/O (zix.Udp), packet protection
-(Layer C), the transport state machine (Layer Q), and the TLS 1.3 handshake driven over CRYPTO
-frames (T1 / T2), all wired together. That assembly is the integration milestone (Layer I, `src/udp/
-http3/` + an example), which does not exist yet.
+The assembled zix HTTP/3 server exists (`src/udp/http3/` + `examples/http3_basic.zig`, port 9063):
+UDP I/O (zix.Udp), packet protection (Layer C), the transport state machine (Layer Q), and the TLS
+1.3 handshake driven over CRYPTO frames (T1 / T2) are wired together with the live-handshake driver.
 
-So this gate does two honest things and no more:
+The live handshake runs and passes:
 
-- Confirms the oracle tool is present: this machine's curl (8.20.0, ngtcp2 / nghttp3) reports HTTP3
-  support, so the gate can run the moment a server exists.
-- Reports the handshake itself as PENDING. It does not fabricate a pass. T1 and T2 prove the QUIC-TLS
-  join deterministically, but a completed live handshake is only claimed once it actually runs.
+- curl (8.20.0, ngtcp2 / nghttp3) completes the TLS 1.3 handshake over QUIC, validates the ECDSA
+  P-256 certificate, gets HTTP/3 200, and exits cleanly (exit 0).
+- The same round trip is also driven by a hermetic native QUIC client (no external tool) in
+  `test-runner-http3` / `test-runner-all`, so the gate holds with or without curl present.
 
 ## Oracle
 
@@ -33,16 +32,18 @@ retry, resumption, multiplexing, keyupdate, http3) becomes the broader oracle.
 bash rnd/0.5.x/verify-quic-tls-t3.sh
 ```
 
-Once the Layer I server is built, point the gate at it:
+Point the gate at the built example:
 
 ```sh
-ZIX_HTTP3_SERVER=zig-out/bin/tls_http3_basic bash rnd/0.5.x/verify-quic-tls-t3.sh
+ZIX_HTTP3_SERVER=zig-out/bin/example-http3_basic bash rnd/0.5.x/verify-quic-tls-t3.sh
 ```
+
+The hermetic, tool-free equivalent is `zig build test-runner-http3` (the native client), folded into
+`test-runner-all`.
 
 ## Expect
 
 - Step 1 prints `PASS` for curl HTTP/3 capability.
 - Step 2 locates the server via `ZIX_HTTP3_SERVER` or a built example binary.
-- With no server: prints `PENDING` and exits 0 (capability confirmed, handshake not run, not faked).
-- With a server: step 3 launches it, runs `curl --http3-only`, and prints `PASS` on a completed
-  handshake or `FAIL` otherwise.
+- Step 3 launches it, runs `curl --http3-only`, and prints `PASS` on the completed handshake (HTTP/3
+  200, clean exit).
