@@ -38,6 +38,23 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
     .{ .path = "/baseline2", .handler = baseline },
 });
 
+// Parse `?...&name=<int>&...` out of a request path. Returns null when absent or not an integer.
+fn queryInt(path: []const u8, name: []const u8) ?i64 {
+    const query_at = std.mem.indexOfScalar(u8, path, '?') orelse return null;
+
+    var it = std.mem.splitScalar(u8, path[query_at + 1 ..], '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], name)) {
+            return std.fmt.parseInt(i64, pair[eq + 1 ..], 10) catch null;
+        }
+    }
+
+    return null;
+}
+
+// --------------------------------------------------------- //
+
 pub fn main(process: std.process.Init) !void {
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = CERT,
@@ -57,21 +74,4 @@ pub fn main(process: std.process.Init) !void {
     defer server.deinit();
 
     try server.run();
-}
-
-// --------------------------------------------------------- //
-
-// Parse `?...&name=<int>&...` out of a request path. Returns null when absent or not an integer.
-fn queryInt(path: []const u8, name: []const u8) ?i64 {
-    const query_at = std.mem.indexOfScalar(u8, path, '?') orelse return null;
-
-    var it = std.mem.splitScalar(u8, path[query_at + 1 ..], '&');
-    while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-        if (std.mem.eql(u8, pair[0..eq], name)) {
-            return std.fmt.parseInt(i64, pair[eq + 1 ..], 10) catch null;
-        }
-    }
-
-    return null;
 }
