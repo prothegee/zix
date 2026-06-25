@@ -119,9 +119,6 @@ Saat ini Zix berfokus pada Linux.
 
 Dalam kondisi saat ini, zix tidak akan:
 - Implementasi database driver.
-- Implementasi Http3.
-
-Lihat [swerver](https://github.com/justinGrosvenor/swerver) untuk HTTP/3 untuk pendekatan lengkap terkait topik tersebut.
 
 <br>
 
@@ -230,7 +227,8 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 __*1. Stack protokol lengkap dalam satu tempat:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (varian
-hot-path-optimized), Http2 (h2c), Grpc (gRPC melalui h2c), Fix (FIX 4.x), plus Channel dan Logger.
+hot-path-optimized), Http2 (h2c), Http3 (HTTP/3 melalui QUIC), Grpc (gRPC melalui h2c), Fix
+(FIX 4.x), plus Channel dan Logger.
 
 > Satu model memori/threading yang koheren untuk backend monolith, micro-service, dan
 modular-micro-service, alih-alih menggabungkan banyak library terpisah dengan
