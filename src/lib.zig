@@ -88,6 +88,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/rsa.zig"));
     std.testing.refAllDecls(@import("tls/context.zig"));
     std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
+    std.testing.refAllDecls(@import("tcp/tls/tls_session.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
 
     // # zix.Tls (TLS 1.2 building blocks: PRF schedule, record, version select)
