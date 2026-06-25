@@ -3,6 +3,11 @@
 Review note for Layer I. Not for commit. Decides how HTTP/3 maps onto the five dispatch models and
 what ADR-049 needs. Companion to `http3-plan.md`.
 
+Status (2026-06-25): v1 has LANDED. `src/udp/http3/` runs the single-worker recv + internal CID demux
+described below, `.EPOLL` / `.URING` fold to the v1 worker, and the live engine is green (curl --http3
+HTTP/3 200 + native client in test-runner-all). v2 (per-core SO_REUSEPORT CID steering) is still
+deferred to ADR-049 phase 3. The rest of this note is the design rationale behind the shipped v1.
+
 ## Decision
 
 - v1 (Layer I now): HTTP/3 runs the single-worker recv shape and demuxes connections by Destination
