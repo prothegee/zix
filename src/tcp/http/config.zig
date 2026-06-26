@@ -23,6 +23,10 @@ pub const HttpServerConfig = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024 * 4,
+    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL). The kernel
+    /// busy-spins this long before sleeping the worker, trading CPU for lower tail latency. 0 leaves
+    /// it unset. No-op when the kernel lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 50,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
     max_recv_buf: usize = 1024 * 4,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
@@ -82,6 +86,14 @@ pub const HttpServerConfig = struct {
     /// N           = exactly N pool threads.
     /// Ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
+    /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Worker thread stack size in bytes when compression is enabled, applied as a floor under
+    /// .EPOLL / .URING: the effective stack is max(worker_stack_size_bytes, this). std.compress.flate
+    /// is built on the handler stack frame (about 230 KB), so a compressing handler needs more than
+    /// the default. No effect when compression is off.
+    worker_stack_compress_bytes: usize = 2 * 1024 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off,
     /// the handler cache API (res.serveCached / res.sendCached) degrades to a
     /// plain send. Active under the .EPOLL dispatch model in this release.
@@ -110,4 +122,7 @@ test "zix http: HttpServerConfig uring_send_buf_size default" {
 
     const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080 };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), cfg.worker_stack_compress_bytes);
 }
