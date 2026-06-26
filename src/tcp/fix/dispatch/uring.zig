@@ -76,6 +76,7 @@ const UringFixCtx = struct {
     comp_id: []const u8,
     opts: FixServeOpts,
     send_buf_size: usize,
+    max_conns: usize,
 };
 
 fn uringFixWorker(ctx: UringFixCtx) void {
@@ -373,7 +374,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     defer net_server.deinit(ctx.io);
     const listener_fd = net_server.socket.handle;
 
-    const slots = slab.mapZeroedSlots(?*UringFixConn, 1 << 16) catch return;
+    const slots = slab.mapZeroedSlots(?*UringFixConn, ctx.max_conns) catch return;
 
     const hb_ms = ctx.opts.heartbeat_timeout_ms;
     var worker = Worker{
@@ -418,7 +419,7 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
 
     for (workers) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             uringFixWorker,
             .{UringFixCtx{
                 .io = cfg.io,
@@ -428,6 +429,7 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
                 .comp_id = cfg.comp_id,
                 .opts = conn_opts,
                 .send_buf_size = cfg.uring_send_buf_size,
+                .max_conns = cfg.uring_max_conns_per_worker,
             }},
         );
 
