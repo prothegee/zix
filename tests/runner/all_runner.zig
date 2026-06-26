@@ -181,6 +181,7 @@ pub fn main(process: std.process.Init) void {
     const tls_http1_path = arg_iter.next() orelse exitMissing("tls-http1");
     const tls_http1_ed25519_path = arg_iter.next() orelse exitMissing("tls-http1-ed25519");
     const tls_http2_path = arg_iter.next() orelse exitMissing("tls-http2");
+    const tls_grpc_path = arg_iter.next() orelse exitMissing("tls-grpc");
 
     // http3 (QUIC over TLS 1.3, exercised by the hand-rolled native client)
     const http3_path = arg_iter.next() orelse exitMissing("http3");
@@ -273,6 +274,7 @@ pub fn main(process: std.process.Init) void {
     report("tls-http1", runTls(io, tls_http1_path, 9060), &tally);
     report("tls-http1-ed25519", runTlsHttp1Ed25519(io, tls_http1_ed25519_path, 9062), &tally);
     report("tls-http2", runTlsHttp2(io, tls_http2_path, 9061), &tally);
+    report("tls-grpc", runTlsGrpc(io, tls_grpc_path, 9070), &tally);
 
     // HTTP/3 test (QUIC over TLS 1.3, native hand-rolled client, no external tool).
     report("http3", runHttp3(io, http3_path, 9063), &tally);
@@ -399,6 +401,122 @@ fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
                 var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
                 var scratch: [4096]u8 = undefined;
                 const cnt = try hdec.decode(payload, &hdrs, &scratch);
+                for (hdrs[0..cnt]) |h| {
+                    if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
+                }
+            }
+            off += total;
+        }
+        if (off >= acc_len) {
+            acc_len = 0;
+        } else if (off > 0) {
+            std.mem.copyForwards(u8, acc[0 .. acc_len - off], acc[off..acc_len]);
+            acc_len -= off;
+        }
+    }
+
+    return error.NoStatus200;
+}
+
+/// One unary gRPC call over TLS 1.3 (h2), exercising the multiplexed TLS path (tls_epoll.zig): TLS
+/// terminates in the epoll worker and the resumable gRPC h2 mux serves the call in place. Drives the
+/// native zix.Tls client offering ALPN h2, then preface + SETTINGS + HEADERS (POST grpc route) + a
+/// DATA frame with one length-prefixed message, and asserts the response HEADERS carry :status 200.
+fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
+    const Tls = zix.Tls;
+    const Http2 = zix.Http2;
+    const linux = std.os.linux;
+
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, 5000);
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    var stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+
+    var rnd: [64]u8 = undefined;
+    _ = linux.getrandom(&rnd, rnd.len, 0);
+    var ch_buf: [600]u8 = undefined;
+    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
+    var state = started.state;
+    try tlsWriteRecord(fd, 22, started.client_hello);
+
+    var flight_buf: [8192]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| flen += try tlsReadRecord(fd, flight_buf[flen..]);
+
+    var fin_buf: [256]u8 = undefined;
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    try tlsWriteAll(fd, finished.client_finished);
+
+    // preface + empty SETTINGS + HEADERS (POST grpc route) + DATA (one length-prefixed message).
+    var req: [512]u8 = undefined;
+    var n: usize = 0;
+    @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
+    n += Http2.PREFACE.len;
+    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+
+    var hbuf: [256]u8 = undefined;
+    var enc = Http2.HpackEncoder.init(&hbuf);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/helloworld.Greeter/SayHello");
+    try enc.writeHeader(":scheme", "https");
+    try enc.writeHeader(":authority", "localhost");
+    try enc.writeHeader("content-type", "application/grpc+proto");
+    try enc.writeHeader("te", "trailers");
+    const hblock = enc.encoded();
+    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+    @memcpy(req[n..][0..hblock.len], hblock);
+    n += hblock.len;
+
+    const payload = "world";
+    var msg: [5 + payload.len]u8 = undefined;
+    msg[0] = 0;
+    std.mem.writeInt(u32, msg[1..5], payload.len, .big);
+    @memcpy(msg[5..], payload);
+    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(msg.len), .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..fh.len], &fh);
+    n += fh.len;
+    @memcpy(req[n..][0..msg.len], &msg);
+    n += msg.len;
+
+    var send_buf: [1024]u8 = undefined;
+    try tlsWriteAll(fd, finished.connection.writeAppData(req[0..n], &send_buf));
+
+    var acc: [16384]u8 = undefined;
+    var acc_len: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 64) : (rounds += 1) {
+        var rec_buf: [17 * 1024]u8 = undefined;
+        const rec_len = try tlsReadRecord(fd, &rec_buf);
+        if (rec_buf[0] != 23) continue;
+
+        var dec: [17 * 1024]u8 = undefined;
+        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &dec);
+        @memcpy(acc[acc_len..][0..plain.len], plain);
+        acc_len += plain.len;
+
+        var off: usize = 0;
+        while (off + Http2.FRAME_HEADER_LEN <= acc_len) {
+            const frame = Http2.parseFrameHeader(acc[off..][0..Http2.FRAME_HEADER_LEN]);
+            const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
+            if (off + total > acc_len) break;
+
+            const fpayload = acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
+                var hdec = Http2.HpackDecoder.init();
+                var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
+                var scratch: [4096]u8 = undefined;
+                const cnt = try hdec.decode(fpayload, &hdrs, &scratch);
                 for (hdrs[0..cnt]) |h| {
                     if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
                 }
