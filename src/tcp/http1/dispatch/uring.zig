@@ -77,6 +77,10 @@ const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 /// see UringWorker.idleCap.
 const URING_IDLE_POOL_FLOOR: usize = 64;
 
+/// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
+/// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
+const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
+
 /// Initialize a worker ring with the single-issuer fast-path flags, falling
 /// back to a flagless ring when the kernel does not support them.
 ///
@@ -100,7 +104,7 @@ fn initUringRing() !IoUring {
             linux.IORING_SETUP_CQSIZE |
             linux.IORING_SETUP_CLAMP,
         .cq_entries = URING_CQ_ENTRIES,
-        .sq_thread_idle = 1000,
+        .sq_thread_idle = URING_SQ_THREAD_IDLE_MS,
     });
 
     return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
@@ -450,7 +454,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         ///   kernel never writes the buffer, so a len past conn.buf.len is safe
         ///   (the same trick serveEpollDrain uses with recvfrom).
         fn armDrainRecv(self: *Self, conn: *UringConn) void {
-            const want = @min(conn.drain, @as(usize, 1 << 30));
+            const want = @min(conn.drain, common.MAX_DRAIN_RECV);
             const sqe = self.getSqe() orelse {
                 self.beginClose(conn);
                 return;
@@ -981,7 +985,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // frame, so a compressing handler (writeNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (config.compression) 2 * 1024 * 1024 else 512 * 1024;
+    const worker_stack: usize = if (config.compression) common.WORKER_STACK_COMPRESS else common.WORKER_STACK_DEFAULT;
 
     const worker = uringWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {

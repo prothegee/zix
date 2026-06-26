@@ -12,6 +12,14 @@ pub const GZIP_OUT_SIZE: usize = 256 * 1024;
 /// Scratch buffer for building one HTTP status line plus its headers.
 pub const HEADER_BUF_SIZE: usize = 256;
 
+/// Inline write fast-path buffer. A response whose status line, headers, and
+/// body all fit here is sent in one direct write, skipping the iovec scatter
+/// path. The body threshold is this minus HEADER_BUF_SIZE.
+const SMALL_BODY_INLINE_BUF: usize = 4096;
+
+/// Body read chunk for the ASYNC serve loop: bytes drained per recv after the head.
+const ASYNC_BODY_CHUNK: usize = 8 * 1024;
+
 pub const ParseResult = struct {
     head: ParsedHead,
     body_offset: usize,
@@ -773,8 +781,8 @@ pub fn writeSimple(
     var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body.len);
 
-    if (body.len <= 3840) {
-        var buf: [4096]u8 = undefined;
+    if (body.len <= SMALL_BODY_INLINE_BUF - HEADER_BUF_SIZE) {
+        var buf: [SMALL_BODY_INLINE_BUF]u8 = undefined;
         @memcpy(buf[0..hdr.len], hdr);
         @memcpy(buf[hdr.len..][0..body.len], body);
 
@@ -1202,7 +1210,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
     }
 
     var recv_buf: [BUF_SIZE]u8 = undefined;
-    var body_buf: [8192]u8 = undefined;
+    var body_buf: [ASYNC_BODY_CHUNK]u8 = undefined;
     var leftover: usize = 0;
 
     while (true) {

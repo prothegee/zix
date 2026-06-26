@@ -3,6 +3,13 @@
 
 const std = @import("std");
 
+/// WebSocket client send chunk buffer.
+const WS_SEND_CHUNK: usize = 4096;
+/// WebSocket handshake request buffer.
+const HANDSHAKE_REQ_BUF: usize = 512;
+/// WebSocket handshake response buffer.
+const HANDSHAKE_RESP_BUF: usize = 4096;
+
 // --------------------------------------------------------- //
 
 const ws_len_max_7bit = 125;
@@ -99,7 +106,7 @@ pub const WsConn = struct {
         try fdWriteAll(self.fd, header[0..header_len]);
 
         var byte_offset: usize = 0;
-        var chunk: [4096]u8 = undefined;
+        var chunk: [WS_SEND_CHUNK]u8 = undefined;
 
         while (byte_offset < payload.len) {
             const batch_size = @min(payload.len - byte_offset, chunk.len);
@@ -218,7 +225,7 @@ pub const WsClient = struct {
         const key_enc_len = std.base64.standard.Encoder.calcSize(16);
         const ws_key = std.base64.standard.Encoder.encode(key_buf[0..key_enc_len], &nonce);
 
-        var req_buf: [512]u8 = undefined;
+        var req_buf: [HANDSHAKE_REQ_BUF]u8 = undefined;
         const req = std.fmt.bufPrint(
             &req_buf,
             "GET {s} HTTP/1.1\r\n" ++
@@ -233,7 +240,7 @@ pub const WsClient = struct {
 
         fdWriteAll(fd, req) catch return error.HandshakeFailed;
 
-        var resp_buf: [4096]u8 = undefined;
+        var resp_buf: [HANDSHAKE_RESP_BUF]u8 = undefined;
         var resp_len: usize = 0;
         var header_end: usize = 0;
 

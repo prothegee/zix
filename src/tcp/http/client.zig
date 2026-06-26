@@ -6,6 +6,19 @@ const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
 const h2_client = @import("h2_client.zig");
 
+/// Request body write buffer.
+const REQUEST_WRITE_BUF: usize = 8192;
+/// Response body transfer buffer.
+const BODY_TRANSFER_BUF: usize = 4096;
+/// Request path build buffer.
+const REQUEST_PATH_BUF: usize = 2048;
+/// Request build buffer (request line plus headers).
+const REQUEST_BUILD_BUF: usize = 4096;
+/// Response head scan buffer.
+const HEAD_SCAN_BUF: usize = 8192;
+/// Body read chunk buffer.
+const BODY_READ_CHUNK: usize = 4096;
+
 // --------------------------------------------------------- //
 
 /// Options for a single HTTP request. All fields that accept null use the client config value.
@@ -213,7 +226,7 @@ pub const HttpClient = struct {
         if (std_method.requestHasBody()) {
             const b = opts.body orelse &.{};
             req.transfer_encoding = .{ .content_length = b.len };
-            var write_buf: [8192]u8 = undefined;
+            var write_buf: [REQUEST_WRITE_BUF]u8 = undefined;
             var body_writer = try req.sendBodyUnflushed(&write_buf);
             if (b.len > 0) try body_writer.writer.writeAll(b);
             try body_writer.end();
@@ -230,7 +243,7 @@ pub const HttpClient = struct {
 
         const status_code: u16 = @intFromEnum(response.head.status);
 
-        var transfer_buf: [4096]u8 = undefined;
+        var transfer_buf: [BODY_TRANSFER_BUF]u8 = undefined;
         const body_reader = response.reader(&transfer_buf);
         const body_bytes = body_reader.allocRemaining(gpa, .limited(self.config.max_response_body)) catch |err| switch (err) {
             error.StreamTooLong => return error.BodyTooLarge,
@@ -261,7 +274,7 @@ pub const HttpClient = struct {
         const port = uri.port orelse 443;
 
         // origin-form request target (:path), the path plus any query, e.g. "/echo?foo=bar".
-        var path_buf: [2048]u8 = undefined;
+        var path_buf: [REQUEST_PATH_BUF]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{f}", .{uri.fmt(.{ .path = true, .query = true })}) catch return error.InvalidUrl;
 
         const parts = try h2_client.fetch(self.config, method, host_name, port, path, opts.headers, opts.body);
@@ -334,7 +347,7 @@ pub const HttpClient = struct {
 
         const method_name = udsMethodStr(method);
 
-        var req_buf: [4096]u8 = undefined;
+        var req_buf: [REQUEST_BUILD_BUF]u8 = undefined;
         var req_len: usize = 0;
 
         const status_line = std.fmt.bufPrint(
@@ -360,7 +373,7 @@ pub const HttpClient = struct {
             try udsWriteAll(fd, req_buf[0..req_len]);
         }
 
-        var head_scan_buf: [8192]u8 = undefined;
+        var head_scan_buf: [HEAD_SCAN_BUF]u8 = undefined;
         var head_scan_len: usize = 0;
         var header_end: usize = 0;
 
@@ -413,7 +426,7 @@ pub const HttpClient = struct {
             }
         } else {
             if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
-            var read_chunk: [4096]u8 = undefined;
+            var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
             while (true) {
                 const n = std.posix.read(fd, &read_chunk) catch break;
                 if (n == 0) break;

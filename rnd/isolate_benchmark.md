@@ -294,7 +294,7 @@ flowchart TD
     D --> E[teardown: restore governor, boost, THP, lo MTU]
 ```
 
-## Honest caveat
+<br>
 
 Everything above tightens variance. It does not change the fact that loopback
 measures the kernel TCP stack more than the engine, which is why a

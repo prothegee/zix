@@ -26,6 +26,10 @@ const frame = @import("../frame.zig");
 /// at most this, so the seal buffer holds one record (plaintext + AEAD + content-type + header).
 const max_plaintext: usize = 16 * 1024;
 
+/// AEAD tag, inner content-type, and record header overhead added over one
+/// record's plaintext when sizing the seal buffer.
+const seal_overhead: usize = 1024;
+
 /// Drive the resumable gRPC h2 mux inline over a decrypted TLS connection: read a record, decrypt it,
 /// feed the plaintext to the mux, and seal the staged reply back into records. No socketpair, no
 /// second thread. Generic over the TLS connection type (1.3 or 1.2).
@@ -40,7 +44,7 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
         fd: posix.fd_t,
         plain: [max_plaintext]u8 = undefined,
         plain_len: usize = 0,
-        seal: [max_plaintext + 1024]u8 = undefined,
+        seal: [max_plaintext + seal_overhead]u8 = undefined,
         failed: bool = false,
 
         fn flush(self: *@This()) void {

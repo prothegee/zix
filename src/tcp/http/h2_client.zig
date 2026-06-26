@@ -21,7 +21,23 @@ const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
 const Tls = @import("../../tls/Tls.zig");
+const record = @import("../../tls/record.zig");
 const Http2 = @import("../http2/Http2.zig");
+
+/// TLS ClientHello scratch buffer.
+const CLIENT_HELLO_BUF: usize = 600;
+/// TLS handshake flight buffer.
+const HANDSHAKE_FLIGHT_BUF: usize = 8192;
+/// CA certificate PEM read buffer and read limit.
+const CA_PEM_BUF: usize = 8192;
+/// HPACK header block buffer.
+const HPACK_BLOCK_BUF: usize = 4096;
+/// h2 frame-out buffer.
+const FRAME_OUT_BUF: usize = 8192;
+/// h2 send buffer.
+const H2_SEND_BUF: usize = 9 * 1024;
+/// Per-frame scratch buffer.
+const FRAME_SCRATCH: usize = 16 * 1024;
 
 const posix = std.posix;
 
@@ -91,14 +107,14 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     var seed: [64]u8 = undefined;
     _ = std.os.linux.getrandom(&seed, seed.len, 0);
 
-    var ch_buf: [600]u8 = undefined;
+    var ch_buf: [CLIENT_HELLO_BUF]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = seed[0..32].*, .ephemeral_secret = seed[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
 
     try writeRecord(fd, 22, started.client_hello);
 
     // server flight: ServerHello + ChangeCipherSpec + the encrypted flight (3 records).
-    var flight_buf: [8192]u8 = undefined;
+    var flight_buf: [HANDSHAKE_FLIGHT_BUF]u8 = undefined;
     var flen: usize = 0;
     for (0..3) |_| flen += try readRecordInto(fd, flight_buf[flen..]);
 
@@ -110,9 +126,9 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     if (config.tls_verify) {
         const anchor_path = config.tls_ca_path orelse return error.TlsNoTrustAnchor;
 
-        var pem_buf: [8192]u8 = undefined;
+        var pem_buf: [CA_PEM_BUF]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
-        const cert_pem = try std.Io.Dir.cwd().readFileAlloc(config.io, anchor_path, fba.allocator(), .limited(8192));
+        const cert_pem = try std.Io.Dir.cwd().readFileAlloc(config.io, anchor_path, fba.allocator(), .limited(CA_PEM_BUF));
 
         var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
         const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
@@ -140,7 +156,7 @@ fn sendRequest(
 ) !void {
     const has_body = methodHasBody(method) and body != null;
 
-    var hbuf: [4096]u8 = undefined;
+    var hbuf: [HPACK_BLOCK_BUF]u8 = undefined;
     var enc = Http2.HpackEncoder.init(&hbuf);
     try enc.writeHeader(":method", Method.stringFromEnum(method));
     try enc.writeHeader(":path", path);
@@ -165,7 +181,7 @@ fn sendRequest(
 
     const hblock = enc.encoded();
 
-    var out: [8192]u8 = undefined;
+    var out: [FRAME_OUT_BUF]u8 = undefined;
     var n: usize = 0;
 
     @memcpy(out[n..][0..Http2.PREFACE.len], Http2.PREFACE);
@@ -177,7 +193,7 @@ fn sendRequest(
     n += putFrame(out[n..], Http2.FRAME_TYPE_HEADERS, headers_flags, 1, hblock);
     n += putWindowUpdate(out[n..], 1, WINDOW_INCREMENT);
 
-    var send_buf: [9 * 1024]u8 = undefined;
+    var send_buf: [H2_SEND_BUF]u8 = undefined;
     try writeAll(fd, conn.writeAppData(out[0..n], &send_buf));
 
     if (has_body) try sendBody(fd, conn, body.?);
@@ -220,11 +236,11 @@ fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.Client
     var acc_len: usize = 0;
     var rounds: usize = 0;
     while (!stream_done and rounds < 4096) : (rounds += 1) {
-        var rec_buf: [17 * 1024]u8 = undefined;
+        var rec_buf: [record.max_record_wire]u8 = undefined;
         const rec_len = try readRecordInto(fd, &rec_buf);
         if (rec_buf[0] != 23) continue; // application_data only
 
-        var dec: [17 * 1024]u8 = undefined;
+        var dec: [record.max_record_wire]u8 = undefined;
         const plain = try conn.readAppData(rec_buf[0..rec_len], &dec);
         if (acc_len + plain.len > acc.len) return error.BodyTooLarge;
         @memcpy(acc[acc_len..][0..plain.len], plain);
@@ -282,7 +298,7 @@ fn handleFrame(
 
             const block = try headerBlock(frame, payload);
             var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
-            var scratch: [16 * 1024]u8 = undefined;
+            var scratch: [FRAME_SCRATCH]u8 = undefined;
             const cnt = try hdec.decode(block, &hdrs, &scratch);
             for (hdrs[0..cnt]) |h| {
                 if (std.mem.eql(u8, h.name, ":status")) {

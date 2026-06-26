@@ -3,6 +3,19 @@
 
 const std = @import("std");
 
+/// SSE stream read buffer.
+const SSE_READ_BUF: usize = 4096;
+/// SSE event-name scratch buffer.
+const EVENT_NAME_SCRATCH: usize = 256;
+/// SSE event-id scratch buffer.
+const EVENT_ID_SCRATCH: usize = 256;
+/// SSE line scratch buffer.
+const LINE_SCRATCH: usize = 1024;
+/// SSE request build buffer.
+const REQUEST_BUILD_BUF: usize = 1024;
+/// SSE response head buffer.
+const RESPONSE_HEAD_BUF: usize = 4096;
+
 // --------------------------------------------------------- //
 
 /// A single Server-Sent Event.
@@ -36,7 +49,7 @@ pub const SseStream = struct {
     const Self = @This();
 
     fd: std.posix.fd_t,
-    read_buf: [4096]u8,
+    read_buf: [SSE_READ_BUF]u8,
     read_len: usize,
     read_pos: usize,
 
@@ -58,14 +71,14 @@ pub const SseStream = struct {
     /// - ?SseEvent
     pub fn next(self: *Self, buf: []u8) !?SseEvent {
         var data_len: usize = 0;
-        var event_scratch: [256]u8 = undefined;
+        var event_scratch: [EVENT_NAME_SCRATCH]u8 = undefined;
         var event_scratch_len: usize = 0;
-        var id_scratch: [256]u8 = undefined;
+        var id_scratch: [EVENT_ID_SCRATCH]u8 = undefined;
         var id_scratch_len: usize = 0;
         var retry: ?u32 = null;
         var has_data = false;
 
-        var line_scratch: [1024]u8 = undefined;
+        var line_scratch: [LINE_SCRATCH]u8 = undefined;
 
         while (true) {
             const maybe_line = try self.readLine(&line_scratch);
@@ -219,7 +232,7 @@ pub const SseClient = struct {
         const fd = tcp_stream.socket.handle;
         errdefer _ = std.posix.system.close(fd);
 
-        var req_buf: [1024]u8 = undefined;
+        var req_buf: [REQUEST_BUILD_BUF]u8 = undefined;
         const req = std.fmt.bufPrint(
             &req_buf,
             "GET {s} HTTP/1.1\r\n" ++
@@ -233,7 +246,7 @@ pub const SseClient = struct {
 
         fdWriteAll(fd, req) catch return error.ConnectionFailed;
 
-        var head_buf: [4096]u8 = undefined;
+        var head_buf: [RESPONSE_HEAD_BUF]u8 = undefined;
         var head_len: usize = 0;
         var header_end: usize = 0;
 

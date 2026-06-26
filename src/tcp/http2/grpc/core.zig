@@ -8,6 +8,12 @@ const Logger = @import("../../../logger/logger.zig").Logger;
 const parseTimeout = @import("timeout.zig").parseTimeout;
 const rc = @import("../../../utils/response_cache.zig");
 
+/// Reply HPACK and frame staging buffer for one streamed response pass.
+const reply_stage_scratch: usize = 4096;
+
+/// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
+const settings_decode_scratch: usize = 256;
+
 pub const GrpcStatus = status.GrpcStatus;
 
 /// Return the current wall-clock time in nanoseconds (CLOCK_REALTIME basis).
@@ -103,7 +109,7 @@ pub const GrpcContext = struct {
         if (self._hdr_sent) return;
 
         if (self._out) |out| {
-            var buf: [600]u8 = undefined;
+            var buf: [frame.headers_frame_scratch]u8 = undefined;
             const n = if (self._resp_gzip)
                 frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type)
             else
@@ -111,7 +117,7 @@ pub const GrpcContext = struct {
             out.append(buf[0..n]);
         } else {
             if (self._resp_gzip) {
-                var buf: [600]u8 = undefined;
+                var buf: [frame.headers_frame_scratch]u8 = undefined;
                 const n = frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type);
                 h2.fdWriteAll(self.fd, buf[0..n]) catch {};
             } else {
@@ -145,7 +151,7 @@ pub const GrpcContext = struct {
     /// On the streaming path headers and data are written under a single lock to prevent interleaving.
     pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
         if (self._resp_gzip and data.len > 0) {
-            const max_comp = data.len + 128;
+            const max_comp = data.len + frame.gzip_framing_headroom;
             if (std.heap.smp_allocator.alloc(u8, max_comp)) |comp_buf| {
                 if (frame.compressGrpcMessage(data, comp_buf)) |comp_len| {
                     self._sendDataFrame(content_type, comp_buf[0..comp_len], true);
@@ -192,7 +198,7 @@ pub const GrpcContext = struct {
         const status_code = self._grpc_status;
 
         if (self._out) |out| {
-            var buf: [600]u8 = undefined;
+            var buf: [frame.headers_frame_scratch]u8 = undefined;
             const n = if (self._hdr_sent)
                 frame.buildGrpcTrailer(&buf, self.stream_id, status_code, grpc_message)
             else
@@ -734,7 +740,7 @@ fn dispatchGrpcInline(
     // Hold the connection write lock across the whole reply only when a streaming
     // task may be writing concurrently, so frames are not interleaved.
     const need_mutex = conn_mutex.active_streaming.load(.acquire) > 0;
-    var stage_buf: [4096]u8 = undefined;
+    var stage_buf: [reply_stage_scratch]u8 = undefined;
     var stage = ReplyStage{ .fd = fd, .buf = &stage_buf };
 
     var ctx = GrpcContext{
@@ -889,7 +895,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     var hpack_dec = h2.HpackDecoder.init();
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |settings_encoded| {
         const trimmed = std.mem.trim(u8, settings_encoded, " ");
-        var decoded: [256]u8 = undefined;
+        var decoded: [settings_decode_scratch]u8 = undefined;
         const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(trimmed) catch 0;
         if (decoded_len > 0 and decoded_len <= decoded.len) {
             std.base64.url_safe_no_pad.Decoder.decode(decoded[0..decoded_len], trimmed) catch {};
@@ -961,7 +967,7 @@ fn serveGrpcLoop(
     opts: GrpcServeOpts,
     initial_last_stream: u31,
 ) !void {
-    const max_payload = opts.max_frame_size + 256;
+    const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
     // Read buffer holds at least one full frame (header + max payload) and is large enough
     // to batch several small frames per read().
     const reader_cap = @max(64 * 1024, max_payload + 9);
@@ -1269,7 +1275,7 @@ pub const GrpcMuxConn = struct {
     pub fn init(fd: std.posix.fd_t, opts: GrpcServeOpts) ?*GrpcMuxConn {
         const conn = std.heap.smp_allocator.create(GrpcMuxConn) catch return null;
 
-        const max_payload = opts.max_frame_size + 256;
+        const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
         const rcap = @max(32 * 1024, max_payload + 9);
         const rbuf = std.heap.smp_allocator.alloc(u8, rcap) catch {
             std.heap.smp_allocator.destroy(conn);
@@ -1551,7 +1557,7 @@ fn muxProcess(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcom
 
 /// The h2 frame loop over buffered bytes for a connection in the .h2 phase.
 fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
-    const max_payload = conn.opts.max_frame_size + 256;
+    const max_payload = conn.opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
 
     while (true) {
         const avail = conn.rend - conn.rstart;

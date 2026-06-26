@@ -19,6 +19,7 @@ const decodeChunkedInBuf = common.decodeChunkedInBuf;
 const parseGetFastPath = common.parseGetFastPath;
 const effectiveCacheEntries = common.effectiveCacheEntries;
 const MAX_FD = common.MAX_FD;
+const MAX_DRAIN_RECV = common.MAX_DRAIN_RECV;
 
 /// Max epoll events drained per epoll_wait call. 4096 reduces round-trips at
 /// high connection counts where many fds can be ready simultaneously.
@@ -406,7 +407,7 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     const fd = conn.fd;
 
     while (conn.drain > 0) {
-        const want = @min(conn.drain, @as(usize, 1 << 30));
+        const want = @min(conn.drain, MAX_DRAIN_RECV);
         const rc = linux.recvfrom(fd, conn.buf.ptr, want, linux.MSG.TRUNC, null, null);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
@@ -558,7 +559,7 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // frame, so a compressing handler (writeNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (config.compression) 2 * 1024 * 1024 else 512 * 1024;
+    const worker_stack: usize = if (config.compression) common.WORKER_STACK_COMPRESS else common.WORKER_STACK_DEFAULT;
 
     const worker = epollWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {

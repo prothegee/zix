@@ -7,6 +7,13 @@ const Request = @import("request.zig").Request;
 const rc = @import("../../utils/response_cache.zig");
 const compression = @import("../../utils/compression/compression.zig");
 
+/// Fast-path fixed response-header staging buffer. The 454 overhead estimate uses the same size.
+const FIXED_HEADER_BUF: usize = 512;
+/// SSE response header staging buffer.
+const SSE_HEADER_BUF: usize = 256;
+/// Per extra-header staging buffer.
+const EXTRA_HEADER_BUF: usize = 256;
+
 // --------------------------------------------------------- //
 
 pub const HttpHeader = struct {
@@ -159,7 +166,7 @@ pub const Response = struct {
         const date_value = self.date_cache orelse "";
 
         // Stage fixed headers into a 512-byte stack buffer.
-        var fixed: [512]u8 = undefined;
+        var fixed: [FIXED_HEADER_BUF]u8 = undefined;
         var offset: usize = 0;
 
         const status_line = Status.statusLine(self.status);
@@ -288,7 +295,7 @@ pub const Response = struct {
         const fd = self.fd;
         const date_value = self.date_cache orelse "";
 
-        var fixed: [256]u8 = undefined;
+        var fixed: [SSE_HEADER_BUF]u8 = undefined;
         var offset: usize = 0;
         const sse_hdr = "HTTP/1.1 200 Ok\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n";
         @memcpy(fixed[0..sse_hdr.len], sse_hdr);
@@ -302,7 +309,7 @@ pub const Response = struct {
 
         if (self.extra_buf) |extra| {
             for (extra[0..self.extra_len]) |h| {
-                var hbuf: [256]u8 = undefined;
+                var hbuf: [EXTRA_HEADER_BUF]u8 = undefined;
                 const s = std.fmt.bufPrint(&hbuf, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
                 fdWriteAll(fd, s) catch return error.BrokenPipe;
             }
@@ -451,7 +458,7 @@ pub const Response = struct {
             for (extra[0..self.extra_len]) |h| extra_bytes += h.name.len + h.value.len + 4;
         }
 
-        const total = 512 + extra_bytes + body_data.len;
+        const total = FIXED_HEADER_BUF + extra_bytes + body_data.len;
         const buf = self.allocator.alloc(u8, total) catch return self.send(body_data);
 
         const len = self.buildResponse(body_data, buf) orelse return self.send(body_data);
