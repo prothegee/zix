@@ -33,6 +33,10 @@ const URING_CQ_ENTRIES: u32 = 16 * 1024;
 /// Max CQEs drained per loop pass.
 const URING_CQE_BATCH: usize = 512;
 
+/// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
+/// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
+const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
+
 /// Initialize a worker ring with the single-issuer fast-path flags, falling back to a flagless ring
 /// when the kernel does not support them. Mirrors the zix.Http1 and gRPC ring init.
 fn initUringRing() !IoUring {
@@ -43,7 +47,7 @@ fn initUringRing() !IoUring {
             linux.IORING_SETUP_CQSIZE |
             linux.IORING_SETUP_CLAMP,
         .cq_entries = URING_CQ_ENTRIES,
-        .sq_thread_idle = 1000,
+        .sq_thread_idle = URING_SQ_THREAD_IDLE_MS,
     });
 
     return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
