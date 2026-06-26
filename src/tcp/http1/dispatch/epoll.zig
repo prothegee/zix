@@ -132,7 +132,7 @@ const ConnTable = struct {
 
 /// Accept every pending connection on listener_fd and register each in epfd.
 /// Level-triggered, so draining to EAGAIN guarantees no accept is missed.
-fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t) void {
+fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, busy_poll_us: u32) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -146,7 +146,7 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
-        setBusyPoll(conn_fd);
+        setBusyPoll(conn_fd, busy_poll_us);
         if (table.alloc(conn_fd) == null) {
             _ = linux.close(conn_fd);
             continue;
@@ -517,7 +517,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 
                 for (events[0..event_count]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd);
+                        acceptAll(&table, epfd, listener_fd, config.busy_poll_us);
                         continue;
                     }
 
