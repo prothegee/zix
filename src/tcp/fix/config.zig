@@ -24,6 +24,9 @@ pub const FixServerConfig = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
+    /// Per-connection send buffer size in bytes for the .URING dispatch model. The send half
+    /// of the per-connection footprint. No effect under the other dispatch models.
+    uring_send_buf_size: usize = 64 * 1024,
     /// Number of accept/event-loop workers.
     /// 0 (default) = cpu_count workers.
     /// Ignored by .ASYNC (always 1 accept thread).
@@ -107,6 +110,15 @@ test "zix fix: FixServerConfig kernel_backlog default" {
     const io = threaded.io();
     const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+}
+
+test "zix fix: FixServerConfig uring_send_buf_size default" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
 }
 
 test "zix fix: FixServerConfig heartbeat_timeout_ms defaults to zero" {
