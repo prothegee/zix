@@ -414,6 +414,8 @@ pub const FixContext = struct {
 pub const FixServeOpts = struct {
     /// Optional logger. When non-null, session() is called after each message processed.
     logger: ?*Logger = null,
+    /// Default HeartBtInt (seconds) echoed in the Logon response when the client omits tag 108.
+    default_heartbeat_secs: u32 = 30,
     /// Heartbeat timeout in milliseconds. 0 = disabled.
     /// When non-zero: after this interval with no incoming message, a TestRequest (35=1) is sent.
     /// If no response arrives within another interval, a Logout (35=5) is sent and the connection closes.
@@ -545,7 +547,9 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
         if (std.mem.eql(u8, msgtype, MsgType.Logon)) {
             @memcpy(peer_comp_id[0..sender.len], sender);
             peer_len = sender.len;
-            const hb_int = getField(fslice, .HeartBtInt) orelse "30";
+            var hb_buf: [8]u8 = undefined;
+            const hb_default = std.fmt.bufPrint(&hb_buf, "{d}", .{opts.default_heartbeat_secs}) catch "30";
+            const hb_int = getField(fslice, .HeartBtInt) orelse hb_default;
             const extra = [_]BuildField{
                 .{ .tag = .EncryptMethod, .value = "0" },
                 .{ .tag = .HeartBtInt, .value = hb_int },
@@ -697,7 +701,9 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
         if (std.mem.eql(u8, msgtype, MsgType.Logon)) {
             @memcpy(state.peer_comp_id[0..sender.len], sender);
             state.peer_len = sender.len;
-            const hb_int = getField(fslice, .HeartBtInt) orelse "30";
+            var hb_buf: [8]u8 = undefined;
+            const hb_default = std.fmt.bufPrint(&hb_buf, "{d}", .{opts.default_heartbeat_secs}) catch "30";
+            const hb_int = getField(fslice, .HeartBtInt) orelse hb_default;
             const extra = [_]BuildField{
                 .{ .tag = .EncryptMethod, .value = "0" },
                 .{ .tag = .HeartBtInt, .value = hb_int },
