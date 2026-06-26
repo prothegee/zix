@@ -7,6 +7,13 @@ const HandlerFn = core.HandlerFn;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 
+/// Initial slot count of the connection handoff queue before it doubles.
+const CONN_QUEUE_INIT_CAP: usize = 16;
+
+/// Auto pool sizing when config.pool_size is 0: max(floor, cpu * multiplier).
+const POOL_SIZE_FLOOR: usize = 10;
+const POOL_CPU_MULTIPLIER: usize = 2;
+
 // --------------------------------------------------------- //
 // POOL model
 
@@ -21,7 +28,7 @@ const ConnQueue = struct {
     fn push(self: *ConnQueue, stream: std.Io.net.Stream, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
+            const new_cap = if (self.buf.len == 0) CONN_QUEUE_INIT_CAP else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.Io.net.Stream, new_cap) catch {
                 self.mutex.unlock(io);
                 stream.close(io);
@@ -107,7 +114,7 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
     const io = config.io;
     const cpu = try std.Thread.getCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
-    const pool_count = if (config.pool_size == 0) @max(10, cpu * 2) else config.pool_size;
+    const pool_count = if (config.pool_size == 0) @max(POOL_SIZE_FLOOR, cpu * POOL_CPU_MULTIPLIER) else config.pool_size;
 
     logSystem(config, "listening on {s}:{d} ({d} accept, {d} pool)", .{ config.ip, config.port, worker_count, pool_count });
 
@@ -118,7 +125,7 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t| {
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = common.WORKER_STACK_DEFAULT },
             poolEntry,
             .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
         );
@@ -128,7 +135,7 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
     defer std.heap.smp_allocator.free(acc_threads);
     for (acc_threads) |*t| {
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 256 * 1024 },
+            .{ .stack_size = common.ACCEPT_STACK },
             acceptEntry,
             .{AcceptCtx{ .queue = &queue, .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog }},
         );
