@@ -118,7 +118,7 @@ pub fn runPool(cfg: TcpServerConfig, handler: HandlerFn) !void {
     const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t| {
-        t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, poolEntry, .{ &queue, io, handler, cfg.logger });
+        t.* = try std.Thread.spawn(.{ .stack_size = cfg.worker_stack_size_bytes }, poolEntry, .{ &queue, io, handler, cfg.logger });
     }
 
     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
