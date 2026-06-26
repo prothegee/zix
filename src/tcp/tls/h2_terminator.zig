@@ -14,6 +14,10 @@ const linux = std.os.linux;
 const posix = std.posix;
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
+const record = @import("../../tls/record.zig");
+
+/// Server handshake flight output staging buffer.
+const HANDSHAKE_FLIGHT_BUF: usize = 8192;
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -48,7 +52,7 @@ pub fn serveConnTls(
     ctx: *const Tls.Context,
     driver: anytype,
 ) !void {
-    var record_buf: [17 * 1024]u8 = undefined;
+    var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientHello (a plaintext handshake record carries the message in its body).
     const client_hello_rec = try readRecord(fd, &record_buf);
@@ -74,7 +78,7 @@ pub fn serveConnTls(
         return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, driver);
     }
 
-    var handshake_out: [8192]u8 = undefined;
+    var handshake_out: [HANDSHAKE_FLIGHT_BUF]u8 = undefined;
     const result = Tls.serverHandshake(hs_opts, client_hello_rec.body, &handshake_out) catch |err| {
         // no 1.3 offer -> the client is TLS 1.2 only. Honor the floor: refuse when min_version is
         // 1.3, else take the h2-over-1.2 path.
@@ -148,7 +152,7 @@ fn serveConnTls12(
     // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3).
     if (state.alpn != .H2) return error.AlpnNotH2;
 
-    var record_buf: [17 * 1024]u8 = undefined;
+    var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientKeyExchange (plaintext handshake record), copied out before record_buf is reused.
     const cke_rec = try readRecord(fd, &record_buf);
