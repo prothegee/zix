@@ -9,6 +9,17 @@ pub const PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// HTTP/2 frame header length in octets (RFC 7540 section 4.1): 3 length + 1 type + 1 flags + 4 stream id.
 pub const FRAME_HEADER_LEN: usize = 9;
 
+/// Slack added over the negotiated SETTINGS_MAX_FRAME_SIZE when sizing a read or
+/// staging buffer: covers the frame header plus small HPACK and control overhead.
+pub const FRAME_PAYLOAD_SLACK: usize = 256;
+
+/// Default initial flow-control window (RFC 7540 6.9.2). Also the per-step
+/// connection-level WINDOW_UPDATE increment (grant one default window of credit).
+pub const DEFAULT_WINDOW_SIZE: u32 = 65535;
+
+/// HPACK encode scratch for one response HEADERS block.
+pub const HPACK_ENCODE_SCRATCH: usize = 512;
+
 pub const FRAME_TYPE_DATA: u8 = 0x00;
 pub const FRAME_TYPE_HEADERS: u8 = 0x01;
 pub const FRAME_TYPE_PRIORITY: u8 = 0x02;
@@ -266,7 +277,7 @@ pub fn sendResponseEncoded(
     body: []const u8,
 ) !void {
     const hpack = @import("hpack.zig");
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [HPACK_ENCODE_SCRATCH]u8 = undefined;
     var enc = hpack.HpackEncoder.init(&hdr_buf);
 
     var status_str: [4]u8 = undefined;
