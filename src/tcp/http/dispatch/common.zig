@@ -301,6 +301,9 @@ pub const URING_CQ_ENTRIES: u32 = 16 * 1024;
 pub const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer: one coalesced send per request.
 pub const URING_SEND_BUF_SIZE: usize = 16 * 1024;
+/// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
+/// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
+pub const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
 
 /// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
 /// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
@@ -320,7 +323,7 @@ pub fn initUringRing() !std.os.linux.IoUring {
             linux.IORING_SETUP_CQSIZE |
             linux.IORING_SETUP_CLAMP,
         .cq_entries = URING_CQ_ENTRIES,
-        .sq_thread_idle = 1000,
+        .sq_thread_idle = URING_SQ_THREAD_IDLE_MS,
     });
 
     return std.os.linux.IoUring.init_params(URING_ENTRIES, &params) catch return std.os.linux.IoUring.init(URING_ENTRIES, 0);
