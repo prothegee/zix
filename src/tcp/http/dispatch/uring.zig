@@ -94,6 +94,8 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
         io: std.Io,
         arena: *std.heap.ArenaAllocator,
         recv_buf_size: usize,
+        /// Per-connection send buffer size, set from config.uring_send_buf_size.
+        send_buf_size: usize = URING_SEND_BUF_SIZE,
 
         const W = @This();
         const allocator = std.heap.smp_allocator;
@@ -211,7 +213,7 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
                 _ = lx.close(conn_fd);
                 return;
             };
-            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+            const send_buf = allocator.alloc(u8, w.send_buf_size) catch {
                 allocator.free(buf);
                 allocator.destroy(conn);
                 _ = lx.close(conn_fd);
@@ -352,6 +354,7 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
         .io = io,
         .arena = &arena,
         .recv_buf_size = cfg.max_recv_buf,
+        .send_buf_size = cfg.uring_send_buf_size,
     };
     worker.ring = initUringRing() catch return;
     defer worker.deinit();
