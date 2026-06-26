@@ -3,6 +3,11 @@
 
 const std = @import("std");
 
+/// WebSocket handshake response header buffer.
+const HANDSHAKE_HEADER_BUF: usize = 256;
+/// WebSocket handshake write buffer.
+const HANDSHAKE_WRITE_BUF: usize = 256;
+
 // --------------------------------------------------------- //
 
 const ws_len_max_7bit = 125;
@@ -206,7 +211,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
 /// Return:
 /// - !void
 pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void {
-    var hdr_buf: [256]u8 = undefined;
+    var hdr_buf: [HANDSHAKE_HEADER_BUF]u8 = undefined;
     const response = try std.fmt.bufPrint(
         &hdr_buf,
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -215,7 +220,7 @@ pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void 
             "Sec-WebSocket-Accept: {s}\r\n\r\n",
         .{accept},
     );
-    var write_buf: [256]u8 = undefined;
+    var write_buf: [HANDSHAKE_WRITE_BUF]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
     try writer.interface.writeAll(response);
     try writer.interface.flush();
