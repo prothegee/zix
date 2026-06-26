@@ -4,6 +4,9 @@ const std = @import("std");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
 
+/// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
+const SETTINGS_DECODE_SCRATCH: usize = 256;
+
 // --------------------------------------------------------- //
 
 /// HTTP/2 handler function type. Called once per completed h2 stream.
@@ -261,7 +264,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     var hpack_dec = hpack.HpackDecoder.init();
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
         const trimmed = std.mem.trim(u8, b64, " ");
-        var decoded: [256]u8 = undefined;
+        var decoded: [SETTINGS_DECODE_SCRATCH]u8 = undefined;
         const dlen = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(trimmed) catch 0;
         if (dlen > 0 and dlen <= decoded.len) {
             std.base64.url_safe_no_pad.Decoder.decode(decoded[0..dlen], trimmed) catch {};
@@ -302,7 +305,7 @@ fn serveH2cLoop(
     opts: ServeOpts,
     initial_last_stream: u31,
 ) !void {
-    const max_payload = opts.max_frame_size + 256;
+    const max_payload = opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
     const payload_buf = try std.heap.smp_allocator.alloc(u8, max_payload);
     defer std.heap.smp_allocator.free(payload_buf);
 
@@ -339,7 +342,7 @@ fn serveH2cLoop(
                     }
                 }
                 try frame.sendSettingsAck(fd);
-                try frame.sendWindowUpdate(fd, 0, 65535);
+                try frame.sendWindowUpdate(fd, 0, frame.DEFAULT_WINDOW_SIZE);
             },
 
             frame.FRAME_TYPE_WINDOW_UPDATE => {},
