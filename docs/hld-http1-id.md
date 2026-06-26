@@ -183,7 +183,7 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
     max_recv_buf:       usize = 16 * 1024,     // buffer per-connection (.EPOLL saja, lihat catatan)
     ws_recv_buf:        usize = 0,             // buffer WebSocket .EPOLL, 0 = max_recv_buf
-    compression:          bool  = false,        // enable negosiasi gzip, opt-in via core.writeNegotiated (.EPOLL/.URING)
+    compression:          bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via core.writeNegotiated (.EPOLL/.URING)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
     compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
     max_headers:        u8    = 16,            // informasional: batas parse adalah core.MAX_HEADERS
