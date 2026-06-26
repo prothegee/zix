@@ -559,7 +559,7 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // frame, so a compressing handler (writeNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (config.compression) common.WORKER_STACK_COMPRESS else common.WORKER_STACK_DEFAULT;
+    const worker_stack: usize = if (config.compression) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
 
     const worker = epollWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {
