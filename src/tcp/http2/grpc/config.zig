@@ -31,6 +31,9 @@ pub const GrpcServerConfig = struct {
     /// 0 (default) = max(10, cpu_count * 2).
     /// Ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
+    /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
     /// Maximum concurrent h2 streams per connection.
     max_streams: usize = 16,
     /// MAX_FRAME_SIZE setting sent to clients (bytes).
@@ -39,6 +42,11 @@ pub const GrpcServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
+    /// Per-connection read buffer floor in bytes (.EPOLL / .URING). The reader is sized to the
+    /// larger of this and one max frame, so a larger floor cuts read() and compaction for big frames.
+    conn_read_buf_min_bytes: usize = 64 * 1024,
+    /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
+    tls_write_buf_initial_bytes: usize = 16 * 1024,
     /// https - opt-in. When non-null the server serves gRPC over TLS (zix.Tls, ALPN h2) instead of
     /// h2c cleartext. The TLS path is a gated per-connection terminator in front of the existing h2c
     /// gRPC engine, so the cleartext dispatch models are untouched. The context carries the cert /
@@ -117,6 +125,9 @@ test "zix grpc: GrpcServerConfig worker and pool defaults to zero" {
     const cfg = GrpcServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083 };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.conn_read_buf_min_bytes);
+    try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.tls_write_buf_initial_bytes);
 }
 
 test "zix grpc: GrpcServerConfig stream and body defaults" {
