@@ -2,6 +2,7 @@
 // Uses a raw TCP socket so the exact Accept-Encoding is under test control (the
 // std-backed Http.Client injects its own Accept-Encoding: gzip, which would mask
 // deflate and identity negotiation). For /data it checks that:
+//   - Accept-Encoding: br      -> Content-Encoding: br, body decodes to the original
 //   - Accept-Encoding: gzip    -> Content-Encoding: gzip, body decodes to the original
 //   - Accept-Encoding: deflate -> Content-Encoding: deflate, body decodes to the original
 //   - no Accept-Encoding       -> no Content-Encoding, body is the original
@@ -14,6 +15,7 @@ const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 const flate = zix.utils.compression.flate;
+const brotli = zix.utils.compression.brotli;
 
 const WAIT_MS: u64 = 5000;
 const EXPECTED_PREFIX: []const u8 = "zix response compression demo";
@@ -58,6 +60,17 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     const alloc = arena.allocator();
 
     var resp_buf: [8192]u8 = undefined;
+
+    // brotli: preferred when offered, compressed, decodes back to the original.
+    {
+        const resp = try request(io, port, "/data", "br", &resp_buf);
+        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        const enc = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
+        if (!std.mem.eql(u8, enc, "br")) return error.WrongEncoding;
+
+        const restored = try brotli.decompressBrotliAlloc(alloc, bodyOf(resp), 1 << 20);
+        if (!std.mem.startsWith(u8, restored, EXPECTED_PREFIX)) return error.BadRoundtrip;
+    }
 
     // gzip: compressed, decodes back to the original.
     {

@@ -8,13 +8,14 @@
 //!   transport-agnostic and know nothing about HTTP.
 //! - gRPC does NOT use this facade. It runs its own grpc-encoding per-message
 //!   negotiation, a different protocol layer, and only reuses the flate codec.
-//! - Today the producible set is gzip plus identity. deflate and brotli are listed in
-//!   the Encoding enum (so they parse and can be forbidden via q=0). brotli is not yet
-//!   produced, pending its codec, and returns error.UnsupportedEncoding from encode.
+//! - The producible set is brotli, gzip, deflate, plus identity. Each has its own codec
+//!   (brotli.zig, flate.zig); the negotiation here picks one against the client's
+//!   Accept-Encoding and the rest of the policy (size floor, already-compressed types).
 
 const std = @import("std");
 
 pub const flate = @import("flate.zig");
+pub const brotli = @import("brotli.zig");
 
 /// Compression effort, forwarded to the codec.
 pub const Level = flate.Level;
@@ -24,10 +25,11 @@ pub const Level = flate.Level;
 pub const min_size_default: usize = 256;
 
 /// The codings this engine can actually produce, in server-preference order. identity
-/// is always an implicit fallback and is not listed here. gzip is preferred over
-/// deflate (broader, less ambiguous client support). brotli extends this list when
-/// its codec lands.
-pub const supported_default = [_]Encoding{ .GZIP, .DEFLATE };
+/// is always an implicit fallback and is not listed here. gzip leads (broad support,
+/// and the in-tree brotli encoder is not yet competitive with gzip on small bodies),
+/// then deflate, then brotli. So brotli is served when the client prefers it (a higher
+/// q, or br as the only offered coding), while gzip stays the default at equal q.
+pub const supported_default = [_]Encoding{ .GZIP, .DEFLATE, .BR };
 
 /// An HTTP content coding.
 pub const Encoding = enum {
@@ -260,13 +262,12 @@ fn startsWithIgnoreCase(haystack: []const u8, prefix: []const u8) bool {
 ///
 /// Return:
 /// - []u8 (owned, free with the same allocator. For identity it is a copy of data)
-/// - error.UnsupportedEncoding if the coding has no codec yet (br)
 pub fn encode(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8, level: Level) ![]u8 {
     return switch (encoding) {
         .IDENTITY => allocator.dupe(u8, data),
         .GZIP => flate.compressGzipAlloc(allocator, data, level),
         .DEFLATE => flate.compressDeflateAlloc(allocator, data, level),
-        .BR => error.UnsupportedEncoding,
+        .BR => brotli.compressBrotliAlloc(allocator, data, level),
     };
 }
 
@@ -280,13 +281,12 @@ pub fn encode(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8
 ///
 /// Return:
 /// - []u8 (owned, free with the same allocator)
-/// - error.UnsupportedEncoding if the coding has no codec yet (br)
 pub fn decode(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8, max_out: usize) ![]u8 {
     return switch (encoding) {
         .IDENTITY => allocator.dupe(u8, data),
         .GZIP => flate.decompressGzipAlloc(allocator, data, max_out),
         .DEFLATE => flate.decompressDeflateAlloc(allocator, data, max_out),
-        .BR => error.UnsupportedEncoding,
+        .BR => brotli.decompressBrotliAlloc(allocator, data, max_out),
     };
 }
 
@@ -456,13 +456,26 @@ test "encode then decode deflate roundtrips" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "encode: brotli is not yet producible" {
-    try testing.expectError(error.UnsupportedEncoding, encode(testing.allocator, .BR, "x", .DEFAULT));
+test "encode then decode brotli roundtrips" {
+    const original = "facade roundtrip over the brotli codec, repeated for a real match. " ++
+        "facade roundtrip over the brotli codec, repeated for a real match.";
+
+    const packed_bytes = try encode(testing.allocator, .BR, original, .DEFAULT);
+    defer testing.allocator.free(packed_bytes);
+
+    const restored = try decode(testing.allocator, .BR, packed_bytes, 1024);
+    defer testing.allocator.free(restored);
+
+    try testing.expectEqualStrings(original, restored);
 }
 
-test "negotiate: supported_default produces gzip and deflate, gzip preferred" {
+test "negotiate: supported_default leads with gzip, brotli when the client prefers it" {
+    try testing.expectEqual(Encoding.BR, negotiate("br", &supported_default).?);
     try testing.expectEqual(Encoding.DEFLATE, negotiate("deflate", &supported_default).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip", &supported_default).?);
-    try testing.expectEqual(Encoding.GZIP, negotiate("gzip, deflate", &supported_default).?);
-    try testing.expectEqual(Encoding.DEFLATE, negotiate("gzip;q=0, deflate", &supported_default).?);
+    // equal q: gzip wins on server preference order.
+    try testing.expectEqual(Encoding.GZIP, negotiate("gzip, deflate, br", &supported_default).?);
+    // the client can still steer to brotli with a higher q or by forbidding gzip.
+    try testing.expectEqual(Encoding.BR, negotiate("gzip;q=0.5, br;q=1", &supported_default).?);
+    try testing.expectEqual(Encoding.BR, negotiate("gzip;q=0, deflate;q=0, br", &supported_default).?);
 }
