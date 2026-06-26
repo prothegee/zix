@@ -25,6 +25,10 @@ pub const HttpServerConfig = struct {
     kernel_backlog: u31 = 1024 * 4,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
     max_recv_buf: usize = 1024 * 4,
+    /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
+    /// half of the per-connection footprint (max_recv_buf covers recv). No effect under
+    /// the other dispatch models.
+    uring_send_buf_size: usize = 16 * 1024,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
     /// brotli). Default false. Compression spends CPU to shrink the body, which only
     /// pays off over a real network, so leaving it off keeps the perf gate untouched.
@@ -99,3 +103,11 @@ pub const HttpServerConfig = struct {
     /// Caller owns the Logger and must ensure it outlives the server.
     logger: ?*Logger = null,
 };
+
+test "zix http: HttpServerConfig uring_send_buf_size default" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080 };
+    try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
+}
