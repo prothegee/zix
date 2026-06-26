@@ -6,10 +6,11 @@ const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
 
-const WRITE_BUF_SIZE: usize = 64 * 1024;
-
 /// Stack buffer for formatting one log line before it is written.
 const LINE_BUF_SIZE: usize = 4096;
+
+/// Stack buffer for formatting one system() message before it is written.
+const MSG_BUF_SIZE: usize = 2048;
 
 const Timestamp = struct {
     date: [10]u8,
@@ -91,6 +92,8 @@ pub const Logger = struct {
         save_min_level: Level = .INFO,
         /// Lines per file before rotating to the next sequence number.
         max_lines: u64 = 1_000_000,
+        /// File write-buffer size in bytes. Larger batches more log lines per write() to disk.
+        write_buf_size: usize = 64 * 1024,
     };
 
     // --------------------------------------------------------- //
@@ -133,7 +136,7 @@ pub const Logger = struct {
             .allocator = allocator,
         };
         if (config.save_path.len > 0) {
-            self.buf = try allocator.alloc(u8, WRITE_BUF_SIZE);
+            self.buf = try allocator.alloc(u8, config.write_buf_size);
         }
         return self;
     }
@@ -549,7 +552,7 @@ pub const Logger = struct {
 
         const timestamp = getTimestamp();
 
-        var msg_buf: [2048]u8 = undefined;
+        var msg_buf: [MSG_BUF_SIZE]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
@@ -583,6 +586,11 @@ test "zix test: Logger init and deinit, no file" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{});
     defer logger.deinit();
+}
+
+test "zix test: Logger.Config write_buf_size default" {
+    const cfg = Logger.Config{};
+    try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.write_buf_size);
 }
 
 test "zix test: Logger system call below min_level is silent" {
