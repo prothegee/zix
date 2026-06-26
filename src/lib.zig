@@ -133,6 +133,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
+    std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
     std.testing.refAllDecls(@import("utils/compression/compression.zig"));
 
     // # zix.Udp
