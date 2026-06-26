@@ -88,7 +88,7 @@ pub const MuxConn = struct {
         const a = std.heap.smp_allocator;
         const conn = a.create(MuxConn) catch return null;
 
-        const max_payload = opts.max_frame_size + 256;
+        const max_payload = opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
         const rcap = @max(32 * 1024, max_payload + 9);
         const rbuf = a.alloc(u8, rcap) catch {
             a.destroy(conn);
@@ -268,7 +268,7 @@ fn resumeAll(conn: *MuxConn) void {
 
 /// Write the response HEADERS frame (status, content-type, optional content-encoding, content-length).
 fn sendRespHeaders(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, content_length: usize, end_stream: bool) void {
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [frame.HPACK_ENCODE_SCRATCH]u8 = undefined;
     var enc = hpack.HpackEncoder.init(&hdr_buf);
 
     var status_str: [4]u8 = undefined;
@@ -401,7 +401,7 @@ fn muxProcess(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 
 /// The h2 frame loop over buffered bytes for a connection in the .h2 phase.
 fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
-    const max_payload = conn.opts.max_frame_size + 256;
+    const max_payload = conn.opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
 
     while (true) {
         const avail = conn.rend - conn.rstart;
@@ -442,7 +442,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     }
                 }
                 frame.sendSettingsAck(conn.fd) catch {};
-                frame.sendWindowUpdate(conn.fd, 0, 65535) catch {};
+                frame.sendWindowUpdate(conn.fd, 0, frame.DEFAULT_WINDOW_SIZE) catch {};
             },
 
             frame.FRAME_TYPE_WINDOW_UPDATE => {
