@@ -1,5 +1,6 @@
 //! zix http1 server configuration
 
+const std = @import("std");
 const DispatchModel = @import("../config.zig").DispatchModel;
 const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
@@ -24,6 +25,16 @@ pub const Http1ServerConfig = struct {
     /// give WS connections more room to accumulate pipelined frames without
     /// forcing a compact+re-read on every fill.
     ws_recv_buf: usize = 0,
+    /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
+    /// half of the per-connection footprint (max_recv_buf covers recv). A response larger
+    /// than this grows the buffer up to an internal ceiling so it still leaves as one
+    /// on-ring send. No effect under the other dispatch models.
+    uring_send_buf_size: usize = 16 * 1024,
+    /// Warm idle-connection pool floor for the .URING dispatch model (A2): the minimum
+    /// number of closed connections kept warm (buffers resident) per worker when otherwise
+    /// idle, so a trickle of new connections skips the allocator. The effective warm cap is
+    /// max(live_count, this). No effect under the other dispatch models.
+    uring_idle_pool_floor: usize = 64,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
     /// brotli). Default false. Compression spends CPU to shrink the body, which only
     /// pays off over a real network: on a loopback benchmark it is a pure CPU add, so
@@ -90,3 +101,12 @@ pub const Http1ServerConfig = struct {
     /// - Caller owns the Logger and must ensure it outlives the server.
     logger: ?*Logger = null,
 };
+
+test "zix http1: Http1ServerConfig URING knob defaults" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
+    try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
+    try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+}
