@@ -17,24 +17,31 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL
 
 // --------------------------------------------------------- //
 
-// A body above COMPRESSION_MIN_SIZE and repetitive enough to compress well.
-const BODY: []const u8 =
+// One paragraph of the demo body. brotli, gzip, and deflate all carry a fixed
+// per-response header, so a body only shrinks once it clears that overhead. The
+// paragraph is repeated below so every coding (brotli included) wins on the wire.
+const PARAGRAPH: []const u8 =
     \\zix response compression demo. This body is served through
     \\Response.sendNegotiated, which reads the request Accept-Encoding header and
-    \\compresses with gzip or deflate when the client accepts a coding, the body
-    \\clears the size floor, and the compressed result is smaller than the original.
-    \\Repetitive text like this compresses well, so the wire payload shrinks while the
-    \\handler stays a single sendNegotiated call. Without a matching Accept-Encoding
-    \\the very same bytes are sent uncompressed.
+    \\compresses with brotli, gzip, or deflate when the client accepts a coding, the
+    \\body clears the size floor, and the compressed result is smaller than the
+    \\original. Repetitive text like this compresses well, so the wire payload shrinks
+    \\while the handler stays a single sendNegotiated call. Without a matching
+    \\Accept-Encoding the very same bytes are sent uncompressed.
 ;
+
+// The repeated paragraphs make the body comfortably compressible for every coding.
+const BODY: []const u8 = PARAGRAPH ++ "\n\n" ++ PARAGRAPH ++ "\n\n" ++ PARAGRAPH;
 
 // --------------------------------------------------------- //
 
 // curl usage: curl --compressed -v "http://localhost:9059/data"
+//   (or) curl -H "Accept-Encoding: br" -v "http://localhost:9059/data"
 //   (or) curl -H "Accept-Encoding: gzip" -v "http://localhost:9059/data"
 //   (or) curl -H "Accept-Encoding: deflate" -v "http://localhost:9059/data"
-// sendNegotiated picks gzip or deflate per the client, or identity when neither is
-// accepted, and sets Content-Encoding plus Vary: Accept-Encoding when it compresses.
+// sendNegotiated picks gzip, deflate, or brotli per the client (gzip leads at equal
+// quality, brotli when the client asks for it), or identity when none is accepted, and
+// sets Content-Encoding plus Vary: Accept-Encoding when it compresses.
 pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = ctx;
     if (req.method() != .GET) {
