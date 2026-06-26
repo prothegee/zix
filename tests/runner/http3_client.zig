@@ -338,7 +338,10 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
 
     var initial_pkt: [1600]u8 = undefined;
     const initial = try protection.sealInitial(&initial_pkt, initial_client, dcid, scid, 0, init_payload[0..pp]);
-    try sock.send(io, server, initial);
+
+    // First send may hit an unbound server socket. A failure here is not fatal, the retransmit loop
+    // below resends the Initial until the server answers or the budget is spent.
+    sock.send(io, server, initial) catch {};
 
     // Receive ServerHello (Initial) then the Handshake flight, deriving keys as each arrives.
     var hs_keys: keyschedule.HandshakeKeys = undefined;
@@ -346,10 +349,26 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
     var have_sh = false;
     var have_app = false;
 
-    var attempts: usize = 0;
-    while ((!have_sh or !have_app) and attempts < 16) : (attempts += 1) {
+    var init_pn: u32 = 0;
+    var sends: usize = 1;
+    while (!have_app) {
         var rbuf: [2048]u8 = undefined;
-        const msg = sock.receiveTimeout(io, &rbuf, recvTimeout()) catch break;
+        const msg = sock.receiveTimeout(io, &rbuf, handshakeTimeout()) catch {
+            // No response yet. The server's UDP socket may not be bound (there is no accept to poll),
+            // or a packet was lost under load. Retransmit the Initial with a fresh packet number, the
+            // QUIC reliability the handshake depends on, until the budget is spent.
+            if (sends >= 25) break;
+            sends += 1;
+            init_pn += 1;
+
+            // A send may report a stale ECONNREFUSED (ICMP port-unreachable queued before the
+            // server bound its UDP socket). That is transient, keep retransmitting until the budget
+            // is spent rather than giving up on the first refusal.
+            var rt_pkt: [1600]u8 = undefined;
+            const rt = protection.sealInitial(&rt_pkt, initial_client, dcid, scid, init_pn, init_payload[0..pp]) catch continue;
+            sock.send(io, server, rt) catch continue;
+            continue;
+        };
         const data = msg.data;
         if (data.len == 0 or data[0] & 0x80 == 0) continue;
 
@@ -509,4 +528,10 @@ pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []co
 
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(3000), .clock = .awake } };
+}
+
+// Per-attempt wait for a handshake packet. Short enough that the Initial is retransmitted
+// promptly when the first send is lost, the retransmit loop spends at most 25 of these.
+fn handshakeTimeout() std.Io.Timeout {
+    return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(600), .clock = .awake } };
 }

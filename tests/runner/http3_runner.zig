@@ -16,7 +16,7 @@ const http3_client = @import("http3_client.zig");
 
 const SERVER_IP: []const u8 = "127.0.0.1";
 const SERVER_PORT: u16 = 9063;
-const WAIT_MS: i64 = 600;
+const WAIT_MS: i64 = 1200;
 
 // --------------------------------------------------------- //
 

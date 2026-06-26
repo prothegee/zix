@@ -8,6 +8,12 @@
 //!   ChaCha20-Poly1305 are additive later.
 //! - Enforces the record-size limit (record_overflow) and maps AEAD open failure to
 //!   bad_record_mac (RFC 8446 5.2).
+//! - Throughput depends on the BUILD CPU target. std.crypto selects the AES-GCM backend at comptime:
+//!   the hardware path needs the `aes` (AES-NI) and `pclmul` (GHASH carry-less multiply) features. A
+//!   target without them (`x86_64_v3` does NOT include them, they are separate features) compiles the
+//!   software fallback, which is about 40x slower (87 MB/s vs 3742 MB/s on one core). Build with a
+//!   target that has them, e.g. `-Dcpu=x86_64_v3+aes+pclmul` or `-Dcpu=native`, for any TLS that
+//!   moves real volume (rnd/0.5.x/issue-tls-software-aes.md).
 
 const std = @import("std");
 

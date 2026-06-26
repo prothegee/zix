@@ -73,6 +73,8 @@ TLS 1.2 jadi floor karena RFC 5246 tidak deprecated dan masih banyak dipakai. Su
 
 Tidak ada finite-field DHE dan tidak ada RSA key exchange, jadi kekuatan key-exchange ditentukan sepenuhnya oleh curve ECDHE, bukan file dhparam. Certificate adalah ECDSA P-256, Ed25519, atau RSA: ECDSA dan Ed25519 menandatangani di kedua versi, sementara certificate RSA menandatangani CertificateVerify TLS 1.3 dengan `rsa_pss_rsae_sha256` sehingga membutuhkan TLS 1.3 (jalur 1.2 ECDSA-only). RSA-2048 adalah minimum dan ECDSA P-256 tetap default (ADR-048).
 
+Build note (throughput record): AES-GCM berjalan di atas `std.crypto`, yang memilih backend hardware atau software saat comptime dari BUILD CPU target. Jalur hardware membutuhkan fitur `aes` (AES-NI) dan `pclmul` (GHASH carry-less multiply). Target tanpa keduanya meng-compile software fallback, yang sekitar 40x lebih lambat (level `x86_64_v3` TIDAK menyertakan keduanya, itu fitur terpisah). Untuk deployment yang melayani TLS volume nyata, build dengan target yang memilikinya, misalnya `-Dcpu=x86_64_v3+aes+pclmul` atau `-Dcpu=native` (di aarch64 ekuivalennya `+aes`).
+
 ## Server Configuration: Tls.Context
 
 Server memasang TLS via pointer, persis seperti logger:

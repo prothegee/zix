@@ -73,6 +73,8 @@ TLS 1.2 is the floor because RFC 5246 is not deprecated and is still widely depl
 
 There is no finite-field DHE and no RSA key exchange, so key-exchange strength is governed entirely by the ECDHE curve, not a dhparam file. The certificate is ECDSA P-256, Ed25519, or RSA: ECDSA and Ed25519 sign on either version, while an RSA certificate signs the TLS 1.3 CertificateVerify with `rsa_pss_rsae_sha256` and therefore requires TLS 1.3 (the 1.2 path is ECDSA-only). RSA-2048 is the minimum and ECDSA P-256 is the default (ADR-048).
 
+Build note (record throughput): AES-GCM runs on `std.crypto`, which picks the hardware or software backend at comptime from the BUILD CPU target. The hardware path needs both the `aes` (AES-NI) and `pclmul` (GHASH carry-less multiply) features. A target without them compiles the software fallback, which is roughly 40x slower (the `x86_64_v3` level does NOT include them, they are separate features). For any deployment that serves real TLS volume, build with a target that has them, for example `-Dcpu=x86_64_v3+aes+pclmul` or `-Dcpu=native` (on aarch64 the equivalent is `+aes`).
+
 ## Server Configuration: Tls.Context
 
 The server attaches TLS by pointer, exactly like the logger:

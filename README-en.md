@@ -252,7 +252,7 @@ __*3. Five selectable dispatch models:*__
 - EPOLL (shared-nothing: each worker owns a SO_REUSEPORT listener + epoll instance, level-triggered, no shared queue): Linux-only, best for high connection counts.
 - URING (shared-nothing io_uring: same thread-per-core topology as EPOLL, but completion-based so most syscall transitions are batched away): Linux-only.
 
-> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, and Fix implement all five natively on Linux. Http2 has no native epoll or uring path and folds to POOL.
+> Concurrency strategy is a deliberate config choice, not a implementation default. Http1, Http, Grpc, Fix, and Http2 implement all five natively on Linux.
 
 <br>
 
@@ -755,7 +755,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring workers, Linux-only):**
 
-Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, ADR-041, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL`. Non-Linux builds fall back to `.POOL`.
+Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, ADR-041, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, and `zix.Http2`. The `zix.Tcp` per-connection handler has no native ring and folds to `.POOL` / `.EPOLL`. Non-Linux builds fall back to `.POOL`.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{

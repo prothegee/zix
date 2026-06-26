@@ -4,6 +4,7 @@ const frame_mod = @import("frame.zig");
 const hpack_mod = @import("hpack.zig");
 const core_mod = @import("core.zig");
 const config_mod = @import("config.zig");
+const mux_mod = @import("mux.zig");
 
 // --------------------------------------------------------- //
 
@@ -32,6 +33,10 @@ pub const encodeFrameHeader = frame_mod.encodeFrameHeader;
 pub const fdWriteAll = frame_mod.fdWriteAll;
 pub const recvExact = frame_mod.recvExact;
 pub const sendResponse = frame_mod.sendResponse;
+pub const sendResponseEncoded = frame_mod.sendResponseEncoded;
+/// Flow-controlled response send for large, caller-owned bodies (paces by WINDOW_UPDATE). See
+/// mux.sendResponseStream: the body must outlive the stream.
+pub const sendResponseStream = mux_mod.sendResponseStream;
 pub const sendSettings = frame_mod.sendSettings;
 pub const sendSettingsAck = frame_mod.sendSettingsAck;
 pub const sendPingAck = frame_mod.sendPingAck;
