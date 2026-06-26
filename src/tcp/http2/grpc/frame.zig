@@ -11,6 +11,16 @@ pub const grpc_prefix_len: usize = 5;
 /// HTTP/2 frame header length in octets (re-exported from the h2 frame module).
 const FRAME_HEADER_LEN = h2.FRAME_HEADER_LEN;
 
+/// HPACK scratch for the comptime cached :status response HEADERS block.
+const status_block_scratch: usize = 128;
+
+/// Full HEADERS or trailer frame send buffer: the HPACK block plus the frame header.
+pub const headers_frame_scratch: usize = 600;
+
+/// Output headroom over the input length when gzip-compressing a gRPC message:
+/// covers the gzip header, trailer, and the length-prefix so the result never overflows.
+pub const gzip_framing_headroom: usize = 128;
+
 /// gRPC 5-byte length-prefix header.
 pub const GrpcPrefix = struct {
     compress: bool,
@@ -38,7 +48,7 @@ pub const GRPC_CONTENT_TYPE = "application/grpc+proto";
 
 /// Comptime HPACK block for the initial response HEADERS (:status 200, content-type proto).
 const HEADERS_PROTO_BLOCK = blk: {
-    var buf: [128]u8 = undefined;
+    var buf: [status_block_scratch]u8 = undefined;
     var enc = h2.HpackEncoder.init(&buf);
     enc.writeHeader(":status", "200") catch unreachable;
     enc.writeHeader("content-type", GRPC_CONTENT_TYPE) catch unreachable;
@@ -85,7 +95,7 @@ pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) usi
         return emitCachedHeaders(out, stream_id, h2.FLAG_END_HEADERS, &HEADERS_PROTO_BLOCK);
     }
 
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [h2.HPACK_ENCODE_SCRATCH]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     hpack_enc.writeHeader(":status", "200") catch return 0;
     hpack_enc.writeHeader("content-type", content_type) catch return 0;
@@ -130,7 +140,7 @@ pub fn buildGrpcDataHeader(out: []u8, stream_id: u31, msg_len: usize, compress: 
 /// Return:
 /// - bytes written into out.
 pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8) usize {
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [h2.HPACK_ENCODE_SCRATCH]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     hpack_enc.writeHeader(":status", "200") catch return 0;
     hpack_enc.writeHeader("content-type", content_type) catch return 0;
@@ -230,7 +240,7 @@ pub fn buildGrpcTrailer(out: []u8, stream_id: u31, grpc_status: u8, grpc_message
         return emitCachedHeaders(out, stream_id, h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM, &TRAILER_OK_BLOCK);
     }
 
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [h2.HPACK_ENCODE_SCRATCH]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     var status_str: [4]u8 = undefined;
     const status_s = std.fmt.bufPrint(&status_str, "{d}", .{grpc_status}) catch "0";
@@ -255,7 +265,7 @@ pub fn buildGrpcTrailer(out: []u8, stream_id: u31, grpc_status: u8, grpc_message
 /// Return:
 /// - bytes written into out.
 pub fn buildGrpcError(out: []u8, stream_id: u31, grpc_status: u8, grpc_message: []const u8) usize {
-    var hdr_buf: [512]u8 = undefined;
+    var hdr_buf: [h2.HPACK_ENCODE_SCRATCH]u8 = undefined;
     var hpack_enc = h2.HpackEncoder.init(&hdr_buf);
     hpack_enc.writeHeader(":status", "200") catch return 0;
     hpack_enc.writeHeader("content-type", "application/grpc+proto") catch return 0;
@@ -279,7 +289,7 @@ pub fn buildGrpcError(out: []u8, stream_id: u31, grpc_status: u8, grpc_message: 
 
 /// Send initial response HEADERS (:status 200, content-type). No END_STREAM.
 pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const u8) !void {
-    var buf: [600]u8 = undefined;
+    var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcHeaders(&buf, stream_id, content_type);
     try h2.fdWriteAll(fd, buf[0..n]);
 }
@@ -295,14 +305,14 @@ pub fn sendGrpcData(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !vo
 
 /// Send trailer HEADERS (grpc-status, grpc-message). FLAG_END_STREAM.
 pub fn sendGrpcTrailer(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
-    var buf: [600]u8 = undefined;
+    var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcTrailer(&buf, stream_id, grpc_status, grpc_message);
     try h2.fdWriteAll(fd, buf[0..n]);
 }
 
 /// Send trailers-only error response (no DATA frame). Includes :status 200 and content-type per gRPC spec.
 pub fn sendGrpcError(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
-    var buf: [600]u8 = undefined;
+    var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcError(&buf, stream_id, grpc_status, grpc_message);
     try h2.fdWriteAll(fd, buf[0..n]);
 }
