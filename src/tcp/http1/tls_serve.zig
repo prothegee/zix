@@ -22,6 +22,7 @@ const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
+const record = @import("../../tls/record.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const HandlerFn = core.HandlerFn;
@@ -30,6 +31,24 @@ const content_type_change_cipher_spec: u8 = 20;
 const content_type_alert: u8 = 21;
 const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
+
+/// Server handshake flight output staging (TLS 1.3 and TLS 1.2 server flights).
+const server_flight_out_size: usize = 8 * 1024;
+
+/// HelloRetryRequest output staging (RFC 8446 4.1.4).
+const hello_retry_out_size: usize = 1024;
+
+/// Incoming ClientKeyExchange body copy (TLS 1.2 path).
+const client_key_exchange_size: usize = 256;
+
+/// Outgoing server Finished output (TLS 1.2 path).
+const server_finished_out_size: usize = 256;
+
+/// Application-data encrypt output: one response record plus AEAD and framing overhead.
+const app_data_encrypt_out_size: usize = 70 * 1024;
+
+/// One encrypted alert record (close_notify or a fatal alert after keys exist).
+const encrypted_alert_size: usize = 64;
 
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the accept loop closes the connection rather than misreading it as a record.
@@ -59,7 +78,7 @@ pub fn runTls(config: Config, handler: HandlerFn) !void {
 }
 
 fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !void {
-    var record_buf: [17 * 1024]u8 = undefined;
+    var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientHello (a plaintext handshake record carries the message in its body).
     const client_hello_rec = try readRecord(fd, &record_buf);
@@ -88,8 +107,8 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     // HelloRetryRequest (RFC 8446 4.1.4): if the 1.3 client picked a group it gave no key_share for,
     // send the HRR and read a second ClientHello before completing. null = no retry needed. A 1.2
     // client surfaces as UnsupportedTlsVersion here and is handled by the serverHandshake path below.
-    var handshake_out: [8192]u8 = undefined;
-    var hrr_out: [1024]u8 = undefined;
+    var handshake_out: [server_flight_out_size]u8 = undefined;
+    var hrr_out: [hello_retry_out_size]u8 = undefined;
     var retry_state: ?Tls.RetryState = null;
     var second_hello: []const u8 = &.{};
     if (Tls.serverHelloRetry(opts, client_hello_rec.body, &hrr_out)) |maybe_retry| {
@@ -163,7 +182,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
         // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
         if (err == error.UnexpectedMessage) {
-            var alert_buf: [64]u8 = undefined;
+            var alert_buf: [encrypted_alert_size]u8 = undefined;
             writeAll(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
         }
 
@@ -174,8 +193,8 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     const head = parsed.head;
     const body = request[parsed.body_offset..];
 
-    var encrypt_buf: [70 * 1024]u8 = undefined;
-    var close_buf: [64]u8 = undefined;
+    var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;
+    var close_buf: [encrypted_alert_size]u8 = undefined;
 
     // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
     // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
@@ -235,7 +254,7 @@ fn stripPort(host: []const u8) []const u8 {
 /// one application request like the 1.3 path. Reached only when the client did not offer 1.3. The
 /// 1.2 ephemeral reuses the same random bytes (reduced to a P-256 scalar inside the engine).
 fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, key_pair: EcdsaP256.KeyPair, client_hello: []const u8, ephemeral_secret: [32]u8, server_random: [32]u8) !void {
-    var flight_out: [8192]u8 = undefined;
+    var flight_out: [server_flight_out_size]u8 = undefined;
     const flight = try tls12.serverFlight1(.{
         .certificate_der = ctx.cert_der,
         .signing_key = key_pair,
@@ -246,12 +265,12 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
     try writeAll(fd, flight.to_send);
     var state = flight.state;
 
-    var record_buf: [17 * 1024]u8 = undefined;
+    var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientKeyExchange (plaintext handshake record), copied out before record_buf is reused.
     const cke_rec = try readRecord(fd, &record_buf);
     if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
-    var cke_buf: [256]u8 = undefined;
+    var cke_buf: [client_key_exchange_size]u8 = undefined;
     if (cke_rec.body.len > cke_buf.len) return error.RecordTooLarge;
     @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
     const client_key_exchange = cke_buf[0..cke_rec.body.len];
@@ -266,7 +285,7 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
         break rec;
     };
 
-    var finish_out: [256]u8 = undefined;
+    var finish_out: [server_finished_out_size]u8 = undefined;
     const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
     try writeAll(fd, finish.to_send);
     var conn = finish.connection;
@@ -285,10 +304,10 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
     var response_buf: [64 * 1024]u8 = undefined;
     const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
 
-    var encrypt_buf: [70 * 1024]u8 = undefined;
+    var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;
     try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
 
-    var close_buf: [64]u8 = undefined;
+    var close_buf: [encrypted_alert_size]u8 = undefined;
     writeAll(fd, conn.closeNotify(&close_buf)) catch {};
 }
 
