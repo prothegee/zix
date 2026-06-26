@@ -252,7 +252,7 @@ __*3. Lima model dispatch yang dapat dipilih:*__
 - EPOLL (shared-nothing: setiap worker memiliki SO_REUSEPORT listener + epoll instance, level-triggered, tanpa antrian bersama): khusus Linux, terbaik untuk jumlah koneksi tinggi.
 - URING (shared-nothing io_uring: topologi thread-per-core yang sama dengan EPOLL, tetapi completion-based sehingga sebagian besar transisi syscall di-batch ke dalam ring): khusus Linux.
 
-> Strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http1, Http, Grpc, dan Fix mengimplementasikan kelimanya secara native di Linux. Http2 tidak punya jalur epoll atau uring native dan melipat (fold) ke POOL.
+> Strategi konkurensi adalah pilihan konfigurasi yang disengaja, bukan default implementasi. Http1, Http, Grpc, Fix, dan Http2 mengimplementasikan kelimanya secara native di Linux.
 
 <br>
 
@@ -755,7 +755,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring worker, khusus Linux):**
 
-Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, ADR-041, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, dan `zix.Fix`. `zix.Http2` dan handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.POOL` / `.EPOLL`. Build non-Linux fallback ke `.POOL`.
+Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, ADR-041, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.POOL` / `.EPOLL`. Build non-Linux fallback ke `.POOL`.
 
 ```zig
 var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
