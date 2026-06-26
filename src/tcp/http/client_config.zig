@@ -44,6 +44,9 @@ pub const HttpClientConfig = struct {
     follow_redirects: bool = true,
     /// Maximum number of automatic redirect hops. Ignored when follow_redirects is false.
     max_redirects: u8 = 3,
+    /// Safety bound on the HTTP/2 client read-loop: max frame-read rounds before giving up on a
+    /// response. Guards against a stuck peer that never completes a stream.
+    h2_max_read_rounds: usize = 4096,
     /// Value sent in the User-Agent request header. Empty string omits the header entirely.
     user_agent: []const u8 = zon_options.user_agent,
     /// HTTP protocol version to use for requests. Default: .HTTP_1.
@@ -78,6 +81,7 @@ test "zix test: HttpClientConfig defaults" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024 * 4), cfg.max_response_body);
     try std.testing.expect(cfg.follow_redirects);
     try std.testing.expectEqual(@as(u8, 3), cfg.max_redirects);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.h2_max_read_rounds);
     try std.testing.expectEqualStrings(user_agent, cfg.user_agent);
     try std.testing.expectEqual(Version.HTTP_1, cfg.version);
     try std.testing.expect(cfg.tls_verify);
