@@ -19,7 +19,7 @@ pub const ZIG_SEMVER = struct {
 /// Note:
 /// - The std.Build API around the build root moved between these two versions, so
 ///   dirExists below comptime-branches on the same check. Anything outside this
-///   range needs its own port first (rnd/roadmap-0.5.x.md, "Zig version decision").
+///   range needs its own port first (see the Zig version decision in the roadmap).
 fn ensureSupportedZig() void {
     if (ZIG_SEMVER.MAJOR == 0 and (ZIG_SEMVER.MINOR == 16 or ZIG_SEMVER.MINOR == 17)) return;
 
@@ -70,6 +70,25 @@ pub fn build(b: *std.Build) void {
     const zon_options = b.addOptions();
     zon_options.addOption([]const u8, "user_agent", zon.user_agent);
     zix.addOptions("zon_options", zon_options);
+
+    // --------------------------------------------------------- //
+
+    // Brotli's static dictionary (RFC 7932 Appendix A) is generated at build time into the
+    // cache by brotli_dictionary.gen.zig and bound to the @embedFile import in brotli.zig, so
+    // no binary asset is tracked and no .gitignore exception is needed. Compiling the codec
+    // depends on this run through the import, so any `zig build` target that builds zix
+    // regenerates the dictionary first.
+    const brotli_dict_gen = b.addExecutable(.{
+        .name = "brotli_dictionary_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/utils/compression/brotli_dictionary.gen.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const brotli_dict_run = b.addRunArtifact(brotli_dict_gen);
+    const brotli_dict = brotli_dict_run.addOutputFileArg("brotli_dictionary.bin");
+    zix.addAnonymousImport("brotli_dictionary.bin", .{ .root_source_file = brotli_dict });
 
     // --------------------------------------------------------- //
 
