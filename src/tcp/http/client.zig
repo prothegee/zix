@@ -18,6 +18,8 @@ const REQUEST_BUILD_BUF: usize = 4096;
 const HEAD_SCAN_BUF: usize = 8192;
 /// Body read chunk buffer.
 const BODY_READ_CHUNK: usize = 4096;
+/// Response head buffer for a redirect hop (caps the redirect response head size).
+const REDIRECT_HEAD_BUF: usize = 8 * 1024;
 
 // --------------------------------------------------------- //
 
@@ -234,7 +236,7 @@ pub const HttpClient = struct {
             try req.sendBodiless();
         }
 
-        var redirect_buf: [8 * 1024]u8 = undefined;
+        var redirect_buf: [REDIRECT_HEAD_BUF]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
         // Copy head bytes before response.reader() invalidates the pointer.
