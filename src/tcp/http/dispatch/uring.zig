@@ -393,7 +393,7 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     // frame, so a compressing handler (sendNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (cfg.compression) 2 * 1024 * 1024 else 512 * 1024;
+    const worker_stack: usize = if (cfg.compression) @max(cfg.worker_stack_size_bytes, cfg.worker_stack_compress_bytes) else cfg.worker_stack_size_bytes;
 
     for (threads, 0..) |*t, idx| {
         t.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx });
