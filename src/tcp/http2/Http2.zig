@@ -46,6 +46,9 @@ pub const sendWindowUpdate = frame_mod.sendWindowUpdate;
 
 pub const PREFACE = frame_mod.PREFACE;
 pub const FRAME_HEADER_LEN = frame_mod.FRAME_HEADER_LEN;
+pub const FRAME_PAYLOAD_SLACK = frame_mod.FRAME_PAYLOAD_SLACK;
+pub const DEFAULT_WINDOW_SIZE = frame_mod.DEFAULT_WINDOW_SIZE;
+pub const HPACK_ENCODE_SCRATCH = frame_mod.HPACK_ENCODE_SCRATCH;
 
 pub const FRAME_TYPE_DATA: u8 = frame_mod.FRAME_TYPE_DATA;
 pub const FRAME_TYPE_HEADERS: u8 = frame_mod.FRAME_TYPE_HEADERS;
