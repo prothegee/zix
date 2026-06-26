@@ -31,8 +31,12 @@ const TlsConn = struct {
     grpc: ?*core.GrpcMuxConn = null,
     opts: core.GrpcServeOpts,
 
+    // Outbound ciphertext staged on EAGAIN. wbuf is the allocation (capacity), the live bytes are
+    // wbuf[woff..wlen]. Length is tracked apart from capacity so a grown buffer never flushes its
+    // uninitialized tail.
     wbuf: []u8 = &.{},
     woff: usize = 0,
+    wlen: usize = 0,
     wclose: bool = false,
     want_out: bool = false,
 
@@ -93,7 +97,15 @@ fn armOut(epfd: posix.fd_t, fd: posix.fd_t, on: bool) void {
     _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &ev);
 }
 
+/// TLS records must reach the peer in order (the AEAD nonce is the record sequence number). If
+/// ciphertext is already staged, append rather than write directly, or a later record would overtake
+/// the staged one on the wire and break decryption.
 fn sendRaw(c: *TlsConn, bytes: []const u8) bool {
+    if (c.wlen > c.woff) {
+        stageWrite(c, bytes);
+        return true;
+    }
+
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(c.fd, bytes[off..].ptr, bytes.len - off);
@@ -115,29 +127,46 @@ fn sendRaw(c: *TlsConn, bytes: []const u8) bool {
 }
 
 fn stageWrite(c: *TlsConn, bytes: []const u8) void {
-    const pending = c.wbuf.len - c.woff;
+    const pending = c.wlen - c.woff;
+
+    // Room already at the tail: append in place.
+    if (c.wbuf.len - c.wlen >= bytes.len) {
+        @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
+        c.wlen += bytes.len;
+        c.want_out = true;
+        return;
+    }
+
     const need = pending + bytes.len;
 
-    if (c.woff > 0 and c.wbuf.len >= need) {
-        std.mem.copyForwards(u8, c.wbuf[0..pending], c.wbuf[c.woff..]);
+    // Compaction alone makes room: slide the live bytes to the front.
+    if (c.wbuf.len >= need) {
+        std.mem.copyForwards(u8, c.wbuf[0..pending], c.wbuf[c.woff..c.wlen]);
         c.woff = 0;
+        c.wlen = pending;
+
+        @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
+        c.wlen += bytes.len;
+        c.want_out = true;
+        return;
     }
 
-    if (c.wbuf.len - c.woff - pending < bytes.len) {
-        var new_cap: usize = if (c.wbuf.len == 0) 16 * 1024 else c.wbuf.len * 2;
-        while (new_cap < need) new_cap *= 2;
+    // Grow: allocate a larger buffer and move the live bytes to its front.
+    var new_cap: usize = if (c.wbuf.len == 0) 16 * 1024 else c.wbuf.len * 2;
+    while (new_cap < need) new_cap *= 2;
 
-        const grown = allocator.alloc(u8, new_cap) catch {
-            c.wclose = true;
-            return;
-        };
-        @memcpy(grown[0..pending], c.wbuf[c.woff..]);
-        if (c.wbuf.len > 0) allocator.free(c.wbuf);
-        c.wbuf = grown;
-        c.woff = 0;
-    }
+    const grown = allocator.alloc(u8, new_cap) catch {
+        c.wclose = true;
+        return;
+    };
+    @memcpy(grown[0..pending], c.wbuf[c.woff..c.wlen]);
+    if (c.wbuf.len > 0) allocator.free(c.wbuf);
+    c.wbuf = grown;
+    c.woff = 0;
+    c.wlen = pending;
 
-    @memcpy(c.wbuf[c.woff + pending ..][0..bytes.len], bytes);
+    @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
+    c.wlen += bytes.len;
     c.want_out = true;
 }
 
@@ -228,8 +257,8 @@ fn feedMux(comptime routes: []const Route, c: *TlsConn, g: *core.GrpcMuxConn, pl
 }
 
 fn onWritable(epfd: posix.fd_t, c: *TlsConn) bool {
-    while (c.woff < c.wbuf.len) {
-        const rc = linux.write(c.fd, c.wbuf[c.woff..].ptr, c.wbuf.len - c.woff);
+    while (c.woff < c.wlen) {
+        const rc = linux.write(c.fd, c.wbuf[c.woff..].ptr, c.wlen - c.woff);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
@@ -241,9 +270,10 @@ fn onWritable(epfd: posix.fd_t, c: *TlsConn) bool {
         }
     }
 
-    allocator.free(c.wbuf);
-    c.wbuf = &.{};
+    // Drained. Keep the buffer for reuse (freeConn releases it at close) rather than free-here +
+    // realloc-next-stage, which churns the shared allocator on the hot path under backpressure.
     c.woff = 0;
+    c.wlen = 0;
     c.want_out = false;
     armOut(epfd, c.fd, false);
 
