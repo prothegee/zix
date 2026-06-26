@@ -106,13 +106,13 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
 
 /// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
-pub fn setBusyPoll(fd: std.posix.fd_t) void {
+pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
         fd,
         std.posix.SOL.SOCKET,
         SO_BUSY_POLL,
-        std.mem.asBytes(&@as(c_int, 50)),
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
     ) catch {};
 }
 
