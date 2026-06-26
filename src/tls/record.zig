@@ -29,6 +29,10 @@ pub const max_plaintext = 1 << 14;
 /// TLSCiphertext.length ceiling, 2^14 + 256, over which is record_overflow (RFC 8446 5.2).
 pub const max_ciphertext = max_plaintext + 256;
 
+/// Read staging for one on-wire TLS record: the record header plus the max
+/// TLSCiphertext payload, rounded up so any single record fits in one buffer.
+pub const max_record_wire = 17 * 1024;
+
 const legacy_record_version: u16 = 0x0303;
 
 /// Record content type (RFC 8446 5.1). The outer type on the wire for protected records is
