@@ -10,6 +10,10 @@ const fdWriteAll = @import("response.zig").fdWriteAll;
 
 /// Stack buffer for reading and copying a file in chunks during static serving.
 const FILE_BUF_SIZE: usize = 8 * 1024;
+/// Served full-path stack buffer.
+const FULL_PATH_BUF: usize = 512;
+/// Static-serve response header staging buffer.
+const HEADER_STAGING_BUF: usize = 2048;
 
 // --------------------------------------------------------- //
 
@@ -42,7 +46,7 @@ pub fn serve(
 ) !bool {
     if (std.mem.indexOf(u8, req_path, "..") != null) return false;
 
-    var full_path_buf: [512]u8 = undefined;
+    var full_path_buf: [FULL_PATH_BUF]u8 = undefined;
     if (public_dir.len + 1 + req_path.len > full_path_buf.len) return false;
     @memcpy(full_path_buf[0..public_dir.len], public_dir);
     full_path_buf[public_dir.len] = '/';
@@ -57,7 +61,7 @@ pub fn serve(
 
     const content_type = content.fromExtension(file_utils.extension(req_path));
 
-    var header_buf: [2048]u8 = undefined;
+    var header_buf: [HEADER_STAGING_BUF]u8 = undefined;
 
     if (req.header("range")) |range_val| {
         if (parseRangeHeader(range_val)) |range| {
