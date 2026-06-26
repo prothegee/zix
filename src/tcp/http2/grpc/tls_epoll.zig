@@ -19,10 +19,18 @@ const common = @import("dispatch/common.zig");
 const frame = @import("../frame.zig");
 const session = @import("../../tls/tls_session.zig");
 const Tls = @import("../../../tls/Tls.zig");
+const record = @import("../../../tls/record.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 
 const MAX_FD = common.MAX_FD;
 const EPOLL_MAX_EVENTS: usize = 4096;
+
+/// One sealed TLS record staging buffer: max record plaintext plus AEAD overhead.
+const TLS_SEALED_RECORD_SIZE: usize = 18 * 1024;
+
+/// Inbound ciphertext read staging (may hold several records per read).
+const TLS_READ_STAGING_SIZE: usize = 32 * 1024;
+
 const allocator = std.heap.smp_allocator;
 
 const TlsConn = struct {
@@ -40,7 +48,7 @@ const TlsConn = struct {
     wclose: bool = false,
     want_out: bool = false,
 
-    plain: [16 * 1024]u8 = undefined,
+    plain: [record.max_plaintext]u8 = undefined,
     plain_len: usize = 0,
 };
 
@@ -173,7 +181,7 @@ fn stageWrite(c: *TlsConn, bytes: []const u8) void {
 fn flushPlain(c: *TlsConn) void {
     if (c.plain_len == 0) return;
 
-    var sealed: [18 * 1024]u8 = undefined;
+    var sealed: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
     const ct = c.tls.encrypt(c.plain[0..c.plain_len], &sealed);
     c.plain_len = 0;
     if (!sendRaw(c, ct)) c.wclose = true;
@@ -193,9 +201,9 @@ fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
 }
 
 fn onReadable(comptime routes: []const Route, c: *TlsConn) bool {
-    var cipher: [32 * 1024]u8 = undefined;
-    var to_send: [18 * 1024]u8 = undefined;
-    var plain_in: [18 * 1024]u8 = undefined;
+    var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
+    var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
+    var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
 
     while (true) {
         const rc = linux.read(c.fd, &cipher, cipher.len);
