@@ -29,6 +29,9 @@ const content_type_application_data: u8 = 23;
 /// The most a single TLS record can be (RFC 8446 5.1: 2^14 plaintext + expansion + 5-byte header).
 const max_record: usize = 17 * 1024;
 
+/// Server handshake flight assembly buffer.
+const server_flight_buf: usize = 12 * 1024;
+
 /// Where the handshake / data state machine is.
 pub const Phase = enum { hello, finished, established, closed };
 
@@ -126,7 +129,7 @@ pub const Session = struct {
                         break;
                     }
 
-                    var flight: [12 * 1024]u8 = undefined;
+                    var flight: [server_flight_buf]u8 = undefined;
                     const result = Tls.serverHandshake(self.handshakeOptions(), body, &flight) catch {
                         // No usable 1.3 offer or a rejected ClientHello: fatal alert + close.
                         var alert: [Tls.fatal_record_len]u8 = undefined;
