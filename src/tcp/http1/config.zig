@@ -17,6 +17,10 @@ pub const Http1ServerConfig = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
+    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL). The kernel
+    /// busy-spins this long before sleeping the worker, trading CPU for lower tail latency. 0 leaves
+    /// it unset. No-op when the kernel lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 50,
     /// Max bytes to buffer per request header block and per HTTP connection
     /// in EPOLL mode.
     max_recv_buf: usize = 16 * 1024,
@@ -126,4 +130,5 @@ test "zix http1: Http1ServerConfig worker stack defaults" {
     const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), cfg.worker_stack_compress_bytes);
+    try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);
 }
