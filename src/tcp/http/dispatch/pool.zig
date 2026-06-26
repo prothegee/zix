@@ -140,7 +140,7 @@ pub fn runPool(server: anytype, io: std.Io, cpu: usize) !void {
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t| {
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             poolEntry,
             .{ server, &queue, io },
         );
