@@ -250,6 +250,21 @@ pub fn sendResponse(
     content_type: []const u8,
     body: []const u8,
 ) !void {
+    return sendResponseEncoded(fd, stream_id, status, content_type, "", body);
+}
+
+/// sendResponse plus an optional content-encoding header (for serving a precompressed body). An empty
+/// content_encoding omits the header. The body is framed in <= DEFAULT_MAX_FRAME_SIZE DATA chunks.
+/// This is the immediate, unmetered send (no flow control). For large bodies that may exceed the
+/// peer's window use the multiplexed `mux.sendResponseStream`, which paces by WINDOW_UPDATE.
+pub fn sendResponseEncoded(
+    fd: std.posix.fd_t,
+    stream_id: u31,
+    status: u16,
+    content_type: []const u8,
+    content_encoding: []const u8,
+    body: []const u8,
+) !void {
     const hpack = @import("hpack.zig");
     var hdr_buf: [512]u8 = undefined;
     var enc = hpack.HpackEncoder.init(&hdr_buf);
@@ -259,6 +274,8 @@ pub fn sendResponse(
     try enc.writeHeader(":status", status_s);
     if (content_type.len > 0)
         try enc.writeHeader("content-type", content_type);
+    if (content_encoding.len > 0)
+        try enc.writeHeader("content-encoding", content_encoding);
     if (body.len > 0) {
         var cl_buf: [20]u8 = undefined;
         const cl_s = std.fmt.bufPrint(&cl_buf, "{d}", .{body.len}) catch "0";
@@ -277,13 +294,24 @@ pub fn sendResponse(
     try fdWriteAll(fd, hblock);
 
     if (body.len > 0) {
-        try writeFrameHeader(fd, .{
-            .length = @intCast(body.len),
-            .frame_type = FRAME_TYPE_DATA,
-            .flags = FLAG_END_STREAM,
-            .stream_id = stream_id,
-        });
-        try fdWriteAll(fd, body);
+        // Frame the body in <= DEFAULT_MAX_FRAME_SIZE chunks: a single DATA frame larger than the
+        // peer's max frame size (16384 by default) is a FRAME_SIZE_ERROR. The last chunk carries
+        // END_STREAM.
+        var off: usize = 0;
+        while (off < body.len) {
+            const chunk = @min(body.len - off, DEFAULT_MAX_FRAME_SIZE);
+            const last = off + chunk == body.len;
+
+            try writeFrameHeader(fd, .{
+                .length = @intCast(chunk),
+                .frame_type = FRAME_TYPE_DATA,
+                .flags = if (last) FLAG_END_STREAM else 0,
+                .stream_id = stream_id,
+            });
+            try fdWriteAll(fd, body[off..][0..chunk]);
+
+            off += chunk;
+        }
     }
 }
 
@@ -300,6 +328,44 @@ test "zix test: fdWriteAll delivers data on a blocking fd" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(fds[0], &buf);
     try std.testing.expectEqualStrings("frame", buf[0..n]);
+}
+
+test "zix test: sendResponse chunks a body past the max frame size, END_STREAM on the last" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var body: [40000]u8 = undefined;
+    @memset(&body, 'a');
+    try sendResponse(fds[1], 1, 200, "text/plain", &body);
+    _ = std.posix.system.close(fds[1]);
+
+    var buf: [64 * 1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(fds[0], buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var off: usize = 0;
+    var data_bytes: usize = 0;
+    var last_data_flags: u8 = 0;
+    while (off + FRAME_HEADER_LEN <= total) {
+        const fh = parseFrameHeader(buf[off..][0..FRAME_HEADER_LEN]);
+        off += FRAME_HEADER_LEN;
+
+        if (fh.frame_type == FRAME_TYPE_DATA) {
+            try std.testing.expect(fh.length <= DEFAULT_MAX_FRAME_SIZE);
+            data_bytes += fh.length;
+            last_data_flags = fh.flags;
+        }
+
+        off += fh.length;
+    }
+
+    try std.testing.expectEqual(@as(usize, 40000), data_bytes);
+    try std.testing.expect((last_data_flags & FLAG_END_STREAM) != 0);
 }
 
 test "zix test: frame constants, FRAME_TYPE_HEADERS is 0x01" {
