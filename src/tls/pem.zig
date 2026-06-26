@@ -10,11 +10,14 @@ const std = @import("std");
 
 pub const Error = error{ InvalidPem, InvalidKey, BufferTooSmall };
 
+/// Base64 accumulation buffer: caps the max PEM cert or key document size.
+const MAX_PEM_BYTES: usize = 16384;
+
 // --------------------------------------------------------------- //
 
 /// Decode a PEM document body to DER into `out`, returning the DER slice.
 pub fn pemToDer(out: []u8, pem: []const u8) ![]const u8 {
-    var b64: [16384]u8 = undefined;
+    var b64: [MAX_PEM_BYTES]u8 = undefined;
     var n: usize = 0;
 
     var lines = std.mem.tokenizeScalar(u8, pem, '\n');
