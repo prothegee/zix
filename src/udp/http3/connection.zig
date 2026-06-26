@@ -26,6 +26,12 @@ const ks = @import("../../tls/key_schedule.zig");
 /// The most concurrent large (multi-packet) response streams one connection tracks for resumption.
 pub const max_send_streams = 32;
 
+/// Decrypted 1-RTT payload copy buffer per connection: caps multiplexed request bytes per datagram.
+const DEFAULT_APP_PAYLOAD_BUF: usize = 2048;
+
+/// Huffman-decoded :path scratch buffer per connection: caps the decoded path length.
+const DEFAULT_PATH_SCRATCH: usize = 1024;
+
 /// A response body being sent across multiple packets, resumed as the client extends flow control
 /// (RFC 9000 4.1). The body is a zero-copy slice into handler-owned memory that MUST outlive the
 /// stream (the static file cache satisfies this): the engine never copies it. The HTTP/3 prefix
@@ -83,10 +89,10 @@ pub const Connection = struct {
     first_response_sent: bool = false,
     // The most recent decrypted 1-RTT payload, copied off the recv buffer so the response builder can
     // walk every request stream it carries (a connection multiplexes many) without a second decrypt.
-    app_payload_buf: [2048]u8 = undefined,
+    app_payload_buf: [DEFAULT_APP_PAYLOAD_BUF]u8 = undefined,
     app_payload_len: usize = 0,
     // Reusable scratch for a Huffman-encoded :path (curl / h2load encode it), expanded per request.
-    path_scratch: [1024]u8 = undefined,
+    path_scratch: [DEFAULT_PATH_SCRATCH]u8 = undefined,
     // Client-advertised flow control limits (RFC 9000 4.1), parsed from the ClientHello transport
     // parameters. The server must not send response stream data past these. Zero until the handshake
     // parses them (a minimal client that sends no transport parameters grants no large-body credit).
