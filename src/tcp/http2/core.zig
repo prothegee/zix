@@ -7,6 +7,9 @@ const hpack = @import("hpack.zig");
 /// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
 const SETTINGS_DECODE_SCRATCH: usize = 256;
 
+/// Request line and header read bound for an h2c upgrade (HeaderTooLarge over this).
+const UPGRADE_HEAD_BUF: usize = 8192;
+
 // --------------------------------------------------------- //
 
 /// HTTP/2 handler function type. Called once per completed h2 stream.
@@ -139,6 +142,12 @@ pub const ServeOpts = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream in bytes.
     max_body: usize = 65536,
+    /// Per-connection read buffer floor in bytes. The reader is sized to the larger of this and
+    /// one max frame, so a larger floor cuts read() and compaction for big frames.
+    conn_read_buf_min: usize = 32 * 1024,
+    /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
+    /// A larger initial avoids early reallocation under big responses on the TLS path.
+    tls_write_buf_initial: usize = 16 * 1024,
 };
 
 // --------------------------------------------------------- //
@@ -220,7 +229,7 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts, prefix: *const [3]u8) !void {
-    var head_buf: [8192]u8 = undefined;
+    var head_buf: [UPGRADE_HEAD_BUF]u8 = undefined;
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
