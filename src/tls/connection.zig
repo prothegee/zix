@@ -21,6 +21,12 @@ const cert_verify = @import("cert_verify.zig");
 const alert = @import("alert.zig");
 const rsa = @import("rsa.zig");
 
+/// Client Certificate record decrypt buffer (split-framing mTLS): caps the client cert size.
+const CLIENT_CERT_RECORD_BUF: usize = 4096;
+
+/// Server handshake flight build buffer: caps the server cert chain plus the flight messages.
+const SERVER_FLIGHT_BUF: usize = 4096;
+
 const X25519 = std.crypto.dh.X25519;
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -160,7 +166,7 @@ pub const Connection = struct {
     /// - error.UnexpectedHandshakeMessage (a record was not the expected message)
     /// - propagates record / signature / key errors otherwise
     pub fn verifyClientCertFlight(self: *Connection, cert_record: []const u8, cert_verify_record: []const u8, out_der: []u8) ![]const u8 {
-        var cert_plain: [4096]u8 = undefined;
+        var cert_plain: [CLIENT_CERT_RECORD_BUF]u8 = undefined;
         const cert_opened = try record.deprotect(&cert_plain, cert_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
         self.client_hs_seq += 1;
         if (cert_opened.inner_type != .HANDSHAKE or cert_opened.data.len < 4) return error.UnexpectedHandshakeMessage;
@@ -364,7 +370,7 @@ fn completeHandshake(opts: HandshakeOptions, hello: *const handshake.ClientHello
     const server_finished_key = certificate.finishedKey(server_hs_traffic);
 
     // build the flight: EncryptedExtensions, Certificate, CertificateVerify, Finished.
-    var flight_buf: [4096]u8 = undefined;
+    var flight_buf: [SERVER_FLIGHT_BUF]u8 = undefined;
     var flight = wire.Writer{ .buf = &flight_buf };
 
     const ee = extensions.buildEncryptedExtensions(flight.buf[flight.len..], .{ .alpn_selected = selected_alpn });
