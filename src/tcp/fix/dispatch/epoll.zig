@@ -129,7 +129,7 @@ pub fn runEpoll(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
 
     for (workers) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             epollWorkerEntry,
             .{EpollWorkerCtx{
                 .io = cfg.io,

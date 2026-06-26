@@ -162,6 +162,9 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         listener_fd: std.posix.fd_t,
         gen_counter: u24,
         recv_buf_size: usize,
+        /// Per-connection send buffer size, set from config.uring_send_buf_size.
+        /// Defaulted to the module const so dispatch-level tests need not set it.
+        send_buf_size: usize = URING_SEND_BUF_SIZE,
         handler_timeout_ms: u32,
         /// Shared per-worker scratch for unmasking WebSocket frame payloads
         /// during a pump pass. Used transiently, never held across calls.
@@ -291,7 +294,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 allocator.destroy(conn);
                 return null;
             };
-            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+            const send_buf = allocator.alloc(u8, self.send_buf_size) catch {
                 allocator.free(buf);
                 allocator.destroy(conn);
                 return null;
@@ -349,8 +352,8 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         ///   reuse. The accept path overwrites buf and send_buf before reading, so
         ///   a cold connection's zeroed pages are safe to reuse.
         fn releaseConn(self: *Self, conn: *UringConn) void {
-            if (conn.send_buf.len > URING_SEND_BUF_SIZE) {
-                if (allocator.realloc(conn.send_buf, URING_SEND_BUF_SIZE)) |shrunk| {
+            if (conn.send_buf.len > self.send_buf_size) {
+                if (allocator.realloc(conn.send_buf, self.send_buf_size)) |shrunk| {
                     conn.send_buf = shrunk;
                 } else |_| {}
             }
@@ -915,6 +918,8 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .recv_buf_size = config.max_recv_buf,
+                .send_buf_size = config.uring_send_buf_size,
+                .idle_floor = config.uring_idle_pool_floor,
                 .handler_timeout_ms = config.handler_timeout_ms,
                 .ws_payload_buf = ws_payload_buf,
                 .body_buf = body_buf,
@@ -985,7 +990,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // frame, so a compressing handler (writeNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (config.compression) common.WORKER_STACK_COMPRESS else common.WORKER_STACK_DEFAULT;
+    const worker_stack: usize = if (config.compression) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
 
     const worker = uringWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {
@@ -1265,6 +1270,37 @@ test "zix http1: URING releaseConn shrinks a grown send_buf back to the base siz
 
     try std.testing.expectEqual(@as(usize, URING_SEND_BUF_SIZE), conn.send_buf.len);
     try std.testing.expectEqual(@as(?*UringConn, conn), worker.warm_head);
+}
+
+test "zix http1: URING releaseConn shrinks send_buf to the configured send_buf_size" {
+    const gpa = std.heap.smp_allocator;
+
+    const Worker = UringWorker(testOkHandler, null);
+    const custom_send_buf: usize = 8 * 1024;
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .send_buf_size = custom_send_buf,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+    };
+
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = 13, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 2 * custom_send_buf), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+
+    worker.releaseConn(conn);
+
+    try std.testing.expectEqual(custom_send_buf, conn.send_buf.len);
 }
 
 test "zix http1: URING releaseConn past the cap returns buffer pages to the OS" {

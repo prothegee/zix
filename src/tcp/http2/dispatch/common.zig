@@ -29,6 +29,8 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
         .max_frame_size = cfg.max_frame_size,
         .max_header_scratch = cfg.max_header_scratch,
         .max_body = cfg.max_body,
+        .conn_read_buf_min = cfg.conn_read_buf_min_bytes,
+        .tls_write_buf_initial = cfg.tls_write_buf_initial_bytes,
     };
 }
 

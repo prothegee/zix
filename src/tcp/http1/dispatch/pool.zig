@@ -125,7 +125,7 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t| {
         t.* = try std.Thread.spawn(
-            .{ .stack_size = common.WORKER_STACK_DEFAULT },
+            .{ .stack_size = config.worker_stack_size_bytes },
             poolEntry,
             .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
         );

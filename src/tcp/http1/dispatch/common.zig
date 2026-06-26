@@ -47,15 +47,6 @@ pub const MAX_FD: usize = 1 << 16;
 /// buffer is safe. 1 GiB is a safety ceiling that is never reached in practice.
 pub const MAX_DRAIN_RECV: usize = 1 << 30;
 
-/// Default per-worker (and pool) thread stack. Thread stacks are demand-paged,
-/// so this costs almost no RSS until the depth is actually used.
-pub const WORKER_STACK_DEFAULT: usize = 512 * 1024;
-
-/// Worker thread stack when compression is enabled. std.compress.flate.Compress
-/// is about 230 KB and is built on the handler stack frame, so a compressing
-/// handler needs more than the default stack.
-pub const WORKER_STACK_COMPRESS: usize = 2 * 1024 * 1024;
-
 /// Accept-thread stack. Accept threads only block in accept and hand off, so a
 /// smaller stack than the workers is enough.
 pub const ACCEPT_STACK: usize = 256 * 1024;
@@ -115,13 +106,13 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
 
 /// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
-pub fn setBusyPoll(fd: std.posix.fd_t) void {
+pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
         fd,
         std.posix.SOL.SOCKET,
         SO_BUSY_POLL,
-        std.mem.asBytes(&@as(c_int, 50)),
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
     ) catch {};
 }
 

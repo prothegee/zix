@@ -153,13 +153,13 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
 
 /// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
-pub fn setBusyPoll(fd: std.posix.fd_t) void {
+pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
         fd,
         std.posix.SOL.SOCKET,
         SO_BUSY_POLL,
-        std.mem.asBytes(&@as(c_int, 50)),
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
     ) catch {};
 }
 
@@ -346,7 +346,7 @@ pub const UringHttpConn = struct {
 
 /// Accept every pending connection on listener_fd and register each in epfd.
 /// Level-triggered, draining to EAGAIN guarantees no accept is missed.
-pub fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t) void {
+pub fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, busy_poll_us: u32) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -360,7 +360,7 @@ pub fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd:
 
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
-        setBusyPoll(conn_fd);
+        setBusyPoll(conn_fd, busy_poll_us);
         if (table.alloc(conn_fd) == null) {
             _ = linux.close(conn_fd);
             continue;

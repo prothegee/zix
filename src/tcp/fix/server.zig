@@ -64,6 +64,7 @@ pub const FixServer = struct {
         const cfg = self.config;
         const conn_opts = FixServeOpts{
             .logger = cfg.logger,
+            .default_heartbeat_secs = cfg.default_heartbeat_secs,
             .heartbeat_timeout_ms = cfg.heartbeat_timeout_ms,
             .conn_timeout_ms = cfg.conn_timeout_ms,
             .handler_timeout_ms = cfg.handler_timeout_ms,

@@ -233,7 +233,7 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     const worker_fn = epollMuxWorkerFn(routes);
     for (workers) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{MuxWorkerCtx{
                 .io = io,

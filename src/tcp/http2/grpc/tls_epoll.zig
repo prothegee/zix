@@ -160,7 +160,7 @@ fn stageWrite(c: *TlsConn, bytes: []const u8) void {
     }
 
     // Grow: allocate a larger buffer and move the live bytes to its front.
-    var new_cap: usize = if (c.wbuf.len == 0) 16 * 1024 else c.wbuf.len * 2;
+    var new_cap: usize = if (c.wbuf.len == 0) c.opts.tls_write_buf_initial else c.wbuf.len * 2;
     while (new_cap < need) new_cap *= 2;
 
     const grown = allocator.alloc(u8, new_cap) catch {
@@ -403,7 +403,7 @@ pub fn runTlsEpoll(comptime routes: []const Route, config: GrpcServerConfig) !vo
 
     const wf = workerFn(routes);
     for (workers) |*t|
-        t.* = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, wf, .{WorkerCtx{
+        t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, wf, .{WorkerCtx{
             .io = config.io,
             .ip = config.ip,
             .port = config.port,

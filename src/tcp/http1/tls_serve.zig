@@ -50,6 +50,12 @@ const app_data_encrypt_out_size: usize = 70 * 1024;
 /// One encrypted alert record (close_notify or a fatal alert after keys exist).
 const encrypted_alert_size: usize = 64;
 
+/// Decrypted request plaintext buffer: the effective max request size over TLS.
+const request_plain_size: usize = 17 * 1024;
+
+/// Handler response buffer: the effective max response size over TLS.
+const response_buf_size: usize = 64 * 1024;
+
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the accept loop closes the connection rather than misreading it as a record.
 fn peerAlert(body: []const u8) anyerror {
@@ -178,7 +184,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     const request_rec = try readRecord(fd, &record_buf);
     if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
 
-    var request_plain: [17 * 1024]u8 = undefined;
+    var request_plain: [request_plain_size]u8 = undefined;
     const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
         // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
         if (err == error.UnexpectedMessage) {
@@ -209,7 +215,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
         };
     }
 
-    var response_buf: [64 * 1024]u8 = undefined;
+    var response_buf: [response_buf_size]u8 = undefined;
     const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
 
     try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
@@ -294,14 +300,14 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
     const request_rec = try readRecord(fd, &record_buf);
     if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
 
-    var request_plain: [17 * 1024]u8 = undefined;
+    var request_plain: [request_plain_size]u8 = undefined;
     const request = try conn.readAppData(request_rec.full, &request_plain);
 
     const parsed = core.parseHead(request) catch return error.BadRequest;
     const head = parsed.head;
     const body = request[parsed.body_offset..];
 
-    var response_buf: [64 * 1024]u8 = undefined;
+    var response_buf: [response_buf_size]u8 = undefined;
     const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
 
     var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;

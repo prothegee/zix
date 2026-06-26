@@ -30,7 +30,7 @@ pub fn runPool(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             D.poolEntry,
             .{D.PoolCtx{ .queue = &queue, .io = io, .opts = opts }},
         );

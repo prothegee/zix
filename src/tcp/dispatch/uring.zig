@@ -91,6 +91,8 @@ const UringFrameCtx = struct {
     port: u16,
     kernel_backlog: u31,
     recv_buf_size: usize,
+    send_buf_size: usize,
+    max_conns: usize,
 };
 
 /// Build a concrete framed io_uring worker entry with frame_fn baked in at
@@ -103,6 +105,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             listener_fd: std.posix.fd_t,
             gen_counter: u24,
             recv_buf_size: usize,
+            send_buf_size: usize = URING_SEND_BUF_SIZE,
 
             const W = @This();
             const allocator = std.heap.smp_allocator;
@@ -220,7 +223,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                     _ = lx.close(conn_fd);
                     return;
                 };
-                const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+                const send_buf = allocator.alloc(u8, w.send_buf_size) catch {
                     allocator.free(buf);
                     allocator.destroy(conn);
                     _ = lx.close(conn_fd);
@@ -376,7 +379,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             defer net_server.deinit(ctx.io);
             const listener_fd = net_server.socket.handle;
 
-            const slots = slab.mapZeroedSlots(?*UringConn, 1 << 16) catch return;
+            const slots = slab.mapZeroedSlots(?*UringConn, ctx.max_conns) catch return;
 
             var worker = Worker{
                 .ring = undefined,
@@ -384,6 +387,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .recv_buf_size = ctx.recv_buf_size,
+                .send_buf_size = ctx.send_buf_size,
             };
             worker.ring = initUringRing() catch return;
             defer worker.deinit();
@@ -407,7 +411,7 @@ pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: Frame
     const worker_fn = uringFrameWorkerFn(frame_fn);
     for (threads) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{UringFrameCtx{
                 .io = io,
@@ -415,6 +419,8 @@ pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: Frame
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .recv_buf_size = cfg.max_recv_buf,
+                .send_buf_size = cfg.uring_send_buf_size,
+                .max_conns = cfg.uring_max_conns_per_worker,
             }},
         );
 

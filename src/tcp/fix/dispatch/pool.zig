@@ -121,7 +121,7 @@ pub fn runPool(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 256 * 1024 },
+            .{ .stack_size = cfg.pool_stack_size_bytes },
             poolEntry,
             .{PoolCtx{ .queue = &queue, .io = io, .comp_id = cfg.comp_id, .opts = conn_opts }},
         );

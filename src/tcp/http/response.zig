@@ -13,6 +13,8 @@ const FIXED_HEADER_BUF: usize = 512;
 const SSE_HEADER_BUF: usize = 256;
 /// Per extra-header staging buffer.
 const EXTRA_HEADER_BUF: usize = 256;
+/// Slow-path response-header staging buffer (caps total fixed plus extra header bytes).
+const SLOW_HEADER_BUF: usize = 2048;
 
 // --------------------------------------------------------- //
 
@@ -240,7 +242,7 @@ pub const Response = struct {
 
         // Slow path: extra headers present or body too large for the stack buffer.
         // Stage fixed headers + extra headers into a secondary buffer, then write body.
-        var slow: [2048]u8 = undefined;
+        var slow: [SLOW_HEADER_BUF]u8 = undefined;
         var slow_off: usize = 0;
         @memcpy(slow[0..offset], fixed[0..offset]);
         slow_off = offset;

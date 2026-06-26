@@ -51,6 +51,11 @@ pub const Http3ServerConfig = struct {
     max_idle_ms: u32 = 30000,
     /// Maximum concurrent request streams (RFC 9000 4.6).
     max_streams: u32 = 128,
+    /// Datagram size in bytes used for new connections (the initial congestion-window basis, RFC 9000).
+    /// 1200 is the QUIC minimum. Keep at or below the path MTU to avoid fragmentation.
+    max_datagram_size: u64 = 1200,
+    /// Max STREAM-frame payload bytes per 1-RTT packet. Tie to max_datagram_size.
+    max_stream_chunk: usize = 1200,
     /// Whether to forbid connection migration (RFC 9000 transport parameter disable_active_migration).
     disable_active_migration: bool = false,
 
@@ -77,5 +82,7 @@ test "zix test: Http3ServerConfig default field values" {
     try std.testing.expectEqual(@as(u8, 8), cfg.cid_len);
     try std.testing.expectEqual(@as(u32, 30000), cfg.max_idle_ms);
     try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);
+    try std.testing.expectEqual(@as(u64, 1200), cfg.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 1200), cfg.max_stream_chunk);
     try std.testing.expect(cfg.tls == null);
 }

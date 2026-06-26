@@ -303,7 +303,7 @@ pub fn runUring(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     const worker_fn = uringMuxWorkerFn(routes);
     for (workers) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{UringMuxCtx{
                 .io = io,

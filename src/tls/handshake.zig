@@ -15,6 +15,9 @@ const Reader = wire.Reader;
 const Writer = wire.Writer;
 const Alert = alert.Alert;
 
+/// Max key_share groups parsed from a ClientHello (the offered curves cap).
+const MAX_KEY_SHARE_GROUPS: usize = 16;
+
 /// legacy_version on the wire (RFC 8446 4.1.2): 1.2 in the record / hello, 1.3 in supported_versions.
 pub const VERSION_TLS_1_2: u16 = 0x0303;
 pub const VERSION_TLS_1_3: u16 = 0x0304;
@@ -90,7 +93,7 @@ pub const ClientHello = struct {
     /// The raw SignatureSchemeList body (RFC 8446 4.2.3), each entry a u16. The server picks its
     /// CertificateVerify scheme from this via offersSignatureScheme. Empty when not offered.
     signature_schemes: []const u8 = &.{},
-    key_share_groups: [16]NamedGroup = undefined,
+    key_share_groups: [MAX_KEY_SHARE_GROUPS]NamedGroup = undefined,
     key_share_count: usize = 0,
     x25519_share: ?[]const u8 = null,
     secp256r1_share: ?[]const u8 = null,

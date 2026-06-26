@@ -55,10 +55,20 @@ pub const TcpServerConfig = struct {
     kernel_backlog: u31 = 4096,
     /// Maximum payload bytes per frame. Frames exceeding this close the connection.
     max_recv_buf: usize = 4096,
+    /// Per-connection send buffer size in bytes for the .URING framed model. The send half
+    /// of the per-connection footprint (max_recv_buf covers recv). No effect under the other
+    /// dispatch models.
+    uring_send_buf_size: usize = 64 * 1024,
     /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC.
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
     pool_size: usize = 0,
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
+    /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Max concurrent connections one .URING worker tracks (the per-worker fd-indexed slab size).
+    /// The slab is demand-paged, so a larger value costs little until used. Connections past it are refused.
+    uring_max_conns_per_worker: usize = 1 << 16,
     /// Socket receive timeout per accepted connection in milliseconds (SO_RCVTIMEO). 0 = disabled.
     recv_timeout_ms: u32 = 0,
     /// Socket send timeout per accepted connection in milliseconds (SO_SNDTIMEO). 0 = disabled.
@@ -97,6 +107,9 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 1 << 16), cfg.uring_max_conns_per_worker);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);

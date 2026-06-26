@@ -14,6 +14,15 @@ const reply_stage_scratch: usize = 4096;
 /// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
 const settings_decode_scratch: usize = 256;
 
+/// Request line and header read bound for an h2c upgrade (HeaderTooLarge over this).
+const upgrade_head_buf: usize = 8192;
+
+/// gRPC mux reply staging buffer per connection.
+const mux_stage_buf: usize = 65536;
+
+/// Secondary mux per-connection read buffer floor (the mux conn path).
+const mux_read_buf_min: usize = 32 * 1024;
+
 pub const GrpcStatus = status.GrpcStatus;
 
 /// Return the current wall-clock time in nanoseconds (CLOCK_REALTIME basis).
@@ -386,6 +395,11 @@ pub const GrpcServeOpts = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream in bytes.
     max_body: usize = 65536,
+    /// Per-connection read buffer floor in bytes. The reader is sized to the larger of this and
+    /// one max frame, so a larger floor cuts read() and compaction for big frames.
+    conn_read_buf_min: usize = 64 * 1024,
+    /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
+    tls_write_buf_initial: usize = 16 * 1024,
     logger: ?*Logger = null,
     /// Global handler timeout cap (milliseconds). Passed from GrpcServerConfig.handler_timeout_ms.
     /// 0 = disabled. Combined with Route.timeout_ms and grpc-timeout header at dispatch.
@@ -853,7 +867,7 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts, prefix: *const [3]u8) !void {
-    var head_buf: [8192]u8 = undefined;
+    var head_buf: [upgrade_head_buf]u8 = undefined;
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
@@ -970,7 +984,7 @@ fn serveGrpcLoop(
     const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
     // Read buffer holds at least one full frame (header + max payload) and is large enough
     // to batch several small frames per read().
-    const reader_cap = @max(64 * 1024, max_payload + 9);
+    const reader_cap = @max(opts.conn_read_buf_min, max_payload + 9);
     const reader_buf = try std.heap.smp_allocator.alloc(u8, reader_cap);
     defer std.heap.smp_allocator.free(reader_buf);
     var reader = ConnReader{ .fd = fd, .buf = reader_buf };
@@ -1265,7 +1279,7 @@ pub const GrpcMuxConn = struct {
     /// 64 KB backing store for the per-event reply stage.
     /// Large enough to hold a full 5000-message streaming call (~85 KB peak) in 2 flushes
     /// and to coalesce 100 concurrent unary replies (~6 KB) in a single write().
-    stage_buf: [65536]u8,
+    stage_buf: [mux_stage_buf]u8,
     stage: ReplyStage,
 
     /// Allocate and initialize a connection.
@@ -1276,7 +1290,7 @@ pub const GrpcMuxConn = struct {
         const conn = std.heap.smp_allocator.create(GrpcMuxConn) catch return null;
 
         const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
-        const rcap = @max(32 * 1024, max_payload + 9);
+        const rcap = @max(mux_read_buf_min, max_payload + 9);
         const rbuf = std.heap.smp_allocator.alloc(u8, rcap) catch {
             std.heap.smp_allocator.destroy(conn);
             return null;

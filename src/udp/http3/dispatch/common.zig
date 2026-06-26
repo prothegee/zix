@@ -75,7 +75,7 @@ pub const Event = union(enum) {
 /// Process one received datagram: demux it to a connection and decrypt by encryption level. A new
 /// Initial opens a connection (keyed by the client's chosen DCID), Handshake / 1-RTT packets address
 /// the connection by the Source Connection ID we issued (our_scid).
-pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Event {
+pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize, max_datagram_size: u64) Event {
     if (data.len == 0) return .ignored;
 
     if (data[0] & 0x80 != 0) {
@@ -84,7 +84,7 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize) Even
 
         const conn = findConn(table, &dcid) orelse blk: {
             if (hdr.packet_type != 0) return .demuxed;
-            break :blk table.put(dcid, Connection.init(hdr.dcid, 1200)) orelse return .ignored;
+            break :blk table.put(dcid, Connection.init(hdr.dcid, max_datagram_size)) orelse return .ignored;
         };
         conn.anti_amplification.onReceive(data.len);
 
@@ -211,7 +211,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
 
         for (0..count) |i| {
             const dg = rx.get(i);
-            switch (processDatagram(table, dg.data, config.cid_len)) {
+            switch (processDatagram(table, dg.data, config.cid_len, config.max_datagram_size)) {
                 .client_hello => |n| {
                     logSystem(config, "decrypted client Initial, parsed ClientHello ({d} bytes)", .{n});
                     sendServerHello(table, dg.data, &tx, fd, dg.from, config);
@@ -348,8 +348,6 @@ fn decodePath(conn: *Connection, req: request.DecodedRequest) []const u8 {
 
 /// The most stream-data bytes one 1-RTT packet carries. Kept well under the 1500 path MTU once the
 /// short header, packet number, STREAM frame header, and AEAD tag are accounted for.
-const max_stream_chunk: usize = 1200;
-
 /// Copy `dst.len` bytes of the logical response stream (the HTTP/3 prefix followed by the body) into
 /// `dst`, starting at stream offset `off`. The prefix and body stay separate, so a large body is
 /// never concatenated into one buffer.
@@ -448,7 +446,7 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
 
     var sent_any = false;
     while (stream.sent < limit) {
-        const chunk = @min(max_stream_chunk, limit - stream.sent);
+        const chunk = @min(config.max_stream_chunk, limit - stream.sent);
         const is_last = (stream.sent + chunk == stream.content_len); // FIN only when fully sent
 
         var payload: [1500]u8 = undefined;
@@ -623,14 +621,14 @@ test "zix test: processDatagram demuxes a long-header Initial by DCID" {
 
     // A crafted Initial long header: 0xc3, version 1, 8-byte DCID, 4-byte SCID, one payload byte.
     const initial = [_]u8{ 0xc3, 0x00, 0x00, 0x00, 0x01, 0x08, 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00 };
-    _ = processDatagram(&table, &initial, 8);
+    _ = processDatagram(&table, &initial, 8, 1200);
 
     const dcid = demux.ConnId.fromSlice(&[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 });
     try std.testing.expectEqual(@as(usize, 1), table.count);
     try std.testing.expect(table.find(&dcid) != null);
 
     // A second datagram for the same connection reuses the slot, not a new one.
-    _ = processDatagram(&table, &initial, 8);
+    _ = processDatagram(&table, &initial, 8, 1200);
     try std.testing.expectEqual(@as(usize, 1), table.count);
 
     // The anti-amplification budget reflects both received datagrams.

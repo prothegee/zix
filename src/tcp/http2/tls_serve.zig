@@ -171,7 +171,7 @@ pub fn runTls(comptime routes: []const Route, config: Http2ServerConfig) !void {
         const stream = srv.accept(io) catch continue;
         const conn_fd = stream.socket.handle;
 
-        const worker = std.Thread.spawn(.{ .stack_size = 512 * 1024 }, TlsConn(routes).entry, .{
+        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn(routes).entry, .{
             TlsConn(routes).Ctx{ .fd = conn_fd, .opts = opts, .ctx = ctx },
         }) catch {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep

@@ -75,6 +75,8 @@ const UringFixCtx = struct {
     kernel_backlog: u31,
     comp_id: []const u8,
     opts: FixServeOpts,
+    send_buf_size: usize,
+    max_conns: usize,
 };
 
 fn uringFixWorker(ctx: UringFixCtx) void {
@@ -87,6 +89,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         opts: FixServeOpts,
         hb_ms: u32,
         hb_timespec: lx.kernel_timespec,
+        send_buf_size: usize = URING_SEND_BUF_SIZE,
 
         const W = @This();
         const allocator = std.heap.smp_allocator;
@@ -204,7 +207,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 _ = lx.close(conn_fd);
                 return;
             };
-            const send_buf = allocator.alloc(u8, URING_SEND_BUF_SIZE) catch {
+            const send_buf = allocator.alloc(u8, w.send_buf_size) catch {
                 allocator.free(buf);
                 allocator.destroy(conn);
                 _ = lx.close(conn_fd);
@@ -371,7 +374,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     defer net_server.deinit(ctx.io);
     const listener_fd = net_server.socket.handle;
 
-    const slots = slab.mapZeroedSlots(?*UringFixConn, 1 << 16) catch return;
+    const slots = slab.mapZeroedSlots(?*UringFixConn, ctx.max_conns) catch return;
 
     const hb_ms = ctx.opts.heartbeat_timeout_ms;
     var worker = Worker{
@@ -383,6 +386,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         .opts = ctx.opts,
         .hb_ms = hb_ms,
         .hb_timespec = .{ .sec = @intCast(hb_ms / 1000), .nsec = @intCast((hb_ms % 1000) * 1_000_000) },
+        .send_buf_size = ctx.send_buf_size,
     };
     worker.ring = initUringRing() catch return;
     defer worker.deinit();
@@ -415,7 +419,7 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
 
     for (workers) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 512 * 1024 },
+            .{ .stack_size = cfg.worker_stack_size_bytes },
             uringFixWorker,
             .{UringFixCtx{
                 .io = cfg.io,
@@ -424,6 +428,8 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
                 .kernel_backlog = cfg.kernel_backlog,
                 .comp_id = cfg.comp_id,
                 .opts = conn_opts,
+                .send_buf_size = cfg.uring_send_buf_size,
+                .max_conns = cfg.uring_max_conns_per_worker,
             }},
         );
 
