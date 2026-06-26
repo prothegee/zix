@@ -55,6 +55,10 @@ pub const TcpServerConfig = struct {
     kernel_backlog: u31 = 4096,
     /// Maximum payload bytes per frame. Frames exceeding this close the connection.
     max_recv_buf: usize = 4096,
+    /// Per-connection send buffer size in bytes for the .URING framed model. The send half
+    /// of the per-connection footprint (max_recv_buf covers recv). No effect under the other
+    /// dispatch models.
+    uring_send_buf_size: usize = 64 * 1024,
     /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC.
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
@@ -97,6 +101,7 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
