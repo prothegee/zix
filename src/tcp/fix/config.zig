@@ -36,9 +36,20 @@ pub const FixServerConfig = struct {
     /// 0 (default) = max(10, cpu_count * 2).
     /// Ignored by .ASYNC, .MIXED, and .EPOLL.
     pool_size: usize = 0,
+    /// Worker thread stack size in bytes for the .EPOLL and .URING handler threads.
+    /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Max concurrent connections one .URING worker tracks (the per-worker fd-indexed slab size).
+    /// The slab is demand-paged, so a larger value costs little until used. Connections past it are refused.
+    uring_max_conns_per_worker: usize = 1 << 16,
+    /// Pool worker thread stack size in bytes for the .POOL dispatch model. Smaller than the
+    /// .EPOLL / .URING worker because FIX handlers process small fixed-format messages.
+    pool_stack_size_bytes: usize = 256 * 1024,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.session() for each FIX message processed. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
+    /// Default HeartBtInt (seconds) echoed in the Logon response when the client omits tag 108.
+    default_heartbeat_secs: u32 = 30,
     /// Heartbeat timeout in milliseconds. 0 = disabled.
     /// When non-zero: after this interval with no incoming message, the server sends TestRequest (35=1).
     /// If no response arrives within another interval, the server sends Logout (35=5) and closes.
@@ -119,6 +130,18 @@ test "zix fix: FixServerConfig uring_send_buf_size default" {
     const io = threaded.io();
     const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
     try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
+}
+
+test "zix fix: FixServerConfig worker stack defaults" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.pool_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 1 << 16), cfg.uring_max_conns_per_worker);
+    try std.testing.expectEqual(@as(u32, 30), cfg.default_heartbeat_secs);
 }
 
 test "zix fix: FixServerConfig heartbeat_timeout_ms defaults to zero" {
