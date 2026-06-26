@@ -80,8 +80,8 @@ pub const GrpcClient = struct {
 
         try h2.fdWriteAll(fd, h2.PREFACE);
         try h2.sendSettings(fd, &.{
-            .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
-            .{ h2.SETTINGS_MAX_FRAME_SIZE, 16384 },
+            .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, h2.DEFAULT_WINDOW_SIZE },
+            .{ h2.SETTINGS_MAX_FRAME_SIZE, h2.DEFAULT_MAX_FRAME_SIZE },
         });
 
         return .{
@@ -111,7 +111,7 @@ pub const GrpcClient = struct {
         const sid = self.next_sid;
         self.next_sid += 2;
 
-        var hbuf: [512]u8 = undefined;
+        var hbuf: [h2.HPACK_ENCODE_SCRATCH]u8 = undefined;
         var enc = h2.HpackEncoder.init(&hbuf);
         try enc.writeHeader(":method", "POST");
         try enc.writeHeader(":path", path);
