@@ -38,6 +38,8 @@ const FRAME_OUT_BUF: usize = 8192;
 const H2_SEND_BUF: usize = 9 * 1024;
 /// Per-frame scratch buffer.
 const FRAME_SCRATCH: usize = 16 * 1024;
+/// h2 response accumulator (hard caps the received body size).
+const H2_RESPONSE_ACC: usize = 64 * 1024;
 
 const posix = std.posix;
 
@@ -97,7 +99,7 @@ pub fn fetch(
 
     try sendRequest(fd, &conn, method, host.bytes, path, headers, body, config.user_agent);
 
-    return readResponse(gpa, fd, &conn, config.max_response_body);
+    return readResponse(gpa, fd, &conn, config.max_response_body, config.h2_max_read_rounds);
 }
 
 // --------------------------------------------------------- //
@@ -220,7 +222,7 @@ fn sendBody(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const u8
 // --------------------------------------------------------- //
 // response: decrypt records, parse frames on stream 1, honor SETTINGS / PING, stop at END_STREAM.
 
-fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.ClientConnection, max_body: usize) !Parts {
+fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.ClientConnection, max_body: usize, max_read_rounds: usize) !Parts {
     var hdec = Http2.HpackDecoder.init();
 
     var head: std.ArrayList(u8) = .empty;
@@ -232,10 +234,10 @@ fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.Client
     var have_status = false;
     var stream_done = false;
 
-    var acc: [64 * 1024]u8 = undefined;
+    var acc: [H2_RESPONSE_ACC]u8 = undefined;
     var acc_len: usize = 0;
     var rounds: usize = 0;
-    while (!stream_done and rounds < 4096) : (rounds += 1) {
+    while (!stream_done and rounds < max_read_rounds) : (rounds += 1) {
         var rec_buf: [record.max_record_wire]u8 = undefined;
         const rec_len = try readRecordInto(fd, &rec_buf);
         if (rec_buf[0] != 23) continue; // application_data only
