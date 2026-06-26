@@ -60,6 +60,14 @@ pub const Http1ServerConfig = struct {
     workers: usize = 0,
     /// Pool thread count (0 = max(10, cpu_count * 2)). Used by .POOL only.
     pool_size: usize = 0,
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
+    /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Worker thread stack size in bytes when compression is enabled, applied as a floor under
+    /// .EPOLL / .URING: the effective stack is max(worker_stack_size_bytes, this). std.compress.flate
+    /// is built on the handler stack frame (about 230 KB), so a compressing handler needs more than
+    /// the default. No effect when compression is off.
+    worker_stack_compress_bytes: usize = 2 * 1024 * 1024,
     /// Per-handler execution budget in milliseconds. 0 = disabled.
     /// When non-zero, the server arms a thread-local deadline before each dispatch.
     /// Handlers opt in by calling zix.Http1.isExpired() between expensive steps and
@@ -109,4 +117,13 @@ test "zix http1: Http1ServerConfig URING knob defaults" {
     const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+}
+
+test "zix http1: Http1ServerConfig worker stack defaults" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), cfg.worker_stack_compress_bytes);
 }
