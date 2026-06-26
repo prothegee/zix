@@ -89,7 +89,7 @@ pub const MuxConn = struct {
         const conn = a.create(MuxConn) catch return null;
 
         const max_payload = opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
-        const rcap = @max(32 * 1024, max_payload + 9);
+        const rcap = @max(opts.conn_read_buf_min, max_payload + 9);
         const rbuf = a.alloc(u8, rcap) catch {
             a.destroy(conn);
             return null;
