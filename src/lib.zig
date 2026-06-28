@@ -34,6 +34,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
+    pub const multipart = @import("utils/multipart.zig");
     pub const response_cache = @import("utils/response_cache.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
@@ -53,13 +54,13 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/response.zig"));
     std.testing.refAllDecls(@import("tcp/http/router.zig"));
     std.testing.refAllDecls(@import("tcp/http/static.zig"));
-    std.testing.refAllDecls(@import("tcp/http/upload.zig"));
     std.testing.refAllDecls(@import("tcp/http/websocket.zig"));
     std.testing.refAllDecls(@import("tcp/http/client_config.zig"));
     std.testing.refAllDecls(@import("tcp/http/config.zig"));
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
     std.testing.refAllDecls(@import("tcp/http/h2_client.zig"));
     std.testing.refAllDecls(@import("tcp/http/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http/tls_serve.zig"));
     std.testing.refAllDecls(@import("tcp/http/sse_client.zig"));
     std.testing.refAllDecls(@import("tcp/http/ws_client.zig"));
 
@@ -74,6 +75,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/static.zig"));
     std.testing.refAllDecls(@import("tcp/http1/websocket.zig"));
 
     // # zix.Tls (TLS 1.3 layer)
@@ -87,10 +89,12 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tls/connection.zig"));
     std.testing.refAllDecls(@import("tls/pem.zig"));
     std.testing.refAllDecls(@import("tls/rsa.zig"));
+    std.testing.refAllDecls(@import("tls/montgomery.zig"));
     std.testing.refAllDecls(@import("tls/context.zig"));
     std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
     std.testing.refAllDecls(@import("tcp/tls/tls_session.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/tls_mux.zig"));
 
     // # zix.Tls (TLS 1.2 building blocks: PRF schedule, record, version select)
     std.testing.refAllDecls(@import("tls/tls12_prf.zig"));
@@ -112,6 +116,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/mux.zig"));
     std.testing.refAllDecls(@import("tcp/http2/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/http2/dispatch/epoll.zig"));
     std.testing.refAllDecls(@import("tcp/http2/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http2/tls_serve.zig"));
@@ -132,6 +137,7 @@ test "zix tests: unit test" {
 
     // # zix.Utils
     std.testing.refAllDecls(@import("utils/file.zig"));
+    std.testing.refAllDecls(@import("utils/multipart.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
