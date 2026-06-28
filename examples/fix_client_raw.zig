@@ -8,6 +8,28 @@ const COMP_ID: []const u8 = "CLIENT";
 
 // --------------------------------------------------------- //
 
+fn recvMessage(
+    reader: *std.Io.Reader,
+    recv_buf: []u8,
+    recv_len: *usize,
+) ![]const u8 {
+    while (true) {
+        if (zix.Fix.findMessageEnd(recv_buf[0..recv_len.*])) |end| {
+            const msg = recv_buf[0..end];
+            const remaining = recv_len.* - end;
+            if (remaining > 0) {
+                std.mem.copyForwards(u8, recv_buf[0..remaining], recv_buf[end..recv_len.*]);
+            }
+            recv_len.* = remaining;
+            return msg;
+        }
+        if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
+        const byte = try reader.takeByte();
+        recv_buf[recv_len.*] = byte;
+        recv_len.* += 1;
+    }
+}
+
 // Usage:
 // zig build example-fix_client_raw
 // zig build example-fix_client_raw -- --port 9048 --target ZIX
@@ -23,8 +45,8 @@ pub fn main(process: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--ip")) {
             ip = args.next() orelse return error.MissingArg;
         } else if (std.mem.eql(u8, arg, "--port")) {
-            const s = args.next() orelse return error.MissingArg;
-            port = try std.fmt.parseInt(u16, s, 10);
+            const port_str = args.next() orelse return error.MissingArg;
+            port = try std.fmt.parseInt(u16, port_str, 10);
         } else if (std.mem.eql(u8, arg, "--target")) {
             target = args.next() orelse return error.MissingArg;
         }
@@ -122,27 +144,5 @@ pub fn main(process: std.process.Init) !void {
         const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
         if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logout)) return error.ExpectedLogout;
         std.debug.print("client: recv Logout, session complete\n", .{});
-    }
-}
-
-fn recvMessage(
-    reader: *std.Io.Reader,
-    recv_buf: []u8,
-    recv_len: *usize,
-) ![]const u8 {
-    while (true) {
-        if (zix.Fix.findMessageEnd(recv_buf[0..recv_len.*])) |end| {
-            const msg = recv_buf[0..end];
-            const remaining = recv_len.* - end;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, recv_buf[0..remaining], recv_buf[end..recv_len.*]);
-            }
-            recv_len.* = remaining;
-            return msg;
-        }
-        if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
-        const b = try reader.takeByte();
-        recv_buf[recv_len.*] = b;
-        recv_len.* += 1;
     }
 }

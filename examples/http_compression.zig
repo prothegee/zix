@@ -63,11 +63,53 @@ pub fn pingHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
     try res.sendNegotiated(req, "pong");
 }
 
+// Produce one specific coding explicitly through the codec facade (zix.utils.compression.encode), the
+// lower-level alternative to sendNegotiated. encode dispatches over every available coding (gzip,
+// deflate, brotli), so the same helper serves all three: the route picks which.
+//
+// Note:
+// - This forces the coding for demonstration and sets Content-Encoding to it regardless of the
+//   request header. A real handler should negotiate from Accept-Encoding instead (see /data).
+fn serveCoding(res: *zix.Http.Response, encoding: zix.utils.compression.Encoding) !void {
+    const encoded = try zix.utils.compression.encode(std.heap.smp_allocator, encoding, BODY, .DEFAULT);
+    defer std.heap.smp_allocator.free(encoded);
+
+    res.setContentType(.TEXT_PLAIN);
+    try res.addHeader("Content-Encoding", encoding.contentEncoding().?);
+    try res.addHeader("Vary", "Accept-Encoding");
+
+    try res.send(encoded);
+}
+
+// curl usage: curl -v "http://localhost:9059/gzip" | gunzip
+pub fn gzipHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    _ = ctx;
+    try serveCoding(res, .GZIP);
+}
+
+// curl usage: curl -v "http://localhost:9059/deflate"
+pub fn deflateHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    _ = ctx;
+    try serveCoding(res, .DEFLATE);
+}
+
+// curl usage: curl -v "http://localhost:9059/br" | brotli -d
+pub fn brHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
+    _ = req;
+    _ = ctx;
+    try serveCoding(res, .BR);
+}
+
 // --------------------------------------------------------- //
 
 const Routes = [_]zix.Http.Route{
     .{ .path = "/data", .handler = dataHandler },
     .{ .path = "/ping", .handler = pingHandler },
+    .{ .path = "/gzip", .handler = gzipHandler },
+    .{ .path = "/deflate", .handler = deflateHandler },
+    .{ .path = "/br", .handler = brHandler },
 };
 
 pub fn main(process: std.process.Init) !void {
@@ -80,7 +122,7 @@ pub fn main(process: std.process.Init) !void {
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .max_client_response = MAX_CLIENT_RESPONSE,
-        .compression = true,
+        .compress = true,
         .compression_min_size = COMPRESSION_MIN_SIZE,
         .compression_max_out = COMPRESSION_MAX_OUT,
         .workers = WORKERS,

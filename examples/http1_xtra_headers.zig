@@ -29,8 +29,8 @@ fn reason(status: u16) []const u8 {
     };
 }
 
-fn hasControlChar(s: []const u8) bool {
-    return std.mem.indexOfScalar(u8, s, '\r') != null or std.mem.indexOfScalar(u8, s, '\n') != null;
+fn hasControlChar(str: []const u8) bool {
+    return std.mem.indexOfScalar(u8, str, '\r') != null or std.mem.indexOfScalar(u8, str, '\n') != null;
 }
 
 // Build and send a response with arbitrary custom headers.

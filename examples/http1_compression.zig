@@ -59,11 +59,60 @@ fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     zix.Http1.writeNegotiated(fd, head, 200, "text/plain", "pong") catch {};
 }
 
+// Produce one specific coding explicitly through the codec facade (zix.utils.compression.encode), the
+// lower-level alternative to writeNegotiated. encode dispatches over every available coding
+// (gzip, deflate, brotli), so the same helper serves all three: the route picks which.
+//
+// Note:
+// - This forces the coding for demonstration and sets Content-Encoding to it regardless of the
+//   request header. A real handler should negotiate from Accept-Encoding instead (see /data).
+fn serveCoding(fd: std.posix.fd_t, encoding: zix.utils.compression.Encoding) void {
+    const encoded = zix.utils.compression.encode(std.heap.smp_allocator, encoding, BODY, .DEFAULT) catch {
+        zix.Http1.writeSimple(fd, 500, "text/plain", "encode failed") catch {};
+        return;
+    };
+    defer std.heap.smp_allocator.free(encoded);
+
+    var hdr: [192]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &hdr,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
+        .{ encoding.contentEncoding().?, encoded.len },
+    ) catch return;
+
+    zix.Http1.fdWriteAll(fd, header) catch return;
+    zix.Http1.fdWriteAll(fd, encoded) catch {};
+}
+
+// curl usage: curl -v "http://localhost:9058/gzip" | gunzip
+fn gzipHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+    _ = head;
+    _ = body;
+    serveCoding(fd, .GZIP);
+}
+
+// curl usage: curl -v "http://localhost:9058/deflate"
+fn deflateHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+    _ = head;
+    _ = body;
+    serveCoding(fd, .DEFLATE);
+}
+
+// curl usage: curl -v "http://localhost:9058/br" | brotli -d
+fn brHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+    _ = head;
+    _ = body;
+    serveCoding(fd, .BR);
+}
+
 // --------------------------------------------------------- //
 
 const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/data", .handler = dataHandler },
     .{ .path = "/ping", .handler = pingHandler },
+    .{ .path = "/gzip", .handler = gzipHandler },
+    .{ .path = "/deflate", .handler = deflateHandler },
+    .{ .path = "/br", .handler = brHandler },
 });
 
 pub fn main(process: std.process.Init) !void {
@@ -74,7 +123,7 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .compression = true,
+        .compress = true,
         .compression_min_size = COMPRESSION_MIN_SIZE,
         .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,

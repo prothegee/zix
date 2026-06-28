@@ -40,6 +40,12 @@ var g_io: std.Io = undefined;
 fn eventsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
+
+    // beginStream() detaches any buffered sink so each event flushes immediately. A no-op in
+    // cleartext .ASYNC (writes go straight to the socket), it is also what lets this same handler
+    // stream over TLS (see examples/tls/tls_http1_sse.zig). An SSE handler never returns, so a
+    // buffered response would never flush.
+    zix.Http1.beginStream();
     const headers =
         "HTTP/1.1 200 OK\r\n" ++
         "Content-Type: text/event-stream\r\n" ++

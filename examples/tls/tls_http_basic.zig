@@ -1,13 +1,14 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// https/1.1 over TLS. The Http1 server serves cleartext by default; attaching a Tls.Context
-// (config.tls) opts into the gated TLS path (zix.Tls), on its own perf band, leaving the
-// cleartext EPOLL / URING engine untouched. The context carries the cert / key / alpn / version
-// / curve / cipher / HSTS policy, loaded and validated once at startup.
+// https/1.1 over TLS on the zix.Http (arena) engine. The server serves cleartext by default;
+// attaching a Tls.Context (config.tls) opts into the gated TLS path (zix.Tls), leaving the cleartext
+// engine untouched. Each connection is handed to its own worker thread for the handshake and the
+// keep-alive request loop. The router response is captured and encrypted, so handlers write a normal
+// Response. Buffered responses only (SSE / streaming and WebSocket are not served over TLS yet).
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9060;
+const PORT: u16 = 9071;
 // Demo fixtures. For a real domain, point CERT / KEY at your certbot files:
 // CERT: /etc/letsencrypt/live/sub.domain.tld/fullchain.pem
 // KEY: /etc/letsencrypt/live/sub.domain.tld/privkey.pem
@@ -19,18 +20,22 @@ const HSTS_MAX_AGE_S: u32 = 31536000;
 
 // --------------------------------------------------------- //
 
-fn handler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    const body = "hello over tls 1.3\n";
+fn rootHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+        try res.send("method not allowed");
 
-    var buf: [512]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    w.print(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nStrict-Transport-Security: max-age={d}; includeSubDomains\r\n\r\n{s}",
-        .{ body.len, HSTS_MAX_AGE_S, body },
-    ) catch return;
+        return;
+    }
 
-    zix.Http1.fdWriteAll(fd, w.buffered()) catch {};
+    res.setContentType(.TEXT_PLAIN);
+    try res.addHeader("Strict-Transport-Security", std.fmt.comptimePrint("max-age={d}; includeSubDomains", .{HSTS_MAX_AGE_S}));
+    try res.send("hello over tls 1.3 (http engine)\n");
 }
+
+const Routes = [_]zix.Http.Route{
+    .{ .path = "/", .handler = rootHandler },
+};
 
 pub fn main(process: std.process.Init) !void {
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
@@ -41,7 +46,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = zix.Http1.Server.init(handler, .{
+    var server = try zix.Http.Server.init(4096, &Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

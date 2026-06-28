@@ -77,7 +77,7 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 
     const body = try req.body();
 
-    var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+    var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
     defer parser.deinit();
 
     try parser.parse(body);

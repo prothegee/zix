@@ -32,6 +32,18 @@ fn createInitDirs(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, SECRET_DIR) catch {};
 }
 
+// Seed one demo file so the engine static fallback is reachable out of the box:
+//   curl http://localhost:9024/hello.txt
+fn seedDemoFile(io: std.Io) void {
+    const file = std.Io.Dir.cwd().createFile(io, PUBLIC_DIR ++ "/hello.txt", .{}) catch return;
+    defer file.close(io);
+
+    var write_buf: [256]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    writer.interface.writeAll("served from public_dir by the zix.Http1 engine\n") catch {};
+    writer.interface.flush() catch {};
+}
+
 fn detectContentType(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm"))
         return "text/html";
@@ -43,12 +55,6 @@ fn detectContentType(path: []const u8) []const u8 {
         return "application/json";
     if (std.mem.endsWith(u8, path, ".png"))
         return "image/png";
-    if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg"))
-        return "image/jpeg";
-    if (std.mem.endsWith(u8, path, ".svg"))
-        return "image/svg+xml";
-    if (std.mem.endsWith(u8, path, ".ico"))
-        return "image/x-icon";
     if (std.mem.endsWith(u8, path, ".txt"))
         return "text/plain";
     return "application/octet-stream";
@@ -65,7 +71,9 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 }
 
 // POST /upload
-// Reads the raw request body and writes it to UPLOAD_DIR/<filename>.
+// Reads the raw request body and writes it to UPLOAD_DIR/<filename>. UPLOAD_DIR is
+// public_dir/public_dir_upload, so an uploaded file is then reachable through the engine
+// static fallback at /<public_dir_upload>/<filename> (e.g. GET /u/file.txt).
 // Filename comes from query param: /upload?name=file.txt
 //
 // curl usage:
@@ -78,12 +86,6 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // - .EPOLL (serveEpollConn): body must fit in max_recv_buf. A larger body arrives EMPTY (the
 //   rest is drained off the socket), so the handler sees body.len == 0.
 // For multipart or large uploads, use the high-level zix.Http static server instead.
-//
-// Verified 2026-06-10 against this example (.POOL, max_recv_buf = 16 KB):
-//   19-byte body    -> {"size":19}    (ok)
-//   8192-byte body  -> {"size":8192}  (ok, exactly at the body_buf cap)
-//   12000-byte body -> {"size":8192}  (TRUNCATED, even though 12000 < 16 KB max_recv_buf)
-//   40000-byte body -> {"size":8192}  (TRUNCATED)
 fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
         zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
@@ -129,8 +131,82 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     zix.Http1.writeJson(fd, 200, resp) catch {};
 }
 
+// POST /upload-multipart
+// Multipart counterpart to /upload: accepts multipart/form-data (curl -F) and uses
+// zix.utils.multipart.Parser, the protocol-agnostic parser shared with the zix.Http static
+// example, to pull the "file" field out of the body. The saved file is then reachable through
+// the engine static fallback at /<public_dir_upload>/<filename> (e.g. GET /u/file.txt).
+//
+// zix.Http1 has no per-request arena (unlike zix.Http), so the handler owns a short-lived arena
+// for the parser and the save path.
+//
+// curl usage:
+// curl -X POST "http://localhost:9024/upload-multipart" -F "file=@/path/to/file.txt"
+//
+// Body-size cap: the multipart body is bounded by the same dispatch-model limit as /upload
+// (see above), so this demonstrates SMALL uploads only. For real or large multipart uploads,
+// use the high-level zix.Http static server instead.
+fn uploadMultipartHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+    if (!std.mem.eql(u8, head.method, "POST")) {
+        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        return;
+    }
+
+    const content_type = zix.Http1.getHeader(head, "content-type") orelse {
+        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing content-type\"}") catch {};
+        return;
+    };
+
+    const boundary_prefix = "boundary=";
+    const boundary_offset = std.mem.indexOf(u8, content_type, boundary_prefix) orelse {
+        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing boundary in content-type\"}") catch {};
+        return;
+    };
+    var boundary = content_type[boundary_offset + boundary_prefix.len ..];
+    if (std.mem.indexOfScalar(u8, boundary, ';')) |semi| boundary = boundary[0..semi];
+    boundary = std.mem.trim(u8, boundary, " \t\r\n\"");
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    var parser = zix.utils.multipart.Parser.init(arena.allocator(), boundary);
+    defer parser.deinit();
+
+    parser.parse(body) catch {
+        zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid multipart body\"}") catch {};
+        return;
+    };
+
+    const file_field = parser.getField("file") orelse {
+        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing field: file\"}") catch {};
+        return;
+    };
+
+    const filename = file_field.filename orelse "upload";
+    if (std.mem.indexOf(u8, filename, "..") != null or std.mem.indexOfScalar(u8, filename, '/') != null) {
+        zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid filename\"}") catch {};
+        return;
+    }
+
+    const saved_path = zix.utils.file.save(g_io, arena.allocator(), UPLOAD_DIR, filename, file_field.data) catch {
+        zix.Http1.writeJson(fd, 500, "{\"error\":\"failed to save file\"}") catch {};
+        return;
+    };
+
+    var resp_buf: [512]u8 = undefined;
+    const resp = std.fmt.bufPrint(
+        &resp_buf,
+        "{{\"file\":{{\"name\":\"{s}\",\"size\":{d},\"path\":\"{s}\"}}}}",
+        .{ filename, file_field.data.len, saved_path },
+    ) catch return;
+    zix.Http1.writeJson(fd, 200, resp) catch {};
+}
+
 // GET /secret/<file>?sec=abc123
-// Serves files from SECRET_DIR with a mandatory access param.
+// Serves files from SECRET_DIR with a mandatory access param. This is the hand-served
+// counterpart to the engine public_dir fallback: a route handler keeps full control over
+// access (the engine static fallback serves any file under public_dir unconditionally, so
+// access-gated files live OUTSIDE public_dir and are served here instead).
 //
 // Logic (file existence is checked before the param):
 // 1. File not found in SECRET_DIR        -> 404
@@ -212,15 +288,21 @@ fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 
 // --------------------------------------------------------- //
 
+// Routes own the dynamic paths (/, /upload, /upload-multipart, /secret). Any GET that matches no
+// route falls through to the engine static fallback, which serves files from public_dir (set
+// below) with MIME-from-extension and Range (206) support. So GET /hello.txt is served by the
+// engine, no route handler needed.
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
     .{ .path = "/upload", .handler = uploadHandler },
+    .{ .path = "/upload-multipart", .handler = uploadMultipartHandler },
     .{ .path = "/secret", .handler = secretHandler, .kind = .PREFIX },
 });
 
 pub fn main(process: std.process.Init) !void {
     g_io = process.io;
     createInitDirs(process.io);
+    seedDemoFile(process.io);
 
     var server = zix.Http1.Server.init(Router.dispatch, .{
         .io = process.io,
@@ -231,6 +313,8 @@ pub fn main(process: std.process.Init) !void {
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
         .max_headers = MAX_HEADERS,
+        .public_dir = PUBLIC_DIR,
+        .public_dir_upload = UPLOAD_SUBDIR,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
