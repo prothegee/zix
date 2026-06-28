@@ -23,11 +23,11 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 
 ## Dispatch model (shared by all TCP-family engines)
 
-`dispatch_model` selects the whole concurrency strategy. Values:
+`dispatch_model` selects the whole concurrency strategy. It is required: set it explicitly, there is no default. Values:
 
 | value | meaning |
 | :- | :- |
-| `.ASYNC` | one accept thread, one `io.async()` per connection. Best for low latency at moderate connection counts. Default. |
+| `.ASYNC` | one accept thread, one `io.async()` per connection. Best for low latency at moderate connection counts. |
 | `.POOL` | N accept threads push connections to a shared queue, M pool threads handle them. Best for throughput under high connection counts. |
 | `.MIXED` | N accept threads each dispatch via `io.async()`, no shared queue. Balanced throughput and latency. |
 | `.EPOLL` | shared-nothing: each worker owns one SO_REUSEPORT listener plus one epoll instance. Best for very high connection counts. Linux-only, folds to `.POOL` elsewhere. |
@@ -40,14 +40,15 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | io | required | std.Io backend, must outlive the server | | | | | must be provided |
 | ip | required | bind address | | | | | |
 | port | required | bind port, must be non-zero | | | | | zero is rejected at init |
-| dispatch_model | `.ASYNC` | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, non-Linux folds to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog before accept() | kernel accept queue depth | raise under bursty connection storms | new connections dropped during a burst | more kernel memory for the queue | too low drops connections during spikes |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
 | max_recv_buf | 16384 | bytes buffered per request header block and per EPOLL connection | per-conn memory and max request size | raise for large request headers | large requests rejected | more memory per connection | too low rejects valid large requests |
+| large_body_rcvbuf | 0 | SO_RCVBUF applied only on the large-body path (a body bigger than the read buffer, ie uploads), 0 leaves the kernel default | upload ingest speed and per-conn memory while a large body is in flight | raise for faster upload ingestion | uploads ingest slower (narrow kernel-default window) | more memory during a large body (256 KiB targets about 256 MiB resident at 256c) | only the upload path touches it, small-request cells are unaffected |
 | ws_recv_buf | 0 | per-connection receive buffer for WebSocket connections, 0 falls back to max_recv_buf | per-WS-conn memory | raise above max_recv_buf to hold more pipelined frames | more compact-and-reread churn for WS | more memory per WS connection | 0 reuses max_recv_buf |
 | uring_send_buf_size | 16384 | per-connection send buffer for the .URING dispatch model (the send half, max_recv_buf covers recv) | per-conn memory under .URING | raise for larger single responses, lower to shrink per-conn memory | more buffer growth on big responses | more memory per connection | no effect under other dispatch models |
 | uring_idle_pool_floor | 64 | warm idle-connection pool floor per worker under .URING (A2) | warm-pool memory vs allocator hits on new connections | raise to keep more connections warm for bursty churn, lower to shrink idle memory | more allocator hits after a quiet spell | more idle connections kept resident | A2 gate knob, validate on the 64-core run if changed, no effect under other models |
-| compression | false | enable gzip/deflate/brotli response compression with Accept-Encoding negotiation | CPU vs body size, only pays off over a real network | enable when serving over a network, leave off for loopback benchmarks | | | on a loopback benchmark it is pure CPU cost |
+| compress | false | enable gzip/deflate/brotli response compression with Accept-Encoding negotiation | CPU vs body size, only pays off over a real network | enable when serving over a network, leave off for loopback benchmarks | | | on a loopback benchmark it is pure CPU cost |
 | compression_min_size | 256 | minimum body size in bytes before compression is attempted | per-response check | raise to skip compressing small bodies | tiny bodies compressed for little gain | larger bodies sent uncompressed | too low wastes CPU on small bodies |
 | compression_max_out | 262144 | max compressed output bytes across all codings | per-compressed-response cap | raise to compress larger bodies | larger bodies sent uncompressed | more CPU and memory before bailing | a body over this is sent uncompressed |
 | max_headers | 16 | no-op with the lazy engine, kept for source compatibility | | | | | inert |
@@ -57,6 +58,8 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | worker_stack_compress_bytes | 2097152 | worker stack when compression is on, applied as a floor: effective stack is max(worker_stack_size_bytes, this) | per-thread RSS under .EPOLL/.URING with compression | raise if a compressing handler needs more | flate (about 230 KB on the handler frame) can overflow a small stack | wasted RSS per worker | no effect when compression is off |
 | handler_timeout_ms | 0 | per-handler execution budget in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut off sooner | slow handlers run longer | handlers must check isExpired() for it to take effect |
 | send_date_header | true | include the Date header in every response (RFC 7231) | 37 bytes per response | leave on for compliance, off to shrink responses | | | off drops a standard header |
+| public_dir | "" | root directory for static file serving, empty disables it | disk I/O on static hits | set to serve static files for routes that match no handler | | | non-empty is validated at run(), a missing dir yields error.PublicDirNotFound |
+| public_dir_upload | "u" | upload subdirectory under public_dir, a declarative path an upload handler writes to by convention | | set the upload path | | | relative to public_dir, the engine does not auto-wire uploads |
 | response_cache | false | enable the per-worker response cache (ADR-036) | memory for cached responses | enable for hot, repeatable responses | | | off makes the cache API a no-op |
 | cache_max_entries | 256 | cache slot count, rounded down to a power of two | per-worker memory = entries * value_bytes | raise for more distinct cached keys | fewer keys cached, more misses | more per-worker memory | per-worker, times the worker count |
 | cache_max_value_bytes | 16384 | per-slot response cap, larger responses bypass the cache | per-slot memory | raise to cache larger responses | large responses bypass the cache | more per-worker memory | keep lean, caching pays off above a few KiB |
@@ -74,17 +77,23 @@ h2c cleartext by default, h2-over-TLS when `tls` is set.
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | `.ASYNC` | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | `.URING` falls back to `.EPOLL`, off Linux both fold to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | `.URING` falls back to `.EPOLL`, off Linux both fold to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under connection storms | connections dropped during a burst | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores used | context-switching | ignored by `.ASYNC` |
 | pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
 | worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING) | hot, kernel busy-spins before sleeping the worker | set to e.g. 50 to cut tail latency under load | shorter spin, more idle-sleep wakeups | cores spin at 100% when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
 | max_streams | 16 | max concurrent streams per connection | per-conn stream state and memory | raise for highly multiplexed clients | clients see REFUSED_STREAM sooner | more per-conn memory | too low serializes a multiplexed client |
 | max_frame_size | 16384 | MAX_FRAME_SIZE setting advertised to clients (bytes) | bytes per DATA frame | raise to send larger frames | more frames per response | larger per-frame buffers | bounded by the HTTP/2 spec range |
 | max_header_scratch | 4096 | HPACK scratch buffer per connection | per-stream memory | raise for large header sets | large header blocks rejected | more memory per stream | too low rejects valid headers |
 | max_body | 65536 | max body buffer per stream (bytes) | per-stream memory, times max_streams | raise for larger request bodies | large bodies rejected | per-conn memory grows fast (body * streams) | too high times many streams is large per-conn memory |
-| conn_read_buf_min_bytes | 32768 | per-connection read buffer floor (.EPOLL / .URING mux) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
+| max_recv_buf | 32768 | per-connection read buffer floor (.EPOLL / .URING mux) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
 | tls_write_buf_initial_bytes | 16384 | initial capacity of the per-connection TLS pending-write buffer (grows on demand) | per-conn, TLS path | raise to avoid early reallocation under big responses | more reallocations under large responses | more idle memory per TLS conn | minor, amortization only |
+| response_cache | false | enable the per-worker response cache (ADR-036), opt-in via serveCached/sendCached | cache memory | enable for hot, repeatable responses | | | off makes the cache API a plain send |
+| cache_max_entries | 256 | cache slot count (power of two) | per-worker memory | raise for more keys | more misses | more memory | times the worker count |
+| cache_max_value_bytes | 16384 | per-slot response cap | per-slot memory | raise for larger cached responses | large responses bypass the cache | more memory | keep lean |
+| cache_ttl_ms | 1000 | default cache freshness in ms | hit rate vs staleness | raise for hit rate, lower for freshness | sooner expiry, more misses | staler data | too high serves stale data |
+| cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for h2-over-TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | browsers require ALPN h2 for HTTP/2 over TLS |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | per-request logging is the handler's job |
 
@@ -97,21 +106,22 @@ gRPC over HTTP/2. h2c cleartext by default, h2-over-TLS when `tls` is set.
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | `.ASYNC` | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | ignored by `.ASYNC` |
 | pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
 | worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING) | hot, kernel busy-spins before sleeping the worker | set to e.g. 50 to cut tail latency under load | shorter spin, more idle-sleep wakeups | cores spin at 100% when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
 | max_streams | 16 | max concurrent h2 streams per connection | per-conn stream state | raise for highly multiplexed clients | clients blocked sooner | more per-conn memory | too low serializes a multiplexed client |
 | max_frame_size | 16384 | MAX_FRAME_SIZE advertised to clients (bytes) | bytes per DATA frame | raise for larger frames | more frames per message | larger per-frame buffers | bounded by the HTTP/2 spec range |
 | max_header_scratch | 4096 | HPACK scratch buffer per connection | per-stream memory | raise for large header sets | large headers rejected | more per-stream memory | too low rejects valid headers |
 | max_body | 65536 | max body buffer per stream (bytes) | per-stream memory | raise for larger messages | large messages rejected | more per-conn memory | too low rejects large messages |
-| conn_read_buf_min_bytes | 65536 | per-connection read buffer floor (.EPOLL / .URING) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
+| max_recv_buf | 65536 | per-connection read buffer floor (.EPOLL / .URING) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
 | tls_write_buf_initial_bytes | 16384 | initial capacity of the per-connection TLS pending-write buffer (grows on demand) | per-conn, TLS path | raise to avoid early reallocation under big replies | more reallocations under large replies | more idle memory per TLS conn | minor, amortization only |
 | tls | null | TLS context for gRPC over TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | gRPC runs on HTTP/2, needs ALPN h2 over TLS |
 | logger | null | optional logger, lifecycle plus per-rpc | | attach for logging | | | |
 | handler_timeout_ms | 0 | global handler timeout cap in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut sooner | slow handlers run longer | Route.timeout_ms and the grpc-timeout header tighten it further |
-| compress_gzip | false | gzip DATA-frame compression for clients advertising grpc-accept-encoding: gzip | CPU vs message size | enable over a network | | | pure CPU cost on loopback |
+| compress | false | gzip DATA-frame compression for clients advertising grpc-accept-encoding: gzip | CPU vs message size | enable over a network | | | pure CPU cost on loopback |
 | response_cache | false | enable the per-worker unary response cache | cache memory | enable for hot unary responses | | | off makes the cache API a plain send |
 | cache_max_entries | 256 | cache slot count (power of two) | per-worker memory | raise for more keys | more misses | more memory | times the worker count |
 | cache_max_value_bytes | 16384 | per-slot response-message cap | per-slot memory | raise for larger cached messages | large messages bypass the cache | more memory | keep lean |
@@ -127,12 +137,15 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | `.ASYNC` | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
 | max_recv_buf | 4096 | read buffer per request, over-size requests get 431 | per-conn memory and max request size | raise for large requests | requests rejected with 431 | more memory per connection | too low rejects valid requests |
+| large_body_rcvbuf | 0 | SO_RCVBUF applied only while reading a large request body (uploads), 0 leaves the kernel default | upload ingest speed and per-conn memory while a large body is in flight | raise for faster upload ingestion | uploads ingest slower (narrow kernel-default window) | more memory during a large body (256 KiB targets about 256 MiB resident at 256c) | only the upload path touches it, small-request handlers are unaffected |
+| body_read_timeout_ms | 30000 | max ms Request.body() waits for the next segment of a multi-segment body on the non-blocking .EPOLL / .URING fd | upload path only, bounds a stalled client | lower to drop stalled uploaders sooner | uploads from slow clients cut sooner | a stalled client holds the worker longer | the hot GET path has no body and never waits here |
 | uring_send_buf_size | 16384 | per-connection send buffer for the .URING dispatch model (max_recv_buf covers recv) | per-conn memory under .URING | raise for larger responses, lower to shrink per-conn memory | more buffer growth on big responses | more memory per connection | no effect under other dispatch models |
-| compression | false | enable gzip/deflate/brotli with Accept-Encoding | CPU vs body size | enable over a network | | | pure CPU cost on loopback |
+| uring_idle_pool_floor | 64 | warm idle-connection pool floor per worker under .URING | warm-pool memory vs allocator hits on new connections | raise to keep more connections warm for bursty churn, lower to shrink idle memory | more allocator hits after a quiet spell | more idle connections kept resident | no effect under other dispatch models |
+| compress | false | enable gzip/deflate/brotli with Accept-Encoding | CPU vs body size | enable over a network | | | pure CPU cost on loopback |
 | compression_min_size | 256 | min body size before compression | per-response check | raise to skip small bodies | small bodies compressed | larger bodies skip compression | too low wastes CPU |
 | compression_max_out | 262144 | max compressed output bytes | per-response cap | raise for larger bodies | larger bodies uncompressed | more CPU before bailing | over this is sent uncompressed |
 | max_allocator_size | 4096 | initial arena capacity per connection, grows if exceeded | per-conn memory, reallocation | raise to avoid early arena growth | more arena growth events | more idle memory per connection | grows automatically anyway |
@@ -161,7 +174,7 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | `.ASYNC` | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | max_recv_buf | 4096 | max payload bytes per frame, over-size closes the connection | per-conn memory and max frame | raise for larger frames | large frames close the connection | more memory per connection | too low closes valid large frames |
 | uring_send_buf_size | 65536 | per-connection send buffer for the .URING framed model (max_recv_buf covers recv) | per-conn memory under .URING | raise for larger frames, lower to shrink per-conn memory | more buffer growth on big frames | more memory per connection | no effect under other dispatch models |
@@ -185,18 +198,21 @@ The typed messaging path runs a single async receive loop. The batch and worker 
 | port | required | bind port, non-zero for REQUIRED | | | | | zero rejected under REQUIRED |
 | port_mode | `.REQUIRED` | how the port is sourced: REQUIRED (config) or CONFIGURABLE (CLI with fallback) | startup validation | `.CONFIGURABLE` to read --port at runtime | | | REQUIRED rejects a zero port at init |
 | endianness | `.LITTLE` | wire endianness on every send and receive | per-packet conversion | `.LITTLE` for cross-language clients, `.BIG` for network order | | | must match across clients and server |
-| disconnect_timeout_ms | 5000 | ms of silence before a client is considered disconnected | liveness tracking | lower for faster disconnect detection | clients dropped sooner | dead clients linger | too low drops slow but live clients |
+| conn_timeout_ms | 5000 | ms of silence before a client is considered disconnected | liveness tracking | lower for faster disconnect detection | clients dropped sooner | dead clients linger | too low drops slow but live clients |
 | poll_timeout_ms | 2000 | receive poll interval in ms, sets disconnect check frequency | wakeup frequency | lower for more responsive checks | more frequent wakeups | slower disconnect detection | trades CPU for responsiveness |
 | auto_ack | false | send a 0x06 ACK byte on successful receipt | one extra send per packet | enable for at-least-once feedback | | | adds reply traffic |
 | error_report | false | send a 0x15 NACK byte on a malformed or oversized packet | one extra send on error | enable for error feedback | | | adds reply traffic |
 | auto_echo | false | echo the received packet back as-is | one extra send per packet | enable for echo behavior | | | adds reply traffic |
 | broadcast | false | relay the received packet to all connected clients | a send per connected client | enable for fan-out | | | per-packet cost scales with client count |
-| dispatch_model | `.ASYNC` | concurrency for the raw path, EPOLL/URING run per-core workers | picks the strategy | `.EPOLL`/`.URING` for the raw path at scale | | | typed path folds a non-ASYNC model to a single loop |
+| dispatch_model | required | concurrency for the raw path, EPOLL/URING run per-core workers | picks the strategy | `.EPOLL`/`.URING` for the raw path at scale | | | typed path folds a non-ASYNC model to a single loop |
 | workers | 0 | worker count for per-core models, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | only for EPOLL/URING |
 | reuse_address | false | set SO_REUSEADDR + SO_REUSEPORT for multi-worker binding | enables kernel load-balancing | enable for per-core workers | | | required for multi-worker port sharing |
 | recv_batch | 32 | datagrams received per recvmmsg syscall (raw path) | syscalls per batch | raise to cut syscalls under load | more syscalls per datagram | larger batch buffers | too low loses batching benefit |
 | send_batch | 32 | replies coalesced per sendmmsg flush (raw path) | syscalls per flush | raise to cut syscalls under load | more flush syscalls | larger batch buffers | too low loses batching benefit |
 | max_recv_buf | 1500 | max datagram size, receive buffer per slot (raw path) | per-slot memory | match to path MTU | larger datagrams truncated | more per-slot memory | 1500 is the common Ethernet MTU |
+| busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for the per-core raw worker socket (.EPOLL / .URING) | recvmmsg wake-up latency | set to e.g. 50 to cut wake-up latency under load | shorter spin, more idle-sleep wakeups | cores spin when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
+| worker_stack_size_bytes | 524288 | worker thread stack for the per-core raw workers (.EPOLL / .URING) | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| gso_enabled | false | UDP GSO (UDP_SEGMENT): coalesce consecutive same-destination replies into one sendmsg per group | send-path syscalls | enable when replies burst to one peer (multi-packet flights) | | fewer send syscalls, lower CPU | probed at startup, off on kernels older than 4.18, helps only multi-packet same-peer batches |
 | logger | null | optional logger, lifecycle plus per-datagram | | attach for logging | | | |
 
 ## HTTP/3 (`Http3ServerConfig`)
@@ -209,11 +225,14 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | allocator | required | backing allocator, general-purpose | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | `.ASYNC` | concurrency, EPOLL/URING run one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC/POOL/MIXED run a single worker with CID demux |
+| dispatch_model | required | concurrency, EPOLL/URING run one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC/POOL/MIXED run a single worker with CID demux |
 | workers | 0 | worker count for per-core models, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | only for EPOLL/URING |
 | recv_batch | 32 | datagrams received per recvmmsg syscall | syscalls per batch | raise to cut syscalls | more syscalls | larger buffers | too low loses batching |
 | send_batch | 32 | packets coalesced per sendmmsg flush | syscalls per flush | raise to cut syscalls | more flushes | larger buffers | too low loses batching |
 | max_recv_buf | 1500 | max datagram size, receive buffer per slot | per-slot memory | match to path MTU | datagrams truncated | more memory | 1500 is the common Ethernet MTU |
+| busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for the per-core worker socket (.EPOLL / .URING) | recvmmsg wake-up latency | set to e.g. 50 to cut wake-up latency under load | shorter spin, more idle-sleep wakeups | cores spin when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
+| worker_stack_size_bytes | 524288 | worker thread stack for the per-core workers (.EPOLL / .URING) | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| gso_enabled | true | UDP GSO (UDP_SEGMENT): coalesce a multi-packet response flight to one peer into one sendmsg | send-path syscalls, hot | leave on, disable only to A/B or on a constrained kernel | | fewer send syscalls, lower CPU and higher throughput | probed at startup, falls back to plain sendmmsg on kernels older than 4.18 |
 | tls | null (required) | TLS 1.3 context: cert, key, ALPN, QUIC needs TLS 1.3 | enables QUIC | attach a TLS 1.3 context | | | null is rejected, QUIC has no cleartext mode |
 | cid_len | 8 | server-issued connection ID length in bytes (RFC 9000) | per-packet CID handling | leave at 8, fixed length enables per-core steering | shorter, fewer distinct CIDs | longer CID overhead per packet | enables future per-core CID steering |
 | max_idle_ms | 30000 | connection idle timeout in ms (RFC 9000 10.1) | liveness | lower for faster reclaim of idle connections | idle connections closed sooner | idle connections linger | too low closes slow but live connections |
@@ -231,7 +250,7 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
 | comp_id | required | server SenderCompID (tag 49) | | | | | required for the FIX session |
-| dispatch_model | `.ASYNC` | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | uring_send_buf_size | 65536 | per-connection send buffer for the .URING dispatch model | per-conn memory under .URING | raise for larger replies, lower to shrink per-conn memory | more buffer growth on big replies | more memory per connection | no effect under other dispatch models |
 | uring_max_conns_per_worker | 65536 | max concurrent connections one .URING worker tracks (fd-indexed slab) | per-worker slab, demand-paged | raise for very high concurrency, lower to shrink the slab | connections rejected past the cap | larger upfront slab (demand-paged) | only the .URING model |
@@ -264,7 +283,7 @@ Server-side TLS policy, validated once at init. Attach the built `Tls.Context` b
 
 | field | default | controls | perf impact | how to tweak | if lower | if higher | knob consequence |
 | :- | :- | :- | :- | :- | :- | :- | :- |
-| cert_path | required | PEM path to the end-entity certificate (ECDSA P-256 or Ed25519) | startup load | | | | required |
+| cert_path | required | PEM path to the end-entity certificate (ECDSA P-256, Ed25519, or RSA) | startup load | | | | required |
 | key_path | required | PEM path to the private key matching cert_path | startup load | | | | required, must match the cert |
 | alpn | empty | ALPN protocols offered, in server-preference order | handshake | set `.{ .HTTP_1_1 }` for Http1, `.{ .H2 }` for Http2 | | | browsers need ALPN h2 for HTTP/2 over TLS |
 | min_version | `.TLS_1_2` | version floor, valid range TLS 1.2 to 1.3 | handshake compatibility | raise to `.TLS_1_3` to require 1.3 | | | 1.0/1.1 are never offered (RFC 8996) |
