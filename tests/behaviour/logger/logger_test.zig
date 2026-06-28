@@ -46,6 +46,7 @@ test "zix behaviour: Http.ServerConfig.logger defaults to null" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 8080,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(?*zix.Logger, null), cfg.logger);
 }

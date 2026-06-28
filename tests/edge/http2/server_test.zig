@@ -115,7 +115,7 @@ test "zix edge: Http2Server.init rejects port zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const result = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0 });
+    const result = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     try std.testing.expectError(error.PortNotConfigured, result);
 }
 

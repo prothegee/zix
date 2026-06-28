@@ -11,6 +11,7 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(u31, 1024 * 4), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_recv_buf);
@@ -23,8 +24,9 @@ test "zix behaviour: ServerConfig, compression defaults match Http1" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
-    try std.testing.expectEqual(false, cfg.compression);
+    try std.testing.expectEqual(false, cfg.compress);
     try std.testing.expectEqual(@as(usize, 256), cfg.compression_min_size);
     try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.compression_max_out);
 }
@@ -34,6 +36,7 @@ test "zix behaviour: ServerConfig, timeout defaults are disabled (zero)" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(u32, 0), cfg.conn_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.handler_timeout_ms);
@@ -44,6 +47,7 @@ test "zix behaviour: ServerConfig, static serving is disabled by default" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqualStrings("", cfg.public_dir);
     try std.testing.expectEqualStrings("u", cfg.public_dir_upload);
@@ -54,16 +58,18 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
-test "zix behaviour: ServerConfig, dispatch_model defaults to ASYNC" {
+test "zix behaviour: ServerConfig, dispatch_model is required and stored as set" {
     const cfg = zix.Http.ServerConfig{
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(zix.Tcp.DispatchModel.ASYNC, cfg.dispatch_model);
 }
@@ -80,6 +86,7 @@ test "zix behaviour: ServerConfig, max_response_headers defaults to MINIMAL (16)
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9000,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(zix.Http.HeaderSize.MINIMAL, cfg.max_response_headers);
     try std.testing.expectEqual(@as(usize, 16), cfg.max_response_headers.value());

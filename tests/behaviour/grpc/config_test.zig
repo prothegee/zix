@@ -10,7 +10,7 @@ test "zix behaviour: GrpcServerConfig defaults" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = zix.Grpc.ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083 };
+    const cfg = zix.Grpc.ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC };
 
     try std.testing.expectEqual(zix.Grpc.DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);

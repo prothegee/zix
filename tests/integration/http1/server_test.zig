@@ -12,6 +12,7 @@ test "zix integration: Http1 Server.init valid config, deinit is safe" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
+        .dispatch_model = .ASYNC,
     });
     server.deinit();
 }

@@ -30,7 +30,7 @@ test "zix behaviour: dispatch, exact beats param regardless of registration orde
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerB, .kind = .PARAM },
         .{ .path = "/users/alice", .handler = handlerA },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -49,7 +49,7 @@ test "zix behaviour: dispatch, param beats prefix regardless of registration ord
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/:resource", .handler = handlerA, .kind = .PARAM },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /api/users HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -68,7 +68,7 @@ test "zix behaviour: dispatch, prefix: longest match wins" {
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/users", .handler = handlerA, .kind = .PREFIX },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /api/users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -86,7 +86,7 @@ test "zix behaviour: dispatch, prefix matches its own path exactly" {
     const al = arena.allocator();
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerA, .kind = .PREFIX },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -104,7 +104,7 @@ test "zix behaviour: dispatch, query string transparent to path matching (param)
     const al = arena.allocator();
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /users/bob?role=admin HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
@@ -121,7 +121,7 @@ test "zix behaviour: dispatch, query string transparent to path matching (exact)
     const al = arena.allocator();
     var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
         .{ .path = "/about", .handler = handlerA },
-    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000 });
+    }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var req = try zix.Http.Request.fromRaw("GET /about?ref=menu HTTP/1.1\r\nHost: localhost\r\n\r\n", al);

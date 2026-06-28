@@ -10,7 +10,7 @@ test "zix edge: TcpServer.init, port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const result = zix.Tcp.Server.init(zix.Tcp.echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 });
+    const result = zix.Tcp.Server.init(zix.Tcp.echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     try std.testing.expectError(error.PortNotConfigured, result);
 }
 
