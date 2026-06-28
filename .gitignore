@@ -32,10 +32,10 @@ zig-pkg
 ## proj.
 /public
 /*poc*
-/orders.jsonl
-/tests/orders.jsonl
+orders.jsonl
 /tests/public
 /tests/logs
+/tests/runner/public
 
 ##
 ## extension
