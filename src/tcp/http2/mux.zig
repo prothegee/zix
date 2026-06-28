@@ -208,6 +208,13 @@ fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void
     }
 
     active_conn = conn;
+    // Record the request key inputs for the response-cache API only when a cache is installed, so the
+    // default (cache off) hot path pays no extra threadlocal writes. serveCached returns false without
+    // a cache, so it never reads these when they go unset, and the next dispatch overwrites them.
+    if (core.tl_cache != null) {
+        core.tl_req_path = path;
+        core.tl_req_body = s.body[0..s.body_len];
+    }
     core.Router(routes).dispatch(method, path, s.headers[0..s.header_count], s.body[0..s.body_len], conn.fd, s.id);
     active_conn = null;
 
@@ -218,10 +225,10 @@ fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void
 /// Send DATA for `body` up to the connection and stream send windows and the max frame size. What
 /// does not fit is parked on the stream (`pending_body`) for a later WINDOW_UPDATE. END_STREAM rides
 /// the final frame only once the whole body has gone out.
-fn pumpBody(conn: *MuxConn, s: *MuxStream, body: []const u8, end: bool) void {
+fn pumpBody(conn: *MuxConn, stream: *MuxStream, body: []const u8, end: bool) void {
     var off: usize = 0;
     while (off < body.len) {
-        const room = @min(conn.send_window, s.send_window);
+        const room = @min(conn.send_window, stream.send_window);
         if (room <= 0) break;
 
         const cap = @min(@as(i64, conn.opts.max_frame_size), room);
@@ -232,31 +239,31 @@ fn pumpBody(conn: *MuxConn, s: *MuxStream, body: []const u8, end: bool) void {
             .length = @intCast(chunk),
             .frame_type = frame.FRAME_TYPE_DATA,
             .flags = if (is_last) frame.FLAG_END_STREAM else 0,
-            .stream_id = s.id,
+            .stream_id = stream.id,
         }) catch break;
         frame.fdWriteAll(conn.fd, body[off..][0..chunk]) catch break;
 
         conn.send_window -= @intCast(chunk);
-        s.send_window -= @intCast(chunk);
+        stream.send_window -= @intCast(chunk);
         off += chunk;
     }
 
     if (off < body.len) {
-        s.pending_body = body[off..];
-        s.pending_end = end;
+        stream.pending_body = body[off..];
+        stream.pending_end = end;
     } else {
-        s.pending_body = &.{};
-        s.pending_end = false;
+        stream.pending_body = &.{};
+        stream.pending_end = false;
     }
 }
 
 /// Resume one parked stream after its window grew. Frees the slot once the body fully drains.
 fn resumeStream(conn: *MuxConn, slot: usize) void {
-    const s = &conn.streams[slot];
-    if (s.pending_body.len == 0) return;
+    const stream = &conn.streams[slot];
+    if (stream.pending_body.len == 0) return;
 
-    pumpBody(conn, s, s.pending_body, s.pending_end);
-    if (s.pending_body.len == 0) conn.slots[slot] = false;
+    pumpBody(conn, stream, stream.pending_body, stream.pending_end);
+    if (stream.pending_body.len == 0) conn.slots[slot] = false;
 }
 
 /// Resume every parked stream after the connection window grew.

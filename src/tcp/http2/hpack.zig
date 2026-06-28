@@ -654,21 +654,21 @@ pub const HpackEncoder = struct {
         self.pos += 1;
     }
 
-    fn writeString(self: *HpackEncoder, s: []const u8) !void {
+    fn writeString(self: *HpackEncoder, str: []const u8) !void {
         var hbuf: [256]u8 = undefined;
         // Explicit ?usize so comptime evaluation (cached gRPC reply blocks) keeps the optional
         // type even when the error branch is statically unreachable.
-        const hn: ?usize = huffEncode(s, &hbuf) catch null;
-        if (hn != null and hn.? < s.len) {
+        const hn: ?usize = huffEncode(str, &hbuf) catch null;
+        if (hn != null and hn.? < str.len) {
             try self.writeInt(hn.?, 7, 0x80);
             if (self.pos + hn.? > self.buf.len) return error.BufferFull;
             @memcpy(self.buf[self.pos..][0..hn.?], hbuf[0..hn.?]);
             self.pos += hn.?;
         } else {
-            try self.writeInt(s.len, 7, 0x00);
-            if (self.pos + s.len > self.buf.len) return error.BufferFull;
-            @memcpy(self.buf[self.pos..][0..s.len], s);
-            self.pos += s.len;
+            try self.writeInt(str.len, 7, 0x00);
+            if (self.pos + str.len > self.buf.len) return error.BufferFull;
+            @memcpy(self.buf[self.pos..][0..str.len], str);
+            self.pos += str.len;
         }
     }
 

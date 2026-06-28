@@ -22,8 +22,10 @@ const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
 const setNoDelay = common.setNoDelay;
 const MAX_FD = common.MAX_FD;
+const effectiveCacheEntries = common.effectiveCacheEntries;
 const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const rcache = @import("../../../utils/response_cache.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// SQ entries per worker ring.
@@ -75,6 +77,8 @@ const UringMuxCtx = struct {
     port: u16,
     kernel_backlog: u31,
     opts: core.ServeOpts,
+    worker_id: usize,
+    busy_poll_us: u32,
 };
 
 /// Build a concrete io_uring mux worker entry with the routes baked in at compile time, mirroring
@@ -87,6 +91,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             listener_fd: std.posix.fd_t,
             gen_counter: u24,
             opts: core.ServeOpts,
+            busy_poll_us: u32,
 
             const Self = @This();
             const allocator = std.heap.smp_allocator;
@@ -180,6 +185,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
 
                 setNoDelay(conn_fd);
                 setNonBlock(conn_fd);
+                common.setBusyPoll(conn_fd, self.busy_poll_us);
 
                 const c = mux.MuxConn.init(conn_fd, self.opts) orelse {
                     _ = linux.close(conn_fd);
@@ -244,6 +250,9 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
         };
 
         fn run(ctx: UringMuxCtx) void {
+            // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
+            common.pinToCpu(ctx.worker_id);
+
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var srv = addr.listen(ctx.io, .{
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: the kernel balances accepts across workers
@@ -260,9 +269,30 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .opts = ctx.opts,
+                .busy_poll_us = ctx.busy_poll_us,
             };
             worker.ring = initUringRing() catch return;
             defer worker.deinit();
+
+            // Per-worker response cache: lock-free by ownership, never shared, like the EPOLL worker.
+            var response_cache: rcache.ResponseCache = undefined;
+            var cache_on = false;
+            if (ctx.opts.response_cache) {
+                if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+                    .max_entries = effectiveCacheEntries(ctx.opts),
+                    .max_value_bytes = ctx.opts.cache_max_value_bytes,
+                })) |built| {
+                    response_cache = built;
+                    cache_on = true;
+                    core.setCache(&response_cache, ctx.opts.cache_ttl_ms);
+                } else |_| {
+                    cache_on = false;
+                }
+            }
+            defer if (cache_on) {
+                core.setCache(null, 0);
+                response_cache.deinit();
+            };
 
             worker.run();
         }
@@ -291,7 +321,8 @@ pub fn runUring(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     probe.deinit();
 
     const io = cfg.io;
-    const cpu = try std.Thread.getCpuCount();
+    // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
     const opts = common.serveOpts(cfg);
 
@@ -301,7 +332,7 @@ pub fn runUring(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     defer std.heap.smp_allocator.free(workers);
 
     const worker_fn = uringMuxWorkerFn(routes);
-    for (workers) |*t|
+    for (workers, 0..) |*t, idx|
         t.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
@@ -311,6 +342,8 @@ pub fn runUring(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .opts = opts,
+                .worker_id = idx,
+                .busy_poll_us = cfg.busy_poll_us,
             }},
         );
 

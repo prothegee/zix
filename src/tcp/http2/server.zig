@@ -12,7 +12,7 @@ const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
-const tls_epoll = @import("tls_epoll.zig");
+const tls_mux = @import("tls_mux.zig");
 
 const is_linux = builtin.target.os.tag == .linux;
 
@@ -54,7 +54,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
                 // not spawn a thread per connection. ASYNC / POOL / MIXED keep the thread-per-conn
                 // terminator, which also serves TLS 1.2.
                 if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
-                    return tls_epoll.runTlsEpoll(routes, cfg);
+                    return tls_mux.runTlsMux(routes, cfg);
 
                 return tls_serve.runTls(routes, cfg);
             }
@@ -92,7 +92,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 ///         .{ .path = "/",     .handler = homeHandler },
 ///         .{ .path = "/echo", .handler = echoHandler },
 ///     },
-///     .{ .io = io, .ip = "127.0.0.1", .port = 8082 },
+///     .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC },
 /// );
 /// defer server.deinit();
 /// try server.run();
@@ -116,7 +116,7 @@ test "zix test: Http2Server.init, port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0 }),
+        Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 
@@ -125,6 +125,6 @@ test "zix test: Http2Server.init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082 });
+    var server = try Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
     server.deinit();
 }

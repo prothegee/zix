@@ -3,12 +3,89 @@
 const std = @import("std");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
+const rc = @import("../../utils/response_cache.zig");
 
 /// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
 const SETTINGS_DECODE_SCRATCH: usize = 256;
 
 /// Request line and header read bound for an h2c upgrade (HeaderTooLarge over this).
 const UPGRADE_HEAD_BUF: usize = 8192;
+
+// --------------------------------------------------------- //
+// Per-worker response cache (ADR-036), opt-in via config.response_cache. Mirrors the zix.Grpc and
+// zix.Http1 response caches: the worker installs a cache, muxDispatch records the request key, and a
+// handler serves or stores an unframed response body that is re-framed per stream-id on a hit.
+
+/// Per-worker response cache installed by the EPOLL / URING mux worker. Null on workers without a
+/// cache, so the serveCached / sendCached API degrades to a plain send.
+pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
+
+/// Default freshness in milliseconds for a stored response, set alongside tl_cache.
+pub threadlocal var tl_cache_ttl_ms: u32 = 1000;
+
+/// Path and body of the request currently dispatching on this worker, set by muxDispatch around each
+/// handler call so the free-function cache API can compute the request key. The handler does not
+/// receive the path, so it is threaded here rather than through HandlerFn.
+pub threadlocal var tl_req_path: []const u8 = "";
+pub threadlocal var tl_req_body: []const u8 = "";
+
+/// Install the per-worker response cache and its default TTL.
+pub fn setCache(cache: ?*rc.ResponseCache, default_ttl_ms: u32) void {
+    tl_cache = cache;
+    tl_cache_ttl_ms = default_ttl_ms;
+}
+
+/// Worker default cache TTL in milliseconds, exposed to handlers.
+pub fn cacheTtl() u32 {
+    return tl_cache_ttl_ms;
+}
+
+/// Hash a request into a cache key from its path and body. A zero digest is bumped to 1 so 0 stays
+/// reserved for an empty cache slot.
+fn requestKey(path: []const u8, body: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(path);
+    hasher.update(body);
+
+    const digest = hasher.final();
+    return if (digest == 0) 1 else digest;
+}
+
+/// Serve the current request from the per-worker cache when present. On a hit the cached (unframed)
+/// body is re-framed for this stream and sent, and the handler should return.
+///
+/// Usage:
+/// ```zig
+/// fn handler(method: []const u8, headers: []const zix.Http2.Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void {
+///     if (zix.Http2.serveCached(fd, sid, "application/json")) return;
+///     const reply = buildExpensive();
+///     zix.Http2.sendCached(fd, sid, "application/json", reply);
+/// }
+/// ```
+///
+/// Return:
+/// - bool (true when served from cache, the handler should return)
+pub fn serveCached(fd: std.posix.fd_t, sid: u31, content_type: []const u8) bool {
+    const cache = tl_cache orelse return false;
+    if (tl_req_path.len == 0) return false;
+
+    const bytes = cache.lookup(requestKey(tl_req_path, tl_req_body), rc.nowMillis()) orelse return false;
+
+    frame.sendResponse(fd, sid, 200, content_type, bytes) catch {};
+
+    return true;
+}
+
+/// Send a response body and store it under the current request key for later serveCached hits.
+/// Storing is skipped when no cache is installed or the path is empty. The body is sent regardless.
+pub fn sendCached(fd: std.posix.fd_t, sid: u31, content_type: []const u8, data: []const u8) void {
+    frame.sendResponse(fd, sid, 200, content_type, data) catch {};
+
+    const cache = tl_cache orelse return;
+    if (tl_req_path.len == 0) return;
+
+    _ = cache.store(requestKey(tl_req_path, tl_req_body), data, tl_cache_ttl_ms, rc.nowMillis());
+}
 
 // --------------------------------------------------------- //
 
@@ -148,6 +225,18 @@ pub const ServeOpts = struct {
     /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial: usize = 16 * 1024,
+    /// Enable the per-worker response cache (ADR-036). When off, serveCached / sendCached degrade to
+    /// a plain send. Active under .EPOLL and .URING (shared-nothing, one owner per worker).
+    response_cache: bool = false,
+    /// Response cache slot count, rounded down to a power of two by ResponseCache.init.
+    cache_max_entries: u32 = 256,
+    /// Per-slot response cap in bytes. A response larger than this bypasses the cache.
+    cache_max_value_bytes: u32 = 16 * 1024,
+    /// Default freshness in milliseconds, exposed to handlers via cacheTtl().
+    cache_ttl_ms: u32 = 1000,
+    /// Optional ceiling on per-worker cache memory in bytes. 0 disables the ceiling. When set, the
+    /// effective entry count is reduced so entries * value_bytes fits (see effectiveCacheEntries).
+    cache_max_total_bytes: usize = 0,
 };
 
 // --------------------------------------------------------- //
@@ -512,10 +601,10 @@ fn findSlot(sid: u31, streams: []Stream, used: []bool) ?usize {
     return null;
 }
 
-fn dispatchStream(comptime routes: []const Route, s: *Stream, fd: std.posix.fd_t) void {
+fn dispatchStream(comptime routes: []const Route, stream: *Stream, fd: std.posix.fd_t) void {
     var method: []const u8 = "GET";
     var path: []const u8 = "/";
-    for (s.headers[0..s.header_count]) |h| {
+    for (stream.headers[0..stream.header_count]) |h| {
         // The two pseudo-headers have distinct lengths (":path" 5, ":method" 7),
         // so dispatch on length first and do at most one compare per header.
         switch (h.name.len) {
@@ -528,7 +617,7 @@ fn dispatchStream(comptime routes: []const Route, s: *Stream, fd: std.posix.fd_t
             else => {},
         }
     }
-    Router(routes).dispatch(method, path, s.headers[0..s.header_count], s.body[0..s.body_len], fd, s.id);
+    Router(routes).dispatch(method, path, stream.headers[0..stream.header_count], stream.body[0..stream.body_len], fd, stream.id);
 }
 
 // --------------------------------------------------------- //
@@ -630,4 +719,34 @@ test "zix test: Router PREFIX respects the segment boundary" {
     R.dispatch("GET", "/jsonx", &.{}, "", fds[1], 1);
 
     try std.testing.expectEqual(@as(u8, 0), tl_router_hit);
+}
+
+test "zix test: http2 response cache round-trips via sendCached then serveCached" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 1024 });
+    defer cache.deinit();
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    tl_req_path = "/cached";
+    tl_req_body = "";
+    defer {
+        tl_req_path = "";
+        tl_req_body = "";
+    }
+
+    // a miss before anything is stored: the handler should build the response itself
+    try std.testing.expect(!serveCached(fds[1], 1, "text/plain"));
+
+    // store under the current request key, then a later request with the same key hits and is
+    // re-framed for its own stream id
+    sendCached(fds[1], 1, "text/plain", "hello-cached");
+    try std.testing.expect(serveCached(fds[1], 3, "text/plain"));
+
+    // a different request key still misses
+    tl_req_path = "/other";
+    try std.testing.expect(!serveCached(fds[1], 5, "text/plain"));
 }
