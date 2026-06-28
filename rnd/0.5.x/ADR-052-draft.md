@@ -14,7 +14,7 @@ Thread-per-connection TLS thrashes at 512c / 1024c (one OS thread per connection
 
 | Path | Dispatch | File |
 | :- | :- | :- |
-| multiplexed, per-core | `.EPOLL` / `.URING` | `src/tcp/http2/tls_epoll.zig`, `src/tcp/http2/grpc/tls_epoll.zig` |
+| multiplexed, per-core | `.EPOLL` / `.URING` | `src/tcp/http2/tls_mux.zig`, `src/tcp/http2/grpc/tls_mux.zig` |
 | resumable session (linchpin) | shared | `src/tcp/tls/tls_session.zig` |
 | inline-mux, thread-per-conn (also TLS 1.2) | `.ASYNC` / `.POOL` / `.MIXED` | `src/tcp/tls/h2_terminator.zig` via `tls_serve.zig` |
 
@@ -28,4 +28,4 @@ Thread-per-connection TLS thrashes at 512c / 1024c (one OS thread per connection
 
 - Multiplexed path is TLS 1.3 only. The 1.2 fallback stays on the thread-per-conn path.
 - `.URING` + TLS routes to the same epoll loop. A native io_uring TLS loop is later.
-- Http1 TLS is still thread-per-conn (json-tls rides it). Porting the same dispatch to Http1 is the remaining step, see `rnd/http1-tls-multiplexed-plan.md`.
+- Http1 TLS is still thread-per-conn (json-tls rides it). Porting the same dispatch to Http1 is the remaining step.

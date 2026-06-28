@@ -15,9 +15,9 @@ RFC 9002 section 5 + section 6.1:
   capped at max_ack_delay once the handshake is confirmed. min_rtt keeps the lesser sample.
 - 6.1.1 fixes kPacketThreshold = 3: a packet at least three before the largest acknowledged is lost.
   6.1.2 fixes the time threshold max(9/8 * max(smoothed_rtt, latest_rtt), kGranularity), with
-  kGranularity = 1 ms; a packet older than that is lost.
+  kGranularity = 1 ms. A packet older than that is lost.
 
-Times are integer microseconds so the EWMA is exact and reproducible. No external tool is used; this
+Times are integer microseconds so the EWMA is exact and reproducible. No external tool is used. This
 is sender-side timing logic over the RTT samples and acknowledgements Layer Q carries.
 
 ## Run

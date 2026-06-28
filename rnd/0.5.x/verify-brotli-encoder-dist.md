@@ -41,7 +41,7 @@ encoder-dist interop: 4 passed, 0 failed
 ## If it fails
 
 - csv/rec fail but rand passes: the ring simulation is out of step with the decoder. The most
-  likely cause is the push rule (short code 0 must NOT push; codes 1..15 and the explicit code
+  likely cause is the push rule (short code 0 must NOT push. Codes 1..15 and the explicit code
   must push the resolved distance) or a wrong short-code offset table (4..9 around the last
   distance, 10..15 around the second).
 - everything compressible fails: the distance prefix code now spans short and explicit codes,

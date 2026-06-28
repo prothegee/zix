@@ -17,7 +17,7 @@ RFC 9114 section 4.1.2 + 4.2 + 4.3:
   after a regular field, and a Content-Length that does not equal the sum of the DATA frame lengths.
 
 The PoC validates well-formed request / CONNECT / response messages and exercises each malformed
-path. No external tool is used at this layer; this is message-level validation above QPACK decode.
+path. No external tool is used at this layer. This is message-level validation above QPACK decode.
 
 ## Run
 

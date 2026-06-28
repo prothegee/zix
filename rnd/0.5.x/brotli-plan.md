@@ -116,7 +116,7 @@ python-`zlib` test.
   records, interleaved periods, run, binary). Interop gate
   `rnd/0.5.x/verify-brotli-encoder-dist.sh` (doc `verify-brotli-encoder-dist.md`): 4/4 decode
   byte-exact through `brotli -dc`. Ring win on structured data (csv 1025 -> 583, about 43
-  percent); on high-distance-variety text it is a few bytes larger (the fixed balanced
+  percent). On high-distance-variety text it is a few bytes larger (the fixed balanced
   distance tree dilutes), which E5's optimal codes remove.
 - [x] E5: dynamic prefix codes (optimal Huffman). All three trees (literal, command,
   distance) are now optimal length-limited Huffman codes built from the real symbol
@@ -148,14 +148,14 @@ python-`zlib` test.
   9 unit tests pass (index lookup against a real word, English texts, dict-then-self-ref,
   binary, full alphabet). Interop gate `rnd/0.5.x/verify-brotli-encoder-dictref.sh` (doc
   `verify-brotli-encoder-dictref.md`): 4/4 decode byte-exact through `brotli -dc`; short text
-  wins (74-byte text 113 -> 53). Scope: IDENTITY transform only; the 120 case / prefix /
+  wins (74-byte text 113 -> 53). Scope: IDENTITY transform only. The 120 case / prefix /
   suffix transforms are a later refinement.
 - [x] E7: quality levels + never-expand fallback. The public front-end
   `compressBrotliAlloc(input, quality 0..11, wbits)`: quality maps to encoder effort (q0
   greedy no-dictionary, higher q widens the hash-chain walk and turns the dictionary on,
   bounded chain depth at the top since a response compressor wants a modest level). The
   encoder always also produces an E1 store-only stream and returns the smaller, so output
-  never grows past the input plus the store header; with the dictionary on it also encodes a
+  never grows past the input plus the store header. With the dictionary on it also encodes a
   no-dictionary variant and keeps the smaller (a dictionary reference can cost more than
   literals when the word repeats locally). Done in `rnd/0.5.x/brotli_encoder_quality_poc.zig`,
   7 unit tests pass (ladder monotonic, round-trip at every quality, random never-expands,
@@ -172,14 +172,24 @@ python-`zlib` test.
   `decompressBrotliAlloc` matching the gzip/deflate signatures in `flate.zig` (plus
   `compressQualityAlloc`, `compressBound`, and a shared `Level`). The 122,784-byte static
   dictionary rides alongside as `brotli_dictionary.bin` (`@embedFile`). Registered in
-  `src/lib.zig` test discovery; 18 in-code tests pass.
+  `src/lib.zig` test discovery, in-code tests pass.
+  - Caller-buffer parity (2026-06-28): `compressBrotli` / `decompressBrotli` added so the codec
+    mirrors `flate.zig`'s full four-function shape (a buffer-into and an alloc variant in each
+    direction). brotli's variants take an allocator for scratch, since its encoder and decoder are
+    heap-backed, and report `error.BufferTooSmall` on overflow to match the gzip side. The one
+    honest divergence: `decompressBrotli` needs an allocator where `decompressGzip` does not.
+    `EncodeError` / `DecodeError` gained `BufferTooSmall`, and `flate.zig` gained matching named
+    `EncodeError` / `DecodeError` so both modules read alike. `compressBound` documents the
+    guarantee difference (brotli never expands, flate can). Edge, behaviour, and integration tests
+    cover the new variants (boundary `BufferTooSmall`, binary-safe, buffer-vs-alloc equality,
+    cross-variant interop).
 - [x] I2: `compression.zig` `.BR` encode/decode arms now call the real codec, and `.BR`
   leads `supported_default` (preferred over gzip on text). The facade tests cover the BR
-  round-trip and the new preference order; both `writeNegotiated` (Http1) and
+  round-trip and the new preference order. Both `writeNegotiated` (Http1) and
   `sendNegotiated` (Http) serve `Content-Encoding: br` end to end, verified with `curl`
   plus `brotli -dc`.
 - [x] I3: gate-neutral. Compression stays opt-in (`compression = true`), so the 64c URING
-  raw bench is untouched; brotli pays off only on a real NIC (bandwidth-bound). The
+  raw bench is untouched. Brotli pays off only on a real NIC (bandwidth-bound). The
   encoder builds its dictionary index per call on the heap (the static dictionary is
   `@embedFile` `.rodata`, not stack), so there is no per-worker stack bump like flate's
   230 KB `Compress`.

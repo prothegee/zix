@@ -17,7 +17,7 @@ RFC 9002 section 6.2 + section 7:
   congestion (collapse to the minimum window). kPersistentCongestionThreshold is 3 and kInitialRtt is
   333 ms.
 
-Integer bytes and microseconds make every value exact. No external tool is used; this is sender-side
+Integer bytes and microseconds make every value exact. No external tool is used. This is sender-side
 pacing logic.
 
 ## Run

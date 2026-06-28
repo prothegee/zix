@@ -44,7 +44,7 @@ encoder-lz interop: 5 passed, 0 failed
 
 - every stream decodes byte-exact under `brotli -dc` (the gate, exit code 0).
 - repetitive inputs shrink sharply (lorem and run to a few dozen bytes, README-en.md to about
-  35 percent); rand.bin grows a few bytes (expected, no matches plus the tree headers).
+  35 percent). rand.bin grows a few bytes (expected, no matches plus the tree headers).
 
 ## If it fails
 

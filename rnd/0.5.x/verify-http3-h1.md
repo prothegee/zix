@@ -15,7 +15,7 @@ RFC 9114 section 6.2 + section 7.2:
 - 7.2 fixes the seven frame type values (DATA 0x00, HEADERS 0x01, CANCEL_PUSH 0x03, SETTINGS 0x04,
   PUSH_PROMISE 0x05, GOAWAY 0x07, MAX_PUSH_ID 0x0d) and which frames are legal on which stream.
   SETTINGS / GOAWAY / MAX_PUSH_ID / CANCEL_PUSH belong on the control stream, HEADERS / DATA /
-  PUSH_PROMISE on a request stream; a frame on the wrong stream is H3_FRAME_UNEXPECTED.
+  PUSH_PROMISE on a request stream. A frame on the wrong stream is H3_FRAME_UNEXPECTED.
 - 4.1 fixes the request frame order: a HEADERS, then optional DATA, then an optional trailing
   HEADERS. DATA before any HEADERS, or any frame after the trailing HEADERS, is H3_FRAME_UNEXPECTED.
 

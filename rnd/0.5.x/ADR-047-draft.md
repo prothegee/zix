@@ -18,11 +18,11 @@ fields on each HTTP config.
 - Version floor / ceiling gates the serve path. ECDHE-only, so no dhparam field. Resumption deferred.
 
 ## rnd-only rationale (kept OUT of the public ADR)
-- The intermediate-config posture this mirrors (nginx / haproxy TLSRef) targets an SSL Labs A+
-  grade. zix reaches A+ on-box (testssl Final Score 92, see `rnd/0.5.x/verify-tls-posture.sh`) with
-  the ECDHE-only set, so the dhparam knob nginx / haproxy expose is intentionally dropped: it only
-  parameterizes finite-field DHE, which zix does not negotiate, and the A+ key-exchange score comes
-  from the EC curve strength, not a DH group file.
+- The intermediate-config posture this mirrors (the common reverse-proxy TLS reference) is the
+  modern-secure baseline. zix verifies that posture on-box (see `rnd/0.5.x/verify-tls-posture.sh`)
+  with the ECDHE-only set, so the dhparam knob those proxies expose is intentionally dropped: it
+  only parameterizes finite-field DHE, which zix does not negotiate, and the key-exchange strength
+  comes from the EC curve, not a DH group file.
 - The public ADR justifies the same choices on technical merit only (forward secrecy, AEAD,
   ECDHE-only), per the internal-only grade policy.
 

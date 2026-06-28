@@ -133,11 +133,11 @@ one piece zix already wrote.
 
 ## Layer L: loss detection + congestion (RFC 9002)
 
-- [x] L1: RTT sampling, min_rtt, ack_delay; loss declaration (packet + time threshold). Proven in
+- [x] L1: RTT sampling, min_rtt, ack_delay. Loss declaration (packet + time threshold). Proven in
   `rnd/0.5.x/quic_loss_l1_poc.zig` against RFC 9002 5 / 6.1: 17 checks (first-sample reset, 7/8
   smoothed + 3/4 rttvar, min_rtt, ack-delay subtract + cap, kPacketThreshold 3, 9/8 time threshold +
   granularity floor). Gate `verify-quic-loss-l1.sh` (doc `verify-quic-loss-l1.md`).
-- [x] L2: PTO (anti-deadlock, ack-eliciting probes); congestion (cwnd, recovery, persistent, pacing).
+- [x] L2: PTO (anti-deadlock, ack-eliciting probes). Congestion (cwnd, recovery, persistent, pacing).
   Proven in `rnd/0.5.x/quic_loss_l2_poc.zig` against RFC 9002 6.2 / 7: 20 checks (PTO formula +
   Initial-space + granularity floor + doubling backoff, initial / minimum window, NewReno slow start
   + congestion event + avoidance + persistent congestion). Gate `verify-quic-loss-l2.sh` (doc
@@ -158,7 +158,7 @@ one piece zix already wrote.
   `test-runner-http3` drives a hermetic native QUIC client (hand-rolled from the exported `zix.Http3`
   primitives, no external tool) and asserts the `/baseline2` handler summed the query.
 - [x] I3: `zig build` + `zig build examples` + `unit-test` + `test-all` + `test-runner-all` green on
-  Zig 0.16 and 0.17. `test-runner-all` is 66 protocols with http3 included; the round trip is native,
+  Zig 0.16 and 0.17. `test-runner-all` is 66 protocols with http3 included. The round trip is native,
   no external tool.
 - [ ] I4: gate. Lean per-connection state (no unbounded buffers / tables), 64c UDP throughput within
   the 1% URING gate, steady-state RSS / cgroup-peak neutral. QUIC is crypto-per-packet heavy, so this
@@ -169,6 +169,47 @@ The live-handshake step is DONE: the driver runs the src/tls TLS 1.3 handshake o
 stream, installs Handshake / 1-RTT keys, decrypts and protects packets per RFC 9001, ACKs every
 received packet so the client exits cleanly, and answers requests through the HTTP/3 + QPACK layers
 with comptime routing. Validated live (curl --http3, exit 0, HTTP/3 200) and by the native client.
+
+## Deferred: D3 + D4 (loss recovery, contingency)
+
+The static-h3 data plane shipped in three stages: D1 (parse client transport params), D2 (fragment
+the response into flow-controlled STREAM frames, body streamed zero-copy never buffered), and D5
+(resume on MAX_STREAM_DATA so files larger than the client's initial limit complete). Two stages were
+left unbuilt on purpose:
+
+- [ ] D3: ACK accounting. Track every sent packet (packet number, the stream offset / length it
+  carried, send timestamp), parse incoming ACK ranges (`flow.parseAck`, proven in Q4), and free the
+  stream data those ACKs cover. This is the ledger of bytes still in flight, which does not exist
+  today since the send path streams and forgets.
+- [ ] D4: loss detection + retransmit. On a poll-timer expiry run the RFC 9002 packet / time
+  threshold (`recovery.zig`, proven in L1 / L2), then resend the unacked stream bytes for any packet
+  declared lost back through the same D2 flow-control-capped send path.
+
+D3 is a hard prerequisite for D4 (cannot retransmit what is lost until the ledger tracks what was
+confirmed), so the build is two phases, each with its own gate:
+
+| Phase | Builds | Gate |
+| :- | :- | :- |
+| 1 | D3 ledger + ACK free | curl transfer byte-exact, in-flight set drains to empty at end of response (proves ACKs consumed, not ignored). No-loss behavior unchanged. |
+| 2 | D4 timer loss-pass + resend | inject synthetic loss (drop 1-in-N, or a forced middle-packet drop), response completes instead of stalling. |
+
+Why deferred, not dropped: both are pure wiring (the RFC 9002 math and ACK-range parsing already
+exist and are proven), but they only cost on the no-loss path and buy nothing there. The trade-off:
+
+| Axis | Cost |
+| :- | :- |
+| Memory | a retransmit buffer per connection (bounded by the congestion window, not the file size), which breaks the D2 zero-copy forget, plus small per-packet send-tracking metadata that grows with throughput |
+| Hot-path CPU | ACK parse + ledger free on every poll, plus a loss-detection pass on every timer tick, added to an engine that is already syscall-bound on loopback |
+| Throughput | no gain. This is robustness insurance, not speed |
+
+Trigger to build: a high-throughput h3 run on the 64c HttpArena box shows non-zero packet loss or a
+stalled transfer. At current scale (loopback and the runs so far) loss was zero and timeouts were
+zero, so a lost middle packet, the failure D4 repairs, never happens. Until the box proves real loss,
+the contingency costs more than it saves.
+
+Mitigations when it is built (to satisfy the I4 gate): cap the retransmit buffer at the congestion
+window so it never holds the full body, and guard the loss-detection pass behind "is anything
+actually in flight" so an idle or fully-acked connection skips it entirely.
 
 ## Interop and conformance
 
@@ -181,5 +222,6 @@ with comptime routing. Validated live (curl --http3, exit 0, HTTP/3 200) and by 
 C -> Q -> T -> P -> H -> L, then integration. Every deterministic layer (C, Q, T1 / T2, P, H, L) and
 Layer I (the assembled `src/udp/http3/` engine, the live handshake driver, the example, and the native
 test-runner client) are now done, which cleared the two previously-pending gates (T3 curl --http3
-handshake, P4 cross-impl QPACK interop via curl). What remains is I4 (the 64c HttpArena bench) and the
-broader interop / qlog follow-ups.
+handshake, P4 cross-impl QPACK interop via curl). What remains is I4 (the 64c HttpArena bench), the
+deferred D3 / D4 loss-recovery contingency (only built if that bench shows real loss), and the broader
+interop / qlog follow-ups.
