@@ -17,7 +17,7 @@ Situs-situs yang tersisa (`extra_buf`, `fields`, `conns`, ...). Ketika salah sat
 <br>
 
 **OoP (Object-oriented Patterns):**<br>
-Sebagian besar struct (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) mengikuti pola ini. Idiomatis di Zig dan baik-baik saja sebagai baseline.
+Sebagian besar struct (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `multipart.Parser`, ...) mengikuti pola ini. Idiomatis di Zig dan baik-baik saja sebagai baseline.
 
 > Pertahankan sebagai default. Gunakan alternatifnya hanya ketika enkapsulasi muncul sebagai biaya throughput.
 

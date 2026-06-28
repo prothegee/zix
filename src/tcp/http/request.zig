@@ -4,6 +4,58 @@ const std = @import("std");
 const Method = @import("method.zig");
 const parser = @import("parser.zig");
 
+/// SO_RCVBUF (bytes) applied while reading a large request body. Installed per worker from
+/// config.large_body_rcvbuf. 0 leaves the kernel default. Threadlocal because body() runs on the
+/// worker without a config handle.
+pub threadlocal var tl_large_body_rcvbuf: usize = 0;
+
+/// Install the large-body SO_RCVBUF for this worker.
+pub fn setLargeBodyRcvbuf(bytes: usize) void {
+    tl_large_body_rcvbuf = bytes;
+}
+
+/// Widen the socket receive buffer for a large-body read. bytes = 0 leaves the socket untouched.
+fn setRecvBuf(fd: std.posix.fd_t, bytes: usize) void {
+    if (bytes == 0) return;
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
+    const val: c_int = @intCast(@min(bytes, std.math.maxInt(c_int)));
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&val)) catch {};
+}
+
+/// Max time body() waits for the next segment of a Content-Length or chunked body before giving up.
+/// Threadlocal so the EPOLL / URING worker can tune it without a config handle. The default covers a
+/// slow upload while keeping a stalled client bounded rather than blocking the worker forever.
+pub threadlocal var tl_body_read_timeout_ms: i32 = 30_000;
+
+/// Install the body read timeout for this worker.
+pub fn setBodyReadTimeout(ms: i32) void {
+    tl_body_read_timeout_ms = ms;
+}
+
+/// Block until fd is readable or the timeout elapses.
+///
+/// The accepted fd is non-blocking under the EPOLL / URING models, so a body split across TCP
+/// segments returns EAGAIN between segments. body() waits here for the next segment instead of
+/// truncating at the first EAGAIN. Upload path only: a request with no body never reaches this.
+///
+/// Return:
+/// - true when the fd became readable
+/// - false on timeout or a poll error
+fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
+    const linux = std.os.linux;
+    var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+
+    while (true) {
+        const rc = linux.poll(&pfd, 1, timeout_ms);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return rc > 0 and (pfd[0].revents & linux.POLL.IN) != 0,
+            .INTR => continue,
+            else => return false,
+        }
+    }
+}
+
 pub const PathParam = struct {
     name: []const u8,
     value: []const u8,
@@ -68,9 +120,18 @@ pub const Request = struct {
         const out = try self.allocator.alloc(u8, content_len);
         @memcpy(out[0..already_len], already_slice[0..already_len]);
 
+        // Large body still to come off the socket: widen the receive window so it ingests in fewer
+        // cycles (the upload path). Small bodies already buffered skip this.
+        if (content_len > already_len) setRecvBuf(self.fd, tl_large_body_rcvbuf);
+
         var total: usize = already_len;
         while (total < content_len) {
-            const n = std.posix.read(self.fd, out[total..content_len]) catch break;
+            const n = std.posix.read(self.fd, out[total..content_len]) catch |err| {
+                // Non-blocking fd between segments: wait for the next one instead of truncating.
+                if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
+
+                break;
+            };
             if (n == 0) break;
             total += n;
         }
@@ -91,7 +152,12 @@ pub const Request = struct {
         // Note: "0\r\n\r\n" pattern match is a heuristic, the dechunker handles correctness.
         while (raw_total < max_raw) {
             if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
-            const n = std.posix.read(self.fd, raw_buf[raw_total..max_raw]) catch break;
+            const n = std.posix.read(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
+                // Non-blocking fd between chunks: wait for the next one instead of truncating.
+                if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
+
+                break;
+            };
             if (n == 0) break;
             raw_total += n;
         }
@@ -237,4 +303,102 @@ test "zix test: http request header lookup" {
     try std.testing.expectEqualStrings("example.com", req.header("Host").?);
     try std.testing.expectEqualStrings("application/json", req.header("content-type").?);
     try std.testing.expect(req.header("x-missing") == null);
+}
+
+test "zix test: http request body must not truncate when a Content-Length body arrives in segments over a non-blocking fd" {
+    // Repro for the EPOLL / URING body gap. The accepted fd is non-blocking, but body() reads the
+    // remaining body with a posix.read loop that `catch break`s on the first EAGAIN. When the body is
+    // split across TCP segments (only the first has arrived), the loop bails with a TRUNCATED body.
+    // A writer thread delivers the first segment up front, then the rest a moment later, so a correct
+    // read collects all 10 bytes while the current code returns only the first 3.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+
+    // server read end is non-blocking, matching the EPOLL / URING accept path
+    const cur_flags = linux.fcntl(fds[0], std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+    // first segment is already on the socket. The remaining bytes follow after a short delay
+    try std.testing.expectEqual(@as(usize, 3), linux.write(fds[1], "abc", 3));
+
+    const Writer = struct {
+        fn run(w_fd: std.posix.fd_t) void {
+            var delay = std.os.linux.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = std.os.linux.nanosleep(&delay, null);
+            _ = std.os.linux.write(w_fd, "defghij", 7);
+            _ = std.os.linux.close(w_fd);
+        }
+    };
+    var writer = try std.Thread.spawn(.{}, Writer.run, .{fds[1]});
+    defer writer.join();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "POST /post HTTP/1.1\r\nContent-Length: 10\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqualStrings("abcdefghij", body);
+}
+
+test "zix test: http request chunked body must not truncate when chunks arrive in segments over a non-blocking fd" {
+    // Same EPOLL / URING gap on the chunked path: readChunkedBody() reads until the terminal
+    // "0\r\n\r\n" chunk, and must wait across segment boundaries instead of bailing at the first
+    // EAGAIN. The writer delivers the terminator only in the second segment.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+
+    const cur_flags = linux.fcntl(fds[0], std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
+
+    // first segment: chunk size line + part of the payload, no terminator yet
+    const seg1 = "a\r\nabcdef";
+    try std.testing.expectEqual(@as(usize, seg1.len), linux.write(fds[1], seg1, seg1.len));
+
+    const Writer = struct {
+        fn run(w_fd: std.posix.fd_t) void {
+            var delay = std.os.linux.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = std.os.linux.nanosleep(&delay, null);
+            // rest of the payload + terminal zero chunk
+            const seg2 = "ghij\r\n0\r\n\r\n";
+            _ = std.os.linux.write(w_fd, seg2, seg2.len);
+            _ = std.os.linux.close(w_fd);
+        }
+    };
+    var writer = try std.Thread.spawn(.{}, Writer.run, .{fds[1]});
+    defer writer.join();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "POST /post HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqualStrings("abcdefghij", body);
 }

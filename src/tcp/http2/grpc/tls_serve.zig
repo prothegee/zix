@@ -145,10 +145,10 @@ fn TlsConn(comptime routes: []const Route) type {
             ctx: *const Tls.Context,
         };
 
-        fn entry(c: Ctx) void {
-            defer _ = linux.close(c.fd);
+        fn entry(conn_ctx: Ctx) void {
+            defer _ = linux.close(conn_ctx.fd);
 
-            terminator.serveConnTls(c.fd, c.ctx, MuxDriver(routes){ .opts = c.opts }) catch {};
+            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(routes){ .opts = conn_ctx.opts }) catch {};
         }
     };
 }

@@ -26,15 +26,32 @@ pub const Level = enum {
     DEFAULT,
 };
 
+/// Errors the gzip / deflate encoders can raise. Shares BufferTooSmall and OutOfMemory with
+/// brotli.EncodeError, so a caller can switch codecs without changing its error handling.
+pub const EncodeError = error{
+    CompressFailed,
+    BufferTooSmall,
+    OutOfMemory,
+};
+
+/// Errors the gzip / deflate decoders surface, identical to brotli.DecodeError. An output that
+/// overflows a caller buffer is BufferTooSmall. An over-cap alloc-variant output is OutputTooLarge.
+pub const DecodeError = error{
+    DecompressFailed,
+    OutputTooLarge,
+    BufferTooSmall,
+    OutOfMemory,
+};
+
 /// Upper bound on the compressed output size for a given input length. Safe for both
 /// the gzip and zlib containers (gzip has the larger framing overhead).
 ///
 /// Note:
-/// - The encoder may emit fixed-Huffman blocks for incompressible data, where a
-///   literal costs up to 9 bits, so the worst case is input * 9 / 8 (not the
-///   stored-block 5-bytes-per-block bound, since std does not guarantee a stored
-///   fallback). Add 5 bytes per 65535-byte block, the gzip header (10), and the
-///   trailer (8 = CRC32 + ISIZE).
+/// - Weaker guarantee than brotli.compressBound. std has no store fallback, so the encoder may emit
+///   fixed-Huffman blocks for incompressible data, where a literal costs up to 9 bits: the output
+///   can exceed the input and the worst case is input * 9 / 8 (not the stored-block 5-bytes-per-block
+///   bound). Add 5 bytes per 65535-byte block, the gzip header (10), and the trailer (8 = CRC32 +
+///   ISIZE). The two bounds are not interchangeable.
 ///
 /// Param:
 /// input_len - usize (uncompressed byte count)
@@ -157,22 +174,22 @@ fn decompressContainerAlloc(allocator: std.mem.Allocator, compressed: []const u8
 // gzip (RFC 1952). The HTTP `gzip` content coding.
 
 /// gzip compress into a caller buffer sized via compressBound. See compressContainer.
-pub fn compressGzip(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) !usize {
+pub fn compressGzip(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) EncodeError!usize {
     return compressContainer(allocator, data, out_buf, level, .gzip);
 }
 
 /// gzip compress into a freshly allocated buffer shrunk to the exact result size.
-pub fn compressGzipAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) ![]u8 {
+pub fn compressGzipAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) EncodeError![]u8 {
     return compressContainerAlloc(allocator, data, level, .gzip);
 }
 
 /// gzip decompress into a caller buffer. See decompressContainer.
-pub fn decompressGzip(compressed: []const u8, out_buf: []u8) !usize {
+pub fn decompressGzip(compressed: []const u8, out_buf: []u8) DecodeError!usize {
     return decompressContainer(compressed, out_buf, .gzip);
 }
 
 /// gzip decompress into a freshly allocated buffer, capped at max_out (bomb guard).
-pub fn decompressGzipAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_out: usize) ![]u8 {
+pub fn decompressGzipAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_out: usize) DecodeError![]u8 {
     return decompressContainerAlloc(allocator, compressed, max_out, .gzip);
 }
 
@@ -180,22 +197,22 @@ pub fn decompressGzipAlloc(allocator: std.mem.Allocator, compressed: []const u8,
 // these use the zlib container, not raw DEFLATE.
 
 /// deflate (zlib) compress into a caller buffer sized via compressBound.
-pub fn compressDeflate(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) !usize {
+pub fn compressDeflate(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) EncodeError!usize {
     return compressContainer(allocator, data, out_buf, level, .zlib);
 }
 
 /// deflate (zlib) compress into a freshly allocated buffer shrunk to the exact size.
-pub fn compressDeflateAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) ![]u8 {
+pub fn compressDeflateAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) EncodeError![]u8 {
     return compressContainerAlloc(allocator, data, level, .zlib);
 }
 
 /// deflate (zlib) decompress into a caller buffer.
-pub fn decompressDeflate(compressed: []const u8, out_buf: []u8) !usize {
+pub fn decompressDeflate(compressed: []const u8, out_buf: []u8) DecodeError!usize {
     return decompressContainer(compressed, out_buf, .zlib);
 }
 
 /// deflate (zlib) decompress into a freshly allocated buffer, capped at max_out.
-pub fn decompressDeflateAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_out: usize) ![]u8 {
+pub fn decompressDeflateAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_out: usize) DecodeError![]u8 {
     return decompressContainerAlloc(allocator, compressed, max_out, .zlib);
 }
 

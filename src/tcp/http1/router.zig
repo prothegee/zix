@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const core = @import("core.zig");
+const static = @import("static.zig");
 
 // --------------------------------------------------------- //
 
@@ -178,6 +179,18 @@ pub fn Router(comptime routes: []const Route) type {
             if (best_handler) |h| {
                 h(head, body, fd);
                 return;
+            }
+
+            // Static file fallback: when public_dir is configured, try to serve the request path
+            // as a file before returning 404. Disabled when public_dir is empty (tl_static_dir = "").
+            if (core.tl_static_dir.len > 0) {
+                if (core.tl_static_io) |io| {
+                    const stripped = if (p.len > 0 and p[0] == '/') p[1..] else p;
+                    if (stripped.len > 0) {
+                        const served = static.serve(head, fd, stripped, core.tl_static_dir, io) catch false;
+                        if (served) return;
+                    }
+                }
             }
 
             core.writeSimple(fd, 404, "text/plain", "Not Found") catch {};

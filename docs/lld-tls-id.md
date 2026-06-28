@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-tls-id.md`](hld-tls-id.md) dan ADR-045 / 046 / 047.
 
-`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine memiliki socket loop. Http1 thread-per-koneksi di `tcp/http1/tls_serve.zig`. Http2 dan Grpc memilih antara dua jalur lewat `dispatch_model` (ADR-052): `.EPOLL` / `.URING` memakai `tcp/http2/tls_epoll.zig` dan `tcp/http2/grpc/tls_epoll.zig` multipleks per-core di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tcp/http2/tls_serve.zig` dan `tcp/http2/grpc/tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig`.
+`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine memiliki socket loop. Http1 thread-per-koneksi di `tcp/http1/tls_serve.zig`. Http2 dan Grpc memilih antara dua jalur lewat `dispatch_model` (ADR-052): `.EPOLL` / `.URING` memakai `tcp/http2/tls_mux.zig` dan `tcp/http2/grpc/tls_mux.zig` multipleks per-core di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tcp/http2/tls_serve.zig` dan `tcp/http2/grpc/tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig`.
 
 ---
 
@@ -23,7 +23,7 @@ pub const CipherSuite = enum(u16) {
     _,
 };
 pub const NamedGroup = enum(u16) { SECP256R1 = 0x0017, X25519 = 0x001d, _ };
-pub const SignatureScheme = enum(u16) { ECDSA_SECP256R1_SHA256 = 0x0403, ED25519 = 0x0807, _ };
+pub const SignatureScheme = enum(u16) { RSA_PKCS1_SHA256 = 0x0401, ECDSA_SECP256R1_SHA256 = 0x0403, RSA_PSS_RSAE_SHA256 = 0x0804, ED25519 = 0x0807, _ };
 ```
 
 `server_cipher_prefs = {AES_128_GCM_SHA256}` dan `server_group_prefs = {X25519, SECP256R1}` adalah default bawaan.
@@ -103,7 +103,7 @@ Menolak list curve / cipher kosong, curve di luar {X25519, SECP256R1}, cipher di
 
 ## rsa.zig
 
-Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-parse RSAPrivateKey two-prime (RFC 8017 A.1.2): wrapper PKCS#8 dibuka dulu ke OCTET STRING di dalamnya, lalu modulus `n` dan private exponent `d` disalin ke buffer tetap milik sendiri (leading-zero dibuang). `signPkcs1v15(message, out)` adalah jalur EMSA-PKCS1-v1_5 deterministik (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` adalah EMSA-PSS (RFC 8017 9.1) dengan MGF1, salt diinjeksi oleh pemanggil sehingga encoding-nya deterministik dan bisa diuji unit. Keduanya berakhir di RSASP1, `s = m^d mod n` via `std.crypto.ff.Modulus.powWithEncodedExponent` (constant-time, jadi `d` tidak bocor), lalu I2OSP ke `k` byte. Prime CRT di-parse tetapi tidak dipakai (jalur `m^d mod n` polos hanya butuh `n` dan `d`).
+Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-parse RSAPrivateKey two-prime (RFC 8017 A.1.2): wrapper PKCS#8 dibuka dulu ke OCTET STRING di dalamnya, lalu modulus `n` dan private exponent `d` disalin ke buffer tetap milik sendiri (leading-zero dibuang). `signPkcs1v15(message, out)` adalah jalur EMSA-PKCS1-v1_5 deterministik (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` adalah EMSA-PSS (RFC 8017 9.1) dengan MGF1, salt diinjeksi oleh pemanggil sehingga encoding-nya deterministik dan bisa diuji unit. Keduanya berakhir di RSASP1 via Chinese Remainder Theorem (RFC 8017 5.1.2): dua modexp setengah-lebar atas prime `p` dan `q` (faktor CRT kini dipakai, bukan hanya `n` dan `d`), masing-masing dijalankan lewat Montgomery modexp constant-time di `montgomery.zig` (jalur asm ADCX / ADOX fused di x86_64+ADX, CIOS portable selain itu), lalu digabung kembali dan I2OSP ke `k` byte. `std.crypto.ff.Modulus.powWithEncodedExponent` adalah fallback untuk lebar prime yang tidak dicakup jalur Montgomery.
 
 ## cert_verify.zig
 
@@ -121,21 +121,29 @@ Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-
 
 `readRecord` / `readAll` / `writeAll` memakai `std.os.linux.read` / `write` dengan switch errno (tanpa wrapper std.posix demi portabilitas lintas 0.16 / 0.17).
 
+### SSE / streaming melalui TLS (ADR-054)
+
+Jalur thread-per-koneksi juga melayani handler streaming (SSE) melalui TLS, di kedua `zix.Http1` (`core.zig`) dan `zix.Http` (`response.zig`). `serveRequests` memasang `TlsStreamSink` per-koneksi, writer type-erased (`StreamSinkFor(@TypeOf(conn))`) yang memegang koneksi hidup dan fd: tiap write mengenkripsi satu TLS record (`conn.writeAppData`) dan mengirimnya. `fdWriteAll` memeriksa buffered capture sink dulu, lalu stream sink, jadi response normal menjaga jalur cepat ter-buffer. Handler memilih streaming dengan `res.stream()` (`zix.Http`, surface tak berubah) atau `beginStream()` (`zix.Http1`, no-op di cleartext), yang melepas capture sink jadi write berikutnya jatuh ke stream sink. `runHandlerToBuffer` / `processRequestToBuffer` melaporkan outcome streamed (capture sink dilepas) jadi loop close setelah stream selesai. Jalur `tls_mux` multipleks tetap request / response saja.
+
+### WebSocket melalui TLS (ADR-055)
+
+WebSocket dibangun di atas stream sink yang sama untuk write half dan menambah read half (dekripsi record, parse frame). Handler yang dilayani melalui TLS memanggil `WebSocket.serveTls(fd, key, on_frame)`: ia melepas capture, menulis `101` lewat stream sink (terenkripsi), dan mendaftarkan handoff (`requestWebSocket` / `takeWebSocket`, dibagi dengan jalur `.EPOLL` cleartext di `zix.Http1`, ditambahkan ke `zix.Http`). Setelah handler return, `serveRequests` mengambil handoff dan menjalankan `serveWsTls`: baca satu ciphertext record, dekripsi (`conn.readAppData`), akumulasi, lalu `WebSocket.pump` frame lengkap (text / binary -> `on_frame`, ping auto-pong, close auto-echo). `pump` meng-coalesce frame keluar pass itu dan flush lewat `fdWriteAll`, yang stream sink enkripsi sebagai satu record. `send` melalui TLS dirutekan sama. `zix.Http` memperoleh bagian engine-driven (`WsFrameFn`, `send`, `pump`, `upgradeFd`, handoff) jadi kedua engine berbagi bentuk `on_frame(fd, opcode, payload)`. Rooms / broadcast hanya cleartext (tiap koneksi punya TLS session sendiri), jadi wss bersifat per-koneksi. Jalur `tls_mux` multipleks membuang handoff (WS thread-per-koneksi saja).
+
 ## tcp/tls/h2_terminator.zig (terminator h2-over-TLS bersama)
 
 `serveConnTls(fd, ctx, driver)` adalah terminator engine-agnostic yang dipakai jalur `.ASYNC` / `.POOL` / `.MIXED` dari Http2 dan Grpc. Ia menjalankan handshake (version policy + fallback 1.2 ke `serveConnTls12`, yang menerima `driver` yang sama), memastikan ALPN memilih h2 (`AlpnNotH2` jika tidak), memverifikasi client Finished, lalu memanggil `driver.drive(fd, &conn, &record_buf)`. Driver memiliki koneksi sampai close: ia menjalankan mux h2 resumable langsung di atas record terdekripsi dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. Tanpa socketpair, tanpa thread kedua.
 
 ## tcp/http2/tls_serve.zig dan tcp/http2/grpc/tls_serve.zig
 
-Ini jalur `.ASYNC` / `.POOL` / `.MIXED`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `frame.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_epoll.zig` multipleks di bawah.
+Ini jalur `.ASYNC` / `.POOL` / `.MIXED`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `frame.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_mux.zig` multipleks di bawah.
 
 ## tcp/tls/tls_session.zig (session server TLS 1.3 resumable)
 
 Linchpin dari jalur multipleks (ADR-052). Session server TLS 1.3 sans-blocking-I/O yang digerakkan satu worker epoll untuk banyak koneksi sekaligus. `Session.init(cert_der, signing_key, alpn_prefs)` menyemai random. `feed(input, to_send_buf, plain_buf)` mengakumulasi ciphertext di `rbuf` internal, memproses tiap record lengkap, dan mengembalikan `FeedResult{ to_send, plaintext, outcome }`. State machine `Phase` berjalan `hello -> finished -> established -> closed`: di `hello` ia memanggil `serverHandshake` dan mengeluarkan flight, di `finished` ia memverifikasi client Finished, di `established` ia men-decrypt application data. `encrypt` menyegel plaintext jadi record, `closeNotify` mengeluarkan alert close. Hanya TLS 1.3: ClientHello 1.2-saja ditolak dengan fatal alert (fallback 1.2 tetap di `tls_serve.zig`).
 
-## tcp/http2/tls_epoll.zig dan tcp/http2/grpc/tls_epoll.zig (dispatch multipleks)
+## tcp/http2/tls_mux.zig dan tcp/http2/grpc/tls_mux.zig (dispatch multipleks)
 
-Jalur `.EPOLL` / `.URING` (ADR-052). `runTlsEpoll` men-spawn satu worker per core, masing-masing dengan listener `SO_REUSEPORT` dan instance epoll sendiri. Slab `TlsConn` (di-index oleh fd) memegang `tls_session.Session`, mux h2 / gRPC, dan buffer ciphertext keluar yang di-stage yang meng-arm `EPOLLOUT` saat `EAGAIN` untuk backpressure. `onReadable` membaca ciphertext, memanggil `session.feed`, mengirim flight handshake, dan pada outcome established memberi plaintext terdekripsi ke mux (`processRing` / `grpcMuxProcessRing`), yang frame-nya disegel kembali ke record lewat `frame.write_hook` yang menunjuk `hookWrite`. Satu worker memultipleks banyak koneksi, jadi konkurensi tinggi tidak men-spawn thread per koneksi.
+Jalur `.EPOLL` / `.URING` (ADR-052). `runTlsMux` men-spawn satu worker per core, masing-masing dengan listener `SO_REUSEPORT` dan instance epoll sendiri. Slab `TlsConn` (di-index oleh fd) memegang `tls_session.Session`, mux h2 / gRPC, dan buffer ciphertext keluar yang di-stage yang meng-arm `EPOLLOUT` saat `EAGAIN` untuk backpressure. `onReadable` membaca ciphertext, memanggil `session.feed`, mengirim flight handshake, dan pada outcome established memberi plaintext terdekripsi ke mux (`processRing` / `grpcMuxProcessRing`), yang frame-nya disegel kembali ke record lewat `frame.write_hook` yang menunjuk `hookWrite`. Satu worker memultipleks banyak koneksi, jadi konkurensi tinggi tidak men-spawn thread per koneksi.
 
 ## tls12_*.zig
 

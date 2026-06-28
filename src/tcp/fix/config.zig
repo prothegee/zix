@@ -20,8 +20,8 @@ pub const FixServerConfig = struct {
     comp_id: []const u8,
     /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
     /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
-    /// Default: .ASYNC (single accept thread, io.async() per connection).
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send half
@@ -89,18 +89,18 @@ test "zix fix: FixServerConfig required fields" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9500), cfg.port);
     try std.testing.expectEqualStrings("SERVER", cfg.comp_id);
 }
 
-test "zix fix: FixServerConfig dispatch_model defaults to ASYNC" {
+test "zix fix: FixServerConfig dispatch_model is required and stored as set" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
@@ -109,7 +109,7 @@ test "zix fix: FixServerConfig worker pool defaults to auto-size (zero)" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
@@ -119,7 +119,7 @@ test "zix fix: FixServerConfig kernel_backlog default" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
 }
 
@@ -128,7 +128,7 @@ test "zix fix: FixServerConfig uring_send_buf_size default" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
 }
 
@@ -137,7 +137,7 @@ test "zix fix: FixServerConfig worker stack defaults" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.pool_stack_size_bytes);
     try std.testing.expectEqual(@as(usize, 1 << 16), cfg.uring_max_conns_per_worker);
@@ -149,7 +149,7 @@ test "zix fix: FixServerConfig heartbeat_timeout_ms defaults to zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u32, 0), cfg.heartbeat_timeout_ms);
 }
 
@@ -158,7 +158,7 @@ test "zix fix: FixServerConfig conn_timeout_ms defaults to zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u32, 0), cfg.conn_timeout_ms);
 }
 
@@ -167,7 +167,7 @@ test "zix fix: FixServerConfig handler_timeout_ms defaults to zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" };
+    const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u32, 0), cfg.handler_timeout_ms);
 }
 

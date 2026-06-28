@@ -9,7 +9,7 @@
 //!   concurrency).
 //!
 //! Note:
-//! - TLS 1.3 only for now (the benchmark clients all offer 1.3; RSA certs work in 1.3 via RSA-PSS).
+//! - TLS 1.3 only for now (the benchmark clients all offer 1.3. RSA certs work in 1.3 via RSA-PSS).
 //!   A 1.2-only ClientHello is refused with a fatal alert. The thread-per-conn runTls path keeps 1.2
 //!   for the ASYNC / POOL models.
 

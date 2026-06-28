@@ -28,27 +28,98 @@ pub fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytyp
     if (comptime builtin.mode == .Debug) std.debug.print("zix udp: " ++ fmt ++ "\n", args);
 }
 
-/// Effective worker count: the configured value, or one per CPU when 0.
+/// Effective worker count: the configured value, or one per available CPU when 0. cgroup-aware so a
+/// taskset / cpuset-limited environment never spawns more SO_REUSEPORT workers than usable cores.
 pub fn effectiveWorkers(config: UdpServerConfig) usize {
     if (config.workers != 0) return config.workers;
 
-    return std.Thread.getCpuCount() catch 1;
+    return getAvailableCpuCount();
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting the cgroup-allowed CPU
+/// mask so we never select a CPU the container cannot use (mirrors zix.Http1 / zix.Http3).
+pub fn pinToCpu(worker_id: usize) void {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
+
+    var cpu_list: [256]u32 = undefined;
+    var n_cpus: usize = 0;
+    for (cpu_set, 0..) |word, word_idx| {
+        var w = word;
+        while (w != 0) : (w &= w - 1) {
+            if (n_cpus < cpu_list.len) {
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                n_cpus += 1;
+            }
+        }
+    }
+    if (n_cpus == 0) return;
+
+    const target = cpu_list[worker_id % n_cpus];
+    var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const cpu_word = target / @bitSizeOf(usize);
+    const cpu_bit: u6 = @intCast(target % @bitSizeOf(usize));
+    target_set[cpu_word] |= @as(usize, 1) << cpu_bit;
+
+    linux.sched_setaffinity(0, &target_set) catch {};
+}
+
+/// Count CPUs available to this process via sched_getaffinity, respecting cgroup and taskset
+/// restrictions (falls back to std.Thread.getCpuCount on failure). One worker per available CPU so
+/// several SO_REUSEPORT workers are never pinned to the same core under a cgroup-limited cpuset.
+pub fn getAvailableCpuCount() usize {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (cpu_set) |word| {
+        count += @popCount(word);
+    }
+
+    return if (count == 0) 1 else count;
+}
+
+/// Spin up to `us` microseconds before the worker sleeps on the UDP socket (SO_BUSY_POLL), trading
+/// CPU for lower recvmmsg wake-up latency on saturated benchmarks. us = 0 leaves it unset (no
+/// syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
+pub fn setBusyPoll(fd: posix.socket_t, us: u32) void {
+    if (us == 0) return;
+
+    const SO_BUSY_POLL: u32 = 46;
+    posix.setsockopt(
+        fd,
+        posix.SOL.SOCKET,
+        SO_BUSY_POLL,
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
+    ) catch {};
 }
 
 /// One worker: a recvmmsg batch in, handler per datagram, sendmmsg out. `reuse` sets SO_REUSEPORT
-/// (required when several workers bind the same port).
-pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reuse: bool) void {
+/// (required when several workers bind the same port). Per-core mode (reuse == true) pins this worker
+/// to its assigned CPU. The single-worker mode (reuse == false) stays unpinned.
+pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reuse: bool, worker_id: usize) void {
+    if (reuse) pinToCpu(worker_id);
+
     const fd = datagram.open(config.ip, config.port, reuse) catch |err| {
         if (config.logger) |lg| lg.system(.ERROR, "udp", "raw bind error: {}", .{err});
         return;
     };
     defer datagram.close(fd);
 
+    setBusyPoll(fd, config.busy_poll_us);
+
     var rx = datagram.RecvBatch.init(config.allocator, config.recv_batch, config.max_recv_buf) catch return;
     defer rx.deinit();
 
     var tx = datagram.SendBatch.init(config.allocator, config.send_batch, config.send_batch * config.max_recv_buf) catch return;
     defer tx.deinit();
+
+    // GSO coalescing on the send path, only when requested and the kernel supports UDP_SEGMENT.
+    tx.gso = config.gso_enabled and datagram.probeGso(fd);
 
     while (true) {
         const count = rx.recv(fd) catch |err| {
@@ -75,7 +146,7 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !voi
     if (!datagram.is_linux) return runFallback(handler, config);
 
     logSystem(config, "raw listening on {s}:{d} (single worker)", .{ config.ip, config.port });
-    workerLoop(handler, config, config.reuse_address);
+    workerLoop(handler, config, config.reuse_address, 0);
 }
 
 /// One SO_REUSEPORT worker per CPU. Used by the EPOLL / URING models. Per-core workers each bind the
@@ -91,7 +162,7 @@ pub fn runPerCore(comptime handler: core.HandlerFn, config: UdpServerConfig) !vo
 
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{}, workerLoop, .{ handler, config, true }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoop, .{ handler, config, true, i }) catch break;
         spawned += 1;
     }
 
@@ -129,4 +200,27 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
         }
         tx.reset();
     }
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix test: udp effectiveWorkers honors an explicit count and defaults to the cpuset-aware count" {
+    const base = UdpServerConfig{ .allocator = std.testing.allocator, .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC };
+
+    // an explicit worker count passes through unchanged
+    var explicit = base;
+    explicit.workers = 3;
+    try std.testing.expectEqual(@as(usize, 3), effectiveWorkers(explicit));
+
+    // workers = 0 defaults to the cgroup-aware count, never zero
+    try std.testing.expect(effectiveWorkers(base) >= 1);
+    try std.testing.expectEqual(getAvailableCpuCount(), effectiveWorkers(base));
+}
+
+test "zix test: udp pinToCpu is a no-op-safe call for any worker_id" {
+    // The modulo keeps a derived slot inside the available set, so an out-of-range worker_id must
+    // not crash and the process keeps a valid affinity mask.
+    pinToCpu(0);
+    pinToCpu(999);
 }

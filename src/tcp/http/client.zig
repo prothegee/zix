@@ -449,8 +449,8 @@ pub const HttpClient = struct {
 
     // --------------------------------------------------------- //
 
-    fn methodToStd(m: Method.Code) std.http.Method {
-        return switch (m) {
+    fn methodToStd(method: Method.Code) std.http.Method {
+        return switch (method) {
             .GET => .GET,
             .HEAD => .HEAD,
             .POST => .POST,
@@ -466,8 +466,8 @@ pub const HttpClient = struct {
 
 // --------------------------------------------------------- //
 
-fn udsMethodStr(m: Method.Code) []const u8 {
-    return switch (m) {
+fn udsMethodStr(method: Method.Code) []const u8 {
+    return switch (method) {
         .GET => "GET",
         .HEAD => "HEAD",
         .POST => "POST",

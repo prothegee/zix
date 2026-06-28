@@ -103,9 +103,9 @@ pub fn main(process: std.process.Init) !void {
         .error_report = false,
 
         // Milliseconds of silence before treating a client as disconnected.
-        // Worst-case detection delay: disconnect_timeout_ms + poll_timeout_ms.
+        // Worst-case detection delay: conn_timeout_ms + poll_timeout_ms.
         // There is no OS-level disconnect signal for UDP: silence is the only indicator.
-        .disconnect_timeout_ms = 5000,
+        .conn_timeout_ms = 5000,
 
         // How often the receive loop checks for disconnected clients (milliseconds).
         // Lower values = faster detection but more CPU usage when idle.

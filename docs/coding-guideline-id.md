@@ -49,14 +49,16 @@ test "zix tests: unit test" {
 | File implementasi | `lowercase.zig` | `server.zig`, `config.zig` |
 | Type / struct / enum | `PascalCase` | `TcpServerConfig`, `DispatchModel`, `RespSink` |
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
-| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size` |
+| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size`(gunakan `_var` jika penggunaan dalam hal private) |
 | Enum value domain / publik / config | `UPPER_CASE` | `ASYNC`, `POOL`, `EPOLL`, `URING` |
 | Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
 | Konstanta versi comptime | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
 Enum yang memodelkan pilihan publik, domain, atau config adalah `UPPER_CASE` (`DispatchModel`, content type, status, logger level). Pengecualian sempit yang dipertahankan di tree adalah enum internal control-flow (outcome gaya `keep_alive` / `close`) dan nilai protocol-mirroring (opcode WebSocket `text` / `binary` yang mencerminkan nama wire). Kalau ragu, pakai `UPPER_CASE`.
 
-**Jangan pernah pakai nama 2-sampai-5 karakter ketika tidak jelas-dengan-sendirinya.** Nama satu karakter hanya boleh untuk idiom loop dan count `i` / `n`. Eja sisanya (`handler`, bukan `h`; `config`, bukan `cfg` di surface publik baru, walaupun `cfg` adalah local yang diterima di kode dispatch yang sudah ada, cocokkan dengan file-nya).
+**Pakai nama pendek hanya ketika nama itu jelas mewakili tujuannya.** Ujinya adalah apakah pembaca yang belum pernah melihat file-nya paham, bukan jumlah karakter. Bentuk pendek yang jelas boleh: `conn`, `cfg`, `ctx`, `fd`, `io`, `str`. Nama yang tidak membawa tujuannya harus dieja: `handler` bukan `h`, `stream` bukan `s`, `worker` bukan `w`, `paths` bukan `p`, `cache` bukan `c`.
+
+Nama satu karakter hanya untuk dua kasus: idiom loop dan count `i` / `n`, dan notasi kripto / aritmetika modular yang mengikuti rumusnya (`p`, `q`, `d`, `n`, `m` di `rsa.zig`, `montgomery.zig`, `ff.zig`). Parameter fungsi satu karakter selain itu tidak boleh, eja namanya.
 
 > Beri nama untuk pembaca yang belum pernah melihat file-nya. Jika nama pendek butuh komentar agar dimengerti, itu nama yang salah.
 
@@ -178,7 +180,7 @@ pub const TcpServerConfig = struct {
     io: std.Io,            // required, caller-provided, must outlive the server
     ip: []const u8,        // required
     port: u16,             // required, must be non-zero
-    dispatch_model: DispatchModel = .ASYNC,
+    dispatch_model: DispatchModel,  // required
     kernel_backlog: u31 = 4096,
     max_recv_buf: usize = 4096,
     // ...

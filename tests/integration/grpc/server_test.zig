@@ -92,7 +92,7 @@ test "zix integration: GrpcServer.init and deinit do not error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083 });
+    var server = try zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -103,7 +103,7 @@ test "zix integration: GrpcServer.init port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0 }),
+        zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 

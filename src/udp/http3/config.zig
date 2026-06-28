@@ -29,7 +29,8 @@ pub const Http3ServerConfig = struct {
 
     /// Concurrency model. ASYNC / POOL / MIXED run a single worker, EPOLL / URING run one
     /// SO_REUSEPORT worker per core (RC3 multicore), the kernel load-balancing by 4-tuple.
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// Worker count for the per-core models (EPOLL / URING). 0 means one per available CPU.
     workers: usize = 0,
     /// recvmmsg batch size: datagrams received per syscall.
@@ -38,6 +39,20 @@ pub const Http3ServerConfig = struct {
     send_batch: usize = 32,
     /// Maximum datagram size, the receive buffer per slot. 1500 is the common Ethernet MTU.
     max_recv_buf: usize = 1500,
+    /// SO_BUSY_POLL spin window in microseconds for the per-core UDP socket (EPOLL / URING). The
+    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower recvmmsg wake-up
+    /// latency on saturated benchmarks. Default 0 leaves it unset, so the current CPU profile is
+    /// unchanged. Mirrors zix.Http1's busy_poll_us. No-op when the kernel lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 0,
+    /// Worker thread stack size in bytes for the per-core workers (EPOLL / URING). Thread stacks are
+    /// demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Enable UDP GSO (UDP_SEGMENT) on the send path: a multi-packet response flight to one peer is
+    /// coalesced into one sendmsg, so the kernel segments it into wire datagrams from one syscall.
+    /// Default true: HTTP/3 is syscall-bound on the send path and a response flight is multi-packet,
+    /// so GSO is a broad win (static-h3 throughput up, baseline-h3 CPU down). Probed at worker start
+    /// and disabled automatically on kernels older than 4.18, falling back to the plain sendmmsg path.
+    gso_enabled: bool = true,
 
     // QUIC / HTTP-3 knobs.
 
@@ -75,10 +90,14 @@ test "zix test: Http3ServerConfig default field values" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9063,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(usize, 32), cfg.recv_batch);
     try std.testing.expectEqual(@as(usize, 1500), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
+    try std.testing.expect(cfg.gso_enabled); // default on: GSO is a broad HTTP/3 win
     try std.testing.expectEqual(@as(u8, 8), cfg.cid_len);
     try std.testing.expectEqual(@as(u32, 30000), cfg.max_idle_ms);
     try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);

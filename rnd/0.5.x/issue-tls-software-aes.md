@@ -17,7 +17,7 @@ cleartext profiles are fine.
 
 The server burns about 6 cores (CPU 583%) yet completes almost nothing. Twelve TLS worker threads sit
 on-CPU (`R`, no wait channel) with deep call stacks in the crypto region, while every connection's
-kernel receive queue backs up (the workers are too busy encrypting to read). swerver and hyper pass
+kernel receive queue backs up (the workers are too busy encrypting to read). ref-server and ref-server-2 pass
 the same static-h2 at 2.2 GB/s and 3.9 GB/s.
 
 ## Root cause
@@ -36,7 +36,7 @@ NOT include `aes` or `pclmul` (they are separate optional features, not part of 
 So zix compiles the pure-software AES plus software GHASH. baseline-h2 hides it (tiny bodies keep up),
 static-h2 exposes it (large bodies saturate the software cipher, the worker never returns to read).
 
-swerver (OpenSSL) and hyper (rustls / ring) are unaffected: they detect AES-NI at RUNTIME and dispatch
+ref-server (OpenSSL) and ref-server-2 (rustls / ring) are unaffected: they detect AES-NI at RUNTIME and dispatch
 to it regardless of the build target. zix decides at comptime, so the build must declare the features.
 
 ## Measured (AES-128-GCM, 16 KiB blocks, one core, zig-0.16 musl ReleaseFast)
@@ -70,14 +70,14 @@ static set) with the server pinned to 2 cores:
 | `x86_64_v3+aes+pclmul` (hardware) | 51200 requests in 2.76s, 0 errored, 0 timeout |
 
 On the 6-core HttpArena run, static-h2 then completed 3/3 at about 124k req/s and 1.9 GB/s (between
-hyper and swerver), and baseline-h2 rose from about 580k to about 706k req/s from the same change.
+ref-server-2 and ref-server), and baseline-h2 rose from about 580k to about 706k req/s from the same change.
 
 ## Note on the parallel fixes
 
 The software-AES build flag was the static-h2 blocker. Three TLS-path bugs were found and fixed along
 the way (real correctness issues the AES stall had masked, kept regardless):
 
-1. `tls_epoll.zig` staging length tracked the allocation capacity, not the live byte count, so a grown
+1. `tls_mux.zig` staging length tracked the allocation capacity, not the live byte count, so a grown
    backpressure buffer flushed its uninitialized tail as ciphertext.
 2. `sendRaw` wrote a new record directly to the socket even when earlier ciphertext was staged, so
    records could reach the peer out of order (TLS requires in-order records, the nonce is the record

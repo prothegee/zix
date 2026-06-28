@@ -99,6 +99,7 @@ test "zix test: Raw init, port zero returns PortNotConfigured" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 0,
+        .dispatch_model = .ASYNC,
     }));
 }
 

@@ -11,7 +11,7 @@ const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
-const tls_epoll = @import("tls_epoll.zig");
+const tls_mux = @import("tls_mux.zig");
 
 pub const Route = core.Route;
 
@@ -51,7 +51,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                 // keep the thread-per-conn terminator (which also serves TLS 1.2).
                 const is_linux = @import("builtin").target.os.tag == .linux;
                 if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
-                    return tls_epoll.runTlsEpoll(routes, cfg);
+                    return tls_mux.runTlsMux(routes, cfg);
 
                 return tls_serve.runTls(routes, cfg);
             }
@@ -90,7 +90,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 ///     &[_]zix.Grpc.Route{
 ///         .{ .path = "/pkg.Svc/Method", .handler = myHandler },
 ///     },
-///     .{ .io = io, .ip = "127.0.0.1", .port = 8083 },
+///     .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC },
 /// );
 /// defer server.deinit();
 /// try server.run();
@@ -114,7 +114,7 @@ test "zix grpc: GrpcServer.init port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0 }),
+        GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 
@@ -123,7 +123,7 @@ test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083 });
+    var server = try GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
     server.deinit();
 }
 

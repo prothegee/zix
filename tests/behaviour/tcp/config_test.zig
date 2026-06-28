@@ -6,11 +6,11 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix behaviour: TcpServerConfig, dispatch_model defaults to .ASYNC" {
+test "zix behaviour: TcpServerConfig, dispatch_model is required and stored as set" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(zix.Tcp.DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
@@ -18,7 +18,7 @@ test "zix behaviour: TcpServerConfig, kernel_backlog defaults to 4096" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
 }
 
@@ -26,7 +26,7 @@ test "zix behaviour: TcpServerConfig, max_recv_buf defaults to 4096" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
 }
 
@@ -34,7 +34,7 @@ test "zix behaviour: TcpServerConfig, workers defaults to 0 (auto)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
 }
 
@@ -42,7 +42,7 @@ test "zix behaviour: TcpServerConfig, pool_size defaults to 0 (auto)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 

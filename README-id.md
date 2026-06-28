@@ -90,7 +90,7 @@
 | [`docs/hld-channel-id.md`](docs/hld-channel-id.md) | Channel: tujuan, model, API, persyaratan konkurensi, contoh |
 | [`docs/hld-fix-id.md`](docs/hld-fix-id.md) | FIX 4.x: tujuan, gambaran protokol, lapisan sesi, model dispatch, konfigurasi |
 | [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) | gRPC h2c: tujuan, arsitektur, API, 4 tipe RPC, codec, model dispatch |
-| [`docs/hld-grpc-proxy-id.md`](docs/hld-grpc-proxy-id.md) | gRPC terminasi TLS via nginx dan haproxy |
+| [`docs/hld-proxy-id.md`](docs/hld-proxy-id.md) | Reverse proxy (nginx, haproxy) untuk zix.Http1, zix.Http, zix.Grpc |
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
 | [`docs/hld-tls-id.md`](docs/hld-tls-id.md) | TLS: tujuan, version policy, Tls.Context, alur handshake, integrasi engine, client |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
@@ -102,6 +102,7 @@
 | [`docs/lld-channel-id.md`](docs/lld-channel-id.md) | Channel: internal ring buffer, locking, algoritma send/recv |
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
 | [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
+| [`docs/zix-deploy-id.md`](docs/zix-deploy-id.md) | Deployment: bangun Docker image (zig fetch atau vendor) dan konfigurasi TLS context untuk Ed25519 / ECDSA P-256 / RSA |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: POOL, ASYNC, MIXED, EPOLL. Jumlah thread, kecocokan protokol. |
 | [`docs/design-considerations-id.md`](docs/design-considerations-id.md) | Pertimbangan desain, design pattern, dan konvensi penamaan |
 | [`docs/coding-guideline-id.md`](docs/coding-guideline-id.md) | Coding style: layout source, naming, anatomi file, doc comment, config, test, aturan prosa |
@@ -283,7 +284,7 @@ __*6. HTTP/1 zix.Http1 yang dioptimasi pada hot-path:*__
 
 __*7. Penanganan request HTTP yang composable:*__
 
-Router comptime dengan parameter path (`matchParam`) yang dibagikan oleh `zix.Http` dan `zix.Http1`, rantai middleware eksplisit (`Middleware` / `NextFn`) pada `zix.Http`, static file serving, parsing multipart dan file upload (`MultipartParser`), dan parsing HTTP range request (`parseRange`) untuk partial content.
+Router comptime dengan parameter path (`matchParam`) yang dibagikan oleh `zix.Http` dan `zix.Http1`, rantai middleware eksplisit (`Middleware` / `NextFn`) pada `zix.Http`, static file serving, parsing multipart dan file upload (`multipart.Parser`), dan parsing HTTP range request (`parseRange`) untuk partial content.
 
 > Setiap bagian adalah bagian engine yang eksplisit dan opt-in, dengan pencocokan route diselesaikan saat compile time. Kamu menyusun hanya apa yang dibutuhkan sebuah request alih-alih mewarisi pipeline tetap.
 
@@ -358,7 +359,7 @@ Setiap config server berbagi satu kosakata: konsep yang sama memakai nama field 
 | `io` | `std.Io` | Backend I/O, wajib, harus hidup lebih lama dari server |
 | `ip` | `[]const u8` | Alamat bind |
 | `port` | `u16` | Port bind, harus bukan nol |
-| `dispatch_model` | `DispatchModel` | `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` |
+| `dispatch_model` | `DispatchModel` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (wajib, tidak ada default) |
 | `kernel_backlog` | `u31` | Backlog listen TCP |
 | `workers` | `usize` | Jumlah worker accept atau EPOLL, `0` memilih cpu_count |
 | `pool_size` | `usize` | Jumlah pool thread untuk `.POOL`, `0` memilih formula |
@@ -369,6 +370,7 @@ Field buffer, timeout, dan cache memakai nama yang sama di mana pun protokol mem
 | Field | Tipe | Ada di |
 | :- | :- | :- |
 | `max_recv_buf` | `usize` | `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Uds` |
+| `large_body_rcvbuf` | `usize` | `zix.Http1`, `zix.Http` |
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` dan empat field `cache_*` | lihat [Kesadaran Cache Respons](#kesadaran-cache-respons-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
@@ -380,6 +382,8 @@ Beberapa perbedaan disengaja, bukan drift:
 - `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
 - Response compression (`compression*`) ada di `zix.Http1` dan `zix.Http`, engine yang melayani respons HTTP dengan negosiasi Accept-Encoding. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
 - `zix.Udp` (datagram) membawa `ip` / `port` / `logger` untuk jalur typed, plus knob jalur raw `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, dipakai `zix.Udp.Raw`). `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya. Tiap engine hanya mengambil subset yang berlaku.
+
+Untuk referensi per-field lengkap (tiap field config dengan default-nya, apa yang dipengaruhi, kapan dinaikkan atau diturunkan, dan trade-off-nya), lihat [`docs/zix-config-id.md`](./docs/zix-config-id.md).
 
 <br>
 
@@ -695,7 +699,7 @@ Penangkapan param per-rute dibatasi 8 param per pencocokan. Lihat ADR-033.
 
 ### Model Konkurensi
 
-Lima model dispatch, dipilih via `config.dispatch_model` (enum `DispatchModel`, default `.ASYNC`):
+Lima model dispatch, dipilih via `config.dispatch_model` (enum `DispatchModel`). Field ini wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
 
 **`.POOL` (work-queue thread pool):**
 
@@ -707,7 +711,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
-        // dispatch_model = .ASYNC (default, bisa dihilangkan)
+        .dispatch_model = .ASYNC, // wajib: .ASYNC, .POOL, .MIXED, .EPOLL, atau .URING
         // workers        = 0  -> cpu_count (accept thread untuk .POOL/.MIXED; worker untuk .EPOLL)
         // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (.POOL only; diabaikan oleh .EPOLL)
     });
@@ -774,8 +778,10 @@ __*In the nutshell:*__
 - Looking for consistent latency? Use `.ASYNC`.
 - For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
 
-> Dalam banyak kasus untuk throughput tinggi, URING umumnya unggul dalam efisiensi CPU & RAM,
-> Namun dalam beberapa kasus, kinerjanya bisa berbeda, lihat bagian benchmark untuk referensi.
+> Dalam banyak kasus untuk throughput tinggi,
+> zix EPOLL sebagian besar unggul dalam efisiensi memori dan zix URING memiliki throughput lebih tinggi.
+> Namun dalam beberapa kasus, kinerjanya dapat bervariasi, lihat bagian benchmark untuk referensi.
+> Uring tidak diizinkan di beberapa lingkungan karena alasan tertentu (misalnya, dari sudut pandang keamanan). Tetapi Anda memiliki pilihan.
 
 **Kapan digunakan:** model dispatch adalah satu knob yang membentuk ulang seluruh server. Pakai `.ASYNC` saat latensi dan koneksi berumur panjang (SSE, WebSocket) penting, `.POOL` / `.MIXED` untuk throughput mentah di platform mana pun, dan `.EPOLL` / `.URING` di Linux untuk jumlah koneksi tertinggi dengan biaya per-request terendah. Di kotak dev loopback keduanya seri pada throughput dan `.URING` menang terutama pada cache locality. Di mesin many-core, ring close (ADR-041) membuat `.URING` menjaga core-nya tetap sibuk lewat connection churn, di mana ia mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
 
@@ -1141,7 +1147,7 @@ pub fn main(process: std.process.Init) !void {
 **Unggah**: parse body multipart di dalam handler, opsional ganti nama sebelum menyimpan:
 
 ```zig
-var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
 defer parser.deinit();
 try parser.parse(try req.body());
 
@@ -1302,7 +1308,7 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 
 - Opt-in saja. Mati secara default, dan handler harus memanggil `res.serveCached` lalu `res.sendCached` (HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `writeWithCache` milik `zix.Http1`.
 - Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
-- Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
+- Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`writeNegotiated` / `writeGzipCached`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
 - Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.
@@ -1427,7 +1433,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // kirim out[0..pos] sebagai payload pesan gRPC
 ```
 
-**Model dispatch:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux). Model gRPC EPOLL adalah multiplexed event loop shared-nothing: setiap worker memiliki `SO_REUSEPORT` listener dan satu epoll instance tersendiri, dan menjalankan banyak koneksi h2 non-blocking melalui resumable HTTP/2 state machine. `pool_size` adalah jumlah worker (0 = cpu_count). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
+**Model dispatch:** `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (khusus Linux, wajib tanpa default). Model gRPC EPOLL dan URING adalah multiplexed event loop shared-nothing: setiap worker memiliki `SO_REUSEPORT` listener dan satu epoll instance tersendiri, dan menjalankan banyak koneksi h2 non-blocking melalui resumable HTTP/2 state machine. `pool_size` adalah jumlah worker (0 = cpu_count). Non-Linux otomatis fallback ke `.POOL`. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
 
 **Timeout context:** Tiga input, yang paling ketat menang:
 
@@ -1486,7 +1492,7 @@ defer tls.deinit();
 var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
 ```
 
-Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `Tls.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup.
+Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `Tls.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup. Cert bisa ECDSA P-256, Ed25519, atau RSA: `Tls.Context.init` mendeteksi tipe key dari cert (cert RSA membutuhkan TLS 1.3 dan menandatangani CertificateVerify dengan `rsa_pss_rsae_sha256`). Untuk deployment baru utamakan Ed25519 (signature handshake termurah), lalu ECDSA P-256, lalu RSA (pakai RSA untuk menyajikan cert RSA yang sudah diterbitkan). Lihat [docs/zix-deploy-id.md](docs/zix-deploy-id.md) untuk snippet config per tipe dan deployment Docker image.
 
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
@@ -1674,7 +1680,7 @@ try client.logout(io);
 
 **`zix.Fix.MsgType`**: namespace struct berisi 47 konstanta string compile-time untuk nilai MsgType FIX (FIX 4.0-4.4). Gunakan konstanta bernama daripada string mentah: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), dll.
 
-**Model dispatch:** `.ASYNC` (default, sesi FIX bersifat long-lived), `.POOL`, `.MIXED`, `.EPOLL` (khusus Linux: satu epoll accept loop, pool worker menahan setiap koneksi untuk seluruh hidupnya). Non-Linux otomatis fallback ke `.POOL`.
+**Model dispatch:** `.ASYNC` (cocok untuk sesi FIX long-lived), `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (khusus Linux: worker per-core shared-nothing, EPOLL adalah satu accept loop dengan pool worker menahan tiap koneksi). Non-Linux otomatis fallback ke `.POOL`.
 
 **Kapan digunakan:** pakai `zix.Fix` saat kamu berintegrasi dengan counterparty finansial melalui FIX 4.x: order entry, execution report, sesi market-data. Mekanika sesi (Logon/Logout/Heartbeat/TestRequest, penanganan sequence) sudah built-in, jadi kamu hanya menulis handler pesan aplikasi. Pakai mode echo untuk harness konformansi dan mode router untuk logika trading nyata. Untuk protokol non-finansial pakai `zix.Tcp`.
 
@@ -1826,7 +1832,7 @@ pub fn main(process: std.process.Init) !void {
         .endianness = .LITTLE,
         .broadcast  = true,   // relay setiap paket ke semua client yang terhubung
         .auto_ack   = false,
-        .disconnect_timeout_ms = 5000,
+        .conn_timeout_ms = 5000,
         .poll_timeout_ms       = 2000,
     });
     defer server.deinit();

@@ -29,9 +29,27 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
         .max_frame_size = cfg.max_frame_size,
         .max_header_scratch = cfg.max_header_scratch,
         .max_body = cfg.max_body,
-        .conn_read_buf_min = cfg.conn_read_buf_min_bytes,
+        .conn_read_buf_min = cfg.max_recv_buf,
         .tls_write_buf_initial = cfg.tls_write_buf_initial_bytes,
+        .response_cache = cfg.response_cache,
+        .cache_max_entries = cfg.cache_max_entries,
+        .cache_max_value_bytes = cfg.cache_max_value_bytes,
+        .cache_ttl_ms = cfg.cache_ttl_ms,
+        .cache_max_total_bytes = cfg.cache_max_total_bytes,
     };
+}
+
+/// Effective cache slot count for a worker, honoring cache_max_total_bytes. When a memory ceiling is
+/// set, the entry count is reduced so the slab (entries * value_bytes) fits. ResponseCache.init then
+/// rounds down to a power of two, so the slab never exceeds the ceiling. Mirrors zix.Grpc.
+pub fn effectiveCacheEntries(opts: core.ServeOpts) u32 {
+    if (opts.cache_max_total_bytes == 0) return opts.cache_max_entries;
+
+    const value_bytes: usize = @max(1, opts.cache_max_value_bytes);
+    const fit = opts.cache_max_total_bytes / value_bytes;
+    const capped = @min(@as(usize, opts.cache_max_entries), fit);
+
+    return @intCast(@max(@as(usize, 1), capped));
 }
 
 /// Highest fd a worker's mux table can index (EPOLL / URING models). Linux hands out the lowest
@@ -48,6 +66,21 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
+}
+
+/// Spin up to `us` microseconds before the worker sleeps on a connection socket (SO_BUSY_POLL),
+/// trading CPU for lower wake-up latency on saturated loopback benchmarks. us = 0 leaves it unset
+/// (no syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
+pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
+    if (us == 0) return;
+
+    const SO_BUSY_POLL: u32 = 46;
+    std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        SO_BUSY_POLL,
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
+    ) catch {};
 }
 
 // --------------------------------------------------------- //
@@ -194,4 +227,72 @@ pub fn Dispatch(comptime routes: []const Route) type {
             }
         }
     };
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting the cgroup-allowed CPU
+/// mask so we never select a CPU the container cannot use. Used by the TLS epoll workers so a
+/// cgroup-pinned cpuset does not oversubscribe one core under a handshake storm (mirrors http1).
+pub fn pinToCpu(worker_id: usize) void {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
+
+    var cpu_list: [256]u32 = undefined;
+    var n_cpus: usize = 0;
+    for (cpu_set, 0..) |word, word_idx| {
+        var w = word;
+        while (w != 0) : (w &= w - 1) {
+            if (n_cpus < cpu_list.len) {
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                n_cpus += 1;
+            }
+        }
+    }
+    if (n_cpus == 0) return;
+
+    const target = cpu_list[worker_id % n_cpus];
+    var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const cpu_word = target / @bitSizeOf(usize);
+    const cpu_bit: u6 = @intCast(target % @bitSizeOf(usize));
+    target_set[cpu_word] |= @as(usize, 1) << cpu_bit;
+
+    linux.sched_setaffinity(0, &target_set) catch {};
+}
+
+/// Count CPUs available to this process via sched_getaffinity, respecting cgroup and taskset
+/// restrictions (falls back to std.Thread.getCpuCount on failure). The TLS epoll default of one
+/// worker per available CPU so workers are never oversubscribed under a cgroup-limited cpuset.
+pub fn getAvailableCpuCount() usize {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (cpu_set) |word| {
+        count += @popCount(word);
+    }
+
+    return if (count == 0) 1 else count;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
+test "zix test: http2 effectiveCacheEntries honors the memory ceiling" {
+    const base = core.ServeOpts{ .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+
+    // no ceiling: the configured entry count passes through
+    try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(base));
+
+    // ceiling of 256 KiB / 16 KiB = 16 slots, below the configured 1024
+    var capped = base;
+    capped.cache_max_total_bytes = 256 * 1024;
+    try std.testing.expectEqual(@as(u32, 16), effectiveCacheEntries(capped));
+
+    // a tiny ceiling still yields at least one slot
+    var tiny = base;
+    tiny.cache_max_total_bytes = 1;
+    try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
 }

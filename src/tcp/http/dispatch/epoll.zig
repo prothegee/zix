@@ -108,7 +108,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
 
     // Response compression, stateless per worker. Active under .EPOLL and .URING,
     // like the cache.
-    if (cfg.compression) setCompression(cfg.compression, cfg.compression_min_size, cfg.compression_max_out);
+    if (cfg.compress) setCompression(cfg.compress, cfg.compression_min_size, cfg.compression_max_out);
     defer setCompression(false, 0, 0);
 
     // Per-worker response staging buffer: the handler's writes coalesce
@@ -310,7 +310,7 @@ pub fn runEpoll(server: anytype, io: std.Io) !void {
     // frame, so a compressing handler (sendNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (cfg.compression) @max(cfg.worker_stack_size_bytes, cfg.worker_stack_compress_bytes) else cfg.worker_stack_size_bytes;
+    const worker_stack: usize = if (cfg.compress) @max(cfg.worker_stack_size_bytes, cfg.worker_stack_compress_bytes) else cfg.worker_stack_size_bytes;
 
     for (threads, 0..) |*t, idx| {
         t.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, epollWorker, .{ server, io, idx });

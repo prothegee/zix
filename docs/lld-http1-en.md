@@ -6,7 +6,7 @@ Internal implementation details for the lean HTTP/1.x engine. For design rationa
 
 ## Http1.zig: namespace
 
-Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the core types (`HandlerFn`, `RawFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, and the core functions (deadline, parse, write helpers) into one public surface.
+Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the core types (`HandlerFn`, `RawFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, and the core functions (deadline, parse, write helpers) into one public surface.
 
 ---
 
@@ -22,11 +22,13 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `pool_size` | .POOL pool thread count |
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | .EPOLL per-connection buffer size (`ConnTable.alloc`) |
+| `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
 | `ws_recv_buf` | .EPOLL WebSocket per-connection buffer size, 0 falls back to `max_recv_buf` |
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
+| `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |
 
-`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.writeNegotiated`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: its live cap is `core.MAX_HEADERS` (16).
+`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.writeNegotiated`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: it is a no-op kept for source compatibility (the lazy engine has no header-count cap).
 
 ---
 
@@ -35,7 +37,6 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 ### Constants
 
 ```
-MAX_HEADERS   = 16          // ParsedHead.headers array size
 BUF_SIZE      = 16 * 1024   // receive buffer (serveConn stack, EPOLL worker scratch)
 GZIP_OUT_SIZE = 256 * 1024  // writeGzip output buffer
 ```
@@ -47,11 +48,10 @@ GZIP_OUT_SIZE = 256 * 1024  // writeGzip output buffer
 2. request line: split on first ' ' (method), last ' ' (version)
       version must be "HTTP/1.1" (minor 1) or "HTTP/1.0" (minor 0), else error.InvalidRequest
 3. target split at '?'           -> path, query
-4. header lines until blank line:
-      no ':' in line -> skipped (tolerant)
-      cap MAX_HEADERS exceeded -> error.TooManyHeaders
-      value offset skips leading spaces after ':'
-5. recognized headers folded into flags while scanning:
+4. raw_headers = slice from after the request-line CRLF through the final header CRLF
+      (no count cap, looked up lazily by getHeader, empty when there are no headers)
+5. framing scan folds recognized headers into flags while walking the block
+      (only a line whose first letter is c, t, or e is tokenized, others skip):
       content-length    -> parseInt u64 (unparseable -> 0)
       connection        -> "close" clears keep_alive, "keep-alive" sets it
       transfer-encoding -> contains "chunked" sets chunked_request
@@ -59,7 +59,7 @@ GZIP_OUT_SIZE = 256 * 1024  // writeGzip output buffer
 6. keep_alive default: version_minor == 1
 ```
 
-All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.{ head, body_offset }` where `body_offset` is the first byte after the blank line.
+All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.{ head, body_offset }` where `body_offset` is the first byte after the blank line. `getHeader(head, name)` does the case-insensitive on-demand lookup over `raw_headers`, so the per-header scan cost is paid only by a handler that actually reads a header.
 
 `parseGetFastPath` (server.zig) is the keep-alive fast path for plain `GET` requests: it confirms the `"GET "` prefix and the `"HTTP/1.1"` version with single integer loads (`std.mem.readInt` of one `u32` and one `u64`, not `mem.eql`), extracts path and query by arithmetic, and only falls back to the full `parseHead` when `Connection: close` may be present. Same `ParsedHead` shape, no per-header scan.
 
@@ -200,7 +200,7 @@ loop:
         chunked requests reset leftover to 0
 ```
 
-The caller (connEntry / poolEntry) owns closing the fd. Step 4's cap means a Content-Length body above 8 KB is read only up to 8 KB and the remaining body bytes are later misparsed as the next request head (documented limit, the HLD's oversize guidance applies).
+The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (8 KB) hands the handler the first 8 KB, then `serveConn` drains the remainder off the socket (and widens the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `head.content_length`, not the bytes.
 
 ### serveConnOne(): EPOLL one-shot fallback
 

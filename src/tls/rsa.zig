@@ -3,8 +3,8 @@
 //! Note:
 //! - std VERIFIES RSA but cannot sign with a private key. This module authors the two signature
 //!   encodings, EMSA-PKCS1-v1_5 (TLS 1.2 RSA suites) and EMSA-PSS (TLS 1.3 CertificateVerify,
-//!   rsa_pss_rsae_sha256), and drives the modular exponentiation through std.crypto.ff.Modulus
-//!   (constant time, the same routine std's RSA verify uses, here with the private exponent).
+//!   rsa_pss_rsae_sha256), and drives the CRT modular exponentiation through the constant-time
+//!   Montgomery modexp in montgomery.zig (std.crypto.ff.Modulus is the fallback for other widths).
 //! - PrivateKey parses a two-prime RSAPrivateKey from PKCS#1 or PKCS#8 DER (the forms openssl emits)
 //!   and copies the modulus + private exponent into owned fixed buffers, so it holds no external
 //!   memory and is safe to store by value in a SigningKey.
@@ -13,6 +13,7 @@
 //! - Verified against openssl in rnd/0.5.x/verify-rsa.sh and against std RSA verify in-file.
 
 const std = @import("std");
+const mont = @import("montgomery.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -264,8 +265,8 @@ pub const PrivateKey = struct {
         const m_p = mod_p.reduce(m_n.v);
         const m_q = mod_q.reduce(m_n.v);
 
-        const s_p = mod_p.powWithEncodedExponent(m_p, self.expDp(), .big) catch return error.InvalidKey;
-        const s_q = mod_q.powWithEncodedExponent(m_q, self.expDq(), .big) catch return error.InvalidKey;
+        const s_p = try crtHalf(mod_p, self.primeP(), m_p, self.expDp());
+        const s_q = try crtHalf(mod_q, self.primeQ(), m_q, self.expDq());
 
         // h = (s_p - s_q) * qInv mod p.
         const s_q_mod_p = mod_p.reduce(s_q.v);
@@ -290,6 +291,49 @@ pub const PrivateKey = struct {
         return sig;
     }
 };
+
+// --------------------------------------------------------------- //
+
+/// One CRT half-exponentiation: s = base^exp mod prime. Runs the constant-time Montgomery modexp
+/// when the prime width is supported, otherwise the std.crypto.ff path. base_fe is already reduced
+/// below the prime, so it serializes into the prime-width buffer without overflow.
+///
+/// Param:
+/// mod - Modulus (the prime field, reused for the result Fe and the fallback)
+/// prime_be - []const u8 (the prime p or q, big-endian, leading zeros stripped)
+/// base_fe - Modulus.Fe (the base, already reduced mod prime)
+/// exp_be - []const u8 (the CRT exponent dP or dQ, big-endian)
+///
+/// Return:
+/// - Modulus.Fe (the half result s_p or s_q)
+/// - error.InvalidKey if serialization fails
+fn crtHalf(mod: Modulus, prime_be: []const u8, base_fe: Modulus.Fe, exp_be: []const u8) Error!Modulus.Fe {
+    const plen = prime_be.len;
+
+    var base_buf: [max_prime_len]u8 = undefined;
+    base_fe.toBytes(base_buf[0..plen], .big) catch return error.InvalidKey;
+
+    var out_buf: [max_prime_len]u8 = undefined;
+    if (montModExp(prime_be, base_buf[0..plen], exp_be, out_buf[0..plen])) {
+        return Modulus.Fe.fromBytes(mod, out_buf[0..plen], .big) catch error.InvalidKey;
+    }
+
+    return mod.powWithEncodedExponent(base_fe, exp_be, .big) catch error.InvalidKey;
+}
+
+/// Dispatch the modexp to a Montgomery instance sized to the prime width (the primes of
+/// RSA-2048 / 3072 / 4096 are 128 / 192 / 256 bytes). Returns false for any other width so the
+/// caller keeps the std.crypto.ff path.
+fn montModExp(prime_be: []const u8, base_be: []const u8, exp_be: []const u8, out: []u8) bool {
+    switch (prime_be.len) {
+        128 => mont.Montgomery(16).modExp(prime_be, base_be, exp_be, out),
+        192 => mont.Montgomery(24).modExp(prime_be, base_be, exp_be, out),
+        256 => mont.Montgomery(32).modExp(prime_be, base_be, exp_be, out),
+        else => return false,
+    }
+
+    return true;
+}
 
 // --------------------------------------------------------------- //
 

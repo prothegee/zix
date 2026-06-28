@@ -142,7 +142,7 @@ pub const UdpServerConfig = struct {
     port:                  u16,                        // bind port & must be non-zero
     port_mode:             PortMode   = .REQUIRED,
     endianness:            Endianness = .LITTLE,
-    disconnect_timeout_ms: i64        = 5000, // silence before client considered disconnected
+    conn_timeout_ms: i64        = 5000, // silence before client considered disconnected
     poll_timeout_ms:       i64        = 2000, // receiveTimeout interval for disconnect checks
     auto_ack:              bool       = false, // send 0x06 ACK to sender on receipt
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
@@ -153,7 +153,7 @@ pub const UdpServerConfig = struct {
     // Knob datagram-transport (ADR-049), dipakai jalur raw-bytes (zix.Udp.Raw). Jalur typed jalan
     // satu loop async: ia mem-fold dispatch_model non-ASYNC dengan notice dan tidak memakai knob
     // batch / worker.
-    dispatch_model:        DispatchModel = .ASYNC, // .EPOLL / .URING = worker per-core
+    dispatch_model:        DispatchModel, // wajib. .EPOLL / .URING = worker per-core
     workers:               usize         = 0,      // 0 = satu worker per CPU
     reuse_address:         bool          = false,  // SO_REUSEADDR + SO_REUSEPORT
     recv_batch:            usize         = 32,     // ukuran batch recvmmsg
@@ -253,12 +253,12 @@ flowchart TD
     C -->|no| E["skip check"]
     F["receiveTimeout (Timeout error)"] --> D
     D --> G["for each client:\nelapsed = now - last_seen"]
-    G --> H{"elapsed >= disconnect_timeout_ms?"}
+    G --> H{"elapsed >= conn_timeout_ms?"}
     H -->|yes| I["swapRemove from clients list\nlog disconnect"]
     H -->|no| J["keep client"]
 ```
 
-Penundaan deteksi maksimum: `disconnect_timeout_ms + poll_timeout_ms`. Tidak ada sinyal tingkat OS yang setara dengan TCP FIN.
+Penundaan deteksi maksimum: `conn_timeout_ms + poll_timeout_ms`. Tidak ada sinyal tingkat OS yang setara dengan TCP FIN.
 
 ---
 

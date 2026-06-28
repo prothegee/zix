@@ -45,7 +45,7 @@ encoder-literal interop: 7 passed, 0 failed
 ```
 
 - every stream decodes byte-exact under `brotli -dc` (the gate, exit code 0).
-- readme.bin shrinks (real, if small, ratio); rand.bin may grow a few bytes (expected, E2 has
+- readme.bin shrinks (real, if small, ratio). rand.bin may grow a few bytes (expected, E2 has
   no matching and a fixed code).
 
 ## If it fails

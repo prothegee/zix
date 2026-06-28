@@ -23,11 +23,11 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 
 ## Dispatch model (dipakai bersama oleh semua engine keluarga TCP)
 
-`dispatch_model` memilih keseluruhan strategi concurrency. Nilai:
+`dispatch_model` memilih keseluruhan strategi concurrency. Field ini wajib: setel secara eksplisit, tidak ada default. Nilai:
 
 | nilai | arti |
 | :- | :- |
-| `.ASYNC` | satu accept thread, satu `io.async()` per koneksi. Terbaik untuk latency rendah pada jumlah koneksi sedang. Default. |
+| `.ASYNC` | satu accept thread, satu `io.async()` per koneksi. Terbaik untuk latency rendah pada jumlah koneksi sedang. |
 | `.POOL` | N accept thread mendorong koneksi ke queue bersama, M pool thread menanganinya. Terbaik untuk throughput pada jumlah koneksi tinggi. |
 | `.MIXED` | N accept thread masing-masing dispatch lewat `io.async()`, tanpa queue bersama. Throughput dan latency yang seimbang. |
 | `.EPOLL` | shared-nothing: tiap worker memiliki satu listener SO_REUSEPORT plus satu instance epoll. Terbaik untuk jumlah koneksi sangat tinggi. Khusus Linux, di luar Linux melipat ke `.POOL`. |
@@ -40,14 +40,15 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | io | wajib | backend std.Io, harus hidup lebih lama dari server | | | | | harus diisi |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, harus non-zero | | | | | nilai nol ditolak saat init |
-| dispatch_model | `.ASYNC` | model concurrency (lihat tabel di atas) | menentukan keseluruhan strategi | `.EPOLL`/`.URING` untuk jumlah koneksi tinggi di Linux | | | model salah membatasi throughput, di luar Linux melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency (lihat tabel di atas) | menentukan keseluruhan strategi | `.EPOLL`/`.URING` untuk jumlah koneksi tinggi di Linux | | | model salah membatasi throughput, di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog sebelum accept() | kedalaman antrian accept kernel | naikkan saat lonjakan koneksi | koneksi baru dibuang saat lonjakan | lebih banyak memori kernel untuk antrian | terlalu kecil membuang koneksi saat spike |
 | busy_poll_us | 50 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL) | hot, kernel busy-spin sebelum menidurkan worker | naikkan untuk memangkas tail latency saat beban, 0 untuk hemat CPU idle | spin lebih pendek, lebih banyak wakeup idle-sleep, tail latency lebih tinggi | core spin 100% saat idle | no-op tanpa dukungan SO_BUSY_POLL kernel |
 | max_recv_buf | 16384 | byte yang di-buffer per blok header request dan per koneksi EPOLL | memori per koneksi dan ukuran request maksimum | naikkan untuk header request besar | request besar ditolak | lebih banyak memori per koneksi | terlalu kecil menolak request besar yang valid |
+| large_body_rcvbuf | 0 | SO_RCVBUF diterapkan hanya pada jalur body besar (body lebih besar dari read buffer, yaitu upload), 0 memakai default kernel | kecepatan ingest upload dan memori per koneksi saat body besar berjalan | naikkan untuk ingest upload lebih cepat | upload ingest lebih lambat (window default kernel yang sempit) | lebih banyak memori saat body besar (256 KiB menargetkan sekitar 256 MiB resident pada 256c) | hanya jalur upload yang menyentuhnya, cell request kecil tidak terpengaruh |
 | ws_recv_buf | 0 | buffer receive per koneksi WebSocket, 0 jatuh ke max_recv_buf | memori per koneksi WS | naikkan di atas max_recv_buf untuk menampung lebih banyak frame pipelined | lebih banyak compact dan re-read untuk WS | lebih banyak memori per koneksi WS | 0 memakai ulang max_recv_buf |
 | uring_send_buf_size | 16384 | buffer send per koneksi untuk dispatch model .URING (sisi send, max_recv_buf untuk recv) | memori per koneksi pada .URING | naikkan untuk respons tunggal lebih besar, turunkan untuk memperkecil memori per koneksi | lebih banyak pertumbuhan buffer pada respons besar | lebih banyak memori per koneksi | tanpa efek pada dispatch model lain |
 | uring_idle_pool_floor | 64 | floor warm idle-connection pool per worker pada .URING (A2) | memori warm-pool vs allocator hit pada koneksi baru | naikkan untuk menjaga lebih banyak koneksi warm saat churn, turunkan untuk memperkecil memori idle | lebih banyak allocator hit setelah periode sepi | lebih banyak koneksi idle tersimpan | knob gate A2, validasi di run 64-core bila diubah, tanpa efek pada model lain |
-| compression | false | aktifkan kompresi respons gzip/deflate/brotli dengan negosiasi Accept-Encoding | CPU vs ukuran body, hanya untung lewat jaringan nyata | aktifkan saat melayani lewat jaringan, matikan untuk benchmark loopback | | | pada benchmark loopback ini murni biaya CPU |
+| compress | false | aktifkan kompresi respons gzip/deflate/brotli dengan negosiasi Accept-Encoding | CPU vs ukuran body, hanya untung lewat jaringan nyata | aktifkan saat melayani lewat jaringan, matikan untuk benchmark loopback | | | pada benchmark loopback ini murni biaya CPU |
 | compression_min_size | 256 | ukuran body minimum (byte) sebelum kompresi dicoba | pemeriksaan per respons | naikkan agar tidak mengompres body kecil | body kecil dikompres dengan untung kecil | body lebih besar dikirim tanpa kompresi | terlalu kecil memboroskan CPU pada body kecil |
 | compression_max_out | 262144 | byte output terkompresi maksimum untuk semua coding | batas per respons terkompresi | naikkan untuk mengompres body lebih besar | body lebih besar dikirim tanpa kompresi | lebih banyak CPU dan memori sebelum menyerah | body di atas ini dikirim tanpa kompresi |
 | max_headers | 16 | no-op pada engine lazy, dipertahankan untuk kompatibilitas sumber | | | | | inert |
@@ -57,6 +58,8 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | worker_stack_compress_bytes | 2097152 | stack worker saat compression aktif, diterapkan sebagai floor: stack efektif = max(worker_stack_size_bytes, ini) | RSS per thread pada .EPOLL/.URING dengan compression | naikkan bila handler yang mengompres butuh lebih | flate (sekitar 230 KB pada frame handler) dapat overflow stack kecil | RSS terbuang per worker | tanpa efek saat compression off |
 | handler_timeout_ms | 0 | budget eksekusi per handler (ms), 0 = nonaktif | deadline kooperatif | atur untuk membatasi handler lambat | handler dihentikan lebih cepat | handler lambat berjalan lebih lama | handler harus cek isExpired() agar berlaku |
 | send_date_header | true | sertakan header Date di setiap respons (RFC 7231) | 37 byte per respons | biarkan on untuk kepatuhan, off untuk memperkecil respons | | | off menghilangkan header standar |
+| public_dir | "" | direktori root untuk serve file statis, kosong menonaktifkan | I/O disk saat hit statis | atur untuk melayani file statis pada route yang tidak match handler | | | non-empty divalidasi saat run(), direktori yang tidak ada menghasilkan error.PublicDirNotFound |
+| public_dir_upload | "u" | subdirektori upload di bawah public_dir, path deklaratif yang ditulis handler upload secara konvensi | | atur path upload | | | relatif terhadap public_dir, engine tidak auto-wire upload |
 | response_cache | false | aktifkan cache respons per worker (ADR-036) | memori untuk respons yang di-cache | aktifkan untuk respons panas yang berulang | | | off membuat API cache jadi no-op |
 | cache_max_entries | 256 | jumlah slot cache, dibulatkan turun ke pangkat dua | memori per worker = entries * value_bytes | naikkan untuk lebih banyak key yang di-cache | lebih sedikit key di-cache, lebih banyak miss | lebih banyak memori per worker | per worker, dikali jumlah worker |
 | cache_max_value_bytes | 16384 | batas respons per slot, respons lebih besar melewati cache | memori per slot | naikkan untuk meng-cache respons lebih besar | respons besar melewati cache | lebih banyak memori per worker | tetap ramping, cache untung di atas beberapa KiB |
@@ -74,17 +77,23 @@ h2c cleartext secara default, h2-over-TLS saat `tls` diisi.
 | io | wajib | backend std.Io | | | | | |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
-| dispatch_model | `.ASYNC` | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | `.URING` jatuh ke `.EPOLL`, di luar Linux keduanya melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | `.URING` jatuh ke `.EPOLL`, di luar Linux keduanya melipat ke `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan koneksi | koneksi dibuang saat lonjakan | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | workers | 0 | jumlah accept thread, 0 = cpu_count | paralelisme | biarkan 0 (otomatis) | lebih sedikit core dipakai | context-switching | diabaikan oleh `.ASYNC` |
 | pool_size | 0 | jumlah pool thread, 0 = max(10, cpu*2) | concurrency `.POOL` | naikkan untuk handler blocking | antrian | lebih banyak thread | hanya dipakai oleh `.POOL` |
 | worker_stack_size_bytes | 524288 | stack worker thread untuk handler thread .EPOLL/.URING/.POOL dan TLS | RSS per thread (demand-paged) | naikkan untuk handler dalam, turunkan untuk memangkas RSS | stack overflow pada handler dalam | RSS terbuang per worker | biaya rendah sampai kedalamannya dipakai |
+| busy_poll_us | 0 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL / .URING) | hot, kernel busy-spin sebelum menidurkan worker | set ke mis. 50 untuk memangkas tail latency saat beban | spin lebih pendek, lebih banyak wakeup idle-sleep | core spin 100% saat idle | 0 membiarkannya tidak diset, no-op tanpa dukungan SO_BUSY_POLL kernel |
 | max_streams | 16 | stream konkuren maksimum per koneksi | state dan memori stream per koneksi | naikkan untuk klien yang sangat multipleks | klien kena REFUSED_STREAM lebih cepat | lebih banyak memori per koneksi | terlalu kecil menyerialkan klien multipleks |
 | max_frame_size | 16384 | setting MAX_FRAME_SIZE yang diiklankan ke klien (byte) | byte per frame DATA | naikkan untuk mengirim frame lebih besar | lebih banyak frame per respons | buffer per frame lebih besar | dibatasi rentang spesifikasi HTTP/2 |
 | max_header_scratch | 4096 | buffer scratch HPACK per koneksi | memori per stream | naikkan untuk set header besar | blok header besar ditolak | lebih banyak memori per stream | terlalu kecil menolak header valid |
 | max_body | 65536 | buffer body maksimum per stream (byte) | memori per stream, dikali max_streams | naikkan untuk body request lebih besar | body besar ditolak | memori per koneksi tumbuh cepat (body * streams) | terlalu besar dikali banyak stream jadi memori per koneksi besar |
-| conn_read_buf_min_bytes | 32768 | floor buffer read per koneksi (.EPOLL / .URING mux) | buffer read per koneksi, hot | naikkan untuk memangkas read() dan compaction untuk frame besar | lebih banyak read dan compaction untuk frame besar | lebih banyak memori per koneksi | reader = max(ini, satu frame maksimum) |
+| max_recv_buf | 32768 | floor buffer read per koneksi (.EPOLL / .URING mux) | buffer read per koneksi, hot | naikkan untuk memangkas read() dan compaction untuk frame besar | lebih banyak read dan compaction untuk frame besar | lebih banyak memori per koneksi | reader = max(ini, satu frame maksimum) |
 | tls_write_buf_initial_bytes | 16384 | kapasitas awal buffer TLS pending-write per koneksi (tumbuh sesuai kebutuhan) | per koneksi, jalur TLS | naikkan untuk menghindari realokasi dini pada respons besar | lebih banyak realokasi pada respons besar | lebih banyak memori idle per koneksi TLS | minor, hanya amortisasi |
+| response_cache | false | aktifkan cache respons per worker (ADR-036), opt-in via serveCached/sendCached | memori cache | aktifkan untuk respons panas yang berulang | | | off membuat API cache jadi send biasa |
+| cache_max_entries | 256 | jumlah slot cache (pangkat dua) | memori per worker | naikkan untuk lebih banyak key | lebih banyak miss | lebih banyak memori | dikali jumlah worker |
+| cache_max_value_bytes | 16384 | batas respons per slot | memori per slot | naikkan untuk respons cache lebih besar | respons besar melewati cache | lebih banyak memori | tetap ramping |
+| cache_ttl_ms | 1000 | kesegaran cache default (ms) | hit rate vs kebasian | naikkan untuk hit rate, turunkan untuk kesegaran | kedaluwarsa lebih cepat, lebih banyak miss | data lebih basi | terlalu tinggi menyajikan data basi |
+| cache_max_total_bytes | 0 | batas memori cache per worker, 0 = tanpa batas | membatasi memori cache | atur untuk membatasi RAM cache | jumlah entri dikurangi agar muat | penuh entries * value_bytes | 0 menonaktifkan batas |
 | tls | null | TLS context untuk h2-over-TLS (ALPN h2), null = h2c | mengaktifkan TLS | pasang context dengan ALPN h2 | | | browser butuh ALPN h2 untuk HTTP/2 over TLS |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging | | | logging per request adalah tugas handler |
 
@@ -97,21 +106,22 @@ gRPC di atas HTTP/2. h2c cleartext secara default, h2-over-TLS saat `tls` diisi.
 | io | wajib | backend std.Io | | | | | |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
-| dispatch_model | `.ASYNC` | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan | koneksi dibuang | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | workers | 0 | jumlah accept thread, 0 = cpu_count | paralelisme | biarkan 0 (otomatis) | lebih sedikit core | context-switching | diabaikan oleh `.ASYNC` |
 | pool_size | 0 | jumlah pool thread, 0 = max(10, cpu*2) | concurrency `.POOL` | naikkan untuk handler blocking | antrian | lebih banyak thread | hanya dipakai oleh `.POOL` |
 | worker_stack_size_bytes | 524288 | stack worker thread untuk handler thread .EPOLL/.URING/.POOL dan TLS | RSS per thread (demand-paged) | naikkan untuk handler dalam, turunkan untuk memangkas RSS | stack overflow pada handler dalam | RSS terbuang per worker | biaya rendah sampai kedalamannya dipakai |
+| busy_poll_us | 0 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL / .URING) | hot, kernel busy-spin sebelum menidurkan worker | set ke mis. 50 untuk memangkas tail latency saat beban | spin lebih pendek, lebih banyak wakeup idle-sleep | core spin 100% saat idle | 0 membiarkannya tidak diset, no-op tanpa dukungan SO_BUSY_POLL kernel |
 | max_streams | 16 | stream h2 konkuren maksimum per koneksi | state stream per koneksi | naikkan untuk klien yang sangat multipleks | klien terblokir lebih cepat | lebih banyak memori per koneksi | terlalu kecil menyerialkan klien multipleks |
 | max_frame_size | 16384 | setting MAX_FRAME_SIZE yang diiklankan ke klien (byte) | byte per frame DATA | naikkan untuk frame lebih besar | lebih banyak frame per pesan | buffer per frame lebih besar | dibatasi rentang spesifikasi HTTP/2 |
 | max_header_scratch | 4096 | buffer scratch HPACK per koneksi | memori per stream | naikkan untuk set header besar | header besar ditolak | lebih banyak memori per stream | terlalu kecil menolak header valid |
 | max_body | 65536 | buffer body maksimum per stream (byte) | memori per stream | naikkan untuk pesan lebih besar | pesan besar ditolak | lebih banyak memori per koneksi | terlalu kecil menolak pesan besar |
-| conn_read_buf_min_bytes | 65536 | floor buffer read per koneksi (.EPOLL / .URING) | buffer read per koneksi, hot | naikkan untuk memangkas read() dan compaction untuk frame besar | lebih banyak read dan compaction untuk frame besar | lebih banyak memori per koneksi | reader = max(ini, satu frame maksimum) |
+| max_recv_buf | 65536 | floor buffer read per koneksi (.EPOLL / .URING) | buffer read per koneksi, hot | naikkan untuk memangkas read() dan compaction untuk frame besar | lebih banyak read dan compaction untuk frame besar | lebih banyak memori per koneksi | reader = max(ini, satu frame maksimum) |
 | tls_write_buf_initial_bytes | 16384 | kapasitas awal buffer TLS pending-write per koneksi (tumbuh sesuai kebutuhan) | per koneksi, jalur TLS | naikkan untuk menghindari realokasi dini pada balasan besar | lebih banyak realokasi pada balasan besar | lebih banyak memori idle per koneksi TLS | minor, hanya amortisasi |
 | tls | null | TLS context untuk gRPC over TLS (ALPN h2), null = h2c | mengaktifkan TLS | pasang context dengan ALPN h2 | | | gRPC jalan di HTTP/2, butuh ALPN h2 over TLS |
 | logger | null | logger opsional, lifecycle plus per-rpc | | pasang untuk logging | | | |
 | handler_timeout_ms | 0 | batas timeout handler global (ms), 0 = nonaktif | deadline kooperatif | atur untuk membatasi handler lambat | handler diputus lebih cepat | handler lambat berjalan lebih lama | Route.timeout_ms dan header grpc-timeout memperketatnya |
-| compress_gzip | false | kompresi gzip frame DATA untuk klien yang mengiklankan grpc-accept-encoding: gzip | CPU vs ukuran pesan | aktifkan lewat jaringan | | | murni biaya CPU pada loopback |
+| compress | false | kompresi gzip frame DATA untuk klien yang mengiklankan grpc-accept-encoding: gzip | CPU vs ukuran pesan | aktifkan lewat jaringan | | | murni biaya CPU pada loopback |
 | response_cache | false | aktifkan cache respons unary per worker | memori cache | aktifkan untuk respons unary panas | | | off membuat API cache jadi send biasa |
 | cache_max_entries | 256 | jumlah slot cache (pangkat dua) | memori per worker | naikkan untuk lebih banyak key | lebih banyak miss | lebih banyak memori | dikali jumlah worker |
 | cache_max_value_bytes | 16384 | batas pesan respons per slot | memori per slot | naikkan untuk pesan cache lebih besar | pesan besar melewati cache | lebih banyak memori | tetap ramping |
@@ -127,12 +137,15 @@ Jalur library standar. Set field compression dan cache yang sama dengan HTTP/1, 
 | io | wajib | backend std.Io | | | | | |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
-| dispatch_model | `.ASYNC` | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan | koneksi dibuang | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | busy_poll_us | 50 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL) | hot, kernel busy-spin sebelum menidurkan worker | naikkan untuk memangkas tail latency saat beban, 0 untuk hemat CPU idle | spin lebih pendek, lebih banyak wakeup idle-sleep, tail latency lebih tinggi | core spin 100% saat idle | no-op tanpa dukungan SO_BUSY_POLL kernel |
 | max_recv_buf | 4096 | buffer read per request, request terlalu besar dapat 431 | memori per koneksi dan ukuran request maksimum | naikkan untuk request besar | request ditolak dengan 431 | lebih banyak memori per koneksi | terlalu kecil menolak request valid |
+| large_body_rcvbuf | 0 | SO_RCVBUF diterapkan hanya saat membaca body request besar (upload), 0 memakai default kernel | kecepatan ingest upload dan memori per koneksi saat body besar berjalan | naikkan untuk ingest upload lebih cepat | upload ingest lebih lambat (window default kernel yang sempit) | lebih banyak memori saat body besar (256 KiB menargetkan sekitar 256 MiB resident pada 256c) | hanya jalur upload yang menyentuhnya, handler request kecil tidak terpengaruh |
+| body_read_timeout_ms | 30000 | maks ms Request.body() menunggu segmen berikutnya dari body multi-segmen pada fd non-blocking .EPOLL / .URING | hanya jalur upload, membatasi klien yang macet | turunkan untuk membuang uploader macet lebih cepat | upload dari klien lambat diputus lebih cepat | klien macet menahan worker lebih lama | jalur GET panas tidak punya body dan tidak pernah menunggu di sini |
 | uring_send_buf_size | 16384 | buffer send per koneksi untuk dispatch model .URING (max_recv_buf untuk recv) | memori per koneksi pada .URING | naikkan untuk respons lebih besar, turunkan untuk memperkecil memori per koneksi | lebih banyak pertumbuhan buffer pada respons besar | lebih banyak memori per koneksi | tanpa efek pada dispatch model lain |
-| compression | false | aktifkan gzip/deflate/brotli dengan Accept-Encoding | CPU vs ukuran body | aktifkan lewat jaringan | | | murni biaya CPU pada loopback |
+| uring_idle_pool_floor | 64 | floor warm idle-connection pool per worker pada .URING | memori warm-pool vs hit allocator pada koneksi baru | naikkan untuk menjaga lebih banyak koneksi warm saat churn bursty, turunkan untuk memperkecil memori idle | lebih banyak hit allocator setelah periode sepi | lebih banyak koneksi idle tetap resident | tanpa efek pada dispatch model lain |
+| compress | false | aktifkan gzip/deflate/brotli dengan Accept-Encoding | CPU vs ukuran body | aktifkan lewat jaringan | | | murni biaya CPU pada loopback |
 | compression_min_size | 256 | ukuran body minimum sebelum kompresi | pemeriksaan per respons | naikkan agar melewati body kecil | body kecil dikompres | body lebih besar melewati kompresi | terlalu kecil memboroskan CPU |
 | compression_max_out | 262144 | byte output terkompresi maksimum | batas per respons | naikkan untuk body lebih besar | body lebih besar tanpa kompresi | lebih banyak CPU sebelum menyerah | di atas ini dikirim tanpa kompresi |
 | max_allocator_size | 4096 | kapasitas arena awal per koneksi, tumbuh bila terlampaui | memori per koneksi, realokasi | naikkan untuk menghindari pertumbuhan arena dini | lebih banyak event pertumbuhan arena | lebih banyak memori idle per koneksi | tetap tumbuh otomatis | 
@@ -161,7 +174,7 @@ Jalur library standar. Set field compression dan cache yang sama dengan HTTP/1, 
 | io | wajib | backend std.Io | | | | | |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
-| dispatch_model | `.ASYNC` | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan | koneksi dibuang | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | max_recv_buf | 4096 | byte payload maksimum per frame, terlalu besar menutup koneksi | memori per koneksi dan frame maksimum | naikkan untuk frame lebih besar | frame besar menutup koneksi | lebih banyak memori per koneksi | terlalu kecil menutup frame besar yang valid |
 | uring_send_buf_size | 65536 | buffer send per koneksi untuk model framed .URING (max_recv_buf untuk recv) | memori per koneksi pada .URING | naikkan untuk frame lebih besar, turunkan untuk memperkecil memori per koneksi | lebih banyak pertumbuhan buffer pada frame besar | lebih banyak memori per koneksi | tanpa efek pada dispatch model lain |
@@ -185,18 +198,21 @@ Jalur messaging bertipe menjalankan satu loop receive async. Knob batch dan work
 | port | wajib | port bind, non-zero untuk REQUIRED | | | | | nilai nol ditolak pada REQUIRED |
 | port_mode | `.REQUIRED` | cara port diambil: REQUIRED (config) atau CONFIGURABLE (CLI dengan fallback) | validasi startup | `.CONFIGURABLE` untuk membaca --port saat runtime | | | REQUIRED menolak port nol saat init |
 | endianness | `.LITTLE` | endianness wire pada setiap send dan receive | konversi per paket | `.LITTLE` untuk klien lintas bahasa, `.BIG` untuk network order | | | harus sama antara klien dan server |
-| disconnect_timeout_ms | 5000 | ms hening sebelum klien dianggap terputus | pelacakan liveness | turunkan untuk deteksi putus lebih cepat | klien dibuang lebih cepat | klien mati menggantung | terlalu kecil membuang klien lambat tapi hidup |
+| conn_timeout_ms | 5000 | ms hening sebelum klien dianggap terputus | pelacakan liveness | turunkan untuk deteksi putus lebih cepat | klien dibuang lebih cepat | klien mati menggantung | terlalu kecil membuang klien lambat tapi hidup |
 | poll_timeout_ms | 2000 | interval poll receive (ms), menentukan frekuensi cek putus | frekuensi wakeup | turunkan untuk cek lebih responsif | wakeup lebih sering | deteksi putus lebih lambat | menukar CPU dengan responsivitas |
 | auto_ack | false | kirim byte ACK 0x06 saat terima sukses | satu send tambahan per paket | aktifkan untuk umpan balik at-least-once | | | menambah trafik balasan |
 | error_report | false | kirim byte NACK 0x15 saat paket cacat atau kebesaran | satu send tambahan saat error | aktifkan untuk umpan balik error | | | menambah trafik balasan |
 | auto_echo | false | echo paket yang diterima apa adanya | satu send tambahan per paket | aktifkan untuk perilaku echo | | | menambah trafik balasan |
 | broadcast | false | relay paket yang diterima ke semua klien terhubung | satu send per klien terhubung | aktifkan untuk fan-out | | | biaya per paket naik seiring jumlah klien |
-| dispatch_model | `.ASYNC` | concurrency jalur raw, EPOLL/URING jalankan worker per-core | menentukan strategi | `.EPOLL`/`.URING` untuk jalur raw pada skala | | | jalur bertipe melipat model non-ASYNC ke satu loop |
+| dispatch_model | wajib | concurrency jalur raw, EPOLL/URING jalankan worker per-core | menentukan strategi | `.EPOLL`/`.URING` untuk jalur raw pada skala | | | jalur bertipe melipat model non-ASYNC ke satu loop |
 | workers | 0 | jumlah worker untuk model per-core, 0 = cpu_count | paralelisme | biarkan 0 (otomatis) | lebih sedikit core | context-switching | hanya untuk EPOLL/URING |
 | reuse_address | false | set SO_REUSEADDR + SO_REUSEPORT untuk bind multi-worker | mengaktifkan load-balancing kernel | aktifkan untuk worker per-core | | | wajib untuk berbagi port multi-worker |
 | recv_batch | 32 | datagram diterima per syscall recvmmsg (jalur raw) | syscall per batch | naikkan untuk memangkas syscall saat beban | lebih banyak syscall per datagram | buffer batch lebih besar | terlalu kecil kehilangan manfaat batching |
 | send_batch | 32 | balasan digabung per flush sendmmsg (jalur raw) | syscall per flush | naikkan untuk memangkas syscall saat beban | lebih banyak syscall flush | buffer batch lebih besar | terlalu kecil kehilangan manfaat batching |
 | max_recv_buf | 1500 | ukuran datagram maksimum, buffer receive per slot (jalur raw) | memori per slot | samakan dengan MTU jalur | datagram lebih besar terpotong | lebih banyak memori per slot | 1500 adalah MTU Ethernet umum |
+| busy_poll_us | 0 | spin window SO_BUSY_POLL dalam mikrodetik untuk socket worker raw per-core (.EPOLL / .URING) | wake-up latency recvmmsg | set ke mis. 50 untuk memangkas wake-up latency saat beban | spin lebih pendek, lebih banyak wakeup idle-sleep | core spin saat idle | 0 membiarkannya tidak diset, no-op tanpa dukungan SO_BUSY_POLL kernel |
+| worker_stack_size_bytes | 524288 | stack thread worker untuk worker raw per-core (.EPOLL / .URING) | RSS per thread (demand-paged) | naikkan untuk handler dalam, turunkan untuk memangkas RSS | stack overflow pada handler dalam | RSS terbuang per worker | biayanya rendah sampai kedalamannya terpakai |
+| gso_enabled | false | UDP GSO (UDP_SEGMENT): gabungkan balasan ke tujuan yang sama berturut-turut jadi satu sendmsg per grup | syscall jalur send | aktifkan saat balasan membludak ke satu peer (flight multi-packet) | | lebih sedikit syscall send, CPU lebih rendah | diprobe saat startup, off pada kernel di bawah 4.18, hanya membantu batch multi-packet ke peer yang sama |
 | logger | null | logger opsional, lifecycle plus per datagram | | pasang untuk logging | | | |
 
 ## HTTP/3 (`Http3ServerConfig`)
@@ -209,11 +225,14 @@ QUIC di atas UDP. Membutuhkan TLS 1.3 context (tidak ada mode cleartext).
 | allocator | wajib | allocator backing, general-purpose | | | | | |
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
-| dispatch_model | `.ASYNC` | concurrency, EPOLL/URING jalankan satu worker SO_REUSEPORT per core | menentukan strategi | `.EPOLL`/`.URING` untuk skala multicore | | | ASYNC/POOL/MIXED jalankan satu worker dengan demux CID |
+| dispatch_model | wajib | concurrency, EPOLL/URING jalankan satu worker SO_REUSEPORT per core | menentukan strategi | `.EPOLL`/`.URING` untuk skala multicore | | | ASYNC/POOL/MIXED jalankan satu worker dengan demux CID |
 | workers | 0 | jumlah worker untuk model per-core, 0 = cpu_count | paralelisme | biarkan 0 (otomatis) | lebih sedikit core | context-switching | hanya untuk EPOLL/URING |
 | recv_batch | 32 | datagram diterima per syscall recvmmsg | syscall per batch | naikkan untuk memangkas syscall | lebih banyak syscall | buffer lebih besar | terlalu kecil kehilangan batching |
 | send_batch | 32 | paket digabung per flush sendmmsg | syscall per flush | naikkan untuk memangkas syscall | lebih banyak flush | buffer lebih besar | terlalu kecil kehilangan batching |
 | max_recv_buf | 1500 | ukuran datagram maksimum, buffer receive per slot | memori per slot | samakan dengan MTU jalur | datagram terpotong | lebih banyak memori | 1500 adalah MTU Ethernet umum |
+| busy_poll_us | 0 | spin window SO_BUSY_POLL dalam mikrodetik untuk socket worker per-core (.EPOLL / .URING) | wake-up latency recvmmsg | set ke mis. 50 untuk memangkas wake-up latency saat beban | spin lebih pendek, lebih banyak wakeup idle-sleep | core spin saat idle | 0 membiarkannya tidak diset, no-op tanpa dukungan SO_BUSY_POLL kernel |
+| worker_stack_size_bytes | 524288 | stack thread worker untuk worker per-core (.EPOLL / .URING) | RSS per thread (demand-paged) | naikkan untuk handler dalam, turunkan untuk memangkas RSS | stack overflow pada handler dalam | RSS terbuang per worker | biayanya rendah sampai kedalamannya terpakai |
+| gso_enabled | true | UDP GSO (UDP_SEGMENT): gabungkan flight respons multi-packet ke satu peer jadi satu sendmsg | syscall jalur send, hot | biarkan on, matikan hanya untuk A/B atau pada kernel terbatas | | lebih sedikit syscall send, CPU lebih rendah dan throughput lebih tinggi | diprobe saat startup, fallback ke sendmmsg biasa pada kernel di bawah 4.18 |
 | tls | null (wajib) | TLS 1.3 context: cert, key, ALPN, QUIC butuh TLS 1.3 | mengaktifkan QUIC | pasang TLS 1.3 context | | | null ditolak, QUIC tidak punya mode cleartext |
 | cid_len | 8 | panjang connection ID terbitan server (byte, RFC 9000) | penanganan CID per paket | biarkan 8, panjang tetap memungkinkan steering per-core | lebih pendek, lebih sedikit CID berbeda | overhead CID per paket lebih besar | memungkinkan steering CID per-core di masa depan |
 | max_idle_ms | 30000 | timeout idle koneksi (ms, RFC 9000 10.1) | liveness | turunkan untuk merebut kembali koneksi idle lebih cepat | koneksi idle ditutup lebih cepat | koneksi idle menggantung | terlalu kecil menutup koneksi lambat tapi hidup |
@@ -231,7 +250,7 @@ QUIC di atas UDP. Membutuhkan TLS 1.3 context (tidak ada mode cleartext).
 | ip | wajib | alamat bind | | | | | |
 | port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
 | comp_id | wajib | SenderCompID server (tag 49) | | | | | wajib untuk sesi FIX |
-| dispatch_model | `.ASYNC` | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
+| dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan | koneksi dibuang | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | uring_send_buf_size | 65536 | buffer send per koneksi untuk dispatch model .URING | memori per koneksi pada .URING | naikkan untuk balasan lebih besar, turunkan untuk memperkecil memori per koneksi | lebih banyak pertumbuhan buffer pada balasan besar | lebih banyak memori per koneksi | tanpa efek pada dispatch model lain |
 | uring_max_conns_per_worker | 65536 | koneksi konkuren maksimum yang dilacak satu worker .URING (slab terindeks fd) | slab per worker, demand-paged | naikkan untuk concurrency sangat tinggi, turunkan untuk memperkecil slab | koneksi ditolak melewati cap | slab awal lebih besar (demand-paged) | hanya model .URING |
@@ -264,7 +283,7 @@ Policy TLS sisi server, divalidasi sekali saat init. Pasang `Tls.Context` yang s
 
 | field | default | fungsi | dampak performa | cara menyetel | jika lebih kecil | jika lebih besar | konsekuensi salah atur |
 | :- | :- | :- | :- | :- | :- | :- | :- |
-| cert_path | wajib | path PEM ke sertifikat end-entity (ECDSA P-256 atau Ed25519) | load startup | | | | wajib |
+| cert_path | wajib | path PEM ke sertifikat end-entity (ECDSA P-256, Ed25519, atau RSA) | load startup | | | | wajib |
 | key_path | wajib | path PEM ke private key yang cocok dengan cert_path | load startup | | | | wajib, harus cocok dengan cert |
 | alpn | kosong | protokol ALPN yang ditawarkan, urutan preferensi server | handshake | set `.{ .HTTP_1_1 }` untuk Http1, `.{ .H2 }` untuk Http2 | | | browser butuh ALPN h2 untuk HTTP/2 over TLS |
 | min_version | `.TLS_1_2` | batas bawah versi, rentang valid TLS 1.2 sampai 1.3 | kompatibilitas handshake | naikkan ke `.TLS_1_3` untuk mewajibkan 1.3 | | | 1.0/1.1 tidak pernah ditawarkan (RFC 8996) |

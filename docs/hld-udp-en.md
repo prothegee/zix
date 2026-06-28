@@ -142,7 +142,7 @@ pub const UdpServerConfig = struct {
     port:                  u16,                        // bind port & must be non-zero
     port_mode:             PortMode   = .REQUIRED,
     endianness:            Endianness = .LITTLE,
-    disconnect_timeout_ms: i64        = 5000, // silence before client considered disconnected
+    conn_timeout_ms: i64        = 5000, // silence before client considered disconnected
     poll_timeout_ms:       i64        = 2000, // receiveTimeout interval for disconnect checks
     auto_ack:              bool       = false, // send 0x06 ACK to sender on receipt
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
@@ -153,7 +153,7 @@ pub const UdpServerConfig = struct {
     // Datagram-transport knobs (ADR-049), used by the raw-bytes path (zix.Udp.Raw). The typed
     // path runs a single async loop: it folds a non-ASYNC dispatch_model with a notice and does
     // not use the batch / worker knobs.
-    dispatch_model:        DispatchModel = .ASYNC, // .EPOLL / .URING = per-core workers
+    dispatch_model:        DispatchModel, // required. .EPOLL / .URING = per-core workers
     workers:               usize         = 0,      // 0 = one worker per CPU
     reuse_address:         bool          = false,  // SO_REUSEADDR + SO_REUSEPORT
     recv_batch:            usize         = 32,     // recvmmsg batch size
@@ -253,12 +253,12 @@ flowchart TD
     C -->|no| E["skip check"]
     F["receiveTimeout (Timeout error)"] --> D
     D --> G["for each client:\nelapsed = now - last_seen"]
-    G --> H{"elapsed >= disconnect_timeout_ms?"}
+    G --> H{"elapsed >= conn_timeout_ms?"}
     H -->|yes| I["swapRemove from clients list\nlog disconnect"]
     H -->|no| J["keep client"]
 ```
 
-Worst-case detection delay: `disconnect_timeout_ms + poll_timeout_ms`. There is no OS-level signal equivalent to TCP FIN.
+Worst-case detection delay: `conn_timeout_ms + poll_timeout_ms`. There is no OS-level signal equivalent to TCP FIN.
 
 ---
 

@@ -16,7 +16,7 @@ Implemented. See ADR-024 for design rationale.
 - SOH-delimited framing: no length prefix, delimiter-based message boundary detection.
 - Session layer built in: Logon / Logout / Heartbeat / TestRequest handled automatically, all other messages are echoed.
 - No heap allocation in `serveConn`: stack buffers throughout.
-- POOL, ASYNC, MIXED, and EPOLL dispatch. Default: ASYNC (FIX sessions are long-lived). EPOLL runs natively on Linux (gRPC pattern: single epoll accept loop, pool workers hold each connection for its full lifetime). Falls back to POOL on non-Linux.
+- POOL, ASYNC, MIXED, EPOLL, and URING dispatch. Required with no default: ASYNC suits long-lived FIX sessions. EPOLL runs natively on Linux (gRPC pattern: single epoll accept loop, pool workers hold each connection for its full lifetime). URING runs shared-nothing io_uring workers on Linux. Both fall back to POOL on non-Linux.
 - `io: std.Io` in config (not passed to `run()`).
 
 ---
@@ -28,7 +28,8 @@ src/tcp/fix/
     Fix.zig      // namespace aggregator
     core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
-    server.zig   // FixServer: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
+    server.zig   // FixServer: thin run() switch over dispatch/ (POOL, ASYNC, MIXED, EPOLL, URING)
+    dispatch/    // per-model files: async.zig, pool.zig, mixed.zig, epoll.zig, uring.zig, common.zig
     router.zig   // comptime FixRouter
     client.zig   // FixClient
 ```
@@ -82,7 +83,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `ip` | required | Bind address |
 | `port` | required | Bind port. Must be non-zero |
 | `comp_id` | required | Server SenderCompID (tag 49) |
-| `dispatch_model` | `.ASYNC` | POOL, ASYNC, MIXED, or EPOLL (Linux-only: native epoll. Non-Linux falls back to POOL) |
+| `dispatch_model` | `.ASYNC` | POOL, ASYNC, MIXED, EPOLL, or URING (EPOLL and URING are Linux-only: native epoll / io_uring. Non-Linux falls back to POOL) |
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Accept thread count. Ignored by ASYNC |
 | `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
@@ -351,11 +352,11 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Dispatch Models
 
-Same five models as `zix.Http.Server`. Default is ASYNC (FIX sessions are long-lived. POOL can exhaust threads under sustained load):
+Same five models as `zix.Http.Server`. The field is required with no default. ASYNC suits long-lived FIX sessions (POOL can exhaust threads under sustained load):
 
 | Model | Accept threads | Notes |
 | :- | :- | :- |
-| `.ASYNC` (default) | 1 | Long-lived sessions, standard FIX deployments |
+| `.ASYNC` | 1 | Long-lived sessions, standard FIX deployments |
 | `.POOL` | cpu_count | High connection volume with short sessions |
 | `.MIXED` | cpu_count | Balanced throughput and latency |
 | `.EPOLL` | 1 (Linux-only) | Single epoll accept loop. Pool workers hold each connection for its full lifetime. Non-Linux falls back to POOL. |
@@ -391,6 +392,7 @@ See `docs/hld-logger.md` for log line format details.
 | `examples/fix_server_2_pool.zig` | `.POOL` server (echo mode) | 9500 |
 | `examples/fix_server_3_mixed.zig` | `.MIXED` server (echo mode) | 9500 |
 | `examples/fix_server_4_epoll.zig` | `.EPOLL` server (Linux-only: native epoll. Non-Linux falls back to POOL) | 9500 |
+| `examples/fix_server_5_uring.zig` | `.URING` server (Linux-only: shared-nothing io_uring workers. Non-Linux falls back to POOL) | 9052 |
 | `examples/fix_server_trading.zig` | `.ASYNC` server with router: NewOrderSingle + OrderCancelRequest, JSON append, logger, timeouts | 9500 |
 | `examples/fix_client.zig` | `FixClient` high-level client | 9500 |
 | `examples/fix_client_raw.zig` | raw core primitives client | 9500 |

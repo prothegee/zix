@@ -76,7 +76,7 @@ fn setNonBlock(fd: std.posix.fd_t) void {
 
 /// Accept every pending connection on listener_fd and register each in epfd. Level-triggered,
 /// so draining to EAGAIN guarantees no accept is missed.
-fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.GrpcServeOpts) void {
+fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.GrpcServeOpts, busy_poll_us: u32) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -90,6 +90,7 @@ fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix
 
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
+        common.setBusyPoll(conn_fd, busy_poll_us);
         if (table.alloc(conn_fd, opts) == null) {
             _ = linux.close(conn_fd);
             continue;
@@ -114,6 +115,8 @@ const MuxWorkerCtx = struct {
     port: u16,
     kernel_backlog: u31,
     opts: core.GrpcServeOpts,
+    worker_id: usize,
+    busy_poll_us: u32,
 };
 
 /// Build a concrete epoll mux worker entry with the routes baked in at compile
@@ -123,6 +126,9 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
     return struct {
         fn run(ctx: MuxWorkerCtx) void {
             const linux = std.os.linux;
+
+            // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
+            common.pinToCpu(ctx.worker_id);
 
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var srv = addr.listen(ctx.io, .{
@@ -186,7 +192,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 
                 for (events[0..n]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, ctx.opts);
+                        acceptAll(&table, epfd, listener_fd, ctx.opts, ctx.busy_poll_us);
                         continue;
                     }
 
@@ -221,7 +227,8 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 ///   loop, so it must stay bounded (it blocks the worker's other connections while running).
 pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     const io = cfg.io;
-    const cpu = try std.Thread.getCpuCount();
+    // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
     const opts = common.serveOptsWithCache(cfg);
 
@@ -231,7 +238,7 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     defer std.heap.smp_allocator.free(workers);
 
     const worker_fn = epollMuxWorkerFn(routes);
-    for (workers) |*t|
+    for (workers, 0..) |*t, idx|
         t.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
@@ -241,6 +248,8 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .opts = opts,
+                .worker_id = idx,
+                .busy_poll_us = cfg.busy_poll_us,
             }},
         );
 

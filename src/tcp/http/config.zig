@@ -4,6 +4,7 @@ const std = @import("std");
 const HeaderSize = @import("response.zig").HeaderSize;
 const RequestHeaderSize = @import("parser.zig").RequestHeaderSize;
 const Logger = @import("../../logger/logger.zig").Logger;
+const Tls = @import("../../tls/Tls.zig");
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 // --------------------------------------------------------- //
@@ -19,8 +20,8 @@ pub const HttpServerConfig = struct {
     port: u16,
     /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
     /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
-    /// Default: .ASYNC (single accept thread, io.async() per connection).
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024 * 4,
     /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL). The kernel
@@ -29,10 +30,27 @@ pub const HttpServerConfig = struct {
     busy_poll_us: u32 = 50,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
     max_recv_buf: usize = 1024 * 4,
+    /// SO_RCVBUF (bytes) applied only while reading a large request body (uploads). Default 0 leaves
+    /// the kernel default and its receive autotuning, which already sizes the upload window well on a
+    /// box with a healthy net.core.rmem_max. An explicit value both caps the window AND disables
+    /// autotuning, so a value below what autotuning would grow to actually slows uploads. Set it only
+    /// to FORCE a window larger than autotuning, at the cost of per-connection memory while a large
+    /// body is in flight. Small-request handlers never touch this path.
+    large_body_rcvbuf: usize = 0,
+    /// Max milliseconds Request.body() waits for the next segment of a multi-segment request body on
+    /// the non-blocking .EPOLL / .URING fd before giving up (upload path). Bounds a stalled client so
+    /// the worker is not blocked indefinitely. Default 30000 (30s) covers a slow upload. The hot GET
+    /// path returns early (no body) and never waits here.
+    body_read_timeout_ms: i32 = 30000,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
     /// half of the per-connection footprint (max_recv_buf covers recv). No effect under
     /// the other dispatch models.
     uring_send_buf_size: usize = 16 * 1024,
+    /// Minimum warm idle-connection pool size for the .URING dispatch model. A closed connection is
+    /// pooled (recv and send buffers intact) instead of freed, so a later accept reuses the
+    /// allocation rather than making three heap allocations. The pool cap scales with this worker's
+    /// live concurrency, with this value as the floor when the worker is idle. Mirrors zix.Http1.
+    uring_idle_pool_floor: usize = 64,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
     /// brotli). Default false. Compression spends CPU to shrink the body, which only
     /// pays off over a real network, so leaving it off keeps the perf gate untouched.
@@ -42,7 +60,7 @@ pub const HttpServerConfig = struct {
     /// - Active under the .EPOLL and .URING dispatch models (shared-nothing, one owner
     ///   per worker), like the response cache. A handler opts in by calling
     ///   resp.sendNegotiated(req, body) instead of resp.send(body).
-    compression: bool = false,
+    compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body
     /// under this floor is sent uncompressed, since the header and CPU cost outweighs
     /// the saving. Mirrors utils.compression.min_size_default.
@@ -114,15 +132,25 @@ pub const HttpServerConfig = struct {
     /// response and injects a pointer into ctx.logger for handler use.
     /// Caller owns the Logger and must ensure it outlives the server.
     logger: ?*Logger = null,
+
+    /// https - opt-in. When non-null the server serves HTTP/1.1 over TLS (zix.Tls) on a gated path,
+    /// leaving the cleartext engine untouched. The .EPOLL / .URING models terminate TLS in the
+    /// event-driven tls_mux worker, the thread models in tls_serve. The context (caller-owned,
+    /// must outlive the server) carries the cert / key / alpn / version / curve / cipher / HSTS
+    /// policy (Tls.Context.Config). Buffered responses only: SSE / streaming and WebSocket are not
+    /// served over TLS yet (they bypass the buffered response sink).
+    tls: ?*Tls.Context = null,
 };
 
 test "zix http: HttpServerConfig uring_send_buf_size default" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080 };
+    const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
+    try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);
+    try std.testing.expectEqual(@as(i32, 30000), cfg.body_read_timeout_ms);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), cfg.worker_stack_compress_bytes);
 }

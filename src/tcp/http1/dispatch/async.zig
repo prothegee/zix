@@ -26,6 +26,6 @@ pub fn runAsync(config: Config, handler: HandlerFn) !void {
 
     while (true) {
         const stream = srv.accept(io) catch continue;
-        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }});
+        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir }});
     }
 }

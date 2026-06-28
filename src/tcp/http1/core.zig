@@ -7,10 +7,10 @@ const compression = @import("../../utils/compression/compression.zig");
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 pub const BUF_SIZE: usize = 16 * 1024;
-pub const GZIP_OUT_SIZE: usize = 256 * 1024;
+const GZIP_OUT_SIZE: usize = 256 * 1024;
 
 /// Scratch buffer for building one HTTP status line plus its headers.
-pub const HEADER_BUF_SIZE: usize = 256;
+const HEADER_BUF_SIZE: usize = 256;
 
 /// Inline write fast-path buffer. A response whose status line, headers, and
 /// body all fit here is sent in one direct write, skipping the iovec scatter
@@ -67,7 +67,34 @@ pub const ServeOpts = struct {
     nodelay: bool = true,
     /// Per-handler execution budget in milliseconds. 0 = no deadline armed.
     handler_timeout_ms: u32 = 0,
+    /// SO_RCVBUF applied on the large-body path only (a body larger than the read buffer). 0 leaves
+    /// the kernel default. Widens the receive window so a large upload drains in fewer cycles.
+    large_body_rcvbuf: usize = 0,
 };
+
+/// SO_RCVBUF for the large-body path under the event-loop models (.EPOLL / .URING), set once per
+/// worker from config.large_body_rcvbuf. The blocking models carry it on ServeOpts instead. The
+/// event-loop request functions do not thread config through, so a threadlocal is the carrier. 0
+/// leaves the kernel default.
+pub threadlocal var tl_large_body_rcvbuf: usize = 0;
+
+/// Install the large-body SO_RCVBUF for this worker (event-loop models).
+pub fn setLargeBodyRcvbuf(bytes: usize) void {
+    tl_large_body_rcvbuf = bytes;
+}
+
+/// Widen the socket receive buffer (SO_RCVBUF) so a large request body drains in fewer cycles.
+/// Applied only on the large-body path (a body bigger than the read buffer), so ordinary small
+/// requests keep the kernel default and its autotuning. bytes = 0 leaves the socket untouched.
+/// Note: an explicit SO_RCVBUF disables receive autotuning for that socket, which is why it is set
+/// only when a large body is actually detected, not at accept.
+pub fn setRecvBuf(fd: std.posix.fd_t, bytes: usize) void {
+    if (bytes == 0) return;
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
+    const val: c_int = @intCast(@min(bytes, std.math.maxInt(c_int)));
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&val)) catch {};
+}
 
 // --------------------------------------------------------- //
 
@@ -154,8 +181,8 @@ pub threadlocal var tl_cache: ?*cache.ResponseCache = null;
 pub threadlocal var tl_cache_ttl_ms: u32 = 1000;
 
 /// Install or clear the response cache and its default TTL for this worker.
-pub fn setCache(c: ?*cache.ResponseCache, default_ttl_ms: u32) void {
-    tl_cache = c;
+pub fn setCache(resp_cache: ?*cache.ResponseCache, default_ttl_ms: u32) void {
+    tl_cache = resp_cache;
     tl_cache_ttl_ms = default_ttl_ms;
 }
 
@@ -165,7 +192,7 @@ pub fn cacheTtl() u32 {
 }
 
 /// Whether response compression is enabled for this worker. Off unless the server
-/// installs it from config.compression. When off, writeNegotiated always writes
+/// installs it from config.compress. When off, writeNegotiated always writes
 /// uncompressed.
 pub threadlocal var tl_compression: bool = false;
 
@@ -199,6 +226,25 @@ pub fn cacheLookup(head: *const ParsedHead) ?[]const u8 {
 pub fn cacheStore(head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) void {
     const c = tl_cache orelse return;
     const key = cache.hashKey(head.method, head.path, head.query);
+
+    _ = c.store(key, bytes, ttl_ms, cache.nowMillis());
+}
+
+/// Look up a cached response for this request under a specific content-encoding (the per-(key,
+/// encoding) cache). The compressed and identity representations live in distinct slots, so a gzip
+/// request never replays the identity body. Returns the full response bytes, or null.
+pub fn cacheLookupEncoded(head: *const ParsedHead, encoding: []const u8) ?[]const u8 {
+    const c = tl_cache orelse return null;
+    const key = cache.hashKeyEncoded(head.method, head.path, head.query, encoding);
+
+    return c.lookup(key, cache.nowMillis());
+}
+
+/// Store full response bytes for this request under a specific content-encoding. The bytes must be a
+/// complete HTTP response (status line + headers + the encoded body).
+pub fn cacheStoreEncoded(head: *const ParsedHead, encoding: []const u8, bytes: []const u8, ttl_ms: u32) void {
+    const c = tl_cache orelse return;
+    const key = cache.hashKeyEncoded(head.method, head.path, head.query, encoding);
 
     _ = c.store(key, bytes, ttl_ms, cache.nowMillis());
 }
@@ -511,6 +557,19 @@ pub fn setDateHeader(enabled: bool) void {
     tl_send_date = enabled;
 }
 
+/// Configured static-serve root for the unmatched-route fallback. Empty disables it. The router
+/// reads these because the HandlerFn carries only (head, body, fd), never io, so the public_dir and
+/// io are threaded down per worker the same way the date / cache / compression switches are.
+pub threadlocal var tl_static_dir: []const u8 = "";
+pub threadlocal var tl_static_io: ?std.Io = null;
+
+/// Install the static-serve root and io for this worker thread. Called once per worker at startup.
+/// An empty public_dir leaves static serving off (the router falls straight through to 404).
+pub fn setStatic(public_dir: []const u8, io: std.Io) void {
+    tl_static_dir = public_dir;
+    tl_static_io = io;
+}
+
 fn cachedDate() []const u8 {
     tl_date_tick +%= 1;
     if (tl_date_tick == 0 or tl_date.len == 0) {
@@ -558,9 +617,9 @@ fn appendDec(buf: []u8, pos: usize, val: usize) usize {
     return pos + tmp_len;
 }
 
-fn appendBytes(buf: []u8, pos: usize, s: []const u8) usize {
-    @memcpy(buf[pos..][0..s.len], s);
-    return pos + s.len;
+fn appendBytes(buf: []u8, pos: usize, str: []const u8) usize {
+    @memcpy(buf[pos..][0..str.len], str);
+    return pos + str.len;
 }
 
 /// Write a simple response header into buf starting at offset 0.
@@ -685,6 +744,55 @@ pub const RespSink = struct {
 
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
+/// Streaming sink for the thread-per-connection https path (ADR-054). While installed
+/// (tl_tls_stream) and the buffered capture sink is detached, fdWriteAll encrypts each write as one
+/// TLS record and sends it straight to the socket, so an SSE handler streams over TLS instead of
+/// buffering a whole response. Type-erased over the live connection (the 1.3 and 1.2 paths share
+/// it): writeFn casts ctx back to the concrete per-connection state and encrypts + writes.
+pub const TlsStreamSink = struct {
+    ctx: *anyopaque,
+    writeFn: *const fn (ctx: *anyopaque, plaintext: []const u8) bool,
+    failed: bool = false,
+
+    pub fn write(self: *TlsStreamSink, bytes: []const u8) bool {
+        if (self.failed) return false;
+
+        if (!self.writeFn(self.ctx, bytes)) {
+            self.failed = true;
+
+            return false;
+        }
+
+        return true;
+    }
+};
+
+/// Active streaming sink for the current worker thread (the thread-per-conn https path). null for
+/// cleartext and the buffered https path, so fdWriteAll never routes through it there.
+pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
+
+/// Begin a streaming response (SSE) from an fd-handler, so one handler serves cleartext and TLS.
+///
+/// Detaches any buffered capture / coalescing sink, so each subsequent fdWriteAll flushes
+/// immediately: over TLS it hands writes to the live-session stream sink (one record per write), in
+/// cleartext it writes straight to the socket. An SSE handler never returns, so a buffered sink
+/// would never flush. A no-op when no sink is installed (the cleartext .ASYNC SSE path).
+///
+/// Usage:
+/// ```zig
+/// fn eventsHandler(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+///     zix.Http1.beginStream();
+///     zix.Http1.fdWriteAll(fd, sse_headers) catch return;
+///     // ... emit events with fdWriteAll(fd, ...) ...
+/// }
+/// ```
+pub fn beginStream() void {
+    if (tl_resp_sink) |sink| {
+        sink.flush();
+        tl_resp_sink = null;
+    }
+}
+
 /// Flush any response bytes still staged for fd. Handlers that write to the
 /// fd directly (sendfile, raw send) must call this first so the wire order
 /// matches the request order under pipelining. No-op when nothing is staged.
@@ -723,6 +831,12 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 
             return;
         }
+    }
+
+    // Streaming https path (ADR-054): the capture sink was detached by beginStream(), so each write
+    // encrypts one TLS record and sends it. null in cleartext, where writes go straight to the fd.
+    if (tl_tls_stream) |strm| {
+        return if (strm.write(data)) {} else error.BrokenPipe;
     }
 
     return fdWriteAllDirect(fd, data);
@@ -845,43 +959,83 @@ pub fn write100Continue(fd: std.posix.fd_t) !void {
     try fdWriteAll(fd, "HTTP/1.1 100 Continue\r\n\r\n");
 }
 
-/// gzip-compressed response via std.compress.flate.
-/// Heap-allocates the compressor to avoid blowing the stack.
-pub fn writeGzip(
-    fd: std.posix.fd_t,
-    status: u16,
-    content_type: []const u8,
-    body: []const u8,
-) !void {
-    const out_buf = try std.heap.smp_allocator.alloc(u8, GZIP_OUT_SIZE);
-    defer std.heap.smp_allocator.free(out_buf);
+/// Per-worker (threadlocal) gzip scratch, reused across requests so the response path never
+/// allocates. The Compress state is about 225 KB, the window 64 KB, the output 64 KB. A
+/// per-request heap alloc of these would overflow SmpAllocator's 32 KB size class and fall to
+/// mmap / munmap, whose process mmap_lock + TLB-shootdown serializes every worker (the json-comp
+/// low-CPU stall). Threadlocal storage is mapped once per worker thread and reused, so the hot
+/// path issues zero allocation syscalls. The compressor is held as an error-union slot and built
+/// in place (sret), never as a 225 KB stack temporary.
+threadlocal var tl_gzip_out: [GZIP_OUT_SIZE]u8 = undefined;
+threadlocal var tl_gzip_window: [std.compress.flate.max_window_len]u8 = undefined;
+threadlocal var tl_gzip_comp: std.Io.Writer.Error!std.compress.flate.Compress = undefined;
+/// Full gzip response (header + compressed body) assembled contiguously, so it writes in one call
+/// and can be stored in the response cache as a single replayable blob.
+threadlocal var tl_gzip_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
 
-    const hist_buf = try std.heap.smp_allocator.alloc(u8, std.compress.flate.max_window_len);
-    defer std.heap.smp_allocator.free(hist_buf);
-
-    const comp = try std.heap.smp_allocator.create(std.compress.flate.Compress);
-    defer std.heap.smp_allocator.destroy(comp);
-
-    var out_w: std.Io.Writer = .fixed(out_buf);
-    comp.* = try std.compress.flate.Compress.init(
+/// Build a complete gzip HTTP response (header + compressed body) into the per-worker buffer and
+/// return the slice. Reuses the threadlocal compressor, so it allocates nothing. Shared by writeGzip
+/// and writeGzipCached.
+fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
+    var out_w: std.Io.Writer = .fixed(&tl_gzip_out);
+    tl_gzip_comp = std.compress.flate.Compress.init(
         &out_w,
-        hist_buf,
+        &tl_gzip_window,
         .gzip,
         std.compress.flate.Compress.Options.default,
     );
+
+    const comp: *std.compress.flate.Compress = if (tl_gzip_comp) |*payload| payload else |_| return error.CompressFailed;
     try comp.writer.writeAll(body);
     try comp.finish();
 
     const compressed = out_w.buffered();
-    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
-    const h = try std.fmt.bufPrint(
-        &hdr,
+    const header = try std.fmt.bufPrint(
+        &tl_gzip_resp,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n",
         .{ status, statusPhrase(status), content_type, compressed.len },
     );
-    try fdWriteAll(fd, h);
-    try fdWriteAll(fd, compressed);
+    const total = header.len + compressed.len;
+
+    @memcpy(tl_gzip_resp[header.len..total], compressed);
+
+    return tl_gzip_resp[0..total];
 }
+
+/// gzip-compressed response via std.compress.flate, reusing the per-worker compressor.
+pub fn writeGzip(fd: std.posix.fd_t, status: u16, content_type: []const u8, body: []const u8) !void {
+    try fdWriteAll(fd, try buildGzipResponse(status, content_type, body));
+}
+
+/// gzip response with the per-(key, encoding) cache: on a hit replay the cached compressed response
+/// with zero compression work, on a miss compress once, store, and write. Deterministic bodies (the
+/// /json family) become a cache replay after the first request, the json-comp ceiling-raiser.
+pub fn writeGzipCached(fd: std.posix.fd_t, head: *const ParsedHead, status: u16, content_type: []const u8, body: []const u8, ttl_ms: u32) !void {
+    if (cacheLookupEncoded(head, "gzip")) |cached| return fdWriteAll(fd, cached);
+
+    const resp = try buildGzipResponse(status, content_type, body);
+    cacheStoreEncoded(head, "gzip", resp, ttl_ms);
+
+    try fdWriteAll(fd, resp);
+}
+
+/// Per-worker arena for negotiated-compression codec scratch (gzip / deflate / brotli), reset with
+/// retained capacity after each response so the codecs reuse one backing allocation per worker
+/// instead of allocating per request. Lazily initialized on first use.
+threadlocal var tl_encode_arena: ?std.heap.ArenaAllocator = null;
+
+fn encodeArena() *std.heap.ArenaAllocator {
+    if (tl_encode_arena == null) {
+        tl_encode_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    }
+
+    return &tl_encode_arena.?;
+}
+
+/// Full negotiated response (header + encoded body) assembled contiguously so it writes in one call
+/// and stores in the per-(key, encoding) cache as a single replayable blob. Sized for the default
+/// compressed-output cap. A larger response streams in two parts and skips the cache.
+threadlocal var tl_neg_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
 
 /// Response with Accept-Encoding negotiation: the body is compressed only when the
 /// worker has compression enabled, the client accepts a producible coding, the body
@@ -890,9 +1044,9 @@ pub fn writeGzip(
 /// other case the body is sent uncompressed, byte-identical to writeSimple.
 ///
 /// Note:
-/// - This is the negotiating replacement for a hand-called writeGzip. It does NOT
-///   touch the response cache. Caching the compressed bytes per (key, encoding) is a
-///   separate slice, since the cache key does not yet include the coding.
+/// - This is the negotiating replacement for a hand-called writeGzip. It uses the per-(key,
+///   encoding) response cache: a hit replays the full compressed response with no compression
+///   work, a miss compresses once then stores the assembled response under (key, encoding).
 /// - The compressed response sets Content-Encoding and Vary: Accept-Encoding.
 ///
 /// Param:
@@ -923,22 +1077,46 @@ pub fn writeNegotiated(
         return writeSimple(fd, status, content_type, body);
     }
 
-    const encoded = compression.encode(std.heap.smp_allocator, encoding, body, .DEFAULT) catch {
+    const token = encoding.contentEncoding().?;
+
+    // Per-(key, encoding) cache hit: replay the full compressed response, no compression work.
+    if (cacheLookupEncoded(head, token)) |cached| return fdWriteAll(fd, cached);
+
+    // Per-worker arena for the codec scratch. gzip / deflate / brotli each allocate transient
+    // buffers (brotli especially: input-sized hash tables, Huffman tables, command lists). A
+    // per-request smp_allocator would mmap the larger ones over the 32 KiB size class and serialize
+    // workers in the kernel. The arena is retained across requests, so after warmup the codec path
+    // issues no allocation syscalls. The reset(.retain_capacity) call reclaims every codec buffer
+    // after the response is written.
+    const arena = encodeArena();
+    defer _ = arena.reset(.retain_capacity);
+
+    const encoded = compression.encode(arena.allocator(), encoding, body, .DEFAULT) catch {
         return writeSimple(fd, status, content_type, body);
     };
-    defer std.heap.smp_allocator.free(encoded);
 
     if (encoded.len > tl_compression_max_out or encoded.len >= body.len) {
         return writeSimple(fd, status, content_type, body);
     }
 
-    var hdr: [HEADER_BUF_SIZE]u8 = undefined;
+    // Assemble the full response (header + encoded body) contiguously so it can be cached and
+    // replayed on the next request with the same (key, encoding).
     const header = try std.fmt.bufPrint(
-        &hdr,
+        &tl_neg_resp,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
-        .{ status, statusPhrase(status), content_type, encoding.contentEncoding().?, encoded.len },
+        .{ status, statusPhrase(status), content_type, token, encoded.len },
     );
+    const total = header.len + encoded.len;
 
+    if (total <= tl_neg_resp.len) {
+        @memcpy(tl_neg_resp[header.len..total], encoded);
+        const full = tl_neg_resp[0..total];
+        cacheStoreEncoded(head, token, full, cacheTtl());
+
+        return fdWriteAll(fd, full);
+    }
+
+    // Too large to assemble in the buffer: stream in two parts, skip the cache.
     try fdWriteAll(fd, header);
     try fdWriteAll(fd, encoded);
 }
@@ -1000,7 +1178,7 @@ pub fn writeRange(
 
 // --------------------------------------------------------- //
 
-pub const RecvHeadResult = struct {
+const RecvHeadResult = struct {
     body_offset: usize,
     filled: usize,
 };
@@ -1010,7 +1188,7 @@ pub const RecvHeadResult = struct {
 ///
 /// Return:
 /// - !RecvHeadResult
-pub fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
+fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
     var filled = pre_filled;
 
     if (filled >= 4) {
@@ -1044,20 +1222,20 @@ pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize
         pos: usize = 0,
         len: usize = 0,
 
-        fn refill(r: *@This()) !void {
-            const rem = r.len - r.pos;
-            if (rem > 0) std.mem.copyForwards(u8, &r.buf, r.buf[r.pos..r.len]);
-            r.pos = 0;
-            r.len = rem;
-            const n = std.posix.read(r.fd, r.buf[r.len..]) catch return error.Closed;
+        fn refill(reader: *@This()) !void {
+            const rem = reader.len - reader.pos;
+            if (rem > 0) std.mem.copyForwards(u8, &reader.buf, reader.buf[reader.pos..reader.len]);
+            reader.pos = 0;
+            reader.len = rem;
+            const n = std.posix.read(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
             if (n == 0) return error.Closed;
-            r.len += n;
+            reader.len += n;
         }
 
-        fn next(r: *@This()) !u8 {
-            if (r.pos >= r.len) try r.refill();
-            const b = r.buf[r.pos];
-            r.pos += 1;
+        fn next(reader: *@This()) !u8 {
+            if (reader.pos >= reader.len) try reader.refill();
+            const b = reader.buf[reader.pos];
+            reader.pos += 1;
             return b;
         }
     };
@@ -1138,63 +1316,6 @@ pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize
 
 pub const ConnOutcome = enum { keep_alive, close };
 
-/// Handle exactly one request on fd and return whether the connection may be reused.
-/// For use with EPOLL one-shot dispatch. buf and body_buf are caller-owned (min BUF_SIZE each).
-///
-/// Return:
-/// - .keep_alive when the client sent Connection: keep-alive and parsing succeeded
-/// - .close on error, peer hangup, or Connection: close
-pub fn serveConnOne(
-    fd: std.posix.fd_t,
-    handler: HandlerFn,
-    buf: []u8,
-    body_buf: []u8,
-) ConnOutcome {
-    const hdr = recvHead(fd, buf, 0) catch |err| {
-        if (err == error.HeaderTooLarge) {
-            fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
-        }
-        return .close;
-    };
-
-    const result = parseHead(buf[0..hdr.filled]) catch {
-        fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-        return .close;
-    };
-    const head = result.head;
-
-    if (head.expect_continue and (head.content_length > 0 or head.chunked_request)) {
-        write100Continue(fd) catch return .close;
-    }
-
-    var body_len: usize = 0;
-    if (head.chunked_request) {
-        const peeked = buf[hdr.body_offset..hdr.filled];
-        body_len = readChunkedBody(fd, peeked, body_buf) catch 0;
-    } else if (head.content_length > 0) {
-        const to_read: usize = @intCast(@min(head.content_length, body_buf.len));
-        const peeked = hdr.filled - hdr.body_offset;
-        const from_peek = @min(peeked, to_read);
-        if (from_peek > 0) {
-            @memcpy(body_buf[0..from_peek], buf[hdr.body_offset..][0..from_peek]);
-        }
-        body_len = from_peek;
-        while (body_len < to_read) {
-            const n = std.posix.read(fd, body_buf[body_len..to_read]) catch break;
-            if (n == 0) break;
-            body_len += n;
-        }
-    }
-
-    handler(&head, body_buf[0..body_len], fd);
-
-    // Engine-owned WebSocket promotion is honored by the EPOLL loop only.
-    // On this path clear the handoff and end the connection so it never leaks.
-    if (takeWebSocket() != null) return .close;
-
-    return if (head.keep_alive) .keep_alive else .close;
-}
-
 /// Keep-alive connection loop. The caller owns closing the fd. Pass raw fd extracted
 /// from the accepted stream.
 pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
@@ -1232,11 +1353,13 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
         }
 
         var body_len: usize = 0;
+        var drained_large = false;
         if (head.chunked_request) {
             const peeked = recv_buf[hdr.body_offset..hdr.filled];
             body_len = readChunkedBody(fd, peeked, &body_buf) catch 0;
         } else if (head.content_length > 0) {
-            const to_read: usize = @intCast(@min(head.content_length, body_buf.len));
+            const content_length: usize = @intCast(head.content_length);
+            const to_read: usize = @min(content_length, body_buf.len);
             const peeked = hdr.filled - hdr.body_offset;
             const from_peek = @min(peeked, to_read);
             if (from_peek > 0) {
@@ -1247,6 +1370,23 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
                 const n = std.posix.read(fd, body_buf[body_len..to_read]) catch break;
                 if (n == 0) break;
                 body_len += n;
+            }
+
+            // Body larger than the handler buffer: drain the remainder off the socket so the
+            // connection stays usable for keep-alive (the leftover would otherwise be misparsed as
+            // the next request). Large-body endpoints use content_length, not the bytes, so the
+            // discard is safe. A wider SO_RCVBUF (opts.large_body_rcvbuf) speeds this on uploads.
+            if (content_length > peeked) {
+                setRecvBuf(fd, opts.large_body_rcvbuf);
+
+                var remaining = content_length - peeked;
+                while (remaining > 0) {
+                    const want = @min(remaining, body_buf.len);
+                    const n = std.posix.read(fd, body_buf[0..want]) catch break;
+                    if (n == 0) break;
+                    remaining -= n;
+                }
+                drained_large = true;
             }
         }
 
@@ -1259,7 +1399,9 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
 
         if (!head.keep_alive) return;
 
-        if (head.chunked_request) {
+        if (head.chunked_request or drained_large) {
+            // drained_large: the whole body was consumed off the socket, and a large body has no
+            // pipelined request after it, so nothing is left to carry.
             leftover = 0;
         } else {
             const body_consumed: usize = @intCast(@min(head.content_length, @as(u64, body_buf.len)));
@@ -1687,4 +1829,123 @@ test "zix http1: RespSink without a grow allocator does not grow" {
     // is never reallocated and overflow stays on the flush path.
     try std.testing.expect(!sink.grow(64));
     try std.testing.expectEqual(@as(usize, 8), sink.buf.len);
+}
+
+test "zix http1: writeGzip reuses the threadlocal compressor across calls, valid gzip, no leak" {
+    const flate = @import("../../utils/compression/flate.zig");
+    const linux = std.os.linux;
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    // two different bodies back to back: the second must NOT carry state from the first.
+    const bodies = [_][]const u8{
+        "{\"a\":1,\"b\":2,\"msg\":\"world world world world world\"}",
+        "{\"different\":true,\"xs\":[1,2,3,4,5,6,7,8,9,10,11,12]}",
+    };
+
+    for (bodies) |body| {
+        try writeGzip(pipe_fds[1], 200, "application/json", body);
+
+        var resp: [4096]u8 = undefined;
+        const n = try std.posix.read(pipe_fds[0], &resp);
+        const sep = std.mem.indexOf(u8, resp[0..n], "\r\n\r\n").?;
+        const gz = resp[sep + 4 .. n];
+
+        var out: [4096]u8 = undefined;
+        const dlen = try flate.decompressGzip(gz, &out);
+        try std.testing.expectEqualStrings(body, out[0..dlen]);
+    }
+}
+
+test "zix http1: writeGzipCached stores per-(key,encoding) and replays the same bytes on a hit" {
+    const flate = @import("../../utils/compression/flate.zig");
+    const linux = std.os.linux;
+
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
+    defer rc.deinit();
+    setCache(&rc, 60_000);
+    defer setCache(null, 1000);
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const parsed = try parseHead("GET /json HTTP/1.1\r\nHost: x\r\n\r\n");
+    const head = parsed.head;
+    const body = "{\"msg\":\"hello hello hello hello hello hello hello\"}";
+
+    // miss: compress + store, the response decompresses back to the body.
+    try std.testing.expect(cacheLookupEncoded(&head, "gzip") == null);
+    try writeGzipCached(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    try std.testing.expect(cacheLookupEncoded(&head, "gzip") != null);
+
+    var resp1: [4096]u8 = undefined;
+    const n1 = try std.posix.read(pipe_fds[0], &resp1);
+    const sep1 = std.mem.indexOf(u8, resp1[0..n1], "\r\n\r\n").?;
+    var out1: [4096]u8 = undefined;
+    const d1 = try flate.decompressGzip(resp1[sep1 + 4 .. n1], &out1);
+    try std.testing.expectEqualStrings(body, out1[0..d1]);
+
+    // hit: replay the cached response, byte-identical to the first.
+    try writeGzipCached(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    var resp2: [4096]u8 = undefined;
+    const n2 = try std.posix.read(pipe_fds[0], &resp2);
+    try std.testing.expectEqualSlices(u8, resp1[0..n1], resp2[0..n2]);
+}
+
+test "zix http1: serveConn drains an over-large body so the keep-alive connection survives" {
+    const linux = std.os.linux;
+
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const Handler = struct {
+        fn h(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+            _ = head;
+            _ = body;
+            fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+        }
+    };
+    const Srv = struct {
+        fn run(fd: std.posix.fd_t) void {
+            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20 });
+
+            _ = linux.close(fd);
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Srv.run, .{server_fd});
+    defer t.join();
+
+    // request 1: a 64 KiB body, well past ASYNC_BODY_CHUNK (8 KiB), so the engine must drain the rest.
+    const big: usize = 64 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const h1 = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
+    try fdWriteAll(client_fd, h1);
+
+    var chunk: [4096]u8 = @splat(0xAB);
+    var body_sent: usize = 0;
+    while (body_sent < big) {
+        const n = @min(chunk.len, big - body_sent);
+        try fdWriteAll(client_fd, chunk[0..n]);
+        body_sent += n;
+    }
+
+    var resp1: [256]u8 = undefined;
+    const n1 = try std.posix.read(client_fd, &resp1);
+    try std.testing.expect(std.mem.indexOf(u8, resp1[0..n1], "200 OK") != null);
+
+    // request 2 on the SAME connection (Connection: close so the server returns after it): served
+    // cleanly only if the first body was fully drained, else the leftover bytes misparse as this one.
+    try fdWriteAll(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var resp2: [256]u8 = undefined;
+    const n2 = try std.posix.read(client_fd, &resp2);
+    try std.testing.expect(std.mem.indexOf(u8, resp2[0..n2], "200 OK") != null);
 }

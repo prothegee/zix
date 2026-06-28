@@ -559,8 +559,8 @@ fn reduceP256Scalar(seed: [32]u8) [32]u8 {
 }
 
 /// Map a negotiation / parse alert to the error the caller surfaces.
-fn alertToError(a: alert.Alert) anyerror {
-    return switch (a) {
+fn alertToError(alert_desc: alert.Alert) anyerror {
+    return switch (alert_desc) {
         .MISSING_EXTENSION => error.MissingExtension,
         .HANDSHAKE_FAILURE => error.HandshakeFailure,
         .ILLEGAL_PARAMETER => error.IllegalParameter,

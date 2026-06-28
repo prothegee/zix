@@ -104,7 +104,7 @@ test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER" }),
+        FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER", .dispatch_model = .ASYNC }),
     );
 }
 
@@ -113,7 +113,7 @@ test "zix fix: FixServer.init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER" });
+    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC });
     server.deinit();
 }
 

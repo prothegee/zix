@@ -20,6 +20,8 @@ const MixedAcceptCtx = struct {
     handler: HandlerFn,
     handler_timeout_ms: u32 = 0,
     send_date_header: bool = true,
+    large_body_rcvbuf: usize = 0,
+    public_dir: []const u8 = "",
 };
 
 fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
@@ -33,7 +35,7 @@ fn mixedAcceptEntry(ctx: MixedAcceptCtx) void {
 
     while (true) {
         const stream = srv.accept(ctx.io) catch continue;
-        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler, .handler_timeout_ms = ctx.handler_timeout_ms, .send_date_header = ctx.send_date_header }});
+        _ = ctx.io.async(connEntry, .{ConnArgs{ .stream = stream, .io = ctx.io, .handler = ctx.handler, .handler_timeout_ms = ctx.handler_timeout_ms, .send_date_header = ctx.send_date_header, .large_body_rcvbuf = ctx.large_body_rcvbuf, .public_dir = ctx.public_dir }});
     }
 }
 
@@ -55,7 +57,7 @@ pub fn runMixed(config: Config, handler: HandlerFn) !void {
         t.* = try std.Thread.spawn(
             .{},
             mixedAcceptEntry,
-            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
+            .{MixedAcceptCtx{ .io = io, .ip = config.ip, .port = config.port, .kernel_backlog = config.kernel_backlog, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir }},
         );
     }
 

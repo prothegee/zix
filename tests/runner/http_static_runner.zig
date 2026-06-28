@@ -47,7 +47,11 @@ pub fn main(process: std.process.Init) void {
         std.process.exit(1);
     };
 
-    run(process.io, server_path, port, filename, file_content) catch |err| {
+    // Only http1_static exposes /upload-multipart. http_static keeps its own /upload (file + data)
+    // contract, so the multipart round trip is gated to the http1-static label.
+    const multipart_path: ?[]const u8 = if (std.mem.eql(u8, label, "http1-static")) "/upload-multipart" else null;
+
+    run(process.io, server_path, port, filename, file_content, multipart_path) catch |err| {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
     };
@@ -60,6 +64,7 @@ fn run(
     port: u16,
     filename: []const u8,
     file_content: []const u8,
+    multipart_path: ?[]const u8,
 ) !void {
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
@@ -93,4 +98,8 @@ fn run(
     defer resp.deinit();
 
     if (resp.status() != 200) return error.UnexpectedStatus;
+
+    // Multipart upload round trip (http1_static only): POST to the upload route, then GET the
+    // saved file back through the engine static fallback at /u/<name>.
+    if (multipart_path) |mp_path| try common.multipartUploadRoundTrip(io, port, mp_path);
 }

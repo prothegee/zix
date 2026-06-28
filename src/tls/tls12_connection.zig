@@ -157,67 +157,67 @@ pub fn serverFlight1(opts: HandshakeOptions, client_hello: []const u8, out: []u8
     return .{ .to_send = w.slice(), .state = state };
 }
 
-fn writeServerHello(w: *wire.Writer, server_random: [32]u8, session_id: []const u8, alpn: ?Alpn) void {
-    w.writeU8(hs_server_hello);
-    const header = w.placeU24();
+fn writeServerHello(writer: *wire.Writer, server_random: [32]u8, session_id: []const u8, alpn: ?Alpn) void {
+    writer.writeU8(hs_server_hello);
+    const header = writer.placeU24();
 
-    w.writeU16(version_tls_1_2);
-    w.writeBytes(&server_random);
-    w.writeU8(@intCast(session_id.len));
-    w.writeBytes(session_id);
-    w.writeU16(cipher_ecdhe_ecdsa_aes128_gcm);
-    w.writeU8(0); // null compression
+    writer.writeU16(version_tls_1_2);
+    writer.writeBytes(&server_random);
+    writer.writeU8(@intCast(session_id.len));
+    writer.writeBytes(session_id);
+    writer.writeU16(cipher_ecdhe_ecdsa_aes128_gcm);
+    writer.writeU8(0); // null compression
 
     // ServerHello extensions openssl expects for a 1.2 ECDHE handshake.
-    const exts = w.placeU16();
+    const exts = writer.placeU16();
     // renegotiation_info (RFC 5746): empty renegotiated_connection on the initial handshake.
-    w.writeU16(0xff01);
-    w.writeU16(1);
-    w.writeU8(0);
+    writer.writeU16(0xff01);
+    writer.writeU16(1);
+    writer.writeU8(0);
     // ec_point_formats (RFC 8422 5.1.2): uncompressed only.
-    w.writeU16(0x000b);
-    w.writeU16(2);
-    w.writeU8(1);
-    w.writeU8(0);
+    writer.writeU16(0x000b);
+    writer.writeU16(2);
+    writer.writeU8(1);
+    writer.writeU8(0);
     // ALPN (RFC 7301): the one selected protocol, when negotiated (h2 for HTTP/2 over TLS).
     if (alpn) |protocol| {
-        w.writeU16(0x0010);
-        const ext = w.placeU16();
-        const list = w.placeU16();
+        writer.writeU16(0x0010);
+        const ext = writer.placeU16();
+        const list = writer.placeU16();
         const token = protocol.token();
-        w.writeU8(@intCast(token.len));
-        w.writeBytes(token);
-        w.patchU16(list);
-        w.patchU16(ext);
+        writer.writeU8(@intCast(token.len));
+        writer.writeBytes(token);
+        writer.patchU16(list);
+        writer.patchU16(ext);
     }
-    w.patchU16(exts);
+    writer.patchU16(exts);
 
-    w.patchU24(header);
+    writer.patchU24(header);
 }
 
-fn writeCertificate(w: *wire.Writer, der: []const u8) void {
-    w.writeU8(hs_certificate);
-    const header = w.placeU24();
-    const list = w.placeU24();
-    const cert = w.placeU24();
+fn writeCertificate(writer: *wire.Writer, der: []const u8) void {
+    writer.writeU8(hs_certificate);
+    const header = writer.placeU24();
+    const list = writer.placeU24();
+    const cert = writer.placeU24();
 
-    w.writeBytes(der);
+    writer.writeBytes(der);
 
-    w.patchU24(cert);
-    w.patchU24(list);
-    w.patchU24(header);
+    writer.patchU24(cert);
+    writer.patchU24(list);
+    writer.patchU24(header);
 }
 
-fn writeServerKeyExchange(w: *wire.Writer, key: EcdsaP256.KeyPair, client_random: [32]u8, server_random: [32]u8, point: []const u8) !void {
-    w.writeU8(hs_server_key_exchange);
-    const header = w.placeU24();
-    const params_start = w.len;
+fn writeServerKeyExchange(writer: *wire.Writer, key: EcdsaP256.KeyPair, client_random: [32]u8, server_random: [32]u8, point: []const u8) !void {
+    writer.writeU8(hs_server_key_exchange);
+    const header = writer.placeU24();
+    const params_start = writer.len;
 
-    w.writeU8(3); // ECCurveType named_curve
-    w.writeU16(named_curve_secp256r1);
-    w.writeU8(@intCast(point.len));
-    w.writeBytes(point);
-    const params = w.buf[params_start..w.len];
+    writer.writeU8(3); // ECCurveType named_curve
+    writer.writeU16(named_curve_secp256r1);
+    writer.writeU8(@intCast(point.len));
+    writer.writeBytes(point);
+    const params = writer.buf[params_start..writer.len];
 
     // signature over client_random ++ server_random ++ params (RFC 5246 7.4.3).
     var signed: [32 + 32 + 70]u8 = undefined;
@@ -229,12 +229,12 @@ fn writeServerKeyExchange(w: *wire.Writer, key: EcdsaP256.KeyPair, client_random
     var der_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
     const der = sig.toDer(&der_buf);
 
-    w.writeU16(sig_ecdsa_secp256r1_sha256);
-    const sig_len = w.placeU16();
-    w.writeBytes(der);
-    w.patchU16(sig_len);
+    writer.writeU16(sig_ecdsa_secp256r1_sha256);
+    const sig_len = writer.placeU16();
+    writer.writeBytes(der);
+    writer.patchU16(sig_len);
 
-    w.patchU24(header);
+    writer.patchU24(header);
 }
 
 /// Phase 2: ClientKeyExchange + the encrypted client Finished -> derive keys, verify the client

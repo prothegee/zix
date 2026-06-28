@@ -18,6 +18,12 @@ pub const Router = core_mod.Router;
 pub const ServeOpts = core_mod.ServeOpts;
 pub const serveConn = core_mod.serveConn;
 
+// Per-worker response cache (ADR-036), opt-in via ServerConfig.response_cache. A handler serves a hit
+// with serveCached and stores its reply with sendCached, both keyed by the current request.
+pub const serveCached = core_mod.serveCached;
+pub const sendCached = core_mod.sendCached;
+pub const cacheTtl = core_mod.cacheTtl;
+
 pub const Header = hpack_mod.Header;
 pub const HpackEncoder = hpack_mod.HpackEncoder;
 pub const HpackDecoder = hpack_mod.HpackDecoder;

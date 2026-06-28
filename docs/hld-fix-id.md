@@ -16,7 +16,7 @@ Sudah diimplementasikan. Lihat ADR-024 untuk alasan desain.
 - Framing berbasis delimiter SOH: tanpa length prefix, deteksi batas pesan berbasis delimiter.
 - Lapisan sesi sudah terintegrasi: Logon / Logout / Heartbeat / TestRequest ditangani secara otomatis, semua pesan lainnya di-echo.
 - Tidak ada heap allocation di `serveConn`: stack buffer digunakan di seluruh implementasi.
-- Dispatch POOL, ASYNC, MIXED, dan EPOLL. Default: ASYNC (sesi FIX berumur panjang). EPOLL berjalan secara native di Linux (pola gRPC: single epoll accept loop, pool worker memegang setiap koneksi selama masa hidupnya). Fallback ke POOL di non-Linux.
+- Dispatch POOL, ASYNC, MIXED, EPOLL, dan URING. Wajib tanpa default: ASYNC cocok untuk sesi FIX berumur panjang. EPOLL berjalan secara native di Linux (pola gRPC: single epoll accept loop, pool worker memegang setiap koneksi selama masa hidupnya). URING menjalankan worker io_uring shared-nothing di Linux. Keduanya fallback ke POOL di non-Linux.
 - `io: std.Io` di dalam konfigurasi (tidak diteruskan ke `run()`).
 
 ---
@@ -28,7 +28,8 @@ src/tcp/fix/
     Fix.zig      // namespace aggregator
     core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
-    server.zig   // FixServer: POOL, ASYNC, MIXED, and EPOLL (Linux-only) dispatch
+    server.zig   // FixServer: run() switch tipis di atas dispatch/ (POOL, ASYNC, MIXED, EPOLL, URING)
+    dispatch/    // berkas per-model: async.zig, pool.zig, mixed.zig, epoll.zig, uring.zig, common.zig
     router.zig   // comptime FixRouter
     client.zig   // FixClient
 ```
@@ -82,7 +83,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `ip` | wajib | Alamat bind |
 | `port` | wajib | Port bind. Harus bukan nol |
 | `comp_id` | wajib | SenderCompID server (tag 49) |
-| `dispatch_model` | `.ASYNC` | POOL, ASYNC, MIXED, atau EPOLL (Linux-only: epoll native. Non-Linux fallback ke POOL) |
+| `dispatch_model` | `.ASYNC` | POOL, ASYNC, MIXED, EPOLL, atau URING (EPOLL dan URING Linux-only: epoll native / io_uring. Non-Linux fallback ke POOL) |
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Jumlah accept thread. Diabaikan oleh ASYNC |
 | `pool_size` | 0 (otomatis) | Pool thread (`max(10, cpu_count * 2)`). Hanya digunakan oleh POOL |
@@ -348,7 +349,7 @@ Sama seperti lima model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX ber
 
 | Model | Accept thread | Catatan |
 | :- | :- | :- |
-| `.ASYNC` (default) | 1 | Sesi berumur panjang, deployment FIX standar |
+| `.ASYNC` | 1 | Sesi berumur panjang, deployment FIX standar |
 | `.POOL` | cpu_count | Volume koneksi tinggi dengan sesi pendek |
 | `.MIXED` | cpu_count | Throughput dan latensi yang seimbang |
 | `.EPOLL` | 1 (Linux-only) | Single epoll accept loop. Pool worker memegang setiap koneksi selama masa hidupnya. Non-Linux fallback ke POOL. |
@@ -384,6 +385,7 @@ Lihat `docs/hld-logger-id.md` untuk detail format baris log.
 | `examples/fix_server_2_pool.zig` | Server `.POOL` (mode echo) | 9500 |
 | `examples/fix_server_3_mixed.zig` | Server `.MIXED` (mode echo) | 9500 |
 | `examples/fix_server_4_epoll.zig` | Server `.EPOLL` (Linux-only: epoll native. Non-Linux fallback ke POOL) | 9500 |
+| `examples/fix_server_5_uring.zig` | Server `.URING` (Linux-only: worker io_uring shared-nothing. Non-Linux fallback ke POOL) | 9052 |
 | `examples/fix_server_trading.zig` | Server `.ASYNC` dengan router: NewOrderSingle + OrderCancelRequest, JSON append, logger, timeout | 9500 |
 | `examples/fix_client.zig` | Client high-level `FixClient` | 9500 |
 | `examples/fix_client_raw.zig` | Client primitif core mentah | 9500 |

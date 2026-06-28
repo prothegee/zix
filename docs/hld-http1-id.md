@@ -27,7 +27,7 @@ Keduanya server HTTP/1.1. `zix.Http` adalah lapisan berfitur lengkap, `zix.Http1
 | Static files / multipart / SSE writer | built in | tidak built in (handler merangkai dari helper) |
 | Routing | tabel route comptime | tabel route comptime (opsional, handler boleh polos) |
 | WebSocket | frame loop milik handler | frame pump milik engine (.EPOLL) |
-| Model dispatch | ASYNC, POOL, MIXED, EPOLL | ASYNC, POOL, MIXED, EPOLL |
+| Model dispatch | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
 
 Pakai `zix.Http` saat handler membutuhkan allocator, static file serving, atau API request/response yang lebih kaya. Pakai `zix.Http1` saat raw throughput dan biaya per-request yang terprediksi lebih penting daripada kenyamanan.
 
@@ -35,7 +35,7 @@ Pakai `zix.Http` saat handler membutuhkan allocator, static file serving, atau A
 
 ## Model Runtime
 
-Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Default: `.ASYNC`.
+Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -114,7 +114,7 @@ graph TD
     zix["src/lib.zig\npublic API root"] --> Http1["tcp/http1/Http1.zig\nzix.Http1 namespace"]
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
-    Http1 --> server["server.zig\nServer + 4 dispatch models\nEPOLL engine"]
+    Http1 --> server["server.zig\nServer + 5 dispatch models\nEPOLL + URING engines"]
     Http1 --> config["config.zig\nHttp1ServerConfig"]
     Http1 --> router["router.zig\ncomptime Router + pathParam"]
     Http1 --> websocket["websocket.zig\nRFC 6455 codec + pump"]
@@ -136,11 +136,10 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` |
 | `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: mendaftarkan `RawFn` yang memiliki fd koneksi secara langsung |
 | `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
-| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) |
+| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
 | `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
 | `zix.Http1.RawFn` | type | Handler raw yang diberi fd dan head hasil parse, memiliki wire langsung (framing kustom, streaming) |
-| `zix.Http1.ParsedHead` | struct | Head request hasil parse zero-copy (method, path, query, headers, flags) |
-| `zix.Http1.Header` | struct | `{ name: []const u8, value: []const u8 }` |
+| `zix.Http1.ParsedHead` | struct | Head request hasil parse zero-copy (method, path, query, raw_headers, flags) |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` dari `parseRange` |
 | `zix.Http1.ServeOpts` | struct | Opsi `serveConn`: `nodelay`, `handler_timeout_ms` |
 | `zix.Http1.ConnOutcome` | enum | `.keep_alive` atau `.close` (hasil one-shot EPOLL) |
@@ -160,6 +159,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` menjadi `Range` |
 | `zix.Http1.fdWriteAll` | fn | Menulis semua byte ke fd (sadar sink, menangani EINTR/EAGAIN) |
 | `zix.Http1.flushPending` | fn | Flush byte response yang masih tertahan sebelum raw fd write (urutan pipelining) |
+| `zix.Http1.beginStream` | fn | Memulai response streaming (SSE), melepas sink jadi write flush per event (cleartext + TLS) |
 | `zix.Http1.writeSimple` | fn | Response lengkap dengan body Content-Length |
 | `zix.Http1.writeSimpleNoBody` | fn | Response headers saja (method HEAD) |
 | `zix.Http1.writeJson` | fn | Singkatan `writeSimple` dengan `application/json` |
@@ -179,23 +179,25 @@ pub const Http1ServerConfig = struct {
     io:                 std.Io,                // dari process.io, hanya plumbing listen/accept
     ip:                 []const u8,
     port:               u16,                   // harus non-zero
-    dispatch_model:     DispatchModel = .ASYNC,
+    dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
     max_recv_buf:       usize = 16 * 1024,     // buffer per-connection (.EPOLL saja, lihat catatan)
+    large_body_rcvbuf:  usize = 256 * 1024,    // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
     ws_recv_buf:        usize = 0,             // buffer WebSocket .EPOLL, 0 = max_recv_buf
     compression:          bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via core.writeNegotiated (.EPOLL/.URING)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
     compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
-    max_headers:        u8    = 16,            // informasional: batas parse adalah core.MAX_HEADERS
+    max_headers:        u8    = 16,            // no-op, dipertahankan untuk kompatibilitas sumber
     workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL saja
     handler_timeout_ms: u32   = 0,             // budget per-handler, 0 = nonaktif
     send_date_header:   bool  = true,          // kirim header Date, false hemat 37 byte/response
+    tls:                ?*Tls.Context = null,  // non-null menyajikan HTTP/1.1 di atas TLS (native https), selain itu cleartext
     logger:             ?*Logger = null,       // baris lifecycle saja, lihat bagian Logging
 };
 ```
 
-Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. Field `compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.writeNegotiated` alih-alih `writeSimple`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` tetap informasional, mencerminkan `core.MAX_HEADERS`.
+Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.writeNegotiated` alih-alih `writeSimple`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` adalah no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection untuk koneksi yang dipromosikan ke WebSocket pada `.EPOLL`. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi frame pipelined sebelum engine compact dan re-read saat fill.
 
@@ -252,8 +254,7 @@ try server.run();
 | `method` | `[]const u8` | Verb apa adanya (`"GET"`, `"POST"`, ...) |
 | `path` | `[]const u8` | Target tanpa query string |
 | `query` | `[]const u8` | Query string mentah setelah `?`, `""` jika tidak ada |
-| `headers` | `[MAX_HEADERS]Header` | Entri valid sebanyak `header_count` pertama |
-| `header_count` | `usize` | Jumlah header ter-parse (batas 16, melebihi mengembalikan 400) |
+| `raw_headers` | `[]const u8` | Blok header mentah, dipindai sesuai kebutuhan via `getHeader` (tanpa batas jumlah) |
 | `version_minor` | `u8` | 1 untuk HTTP/1.1, 0 untuk HTTP/1.0 |
 | `keep_alive` | `bool` | Default berdasarkan versi, ditimpa header `Connection` |
 | `content_length` | `u64` | 0 saat tidak ada atau tidak bisa di-parse |
@@ -393,8 +394,9 @@ sequenceDiagram
 - Ping otomatis dibalas pong dan close otomatis digema oleh engine. Callback hanya pernah menerima frame text dan binary.
 - Frame yang dikirim dalam satu pass pump digabung menjadi satu `write()`.
 - Promosi hanya dihormati pada `.EPOLL`. Pada `.ASYNC` / `.POOL` / `.MIXED` handoff dibersihkan dan koneksi berakhir setelah handler return (pakai `zix.Http` untuk loop WebSocket milik handler pada model-model itu).
+- Melalui TLS (`config.tls`, jalur thread-per-koneksi), panggil `WebSocket.serveTls(fd, key, on_frame)` (ADR-055): `101` dan tiap frame dienkripsi lewat ADR-054 stream sink, dan thread https menjalankan frame loop inline atas TLS session. Rooms / broadcast hanya cleartext (enkripsi per-session), jadi wss bersifat per-koneksi.
 
-Lihat `examples/http1_websocket.zig`.
+Lihat `examples/http1_websocket.zig` (cleartext) dan `examples/tls/tls_http1_ws.zig` (wss).
 
 ---
 
@@ -423,15 +425,15 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 
 | Batas | Perilaku |
 | :- | :- |
-| Header request | Maksimum 16 (`core.MAX_HEADERS`). Melebihi mengembalikan `400` (jalur parse error) |
 | Ukuran blok header | Maksimum 16 KB (`core.BUF_SIZE`, atau `max_recv_buf` pada .EPOLL). Melebihi mengembalikan `431` dan menutup |
-| Body pada .ASYNC/.POOL/.MIXED | Di-buffer sampai 8 KB. Body Content-Length yang lebih besar terpotong di 8 KB, sisanya merusak request keep-alive berikutnya |
-| Body pada .EPOLL | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar men-dispatch handler dengan slice body kosong, lalu engine membuang sisanya dari socket (`MSG_TRUNC`) sehingga koneksi tetap dapat dipakai |
+| Body pada .ASYNC/.POOL/.MIXED | Handler melihat sampai 8 KB (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai (handler membaca `head.content_length`, bukan byte-nya) |
+| Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar men-dispatch handler dengan slice body kosong, lalu engine membuang sisanya dari socket (`MSG_TRUNC`) sehingga koneksi tetap dapat dipakai |
+| Body request besar (upload) | Drain melebarkan receive window via `large_body_rcvbuf` (SO_RCVBUF), lihat [`docs/zix-config-id.md`](zix-config-id.md) |
 | Body request chunked | Di-decode ke body buffer, kelebihan dibuang |
 | Versi HTTP | Hanya HTTP/1.0 dan HTTP/1.1, selain itu `400` |
-| TLS | Di luar lingkup, terminasi TLS di lapisan proxy (kebijakan yang sama dengan `zix.Http`) |
+| TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` / `.POOL` / `.MIXED` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
 
-Endpoint yang menerima upload besar sebaiknya mengandalkan `head.content_length` dan melakukan streaming dari fd sendiri, atau berjalan pada `.EPOLL` yang jalur oversize-nya terdefinisi dengan baik.
+Endpoint yang menerima upload besar mengandalkan `head.content_length` (byte-nya dibuang, tidak di-buffer).
 
 Untuk lapisan HTTP berfitur lengkap lihat [`docs/hld-http-id.md`](hld-http-id.md). Untuk detail implementasi lihat [`docs/lld-http1-id.md`](lld-http1-id.md).
 

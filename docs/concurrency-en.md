@@ -1,6 +1,6 @@
 # Concurrency Models: zix
 
-Five dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Default: `.ASYNC`.
+Five dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Required: set it explicitly (no default).
 
 ---
 

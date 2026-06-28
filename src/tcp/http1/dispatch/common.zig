@@ -28,14 +28,17 @@ pub const ConnArgs = struct {
     handler: HandlerFn,
     handler_timeout_ms: u32 = 0,
     send_date_header: bool = true,
+    large_body_rcvbuf: usize = 0,
+    public_dir: []const u8 = "",
 };
 
 pub fn connEntry(args: ConnArgs) void {
     core.setDateHeader(args.send_date_header);
+    core.setStatic(args.public_dir, args.io);
 
     defer args.stream.close(args.io);
     const fd = args.stream.socket.handle;
-    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms });
+    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf });
 }
 
 /// Highest fd a worker's table can index. Linux hands out the lowest free fd,
@@ -226,7 +229,7 @@ pub fn effectiveCacheEntries(config: Config) u32 {
 }
 
 test "zix http1: effectiveCacheEntries honors the memory ceiling" {
-    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
 
     // no ceiling: entry count unchanged
     try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(base));

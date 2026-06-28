@@ -6,7 +6,7 @@ Detail implementasi internal untuk engine HTTP/1.x ramping. Untuk alasan desain 
 
 ## Http1.zig: namespace
 
-Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, tipe-tipe core (`HandlerFn`, `RawFn`, `ParsedHead`, `Header`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, dan fungsi-fungsi core (deadline, parse, write helper) menjadi satu permukaan publik.
+Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, tipe-tipe core (`HandlerFn`, `RawFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, dan fungsi-fungsi core (deadline, parse, write helper) menjadi satu permukaan publik.
 
 ---
 
@@ -22,11 +22,13 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `pool_size` | jumlah pool thread .POOL |
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection .EPOLL (`ConnTable.alloc`) |
+| `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
 | `ws_recv_buf` | ukuran buffer per-connection WebSocket .EPOLL, 0 jatuh ke `max_recv_buf` |
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
+| `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
 
-`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.writeNegotiated`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: batasnya adalah `core.MAX_HEADERS` (16).
+`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.writeNegotiated`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: ia no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
 
 ---
 
@@ -35,7 +37,6 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 ### Konstanta
 
 ```
-MAX_HEADERS   = 16          // ukuran array ParsedHead.headers
 BUF_SIZE      = 16 * 1024   // receive buffer (stack serveConn, scratch worker EPOLL)
 GZIP_OUT_SIZE = 256 * 1024  // buffer output writeGzip
 ```
@@ -47,11 +48,10 @@ GZIP_OUT_SIZE = 256 * 1024  // buffer output writeGzip
 2. request line: pecah pada ' ' pertama (method), ' ' terakhir (versi)
       versi harus "HTTP/1.1" (minor 1) atau "HTTP/1.0" (minor 0), selain itu error.InvalidRequest
 3. target dipecah pada '?'       -> path, query
-4. baris header sampai baris kosong:
-      tanpa ':' di baris -> dilewati (toleran)
-      melebihi MAX_HEADERS -> error.TooManyHeaders
-      offset value melompati spasi setelah ':'
-5. header yang dikenali dilipat menjadi flag saat pemindaian:
+4. raw_headers = slice dari setelah CRLF request-line sampai CRLF header terakhir
+      (tanpa batas jumlah, dipindai sesuai kebutuhan oleh getHeader, kosong saat tanpa header)
+5. framing scan melipat header yang dikenali menjadi flag saat menelusuri blok
+      (hanya baris yang huruf pertamanya c, t, atau e yang ditokenisasi, lainnya dilewati):
       content-length    -> parseInt u64 (gagal parse -> 0)
       connection        -> "close" mematikan keep_alive, "keep-alive" menyalakannya
       transfer-encoding -> mengandung "chunked" menyalakan chunked_request
@@ -59,7 +59,7 @@ GZIP_OUT_SIZE = 256 * 1024  // buffer output writeGzip
 6. default keep_alive: version_minor == 1
 ```
 
-Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Mengembalikan `.{ head, body_offset }` dengan `body_offset` byte pertama setelah baris kosong.
+Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Mengembalikan `.{ head, body_offset }` dengan `body_offset` byte pertama setelah baris kosong. `getHeader(head, name)` melakukan pencarian case-insensitive sesuai kebutuhan atas `raw_headers`, jadi biaya scan per-header hanya dibayar oleh handler yang memang membaca sebuah header.
 
 `parseGetFastPath` (server.zig) adalah fast path keep-alive untuk request `GET` polos: ia memastikan prefix `"GET "` dan versi `"HTTP/1.1"` dengan integer load tunggal (`std.mem.readInt` satu `u32` dan satu `u64`, bukan `mem.eql`), mengekstrak path dan query secara aritmetika, dan hanya jatuh ke `parseHead` penuh bila `Connection: close` mungkin ada. Bentuk `ParsedHead` sama, tanpa scan per-header.
 
@@ -200,7 +200,7 @@ loop:
         request chunked me-reset leftover ke 0
 ```
 
-Pemanggil (connEntry / poolEntry) yang menutup fd. Batas di langkah 4 berarti body Content-Length di atas 8 KB hanya dibaca sampai 8 KB dan sisa byte body kemudian salah di-parse sebagai head request berikutnya (batasan terdokumentasi, panduan oversize di HLD berlaku).
+Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (8 KB) memberi handler 8 KB pertama, lalu `serveConn` membuang sisanya dari socket (dan melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `head.content_length`, bukan byte-nya.
 
 ### serveConnOne(): fallback one-shot EPOLL
 

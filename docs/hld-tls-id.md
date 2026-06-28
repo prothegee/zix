@@ -32,7 +32,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Engine yang memiliki socket. Engine h2 (Http2, Grpc) memilih antara dua jalur serve TLS lewat `dispatch_model`: `.EPOLL` / `.URING` memakai loop multipleks per-core (`tls_epoll.zig`) di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig` (ADR-052). Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
+`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Engine yang memiliki socket. Engine h2 (Http2, Grpc) memilih antara dua jalur serve TLS lewat `dispatch_model`: `.EPOLL` / `.URING` memakai loop multipleks per-core (`tls_mux.zig`) di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig` (ADR-052). Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
 
 ## Source Layout
 
@@ -48,7 +48,8 @@ graph TD
 | `extensions.zig` | ALPN (`Alpn`, `negotiateAlpn`), EncryptedExtensions, helper supported_versions / key_share |
 | `alert.zig` | Kode alert, record alert keluar, klasifikasi alert masuk |
 | `pem.zig` | Decode PEM ke DER, ekstraksi scalar SEC1 ECDSA + seed PKCS#8 Ed25519 |
-| `rsa.zig` | RSA signing (ADR-048): parse key PKCS#1 / PKCS#8, EMSA-PKCS1-v1_5 + EMSA-PSS, modexp via `std.crypto.ff` |
+| `rsa.zig` | RSA signing (ADR-048): parse key PKCS#1 / PKCS#8, EMSA-PKCS1-v1_5 + EMSA-PSS, CRT modexp via `montgomery.zig` |
+| `montgomery.zig` | Montgomery modexp constant-time untuk RSA CRT sign: CIOS portable, plus jalur asm ADCX / ADOX fused di x86_64+ADX |
 | `cert_verify.zig` | Chain cert peer (RFC 5280) + identitas hostname / IP (RFC 6125), cek misdirected-request |
 | `client.zig` | Handshake client TLS 1.3 (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | Track TLS 1.2: PRF schedule, record layer, version select, handshake server, client |
@@ -123,7 +124,7 @@ TLS adalah jalur serve blocking ber-gate per engine, dipilih oleh `config.tls`, 
 
 - Http1: `serveConnTls` menjalankan handshake, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang ada lewat sebuah pipe (handler menulis plaintext tanpa perubahan), lalu meng-encrypt response.
 - Http2 dan Grpc (ADR-052): dua jalur serve, dipilih oleh `dispatch_model`. ALPN memilih h2 di keduanya.
-  - `.EPOLL` / `.URING`: satu worker epoll `SO_REUSEPORT` per core (`tls_epoll.zig`, `grpc/tls_epoll.zig`) menterminasi TLS di tempat lewat session TLS 1.3 resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker. Tanpa socketpair, tanpa thread per koneksi. Ini jalur konkurensi-tinggi.
+  - `.EPOLL` / `.URING`: satu worker epoll `SO_REUSEPORT` per core (`tls_mux.zig`, `grpc/tls_mux.zig`) menterminasi TLS di tempat lewat session TLS 1.3 resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker. Tanpa socketpair, tanpa thread per koneksi. Ini jalur konkurensi-tinggi.
   - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` menjalankan accept loop thread-per-koneksi di atas terminator bersama `tcp/tls/h2_terminator.zig`, yang menjalankan driver inline-mux langsung di atas record terdekripsi (frame disegel kembali ke record TLS lewat write hook thread-local). Tanpa socketpair, tanpa thread kedua. Jalur ini juga melayani fallback TLS 1.2.
 
 Karena engine dipakai ulang tanpa perubahan, https tidak bisa meregresi hot path cleartext. Pipe blocking (Http1) dapat diterima di band https, yang bukan gate perf 1 persen.

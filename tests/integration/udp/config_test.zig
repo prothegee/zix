@@ -16,6 +16,7 @@ test "zix integration: UdpServer.init, valid config succeeds" {
         .allocator = std.heap.smp_allocator,
         .ip = "127.0.0.1",
         .port = 9200,
+        .dispatch_model = .ASYNC,
     });
     _ = server;
 }
@@ -27,7 +28,7 @@ test "zix integration: UdpServer.init, port zero returns error.PortNotConfigured
     const S = zix.Udp.Server(Pkt);
     try std.testing.expectError(
         error.PortNotConfigured,
-        S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0 }),
+        S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 

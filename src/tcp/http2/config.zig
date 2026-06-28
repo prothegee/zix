@@ -21,8 +21,8 @@ pub const Http2ServerConfig = struct {
     /// plus epoll or io_uring per worker), driving the resumable h2 state machine. .URING probes the
     /// ring at startup and falls back to .EPOLL when io_uring is unavailable. Off Linux both fold to
     /// .POOL. Ignored on the TLS path (the https terminator runs the blocking engine).
-    /// Default: .ASYNC (single accept thread, io.async() per connection).
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
     /// Accept thread count.
@@ -36,6 +36,12 @@ pub const Http2ServerConfig = struct {
     /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
+    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING). The
+    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower wake-up latency
+    /// on saturated benchmarks. Default 0 leaves it unset, so the engine's current CPU profile is
+    /// unchanged. Mirrors zix.Http1's busy_poll_us: set to e.g. 50 to opt in. No-op when the kernel
+    /// lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 0,
     /// Maximum concurrent streams per connection.
     max_streams: usize = 16,
     /// MAX_FRAME_SIZE setting sent to clients (bytes).
@@ -44,12 +50,25 @@ pub const Http2ServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 65536,
-    /// Per-connection read buffer floor in bytes (.EPOLL / .URING mux). The reader is sized to the
-    /// larger of this and one max frame, so a larger floor cuts read() and compaction for big frames.
-    conn_read_buf_min_bytes: usize = 32 * 1024,
+    /// Per-connection receive buffer in bytes (.EPOLL / .URING mux). Used as a floor: the reader is
+    /// sized to the larger of this and one max frame, so a larger value cuts read() and compaction
+    /// for big frames.
+    max_recv_buf: usize = 32 * 1024,
     /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial_bytes: usize = 16 * 1024,
+    /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache API
+    /// (serveCached / sendCached) degrades to a plain send. Active under .EPOLL and .URING.
+    response_cache: bool = false,
+    /// Response cache slot count, rounded down to a power of two. Per-worker memory is
+    /// cache_max_entries * cache_max_value_bytes, times the worker count.
+    cache_max_entries: u32 = 256,
+    /// Per-slot response cap in bytes. A response larger than this bypasses the cache.
+    cache_max_value_bytes: u32 = 16 * 1024,
+    /// Default cache freshness in milliseconds, exposed to handlers via cacheTtl().
+    cache_ttl_ms: u32 = 1000,
+    /// Optional ceiling on per-worker cache memory in bytes. 0 disables the ceiling.
+    cache_max_total_bytes: usize = 0,
     /// https - opt-in. When non-null the server serves HTTP/2 over TLS (zix.Tls, ALPN h2), otherwise
     /// h2c cleartext, the default. The TLS path is a gated blocking terminator in front of the
     /// existing h2c engine, so the cleartext dispatch models are untouched. The context carries the
@@ -72,17 +91,17 @@ test "zix test: Http2ServerConfig required fields" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 8082), cfg.port);
 }
 
-test "zix test: Http2ServerConfig dispatch_model defaults to ASYNC" {
+test "zix test: Http2ServerConfig dispatch_model is required and stored as set" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
@@ -91,7 +110,7 @@ test "zix test: Http2ServerConfig worker and pool defaults to zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
@@ -101,7 +120,7 @@ test "zix test: Http2ServerConfig stream and frame defaults" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16), cfg.max_streams);
     try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
     try std.testing.expectEqual(@as(usize, 65536), cfg.max_body);
@@ -112,7 +131,7 @@ test "zix test: Http2ServerConfig logger defaults to null" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expect(cfg.logger == null);
 }
 
@@ -121,8 +140,9 @@ test "zix test: Http2ServerConfig worker_stack_size_bytes default" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082 };
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
-    try std.testing.expectEqual(@as(usize, 32 * 1024), cfg.conn_read_buf_min_bytes);
+    try std.testing.expectEqual(@as(usize, 32 * 1024), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.tls_write_buf_initial_bytes);
+    try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
 }

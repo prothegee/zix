@@ -33,7 +33,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (dispatch_model=.ASYNC, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), default `TcpClientConfig` (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0) dengan dispatch_model wajib (disetel eksplisit), default `TcpClientConfig` (max_msg_len=4096) |
 | `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -49,7 +49,6 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http/response.zig` | `refAllDecls` + perilaku: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, penjaga injeksi (CR/LF), TooManyHeaders, format wire `SseWriter`, default `Response.streaming` |
 | `tcp/http/router.zig` | `refAllDecls` + perilaku: matchParam, registrasi route (kind + path tersimpan) |
 | `tcp/http/static.zig` | `refAllDecls` + perilaku: mimeType, parseRangeHeader |
-| `tcp/http/upload.zig` | `refAllDecls` + perilaku: MultipartParser parse + getField |
 | `tcp/http/websocket.zig` | `refAllDecls` + perilaku: vektor RFC acceptKey, round-trip buildFrame + parseFrame, frame bermasker |
 | `tcp/http/context.zig` | `refAllDecls` + perilaku: `timedOut` dengan deadline null menghasilkan false, `isExpired` dengan deadline null menghasilkan false |
 | `tcp/http/server.zig` | `refAllDecls` + perilaku: siklus hidup alloc / free slab `EpollConnTable`, akuntansi filled-bytes, fd di luar jangkauan menghasilkan null, `getAvailableCpuCount` menghasilkan minimal 1, `effectiveCacheEntries` menghormati plafon memori, EPOLL `processRequest` melayani cache miss lalu hit |
@@ -100,7 +99,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model default ASYNC, workers/pool_size default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + perilaku: round-trip `parseFields`, pencarian `getField` dan kasus null, vektor `computeChecksum` yang diketahui, `verifyChecksum` valid/terpotong/salah, `findMessageEnd` lengkap/parsial/tanpa-terminator, `buildMessage` menghasilkan checksum valid |
 | `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
 | `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.PortNotConfigured` |
@@ -113,7 +112,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/frame.zig` | `refAllDecls` + perilaku: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, round-trip `writeFrameHeader`/`readFrameHeader` melalui pipe, PREFACE dimulai dengan `PRI`, `sendSettings` menulis frame SETTINGS 9-byte valid melalui pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + perilaku: round-trip encode/decode Huffman, `HpackEncoder.writeHeader` menghasilkan entri terindeks dari static table, `HpackDecoder.decode` mendekode `:method GET` terindeks, eviksi dynamic table menghormati max_size, indeks `HPACK_STATIC` ke-8 adalah `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
-| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model default ASYNC, workers/pool_size default 0, max_streams=16 dan max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, max_streams=16 dan max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
 
 ### zix.Grpc
@@ -157,6 +156,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | Modul | Cakupan |
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + perilaku: extension, save |
+| `utils/multipart.zig` | `refAllDecls` + perilaku: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
 
 ---
@@ -411,7 +411,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Default ukuran buffer | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` semuanya 4096 |
 | Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` default ke `.ASYNC` | default field eksplisit di `HttpServerConfig` |
+| `dispatch_model` wajib (tidak ada default) | pemanggil harus menyetelnya di `HttpServerConfig` |
 | Default worker pool ukuran otomatis | `workers == 0`, `pool_size == 0` |
 | `max_request_headers` default ke `.LARGE` | varian enum dan `.value()` == 64 |
 | Nilai tier `RequestHeaderSize` | MINIMAL=16, COMMON=32, LARGE=64 |
@@ -443,7 +443,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| `UdpServerConfig` disconnect_timeout_ms | default 5000 |
+| `UdpServerConfig` conn_timeout_ms | default 5000 |
 | `UdpServerConfig` poll_timeout_ms | default 2000 |
 | `UdpServerConfig` auto_ack | default false |
 | `UdpServerConfig` broadcast | default false |
@@ -522,7 +522,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| `Http2ServerConfig` dispatch_model default ke ASYNC | `.ASYNC` adalah default nilai-nol |
+| `Http2ServerConfig` dispatch_model wajib (tidak ada default) | pemanggil harus menyetelnya eksplisit |
 | `Http2ServerConfig` max_streams default ke 16 | invarian `max_streams == 16` |
 | `Http2ServerConfig` max_frame_size default ke 16384 | invarian `max_frame_size == 16384` |
 | `Http2` HandlerFn dapat ditugaskan ke variabel lokal | penugasan tipe `zix.Http2.HandlerFn` berhasil dikompilasi |

@@ -11,6 +11,7 @@ test "zix integration: TcpServer.init, valid config succeeds and deinit is safe"
         .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
+        .dispatch_model = .ASYNC,
     });
     server.deinit();
 }
@@ -52,6 +53,7 @@ test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
         .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 0,
+        .dispatch_model = .ASYNC,
     });
     try std.testing.expectError(error.PortNotConfigured, result);
 }

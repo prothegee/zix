@@ -166,6 +166,9 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// Defaulted to the module const so dispatch-level tests need not set it.
         send_buf_size: usize = URING_SEND_BUF_SIZE,
         handler_timeout_ms: u32,
+        /// SO_BUSY_POLL window applied to each accepted connection, set from config.busy_poll_us.
+        /// Defaulted to 0 so dispatch-level tests need not set it (EPOLL parity).
+        busy_poll_us: u32 = 0,
         /// Shared per-worker scratch for unmasking WebSocket frame payloads
         /// during a pump pass. Used transiently, never held across calls.
         ws_payload_buf: []u8,
@@ -508,6 +511,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
 
             setNoDelay(conn_fd);
+            common.setBusyPoll(conn_fd, self.busy_poll_us);
 
             const conn = self.acquireConn() orelse {
                 _ = linux.close(conn_fd);
@@ -764,6 +768,10 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
                         handler_fn(&head, &.{}, fd);
 
+                        // Widen the receive window for the upcoming large-body drain (uploads).
+                        // Only this branch (body larger than the recv buffer) touches it.
+                        core.setRecvBuf(fd, core.tl_large_body_rcvbuf);
+
                         const present_body = rem.len - parsed.body_offset;
                         conn.drain = content_length - present_body;
                         conn.drain_close = !head.keep_alive;
@@ -890,6 +898,8 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             const io = config.io;
 
             core.setDateHeader(config.send_date_header);
+            core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
+            core.setStatic(config.public_dir, io);
 
             const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
             var srv = addr.listen(io, .{
@@ -921,6 +931,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .send_buf_size = config.uring_send_buf_size,
                 .idle_floor = config.uring_idle_pool_floor,
                 .handler_timeout_ms = config.handler_timeout_ms,
+                .busy_poll_us = config.busy_poll_us,
                 .ws_payload_buf = ws_payload_buf,
                 .body_buf = body_buf,
                 .ws_bufs = null,
@@ -958,7 +969,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 
             // Response compression, stateless per worker (no owned structure). Active
             // under .EPOLL and .URING, like the cache.
-            if (config.compression) core.setCompression(config.compression, config.compression_min_size, config.compression_max_out);
+            if (config.compress) core.setCompression(config.compress, config.compression_min_size, config.compression_max_out);
             defer core.setCompression(false, 0, 0);
 
             worker.run();
@@ -990,7 +1001,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // frame, so a compressing handler (writeNegotiated) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
-    const worker_stack: usize = if (config.compression) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
+    const worker_stack: usize = if (config.compress) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
 
     const worker = uringWorkerFn(handler_fn, raw_fn);
     for (threads, 0..) |*t, worker_id| {

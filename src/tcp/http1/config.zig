@@ -13,8 +13,8 @@ pub const Http1ServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Default: .ASYNC.
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Connection dispatch model. Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
     /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL). The kernel
@@ -24,6 +24,14 @@ pub const Http1ServerConfig = struct {
     /// Max bytes to buffer per request header block and per HTTP connection
     /// in EPOLL mode.
     max_recv_buf: usize = 16 * 1024,
+    /// SO_RCVBUF (bytes) applied ONLY on the large-body path: a request whose body exceeds the read
+    /// buffer (uploads). Default 0 leaves the kernel default and its receive autotuning, which on a
+    /// box with a healthy net.core.rmem_max already sizes the upload window well. An explicit value
+    /// both caps the window AND disables autotuning, so a value BELOW what autotuning would grow to
+    /// actually slows uploads (measured: 256 KiB capped the window down for about 18% less upload on
+    /// this box). Set it only to FORCE a window larger than autotuning, at the cost of per-connection
+    /// memory while a large body is in flight. Small-request cells never touch this path.
+    large_body_rcvbuf: usize = 0,
     /// Per-connection receive buffer size for WebSocket connections in EPOLL
     /// mode. 0 falls back to max_recv_buf. Set larger than max_recv_buf to
     /// give WS connections more room to accumulate pipelined frames without
@@ -47,9 +55,10 @@ pub const Http1ServerConfig = struct {
     /// Note:
     /// - Active under the .EPOLL and .URING dispatch models (shared-nothing, one owner
     ///   per worker), installed into the write path from setCompression. A handler opts
-    ///   in by calling writeNegotiated instead of writeSimple. Caching the compressed
-    ///   bytes per (key, encoding) is a separate slice, still pending.
-    compression: bool = false,
+    ///   in by calling writeNegotiated instead of writeSimple. The compressed bytes are
+    ///   cached per (key, encoding) via cache.hashKeyEncoded (writeGzipCached / the cache-
+    ///   aware writeNegotiated), so a repeat request replays without recompressing.
+    compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body
     /// under this floor is sent uncompressed, since the header and CPU cost outweighs
     /// the saving. Mirrors utils.compression.min_size_default.
@@ -80,6 +89,20 @@ pub const Http1ServerConfig = struct {
     /// Include the Date header in every response. Default true for RFC 7231 compliance.
     /// Set false to reduce response size by 37 bytes per response.
     send_date_header: bool = true,
+    /// Root directory for static file serving. Empty string (default) disables static serving.
+    /// When set, a request that matches no route is served as a file from this directory before
+    /// the 404 fallback. Paths containing ".." are rejected (no directory traversal). Range
+    /// requests (RFC 7233) yield 206 partial content. Mirrors zix.Http public_dir.
+    ///
+    /// Note:
+    /// - Active under every dispatch model (.ASYNC / .POOL / .MIXED / .EPOLL / .URING) and the
+    ///   https paths, since all of them route the unmatched request through the same router.
+    /// - Validated at run(): a non-empty directory that does not exist yields error.PublicDirNotFound.
+    public_dir: []const u8 = "",
+    /// Upload subdirectory relative to public_dir. Declarative companion to public_dir: an upload
+    /// handler saves received files here by convention. The engine does not auto-wire uploads,
+    /// the handler owns the write. Mirrors zix.Http public_dir_upload.
+    public_dir_upload: []const u8 = "u",
     /// Enable the per-worker response cache (ADR-036). Default false. When off,
     /// the handler cache API (cacheLookup / cacheStore / writeWithCache) degrades
     /// to a no-op. Active under the .EPOLL and .URING dispatch models (both are
@@ -118,7 +141,7 @@ test "zix http1: Http1ServerConfig URING knob defaults" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
+    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
 }
@@ -127,8 +150,21 @@ test "zix http1: Http1ServerConfig worker stack defaults" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200 };
+    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), cfg.worker_stack_compress_bytes);
     try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);
+}
+
+test "zix http1: Http1ServerConfig static-serve defaults and override" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC };
+    try std.testing.expectEqualStrings("", cfg.public_dir);
+    try std.testing.expectEqualStrings("u", cfg.public_dir_upload);
+
+    const with_static = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC, .public_dir = "./public", .public_dir_upload = "uploads" };
+    try std.testing.expectEqualStrings("./public", with_static.public_dir);
+    try std.testing.expectEqualStrings("uploads", with_static.public_dir_upload);
 }

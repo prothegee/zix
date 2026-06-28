@@ -32,7 +32,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` is sans-I/O: it has no listener and no socket loop. The engine owns the socket. The h2 engines (Http2, Grpc) select between two TLS serve paths by `dispatch_model`: `.EPOLL` / `.URING` use a per-core multiplexed loop (`tls_epoll.zig`) over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig` (ADR-052). The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
+`zix.Tls` is sans-I/O: it has no listener and no socket loop. The engine owns the socket. The h2 engines (Http2, Grpc) select between two TLS serve paths by `dispatch_model`: `.EPOLL` / `.URING` use a per-core multiplexed loop (`tls_mux.zig`) over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig` (ADR-052). The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
 
 ## Source Layout
 
@@ -48,7 +48,8 @@ graph TD
 | `extensions.zig` | ALPN (`Alpn`, `negotiateAlpn`), EncryptedExtensions, supported_versions / key_share helpers |
 | `alert.zig` | Alert codes, outbound alert records, inbound alert classification |
 | `pem.zig` | PEM to DER decode, ECDSA SEC1 scalar + Ed25519 PKCS#8 seed extraction |
-| `rsa.zig` | RSA signing (ADR-048): PKCS#1 / PKCS#8 key parse, EMSA-PKCS1-v1_5 + EMSA-PSS, modexp via `std.crypto.ff` |
+| `rsa.zig` | RSA signing (ADR-048): PKCS#1 / PKCS#8 key parse, EMSA-PKCS1-v1_5 + EMSA-PSS, CRT modexp via `montgomery.zig` |
+| `montgomery.zig` | Constant-time Montgomery modexp for the RSA CRT sign: portable CIOS, plus a fused ADCX / ADOX asm path on x86_64+ADX |
 | `cert_verify.zig` | Peer cert chain (RFC 5280) + hostname / IP identity (RFC 6125), the misdirected-request check |
 | `client.zig` | TLS 1.3 client handshake (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | TLS 1.2 track: PRF schedule, record layer, version select, server handshake, client |
@@ -123,7 +124,7 @@ TLS is a gated blocking serve path per engine, selected by `config.tls`, leaving
 
 - Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe (the handler writes plaintext unchanged), and encrypts the response.
 - Http2 and Grpc (ADR-052): two serve paths, selected by `dispatch_model`. ALPN selects h2 on both.
-  - `.EPOLL` / `.URING`: one `SO_REUSEPORT` epoll worker per core (`tls_epoll.zig`, `grpc/tls_epoll.zig`) terminates TLS in place via a resumable TLS 1.3 session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker. No socketpair, no thread per connection. This is the high-concurrency path.
+  - `.EPOLL` / `.URING`: one `SO_REUSEPORT` epoll worker per core (`tls_mux.zig`, `grpc/tls_mux.zig`) terminates TLS in place via a resumable TLS 1.3 session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker. No socketpair, no thread per connection. This is the high-concurrency path.
   - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` runs a thread-per-connection accept loop over the shared terminator `tcp/tls/h2_terminator.zig`, which runs an inline-mux driver directly over the decrypted records (frames sealed back into TLS records through a thread-local write hook). No socketpair, no second thread. This path also serves the TLS 1.2 fallback.
 
 Because the engines are reused unchanged, https cannot regress the cleartext hot path. The blocking pipe (Http1) is acceptable on the https band, which is not the 1 percent perf gate.

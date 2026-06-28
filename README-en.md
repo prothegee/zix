@@ -90,7 +90,7 @@
 | [`docs/hld-channel-en.md`](docs/hld-channel-en.md) | Channel: goals, model, API, concurrency requirement, examples |
 | [`docs/hld-fix-en.md`](docs/hld-fix-en.md) | FIX 4.x: goals, protocol overview, session layer, dispatch models, config |
 | [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) | gRPC h2c: goals, architecture, API, all 4 RPC types, codec, dispatch models |
-| [`docs/hld-grpc-proxy-en.md`](docs/hld-grpc-proxy-en.md) | gRPC TLS termination via nginx and haproxy |
+| [`docs/hld-proxy-en.md`](docs/hld-proxy-en.md) | Reverse proxy (nginx, haproxy) for zix.Http1, zix.Http, zix.Grpc |
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
 | [`docs/hld-tls-en.md`](docs/hld-tls-en.md) | TLS: goals, version policy, Tls.Context, handshake flow, engine integration, client |
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
@@ -102,6 +102,7 @@
 | [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
 | [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
+| [`docs/zix-deploy-en.md`](docs/zix-deploy-en.md) | Deployment: build a Docker image (zig fetch or vendor) and configure the TLS context for Ed25519 / ECDSA P-256 / RSA |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
 | [`docs/design-considerations-en.md`](docs/design-considerations-en.md) | Design considerations, design patterns, and naming conventions |
 | [`docs/coding-guideline-en.md`](docs/coding-guideline-en.md) | Coding style: source layout, naming, file anatomy, doc comments, config, tests, prose rules |
@@ -283,7 +284,7 @@ __*6. Hot-path-optimized HTTP/1 zix.Http1:*__
 
 __*7. Composable HTTP request handling:*__
 
-A comptime router with path parameters (`matchParam`) shared by `zix.Http` and `zix.Http1`, an explicit middleware chain (`Middleware` / `NextFn`) on `zix.Http`, static file serving, multipart and file upload parsing (`MultipartParser`), and HTTP range request parsing (`parseRange`) for partial content.
+A comptime router with path parameters (`matchParam`) shared by `zix.Http` and `zix.Http1`, an explicit middleware chain (`Middleware` / `NextFn`) on `zix.Http`, static file serving, multipart and file upload parsing (`multipart.Parser`), and HTTP range request parsing (`parseRange`) for partial content.
 
 > Each piece is an explicit, opt-in part of the engine, with route matching resolved at compile time. You compose only what a request needs instead of inheriting a fixed pipeline.
 
@@ -358,7 +359,7 @@ Every server config shares one vocabulary: the same concept uses the same field 
 | `io` | `std.Io` | I/O backend, required, must outlive the server |
 | `ip` | `[]const u8` | Bind address |
 | `port` | `u16` | Bind port, must be non-zero |
-| `dispatch_model` | `DispatchModel` | `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL`, `.URING` |
+| `dispatch_model` | `DispatchModel` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (required, no default) |
 | `kernel_backlog` | `u31` | TCP listen backlog |
 | `workers` | `usize` | Accept or EPOLL worker count, `0` selects cpu_count |
 | `pool_size` | `usize` | Pool thread count for `.POOL`, `0` selects a formula |
@@ -369,6 +370,7 @@ Buffer, timeout, and cache fields keep the same names wherever a protocol has th
 | Field | Type | Present on |
 | :- | :- | :- |
 | `max_recv_buf` | `usize` | `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Uds` |
+| `large_body_rcvbuf` | `usize` | `zix.Http1`, `zix.Http` |
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` and the four `cache_*` fields | see [Response Cache Awareness](#response-cache-awareness-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
@@ -380,6 +382,8 @@ A few differences are by design, not drift:
 - `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
 - Response compression (`compression*`) lives on `zix.Http1` and `zix.Http`, the engines that serve HTTP responses with Accept-Encoding negotiation. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
 - `zix.Udp` (datagram) carries `ip` / `port` / `logger` for the typed path, plus the raw-path knobs `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, used by `zix.Udp.Raw`). `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path. Each engine takes only the subset that applies.
+
+For the full per-field reference (every config field with its default, what it affects, when to raise or lower it, and the trade-offs), see [`docs/zix-config-en.md`](./docs/zix-config-en.md).
 
 <br>
 
@@ -695,7 +699,7 @@ Per-route param capture is capped at 8 params per match. See ADR-033.
 
 ### Concurrency Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum, default `.ASYNC`):
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). This field is required: the caller must set it explicitly (there is no default).
 
 **`.POOL` (work-queue thread pool):**
 
@@ -707,7 +711,7 @@ pub fn main(process: std.process.Init) !void {
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
-        // dispatch_model = .ASYNC (default, can be omitted)
+        .dispatch_model = .ASYNC, // required: .ASYNC, .POOL, .MIXED, .EPOLL, or .URING
         // workers        = 0  -> cpu_count (accept threads for .POOL/.MIXED; workers for .EPOLL)
         // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (.POOL only; ignored by .EPOLL)
     });
@@ -774,8 +778,10 @@ __*In the nutshell:*__
 - Looking for consistent latency? Use `.ASYNC`.
 - For non-linux user and looking for high throughput? Use `.POOL` or `.MIXED`.
 
-> In many cases for high throughput, URING mostly wins for CPU & RAM efficiency,
-> however in some cases its performance can vary, see the benchmark section for reference.
+> In many cases for high throughput,
+> zix EPOLL mostly wins for memory efficiency and zix URING got more throughput.
+> However in some cases its performance can vary, see the benchmark section for reference.
+> Uring is not allowed in some environment for some reason (e.g. security stand point). But you got the options.
 
 **When to use:** the dispatch model is the one knob that reshapes the whole server. Reach for `.ASYNC` when latency and long-lived connections (SSE, WebSocket) matter, `.POOL` / `.MIXED` for raw throughput on any platform, and `.EPOLL` / `.URING` on Linux for the highest connection counts at the lowest per-request cost. On a loopback dev box the two tie on throughput and `.URING` wins mainly on cache locality. On a many-core box the ring close (ADR-041) lets `.URING` keep its cores busy through connection churn, where it reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 
@@ -1141,7 +1147,7 @@ pub fn main(process: std.process.Init) !void {
 **Upload**: parse the multipart body in a handler, optionally rename before saving:
 
 ```zig
-var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
 defer parser.deinit();
 try parser.parse(try req.body());
 
@@ -1302,7 +1308,7 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 
 - Opt-in only. Off by default, and the handler must call `res.serveCached` then `res.sendCached` (HTTP), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the `zix.Http1` `cacheLookup` / `writeWithCache`.
 - `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
-- For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. For gRPC the key is the path plus the request message, so only an identical request hits.
+- For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`writeNegotiated` / `writeGzipCached`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
 - Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
 - Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.
@@ -1427,7 +1433,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC` (default), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only). The gRPC EPOLL model is a shared-nothing multiplexed event loop: each worker owns a private `SO_REUSEPORT` listener and one epoll instance, and drives many non-blocking h2 connections through a resumable HTTP/2 state machine. `pool_size` is the worker count (0 = cpu_count). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
+**Dispatch models:** `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (Linux-only, required with no default). The gRPC EPOLL and URING models are shared-nothing multiplexed event loops: each worker owns a private `SO_REUSEPORT` listener and one epoll instance, and drives many non-blocking h2 connections through a resumable HTTP/2 state machine. `pool_size` is the worker count (0 = cpu_count). Non-Linux falls back to `.POOL` automatically. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -1486,7 +1492,7 @@ defer tls.deinit();
 var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
 ```
 
-The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `Tls.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error.
+The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `Tls.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error. The cert can be ECDSA P-256, Ed25519, or RSA: `Tls.Context.init` detects the key type from the cert (an RSA cert requires TLS 1.3 and signs the CertificateVerify with `rsa_pss_rsae_sha256`). For a new deployment prefer Ed25519 (cheapest handshake signature), then ECDSA P-256, then RSA (use RSA to serve a pre-issued RSA cert). See [docs/zix-deploy-en.md](docs/zix-deploy-en.md) for per-type config snippets and Docker image deployment.
 
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
@@ -1674,7 +1680,7 @@ try client.logout(io);
 
 **`zix.Fix.MsgType`**: namespace struct of 47 compile-time string constants for FIX MsgType values (FIX 4.0-4.4). Use named constants instead of raw strings: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), etc.
 
-**Dispatch models:** `.ASYNC` (default, FIX sessions are long-lived), `.POOL`, `.MIXED`, `.EPOLL` (Linux-only: single epoll accept loop, pool workers hold each connection for its full lifetime). Non-Linux falls back to `.POOL` automatically.
+**Dispatch models:** `.ASYNC` (suited to long-lived FIX sessions), `.POOL`, `.MIXED`, `.EPOLL`, `.URING` (Linux-only: shared-nothing per-core workers, EPOLL is a single accept loop with pool workers holding each connection). Non-Linux falls back to `.POOL` automatically.
 
 **When to use:** use `zix.Fix` when you integrate with financial counterparties over FIX 4.x: order entry, execution reports, market-data sessions. Session mechanics (Logon/Logout/Heartbeat/TestRequest, sequence handling) are built in, so you write only application-message handlers. Use echo mode for a conformance harness and router mode for real trading logic. For any non-financial protocol use `zix.Tcp` instead.
 
@@ -1826,7 +1832,7 @@ pub fn main(process: std.process.Init) !void {
         .endianness = .LITTLE,
         .broadcast  = true,   // relay each packet to all connected clients
         .auto_ack   = false,
-        .disconnect_timeout_ms = 5000,
+        .conn_timeout_ms = 5000,
         .poll_timeout_ms       = 2000,
     });
     defer server.deinit();

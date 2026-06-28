@@ -49,14 +49,16 @@ test "zix tests: unit test" {
 | Implementation file | `lowercase.zig` | `server.zig`, `config.zig` |
 | Type / struct / enum | `PascalCase` | `TcpServerConfig`, `DispatchModel`, `RespSink` |
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
-| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size` |
+| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size` (use `_var` if it meant for private usage) |
 | Domain / public / config enum value | `UPPER_CASE` | `ASYNC`, `POOL`, `EPOLL`, `URING` |
 | Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
 | Comptime version constants | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
 Enums that model a public, domain, or config choice are `UPPER_CASE` (`DispatchModel`, content type, status, logger level). The narrow exceptions kept in-tree are internal control-flow enums (`keep_alive` / `close` style outcomes) and protocol-mirroring values (WebSocket `text` / `binary` opcodes that mirror the wire name). When in doubt, `UPPER_CASE`.
 
-**Never use a 2-to-5 character name when it is not self-evident.** One-character names are allowed only for `i` / `n` loop and count idioms. Spell out the rest (`handler`, not `h`; `config`, not `cfg` in new public surface, though `cfg` is an accepted local in existing dispatch code, match the file).
+**Use a short name only when it clearly represents its purpose.** The test is whether a reader who has not seen the file understands it, not the character count. Clear short forms are fine: `conn`, `cfg`, `ctx`, `fd`, `io`, `str`. A name that does not carry its purpose must be spelled out: `handler` not `h`, `stream` not `s`, `worker` not `w`, `paths` not `p`, `cache` not `c`.
+
+One-character names are reserved for two cases: `i` / `n` loop and count idioms, and crypto / modular-arithmetic notation that mirrors the math (`p`, `q`, `d`, `n`, `m` in `rsa.zig`, `montgomery.zig`, `ff.zig`). A single-character function parameter is otherwise not allowed, spell it out.
 
 > Name for the reader who has not seen the file. If a short name needs a comment to be understood, it is the wrong name.
 
@@ -178,7 +180,7 @@ pub const TcpServerConfig = struct {
     io: std.Io,            // required, caller-provided, must outlive the server
     ip: []const u8,        // required
     port: u16,             // required, must be non-zero
-    dispatch_model: DispatchModel = .ASYNC,
+    dispatch_model: DispatchModel,  // required
     kernel_backlog: u31 = 4096,
     max_recv_buf: usize = 4096,
     // ...

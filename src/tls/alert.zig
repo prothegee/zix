@@ -8,7 +8,7 @@
 const std = @import("std");
 
 /// AlertLevel (RFC 8446 6): legacy in 1.3 (all these are fatal), kept for the wire byte.
-pub const level_warning: u8 = 1;
+const level_warning: u8 = 1;
 pub const level_fatal: u8 = 2;
 
 const content_type_alert: u8 = 21;

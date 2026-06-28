@@ -4,7 +4,7 @@
 // (POST /helloworld.Greeter/SayHello, grpc content-type) + a DATA frame carrying one
 // length-prefixed gRPC message, and asserts the response HEADERS carry :status 200. No grpcurl.
 //
-// This exercises the multiplexed TLS path (tls_epoll.zig): TLS terminates in the epoll worker and
+// This exercises the multiplexed TLS path (tls_mux.zig): TLS terminates in the epoll worker and
 // the resumable gRPC h2 mux serves the call in place, no thread per connection.
 //
 // Invoked by `zig build test-runner-tls-grpc`.

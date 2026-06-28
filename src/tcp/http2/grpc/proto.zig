@@ -54,12 +54,12 @@ pub fn decodeVarint(buf: []const u8) error{ UnexpectedEOF, VarintOverflow }!stru
 ///
 /// Return:
 /// - usize (bytes written)
-pub fn encodeString(field_number: u32, s: []const u8, buf: []u8) usize {
+pub fn encodeString(field_number: u32, str: []const u8, buf: []u8) usize {
     const tag: u64 = (@as(u64, field_number) << 3) | WT_LEN;
     var pos = encodeVarint(buf, tag);
-    pos += encodeVarint(buf[pos..], @as(u64, s.len));
-    @memcpy(buf[pos..][0..s.len], s);
-    return pos + s.len;
+    pos += encodeVarint(buf[pos..], @as(u64, str.len));
+    @memcpy(buf[pos..][0..str.len], str);
+    return pos + str.len;
 }
 
 /// Encode a VARINT field (int32).

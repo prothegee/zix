@@ -6,7 +6,7 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix behaviour: UdpServerConfig, disconnect_timeout_ms defaults to 5000" {
+test "zix behaviour: UdpServerConfig, conn_timeout_ms defaults to 5000" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -15,8 +15,9 @@ test "zix behaviour: UdpServerConfig, disconnect_timeout_ms defaults to 5000" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
-    try std.testing.expectEqual(@as(i64, 5000), cfg.disconnect_timeout_ms);
+    try std.testing.expectEqual(@as(i64, 5000), cfg.conn_timeout_ms);
 }
 
 test "zix behaviour: UdpServerConfig, poll_timeout_ms defaults to 2000" {
@@ -28,6 +29,7 @@ test "zix behaviour: UdpServerConfig, poll_timeout_ms defaults to 2000" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(i64, 2000), cfg.poll_timeout_ms);
 }
@@ -41,6 +43,7 @@ test "zix behaviour: UdpServerConfig, auto_ack defaults to false" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expect(!cfg.auto_ack);
 }
@@ -54,6 +57,7 @@ test "zix behaviour: UdpServerConfig, broadcast defaults to false" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expect(!cfg.broadcast);
 }
@@ -67,6 +71,7 @@ test "zix behaviour: UdpServerConfig, endianness defaults to LITTLE" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(zix.Udp.Endianness.LITTLE, cfg.endianness);
 }
@@ -80,6 +85,7 @@ test "zix behaviour: UdpServerConfig, port_mode defaults to REQUIRED" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(zix.Udp.PortMode.REQUIRED, cfg.port_mode);
 }

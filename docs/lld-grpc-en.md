@@ -200,11 +200,13 @@ The blocks are produced by running the real `HpackEncoder` at comptime, so they 
 
 ---
 
-## server.zig
+## server.zig and dispatch/
 
 ### Dispatch (run)
 
-`run()` switches on `dispatch_model`. `.ASYNC` / `.POOL` / `.MIXED` keep the accept-thread + `io.async` / `ConnQueue` pool structure and call `serveGrpcConn`. `.EPOLL` calls `runEpoll`.
+`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` / `.POOL` / `.MIXED` keep the accept-thread + `io.async` / `ConnQueue` pool structure and call `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection).
+
+The `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, and `runEpoll` symbols below all live in `dispatch/epoll.zig`.
 
 ### GrpcConnTable
 
@@ -214,9 +216,9 @@ Private per-worker fd to `*GrpcMuxConn` map, indexed directly by fd (sparse, `MA
 
 Drains `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` to `EAGAIN` (level-triggered). Each accepted fd gets `TCP_NODELAY`, a `GrpcMuxConn`, and an `EPOLL.IN | RDHUP` registration. On allocation or registration failure the fd is closed.
 
-### epollMuxWorker(ctx)
+### epollMuxWorkerFn(routes)(ctx)
 
-One worker thread:
+`epollMuxWorkerFn(comptime routes)` returns the worker entry function. One worker thread:
 
 ```
 1. private SO_REUSEPORT listener on ip:port; setNonBlock
@@ -229,9 +231,9 @@ One worker thread:
                        if .close -> epoll_ctl DEL, table.free, close
 ```
 
-### runEpoll(self, io)
+### runEpoll(comptime routes, cfg)
 
-`worker_count = pool_size` (0 = cpu count). Spawns `worker_count` `epollMuxWorker` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
+`worker_count = pool_size` (0 = cpu count). Spawns `worker_count` `epollMuxWorkerFn(routes)` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
 
 ---
 

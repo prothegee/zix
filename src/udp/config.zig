@@ -56,8 +56,8 @@ pub const UdpServerConfig = struct {
     port_mode: PortMode = .REQUIRED,
     /// Wire endianness applied on every send and receive.
     endianness: Endianness = .LITTLE,
-    /// Milliseconds of silence before a client is considered disconnected.
-    disconnect_timeout_ms: i64 = 5000,
+    /// Milliseconds of silence before a client is considered disconnected (idle connection timeout).
+    conn_timeout_ms: i64 = 5000,
     /// Receive poll interval in milliseconds, controls disconnect check frequency.
     poll_timeout_ms: i64 = 2000,
     /// Send 0x06 ACK byte back to sender on successful packet receipt.
@@ -79,7 +79,8 @@ pub const UdpServerConfig = struct {
     /// Concurrency model for the raw path. `.EPOLL` / `.URING` run per-core SO_REUSEPORT workers
     /// (the recvmmsg loop). `.ASYNC` / `.POOL` / `.MIXED` run a single worker. URING currently folds
     /// to the recvmmsg loop (true io_uring submission is a later phase). Same enum as the TCP engines.
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// Worker count for the per-core models. 0 means one per available CPU.
     workers: usize = 0,
     /// Set SO_REUSEADDR + SO_REUSEPORT so multiple workers can bind the same port and the kernel
@@ -92,6 +93,21 @@ pub const UdpServerConfig = struct {
     /// Maximum datagram size for the raw path, the receive buffer per slot. The typed path uses
     /// `@sizeOf(Packet)` instead. 1500 is the common Ethernet MTU.
     max_recv_buf: usize = 1500,
+    /// SO_BUSY_POLL spin window in microseconds for the raw path's UDP socket (.EPOLL / .URING
+    /// per-core workers). The kernel busy-spins this long before sleeping the worker, trading CPU for
+    /// lower recvmmsg wake-up latency on saturated benchmarks. Default 0 leaves it unset, so the
+    /// current CPU profile is unchanged. Mirrors zix.Http1's busy_poll_us. No-op when the kernel
+    /// lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 0,
+    /// Worker thread stack size in bytes for the per-core raw workers (.EPOLL / .URING). Thread
+    /// stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// Enable UDP GSO (UDP_SEGMENT) on the send path: consecutive same-destination replies in a flush
+    /// are coalesced into one sendmsg per group, so the kernel segments them into wire datagrams from
+    /// one syscall. Default false, so the send path is the plain sendmmsg. Probed at worker start and
+    /// left off when the kernel (older than 4.18) lacks support. Helps multi-packet same-peer bursts;
+    /// a one-datagram-per-peer batch sees no benefit.
+    gso_enabled: bool = false,
 };
 
 // --------------------------------------------------------- //
@@ -133,13 +149,14 @@ test "zix test: UdpServerConfig, default field values" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(std.testing.allocator.ptr, cfg.allocator.ptr);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9100), cfg.port);
     try std.testing.expectEqual(PortMode.REQUIRED, cfg.port_mode);
     try std.testing.expectEqual(Endianness.LITTLE, cfg.endianness);
-    try std.testing.expectEqual(@as(i64, 5000), cfg.disconnect_timeout_ms);
+    try std.testing.expectEqual(@as(i64, 5000), cfg.conn_timeout_ms);
     try std.testing.expectEqual(@as(i64, 2000), cfg.poll_timeout_ms);
     try std.testing.expect(!cfg.auto_ack);
     try std.testing.expect(!cfg.error_report);
@@ -156,6 +173,7 @@ test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9100,
+        .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
@@ -163,6 +181,8 @@ test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
     try std.testing.expectEqual(@as(usize, 32), cfg.recv_batch);
     try std.testing.expectEqual(@as(usize, 32), cfg.send_batch);
     try std.testing.expectEqual(@as(usize, 1500), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
+    try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
 }
 
 test "zix test: UdpClientConfig, default field values" {

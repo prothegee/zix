@@ -1,7 +1,7 @@
 # Issue: RSA TLS handshake is CPU-bound, stalls h2/grpc-over-TLS at high concurrency
 
 Date: 2026-06-25
-Scope: 0.5.x, the multiplexed TLS dispatch (tls_epoll) under the HttpArena musl ReleaseFast build.
+Scope: 0.5.x, the multiplexed TLS dispatch (tls_mux) under the HttpArena musl ReleaseFast build.
 
 ## Symptom
 
@@ -23,7 +23,7 @@ The only difference between the working and stalling profiles is TLS on port 844
    static-h2 512c: CPU 587.9% (about 6 cores pegged), connect mean 3.97s, max 7.18s, run 1 finished
    in 203.64s, runs 2 and 3 returned 0 req/s (the server never recovered). When a connection does
    establish, serving is healthy (unary-grpc-tls 256c sustained 414k req/s).
-2. The multiplexed tls_epoll dispatch IS engaged (the dispatch_model fix landed). Proof: grpc-tls
+2. The multiplexed tls_mux dispatch IS engaged (the dispatch_model fix landed). Proof: grpc-tls
    256c connect dropped from 1.48s (the old thread-per-conn terminator) to 841ms (multiplexed). So
    the stall is not the old thread-per-conn thrash, it is a new, CPU-bound handshake bottleneck.
 3. The handshake performs an RSA-2048 private-key operation. src/tls/rsa.zig signs via a single
@@ -35,7 +35,7 @@ The only difference between the working and stalling profiles is TLS on port 844
    cannot service other connections' handshake round-trips or established traffic. h2load times out
    on connect, reconnects, and the handshake backlog spirals (the 203s and the 0 req/s reruns).
 5. The native (glibc, non-container) ReleaseFast build does NOT reproduce the stall: the same
-   tls_epoll path served grpc-tls 1024c at 712k req/s with no stall. So the stall is specific to the
+   tls_mux path served grpc-tls 1024c at 712k req/s with no stall. So the stall is specific to the
    HttpArena build or environment.
 
 ## Measured (RSA-2048 signPss, 200 iterations, one core)

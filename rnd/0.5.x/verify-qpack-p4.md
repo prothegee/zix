@@ -19,7 +19,7 @@ It has two halves, and they are honestly different in what they can prove right 
 
 ## Oracle
 
-RFC 9204 section 4.5 for the self round trip; the qpack-interop corpus (decode-and-compare against
+RFC 9204 section 4.5 for the self round trip. The qpack-interop corpus (decode-and-compare against
 `.qif`) for the cross-impl half.
 
 ## Run

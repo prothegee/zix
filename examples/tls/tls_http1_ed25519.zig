@@ -8,6 +8,9 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9062;
+// Demo fixtures. For a real domain, point CERT / KEY at your certbot files:
+// CERT: /etc/letsencrypt/live/sub.domain.tld/fullchain.pem
+// KEY: /etc/letsencrypt/live/sub.domain.tld/privkey.pem
 const CERT: []const u8 = "examples/tls/certs/ed25519_cert.pem";
 const KEY: []const u8 = "examples/tls/certs/ed25519_key.pem";
 
@@ -43,6 +46,7 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .tls = &tls,
+        .dispatch_model = .EPOLL,
     });
     defer server.deinit();
 

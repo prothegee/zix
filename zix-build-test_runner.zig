@@ -32,6 +32,12 @@ pub fn addSteps(
         .{ "test-runner-tls-http2", "tests/runner/tls_http2_basic_runner.zig", "tr-server-tls-http2", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
         .{ "test-runner-tls-http2-client", "tests/runner/tls_http2_client_runner.zig", "tr-server-tls-http2-client", "examples/tls/tls_http2_basic.zig", "9061", "", "", "" },
         .{ "test-runner-tls-grpc", "tests/runner/tls_grpc_basic_runner.zig", "tr-server-tls-grpc", "examples/tls/tls_grpc_basic.zig", "9070", "", "", "" },
+        // sse over tls runners (ADR-054): native zix.Tls client reads the first event over TLS
+        .{ "test-runner-tls-http-sse", "tests/runner/tls_sse_runner.zig", "tr-server-tls-http-sse", "examples/tls/tls_http_sse.zig", "9072", "", "", "" },
+        .{ "test-runner-tls-http1-sse", "tests/runner/tls_sse_runner.zig", "tr-server-tls-http1-sse", "examples/tls/tls_http1_sse.zig", "9073", "", "", "" },
+        // websocket over tls runners (ADR-055): native zix.Tls client echoes one frame over TLS
+        .{ "test-runner-tls-http1-ws", "tests/runner/tls_ws_runner.zig", "tr-server-tls-http1-ws", "examples/tls/tls_http1_ws.zig", "9074", "", "", "" },
+        .{ "test-runner-tls-http-ws", "tests/runner/tls_ws_runner.zig", "tr-server-tls-http-ws", "examples/tls/tls_http_ws.zig", "9075", "", "", "" },
         .{ "test-runner-http2-async", "tests/runner/http2_runner.zig", "tr-server-http2-async", "examples/http2_basic_1_async.zig", "9065", "", "", "" },
         .{ "test-runner-http2-pool", "tests/runner/http2_runner.zig", "tr-server-http2-pool", "examples/http2_basic_2_pool.zig", "9066", "", "", "" },
         .{ "test-runner-http2-mixed", "tests/runner/http2_runner.zig", "tr-server-http2-mixed", "examples/http2_basic_3_mixed.zig", "9067", "", "", "" },
@@ -55,7 +61,7 @@ pub fn addSteps(
         .{ "test-runner-fix-uring", "tests/runner/fix_runner.zig", "tr-server-fix-uring", "examples/fix_server_5_uring.zig", "9052", "", "", "" },
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9054", "", "", "" },
         .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_raw_echo.zig", "9064", "", "", "" },
-        .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/http3_basic.zig", "9063", "", "", "" },
+        .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/tls/http3_basic.zig", "9063", "", "", "" },
         .{ "test-runner-uds", "tests/runner/uds_runner.zig", "tr-server-uds", "examples/uds_server.zig", "0", "", "", "" },
         // http feature runners (http_get_runner: arg4=route, arg5=origin, arg6=expected)
         .{ "test-runner-http-json", "tests/runner/http_get_runner.zig", "tr-server-http-json", "examples/http_json.zig", "9005", "/status", "", "server" },
@@ -258,7 +264,7 @@ pub fn addSteps(
             .{ "tr-all-server-udp", "examples/udp_server.zig" },
             .{ "tr-all-server-udp-raw", "examples/udp_raw_echo.zig" },
             .{ "tr-all-server-uds", "examples/uds_server.zig" },
-            // http feature servers (10)
+            // http feature servers (11)
             .{ "tr-all-server-http-json", "examples/http_json.zig" },
             .{ "tr-all-server-http-middleware", "examples/http_middleware.zig" },
             .{ "tr-all-server-http-params", "examples/http_params.zig" },
@@ -269,7 +275,8 @@ pub fn addSteps(
             .{ "tr-all-server-http-static", "examples/http_static.zig" },
             .{ "tr-all-server-http-sse", "examples/http_sse.zig" },
             .{ "tr-all-server-http-websocket", "examples/http_websocket.zig" },
-            // http1 feature servers (11)
+            .{ "tr-all-server-http-compression", "examples/http_compression.zig" },
+            // http1 feature servers (12)
             .{ "tr-all-server-http1-json", "examples/http1_json.zig" },
             .{ "tr-all-server-http1-middleware", "examples/http1_middleware.zig" },
             .{ "tr-all-server-http1-params", "examples/http1_params.zig" },
@@ -281,6 +288,7 @@ pub fn addSteps(
             .{ "tr-all-server-http1-sse", "examples/http1_sse.zig" },
             .{ "tr-all-server-http1-websocket", "examples/http1_websocket.zig" },
             .{ "tr-all-server-http1-cache", "examples/http1_cache.zig" },
+            .{ "tr-all-server-http1-compression", "examples/http1_compression.zig" },
             // grpc location + multi + timeout (6)
             .{ "tr-all-server-grpc-location-async", "examples/grpc_location_server_1_async.zig" },
             .{ "tr-all-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig" },
@@ -308,7 +316,18 @@ pub fn addSteps(
             .{ "tr-all-server-tls-grpc", "examples/tls/tls_grpc_basic.zig" },
 
             // http3 (QUIC over TLS 1.3, driven by the hand-rolled native client)
-            .{ "tr-all-server-http3", "examples/http3_basic.zig" },
+            .{ "tr-all-server-http3", "examples/tls/http3_basic.zig" },
+
+            // sse over tls (ADR-054): appended last so the argv order in all_runner stays stable
+            .{ "tr-all-server-tls-http-sse", "examples/tls/tls_http_sse.zig" },
+            .{ "tr-all-server-tls-http1-sse", "examples/tls/tls_http1_sse.zig" },
+
+            // websocket over tls (ADR-055): appended after the sse servers, argv order stays stable
+            .{ "tr-all-server-tls-http1-ws", "examples/tls/tls_http1_ws.zig" },
+            .{ "tr-all-server-tls-http-ws", "examples/tls/tls_http_ws.zig" },
+
+            // https/1.1 over TLS on the arena engine: appended last so existing argv order is stable
+            .{ "tr-all-server-tls-http", "examples/tls/tls_http_basic.zig" },
         };
 
         const all_runner_mod = b.createModule(.{

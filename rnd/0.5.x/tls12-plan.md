@@ -9,7 +9,7 @@ live here for now (the 1.3 layers are in `tls-plan.md`).
 
 - Offer TLS 1.2 AND 1.3, prefer 1.3, never below 1.2. 1.0 / 1.1 / SSL never offered (RFC 8996).
 - 1.2 suites restricted to ECDHE-AEAD, no static-RSA key exchange, no CBC. This keeps forward
-  secrecy and the SSL Labs A+ posture (ADR-045), and reuses the AES-GCM AEAD already in `record`.
+  secrecy and the modern-TLS posture (ADR-045), and reuses the AES-GCM AEAD already in `record`.
 - Mandatory 1.2 suite target: `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B), matching the
   ECDSA P-256 cert. (`TLS_ECDHE_RSA_*` only if/when RSA signing lands, which stays optional.)
 - Additive only: 1.2 is a sibling path, the 1.3 path and the cleartext engines stay untouched.
@@ -30,8 +30,8 @@ graph TD
 | :- | :- | :- | :- |
 | P | `tls12_prf_poc.zig` | the canonical TLS 1.2 PRF SHA-256 known-answer vector (100 bytes) | DONE, P_SHA256 + PRF byte-exact vs the 100-byte vector, Zig 0.16 + 0.17 |
 | R12 | `tls12_record_poc.zig` | NIST AES-128-GCM KAT + byte-exact 1.2 framing | DONE, protect/deprotect (salt+explicit nonce, 13-byte AAD, explicit-nonce layout), round trip + tamper + NIST case 4, Zig 0.16 + 0.17. openssl wire cross-check at integration |
-| H12 | `tls12_handshake_poc.zig` | deterministic crypto (sign/verify, ECDHE, PRF schedule); openssl wire at integration | DONE, ServerKeyExchange sign/verify + tamper, ECDHE pre_master both-sides-agree, master_secret/key_block/Finished, AEAD round trip on derived keys, Zig 0.16 + 0.17 |
-| N | `tls12_negotiate_poc.zig` | byte-exact sentinel + selection logic; openssl `-tls1_2`/`-tls1_3` at integration | DONE, version select (1.3 pref, 1.2 floor, reject below) + DOWNGRD\x01 sentinel plant + client-side detect, Zig 0.16 + 0.17 |
+| H12 | `tls12_handshake_poc.zig` | deterministic crypto (sign/verify, ECDHE, PRF schedule). openssl wire at integration | DONE, ServerKeyExchange sign/verify + tamper, ECDHE pre_master both-sides-agree, master_secret/key_block/Finished, AEAD round trip on derived keys, Zig 0.16 + 0.17 |
+| N | `tls12_negotiate_poc.zig` | byte-exact sentinel + selection logic. openssl `-tls1_2`/`-tls1_3` at integration | DONE, version select (1.3 pref, 1.2 floor, reject below) + DOWNGRD\x01 sentinel plant + client-side detect, Zig 0.16 + 0.17 |
 
 ## Key differences from 1.3 (what is genuinely new)
 
@@ -86,7 +86,7 @@ http2 1.2 branch DONE: the 1.2 engine now negotiates + emits ALPN h2 (tls12_conn
 + state.alpn, unit-tested), and src/tcp/http2/tls_serve.zig branches to serveConnTls12 (require
 ALPN h2, then the SAME inline-mux driver over the resumable h2 state machine, no socketpair, per
 ADR-052). Gated, dormant for 1.3 clients, test-runner-all 57 green both toolchains.
-Note: the multiplexed `.EPOLL` / `.URING` path (tls_epoll.zig) is TLS 1.3 only, so the 1.2 h2
+Note: the multiplexed `.EPOLL` / `.URING` path (tls_mux.zig) is TLS 1.3 only, so the 1.2 h2
 fallback is served by the thread-per-conn `.ASYNC` / `.POOL` / `.MIXED` path.
 
 WIRE-VALIDATED (verify-tls12.md, user-run): openssl -tls1_2 completed the http1 handshake (cert

@@ -47,7 +47,7 @@ cmp ref_v15.sig zix_key.sig                                  # byte-exact proves
 | zix v1.5 vs openssl | `cmp` reports no difference (byte-exact) |
 | openssl verifies zix v1.5 | `Verified OK` |
 | openssl verifies zix PSS | `Verified OK` (salt differs, so not byte-exact) |
-| zix verifies openssl PSS | accepted (round-trip; std already does RSA verify) |
+| zix verifies openssl PSS | accepted (round-trip, std already does RSA verify) |
 | zix key parse modulus (PKCS#1 + PKCS#8) | equals `openssl rsa -modulus` |
 | zix sign from parsed key | byte-exact vs openssl (proves n and d parsed) |
 

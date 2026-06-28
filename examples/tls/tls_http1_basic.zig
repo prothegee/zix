@@ -8,6 +8,9 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9060;
+// Demo fixtures. For a real domain, point CERT / KEY at your certbot files:
+// CERT: /etc/letsencrypt/live/sub.domain.tld/fullchain.pem
+// KEY: /etc/letsencrypt/live/sub.domain.tld/privkey.pem
 const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
 const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
@@ -43,6 +46,10 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .tls = &tls,
+        // .EPOLL / .URING terminate TLS in the event-driven epoll-mux worker (keep-alive, many
+        // connections per worker); .ASYNC / .POOL / .MIXED use the thread-per-connection path.
+        .dispatch_model = .EPOLL,
+        .workers = 1,
     });
     defer server.deinit();
 

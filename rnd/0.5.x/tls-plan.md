@@ -44,15 +44,15 @@ graph TD
 | P0 | `tls_server_poc.zig` | RFC 8448 + ECDSA fixture, self-deprotect | DONE, in-memory compose of K+H+X+C (real ECDHE, byte-exact SH/EE, AEAD encrypt round trip), Zig 0.16 + 0.17 |
 | P0 | `tls_server_live.zig` | live openssl s_client + curl | DONE, full TLS 1.3 handshake over a socket (fresh ephemeral key, CertificateVerify + Finished accepted, app data), gate 2 |
 | A | `src/tls/alert.zig` | emit-side condition -> alert matrix | DONE (emit): fatal alert record + alertForError map wired into http1/http2 tls_serve, unit-tested. Inbound alert + post-handshake encrypted alert pending |
-| V | `src/tls/cert_verify.zig` | self-signed fixture + std X.509 | DONE (mTLS server side): verifyCertChain (RFC 5280) + verifyCertHostname (RFC 6125) + peerEcdsaP256PublicKey; connection.zig request_client_cert -> CertificateRequest + verifyClientCertFlight (split) / verifyClientAuthFlight (coalesced), round-trip + tamper-reject unit-tested. Remaining: multi-cert chains (std Bundle.verify) + engine tls_serve wiring |
+| V | `src/tls/cert_verify.zig` | self-signed fixture + std X.509 | DONE (mTLS server side): verifyCertChain (RFC 5280) + verifyCertHostname (RFC 6125) + peerEcdsaP256PublicKey. connection.zig request_client_cert -> CertificateRequest + verifyClientCertFlight (split) / verifyClientAuthFlight (coalesced), round-trip + tamper-reject unit-tested. Remaining: multi-cert chains (std Bundle.verify) + engine tls_serve wiring |
 
 Landed in src/ (no longer PoC-only): K + H + X + C + V + connection + Tls.zig + the 1.2 engine, the
 Http1 https path and the Http2 h2-over-TLS terminator, plus Layer A emit. serverHandshake routes
 through negotiate() (version / cipher / group selection enforced live), both X25519 and secp256r1
 ECDHE are wired, and Layer C selects the CertificateVerify signature scheme (ECDSA P-256 / Ed25519)
 from the client signature_algorithms (no-overlap -> handshake_failure). TLS 1.2 (the minimum floor,
-ADR-045) is DONE and wire-validated, see tls12-plan.md. The A+ grade is measured on-box (testssl,
-Final Score 92), see rnd/0.5.x/verify-tls-posture.sh.
+ADR-045) is DONE and wire-validated, see tls12-plan.md. The TLS posture is verified on-box
+(testssl), see rnd/0.5.x/verify-tls-posture.sh.
 
 ## P0 remaining (live handshake works, src + receive side next)
 
@@ -130,7 +130,7 @@ hsts_max_age_s: u32 = 0,                    // RFC 6797 max-age in SECONDS (not 
 HSTS policy: `hsts_max_age_s` is the listener default, emitted by the response helper on https
 responses when > 0 (the same mechanism that emits `Date`), and the handler may OVERRIDE it
 per-response (different max-age, or suppress). Not silent auto-inject, a config default with a
-handler escape hatch. Seconds, since RFC 6797 max-age is seconds (15552000 = 180d SSL Labs A+
+handler escape hatch. Seconds, since RFC 6797 max-age is seconds (15552000 = 180d common
 minimum, 31536000 = 1y recommended).
 
 ### Example naming: examples/tls/tls_<engine>_basic.zig
@@ -155,8 +155,8 @@ First file is `tls_http1_basic.zig`:
 
 Registration: create `examples/tls/` + `examples/tls/certs/` (ECDSA PEM + README), register in
 zix-build-examples.zig, add tests/runner/tls_http1_basic_runner.zig (openssl + curl asserting
-handshake + 200 + HSTS), add a row in zix-build-test_runner.zig with port 9060. A+ note: the
-fixture is self-signed (SSL Labs needs a CA cert + public host), testssl.sh is the offline grade.
+handshake + 200 + HSTS), add a row in zix-build-test_runner.zig with port 9060. Posture note: the
+fixture is self-signed (an online scan needs a CA cert + public host), testssl.sh is the offline check.
 
 ## Oracle strategy
 
@@ -166,14 +166,14 @@ fixture is self-signed (SSL Labs needs a CA cert + public host), testssl.sh is t
 - Live interop: `openssl s_client` (full TLS 1.3), `curl` (ALPN h2 / http/1.1 negotiation),
   and the std `crypto.tls.Client` as an independent Zig peer.
 - Posture / adversarial (fetch when needed): testssl.sh, sslyze, nmap `ssl-enum-ciphers`,
-  tlsfuzzer, and SSL Labs online for the A+ grade.
+  tlsfuzzer, and an online TLS posture scan when needed.
 - Driver: `rnd/0.5.x/tls-conformance.sh` runs the deterministic gate on both toolchains now
   and activates the interop gate once an https server binary exists.
 
 ## Cert fixtures
 
 `rnd/0.5.x/tls-certs/`, self-signed, `CN=localhost` + SAN `DNS:localhost,IP:127.0.0.1`,
-10-year validity. ECDSA P-256 (`ecdsa_p256_*.pem`) is the conformance + A+ default. Ed25519
+10-year validity. ECDSA P-256 (`ecdsa_p256_*.pem`) is the conformance default. Ed25519
 (`ed25519_*.pem`) is the interop second algorithm. No RSA fixture (optional, off the path).
 
 ## Perf / memory

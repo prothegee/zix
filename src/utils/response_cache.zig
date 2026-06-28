@@ -159,6 +159,21 @@ pub fn hashKey(method: []const u8, path: []const u8, query: []const u8) u64 {
     return if (digest == 0) 1 else digest;
 }
 
+/// Like hashKey, but folds the content-encoding token into the key so the compressed and identity
+/// representations of one resource occupy distinct cache slots (the per-(key, encoding) cache). A
+/// NUL separator keeps the encoding from colliding across the path / query boundary.
+pub fn hashKeyEncoded(method: []const u8, path: []const u8, query: []const u8, encoding: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(method);
+    hasher.update(path);
+    hasher.update(query);
+    hasher.update("\x00");
+    hasher.update(encoding);
+
+    const digest = hasher.final();
+    return if (digest == 0) 1 else digest;
+}
+
 /// Coarse monotonic milliseconds for TTL. CLOCK_MONOTONIC_COARSE is served from
 /// the vDSO without a syscall, and millisecond resolution is enough for TTL.
 pub fn nowMillis() u64 {
@@ -245,4 +260,14 @@ test "zix response cache: max_entries rounded down to power of two" {
 test "zix response cache: hashKey separates by query" {
     try std.testing.expect(hashKey("GET", "/p", "a=1") != hashKey("GET", "/p", "a=2"));
     try std.testing.expect(hashKey("GET", "/p", "") != hashKey("POST", "/p", ""));
+}
+
+test "zix response cache: hashKeyEncoded separates by encoding and from identity" {
+    const gz = hashKeyEncoded("GET", "/json", "", "gzip");
+    const br = hashKeyEncoded("GET", "/json", "", "br");
+    const ident = hashKey("GET", "/json", "");
+
+    try std.testing.expect(gz != br);
+    try std.testing.expect(gz != ident);
+    try std.testing.expect(hashKeyEncoded("GET", "/json", "", "gzip") == gz); // stable
 }
