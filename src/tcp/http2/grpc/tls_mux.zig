@@ -1,7 +1,7 @@
 //! zix grpc https serve path, multiplexed (gRPC over TLS 1.3, RFC 8446 + 7540).
 //!
 //! What:
-//! - The gRPC twin of ../tls_epoll.zig: one SO_REUSEPORT listener + epoll instance per worker, each
+//! - The gRPC twin of ../tls_mux.zig: one SO_REUSEPORT listener + epoll instance per worker, each
 //!   connection terminating TLS in place via a resumable tls_session.Session (no socketpair, no thread
 //!   per connection). recv ciphertext -> session decrypts -> the resumable gRPC h2 mux
 //!   (grpcMuxProcessRing) consumes plaintext -> its staged reply is encrypted back into TLS records
@@ -61,7 +61,7 @@ const ConnTable = struct {
 
     fn deinit(self: *ConnTable) void {
         for (self.slots) |maybe| {
-            if (maybe) |c| freeConn(c);
+            if (maybe) |conn| freeConn(conn);
         }
         slab.unmapSlots(self.slots);
     }
@@ -73,22 +73,22 @@ const ConnTable = struct {
         return self.slots[idx];
     }
 
-    fn put(self: *ConnTable, c: *TlsConn) void {
-        self.slots[@intCast(c.fd)] = c;
+    fn put(self: *ConnTable, conn: *TlsConn) void {
+        self.slots[@intCast(conn.fd)] = conn;
     }
 
     fn drop(self: *ConnTable, fd: posix.fd_t) void {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return;
-        if (self.slots[idx]) |c| freeConn(c);
+        if (self.slots[idx]) |conn| freeConn(conn);
         self.slots[idx] = null;
     }
 };
 
-fn freeConn(c: *TlsConn) void {
-    if (c.grpc) |g| g.deinit();
-    if (c.wbuf.len > 0) allocator.free(c.wbuf);
-    allocator.destroy(c);
+fn freeConn(conn: *TlsConn) void {
+    if (conn.grpc) |grpc_conn| grpc_conn.deinit();
+    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
+    allocator.destroy(conn);
 }
 
 fn setNonBlock(fd: posix.fd_t) void {
@@ -108,15 +108,15 @@ fn armOut(epfd: posix.fd_t, fd: posix.fd_t, on: bool) void {
 /// TLS records must reach the peer in order (the AEAD nonce is the record sequence number). If
 /// ciphertext is already staged, append rather than write directly, or a later record would overtake
 /// the staged one on the wire and break decryption.
-fn sendRaw(c: *TlsConn, bytes: []const u8) bool {
-    if (c.wlen > c.woff) {
-        stageWrite(c, bytes);
+fn sendRaw(conn: *TlsConn, bytes: []const u8) bool {
+    if (conn.wlen > conn.woff) {
+        stageWrite(conn, bytes);
         return true;
     }
 
     var off: usize = 0;
     while (off < bytes.len) {
-        const rc = linux.write(c.fd, bytes[off..].ptr, bytes.len - off);
+        const rc = linux.write(conn.fd, bytes[off..].ptr, bytes.len - off);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
@@ -124,7 +124,7 @@ fn sendRaw(c: *TlsConn, bytes: []const u8) bool {
             },
             .INTR => continue,
             .AGAIN => {
-                stageWrite(c, bytes[off..]);
+                stageWrite(conn, bytes[off..]);
                 return true;
             },
             else => return false,
@@ -134,79 +134,79 @@ fn sendRaw(c: *TlsConn, bytes: []const u8) bool {
     return true;
 }
 
-fn stageWrite(c: *TlsConn, bytes: []const u8) void {
-    const pending = c.wlen - c.woff;
+fn stageWrite(conn: *TlsConn, bytes: []const u8) void {
+    const pending = conn.wlen - conn.woff;
 
     // Room already at the tail: append in place.
-    if (c.wbuf.len - c.wlen >= bytes.len) {
-        @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
-        c.wlen += bytes.len;
-        c.want_out = true;
+    if (conn.wbuf.len - conn.wlen >= bytes.len) {
+        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
+        conn.wlen += bytes.len;
+        conn.want_out = true;
         return;
     }
 
     const need = pending + bytes.len;
 
     // Compaction alone makes room: slide the live bytes to the front.
-    if (c.wbuf.len >= need) {
-        std.mem.copyForwards(u8, c.wbuf[0..pending], c.wbuf[c.woff..c.wlen]);
-        c.woff = 0;
-        c.wlen = pending;
+    if (conn.wbuf.len >= need) {
+        std.mem.copyForwards(u8, conn.wbuf[0..pending], conn.wbuf[conn.woff..conn.wlen]);
+        conn.woff = 0;
+        conn.wlen = pending;
 
-        @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
-        c.wlen += bytes.len;
-        c.want_out = true;
+        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
+        conn.wlen += bytes.len;
+        conn.want_out = true;
         return;
     }
 
     // Grow: allocate a larger buffer and move the live bytes to its front.
-    var new_cap: usize = if (c.wbuf.len == 0) c.opts.tls_write_buf_initial else c.wbuf.len * 2;
+    var new_cap: usize = if (conn.wbuf.len == 0) conn.opts.tls_write_buf_initial else conn.wbuf.len * 2;
     while (new_cap < need) new_cap *= 2;
 
     const grown = allocator.alloc(u8, new_cap) catch {
-        c.wclose = true;
+        conn.wclose = true;
         return;
     };
-    @memcpy(grown[0..pending], c.wbuf[c.woff..c.wlen]);
-    if (c.wbuf.len > 0) allocator.free(c.wbuf);
-    c.wbuf = grown;
-    c.woff = 0;
-    c.wlen = pending;
+    @memcpy(grown[0..pending], conn.wbuf[conn.woff..conn.wlen]);
+    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
+    conn.wbuf = grown;
+    conn.woff = 0;
+    conn.wlen = pending;
 
-    @memcpy(c.wbuf[c.wlen..][0..bytes.len], bytes);
-    c.wlen += bytes.len;
-    c.want_out = true;
+    @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
+    conn.wlen += bytes.len;
+    conn.want_out = true;
 }
 
-fn flushPlain(c: *TlsConn) void {
-    if (c.plain_len == 0) return;
+fn flushPlain(conn: *TlsConn) void {
+    if (conn.plain_len == 0) return;
 
     var sealed: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
-    const ct = c.tls.encrypt(c.plain[0..c.plain_len], &sealed);
-    c.plain_len = 0;
-    if (!sendRaw(c, ct)) c.wclose = true;
+    const ct = conn.tls.encrypt(conn.plain[0..conn.plain_len], &sealed);
+    conn.plain_len = 0;
+    if (!sendRaw(conn, ct)) conn.wclose = true;
 }
 
 fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
-    const c: *TlsConn = @ptrCast(@alignCast(ctx));
+    const conn: *TlsConn = @ptrCast(@alignCast(ctx));
     var rest = bytes;
     while (rest.len > 0) {
-        if (c.plain_len == c.plain.len) flushPlain(c);
+        if (conn.plain_len == conn.plain.len) flushPlain(conn);
 
-        const n = @min(rest.len, c.plain.len - c.plain_len);
-        @memcpy(c.plain[c.plain_len..][0..n], rest[0..n]);
-        c.plain_len += n;
+        const n = @min(rest.len, conn.plain.len - conn.plain_len);
+        @memcpy(conn.plain[conn.plain_len..][0..n], rest[0..n]);
+        conn.plain_len += n;
         rest = rest[n..];
     }
 }
 
-fn onReadable(comptime routes: []const Route, c: *TlsConn) bool {
+fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
     var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
     var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
 
     while (true) {
-        const rc = linux.read(c.fd, &cipher, cipher.len);
+        const rc = linux.read(conn.fd, &cipher, cipher.len);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
@@ -217,60 +217,60 @@ fn onReadable(comptime routes: []const Route, c: *TlsConn) bool {
         }
 
         const got = cipher[0..@intCast(rc)];
-        const r = c.tls.feed(got, &to_send, &plain_in);
+        const r = conn.tls.feed(got, &to_send, &plain_in);
 
-        if (r.to_send.len > 0 and !sendRaw(c, r.to_send)) return false;
+        if (r.to_send.len > 0 and !sendRaw(conn, r.to_send)) return false;
 
         if (r.outcome == .established) {
-            if (!c.tls.alpnIsH2()) return false;
-            c.grpc = core.GrpcMuxConn.init(c.fd, c.opts) orelse return false;
+            if (!conn.tls.alpnIsH2()) return false;
+            conn.grpc = core.GrpcMuxConn.init(conn.fd, conn.opts) orelse return false;
         }
 
         if (r.outcome == .close) {
-            c.wclose = true;
-            return c.want_out;
+            conn.wclose = true;
+            return conn.want_out;
         }
 
         if (r.plaintext.len > 0) {
-            const g = c.grpc orelse return false;
-            if (!feedMux(routes, c, g, r.plaintext)) return false;
+            const grpc_conn = conn.grpc orelse return false;
+            if (!feedMux(routes, conn, grpc_conn, r.plaintext)) return false;
         }
     }
 }
 
-fn feedMux(comptime routes: []const Route, c: *TlsConn, g: *core.GrpcMuxConn, plaintext: []const u8) bool {
-    if (g.rstart == g.rend) {
-        g.rstart = 0;
-        g.rend = 0;
-    } else if (g.rend == g.rbuf.len) {
-        const keep = g.rend - g.rstart;
-        std.mem.copyForwards(u8, g.rbuf[0..keep], g.rbuf[g.rstart..g.rend]);
-        g.rstart = 0;
-        g.rend = keep;
+fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.GrpcMuxConn, plaintext: []const u8) bool {
+    if (grpc_conn.rstart == grpc_conn.rend) {
+        grpc_conn.rstart = 0;
+        grpc_conn.rend = 0;
+    } else if (grpc_conn.rend == grpc_conn.rbuf.len) {
+        const keep = grpc_conn.rend - grpc_conn.rstart;
+        std.mem.copyForwards(u8, grpc_conn.rbuf[0..keep], grpc_conn.rbuf[grpc_conn.rstart..grpc_conn.rend]);
+        grpc_conn.rstart = 0;
+        grpc_conn.rend = keep;
     }
 
-    if (plaintext.len > g.rbuf.len - g.rend) return false;
-    @memcpy(g.rbuf[g.rend..][0..plaintext.len], plaintext);
-    g.rend += plaintext.len;
+    if (plaintext.len > grpc_conn.rbuf.len - grpc_conn.rend) return false;
+    @memcpy(grpc_conn.rbuf[grpc_conn.rend..][0..plaintext.len], plaintext);
+    grpc_conn.rend += plaintext.len;
 
     frame.write_hook = hookWrite;
-    frame.write_hook_ctx = c;
-    const outcome = core.grpcMuxProcessRing(routes, g);
-    g.flushStage(); // staged reply -> frame.fdWriteAll -> hook -> encrypt
-    flushPlain(c);
+    frame.write_hook_ctx = conn;
+    const outcome = core.grpcMuxProcessRing(routes, grpc_conn);
+    grpc_conn.flushStage(); // staged reply -> frame.fdWriteAll -> hook -> encrypt
+    flushPlain(conn);
     frame.write_hook = null;
     frame.write_hook_ctx = null;
 
     return outcome != .close;
 }
 
-fn onWritable(epfd: posix.fd_t, c: *TlsConn) bool {
-    while (c.woff < c.wlen) {
-        const rc = linux.write(c.fd, c.wbuf[c.woff..].ptr, c.wlen - c.woff);
+fn onWritable(epfd: posix.fd_t, conn: *TlsConn) bool {
+    while (conn.woff < conn.wlen) {
+        const rc = linux.write(conn.fd, conn.wbuf[conn.woff..].ptr, conn.wlen - conn.woff);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
-                c.woff += @intCast(rc);
+                conn.woff += @intCast(rc);
             },
             .INTR => continue,
             .AGAIN => return true,
@@ -280,12 +280,12 @@ fn onWritable(epfd: posix.fd_t, c: *TlsConn) bool {
 
     // Drained. Keep the buffer for reuse (freeConn releases it at close) rather than free-here +
     // realloc-next-stage, which churns the shared allocator on the hot path under backpressure.
-    c.woff = 0;
-    c.wlen = 0;
-    c.want_out = false;
-    armOut(epfd, c.fd, false);
+    conn.woff = 0;
+    conn.wlen = 0;
+    conn.want_out = false;
+    armOut(epfd, conn.fd, false);
 
-    return !c.wclose;
+    return !conn.wclose;
 }
 
 fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.GrpcServeOpts) void {
@@ -307,12 +307,12 @@ fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: 
             continue;
         }
 
-        const c = allocator.create(TlsConn) catch {
+        const conn = allocator.create(TlsConn) catch {
             _ = linux.close(fd);
             continue;
         };
-        c.* = .{ .fd = fd, .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn), .opts = opts };
-        table.put(c);
+        conn.* = .{ .fd = fd, .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn), .opts = opts };
+        table.put(conn);
 
         var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .fd = fd } };
         if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev)) != .SUCCESS) {
@@ -329,14 +329,19 @@ const WorkerCtx = struct {
     kernel_backlog: u31,
     ctx: *const Tls.Context,
     opts: core.GrpcServeOpts,
+    worker_id: usize,
 };
 
 fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
     return struct {
-        fn run(w: WorkerCtx) void {
-            const addr = std.Io.net.IpAddress.resolve(w.io, w.ip, w.port) catch return;
-            var srv = addr.listen(w.io, .{ .reuse_address = true, .kernel_backlog = w.kernel_backlog }) catch return;
-            defer srv.deinit(w.io);
+        fn run(worker: WorkerCtx) void {
+            // Pin to the worker's CPU slot (cgroup-mask aware) so a pinned cpuset does not
+            // oversubscribe one core under a handshake storm (mirrors http1's tls_mux).
+            common.pinToCpu(worker.worker_id);
+
+            const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
+            var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
+            defer srv.deinit(worker.io);
             const listener_fd = srv.socket.handle;
             setNonBlock(listener_fd);
 
@@ -362,20 +367,20 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
 
                 for (events[0..@intCast(wait_rc)]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, w.ctx, w.opts);
+                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts);
                         continue;
                     }
 
-                    const c = table.get(ev.data.fd) orelse continue;
+                    const conn = table.get(ev.data.fd) orelse continue;
                     var keep = true;
 
                     if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
                         keep = false;
                     } else {
-                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = onWritable(epfd, c);
-                        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(routes, c);
-                        if (keep and c.want_out) armOut(epfd, c.fd, true);
-                        if (keep and c.wclose and !c.want_out) keep = false;
+                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = onWritable(epfd, conn);
+                        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(routes, conn);
+                        if (keep and conn.want_out) armOut(epfd, conn.fd, true);
+                        if (keep and conn.wclose and !conn.want_out) keep = false;
                     }
 
                     if (!keep) {
@@ -390,9 +395,9 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
 }
 
 /// Listen and serve gRPC over TLS, multiplexed across one epoll worker per core.
-pub fn runTlsEpoll(comptime routes: []const Route, config: GrpcServerConfig) !void {
+pub fn runTlsMux(comptime routes: []const Route, config: GrpcServerConfig) !void {
     const ctx = config.tls.?;
-    const cpu = try std.Thread.getCpuCount();
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (config.pool_size == 0) cpu else config.pool_size;
     const opts = common.serveOpts(config);
 
@@ -402,7 +407,7 @@ pub fn runTlsEpoll(comptime routes: []const Route, config: GrpcServerConfig) !vo
     defer allocator.free(workers);
 
     const wf = workerFn(routes);
-    for (workers) |*t|
+    for (workers, 0..) |*t, i|
         t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, wf, .{WorkerCtx{
             .io = config.io,
             .ip = config.ip,
@@ -410,6 +415,7 @@ pub fn runTlsEpoll(comptime routes: []const Route, config: GrpcServerConfig) !vo
             .kernel_backlog = config.kernel_backlog,
             .ctx = ctx,
             .opts = opts,
+            .worker_id = i,
         }});
 
     for (workers) |t| t.join();

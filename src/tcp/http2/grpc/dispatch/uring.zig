@@ -66,6 +66,8 @@ const UringMuxCtx = struct {
     port: u16,
     kernel_backlog: u31,
     opts: core.GrpcServeOpts,
+    worker_id: usize,
+    busy_poll_us: u32,
 };
 
 /// Build a concrete io_uring mux worker entry with the routes baked in at compile
@@ -78,6 +80,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             listener_fd: std.posix.fd_t,
             gen_counter: u24,
             opts: core.GrpcServeOpts,
+            busy_poll_us: u32,
 
             const Self = @This();
             const allocator = std.heap.smp_allocator;
@@ -200,6 +203,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                 }
 
                 setNoDelay(conn_fd);
+                common.setBusyPoll(conn_fd, self.busy_poll_us);
 
                 const c = core.GrpcMuxConn.init(conn_fd, self.opts) orelse {
                     _ = linux.close(conn_fd);
@@ -302,6 +306,9 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
         };
 
         fn run(ctx: UringMuxCtx) void {
+            // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
+            common.pinToCpu(ctx.worker_id);
+
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var srv = addr.listen(ctx.io, .{
                 .reuse_address = true,
@@ -318,6 +325,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .opts = ctx.opts,
+                .busy_poll_us = ctx.busy_poll_us,
             };
             worker.ring = initUringRing() catch return;
             defer worker.deinit();
@@ -368,7 +376,8 @@ pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     probe.deinit();
 
     const io = cfg.io;
-    const cpu = try std.Thread.getCpuCount();
+    // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
     const opts = common.serveOptsWithCache(cfg);
 
@@ -378,7 +387,7 @@ pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     defer std.heap.smp_allocator.free(workers);
 
     const worker_fn = uringMuxWorkerFn(routes);
-    for (workers) |*t|
+    for (workers, 0..) |*t, idx|
         t.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
@@ -388,6 +397,8 @@ pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .opts = opts,
+                .worker_id = idx,
+                .busy_poll_us = cfg.busy_poll_us,
             }},
         );
 

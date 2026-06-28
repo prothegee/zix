@@ -93,7 +93,7 @@ pub const GrpcContext = struct {
     /// Null on the streaming path, which writes each frame directly under _write_mutex.
     _out: ?*ReplyStage = null,
     /// When true, sendMessage compresses DATA payloads with gzip and emits grpc-encoding: gzip
-    /// in the initial HEADERS frame. Set at dispatch when opts.compress_gzip is enabled and
+    /// in the initial HEADERS frame. Set at dispatch when opts.compress is enabled and
     /// the client advertised grpc-accept-encoding: gzip.
     _resp_gzip: bool = false,
 
@@ -409,8 +409,8 @@ pub const GrpcServeOpts = struct {
     /// Null falls back to std.Thread.spawn for compatibility with standalone serveConn callers.
     io: ?std.Io = null,
     /// Enable gzip response compression. When true, compresses DATA frames for clients
-    /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress_gzip.
-    compress_gzip: bool = false,
+    /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress.
+    compress: bool = false,
     /// Enable the per-worker unary response cache (ADR-036). Passed from
     /// GrpcServerConfig.response_cache. Active under .EPOLL in this release.
     response_cache: bool = false,
@@ -603,7 +603,7 @@ fn DispatchTask(comptime routes: []const Route) type {
                 ._grpc_status = 0,
                 .deadline_ns = computeDeadline(self.opts.handler_timeout_ms, self.headers[0..self.header_count]),
                 ._write_mutex = conn_mutex_ptr,
-                ._resp_gzip = self.opts.compress_gzip and headersAcceptGzip(self.headers[0..self.header_count]),
+                ._resp_gzip = self.opts.compress and headersAcceptGzip(self.headers[0..self.header_count]),
             };
             Router(routes).dispatch(path, self.headers[0..self.header_count], &ctx);
 
@@ -627,7 +627,7 @@ fn DispatchTask(comptime routes: []const Route) type {
 /// Falls back to an inline INTERNAL error if allocation or spawn fails.
 fn spawnGrpcStream(
     comptime routes: []const Route,
-    s: *Stream,
+    stream: *Stream,
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
     conn_mutex: *ConnMutex,
@@ -636,7 +636,7 @@ fn spawnGrpcStream(
     const task = std.heap.smp_allocator.create(Task) catch {
         var ctx = GrpcContext{
             .fd = fd,
-            .stream_id = s.id,
+            .stream_id = stream.id,
             ._body = &.{},
             ._pos = 0,
             ._hdr_sent = false,
@@ -649,31 +649,31 @@ fn spawnGrpcStream(
     };
 
     task.fd = fd;
-    task.stream_id = s.id;
-    task.header_count = s.header_count;
-    task.headers = s.headers;
+    task.stream_id = stream.id;
+    task.header_count = stream.header_count;
+    task.headers = stream.headers;
 
-    // s.header_scratch is a slice into the connection backing buffer. Copy its used range
-    // into the task's owned array so header name/value pointers can be rebased below.
+    // stream.header_scratch is a slice into the connection backing buffer. Copy its used range
+    // into the task'stream owned array so header name/value pointers can be rebased below.
     // Requires opts.max_header_scratch <= task.header_scratch.len (4096).
-    const scratch_n = @min(task.header_scratch.len, s.header_scratch.len);
-    @memcpy(task.header_scratch[0..scratch_n], s.header_scratch[0..scratch_n]);
+    const scratch_n = @min(task.header_scratch.len, stream.header_scratch.len);
+    @memcpy(task.header_scratch[0..scratch_n], stream.header_scratch[0..scratch_n]);
 
-    if (headersHaveGzipEncoding(s.headers[0..s.header_count])) {
+    if (headersHaveGzipEncoding(stream.headers[0..stream.header_count])) {
         var decomp_buf: ?[]u8 = null;
-        const eff = maybeDecompressBody(s.body[0..s.body_len], s.headers[0..s.header_count], opts.max_body, &decomp_buf);
+        const eff = maybeDecompressBody(stream.body[0..stream.body_len], stream.headers[0..stream.header_count], opts.max_body, &decomp_buf);
         defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
         task.body_len = @min(eff.len, task.body.len);
         @memcpy(task.body[0..task.body_len], eff[0..task.body_len]);
     } else {
-        task.body_len = s.body_len;
-        @memcpy(task.body[0..s.body_len], s.body[0..s.body_len]);
+        task.body_len = stream.body_len;
+        @memcpy(task.body[0..stream.body_len], stream.body[0..stream.body_len]);
     }
 
     task.opts = opts;
 
-    const old_base = @intFromPtr(&s.header_scratch[0]);
-    const old_end = old_base + s.header_scratch.len;
+    const old_base = @intFromPtr(&stream.header_scratch[0]);
+    const old_end = old_base + stream.header_scratch.len;
     for (task.headers[0..task.header_count]) |*hdr| {
         const name_ptr = @intFromPtr(hdr.name.ptr);
         if (name_ptr >= old_base and name_ptr < old_end) {
@@ -699,7 +699,7 @@ fn spawnGrpcStream(
             std.heap.smp_allocator.destroy(task);
             var ctx = GrpcContext{
                 .fd = fd,
-                .stream_id = s.id,
+                .stream_id = stream.id,
                 ._body = &.{},
                 ._pos = 0,
                 ._hdr_sent = false,
@@ -748,7 +748,7 @@ fn dispatchGrpcInline(
         &decomp_buf,
     );
 
-    const resp_gzip = opts.compress_gzip and headersAcceptGzip(stream.headers[0..stream.header_count]);
+    const resp_gzip = opts.compress and headersAcceptGzip(stream.headers[0..stream.header_count]);
 
     // The reply (HEADERS + DATA + trailer) is staged and flushed in one write().
     // Hold the connection write lock across the whole reply only when a streaming
@@ -1459,7 +1459,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
         &decomp_buf,
     );
 
-    const resp_gzip = conn.opts.compress_gzip and headersAcceptGzip(stream.headers[0..stream.header_count]);
+    const resp_gzip = conn.opts.compress and headersAcceptGzip(stream.headers[0..stream.header_count]);
 
     var ctx = GrpcContext{
         .fd = conn.fd,
