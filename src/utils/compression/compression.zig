@@ -65,7 +65,7 @@ pub const Encoding = enum {
 /// preferences against the server-producible set.
 ///
 /// Note:
-/// - Policy is compression-leaning (the common server behaviour, matching nginx): the
+/// - Policy is compression-leaning (the common server behaviour): the
 ///   best producible coding is chosen whenever it is acceptable (q greater than 0).
 ///   identity only wins when the client lists it EXPLICITLY with a strictly higher q.
 ///   An unlisted or wildcard-matched identity does not suppress compression.

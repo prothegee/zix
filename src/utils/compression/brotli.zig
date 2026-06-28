@@ -3,7 +3,7 @@
 //! Note:
 //! - std.compress has flate / zstd / lzma / xz but NO brotli, so the `br` content coding
 //!   is implemented here from RFC 7932 (the format, the Appendix A static dictionary, and
-//!   the Appendix B word transforms). The decoder is complete; the encoder targets a
+//!   the Appendix B word transforms). The decoder is complete. The encoder targets a
 //!   modest, response-friendly ratio and always falls back to a never-expand store.
 //! - Transport-agnostic: it compresses and decompresses bytes and knows nothing about
 //!   HTTP. The Accept-Encoding negotiation and the Content-Encoding / Vary headers live in
@@ -259,36 +259,36 @@ fn fermentAll(word: []u8) void {
 
 /// Apply a transform to a base word, writing prefix + T(word) + suffix into out (sec 8).
 /// Returns the number of bytes written.
-fn applyTransform(t: Transform, base: []const u8, out: []u8) usize {
+fn applyTransform(transform: Transform, base: []const u8, out: []u8) usize {
     var n: usize = 0;
-    @memcpy(out[n..][0..t.prefix.len], t.prefix);
-    n += t.prefix.len;
+    @memcpy(out[n..][0..transform.prefix.len], transform.prefix);
+    n += transform.prefix.len;
 
     var word: [38]u8 = undefined;
     @memcpy(word[0..base.len], base);
 
     var mid_start: usize = 0;
     var mid_len: usize = base.len;
-    if (t.op == FF) {
+    if (transform.op == FF) {
         fermentFirst(word[0..mid_len]);
-    } else if (t.op == FA) {
+    } else if (transform.op == FA) {
         fermentAll(word[0..mid_len]);
-    } else if (t.op >= OF1 and t.op <= OF9) {
-        const k = t.op - 2; // OmitFirst1 is op 3
+    } else if (transform.op >= OF1 and transform.op <= OF9) {
+        const k = transform.op - 2; // OmitFirst1 is op 3
         if (k >= mid_len) mid_len = 0 else {
             mid_start = k;
             mid_len -= k;
         }
-    } else if (t.op >= OL1 and t.op <= OL9) {
-        const k = t.op - 11; // OmitLast1 is op 12
+    } else if (transform.op >= OL1 and transform.op <= OL9) {
+        const k = transform.op - 11; // OmitLast1 is op 12
         if (k >= mid_len) mid_len = 0 else mid_len -= k;
     }
 
     @memcpy(out[n..][0..mid_len], word[mid_start .. mid_start + mid_len]);
     n += mid_len;
 
-    @memcpy(out[n..][0..t.suffix.len], t.suffix);
-    n += t.suffix.len;
+    @memcpy(out[n..][0..transform.suffix.len], transform.suffix);
+    n += transform.suffix.len;
 
     return n;
 }
@@ -633,11 +633,11 @@ fn readRleMax(br: *BitReader) !u32 {
 
 /// The inverse move-to-front transform (sec 7.3), mapping the run-length-decoded values
 /// back to prefix-code indexes in place.
-fn inverseMoveToFront(v: []u8) void {
+fn inverseMoveToFront(values: []u8) void {
     var mtf: [256]u8 = undefined;
     for (&mtf, 0..) |*slot, i| slot.* = @intCast(i);
 
-    for (v) |*vi| {
+    for (values) |*vi| {
         const index = vi.*;
         const value = mtf[index];
         vi.* = value;
@@ -910,10 +910,10 @@ const Decoder = struct {
     p1: u8 = 0,
     p2: u8 = 0,
 
-    fn pushByte(self: *Decoder, b: u8) !void {
-        try self.out.append(self.allocator, b);
+    fn pushByte(self: *Decoder, byte: u8) !void {
+        try self.out.append(self.allocator, byte);
         self.p2 = self.p1;
-        self.p1 = b;
+        self.p1 = byte;
     }
 
     /// Decode the whole stream (sec 10), returning the owned uncompressed bytes.
@@ -1086,11 +1086,15 @@ const Decoder = struct {
 // --------------------------------------------------------- //
 // Encoder: bit writer and canonical codes (sec 1.5.1, sec 3.2)
 
-/// Errors the encoder can raise. InputTooLarge guards the single-meta-block compressed
-/// path; the store path splits instead, so it is the compressed encoder's limit.
+/// Errors the encoder can raise. InvalidWindowBits and InputTooLarge are brotli-specific
+/// validation. BufferTooSmall and OutOfMemory are shared with flate.EncodeError, so the
+/// into-buffer compress (compressBrotli) reports the same overflow error as compressGzip.
+/// InputTooLarge guards the single-meta-block compressed path. The store path splits instead,
+/// so it is the compressed encoder's limit.
 pub const EncodeError = error{
     InvalidWindowBits,
     InputTooLarge,
+    BufferTooSmall,
     OutOfMemory,
 };
 
@@ -1489,8 +1493,8 @@ fn huffmanLengths(allocator: std.mem.Allocator, freq: []const u32, lengths_out: 
             }
         }
         std.mem.sort(usize, order, freq, struct {
-            fn lt(f: []const u32, a: usize, b: usize) bool {
-                return f[a] < f[b];
+            fn lt(freqs: []const u32, idx_a: usize, idx_b: usize) bool {
+                return freqs[idx_a] < freqs[idx_b];
             }
         }.lt);
     }
@@ -1746,7 +1750,7 @@ fn parseWithDict(allocator: std.mem.Allocator, input: []const u8, wbits: u6, din
         var dict_index: u32 = 0;
         const dict_len = if (params.use_dict) dindex.longestMatch(input, i, &dict_index) else 0;
 
-        // a local back-reference is cheap; a dictionary reference costs a large distance, so
+        // a local back-reference is cheap. A dictionary reference costs a large distance, so
         // only reach for the dictionary when there is no usable local match (the gap case).
         const use_local = local_len >= MIN_MATCH;
         const use_dict = !use_local and dict_len >= MIN_MATCH;
@@ -1846,11 +1850,11 @@ const LitModel = struct {
     /// The literal tree for the byte at input position j. The decoder derives the same
     /// context from its last two emitted bytes, which equal input[j-1] and input[j-2]
     /// because the output so far is exactly the input prefix.
-    fn treeFor(self: *const LitModel, input: []const u8, j: usize) *const TreeCode {
+    fn treeFor(self: *const LitModel, input: []const u8, index: usize) *const TreeCode {
         if (!self.contexts) return &self.flat;
 
-        const c1: u8 = if (j >= 1) input[j - 1] else 0;
-        const c2: u8 = if (j >= 2) input[j - 2] else 0;
+        const c1: u8 = if (index >= 1) input[index - 1] else 0;
+        const c2: u8 = if (index >= 2) input[index - 2] else 0;
         const ctx = literalContextId(self.mode, c1, c2);
 
         return &self.trees[self.cmap[ctx]];
@@ -1859,7 +1863,7 @@ const LitModel = struct {
 
 /// Build the literal coding plan. Without contexts it is one optimal tree over all
 /// literals. With contexts each UTF8 context (sec 7.1) that carries at least
-/// LIT_CONTEXT_THRESHOLD literals gets its own optimal tree; sparser contexts share tree
+/// LIT_CONTEXT_THRESHOLD literals gets its own optimal tree. Sparser contexts share tree
 /// 0. If no context earns a split it degrades to the single flat tree.
 fn buildLitModel(scratch: std.mem.Allocator, input: []const u8, commands: []const Command, contexts: bool) EncodeError!LitModel {
     if (!contexts) {
@@ -1907,7 +1911,7 @@ fn buildLitModel(scratch: std.mem.Allocator, input: []const u8, commands: []cons
     }
 
     if (ntrees == 1) {
-        // no context split earned its keep; fall back to one flat tree over all literals.
+        // no context split earned its keep. Fall back to one flat tree over all literals.
         return .{ .contexts = false, .flat = try buildOptimalTree(scratch, &tree_freq[0], LITERAL_ALPHABET) };
     }
 
@@ -2024,7 +2028,7 @@ fn encodeCompressedAlloc(allocator: std.mem.Allocator, input: []const u8, wbits:
     return bw.toOwnedSlice(allocator);
 }
 
-/// Map a quality 0..11 to encoder effort. q0 is greedy with no dictionary; higher q widens
+/// Map a quality 0..11 to encoder effort. q0 is greedy with no dictionary. Higher q widens
 /// the match search and turns the dictionary on. The chain depth is bounded so the top of
 /// the ladder stays cheap (a response compressor wants a modest level, not q11).
 fn qualityParams(quality: u8) Params {
@@ -2039,18 +2043,29 @@ fn qualityParams(quality: u8) Params {
 }
 
 // --------------------------------------------------------- //
-// Public API (mirrors flate.zig so the compression facade dispatches uniformly)
+// Public API. Mirrors flate.zig's four-function codec shape (a buffer-into and an alloc variant
+// for each direction, plus compressBound), so the compression facade dispatches uniformly and a
+// caller can swap codecs without changing call shape.
 
-/// Errors the decoder surfaces to the caller. Internal format errors collapse to
-/// DecompressFailed; an over-cap output (decompression-bomb guard) is OutputTooLarge.
+/// Errors the decoder surfaces to the caller, identical to flate.DecodeError so both codecs report
+/// the same vocabulary. Internal format errors collapse to DecompressFailed. An over-cap output on
+/// the alloc variant (decompression-bomb guard) is OutputTooLarge. An output that overflows the
+/// caller buffer on decompressBrotli is BufferTooSmall.
 pub const DecodeError = error{
     DecompressFailed,
     OutputTooLarge,
+    BufferTooSmall,
     OutOfMemory,
 };
 
 /// Upper bound on the compressed output for a given input length. The store fallback
 /// guarantees the output never exceeds the input plus the per-meta-block framing.
+///
+/// Note:
+/// - Stronger guarantee than flate.compressBound. brotli always also tries a store and keeps the
+///   smaller, so the output never grows past the input plus this small framing. flate has no store
+///   fallback in std, so flate's output can exceed the input on incompressible data and its bound
+///   adds input / 8 to cover that. The two bounds are not interchangeable.
 ///
 /// Param:
 /// input_len - usize (uncompressed byte count)
@@ -2098,7 +2113,7 @@ pub fn compressQualityAlloc(allocator: std.mem.Allocator, data: []const u8, qual
         }
     }
 
-    // a literal context model helps larger text; try it at higher quality and keep it only
+    // a literal context model helps larger text. Try it at higher quality and keep it only
     // when it is smaller, so it never replaces a smaller flat or store result.
     if (quality >= 5) {
         const ctx_variant = try encodeCompressedAlloc(allocator, data, wbits, .{ .max_chain = params.max_chain, .use_dict = params.use_dict, .literal_contexts = true });
@@ -2144,6 +2159,38 @@ pub fn compressBrotliAlloc(allocator: std.mem.Allocator, data: []const u8, level
     return compressQualityAlloc(allocator, data, quality, default_wbits);
 }
 
+/// Compress data into a caller-provided buffer at the shared Level, returning the byte count
+/// written. The buffer-into counterpart to compressBrotliAlloc, mirroring flate.compressGzip so the
+/// codec layer exposes the same shape for both codecs.
+///
+/// Note:
+/// - Unlike flate.compressGzip, brotli cannot stream straight into out_buf: the encoder runs a
+///   multi-variant search (compressed / store / dictionary / context) and keeps the smallest, which
+///   is allocate-then-pick. So this compresses through compressBrotliAlloc and copies the result in,
+///   still taking an allocator for the transient codec state, freed before return.
+/// - out_buf must be at least compressBound(data.len) to be sure any input fits.
+///
+/// Param:
+/// allocator - std.mem.Allocator (transient codec scratch, freed before return)
+/// data - []const u8 (bytes to compress)
+/// out_buf - []u8 (destination, size via compressBound)
+/// level - Level (effort)
+///
+/// Return:
+/// - usize (compressed byte count written into out_buf)
+/// - error.BufferTooSmall if out_buf cannot hold the result
+/// - error.InvalidWindowBits / error.InputTooLarge / error.OutOfMemory
+pub fn compressBrotli(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) EncodeError!usize {
+    const stream = try compressBrotliAlloc(allocator, data, level);
+    defer allocator.free(stream);
+
+    if (out_buf.len < stream.len) return error.BufferTooSmall;
+
+    @memcpy(out_buf[0..stream.len], stream);
+
+    return stream.len;
+}
+
 /// Decompress a brotli stream into a freshly allocated buffer, capped at max_out (a
 /// decompression-bomb guard). Caller owns the returned slice.
 ///
@@ -2167,6 +2214,37 @@ pub fn decompressBrotliAlloc(allocator: std.mem.Allocator, compressed: []const u
         error.OutputTooLarge => error.OutputTooLarge,
         else => error.DecompressFailed,
     };
+}
+
+/// Decompress a brotli stream into a caller-provided buffer, returning the inflated byte count.
+/// The buffer-into counterpart to decompressBrotliAlloc, mirroring flate.decompressGzip.
+///
+/// Note:
+/// - flate.decompressGzip takes no allocator (std streams inflate without a history window). brotli's
+///   decoder needs heap (the output ring it back-references plus the Huffman tables), so this takes
+///   one. Output beyond out_buf.len surfaces as error.BufferTooSmall, matching flate's caller-buffer
+///   semantics, not OutputTooLarge (which is the alloc variant's decompression-bomb guard).
+///
+/// Param:
+/// allocator - std.mem.Allocator (transient codec scratch, freed before return)
+/// compressed - []const u8 (brotli bytes)
+/// out_buf - []u8 (destination for the inflated bytes)
+///
+/// Return:
+/// - usize (inflated byte count written into out_buf)
+/// - error.BufferTooSmall if the inflated result does not fit out_buf
+/// - error.DecompressFailed if the stream is malformed
+/// - error.OutOfMemory
+pub fn decompressBrotli(allocator: std.mem.Allocator, compressed: []const u8, out_buf: []u8) DecodeError!usize {
+    const decoded = decompressBrotliAlloc(allocator, compressed, out_buf.len) catch |err| switch (err) {
+        error.OutputTooLarge => return error.BufferTooSmall,
+        else => return err,
+    };
+    defer allocator.free(decoded);
+
+    @memcpy(out_buf[0..decoded.len], decoded);
+
+    return decoded.len;
 }
 
 // --------------------------------------------------------- //
@@ -2371,4 +2449,152 @@ test "brotli: compressBound holds for compressible and random input" {
     defer testing.allocator.free(stream);
 
     try testing.expect(stream.len <= compressBound(rand.len));
+}
+
+test "brotli: caller-buffer compress then decompress round-trips" {
+    const input = "information about the world and the people in the government, repeated for ratio. " ++
+        "information about the world and the people in the government, repeated for ratio.";
+
+    var comp_buf: [256]u8 = undefined;
+    const written = try compressBrotli(testing.allocator, input, &comp_buf, .DEFAULT);
+    try testing.expect(written > 0 and written <= comp_buf.len);
+
+    var out_buf: [256]u8 = undefined;
+    const inflated = try decompressBrotli(testing.allocator, comp_buf[0..written], &out_buf);
+    try testing.expectEqualSlices(u8, input, out_buf[0..inflated]);
+}
+
+test "brotli: caller-buffer compress never exceeds compressBound" {
+    var input: [2048]u8 = undefined;
+    for (&input, 0..) |*b, i| b.* = @intCast('a' + (i % 16));
+
+    var comp_buf: [compressBound(input.len)]u8 = undefined;
+    const written = try compressBrotli(testing.allocator, &input, &comp_buf, .DEFAULT);
+
+    var out_buf: [2048]u8 = undefined;
+    const inflated = try decompressBrotli(testing.allocator, comp_buf[0..written], &out_buf);
+    try testing.expectEqualSlices(u8, &input, out_buf[0..inflated]);
+}
+
+test "brotli: compressBrotli reports BufferTooSmall on an undersized buffer" {
+    // Random data brotli cannot shrink, so the store fallback is near the input size and overflows
+    // the tiny destination.
+    var input: [4096]u8 = undefined;
+    for (&input, 0..) |*b, i| b.* = @truncate((i *% 2654435761) >> 11);
+
+    var tiny: [8]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, compressBrotli(testing.allocator, &input, &tiny, .DEFAULT));
+}
+
+test "brotli: decompressBrotli reports BufferTooSmall when output exceeds the buffer" {
+    const input = "the quick brown fox jumps over the lazy dog. " ++
+        "the quick brown fox jumps over the lazy dog.";
+
+    const stream = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
+    defer testing.allocator.free(stream);
+
+    var tiny: [4]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, decompressBrotli(testing.allocator, stream, &tiny));
+}
+
+// edge: empty and single-byte inputs through the caller-buffer pair.
+test "brotli: caller-buffer round-trips empty and single-byte input" {
+    inline for (.{ "", "x" }) |input| {
+        var comp: [64]u8 = undefined;
+        const n = try compressBrotli(testing.allocator, input, &comp, .DEFAULT);
+
+        var out: [8]u8 = undefined;
+        const m = try decompressBrotli(testing.allocator, comp[0..n], &out);
+        try testing.expectEqualSlices(u8, input, out[0..m]);
+    }
+}
+
+// edge: the BufferTooSmall boundary for compress is exactly the produced length, not a gross gap.
+test "brotli: compressBrotli succeeds at the exact size and fails one byte short" {
+    const input = "boundary text that compresses to a stable length under the default effort.";
+
+    const ref = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
+    defer testing.allocator.free(ref);
+    try testing.expect(ref.len > 1);
+
+    const exact = try testing.allocator.alloc(u8, ref.len);
+    defer testing.allocator.free(exact);
+    try testing.expectEqual(ref.len, try compressBrotli(testing.allocator, input, exact, .DEFAULT));
+
+    const short = try testing.allocator.alloc(u8, ref.len - 1);
+    defer testing.allocator.free(short);
+    try testing.expectError(error.BufferTooSmall, compressBrotli(testing.allocator, input, short, .DEFAULT));
+}
+
+// edge: the BufferTooSmall boundary for decompress is exactly the inflated length.
+test "brotli: decompressBrotli succeeds at the exact size and fails one byte short" {
+    const input = "boundary text that round-trips to a known length after inflation.";
+
+    const stream = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
+    defer testing.allocator.free(stream);
+
+    var exact: [input.len]u8 = undefined;
+    const n = try decompressBrotli(testing.allocator, stream, &exact);
+    try testing.expectEqual(@as(usize, input.len), n);
+    try testing.expectEqualSlices(u8, input, exact[0..n]);
+
+    var short: [input.len - 1]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, decompressBrotli(testing.allocator, stream, &short));
+}
+
+// behaviour: the buffer variant is a faithful copy of the alloc variant, byte for byte.
+test "brotli: compressBrotli writes the same bytes as compressBrotliAlloc" {
+    const input = "the buffer-into and alloc variants must produce identical brotli streams.";
+
+    const ref = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
+    defer testing.allocator.free(ref);
+
+    var buf: [256]u8 = undefined;
+    const n = try compressBrotli(testing.allocator, input, &buf, .DEFAULT);
+    try testing.expectEqualSlices(u8, ref, buf[0..n]);
+}
+
+// behaviour: binary-safe across every byte value through both caller-buffer directions.
+test "brotli: every byte value round-trips through the caller-buffer variants" {
+    var input: [256]u8 = undefined;
+    for (&input, 0..) |*b, i| b.* = @intCast(i);
+
+    var comp: [compressBound(256)]u8 = undefined;
+    const n = try compressBrotli(testing.allocator, &input, &comp, .DEFAULT);
+
+    var out: [256]u8 = undefined;
+    const m = try decompressBrotli(testing.allocator, comp[0..n], &out);
+    try testing.expectEqualSlices(u8, &input, out[0..m]);
+}
+
+// integration: the caller-buffer and alloc variants interoperate in both directions, so a stream
+// produced by one decodes through the other.
+test "brotli: caller-buffer and alloc variants interoperate both directions" {
+    const input = "interop between compressBrotli/decompressBrotli and the alloc variants, both ways.";
+
+    var cbuf: [256]u8 = undefined;
+    const n = try compressBrotli(testing.allocator, input, &cbuf, .DEFAULT);
+    const via_alloc = try decompressBrotliAlloc(testing.allocator, cbuf[0..n], 1 << 16);
+    defer testing.allocator.free(via_alloc);
+    try testing.expectEqualSlices(u8, input, via_alloc);
+
+    const stream = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
+    defer testing.allocator.free(stream);
+    var obuf: [256]u8 = undefined;
+    const m = try decompressBrotli(testing.allocator, stream, &obuf);
+    try testing.expectEqualSlices(u8, input, obuf[0..m]);
+}
+
+// behaviour: both Level efforts survive the caller-buffer round-trip.
+test "brotli: caller-buffer round-trip holds for both Level efforts" {
+    const input = "level mapping over the caller-buffer path, long enough to actually compress a bit.";
+
+    inline for (.{ Level.FASTEST, Level.DEFAULT }) |level| {
+        var comp: [256]u8 = undefined;
+        const n = try compressBrotli(testing.allocator, input, &comp, level);
+
+        var out: [256]u8 = undefined;
+        const m = try decompressBrotli(testing.allocator, comp[0..n], &out);
+        try testing.expectEqualSlices(u8, input, out[0..m]);
+    }
 }

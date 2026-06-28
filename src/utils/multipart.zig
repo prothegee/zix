@@ -1,10 +1,10 @@
-//! zix http upload
+//! zix multipart utils
 
 const std = @import("std");
 
 // --------------------------------------------------------- //
 
-pub const MultipartField = struct {
+pub const Field = struct {
     name: []const u8,
     filename: ?[]const u8,
     content_type: ?[]const u8,
@@ -12,9 +12,9 @@ pub const MultipartField = struct {
     is_file: bool,
 };
 
-pub const MultipartParser = struct {
+pub const Parser = struct {
     boundary: []const u8,
-    fields: std.ArrayList(MultipartField),
+    fields: std.ArrayList(Field),
     allocator: std.mem.Allocator,
 
     /// Initialize the multipart parser with the given boundary
@@ -24,8 +24,8 @@ pub const MultipartParser = struct {
     /// boundary - []const u8 (boundary string from the Content-Type header)
     ///
     /// Return:
-    /// - MultipartParser
-    pub fn init(allocator: std.mem.Allocator, boundary: []const u8) MultipartParser {
+    /// - Parser
+    pub fn init(allocator: std.mem.Allocator, boundary: []const u8) Parser {
         return .{
             .boundary = boundary,
             .fields = .empty,
@@ -37,7 +37,7 @@ pub const MultipartParser = struct {
     ///
     /// Note:
     /// - Only file fields have heap-allocated data, form fields borrow from the body slice
-    pub fn deinit(self: *MultipartParser) void {
+    pub fn deinit(self: *Parser) void {
         for (self.fields.items) |field| {
             if (field.is_file) self.allocator.free(field.data);
         }
@@ -54,7 +54,7 @@ pub const MultipartParser = struct {
     ///
     /// Return:
     /// - !void
-    pub fn parse(self: *MultipartParser, body: []const u8) !void {
+    pub fn parse(self: *Parser, body: []const u8) !void {
         const boundary_start = try self.allocator.alloc(u8, self.boundary.len + 4);
         defer self.allocator.free(boundary_start);
         boundary_start[0] = '-';
@@ -141,8 +141,8 @@ pub const MultipartParser = struct {
     /// name - []const u8
     ///
     /// Return:
-    /// - ?*MultipartField
-    pub fn getField(self: *MultipartParser, name: []const u8) ?*MultipartField {
+    /// - ?*Field
+    pub fn getField(self: *Parser, name: []const u8) ?*Field {
         for (self.fields.items) |*f| {
             if (std.mem.eql(u8, f.name, name)) return f;
         }
@@ -153,7 +153,7 @@ pub const MultipartParser = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http upload MultipartParser" {
+test "zix test: multipart Parser parses form and file fields" {
     const boundary = "boundary123";
     const body =
         "--boundary123\r\n" ++
@@ -167,7 +167,7 @@ test "zix test: http upload MultipartParser" {
         "hello world\r\n" ++
         "--boundary123--\r\n";
 
-    var parser = MultipartParser.init(std.testing.allocator, boundary);
+    var parser = Parser.init(std.testing.allocator, boundary);
     defer parser.deinit();
 
     try parser.parse(body);
