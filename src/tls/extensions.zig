@@ -54,7 +54,7 @@ pub fn negotiateAlpn(client_protocols: []const u8, prefs: []const Alpn) ?Alpn {
 }
 
 /// Reject a ServerNameList carrying more than one host_name (RFC 6066 3, MUST NOT).
-pub fn validateSni(server_name_list: []const u8) ?Alert {
+fn validateSni(server_name_list: []const u8) ?Alert {
     var r = Reader{ .buf = server_name_list };
     const list_len = r.readU16() catch return .DECODE_ERROR;
     const list = r.readBytes(list_len) catch return .DECODE_ERROR;

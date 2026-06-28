@@ -16,7 +16,7 @@ pub const Selected = enum { TLS_1_3, TLS_1_2, UNSUPPORTED };
 
 /// Pick the version (RFC 8446 4.2.1): prefer 1.3 when offered via supported_versions, else 1.2 when
 /// legacy_version is at least 0x0303, else unsupported.
-pub fn selectVersion(offers_tls13: bool, legacy_version: u16) Selected {
+fn selectVersion(offers_tls13: bool, legacy_version: u16) Selected {
     if (offers_tls13) return .TLS_1_3;
     if (legacy_version >= version_tls_1_2) return .TLS_1_2;
 
@@ -35,7 +35,7 @@ pub fn applyDowngradeSentinel(server_random: *[32]u8, negotiated: Selected) void
 
 /// Client-side check: a client that offered 1.3 but got a lower version with the matching sentinel
 /// MUST treat it as a downgrade attack and abort (RFC 8446 4.1.3).
-pub fn downgradeDetected(server_random: [32]u8, negotiated: Selected, client_offered_1_3: bool) bool {
+fn downgradeDetected(server_random: [32]u8, negotiated: Selected, client_offered_1_3: bool) bool {
     if (!client_offered_1_3) return false;
 
     return switch (negotiated) {

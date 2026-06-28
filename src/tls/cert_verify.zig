@@ -314,7 +314,7 @@ test "zix test: cert verify, peer P-256 public key matches the fixture signing k
 
     const pub_key = try peerEcdsaP256PublicKey(der);
 
-    // the fixture cert's key is the scalar reused across the tls tests; its public key must match.
+    // the fixture cert's key is the scalar reused across the tls tests. Its public key must match.
     var scalar: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
     const expected = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));

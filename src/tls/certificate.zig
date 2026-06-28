@@ -2,7 +2,7 @@
 //!
 //! Note:
 //! - Server-side message builders plus the CertificateVerify signing content and the Finished
-//!   verify_data. zix authenticates with ECDSA P-256 (and Ed25519), no RSA.
+//!   verify_data. zix authenticates with ECDSA P-256, Ed25519, or RSA (rsa_pss_rsae_sha256).
 //! - The DER end-entity certificate is supplied by the caller (connection.zig loads it). PEM
 //!   parsing + X.509 path validation are separate concerns (Layer V).
 //! - Verified against the RFC 8448 trace in-file (Finished verify_data byte-exact).

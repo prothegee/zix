@@ -22,6 +22,7 @@ const NamedGroup = handshake.NamedGroup;
 const CipherSuite = handshake.CipherSuite;
 const SigningKey = certificate.SigningKey;
 const HandshakeOptions = connection.HandshakeOptions;
+// RESERVED: RSA (Replace after implementation)
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
 
@@ -64,7 +65,7 @@ pub const Config = struct {
     /// error.TlsUnsupportedCipher.
     ciphers: []const CipherSuite = default_ciphers,
 
-    /// Honor server cipher order over the client's (nginx ssl_prefer_server_ciphers).
+    /// Honor server cipher order over the client's (the server-prefers-order policy).
     /// Note: with the current single-suite-per-version set the selection is identical either way.
     prefer_server_ciphers: bool = true,
 
