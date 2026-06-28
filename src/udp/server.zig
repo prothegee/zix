@@ -136,7 +136,7 @@ pub fn UdpServer(comptime Packet: type) type {
                 const msg = socket.receiveTimeout(io, &buf, poll_timeout) catch |err| {
                     if (err == error.Timeout) {
                         const now = std.Io.Clock.Timestamp.now(io, .awake);
-                        checkDisconnections(&clients, now, self.config.disconnect_timeout_ms, self.config.logger);
+                        checkDisconnections(&clients, now, self.config.conn_timeout_ms, self.config.logger);
                         last_check = now;
                         continue;
                     }
@@ -176,7 +176,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
                 // rate-limited disconnect check even when packets arrive rapidly
                 if (std.Io.Clock.Timestamp.durationTo(last_check, now).raw.toMilliseconds() >= self.config.poll_timeout_ms) {
-                    checkDisconnections(&clients, now, self.config.disconnect_timeout_ms, self.config.logger);
+                    checkDisconnections(&clients, now, self.config.conn_timeout_ms, self.config.logger);
                     last_check = now;
                 }
 
@@ -289,7 +289,7 @@ test "zix test: UdpServer init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     const S = UdpServer(TestPkt);
-    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0 }));
+    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }));
 }
 
 test "zix test: UdpServer init, nonzero port succeeds" {
@@ -297,7 +297,7 @@ test "zix test: UdpServer init, nonzero port succeeds" {
     defer threaded.deinit();
 
     const S = UdpServer(TestPkt);
-    var server = try S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100 });
+    var server = try S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -311,6 +311,7 @@ test "zix test: UdpServer init, config fields are preserved" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9200,
+        .dispatch_model = .ASYNC,
         .broadcast = true,
         .auto_ack = true,
     });

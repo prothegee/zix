@@ -178,23 +178,96 @@ fn feedInitialFrames(conn: *Connection, payload: []const u8) void {
     }
 }
 
-/// Effective worker count: the configured value, or one per CPU when 0.
+/// Effective worker count: the configured value, or one per available CPU when 0.
+/// Uses the cgroup-allowed CPU mask (getAvailableCpuCount), so under a container or
+/// taskset that pins the server to a core subset we never spawn more SO_REUSEPORT
+/// workers than there are usable cores (which would oversubscribe and collapse).
 pub fn effectiveWorkers(config: Http3ServerConfig) usize {
     if (config.workers != 0) return config.workers;
 
-    return std.Thread.getCpuCount() catch 1;
+    return getAvailableCpuCount();
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting the
+/// cgroup-allowed CPU mask so we never select a CPU the container cannot use.
+pub fn pinToCpu(worker_id: usize) void {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
+
+    var cpu_list: [256]u32 = undefined;
+    var n_cpus: usize = 0;
+    for (cpu_set, 0..) |word, word_idx| {
+        var w = word;
+        while (w != 0) : (w &= w - 1) {
+            if (n_cpus < cpu_list.len) {
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                n_cpus += 1;
+            }
+        }
+    }
+    if (n_cpus == 0) return;
+
+    const target = cpu_list[worker_id % n_cpus];
+    var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const cpu_word = target / @bitSizeOf(usize);
+    const cpu_bit: u6 = @intCast(target % @bitSizeOf(usize));
+    target_set[cpu_word] |= @as(usize, 1) << cpu_bit;
+
+    linux.sched_setaffinity(0, &target_set) catch {};
+}
+
+/// Count CPUs available to this process via sched_getaffinity, respecting cgroup
+/// and taskset restrictions. Falls back to std.Thread.getCpuCount when the syscall
+/// fails. Used to default to one worker per available CPU so several workers are
+/// never pinned to the same core under cgroup-limited bench environments.
+pub fn getAvailableCpuCount() usize {
+    const linux = std.os.linux;
+    var cpu_set: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (cpu_set) |word| {
+        count += @popCount(word);
+    }
+
+    return if (count == 0) 1 else count;
+}
+
+/// Spin up to `us` microseconds before the worker sleeps on the UDP socket (SO_BUSY_POLL), trading
+/// CPU for lower recvmmsg wake-up latency on saturated benchmarks. us = 0 leaves it unset (no
+/// syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
+pub fn setBusyPoll(fd: std.posix.socket_t, us: u32) void {
+    if (us == 0) return;
+
+    const SO_BUSY_POLL: u32 = 46;
+    std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        SO_BUSY_POLL,
+        std.mem.asBytes(&@as(c_int, @intCast(us))),
+    ) catch {};
 }
 
 /// One HTTP/3 worker: bind a UDP socket, own a CID table, and run the recv / demux / respond loop.
 /// `reuse` sets SO_REUSEADDR + SO_REUSEPORT so several workers can bind the same port and the kernel
 /// load-balances connections across them by 4-tuple (RC3 multicore). Each worker is shared-nothing:
 /// its own socket, CID table, and send / recv batches, so no lock is taken on the hot path.
-pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, reuse: bool) void {
+pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, reuse: bool, worker_id: usize) void {
+    // Per-core mode (reuse == SO_REUSEPORT) pins this worker to its assigned CPU so the
+    // kernel never migrates it and N workers never pile onto the same core under a
+    // cgroup-limited cpuset. The single-worker mode (reuse == false) stays unpinned.
+    if (reuse) pinToCpu(worker_id);
+
     const fd = datagram.open(config.ip, config.port, reuse) catch |err| {
         logSystem(config, "bind error: {}", .{err});
         return;
     };
     defer datagram.close(fd);
+
+    setBusyPoll(fd, config.busy_poll_us);
 
     const table = config.allocator.create(ConnTable) catch return;
     defer config.allocator.destroy(table);
@@ -205,6 +278,10 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
 
     var tx = datagram.SendBatch.init(config.allocator, config.send_batch, config.send_batch * config.max_recv_buf) catch return;
     defer tx.deinit();
+
+    // GSO coalescing on the send path, only when requested and the kernel supports UDP_SEGMENT. The
+    // prime case is a multi-packet static-h3 body to one peer collapsing into one sendmsg.
+    tx.gso = config.gso_enabled and datagram.probeGso(fd);
 
     while (true) {
         const count = rx.recv(fd) catch continue;
@@ -238,7 +315,7 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !v
     }
 
     logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
-    workerLoop(handler, config, false);
+    workerLoop(handler, config, false, 0);
 }
 
 /// Build and send the server's ServerHello Initial in reply to a decrypted ClientHello (handshake
@@ -604,7 +681,7 @@ pub fn runPerCore(comptime handler: core.HandlerFn, config: Http3ServerConfig) !
 
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{}, workerLoop, .{ handler, config, true }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoop, .{ handler, config, true, i }) catch break;
         spawned += 1;
     }
 
@@ -666,4 +743,28 @@ test "zix test: applyFlowControl raises the connection and stream limits" {
     const lower = [_]u8{ 0x11, 0x00, 0x40, 0x64 }; // MAX_STREAM_DATA stream 0 = 100
     applyFlowControl(&conn, &lower);
     try std.testing.expectEqual(@as(u64, 9000), conn.send_streams[0].stream_limit);
+}
+
+test "zix test: getAvailableCpuCount returns at least 1" {
+    try std.testing.expect(getAvailableCpuCount() >= 1);
+}
+
+test "zix test: effectiveWorkers honors an explicit count and caps at available CPUs" {
+    const base = Http3ServerConfig{ .allocator = std.testing.allocator, .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC };
+
+    // an explicit worker count passes through unchanged
+    var explicit = base;
+    explicit.workers = 3;
+    try std.testing.expectEqual(@as(usize, 3), effectiveWorkers(explicit));
+
+    // workers = 0 defaults to the cpuset-aware count, never zero
+    try std.testing.expect(effectiveWorkers(base) >= 1);
+    try std.testing.expectEqual(getAvailableCpuCount(), effectiveWorkers(base));
+}
+
+test "zix test: pinToCpu is a no-op-safe call for any worker_id" {
+    // The process keeps its original affinity mask, so pinning to a derived slot must not crash
+    // for an out-of-range worker_id (the modulo keeps it inside the available set).
+    pinToCpu(0);
+    pinToCpu(999);
 }

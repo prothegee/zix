@@ -85,6 +85,7 @@ test "zix test: Http3 init rejects port zero and missing TLS" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 0,
+        .dispatch_model = .ASYNC,
     }));
 
     try std.testing.expectError(error.TlsRequired, Server.init(.{
@@ -92,6 +93,7 @@ test "zix test: Http3 init rejects port zero and missing TLS" {
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",
         .port = 9063,
+        .dispatch_model = .ASYNC,
     }));
 }
 

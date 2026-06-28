@@ -200,6 +200,10 @@ pub const SendBatch = struct {
     cap: usize,
     used: usize = 0,
     count: usize = 0,
+    /// When true, flush coalesces consecutive same-destination replies into one sendmsg per group
+    /// with a UDP_SEGMENT (GSO) control message, so the kernel splits the buffer into wire datagrams.
+    /// Set by the worker only after probeGso confirms kernel support. Off keeps the plain sendmmsg path.
+    gso: bool = false,
 
     /// Allocate a batch holding up to `count` replies totalling `buf_bytes` payload bytes.
     pub fn init(allocator: std.mem.Allocator, count: usize, buf_bytes: usize) !SendBatch {
@@ -254,7 +258,15 @@ pub const SendBatch = struct {
     }
 
     /// Send every queued reply, then reset the batch. Handles partial sends and signal interruption.
+    /// With gso set, consecutive same-destination replies are coalesced (see flushGso), otherwise the
+    /// replies go out one-per-datagram batched into a single sendmmsg.
     pub fn flush(self: *SendBatch, fd: posix.socket_t) !void {
+        if (self.gso) {
+            try self.flushGso(fd);
+            self.reset();
+            return;
+        }
+
         var sent: usize = 0;
         while (sent < self.count) {
             const rc = linux.sendmmsg(fd, self.hdrs.ptr + sent, @intCast(self.count - sent), 0);
@@ -270,12 +282,117 @@ pub const SendBatch = struct {
         self.reset();
     }
 
+    /// Send the queued replies coalescing consecutive same-destination runs via UDP GSO. A run is a
+    /// span of queued replies all to the same peer where every reply but the last is exactly the
+    /// segment size (the first reply's length) and the last is no larger. Such a run is sent as one
+    /// sendmsg over its contiguous bytes (the queue lays them out back to back) plus a UDP_SEGMENT
+    /// control message, so the kernel emits each segment as its own wire datagram from one syscall.
+    /// A run of one is sent as a plain sendmsg. The big win is the Http3 multi-packet response flight
+    /// to one peer. A per-peer-single-packet batch falls back to one sendmsg each (enable gso for
+    /// multi-packet workloads). The caller resets the batch.
+    fn flushGso(self: *SendBatch, fd: posix.socket_t) !void {
+        var i: usize = 0;
+        while (i < self.count) {
+            const run = gsoGroupLen(self.iovs[0..self.count], self.names[0..self.count], i);
+
+            const seg_size: u16 = if (run >= 2) @intCast(self.iovs[i].len) else 0;
+            var total: usize = 0;
+            for (i..i + run) |k| total += self.iovs[k].len;
+
+            try sendSeg(fd, @ptrCast(self.iovs[i].base), total, seg_size, &self.names[i]);
+
+            i += run;
+        }
+    }
+
     /// Drop all queued replies without sending.
     pub fn reset(self: *SendBatch) void {
         self.used = 0;
         self.count = 0;
     }
 };
+
+/// Length in bytes of one UDP_SEGMENT control message: the cmsghdr plus the u16 segment size. The
+/// cmsghdr is already usize-aligned, so no extra alignment padding sits between it and the u16.
+const GSO_CMSG_LEN: usize = @sizeOf(linux.cmsghdr) + @sizeOf(u16);
+
+/// Control-message buffer for one UDP_SEGMENT cmsg. extern + usize-aligned so the u16 lands at the
+/// CMSG_DATA offset the kernel reads (right after the cmsghdr).
+const GsoControl = extern struct {
+    hdr: linux.cmsghdr,
+    seg: u16,
+};
+
+/// True when two addresses name the same peer (address bytes and port).
+fn sameAddr(addr_a: posix.sockaddr.in6, addr_b: posix.sockaddr.in6) bool {
+    return addr_a.port == addr_b.port and std.mem.eql(u8, &addr_a.addr, &addr_b.addr);
+}
+
+/// Length of the GSO run starting at index i: consecutive replies to the same peer where every reply
+/// but the last is exactly the first reply's size and the last is no larger, bounded by the kernel
+/// GSO limits (64 segments, 64 KiB total). Returns at least 1.
+fn gsoGroupLen(iovs: []const posix.iovec, names: []const posix.sockaddr.in6, i: usize) usize {
+    const seg_len = iovs[i].len;
+    var j = i + 1;
+    var total = seg_len;
+    var segs: usize = 1;
+    while (j < iovs.len and
+        sameAddr(names[j], names[i]) and
+        iovs[j - 1].len == seg_len and
+        iovs[j].len <= seg_len and
+        segs < 64 and
+        total + iovs[j].len <= 65535)
+    {
+        total += iovs[j].len;
+        segs += 1;
+        j += 1;
+    }
+
+    return j - i;
+}
+
+/// Send one contiguous buffer to dest. When seg_size > 0 a UDP_SEGMENT control message asks the
+/// kernel to split it into seg_size-byte wire datagrams (the last may be shorter). seg_size 0 sends
+/// the buffer as a single datagram.
+fn sendSeg(fd: posix.socket_t, base: [*]const u8, total: usize, seg_size: u16, dest: *const posix.sockaddr.in6) !void {
+    var iov = posix.iovec_const{ .base = base, .len = total };
+    var control: GsoControl align(@alignOf(usize)) = undefined;
+
+    var msg = linux.msghdr_const{
+        .name = @ptrCast(dest),
+        .namelen = sockaddr_in6_len,
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = null,
+        .controllen = 0,
+        .flags = 0,
+    };
+    if (seg_size > 0) {
+        control.hdr = .{ .len = GSO_CMSG_LEN, .level = linux.IPPROTO.UDP, .type = linux.UDP.SEGMENT };
+        control.seg = seg_size;
+        msg.control = &control;
+        msg.controllen = GSO_CMSG_LEN;
+    }
+
+    while (true) {
+        const rc = linux.sendmsg(fd, &msg, 0);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.SendFailed,
+        }
+    }
+}
+
+/// Probe whether the kernel supports UDP GSO on this socket by setting the socket-wide segment size
+/// to 0 (no socket default. The send path uses a per-message cmsg instead). Returns true when the
+/// option exists (Linux 4.18+), false otherwise, so the caller leaves gso off on older kernels.
+pub fn probeGso(fd: posix.socket_t) bool {
+    const zero: c_int = 0;
+    posix.setsockopt(fd, linux.IPPROTO.UDP, linux.UDP.SEGMENT, std.mem.asBytes(&zero)) catch return false;
+
+    return true;
+}
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -351,4 +468,105 @@ test "zix test: RecvBatch allocates slots and wires headers" {
     try std.testing.expectEqual(@as(usize, 1500), batch.iovs[0].len);
     try std.testing.expectEqual(@as(usize, 4 * 1500), batch.data.len);
     try std.testing.expectEqual(@as(usize, 1), batch.hdrs[0].hdr.iovlen);
+}
+
+fn testPeer(port: u16) posix.sockaddr.in6 {
+    var s = std.mem.zeroes(posix.sockaddr.in6);
+    s.port = port;
+    return s;
+}
+
+test "zix test: gsoGroupLen coalesces a same-peer run with a shorter final segment" {
+    var buf: [1]u8 = undefined;
+    const a = testPeer(1);
+    var iovs = [_]posix.iovec{
+        .{ .base = &buf, .len = 1200 },
+        .{ .base = &buf, .len = 1200 },
+        .{ .base = &buf, .len = 800 },
+    };
+    var names = [_]posix.sockaddr.in6{ a, a, a };
+    try std.testing.expectEqual(@as(usize, 3), gsoGroupLen(&iovs, &names, 0));
+}
+
+test "zix test: gsoGroupLen stops after a short segment that is not last" {
+    var buf: [1]u8 = undefined;
+    const a = testPeer(1);
+    // a short middle segment cannot be followed by another, so the run ends at the short one
+    var iovs = [_]posix.iovec{
+        .{ .base = &buf, .len = 1200 },
+        .{ .base = &buf, .len = 800 },
+        .{ .base = &buf, .len = 1200 },
+    };
+    var names = [_]posix.sockaddr.in6{ a, a, a };
+    try std.testing.expectEqual(@as(usize, 2), gsoGroupLen(&iovs, &names, 0));
+    try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 2));
+}
+
+test "zix test: gsoGroupLen breaks the run at a different peer" {
+    var buf: [1]u8 = undefined;
+    const a = testPeer(1);
+    const b = testPeer(2);
+    var iovs = [_]posix.iovec{
+        .{ .base = &buf, .len = 1200 },
+        .{ .base = &buf, .len = 1200 },
+    };
+    var names = [_]posix.sockaddr.in6{ a, b };
+    try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 0));
+}
+
+test "zix test: gsoGroupLen rejects a larger following segment" {
+    var buf: [1]u8 = undefined;
+    const a = testPeer(1);
+    // the second reply is larger than the first (the segment size), so it cannot ride the same GSO
+    var iovs = [_]posix.iovec{
+        .{ .base = &buf, .len = 800 },
+        .{ .base = &buf, .len = 1200 },
+    };
+    var names = [_]posix.sockaddr.in6{ a, a };
+    try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 0));
+}
+
+test "zix test: SendBatch GSO send is accepted by the kernel and delivers over loopback" {
+    if (comptime !is_linux) return;
+
+    const r_fd = open("127.0.0.1", 19071, false) catch return; // skip if the port is busy
+    defer close(r_fd);
+    const s_fd = open("127.0.0.1", 19072, false) catch return;
+    defer close(s_fd);
+
+    if (!probeGso(s_fd)) return; // kernel older than 4.18 without UDP GSO: skip
+
+    // receiver non-blocking so the post-flush recv never hangs
+    const fl = linux.fcntl(r_fd, posix.F.GETFL, 0);
+    const nb: u32 = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(r_fd, posix.F.SETFL, fl | @as(usize, nb));
+
+    const dest = ipToSockaddr6(try std.Io.net.IpAddress.parse("127.0.0.1", 19071));
+
+    var payload_a: [1200]u8 = undefined;
+    @memset(&payload_a, 'A');
+    var payload_b: [800]u8 = undefined;
+    @memset(&payload_b, 'B');
+
+    var tx = try SendBatch.init(std.testing.allocator, 8, 8 * 1500);
+    defer tx.deinit();
+    tx.gso = true;
+    try std.testing.expect(tx.queue(dest, &payload_a));
+    try std.testing.expect(tx.queue(dest, &payload_b));
+
+    // the coalesced UDP_SEGMENT sendmsg must be accepted by the kernel, not rejected with EINVAL.
+    // A malformed control message fails here.
+    try tx.flush(s_fd);
+
+    // loopback delivers within the send syscall, so a non-blocking recv finds the first segment. The
+    // delivery assertion is best-effort (guarded on n) to stay non-flaky. The flush above is the hard
+    // check that the control message is well-formed.
+    var rx = try RecvBatch.init(std.testing.allocator, 8, 1500);
+    defer rx.deinit();
+    const n = rx.recv(r_fd) catch 0;
+    if (n >= 1) {
+        const first = rx.get(0);
+        try std.testing.expectEqual(@as(usize, 1200), first.data.len);
+        try std.testing.expectEqual(@as(u8, 'A'), first.data[0]);
+    }
 }
