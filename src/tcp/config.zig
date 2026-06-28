@@ -49,8 +49,8 @@ pub const TcpServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Default: .ASYNC (single accept thread, io.async() per connection).
-    dispatch_model: DispatchModel = .ASYNC,
+    /// Connection dispatch model. Required: the caller must set it explicitly (no default).
+    dispatch_model: DispatchModel,
     /// TCP listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 4096,
     /// Maximum payload bytes per frame. Frames exceeding this close the connection.
@@ -101,7 +101,7 @@ test "zix test: TcpServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const cfg = TcpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 };
+    const cfg = TcpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);

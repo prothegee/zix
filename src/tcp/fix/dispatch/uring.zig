@@ -95,8 +95,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         const allocator = std.heap.smp_allocator;
         const lx = std.os.linux;
 
-        fn deinit(w: *W) void {
-            for (w.slots) |maybe_conn| {
+        fn deinit(worker: *W) void {
+            for (worker.slots) |maybe_conn| {
                 if (maybe_conn) |conn| {
                     _ = lx.close(conn.fd);
                     allocator.free(conn.buf);
@@ -105,76 +105,76 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 }
             }
 
-            slab.unmapSlots(w.slots);
-            w.ring.deinit();
+            slab.unmapSlots(worker.slots);
+            worker.ring.deinit();
         }
 
-        fn getSqe(w: *W) ?*lx.io_uring_sqe {
-            return w.ring.get_sqe() catch {
-                _ = w.ring.submit() catch return null;
+        fn getSqe(worker: *W) ?*lx.io_uring_sqe {
+            return worker.ring.get_sqe() catch {
+                _ = worker.ring.submit() catch return null;
 
-                return w.ring.get_sqe() catch null;
+                return worker.ring.get_sqe() catch null;
             };
         }
 
-        fn lookup(w: *W, decoded: uring.Decoded) ?*UringFixConn {
+        fn lookup(worker: *W, decoded: uring.Decoded) ?*UringFixConn {
             const idx: usize = @intCast(decoded.fd);
-            if (idx >= w.slots.len) return null;
+            if (idx >= worker.slots.len) return null;
 
-            const conn = w.slots[idx] orelse return null;
+            const conn = worker.slots[idx] orelse return null;
             if (conn.gen != decoded.gen) return null;
 
             return conn;
         }
 
-        fn destroyConn(w: *W, conn: *UringFixConn) void {
-            w.slots[@intCast(conn.fd)] = null;
+        fn destroyConn(worker: *W, conn: *UringFixConn) void {
+            worker.slots[@intCast(conn.fd)] = null;
 
             allocator.free(conn.buf);
             allocator.free(conn.send_buf);
             allocator.destroy(conn);
         }
 
-        fn finishClose(w: *W, conn: *UringFixConn) void {
+        fn finishClose(worker: *W, conn: *UringFixConn) void {
             _ = lx.close(conn.fd);
-            w.destroyConn(conn);
+            worker.destroyConn(conn);
         }
 
-        fn beginClose(w: *W, conn: *UringFixConn) void {
+        fn beginClose(worker: *W, conn: *UringFixConn) void {
             conn.closing = true;
             if (conn.inflight > 0) return;
 
             if (conn.staged > 0) {
-                w.submitSend(conn);
+                worker.submitSend(conn);
                 return;
             }
 
-            w.finishClose(conn);
+            worker.finishClose(conn);
         }
 
-        fn armAccept(w: *W) void {
-            const sqe = w.getSqe() orelse return;
-            sqe.prep_multishot_accept(w.listener_fd, null, null, 0);
-            sqe.user_data = uring.packUserData(.accept, 0, w.listener_fd);
+        fn armAccept(worker: *W) void {
+            const sqe = worker.getSqe() orelse return;
+            sqe.prep_multishot_accept(worker.listener_fd, null, null, 0);
+            sqe.user_data = uring.packUserData(.accept, 0, worker.listener_fd);
         }
 
-        fn armRecv(w: *W, conn: *UringFixConn) void {
+        fn armRecv(worker: *W, conn: *UringFixConn) void {
             if (conn.filled >= conn.buf.len) {
-                w.beginClose(conn);
+                worker.beginClose(conn);
                 return;
             }
 
-            const sqe = w.getSqe() orelse {
-                w.beginClose(conn);
+            const sqe = worker.getSqe() orelse {
+                worker.beginClose(conn);
                 return;
             };
             sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
             sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
         }
 
-        fn submitSend(w: *W, conn: *UringFixConn) void {
-            const sqe = w.getSqe() orelse {
-                w.finishClose(conn);
+        fn submitSend(worker: *W, conn: *UringFixConn) void {
+            const sqe = worker.getSqe() orelse {
+                worker.finishClose(conn);
                 return;
             };
             sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], lx.MSG.NOSIGNAL);
@@ -183,15 +183,15 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             conn.inflight = conn.staged;
         }
 
-        fn handleAccept(w: *W, cqe: lx.io_uring_cqe) void {
+        fn handleAccept(worker: *W, cqe: lx.io_uring_cqe) void {
             const rearm = (cqe.flags & lx.IORING_CQE_F_MORE) == 0;
-            defer if (rearm) w.armAccept();
+            defer if (rearm) worker.armAccept();
 
             if (cqe.res < 0) return;
 
             const conn_fd: std.posix.fd_t = cqe.res;
             const idx: usize = @intCast(conn_fd);
-            if (idx >= w.slots.len) {
+            if (idx >= worker.slots.len) {
                 _ = lx.close(conn_fd);
                 return;
             }
@@ -207,17 +207,17 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 _ = lx.close(conn_fd);
                 return;
             };
-            const send_buf = allocator.alloc(u8, w.send_buf_size) catch {
+            const send_buf = allocator.alloc(u8, worker.send_buf_size) catch {
                 allocator.free(buf);
                 allocator.destroy(conn);
                 _ = lx.close(conn_fd);
                 return;
             };
 
-            w.gen_counter +%= 1;
+            worker.gen_counter +%= 1;
             conn.* = .{
                 .fd = conn_fd,
-                .gen = w.gen_counter,
+                .gen = worker.gen_counter,
                 .buf = buf,
                 .filled = 0,
                 .send_buf = send_buf,
@@ -226,16 +226,16 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 .closing = false,
                 .fix_state = .{},
             };
-            w.slots[idx] = conn;
+            worker.slots[idx] = conn;
 
-            w.armRecv(conn);
+            worker.armRecv(conn);
         }
 
-        fn handleRecv(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
-            const conn = w.lookup(decoded) orelse return;
+        fn handleRecv(worker: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+            const conn = worker.lookup(decoded) orelse return;
 
             if (cqe.res <= 0) {
-                w.beginClose(conn);
+                worker.beginClose(conn);
                 return;
             }
 
@@ -243,28 +243,28 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             conn.fix_state.last_activity_ms = core.monotonicMs();
             conn.fix_state.sent_test_request = false;
 
-            const close = w.dispatch(conn);
+            const close = worker.dispatch(conn);
 
             if (conn.staged > 0) {
-                w.submitSend(conn);
+                worker.submitSend(conn);
                 if (close) conn.closing = true;
 
                 return;
             }
 
             if (close) {
-                w.beginClose(conn);
+                worker.beginClose(conn);
                 return;
             }
 
-            w.armRecv(conn);
+            worker.armRecv(conn);
         }
 
-        fn handleSend(w: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
-            const conn = w.lookup(decoded) orelse return;
+        fn handleSend(worker: *W, cqe: lx.io_uring_cqe, decoded: uring.Decoded) void {
+            const conn = worker.lookup(decoded) orelse return;
 
             if (cqe.res < 0) {
-                w.beginClose(conn);
+                worker.beginClose(conn);
                 return;
             }
 
@@ -273,7 +273,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                 std.mem.copyForwards(u8, conn.send_buf[0 .. conn.staged - sent], conn.send_buf[sent..conn.staged]);
                 conn.staged -= sent;
                 conn.inflight = 0;
-                w.submitSend(conn);
+                worker.submitSend(conn);
 
                 return;
             }
@@ -282,23 +282,23 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             conn.inflight = 0;
 
             if (conn.closing) {
-                w.finishClose(conn);
+                worker.finishClose(conn);
                 return;
             }
 
-            w.armRecv(conn);
+            worker.armRecv(conn);
         }
 
         /// Install the sink, run the resumable FIX processor over conn.buf, then
         /// compact the unconsumed tail. Returns true when the session must close.
-        fn dispatch(w: *W, conn: *UringFixConn) bool {
+        fn dispatch(worker: *W, conn: *UringFixConn) bool {
             const fd = conn.fd;
 
             var sink = core.RespSink{ .fd = fd, .buf = conn.send_buf };
             core.tl_resp_sink = &sink;
             defer core.tl_resp_sink = null;
 
-            const result = core.processFixRing(&conn.fix_state, w.comp_id, w.opts, conn.buf[0..conn.filled], fd);
+            const result = core.processFixRing(&conn.fix_state, worker.comp_id, worker.opts, conn.buf[0..conn.filled], fd);
 
             if (result.consumed >= conn.filled) {
                 conn.filled = 0;
@@ -312,52 +312,52 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             return result.close or sink.failed;
         }
 
-        fn armTimeout(w: *W) void {
-            if (w.hb_ms == 0) return;
+        fn armTimeout(worker: *W) void {
+            if (worker.hb_ms == 0) return;
 
-            const sqe = w.getSqe() orelse return;
-            sqe.prep_timeout(&w.hb_timespec, 0, 0);
-            sqe.user_data = uring.packUserData(.timeout, 0, w.listener_fd);
+            const sqe = worker.getSqe() orelse return;
+            sqe.prep_timeout(&worker.hb_timespec, 0, 0);
+            sqe.user_data = uring.packUserData(.timeout, 0, worker.listener_fd);
         }
 
         /// Periodic heartbeat tick: send a TestRequest to every idle logged-in
         /// session, reap one that stayed silent through a Logout, then re-arm. The
         /// reaped connection has only an idle recv in flight (no buffered data), so
         /// closing it is safe: the stale recv completion is dropped by the gen tag.
-        fn handleTimeout(w: *W, cqe: lx.io_uring_cqe) void {
+        fn handleTimeout(worker: *W, cqe: lx.io_uring_cqe) void {
             _ = cqe;
 
             const now = core.monotonicMs();
-            for (w.slots) |maybe_conn| {
+            for (worker.slots) |maybe_conn| {
                 if (maybe_conn) |conn| {
-                    if (core.fixHeartbeatTick(&conn.fix_state, w.comp_id, conn.fd, now, w.hb_ms)) {
-                        w.finishClose(conn);
+                    if (core.fixHeartbeatTick(&conn.fix_state, worker.comp_id, conn.fd, now, worker.hb_ms)) {
+                        worker.finishClose(conn);
                     }
                 }
             }
 
-            w.armTimeout();
+            worker.armTimeout();
         }
 
-        fn run(w: *W) void {
-            w.armAccept();
-            w.armTimeout();
+        fn run(worker: *W) void {
+            worker.armAccept();
+            worker.armTimeout();
 
             var cqes: [URING_CQE_BATCH]lx.io_uring_cqe = undefined;
             while (true) {
-                _ = w.ring.submit_and_wait(1) catch |err| switch (err) {
+                _ = worker.ring.submit_and_wait(1) catch |err| switch (err) {
                     error.SignalInterrupt => continue,
                     else => return,
                 };
 
-                const count = w.ring.copy_cqes(&cqes, 0) catch return;
+                const count = worker.ring.copy_cqes(&cqes, 0) catch return;
                 for (cqes[0..count]) |cqe| {
                     const decoded = uring.unpackUserData(cqe.user_data);
                     switch (decoded.op) {
-                        .accept => w.handleAccept(cqe),
-                        .recv => w.handleRecv(cqe, decoded),
-                        .send => w.handleSend(cqe, decoded),
-                        .timeout => w.handleTimeout(cqe),
+                        .accept => worker.handleAccept(cqe),
+                        .recv => worker.handleRecv(cqe, decoded),
+                        .send => worker.handleSend(cqe, decoded),
+                        .timeout => worker.handleTimeout(cqe),
                         .close => {},
                     }
                 }

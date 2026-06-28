@@ -230,7 +230,7 @@ test "zix test: TcpServer init, port zero returns PortNotConfigured" {
 
     try std.testing.expectError(
         error.PortNotConfigured,
-        Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 }),
+        Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 
@@ -238,7 +238,7 @@ test "zix test: TcpServer init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    var server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 });
+    var server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -270,7 +270,7 @@ test "zix test: TcpServer init, timeout fields default to zero" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300 });
+    const server = try Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
@@ -283,6 +283,7 @@ test "zix test: TcpServer init, timeout fields stored from config" {
         .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
+        .dispatch_model = .ASYNC,
         .recv_timeout_ms = 5000,
         .send_timeout_ms = 3000,
     });
@@ -320,7 +321,7 @@ test "zix test: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
 
     try std.testing.expectError(
         error.PortNotConfigured,
-        Server.initFramed(testTcpFrame, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0 }),
+        Server.initFramed(testTcpFrame, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
 
