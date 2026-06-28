@@ -1,18 +1,25 @@
 //! zix http1 https serve path (approach A, RFC 8446 + 9112).
 //!
 //! Note:
-//! - Gated on config.tls (a *Tls.Context). A blocking accept loop reads the ClientHello, then
-//!   branches on the version policy: a 1.3-capable client takes the TLS 1.3 path (zix.Tls), a
-//!   1.2-only client takes the TLS 1.2 path (zix.Tls tls12_connection), each subject to the
-//!   context's min_version / max_version. Either way it then per request decrypts the record,
-//!   reuses core.parseHead, runs the existing fd-handler against a pipe (so the handler writes
-//!   plaintext unchanged), reads that back, encrypts it, and sends it.
+//! - Gated on config.tls (a *Tls.Context). The accept loop hands each connection to its own worker
+//!   thread (.ASYNC / .POOL / .MIXED), so a slow handshake or a keep-alive client never serializes
+//!   the others. The worker reads the ClientHello, then branches on the version policy: a 1.3-capable
+//!   client takes the TLS 1.3 path (zix.Tls), a 1.2-only client takes the TLS 1.2 path (zix.Tls
+//!   tls12_connection), each subject to the context's min_version / max_version. Either way it then
+//!   per request decrypts the record, reuses core.parseHead, runs the existing fd-handler against a
+//!   pipe (so the handler writes plaintext unchanged), reads that back, encrypts it, and sends it.
 //! - The cleartext EPOLL / URING hot path is untouched: this whole file is reached only when
-//!   config.tls is set (gated in server.zig before the dispatch switch). https is a separate path
-//!   on its own perf band (not the 1% gate), so the per-request pipe is acceptable.
+//!   config.tls is set (gated in server.zig before the dispatch switch). .EPOLL / .URING terminate
+//!   TLS in the event-driven tls_mux worker instead. https is a separate path on its own perf band
+//!   (not the 1% gate), so the per-request pipe is acceptable.
 //! - The cert / key are loaded and validated once in Tls.Context.init (the cold path), so the
 //!   accept loop reads a ready context with no per-connection PEM work.
-//! - Single request per connection for now (keep-alive is a later refinement).
+//! - Keep-alive (RFC 9112 9.3): once the handshake completes the connection serves requests in a
+//!   loop over the established session, so the costly handshake is paid once per connection, not
+//!   once per request. The loop ends on Connection: close, a client close_notify, or a hangup.
+//! - Buffered responses by default. A handler that calls beginStream() (SSE) is served over TLS via
+//!   the per-connection stream sink (ADR-054): each event encrypts one record and sends it. A
+//!   WebSocket upgrade (bidirectional) is still out of scope here (ADR-055 adds the TLS read path).
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -20,6 +27,7 @@ const posix = std.posix;
 const Config = @import("config.zig").Http1ServerConfig;
 const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
+const ws = @import("websocket.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
 const record = @import("../../tls/record.zig");
@@ -56,6 +64,13 @@ const request_plain_size: usize = 17 * 1024;
 /// Handler response buffer: the effective max response size over TLS.
 const response_buf_size: usize = 64 * 1024;
 
+/// WebSocket-over-TLS frame loop buffers (ADR-055): accumulated client frame bytes, one decrypted
+/// record, the largest unmasked payload, and the coalesced outbound frames staged before encryption.
+const ws_acc_size: usize = 17 * 1024;
+const ws_record_plain_size: usize = 17 * 1024;
+const ws_payload_size: usize = 16 * 1024;
+const ws_out_size: usize = 32 * 1024;
+
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the accept loop closes the connection rather than misreading it as a record.
 fn peerAlert(body: []const u8) anyerror {
@@ -64,23 +79,58 @@ fn peerAlert(body: []const u8) anyerror {
     return error.PeerAlert;
 }
 
-/// Listen and serve https/1.1 (blocking accept loop). The cert / key / policy are already loaded and
+/// Listen and serve https/1.1, one worker thread per connection (the .ASYNC / .POOL / .MIXED path,
+/// .EPOLL / .URING use the event-driven tls_mux). The cert / key / policy are already loaded and
 /// validated in the context (config.tls), so this only accepts and drives per-connection handshakes.
+///
+/// Note:
+/// - Each accepted connection is handed to its own thread so a slow handshake or a keep-alive client
+///   never blocks the accept loop (serving inline would serialize every connection, the slow path
+///   that wedged json-tls). The connection thread runs the full keep-alive request loop.
 pub fn runTls(config: Config, handler: HandlerFn) !void {
     const io = config.io;
     const ctx = config.tls.?;
 
     const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
-    var srv = try addr.listen(io, .{ .reuse_address = true });
+    var srv = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = config.kernel_backlog });
 
     common.logSystem(config, "listening on {s}:{d} (https/1.1)", .{ config.ip, config.port });
 
     while (true) {
-        var stream = srv.accept(io) catch continue;
-        defer stream.close(io);
+        const stream = srv.accept(io) catch continue;
+        const conn_fd = stream.socket.handle;
 
-        serveConnTls(stream.socket.handle, handler, ctx) catch {};
+        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, connWorker, .{
+            ConnCtx{ .fd = conn_fd, .handler = handler, .ctx = ctx, .io = io, .public_dir = config.public_dir },
+        }) catch {
+            // Spawn failed (thread / pid limit under extreme load): drop this connection and keep
+            // accepting. Serving inline here would block the accept loop for the connection's whole
+            // lifetime, wedging every other pending connection. The client retries the dropped one.
+            _ = linux.close(conn_fd);
+
+            continue;
+        };
+
+        worker.detach();
     }
+}
+
+/// One connection thread's inputs: the accepted fd plus the shared (borrowed) handler and context.
+const ConnCtx = struct {
+    fd: posix.fd_t,
+    handler: HandlerFn,
+    ctx: *const Tls.Context,
+    io: std.Io,
+    public_dir: []const u8 = "",
+};
+
+/// Drive one https/1.1 connection (handshake + keep-alive request loop), then close it.
+fn connWorker(conn_ctx: ConnCtx) void {
+    core.setStatic(conn_ctx.public_dir, conn_ctx.io);
+
+    serveConnTls(conn_ctx.fd, conn_ctx.handler, conn_ctx.ctx) catch {};
+
+    _ = linux.close(conn_ctx.fd);
 }
 
 fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !void {
@@ -180,51 +230,150 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
         break;
     }
 
-    // one application request -> decrypt -> parse -> handler (over a pipe) -> encrypt response.
-    const request_rec = try readRecord(fd, &record_buf);
-    if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+    // keep-alive request loop over the established 1.3 session.
+    try serveRequests(fd, handler, ctx, &conn, &record_buf);
+}
 
+/// Serve application requests over an established TLS session until the client signals close.
+/// Each request: decrypt -> parse -> handler (over a pipe) -> encrypt -> write. The handshake is
+/// already paid, so this loop is what makes the cost per connection rather than per request.
+///
+/// Note:
+/// - Generic over the connection type so the TLS 1.3 and TLS 1.2 paths share one loop. Both expose
+///   readAppData / writeAppData / closeNotify, only the 1.3 connection adds encryptedAlert.
+/// - Ends cleanly on a peer hangup (ConnectionClosed), a client close_notify (an inner alert ->
+///   PeerClosed on 1.3, an alert record on 1.2), or a request carrying Connection: close.
+fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, conn: anytype, record_buf: []u8) !void {
     var request_plain: [request_plain_size]u8 = undefined;
-    const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
-        // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
-        if (err == error.UnexpectedMessage) {
-            var alert_buf: [encrypted_alert_size]u8 = undefined;
-            writeAll(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
-        }
-
-        return err;
-    };
-
-    const parsed = core.parseHead(request) catch return error.BadRequest;
-    const head = parsed.head;
-    const body = request[parsed.body_offset..];
-
+    var response_buf: [response_buf_size]u8 = undefined;
     var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;
     var close_buf: [encrypted_alert_size]u8 = undefined;
 
-    // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
-    // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
-    if (hostFromHead(request[0..parsed.body_offset])) |host_raw| {
-        const host = stripPort(host_raw);
-        Tls.verifyCertIdentity(ctx.cert_der, host) catch {
-            const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+    // arm the streaming sink for this connection (ADR-054): an SSE handler that called beginStream()
+    // writes each event through it, encrypting one record per write. A normal handler never touches
+    // it (the capture sink wins in core.fdWriteAll).
+    const Stream = StreamSinkFor(@TypeOf(conn));
+    var stream_state = Stream{ .conn = conn, .fd = fd, .enc = &encrypt_buf };
+    const prev_stream = core.tl_tls_stream;
+    var stream_sink = core.TlsStreamSink{ .ctx = &stream_state, .writeFn = Stream.write };
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = prev_stream;
+
+    while (true) {
+        const request_rec = readRecord(fd, record_buf) catch |err| {
+            // the peer hung up between requests (no close_notify): a clean keep-alive end.
+            if (err == error.ConnectionClosed) return;
+
+            return err;
+        };
+        if (request_rec.content_type == content_type_alert) return; // peer close_notify / alert: done.
+        if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+
+        const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
+            // client close_notify arrives as an inner alert -> PeerClosed: a clean end.
+            if (err == error.PeerClosed) return;
+
+            // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
+            if (comptime @hasDecl(@TypeOf(conn.*), "encryptedAlert")) {
+                if (err == error.UnexpectedMessage) {
+                    var alert_buf: [encrypted_alert_size]u8 = undefined;
+                    writeAll(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
+                }
+            }
+
+            return err;
+        };
+
+        const parsed = core.parseHead(request) catch return error.BadRequest;
+        const head = parsed.head;
+        const body = request[parsed.body_offset..];
+
+        // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
+        // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
+        if (hostFromHead(request[0..parsed.body_offset])) |host_raw| {
+            const host = stripPort(host_raw);
+            Tls.verifyCertIdentity(ctx.cert_der, host) catch {
+                const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+                writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+
+                return;
+            };
+        }
+
+        const result = try runHandlerToBuffer(handler, &head, body, &response_buf);
+
+        if (core.takeWebSocket()) |handoff| {
+            // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
+            // Run the inline frame loop over this TLS session, then close.
+            serveWsTls(conn, fd, handoff.on_frame, record_buf) catch {};
             writeAll(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
-        };
+        }
+
+        if (result.streamed) {
+            // the handler streamed the whole response over TLS (already encrypted + sent through the
+            // stream sink). The stream owns the rest of the connection, so close after it returns.
+            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+
+            return;
+        }
+
+        try writeAll(fd, conn.writeAppData(result.bytes, &encrypt_buf));
+
+        // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
+        if (!head.keep_alive) {
+            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+
+            return;
+        }
     }
+}
 
-    var response_buf: [response_buf_size]u8 = undefined;
-    const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
+/// Drive a WebSocket session over the established TLS connection (ADR-055). Each iteration reads one
+/// ciphertext record, decrypts it, accumulates the plaintext, and pumps every complete frame: a
+/// text / binary frame invokes on_frame, ping is auto-ponged, close is auto-echoed. Outbound frames
+/// flow through the ADR-054 stream sink (fdWriteAll -> conn.writeAppData), so each pump pass encrypts
+/// its coalesced frames as one record. Ends on a peer hangup, a close frame, or a close_notify.
+fn serveWsTls(conn: anytype, fd: posix.fd_t, on_frame: core.WsFrameFn, record_buf: []u8) !void {
+    var acc: [ws_acc_size]u8 = undefined;
+    var acc_len: usize = 0;
+    var plain_temp: [ws_record_plain_size]u8 = undefined;
+    var payload_buf: [ws_payload_size]u8 = undefined;
+    var out_buf: [ws_out_size]u8 = undefined;
 
-    try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
+    while (true) {
+        const rec = readRecord(fd, record_buf) catch |err| {
+            if (err == error.ConnectionClosed) return; // peer hung up
 
-    try writeAll(fd, conn.closeNotify(&close_buf));
+            return err;
+        };
+        if (rec.content_type == content_type_alert) return; // peer close_notify
+        if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+
+        const plain = conn.readAppData(rec.full, &plain_temp) catch |err| {
+            if (err == error.PeerClosed) return; // client close_notify
+
+            return err;
+        };
+        if (acc_len + plain.len > acc.len) return error.WsFrameTooLarge;
+        @memcpy(acc[acc_len..][0..plain.len], plain);
+        acc_len += plain.len;
+
+        const result = ws.pump(fd, acc[0..acc_len], &payload_buf, &out_buf, on_frame);
+
+        // slide any trailing partial frame down for the next record.
+        const remaining = acc_len - result.consumed;
+        if (remaining > 0) std.mem.copyForwards(u8, acc[0..remaining], acc[result.consumed..acc_len]);
+        acc_len = remaining;
+
+        if (result.close) return;
+    }
 }
 
 /// The Host header value (RFC 9112 3.2) from a request head, or null when absent.
-fn hostFromHead(head: []const u8) ?[]const u8 {
+pub fn hostFromHead(head: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     _ = lines.next(); // request line
     while (lines.next()) |line| {
@@ -239,7 +388,7 @@ fn hostFromHead(head: []const u8) ?[]const u8 {
 
 /// Strip the ":port" suffix from a Host value, leaving the authority host. Handles a bracketed IPv6
 /// literal ([::1]:443 -> ::1) and host:port (localhost:443 -> localhost), leaves bare hosts as-is.
-fn stripPort(host: []const u8) []const u8 {
+pub fn stripPort(host: []const u8) []const u8 {
     if (host.len == 0) return host;
 
     if (host[0] == '[') {
@@ -296,50 +445,66 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
     try writeAll(fd, finish.to_send);
     var conn = finish.connection;
 
-    // one application request -> decrypt -> parse -> handler (over a pipe) -> encrypt response.
-    const request_rec = try readRecord(fd, &record_buf);
-    if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
-
-    var request_plain: [request_plain_size]u8 = undefined;
-    const request = try conn.readAppData(request_rec.full, &request_plain);
-
-    const parsed = core.parseHead(request) catch return error.BadRequest;
-    const head = parsed.head;
-    const body = request[parsed.body_offset..];
-
-    var response_buf: [response_buf_size]u8 = undefined;
-    const response = try runHandlerToBuffer(handler, &head, body, &response_buf);
-
-    var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;
-    try writeAll(fd, conn.writeAppData(response, &encrypt_buf));
-
-    var close_buf: [encrypted_alert_size]u8 = undefined;
-    writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+    // keep-alive request loop over the established 1.2 session.
+    try serveRequests(fd, handler, ctx, &conn, &record_buf);
 }
 
-/// Run the fd-handler against a pipe, returning the plaintext response it wrote. The handler
-/// writes to the pipe write end unchanged, then it is closed so the read end drains to EOF.
-fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8) ![]const u8 {
-    var pipe_fds: [2]i32 = undefined;
-    if (posix.errno(linux.pipe2(&pipe_fds, .{})) != .SUCCESS) return error.PipeFailed;
-    defer _ = linux.close(pipe_fds[0]);
+/// The sentinel fd handed to the fd-handler while a response sink is installed: its fdWriteAll
+/// calls match the sink by this fd and append to the buffer, they never touch a real descriptor.
+const sink_fd: posix.fd_t = -1;
 
-    handler(head, body, pipe_fds[1]);
-    _ = linux.close(pipe_fds[1]);
+/// One handler outcome: the buffered plaintext response, or the streamed flag when the handler took
+/// the streaming path (beginStream / SSE) over TLS. When `streamed` is true the response was already
+/// encrypted and sent through the stream sink, so `bytes` is empty and the caller closes.
+pub const HandlerResult = struct {
+    bytes: []const u8,
+    streamed: bool = false,
+};
 
-    var len: usize = 0;
-    while (len < out.len) {
-        const rc = linux.read(pipe_fds[0], out[len..].ptr, out.len - len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) break;
-        len += rc;
+/// Run the fd-handler with a response sink installed, returning the plaintext response it wrote into
+/// `out`. The handler's fdWriteAll appends to `out` directly (core.tl_resp_sink), so there is no
+/// pipe2 / read / close per request, just an in-memory copy. An overflowing response (the sink would
+/// flush to the sentinel fd, which fails) surfaces as error.ResponseTooLarge.
+///
+/// Note:
+/// - A streaming handler calls beginStream(), which detaches the capture sink. With the stream sink
+///   armed it already streamed over TLS (ADR-054), reported as streamed = true.
+pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8) !HandlerResult {
+    var sink = core.RespSink{ .fd = sink_fd, .buf = out };
+    const prev = core.tl_resp_sink;
+    core.tl_resp_sink = &sink;
+    defer core.tl_resp_sink = prev;
+
+    handler(head, body, sink_fd);
+
+    if (core.tl_resp_sink != &sink) {
+        if (core.tl_tls_stream != null) return .{ .bytes = &.{}, .streamed = true };
+
+        return error.StreamingNotSupported;
     }
+    if (sink.failed) return error.ResponseTooLarge;
 
-    return out[0..len];
+    return .{ .bytes = out[0..sink.len], .streamed = false };
+}
+
+/// Per-connection streaming state behind the type-erased core.TlsStreamSink (ADR-054). Generic over
+/// the connection so the TLS 1.3 and 1.2 paths share one implementation: write encrypts one record
+/// from `plaintext` and sends it straight to the socket, the streaming counterpart of writeAppData.
+fn StreamSinkFor(comptime Conn: type) type {
+    return struct {
+        conn: Conn,
+        fd: posix.fd_t,
+        enc: []u8,
+
+        fn write(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+
+            const encrypted = self.conn.writeAppData(plaintext, self.enc);
+            writeAll(self.fd, encrypted) catch return false;
+
+            return true;
+        }
+    };
 }
 
 // --------------------------------------------------------------- //
@@ -407,4 +572,176 @@ test "zix test: tls_serve, hostFromHead extracts the Host header" {
 
     const no_host = "GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
     try std.testing.expect(hostFromHead(no_host) == null);
+}
+
+/// Test handler: write a fixed 200 response, ignoring the request (keep-alive loop exercise).
+fn keepAliveTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
+    _ = head;
+    _ = body;
+
+    core.fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+}
+
+/// Test-only fixture: the localhost ECDSA P-256 cert DER (SAN localhost + 127.0.0.1), in hex. Public so
+/// the event-driven tls_mux tests reuse the same identity without a third copy of the literal.
+pub const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914f4a810c1ece713402574300a06082a8648ce3d040302302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f63301e170d3236303632323132353432305a170d3336303631393132353432305a302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f633059301306072a8648ce3d020106082a8648ce3d03010703420004c2a0121b298ac9cd389200e78d94e7bde1cc7cd8074795fab4f919799d40fdc231c5a90990ac8c6166ae472f33f74fced097f2edb7b8a1974be66a4ab07f253ba37f307d301d0603551d0e04160414c34e1d0a36a43947709b539e16dd0213aa4196aa301f0603551d23041830168014c34e1d0a36a43947709b539e16dd0213aa4196aa300f0603551d130101ff040530030101ff301a0603551d110413301182096c6f63616c686f737487047f000001300e0603551d0f0101ff040403020780300a06082a8648ce3d040302034700304402200b012f119db9b95d990bc482cb63e8f81e337a08634904e4caf513dc10c8aa8302202fdfe79ff6d5403e753ddf2aa52671923b8a2c28126bcbf196bd6fb7ecbcb14e";
+
+/// Test-only fixture: the secret key paired with fixture_cert_hex, in hex.
+pub const fixture_key_hex = "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c";
+
+test "zix test: tls_serve, keep-alive serves many requests then honors Connection: close" {
+    const client = @import("../../tls/client.zig");
+    const context = @import("../../tls/context.zig");
+
+    // server identity from the fixture cert + its secret key.
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, fixture_key_hex);
+    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var ctx = Tls.Context{
+        .allocator = std.testing.allocator,
+        .cert_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = server_key },
+        .alpn = &.{},
+        .curves = context.default_curves,
+        .ciphers = context.default_ciphers,
+        .min_version = .TLS_1_2,
+        .max_version = .TLS_1_3,
+        .prefer_server_ciphers = true,
+        .hsts_max_age_s = 0,
+    };
+
+    var pair: [2]posix.fd_t = undefined;
+    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const Srv = struct {
+        fn run(fd: posix.fd_t, server_ctx: *const Tls.Context) void {
+            serveConnTls(fd, keepAliveTestHandler, server_ctx) catch {};
+
+            _ = linux.close(fd);
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Srv.run, .{ server_fd, &ctx });
+    defer t.join();
+
+    // client handshake: ClientHello wrapped in a plaintext handshake record, then the server flight.
+    var ch_buf: [512]u8 = undefined;
+    const started = try client.start(.{ .client_random = @splat(0x11), .ephemeral_secret = @splat(0x42) }, &ch_buf);
+    var state = started.state;
+
+    var ch_rec: [600]u8 = undefined;
+    ch_rec[0] = content_type_handshake;
+    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
+    try writeAll(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+
+    var flight_buf: [4096]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| {
+        const rec = try readRecord(client_fd, flight_buf[flen..]);
+        flen += rec.full.len;
+    }
+
+    var fin_buf: [256]u8 = undefined;
+    var finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
+    try writeAll(client_fd, finished.client_finished);
+
+    // three requests on the one connection: two keep-alive, then Connection: close. All three must
+    // get a 200 over the SAME session (no re-handshake), proving keep-alive.
+    const requests = [_][]const u8{
+        "GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /b HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    };
+    for (requests) |req| {
+        var enc: [512]u8 = undefined;
+        try writeAll(client_fd, finished.connection.writeAppData(req, &enc));
+
+        var resp_rec: [1024]u8 = undefined;
+        const rec = try readRecord(client_fd, &resp_rec);
+        var plain: [1024]u8 = undefined;
+        const resp = try finished.connection.readAppData(rec.full, &plain);
+        try std.testing.expect(std.mem.indexOf(u8, resp, "200 OK") != null);
+    }
+
+    // after Connection: close the server sends one close_notify record (TLS 1.3 wraps the alert as
+    // application_data) and then closes, so the next read hits EOF.
+    var tail_rec: [256]u8 = undefined;
+    const tail = try readRecord(client_fd, &tail_rec);
+    try std.testing.expectEqual(content_type_application_data, tail.content_type);
+
+    var eof_rec: [64]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, readRecord(client_fd, &eof_rec));
+}
+
+/// Test handler: an SSE stream that opts in via beginStream(), then writes one event and returns.
+fn sseTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
+    _ = head;
+    _ = body;
+
+    core.beginStream();
+    core.fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.fdWriteAll(fd, "data: hello\n\n") catch return;
+}
+
+/// Capture stream sink for the test: a streaming handler's writes land in `buf` instead of a socket.
+const CaptureStream = struct {
+    buf: [1024]u8 = undefined,
+    len: usize = 0,
+
+    fn write(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
+        const self: *CaptureStream = @ptrCast(@alignCast(ctx_ptr));
+
+        @memcpy(self.buf[self.len..][0..plaintext.len], plaintext);
+        self.len += plaintext.len;
+
+        return true;
+    }
+};
+
+test "zix test: tls_serve, runHandlerToBuffer streams over TLS when the stream sink is armed" {
+    var capture = CaptureStream{};
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+    const prev = core.tl_tls_stream;
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = prev;
+
+    const req = "GET /events HTTP/1.1\r\nHost: x\r\n\r\n";
+    const parsed = try core.parseHead(req);
+
+    var out: [4096]u8 = undefined;
+
+    // beginStream() detaches the capture sink, so both writes route through the stream sink.
+    const result = try runHandlerToBuffer(sseTestHandler, &parsed.head, req[parsed.body_offset..], &out);
+    try std.testing.expect(result.streamed);
+    try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "text/event-stream") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "data: hello") != null);
+}
+
+fn wsNoopFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
+    _ = fd;
+    _ = opcode;
+    _ = payload;
+}
+
+test "zix test: tls_serve, serveTls encrypts the 101 through the stream sink and registers the handoff" {
+    var capture = CaptureStream{};
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+    const prev = core.tl_tls_stream;
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = prev;
+
+    // the 101 routes through the stream sink (encrypted over TLS in production), the handoff is set.
+    try ws.serveTls(-1, "dGhlIHNhbXBsZSBub25jZQ==", wsNoopFrame);
+    try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "101 Switching Protocols") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null);
+
+    const handoff = core.takeWebSocket();
+    try std.testing.expect(handoff != null);
 }
