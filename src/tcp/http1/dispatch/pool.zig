@@ -75,7 +75,7 @@ const ConnQueue = struct {
     }
 };
 
-const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0, send_date_header: bool = true };
+const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0, send_date_header: bool = true, large_body_rcvbuf: usize = 0, public_dir: []const u8 = "" };
 
 const AcceptCtx = struct {
     queue: *ConnQueue,
@@ -87,11 +87,12 @@ const AcceptCtx = struct {
 
 fn poolEntry(ctx: PoolCtx) void {
     core.setDateHeader(ctx.send_date_header);
+    core.setStatic(ctx.public_dir, ctx.io);
 
     while (ctx.queue.pop(ctx.io)) |stream| {
         defer stream.close(ctx.io);
         const fd = stream.socket.handle;
-        core.serveConn(fd, ctx.handler, .{ .handler_timeout_ms = ctx.handler_timeout_ms });
+        core.serveConn(fd, ctx.handler, .{ .handler_timeout_ms = ctx.handler_timeout_ms, .large_body_rcvbuf = ctx.large_body_rcvbuf });
     }
 }
 
@@ -127,7 +128,7 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
         t.* = try std.Thread.spawn(
             .{ .stack_size = config.worker_stack_size_bytes },
             poolEntry,
-            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header }},
+            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir }},
         );
     }
 

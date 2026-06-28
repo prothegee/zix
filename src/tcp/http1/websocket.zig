@@ -383,6 +383,35 @@ pub fn serve(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
     core.requestWebSocket(fd, on_frame);
 }
 
+/// Complete the handshake over TLS, then hand the connection to the https thread (ADR-055). Call
+/// this from an http1 handler served over TLS (`config.tls`, the `.ASYNC` / `.POOL` / `.MIXED`
+/// path) instead of `serve`: it detaches the buffered response capture so the `101` and every
+/// frame encrypt one TLS record per write (ADR-054 stream sink), then registers the handoff. After
+/// the handler returns, the https serve loop drives the inline frame loop over the TLS session,
+/// invoking on_frame for each text/binary frame (ping auto-ponged, close auto-echoed).
+///
+/// Note:
+/// - Thread-per-connection only, like SSE over TLS. `fd` is the sentinel (-1) the handler is given
+///   over TLS, used only to match the send sink, never a real descriptor.
+/// - `broadcast` and rooms are not supported over TLS: each connection has its own TLS session, so
+///   a frame must be encrypted per connection. Use `send` (echo / per-connection) over TLS.
+///
+/// Param:
+/// fd       - std.posix.fd_t (the sentinel fd the handler received)
+/// key      - []const u8 (the Sec-WebSocket-Key request header value)
+/// on_frame - WsFrameFn
+///
+/// Return:
+/// - !void (handshake errors from acceptKey / upgrade)
+pub fn serveTls(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
+    var accept_buf: [64]u8 = undefined;
+    const accept = try acceptKey(key, &accept_buf);
+
+    core.beginStream();
+    try upgrade(fd, accept);
+    core.requestWebSocket(fd, on_frame);
+}
+
 /// Outcome of one pump pass over a connection's read buffer.
 pub const PumpResult = struct {
     /// Bytes consumed from the front of data (whole frames only).

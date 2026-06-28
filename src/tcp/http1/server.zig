@@ -12,6 +12,7 @@ const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
+const tls_mux = @import("tls_mux.zig");
 
 // --------------------------------------------------------- //
 
@@ -34,7 +35,24 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
         pub fn deinit(_: *Self) void {}
 
         pub fn run(self: *const Self) !void {
-            if (self.config.tls != null) return tls_serve.runTls(self.config, handler);
+            // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
+            // rather than 404-ing every file request at runtime. Mirrors zix.Http.Server.run.
+            if (self.config.public_dir.len > 0) {
+                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch return error.PublicDirNotFound;
+                dir.close(self.config.io);
+            }
+
+            if (self.config.tls != null) {
+                const is_linux = comptime @import("builtin").target.os.tag == .linux;
+
+                // .EPOLL / .URING terminate TLS in an event-driven epoll-mux worker (keep-alive,
+                // thousands of connections per worker). The thread-per-connection blocking path
+                // (tls_serve) serves the remaining models.
+                if (is_linux and (self.config.dispatch_model == .EPOLL or self.config.dispatch_model == .URING))
+                    return tls_mux.runTlsMux(self.config, handler);
+
+                return tls_serve.runTls(self.config, handler);
+            }
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(self.config, handler),
@@ -115,6 +133,7 @@ test "zix http1: Server.init valid config, deinit is safe" {
         .io = undefined,
         .ip = "127.0.0.1",
         .port = 9200,
+        .dispatch_model = .ASYNC,
     });
     server.deinit();
 }
