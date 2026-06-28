@@ -20,6 +20,8 @@ const async_model = @import("dispatch/async.zig");
 const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
+const tls_serve = @import("tls_serve.zig");
+const tls_mux = @import("tls_mux.zig");
 
 // --------------------------------------------------------- //
 
@@ -108,6 +110,17 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
                 }
                 break :blk cfg.dispatch_model;
             };
+
+            // https opt-in (config.tls): terminate TLS on a gated path, the cleartext models above
+            // are untouched. EPOLL / URING multiplex TLS in the event-driven worker (one SO_REUSEPORT
+            // epoll worker per core, many connections each), the thread models hand each connection to
+            // its own worker thread.
+            if (cfg.tls != null) {
+                if (effective_model == .EPOLL or effective_model == .URING) {
+                    return tls_mux.runTlsMux(self, thread_io);
+                }
+                return tls_serve.runTls(self, thread_io);
+            }
 
             switch (effective_model) {
                 .POOL => try pool_model.runPool(self, thread_io, cpu),
@@ -212,7 +225,7 @@ test "zix http: getAvailableCpuCount returns at least 1" {
 }
 
 test "zix http: effectiveCacheEntries honors the memory ceiling" {
-    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
+    const base = Config{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
 
     // no ceiling: the configured entry count passes through unchanged
     try std.testing.expectEqual(@as(u32, 1024), common.effectiveCacheEntries(base));
@@ -243,7 +256,7 @@ test "zix http: EPOLL processRequest serves a cache miss then a hit" {
 
     const routes = [_]Route{.{ .path = "/cached", .handler = cacheRouteHandler }};
     const ServerImpl = HttpServerImpl(4096, &routes);
-    var server = try ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .response_cache = true });
+    var server = try ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .response_cache = true });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

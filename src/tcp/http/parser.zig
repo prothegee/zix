@@ -30,15 +30,6 @@ pub const RequestHeaderSize = union(enum) {
     }
 };
 
-/// One request header, encoded as byte offsets + lengths into the read buffer.
-/// Zero-copy: no data is copied during parsing.
-pub const HeaderEntry = struct {
-    name_start: u16,
-    name_len: u8,
-    value_start: u16,
-    value_len: u16,
-};
-
 /// Fully parsed HTTP/1.1 request head, encoded as offsets into the read buffer.
 /// Pre-parses method, keep_alive, and content_length to avoid re-scanning on the hot path.
 pub const ParsedHead = struct {
@@ -63,7 +54,7 @@ pub const ParseError = error{
     TooManyHeaders,
 };
 
-pub const DechunkError = error{
+const DechunkError = error{
     InvalidChunkSize,
 };
 
@@ -89,6 +80,60 @@ pub fn findHeaderEnd(buf: []const u8, start: usize) ?usize {
     return null;
 }
 
+/// Fast path for the common GET request: extract method, path, and query with direct integer
+/// compares and a single header-region scan, skipping the per-line header loop that the full parse
+/// runs. Returns null (falling back to the full parse) unless the request is a plain keep-alive GET
+/// with no framing headers, so correctness is never traded for speed.
+///
+/// Note:
+/// - The header region is bailed to the full parse when it carries a Connection header (keep-alive
+///   needs the per-line value), Content-Length (a body), or Transfer-Encoding (chunked). The bail
+///   probes are case-robust: the first letter is skipped so "Content-" and "content-" both match.
+/// - Mirrors zix.Http1's parseGetFastPath, hardened so a GET carrying a body or an explicit
+///   Connection header is never mis-framed.
+fn parseGetFast(buf: []const u8, header_end: usize) ?ParsedHead {
+    if (buf.len < 16) return null;
+    if (std.mem.readInt(u32, buf[0..4], .little) != comptime std.mem.readInt(u32, "GET ", .little)) return null;
+
+    const line_end = std.mem.indexOfScalarPos(u8, buf, 4, '\r') orelse return null;
+
+    // Minimum for "GET / HTTP/1.1": line_end >= 14, the last 9 bytes of the line are " HTTP/1.1".
+    if (line_end < 14) return null;
+    if (buf[line_end - 9] != ' ') return null;
+    if (std.mem.readInt(u64, buf[line_end - 8 ..][0..8], .little) != comptime std.mem.readInt(u64, "HTTP/1.1", .little)) return null;
+
+    const target = buf[4 .. line_end - 9];
+    var path_len: u16 = @intCast(target.len);
+    var query_start: u16 = 0;
+    var query_len: u16 = 0;
+    if (std.mem.indexOfScalar(u8, target, '?')) |q| {
+        path_len = @intCast(q);
+        query_start = @intCast(4 + q + 1);
+        query_len = @intCast(target.len - q - 1);
+    }
+
+    const headers_start = line_end + 2;
+    const header_region = if (headers_start < header_end) buf[headers_start..header_end] else buf[0..0];
+
+    if (std.mem.indexOf(u8, header_region, "onnection") != null) return null; // any Connection header
+    if (std.mem.indexOf(u8, header_region, "ontent-") != null) return null; // Content-Length (body)
+    if (std.mem.indexOf(u8, header_region, "ransfer-") != null) return null; // Transfer-Encoding (chunked)
+
+    return ParsedHead{
+        .method = .GET,
+        .path_start = 4,
+        .path_len = path_len,
+        .query_start = query_start,
+        .query_len = query_len,
+        .headers_start = @intCast(headers_start),
+        .headers_len = @intCast(if (headers_start < header_end) header_end - headers_start else 0),
+        .body_offset = @intCast(header_end + 4),
+        .keep_alive = true,
+        .content_length = 0,
+        .chunked = false,
+    };
+}
+
 /// Parse an HTTP/1.1 request from buf.
 /// On success the returned ParsedHead contains only offsets into buf, no data is copied.
 ///
@@ -98,6 +143,10 @@ pub fn findHeaderEnd(buf: []const u8, start: usize) ?usize {
 pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     // Scan for the end-of-headers marker. Search stops as soon as it is found.
     const header_end = findHeaderEnd(buf, 0) orelse return null;
+
+    // Fast path for the common keep-alive GET: skips the per-line header scan. Bails to the full
+    // parse below for anything with framing or Connection headers.
+    if (parseGetFast(buf, header_end)) |fast| return fast;
     const head_buf = buf[0..header_end];
 
     // Parse request line: "METHOD TARGET HTTP/1.1"
@@ -268,13 +317,13 @@ pub fn dechunk(raw: []const u8, out: []u8) DechunkError!usize {
     return written;
 }
 
-fn parseMethod(s: []const u8) ?Method.Code {
-    return switch (s.len) {
-        3 => if (std.mem.eql(u8, s, "GET")) .GET else if (std.mem.eql(u8, s, "PUT")) .PUT else null,
-        4 => if (std.mem.eql(u8, s, "HEAD")) .HEAD else if (std.mem.eql(u8, s, "POST")) .POST else null,
-        5 => if (std.mem.eql(u8, s, "PATCH")) .PATCH else if (std.mem.eql(u8, s, "TRACE")) .TRACE else null,
-        6 => if (std.mem.eql(u8, s, "DELETE")) .DELETE else null,
-        7 => if (std.mem.eql(u8, s, "OPTIONS")) .OPTIONS else if (std.mem.eql(u8, s, "CONNECT")) .CONNECT else null,
+fn parseMethod(str: []const u8) ?Method.Code {
+    return switch (str.len) {
+        3 => if (std.mem.eql(u8, str, "GET")) .GET else if (std.mem.eql(u8, str, "PUT")) .PUT else null,
+        4 => if (std.mem.eql(u8, str, "HEAD")) .HEAD else if (std.mem.eql(u8, str, "POST")) .POST else null,
+        5 => if (std.mem.eql(u8, str, "PATCH")) .PATCH else if (std.mem.eql(u8, str, "TRACE")) .TRACE else null,
+        6 => if (std.mem.eql(u8, str, "DELETE")) .DELETE else null,
+        7 => if (std.mem.eql(u8, str, "OPTIONS")) .OPTIONS else if (std.mem.eql(u8, str, "CONNECT")) .CONNECT else null,
         else => null,
     };
 }
@@ -408,4 +457,54 @@ test "zix test: dechunk uppercase hex accepted" {
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqualStrings("0123456789", out[0..n]);
+}
+
+test "zix test: parseGetFast serves a plain keep-alive GET with query and headers" {
+    // No Connection / Content-Length / Transfer-Encoding header, so the fast path applies.
+    const raw = "GET /search?q=zig HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(Method.Code.GET, h.method);
+    try std.testing.expectEqualStrings("/search", raw[h.path_start..][0..h.path_len]);
+    try std.testing.expectEqualStrings("q=zig", raw[h.query_start..][0..h.query_len]);
+    try std.testing.expect(h.keep_alive);
+    try std.testing.expectEqual(@as(u64, 0), h.content_length);
+    try std.testing.expect(!h.chunked);
+    try std.testing.expectEqualStrings("x", getHeader(h, raw, "host").?);
+}
+
+test "zix test: parseGetFast bails on a Connection header so keep-alive stays correct" {
+    const raw = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(Method.Code.GET, h.method);
+    try std.testing.expect(!h.keep_alive); // the full parse read Connection: close
+}
+
+test "zix test: parseGetFast bails on a GET body so Content-Length is framed" {
+    const raw = "GET /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqualStrings("/x", raw[h.path_start..][0..h.path_len]);
+    try std.testing.expectEqual(@as(u64, 5), h.content_length);
+}
+
+test "zix test: parseGetFast bail probe is case-robust for a lowercase content-length" {
+    const raw = "GET / HTTP/1.1\r\ncontent-length: 3\r\n\r\nabc";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(@as(u64, 3), h.content_length);
+}
+
+test "zix test: parseGetFast bails on Transfer-Encoding chunked" {
+    const raw = "GET / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expect(h.chunked);
+}
+
+test "zix test: parseGetFast declines non-GET and HTTP/1.0 (full parse handles them)" {
+    const post = "POST /data HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi";
+    const hp = (try parse(post, 64)).?;
+    try std.testing.expectEqual(Method.Code.POST, hp.method);
+
+    const v10 = "GET / HTTP/1.0\r\nHost: x\r\n\r\n";
+    const h10 = (try parse(v10, 64)).?;
+    try std.testing.expectEqual(Method.Code.GET, h10.method);
+    try std.testing.expectEqualStrings("/", v10[h10.path_start..][0..h10.path_len]);
 }

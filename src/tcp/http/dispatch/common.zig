@@ -26,7 +26,7 @@ const slab = @import("../../../multiplexers/slab.zig");
 
 // --------------------------------------------------------- //
 
-pub const timer_interval_ms: u32 = 500;
+const timer_interval_ms: u32 = 500;
 pub const conn_queue_initial_cap: usize = 16;
 /// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
@@ -56,7 +56,7 @@ pub var g_date_secs = std.atomic.Value(u64).init(0);
 
 // --------------------------------------------------------- //
 
-pub fn updateDateCache(io: std.Io) void {
+fn updateDateCache(io: std.Io) void {
     const timestamp = std.Io.Clock.real.now(io);
     const raw_secs = timestamp.toSeconds();
     const cur_secs: u64 = if (raw_secs >= 0) @intCast(raw_secs) else 0;
@@ -85,7 +85,7 @@ pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
 // --------------------------------------------------------- //
 // Layer D: connection registry + timer eviction
 
-pub const ConnEntry = struct {
+const ConnEntry = struct {
     stream: std.Io.net.Stream,
     deadline: std.Io.Clock.Timestamp,
     done: std.atomic.Value(bool) = .init(false),
@@ -149,6 +149,14 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
+}
+
+/// Set O_NONBLOCK on a descriptor (the TLS epoll listener, so accept4 returns EAGAIN when drained).
+pub fn setNonBlock(fd: std.posix.fd_t) void {
+    const linux = std.os.linux;
+    const cur_flags = linux.fcntl(fd, std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fd, std.posix.F.SETFL, cur_flags | @as(usize, nonblock_bit));
 }
 
 /// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
@@ -342,6 +350,12 @@ pub const UringHttpConn = struct {
     staged: usize,
     inflight: usize,
     closing: bool,
+    /// Idle-pool links, valid only while this connection sits in the worker's idle pool between a
+    /// close and the next accept that reuses it. The warm pool is doubly linked (most-recently-used
+    /// at the head, least-recently-used at the tail) so the release path evicts the LRU tail in O(1).
+    /// The cold stack uses next only. Mirrors the zix.Http1 URING idle pool.
+    next: ?*UringHttpConn = null,
+    prev: ?*UringHttpConn = null,
 };
 
 /// Accept every pending connection on listener_fd and register each in epfd.
@@ -401,6 +415,14 @@ pub fn processRequest(
 ) ReqOutcome {
     const allocator = arena.allocator();
     const cfg = server.config;
+
+    // Install the large-body SO_RCVBUF for this worker (read by Request.body when a big body comes
+    // off the socket). Shared by every dispatch model, since all funnel through here.
+    @import("../request.zig").setLargeBodyRcvbuf(cfg.large_body_rcvbuf);
+
+    // Install the body read timeout so a multi-segment body on the non-blocking fd waits for the
+    // next segment (up to this bound) instead of truncating at the first EAGAIN.
+    @import("../request.zig").setBodyReadTimeout(cfg.body_read_timeout_ms);
 
     const head = parser.parse(buf, cfg.max_request_headers.value()) catch {
         fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
@@ -489,7 +511,7 @@ pub fn processRequest(
 /// Return:
 /// - .keep_alive when the connection may serve another request
 /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
-pub fn handleOneRequest(
+fn handleOneRequest(
     server: anytype,
     stream: std.Io.net.Stream,
     fd: std.posix.fd_t,

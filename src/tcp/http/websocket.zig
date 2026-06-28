@@ -2,6 +2,7 @@
 //! RFC 6455: frame parsing, handshake, room-based broadcast.
 
 const std = @import("std");
+const response = @import("response.zig");
 
 /// WebSocket handshake response header buffer.
 const HANDSHAKE_HEADER_BUF: usize = 256;
@@ -212,7 +213,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
 /// - !void
 pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void {
     var hdr_buf: [HANDSHAKE_HEADER_BUF]u8 = undefined;
-    const response = try std.fmt.bufPrint(
+    const response_bytes = try std.fmt.bufPrint(
         &hdr_buf,
         "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Upgrade: websocket\r\n" ++
@@ -222,8 +223,213 @@ pub fn upgrade(stream: std.Io.net.Stream, io: std.Io, accept: []const u8) !void 
     );
     var write_buf: [HANDSHAKE_WRITE_BUF]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
-    try writer.interface.writeAll(response);
+    try writer.interface.writeAll(response_bytes);
     try writer.interface.flush();
+}
+
+// --------------------------------------------------------- //
+// engine-driven WebSocket over TLS (ADR-055)
+// --------------------------------------------------------- //
+
+/// Largest frame written with one combined header + payload buffer, above this the header and
+/// payload are written separately to avoid a large stack copy.
+const ws_send_inline_cap: usize = 4096;
+
+/// Per-frame callback for the engine-driven WebSocket-over-TLS loop. Matches the http1 shape so a
+/// handler reads the same. `fd` is the sentinel (-1) over TLS, used only to match the send sink.
+pub const WsFrameFn = *const fn (fd: std.posix.fd_t, opcode: u8, payload: []const u8) void;
+
+const WsPending = struct {
+    fd: std.posix.fd_t,
+    on_frame: WsFrameFn,
+};
+
+/// Set by serveTls during a handler, read by the https serve loop right after the handler returns.
+/// Thread-local so each connection thread hands off only its own connection.
+threadlocal var tl_ws_pending: ?WsPending = null;
+
+/// Request that this connection be promoted to a WebSocket after the handler returns. serveTls calls
+/// this for you. Honored on the thread-per-connection https path only.
+pub fn requestWebSocket(fd: std.posix.fd_t, on_frame: WsFrameFn) void {
+    tl_ws_pending = .{ .fd = fd, .on_frame = on_frame };
+}
+
+/// Take and clear any pending WebSocket promotion for the current thread.
+pub fn takeWebSocket() ?WsPending {
+    const pending = tl_ws_pending;
+    tl_ws_pending = null;
+
+    return pending;
+}
+
+/// Coalesces every frame sent during one pump pass into a single write, so a burst flushes once.
+/// Over TLS the flush goes through response.fdWriteAll, which the stream sink encrypts into one
+/// record (ADR-054).
+const SendSink = struct {
+    fd: std.posix.fd_t,
+    buf: []u8,
+    len: usize = 0,
+    failed: bool = false,
+
+    fn append(self: *SendSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            response.fdWriteAll(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    fn flush(self: *SendSink) void {
+        if (self.len == 0) return;
+
+        response.fdWriteAll(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+threadlocal var tl_send_sink: ?*SendSink = null;
+
+/// Build and write one unmasked server frame. During a pump pass the frame is staged into the send
+/// sink for a single batched, encrypted write, otherwise it goes out immediately through
+/// response.fdWriteAll (the stream sink encrypts it over TLS).
+///
+/// Param:
+/// fd      - std.posix.fd_t (the sentinel fd over TLS)
+/// opcode  - Opcode
+/// payload - []const u8
+///
+/// Return:
+/// - !void (error.BrokenPipe on a dead peer)
+pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
+    if (tl_send_sink) |sink| {
+        var hdr: [ws_max_frame_header]u8 = undefined;
+        const hdr_len = buildHeader(&hdr, opcode, payload.len);
+
+        sink.append(hdr[0..hdr_len]);
+        sink.append(payload);
+
+        return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    if (payload.len + ws_max_frame_header <= ws_send_inline_cap) {
+        var buf: [ws_send_inline_cap]u8 = undefined;
+        const len = buildFrame(&buf, opcode, payload);
+
+        return response.fdWriteAll(fd, buf[0..len]);
+    }
+
+    var hdr: [ws_max_frame_header]u8 = undefined;
+    const hdr_len = buildHeader(&hdr, opcode, payload.len);
+
+    try response.fdWriteAll(fd, hdr[0..hdr_len]);
+    try response.fdWriteAll(fd, payload);
+}
+
+/// Outcome of one pump pass over a connection's read buffer.
+pub const PumpResult = struct {
+    /// Bytes consumed from the front of data (whole frames only).
+    consumed: usize,
+    /// Whether the connection should close (close frame seen or write failed).
+    close: bool,
+};
+
+/// Parse and dispatch every complete frame in data, in order. Text and binary frames invoke
+/// on_frame, ping is auto-ponged, close is auto-echoed and ends the connection. A trailing partial
+/// frame is left for the next read. All frames sent during the pass are coalesced into out_buf and
+/// flushed in one write.
+///
+/// Param:
+/// fd          - std.posix.fd_t
+/// data        - []const u8 (raw frame bytes received so far)
+/// payload_buf - []u8 (scratch for unmasking, must hold the largest payload)
+/// out_buf     - []u8 (staging for the coalesced write)
+/// on_frame    - WsFrameFn
+///
+/// Return:
+/// - PumpResult
+pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []u8, on_frame: WsFrameFn) PumpResult {
+    var sink = SendSink{ .fd = fd, .buf = out_buf };
+    tl_send_sink = &sink;
+    defer tl_send_sink = null;
+
+    var offset: usize = 0;
+    var close = false;
+
+    while (offset < data.len) {
+        const result = parseFrame(data[offset..], payload_buf) orelse break;
+
+        switch (result.frame.opcode) {
+            .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
+            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .close => {
+                send(fd, .close, &.{}) catch {};
+                offset += result.consumed;
+                close = true;
+                break;
+            },
+            .pong, .continuation => {},
+            else => {},
+        }
+
+        offset += result.consumed;
+    }
+
+    sink.flush();
+
+    return .{ .consumed = offset, .close = close or sink.failed };
+}
+
+/// Write the 101 Switching Protocols response through response.fdWriteAll (the fd / sink path), the
+/// TLS counterpart of `upgrade` which writes onto a std.Io stream.
+pub fn upgradeFd(fd: std.posix.fd_t, accept: []const u8) !void {
+    var hdr_buf: [HANDSHAKE_HEADER_BUF]u8 = undefined;
+    const resp = try std.fmt.bufPrint(
+        &hdr_buf,
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: {s}\r\n\r\n",
+        .{accept},
+    );
+
+    try response.fdWriteAll(fd, resp);
+}
+
+/// Complete the handshake over TLS, then hand the connection to the https thread (ADR-055). Call
+/// this from a handler served over TLS (`config.tls`, the `.ASYNC` / `.POOL` / `.MIXED` path)
+/// instead of `upgrade` + a stream loop: it detaches the buffered response capture so the `101` and
+/// every frame encrypt one TLS record per write (the ADR-054 stream sink), then registers the
+/// handoff. After the handler returns, the https serve loop drives the inline frame loop over the
+/// TLS session, invoking on_frame per text / binary frame (ping auto-ponged, close auto-echoed).
+///
+/// Note:
+/// - Thread-per-connection only. `fd` is the sentinel (-1) the handler is given over TLS.
+/// - Rooms / broadcast are not served over TLS (each connection has its own session). Use `send`.
+///
+/// Param:
+/// fd       - std.posix.fd_t (the sentinel fd, from ctx.stream.socket.handle over TLS)
+/// key      - []const u8 (the Sec-WebSocket-Key request header value)
+/// on_frame - WsFrameFn
+///
+/// Return:
+/// - !void (handshake errors from acceptKey / upgradeFd)
+pub fn serveTls(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
+    var accept_buf: [64]u8 = undefined;
+    const accept = try acceptKey(key, &accept_buf);
+
+    response.tl_resp_sink = null;
+    try upgradeFd(fd, accept);
+    requestWebSocket(fd, on_frame);
 }
 
 // --------------------------------------------------------- //

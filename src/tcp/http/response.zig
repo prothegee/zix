@@ -113,8 +113,8 @@ pub const Response = struct {
         };
     }
 
-    pub fn setStatus(self: *Response, s: Status.Code) void {
-        self.status = s;
+    pub fn setStatus(self: *Response, status: Status.Code) void {
+        self.status = status;
     }
 
     pub fn setContentType(self: *Response, ct: Content.Type) void {
@@ -289,7 +289,13 @@ pub const Response = struct {
         // so detach any coalescing sink. Each event must flush to the fd directly
         // rather than buffer into the .EPOLL/.URING response sink (which only
         // flushes after the handler returns, but an SSE handler never returns).
-        if (tl_resp_sink) |sink| {
+        //
+        // Over TLS (ADR-054) the live-session stream sink is armed: drop the buffered capture (its
+        // bytes are replaced by the stream, so it is discarded not flushed to the -1 sentinel) and
+        // let fdWriteAll route each event through the stream sink, encrypting one record per write.
+        if (tl_tls_stream != null) {
+            tl_resp_sink = null;
+        } else if (tl_resp_sink) |sink| {
             sink.flush();
             tl_resp_sink = null;
         }
@@ -544,7 +550,7 @@ pub fn cacheTtl() u32 {
 }
 
 /// Whether response compression is enabled for this worker. Off unless the server
-/// installs it from config.compression, in which case sendNegotiated sends uncompressed.
+/// installs it from config.compress, in which case sendNegotiated sends uncompressed.
 pub threadlocal var tl_compression: bool = false;
 
 /// Body size floor for compression, installed from config.compression_min_size.
@@ -578,6 +584,12 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
         sink.append(data);
 
         return if (sink.failed) error.BrokenPipe else {};
+    }
+
+    // Streaming https path (ADR-054): no buffered capture is installed, so each write encrypts one
+    // TLS record and sends it. Reached only after res.stream() detaches the capture sink over TLS.
+    if (tl_tls_stream) |strm| {
+        return if (strm.write(data)) {} else error.BrokenPipe;
     }
 
     return rawFdWrite(fd, data);
@@ -668,6 +680,33 @@ pub const RespSink = struct {
 /// Active response sink for the current worker thread (the .URING ring path).
 /// null for every other dispatch model, so fdWriteAll writes straight to the fd.
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
+
+/// Streaming sink for the thread-per-connection https path (ADR-054). While installed
+/// (tl_tls_stream) and the buffered capture sink is detached, fdWriteAll encrypts each write as one
+/// TLS record and sends it straight to the socket, so an SSE handler streams over TLS instead of
+/// buffering a whole response. Type-erased over the live connection (the 1.3 and 1.2 paths share
+/// it): writeFn casts ctx back to the concrete per-connection state and encrypts + writes.
+pub const TlsStreamSink = struct {
+    ctx: *anyopaque,
+    writeFn: *const fn (ctx: *anyopaque, plaintext: []const u8) bool,
+    failed: bool = false,
+
+    pub fn write(self: *TlsStreamSink, bytes: []const u8) bool {
+        if (self.failed) return false;
+
+        if (!self.writeFn(self.ctx, bytes)) {
+            self.failed = true;
+
+            return false;
+        }
+
+        return true;
+    }
+};
+
+/// Active streaming sink for the current worker thread (the thread-per-conn https path). null for
+/// cleartext and the buffered https path, so fdWriteAll never routes through it there.
+pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 
 // --------------------------------------------------------- //
 

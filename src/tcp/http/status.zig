@@ -486,8 +486,8 @@ pub fn stringFromEnum(status_enum: Code) []const u8 {
 /// - "HTTP/1.1 NNN Reason\r\n" verbatim for common status codes
 /// - "" for uncommon codes, caller falls back to bufPrint
 /// - Reason phrases match stringFromEnum() so behavior is unchanged for clients
-pub fn statusLine(c: Code) []const u8 {
-    return switch (c) {
+pub fn statusLine(code: Code) []const u8 {
+    return switch (code) {
         .OK => "HTTP/1.1 200 Ok\r\n",
         .CREATED => "HTTP/1.1 201 Created\r\n",
         .ACCEPTED => "HTTP/1.1 202 Accepted\r\n",
