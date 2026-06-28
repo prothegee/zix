@@ -23,7 +23,7 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default).
 
 ### .POOL: Work-Queue Thread Pool
 
@@ -155,7 +155,7 @@ graph TD
     Http --> context["context.zig\nContext"]
     Http --> middleware["middleware.zig"]
     Http --> static["static.zig"]
-    Http --> upload["upload.zig\nMultipartParser"]
+    Http --> multipart["utils/multipart.zig\nParser + Field"]
     Http --> websocket["websocket.zig\nWebSocket"]
     Http --> method["method.zig\nMethod.Code"]
     Http --> status["status.zig\nStatus.Code"]
@@ -221,14 +221,14 @@ Access via `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively, non-Linux and non-HTTP/Grpc protocols use `.POOL` automatically) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively, non-Linux and non-HTTP/Grpc protocols use `.POOL` automatically) `.URING`(4, Linux-only io_uring, same automatic `.POOL` fallback off Linux) |
 | `zix.Http.RequestHeaderSize` | union(enum) | Request header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | Client user agent string from `build.zig.zon` (e.g. `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
 | `zix.Http.ContentType` | enum | Type-safe MIME representation |
 | `zix.Http.Content` | namespace | `typeFromExtension(ext)`, `fromExtension(ext)` |
-| `zix.Http.Multipart` | struct | Parse `multipart/form-data` bodies |
-| `zix.Http.MultipartField` | struct | `{ name, filename, content_type, data, is_file }` |
+| `zix.Http.Multipart` | struct | Parse `multipart/form-data` bodies (alias of `zix.utils.multipart.Parser`) |
+| `zix.Http.MultipartField` | struct | `{ name, filename, content_type, data, is_file }` (alias of `zix.utils.multipart.Field`) |
 | `zix.Http.WebSocket` | namespace | Frame parsing, handshake, room broadcast |
 | `zix.Http.WebSocket.Opcode` | enum | continuation text binary close ping pong |
 | `zix.Http.WebSocket.Frame` | struct | `{ fin, opcode, payload }` |
@@ -238,6 +238,8 @@ Access via `const zix = @import("zix");`
 | `zix.Http.WebSocket.buildFrame` | fn | Serialize a server-to-client frame (unmasked) |
 | `zix.Http.WebSocket.acceptKey` | fn | Compute `Sec-WebSocket-Accept` from `Sec-WebSocket-Key` |
 | `zix.Http.WebSocket.upgrade` | fn | Write `101 Switching Protocols` onto `ctx.stream` |
+| `zix.Http.WebSocket.serveTls` | fn | WebSocket over TLS (wss): encrypted `101` + engine-driven inline frame loop (ADR-055) |
+| `zix.Http.WebSocket.send` | fn | Send one server frame, sink-coalesced (used from an `on_frame` callback over TLS) |
 | `zix.utils.file.save` | fn | Write bytes to `dir/filename`, creates directory if needed |
 | `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
 | `zix.Tcp.Http.Status.Code` | enum | Full HTTP 1xx--5xx status codes |
@@ -251,9 +253,10 @@ pub const HttpServerConfig = struct {
     io:                   ?std.Io           = null,      // caller-provided io backend. null = internal Threaded
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
+    dispatch_model:       DispatchModel,    // required: ASYNC, POOL, MIXED, EPOLL, or URING (EPOLL/URING Linux-only)
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
+    large_body_rcvbuf:    usize             = 256 * 1024, // SO_RCVBUF on the large-body/upload path, 0 = kernel default
     compression:          bool              = false,      // gzip / deflate / brotli negotiation, opt-in via resp.sendNegotiated (.EPOLL/.URING)
     compression_min_size: usize             = 256,        // skip bodies under this floor
     compression_max_out:  usize             = 256 * 1024, // codec-agnostic compressed-output cap
@@ -485,10 +488,10 @@ flowchart TD
 
 ## Upload
 
-`zix.Http.Multipart` parses `multipart/form-data` bodies into fields. `zix.utils.file.save` writes bytes to disk. Neither is wired into the server automatically (handlers call them directly).
+`zix.utils.multipart.Parser` parses `multipart/form-data` bodies into fields (also exposed as the alias `zix.Http.Multipart`). `zix.utils.file.save` writes bytes to disk. Neither is wired into the server automatically (handlers call them directly).
 
 ```zig
-var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
 defer parser.deinit();
 try parser.parse(try req.body());
 
@@ -765,7 +768,11 @@ pub const HttpClientConfig = struct {
     max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
+    h2_max_read_rounds:  usize = 4096,                       // HTTP/2 client read-loop bound, max frame-read rounds
     user_agent:          []const u8 = zon_options.user_agent, // library version string (e.g. "zix/0.1.0"); "" omits
+    version:             Version = .HTTP_1,                  // .HTTP_1 (std client) or .HTTP_2 (h2 over TLS 1.3, https only)
+    tls_ca_path:         ?[]const u8 = null,                 // extra CA PEM for https. null = system roots
+    tls_verify:          bool = true,                        // verify server cert chain + hostname on https
 };
 ```
 
@@ -826,7 +833,7 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | :- | :- |
 | `response_timeout_ms` enforcement | v1: field stored, not yet applied |
 | `read_timeout_ms` enforcement | v1: field stored, not yet applied |
-| TLS / HTTPS | out of scope: terminate TLS at the proxy layer (nginx, HAProxy, Envoy), zix speaks plain HTTP behind the proxy |
+| TLS / HTTPS (client) | https via `version = .HTTP_2` (h2 over TLS 1.3, `h2_client.zig`), trusting the server cert through `tls_ca_path` / `tls_verify`. The HTTP/1 client path is cleartext |
 | Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
 
 ---
@@ -836,7 +843,7 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | Feature | Location | Note |
 | :- | :- | :- |
 | Middleware chain runner | `middleware.zig` | Comptime wrapper pattern is the current approach |
-| HTTP/2 / TLS (server) | out of scope: TLS termination is the responsibility of an upstream proxy (nginx, HAProxy, Envoy). zix is a network backend library and does not face the internet directly. | n/a |
+| TLS (this high-level server) | proxy-terminated by design: run nginx / haproxy in front (see [`docs/hld-proxy-en.md`](hld-proxy-en.md)). For in-process TLS use `zix.Http1` (native https/1.1), `zix.Http2` (native h2 over TLS), or `zix.Grpc`, which all serve TLS directly. | n/a |
 | response/read timeout enforcement (client) | `client.zig` | Config fields stored. IO-level wiring deferred |
 
 For UDP design see [`docs/hld-udp.md`](hld-udp.md). For UDS see [`docs/hld-uds.md`](hld-uds.md).

@@ -289,10 +289,10 @@ Content-Type dan Date ditulis dengan `@memcpy` prefix literal plus value (bukan 
 4. writeAll("\r\n")
 5. flush()
 6. atur res.streaming = true
-7. return SseWriter{ .out = req.server.out }
+7. return SseWriter{ .fd = fd }
 ```
 
-`SseWriter` menyimpan pointer `*std.Io.Writer` ke write buffer koneksi. Setiap metode penulisan langsung flush agar event sampai ke client tanpa buffering.
+`SseWriter` menyimpan fd koneksi. Setiap metode penulisan memanggil `fdWriteAll` agar event sampai ke client tanpa buffering. Melalui TLS (ADR-054) stream sink per-koneksi terpasang: langkah 1 melepas buffered capture sink alih-alih mem-flush-nya (byte-nya digantikan oleh stream), dan `fdWriteAll` merutekan tiap header dan event lewat stream sink, mengenkripsi satu TLS record per write. Di cleartext write langsung ke socket.
 
 ```
 writeEvent(data):      writeAll("data: ") + writeAll(data) + writeAll("\n\n") + flush
@@ -411,7 +411,9 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 
 ---
 
-## upload.zig: MultipartParser
+## multipart.zig: Parser
+
+Parser berada di `src/utils/multipart.zig` (`zix.utils.multipart`), dibagikan oleh `zix.Http` dan `zix.Http1`. `zix.Http.Multipart` tetap ada sebagai thin alias.
 
 ### Algoritma Parsing
 
@@ -420,7 +422,7 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 2. Di antara delimiter: parse blok header (Content-Disposition, Content-Type)
 3. Ekstrak name, filename dari Content-Disposition
 4. Slice data antara akhir-header dan delimiter berikutnya
-5. Tambahkan MultipartField ke slice fields
+5. Tambahkan multipart.Field ke slice fields
 ```
 
 Semua slice merujuk byte body asli (tanpa salinan). `deinit()` hanya membebaskan slice fields.
@@ -441,7 +443,11 @@ Nilai default:
 | `max_response_body` | 4 MB | Ya, melalui `allocRemaining` |
 | `follow_redirects` | true | Ya |
 | `max_redirects` | 3 | Ya |
+| `h2_max_read_rounds` | 4096 | Ya, membatasi read-loop client HTTP/2 |
 | `user_agent` | "zix/1" | Ya, melalui `Request.Headers.user_agent` |
+| `version` | `.HTTP_1` | Ya. `.HTTP_2` melewati jalur native h2-over-TLS (`requestHttp2` / `h2_client.zig`) |
+| `tls_ca_path` | null | Ya, pada jalur https (CA PEM tambahan, null = system roots) |
+| `tls_verify` | true | Ya, pada jalur native `.HTTP_2` |
 
 ---
 

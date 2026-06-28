@@ -236,7 +236,7 @@ pub const DispatchModel = enum(u8) {
 pub const TcpServerConfig = struct {
     ip:             []const u8,
     port:           u16,
-    dispatch_model: DispatchModel = .ASYNC,
+    dispatch_model: DispatchModel,
     kernel_backlog: u31           = 4096,
     max_msg_len:    usize         = 4096,
     workers:        usize         = 0,

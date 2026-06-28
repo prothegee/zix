@@ -4,7 +4,7 @@
 
 - Server dan client gRPC h2c (HTTP/2 cleartext) diimplementasikan tanpa C FFI.
 - Semua 4 tipe RPC: unary, server streaming, client streaming, bidirectional streaming.
-- Semua 5 model dispatch: ASYNC (default), POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux).
+- Semua 5 model dispatch: ASYNC, POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux). Wajib, tidak ada default.
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
 - TLS native (TLS 1.3 / 1.2, ALPN h2) via `Tls.Context`, aditif di atas default h2c. Reverse proxy (nginx, haproxy) tetap opsi untuk offloading.
@@ -29,7 +29,10 @@ graph LR
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (model blocking), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplex `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: ASYNC, POOL, MIXED (pool blocking), EPOLL (multiplex `epollMuxWorker` + `GrpcConnTable`) |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: `run()` switch tipis yang men-dispatch ke berkas per-model di bawah `dispatch/` (dan ke jalur serve TLS saat `cfg.tls != null`) |
+| `src/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplex `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (helper bersama) |
+| `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: jalur handler TLS blocking (per koneksi) |
+| `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: jalur dispatch TLS multiplex |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | struct `GrpcPrefix`, `readGrpcPrefix`, `writeGrpcPrefix`, helper frame `send*`/`build*` (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), blok reply cache comptime |
 | `src/tcp/http2/grpc/proto.zig` | konstanta tipe wire `WT_*`, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
@@ -48,7 +51,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok) |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (hanya Linux), URING=4 (hanya Linux) |
+| `zix.Grpc.DispatchModel` | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 (hanya Linux), URING=4 (hanya Linux), wajib tanpa default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |
@@ -74,7 +77,7 @@ graph LR
 | `io` | wajib | backend `std.Io` yang disediakan pemanggil |
 | `ip` | wajib | alamat bind |
 | `port` | wajib | port listen, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, atau `.EPOLL` (hanya Linux, native) |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count accept thread (POOL dan MIXED) |
 | `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool thread. EPOLL: 0 -> cpu_count worker multiplex |
@@ -301,14 +304,15 @@ Saat handler memanggil `ctx.finish(status, msg)` tanpa mengirim data apa pun, se
 
 | Model | Accept thread | Dispatch koneksi | Catatan |
 | :- | :- | :- | :- |
-| `.ASYNC` (default) | 1 | `io.async()` per koneksi | direkomendasikan untuk stream tak terbatas atau berumur panjang |
+| `.ASYNC` | 1 | `io.async()` per koneksi | direkomendasikan untuk stream tak terbatas atau berumur panjang |
 | `.POOL` | cpu_count | `ConnQueue` bersama + pool blocking | workers dan pool_size berlaku |
 | `.MIXED` | cpu_count | `io.async()` per accept thread | tanpa ConnQueue, pool_size diabaikan |
 | `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
+| `.URING` | per worker | loop io_uring multiplex (hanya Linux) | bentuk sama dengan `.EPOLL`, berbasis completion |
 
 Accept thread MIXED menggunakan ukuran stack default `.{}` (default sistem ~8MB) untuk mencegah stack overflow saat `io.async()` jatuh kembali ke eksekusi inline.
 
-`.EPOLL` spesifik Linux. Pada platform non-Linux, `.EPOLL` otomatis jatuh kembali ke `.POOL`.
+`.EPOLL` spesifik Linux. Pada platform non-Linux, `.EPOLL` otomatis jatuh kembali ke `.POOL`. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `pool_size` (0 = cpu_count), hanya Linux, dan juga jatuh kembali ke `.POOL` pada non-Linux.
 
 ### `.EPOLL` bersifat multiplex dan shared-nothing
 
@@ -375,14 +379,14 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_epoll.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
 
 ```mermaid
 graph LR
     C[gRPC client\nTLS/port 8443] -->|grpc over tls| Z[zix.Grpc server\nTLS terminator + engine h2c]
 ```
 
-Reverse proxy tetap alternatif ketika TLS offload, routing, atau berbagi port dengan service lain diinginkan. Lihat [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) untuk contoh konfigurasi nginx dan haproxy.
+Reverse proxy tetap alternatif ketika TLS offload, routing, atau berbagi port dengan service lain diinginkan. Lihat [`docs/hld-proxy-id.md`](hld-proxy-id.md) untuk contoh konfigurasi nginx dan haproxy.
 
 ## Contoh
 

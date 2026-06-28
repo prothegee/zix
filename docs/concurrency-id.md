@@ -1,6 +1,6 @@
 # Model Konkurensi: zix
 
-Lima model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Default: `.ASYNC`.
+Lima model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Wajib: setel secara eksplisit (tidak ada default).
 
 ---
 

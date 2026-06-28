@@ -106,13 +106,13 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** UDP has no connection state. There is no OS-level equivalent of TCP FIN. The only reliable way to detect that a client has stopped sending is the absence of traffic for a configurable period.
 
-**Decision:** Track clients by remote address in a `Managed(ClientRecord)` list. Update `last_seen` on each packet. On `receiveTimeout` expiry (poll interval) and after each burst of packets (rate-limited check), scan for clients whose `last_seen` is older than `disconnect_timeout_ms` and remove them.
+**Decision:** Track clients by remote address in a `Managed(ClientRecord)` list. Update `last_seen` on each packet. On `receiveTimeout` expiry (poll interval) and after each burst of packets (rate-limited check), scan for clients whose `last_seen` is older than `conn_timeout_ms` and remove them.
 
 **Consequences:**
-- Worst-case detection delay is `disconnect_timeout_ms + poll_timeout_ms`. This is documented and configurable.
+- Worst-case detection delay is `conn_timeout_ms + poll_timeout_ms`. This is documented and configurable.
 - A client that crashes and restarts from a new port is treated as a new client.
 - A client that restarts from the same port is re-registered on the next packet.
-- False positives (briefly silent clients) are bounded by `disconnect_timeout_ms`.
+- False positives (briefly silent clients) are bounded by `conn_timeout_ms`.
 
 ---
 
@@ -423,7 +423,7 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 **Consequences:**
 - One extra heap allocation per request (head bytes copy via `gpa.dupe`). Size is the raw head (status line + headers), typically a few hundred bytes.
 - `ClientResponse` is not safe to use after `deinit()`.
-- TLS (HTTPS) is out of scope for zix. The library is a network backend: TLS termination is delegated to an upstream proxy (nginx, HAProxy, Envoy). `std.http.Client` supports TLS internally, but zix does not expose, configure, or test it. Plain HTTP on the internal network is the intended usage.
+- TLS (HTTPS) is out of scope for `zix.Http.Client`. The library is a network backend: for the client wrapper, TLS termination is delegated to an upstream reverse proxy. `std.http.Client` supports TLS internally, but the wrapper does not expose, configure, or test it. Plain HTTP on the internal network is the intended usage. (A native zix TLS server landed later: ADR-045 to ADR-048.)
 - `response_timeout_ms` and `read_timeout_ms` are stored in config and documented as "v1: not yet enforced" so callers can set them now and get enforcement in a future release without an API change.
 
 ---
@@ -498,7 +498,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 
 **Context:** FIX (Financial Information eXchange) protocol is the dominant messaging standard for financial trading systems. It uses SOH (0x01) as a field delimiter (not a length prefix), which makes it incompatible with the `readSliceShort` recv pattern used by HTTP. A standalone server following the same config and dispatch-model pattern as `zix.Tcp` is required, with the session layer (Logon/Logout/Heartbeat handling) built in so callers do not implement it themselves.
 
-**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically, all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn`, no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` is the default because FIX sessions are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime, same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
+**Decision:** Implement `zix.Fix` in `src/tcp/fix/`. `serveConn` is the core loop: it accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message, then dispatches internally by MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest are handled automatically, all other messages are echoed. No handler callback needed. Session state (comp_id, seq_num) is stack-local to `serveConn`, no heap allocation in the message loop. All 4 dispatch models apply. `.ASYNC` suits FIX sessions because they are long-lived. `.EPOLL` runs natively on Linux (single epoll accept loop, `FdQueue` ring buffer, pool workers hold each connection for its full lifetime, same pattern as `zix.Grpc`). Non-Linux falls back to `.POOL`.
 
 **Consequences:**
 - `takeByte` in a loop avoids the `readSliceShort` deadlock: the reader's internal buffer absorbs the full TCP segment, subsequent `takeByte` calls drain it with no extra syscalls.
@@ -1046,14 +1046,15 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Context:** ADR-045 left RSA signing optional: an ECDSA P-256 or Ed25519 certificate covers authentication on the std signing path, and std verifies RSA but cannot sign with an RSA private key. A deployment that must serve a pre-issued RSA-2048 certificate (a common shape, for example a shared certificate mounted by an external harness) could not be served, since zix had no RSA signing.
 
-**Decision:** Implement RSA signing in pure Zig on `std.crypto`, server-side only, for RSA server certificates. The primitive is `std.crypto.ff.Modulus` modular exponentiation (the same constant-time routine std's RSA verify uses, here with the private exponent), and zix authors the padding: EMSA-PKCS1-v1_5 (RFC 8017 9.2) and EMSA-PSS plus MGF1 (RFC 8017 9.1), plus the PKCS#1 / PKCS#8 private-key DER parse. `Tls.Context.init` detects an `rsaEncryption` certificate, parses the key, and rejects below RSA-2048. RSA authenticates the TLS 1.3 CertificateVerify with `rsa_pss_rsae_sha256`, so an RSA certificate requires TLS 1.3: the 1.2 ServerKeyExchange path stays ECDSA-only, and an RSA context that meets a 1.2-only client returns an error. The default certificate type is unchanged (ECDSA P-256), RSA engages only when an RSA certificate is loaded.
+**Decision:** Implement RSA signing in pure Zig on `std.crypto`, server-side only, for RSA server certificates. The primitive is a constant-time modular exponentiation: a dedicated Montgomery modexp in `montgomery.zig` (portable CIOS plus a fused ADCX / ADOX asm path on x86_64+ADX), with `std.crypto.ff.Modulus` as the fallback for prime widths it does not cover. zix authors the padding: EMSA-PKCS1-v1_5 (RFC 8017 9.2) and EMSA-PSS plus MGF1 (RFC 8017 9.1), plus the PKCS#1 / PKCS#8 private-key DER parse. `Tls.Context.init` detects an `rsaEncryption` certificate, parses the key, and rejects below RSA-2048. RSA authenticates the TLS 1.3 CertificateVerify with `rsa_pss_rsae_sha256`, so an RSA certificate requires TLS 1.3: the 1.2 ServerKeyExchange path stays ECDSA-only, and an RSA context that meets a 1.2-only client returns an error. The default certificate type is unchanged (ECDSA P-256), RSA engages only when an RSA certificate is loaded.
 
-**Rationale:** The bignum was never the gap (`std.crypto.ff` already provides constant-time modexp), only the PKCS#1 padding and the key DER parse were missing, so the work is pure-Zig with no new dependency, holding the ADR-045 posture. PSS (not v1.5) on the 1.3 path because RFC 8446 permits only `rsa_pss_rsae_sha256` for an RSA CertificateVerify. The 2048-bit floor is the modern minimum. Server-side only, with no RSA on the client (`zix.Tls.Client` still offers and verifies ECDSA plus Ed25519), because the driver is serving an RSA certificate, not consuming one. ECDSA stays the default for its smaller, faster signatures.
+**Rationale:** The bignum was never the gap (`std.crypto.ff` already provides constant-time modexp), only the PKCS#1 padding and the key DER parse were missing, so the work is pure-Zig with no new dependency, holding the ADR-045 posture. The modexp later moved to a dedicated constant-time Montgomery routine (`montgomery.zig`) to lift the sign rate under a TLS handshake storm (ff stays the fallback), still pure-Zig. PSS (not v1.5) on the 1.3 path because RFC 8446 permits only `rsa_pss_rsae_sha256` for an RSA CertificateVerify. The 2048-bit floor is the modern minimum. Server-side only, with no RSA on the client (`zix.Tls.Client` still offers and verifies ECDSA plus Ed25519), because the driver is serving an RSA certificate, not consuming one. ECDSA stays the default for its smaller, faster signatures.
 
 **Config:** none new. An RSA certificate is selected by pointing `Tls.Context.Config.cert_path` / `key_path` at an RSA certificate and key, `Tls.Context.init` detects the type. Floor the context at TLS 1.3 for an RSA certificate (`min_version = .TLS_1_3`).
 
 **Consequences:**
 - `src/tls/rsa.zig` is the signer (key parse, EMSA-PKCS1-v1_5, EMSA-PSS, salt injected by the caller). `certificate.SigningKey` gains an `rsa` variant with `scheme()` returning `rsa_pss_rsae_sha256`. `handshake.SignatureScheme` gains `rsa_pkcs1_sha256` (0x0401) and `rsa_pss_rsae_sha256` (0x0804).
+- `src/tls/montgomery.zig` is the modexp: a constant-time Montgomery routine (portable CIOS, plus a fused ADCX / ADOX asm path on x86_64+ADX selected by a `+adx` build), used for the two CRT half-exponentiations of the sign. `std.crypto.ff` remains the fallback. The sign is constant-time on either path.
 - The PSS salt is threaded per connection like the other randoms: serve-path getrandom into `Tls.Context.handshakeOptions`, then `HandshakeOptions.pss_salt`, then `buildCertificateVerify`.
 - Verified: byte-exact against `openssl dgst -sign` for v1.5, std RSA verify for PSS, and an integration test loads an RSA certificate, signs a std-verified PSS signature, and rejects a 1024-bit key. Green on Zig 0.16 and 0.17.
 - RSA over TLS 1.2 is out of scope: the 1.2 path is ECDSA-only, so an RSA context serves 1.3 only.
@@ -1070,7 +1071,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Rationale:** Batched syscalls (`recvmmsg` / `sendmmsg`) and per-core `SO_REUSEPORT` workers are the real datagram-throughput levers, so building them as a first-class `zix.Udp` capability earns its keep beyond QUIC and keeps a future QUIC layer focused on transport semantics rather than reaching around a fixed-struct messaging engine. The handler-plus-`Sink` shape keeps batching invisible: a reply queues into the send batch and the whole batch leaves as one `sendmmsg`, and a reply to the sender reuses the kernel-filled address with no conversion. Reusing the TCP `DispatchModel` enum and the ADR-043 dispatch folder keeps the engine family consistent. GSO (`UDP_SEGMENT`), GRO (`UDP_GRO`), ECN, and a dedicated io_uring submission path behind `.URING` are deferred: the offloads need per-message control-data paths whose correctness depends on hardware (GRO coalesces several datagrams into one buffer, so enabling it without a splitter would hand the handler a wrong super-datagram), so `.URING` folds to the `recvmmsg` per-core loop for now.
 
-**Config:** new `UdpServerConfig` fields, all additive with safe defaults, used by the raw path: `dispatch_model` (default `.ASYNC`), `workers` (0 = one per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (the mmsg batch sizes), and `max_recv_buf` (the per-datagram buffer, the typed path keeps `@sizeOf(Packet)`). There is no `kernel_backlog`: UDP has no `listen` backlog.
+**Config:** new `UdpServerConfig` fields, all additive with safe defaults, used by the raw path: `dispatch_model` (required, no default), `workers` (0 = one per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (the mmsg batch sizes), and `max_recv_buf` (the per-datagram buffer, the typed path keeps `@sizeOf(Packet)`). There is no `kernel_backlog`: UDP has no `listen` backlog.
 
 **Consequences:**
 - New `src/udp/datagram.zig` (raw-fd socket, `recvmmsg` with `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, address conversion), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus one file per model), and `src/udp/raw.zig` (the `Raw` facade and `run()` switch). Sockets are raw `std.os.linux` syscalls, since `std.posix` no longer wraps `socket` / `bind` / `close`.
@@ -1126,7 +1127,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Context:** TLS for Http2 and gRPC was served by the ADR-046 terminator: run the handshake, then run the h2 engine behind a socketpair with a second worker thread, one thread per connection. That shape thrashes at high concurrency. At 512 or 1024 connections on a core count far below that, the scheduler churns one thread per connection and throughput collapses (the cleartext EPOLL and URING engines already multiplex many connections per core, but the TLS path did not). The socketpair plus the second thread were the cost, not the crypto.
 
-**Decision:** For the `.EPOLL` and `.URING` dispatch models, terminate TLS in place on a multiplexed event loop. One `SO_REUSEPORT` listener plus one epoll instance per worker (worker count is the core count), each worker holding many TLS connections through a resumable TLS 1.3 session (`src/tcp/tls/tls_session.zig`): it accumulates ciphertext, processes each complete record, drives the resumable h2 / gRPC mux over the decrypted plaintext, and seals the engine's frames back into TLS records through a thread-local write hook. The new files are `src/tcp/http2/tls_epoll.zig` and `src/tcp/http2/grpc/tls_epoll.zig`. The socketpair and the per-connection second thread are removed everywhere: the `.ASYNC` / `.POOL` / `.MIXED` path keeps a thread-per-connection accept loop but runs the same inline-mux driver in `tcp/tls/h2_terminator.zig` (also no socketpair), and that path also serves the TLS 1.2 fallback. `server.run` routes `.EPOLL` / `.URING` with `config.tls` to `runTlsEpoll`, every other case to `runTls`.
+**Decision:** For the `.EPOLL` and `.URING` dispatch models, terminate TLS in place on a multiplexed event loop. One `SO_REUSEPORT` listener plus one epoll instance per worker (worker count is the core count), each worker holding many TLS connections through a resumable TLS 1.3 session (`src/tcp/tls/tls_session.zig`): it accumulates ciphertext, processes each complete record, drives the resumable h2 / gRPC mux over the decrypted plaintext, and seals the engine's frames back into TLS records through a thread-local write hook. The new files are `src/tcp/http2/tls_mux.zig` and `src/tcp/http2/grpc/tls_mux.zig`. The socketpair and the per-connection second thread are removed everywhere: the `.ASYNC` / `.POOL` / `.MIXED` path keeps a thread-per-connection accept loop but runs the same inline-mux driver in `tcp/tls/h2_terminator.zig` (also no socketpair), and that path also serves the TLS 1.2 fallback. `server.run` routes `.EPOLL` / `.URING` with `config.tls` to `runTlsMux`, every other case to `runTls`.
 
 **Rationale:** The thread-per-connection terminator was correct but did not scale, so https was latency-by-construction at high concurrency. Multiplexing TLS the same way the cleartext engines already multiplex matches the proven shape, so one worker per core holds thousands of half-open handshakes and established connections with no thread each. The resumable sans-I/O session is the linchpin that makes that possible. Keeping the low-concurrency and 1.2 cases on the inline-mux driver avoids forking the mux state machine. Proven locally on 6 cores (the worst case against the 64-core box): Http2 RSA at 512 connections and gRPC at 512 and 1024 connections serve with one worker thread per core, not per connection, and no hang, where the old path thrashed (load average in the hundreds, minutes to finish).
 
@@ -1136,6 +1137,71 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - `.URING` with `config.tls` currently routes to the same epoll-multiplexed loop. A native io_uring TLS loop is a later optimization.
 - Http1 TLS is still thread-per-connection (`tcp/http1/tls_serve.zig`), which json-tls rides. Porting the same dispatch to Http1 is the remaining step.
 - New example `examples/tls/tls_grpc_basic.zig` (port 9070, ECDSA P-256) and runner `tests/runner/tls_grpc_basic_runner.zig` (a real unary gRPC call over TLS), green on Zig 0.16 and 0.17.
+- The multiplexed Http2 and gRPC TLS workers now pin to their CPU slot (cgroup-mask aware) and size the worker count by the available cpuset, matching Http1's `tls_mux`. Without it the workers spawned host-many threads with no pin, so a cgroup-pinned cpuset oversubscribed one core under a handshake storm (the same collapse Http1 was fixed for).
+
+---
+
+## ADR-053: https serve path for zix.Http
+
+**Status:** Accepted
+
+**Context:** `zix.Http` (the arena engine) served cleartext only. Http1, Http2, and gRPC gained TLS (ADR-046, ADR-052), but the arena engine had no https path, so a deployment standardizing on `zix.Http` could not opt into TLS without an upstream proxy.
+
+**Decision:** Add a gated TLS serve path to `zix.Http`, opt-in via `config.tls` (a `*Tls.Context`), mirroring Http1. The router response is captured into a buffer and encrypted: rather than author a new sink, the path reuses the arena engine's existing `RespSink` / `tl_resp_sink` response-coalescing hook (built for the URING path, ADR-037) by installing a sentinel-fd (-1) sink over the output buffer and running the normal `processRequest` with fd -1, so every Response write (the send fast path, `fdWriteAll`, static files, 404) serializes into the buffer instead of a socket, with no plaintext escape and no new cleartext hot-path branch. The cert / key / policy load once in `Tls.Context.init`. Two execution paths share the capture, picked by `dispatch_model`:
+- `.ASYNC` / `.POOL` / `.MIXED`: thread-per-connection (`src/tcp/http/tls_serve.zig`). Each connection gets its own worker thread for the handshake (TLS 1.3, with a 1.2 ECDSA fallback) and the keep-alive loop.
+- `.EPOLL` / `.URING`: event-driven multiplexed (`src/tcp/http/tls_mux.zig`). One SO_REUSEPORT epoll worker per core, many connections each, a resumable handshake / record state machine per connection (`src/tcp/tls/tls_session.zig`). The worker count is cpuset-aware (`getAvailableCpuCount`) and each worker pins to its core (`pinToCpu`), the same collapse-fix as Http1 / Http2 / gRPC (ADR-052).
+
+`server.run` routes `config.tls` to the multiplexed worker for `.EPOLL` / `.URING` and to the thread-per-connection path otherwise.
+
+**Rationale:** Reusing the existing sink keeps the cleartext path untouched (the `tl_resp_sink` null-check is already paid for the URING coalescing), so https adds zero overhead off the TLS path. The sentinel fd -1 makes a stray socket write fail safely instead of leaking plaintext past TLS. The multiplexed worker is the throughput path (parity with Http1), the thread-per-connection path is the simpler model and the home for handler-blocking work (SSE / streaming, WebSocket).
+
+**Consequences:**
+- Request / response is served on both paths. At this cut SSE / streaming and WebSocket were buffered-capture-incompatible (the handler writes incrementally and never returns, the buffer only flushes after the handler exits), so they detached the sink (`res.stream` nulls `tl_resp_sink`), surfaced as `StreamingNotSupported`, and closed cleanly. ADR-054 lands SSE / streaming over TLS (the streaming write hook below), so this no longer holds for SSE on the thread-per-connection path. WebSocket over TLS is ADR-055.
+- The solution path for SSE / streaming over TLS (realized in ADR-054): a streaming TLS write hook on the thread-per-connection path. Instead of the buffered sink, install a thread-local writer that holds the live TLS session and the fd, so each `fdWriteAll` encrypts that chunk into TLS records and writes the ciphertext immediately (vs the buffered capture that accumulates plaintext and encrypts once). `res.stream` installs this writer instead of nulling the sink, so the existing SSE write loop flows unchanged, each event encrypted as it is produced. WebSocket (ADR-055) sends its upgrade response through the same stream sink, then runs the frame loop reading / writing through the same session. This belongs on the thread-per-connection path because, like cleartext SSE, it requires a blocking handler, which the multiplexed worker (one core, many connections) cannot host. The multiplexed `tls_mux` stays request / response only, matching cleartext `.EPOLL` / `.URING` which also do not serve handler-blocking SSE.
+- `HttpServerConfig` gains `tls: ?*Tls.Context = null`. The cert is ECDSA P-256, Ed25519, or RSA (detected from the cert), Ed25519 and RSA require TLS 1.3.
+- New example `examples/tls/tls_http_basic.zig` (port 9071). Verified end-to-end (curl + openssl: TLS 1.3, ALPN http/1.1, ECDSA P-256), both the multiplexed `.EPOLL` worker (keep-alive and concurrent connections multiplexed on one worker) and the thread-per-connection path, green on Zig 0.16 and 0.17.
+
+---
+
+## ADR-054: SSE / streaming over TLS for zix.Http and zix.Http1
+
+**Status:** Accepted
+
+**Context:** The https serve paths (ADR-053 for `zix.Http`, the approach-A path for `zix.Http1`) capture the handler's plaintext response into a buffer behind a `-1` sentinel fd, encrypt it once, and send it. That fits request / response but not a streaming handler (SSE): it loops emitting events and never returns, so a buffered capture deadlocks or overflows. ADR-053 left SSE / streaming over TLS out of scope for this reason.
+
+**Decision:** On the thread-per-connection https path, add a per-connection streaming sink that encrypts one TLS record per write and sends it immediately, replacing the buffered capture only when a handler opts into streaming.
+- A thread-local `TlsStreamSink` (type-erased over the live connection, so the TLS 1.3 and 1.2 paths share it) holds the connection and fd. Its write encrypts one record and sends it. It lives in `src/tcp/http/response.zig` (`zix.Http`) and `src/tcp/http1/core.zig` (`zix.Http1`).
+- `fdWriteAll` precedence: the buffered capture sink first, then the stream sink, then the raw fd. During buffered capture both are armed and the capture wins. The opt-in switch detaches the capture, so writes fall through to the stream sink.
+- Opt-in switch: `zix.Http` reuses `res.stream()` (it already detaches the sink, now it keeps the stream sink active over TLS, so no new public symbol). `zix.Http1` gains one call, `beginStream()`, a no-op in cleartext, so the same fd-handler serves cleartext and TLS.
+- `serveRequests` installs the stream sink per connection and detects the streamed outcome (the capture sink was detached) to close after the stream ends.
+
+**Rationale:** Reusing `fdWriteAll` as the one chokepoint keeps the buffered fast path for normal responses untouched (the capture sink still wins until a handler streams), so SSE adds nothing off the streaming path. A streaming handler parks its own per-connection thread, which is exactly the thread-per-connection model the https path already uses, so no new execution model is needed.
+
+**Consequences:**
+- SSE / streaming is served over TLS on the thread-per-connection path (`.ASYNC` / `.POOL` / `.MIXED`) for both engines. The multiplexed `tls_mux` path (`.EPOLL` / `.URING`) stays request / response only: hosting a long-lived stream there needs event-loop state-machine work, out of scope. SSE on `zix.Http` already requires the thread-per-connection model in cleartext, so TLS adds no new limit.
+- Per-event size is bounded by one TLS record (~16 KiB plaintext), ample for an SSE event.
+- New examples `examples/tls/tls_http_sse.zig` (port 9072) and `examples/tls/tls_http1_sse.zig` (port 9073). `examples/http1_sse.zig` now calls `beginStream()` so one handler serves cleartext and TLS. Verified end-to-end with the native `zix.Tls` client (handshake, GET /events, decrypt, `Content-Type: text/event-stream` plus the first event), green on Zig 0.16 and 0.17.
+- WebSocket over TLS (bidirectional, the read path) builds on this stream sink and is ADR-055.
+
+---
+
+## ADR-055: WebSocket over TLS for zix.Http and zix.Http1
+
+**Status:** Accepted
+
+**Context:** SSE over TLS (ADR-054) added a streaming write hook on the thread-per-connection https path. WebSocket is the bidirectional sibling: after the `101` upgrade it needs both the write half (encrypt outbound frames) and a read half (decrypt inbound records, parse frames). The cleartext WS paths cannot serve TLS: `zix.Http1`'s `WebSocket.serve` hands the raw fd to the `.EPOLL` engine (there is no engine loop on the thread-per-connection path), and `zix.Http`'s `WebSocket.upgrade` writes onto a `std.Io` stream and the handler reads the raw stream. Over TLS the fd is the `-1` sentinel and the stream is fake, so neither runs.
+
+**Decision:** Add an engine-driven WebSocket-over-TLS path on the thread-per-connection https loop, built on the ADR-054 stream sink for the write half and an inline frame loop for the read half. A handler served over TLS calls `WebSocket.serveTls(fd, key, on_frame)` instead of the cleartext `serve` / `upgrade`:
+- `serveTls` detaches the buffered capture (the ADR-054 stream sink takes over), writes the `101` through it (encrypted), and registers the handoff (`requestWebSocket`).
+- After the handler returns, `serveRequests` calls `takeWebSocket` and runs an inline frame loop (`serveWsTls`): read one ciphertext record, decrypt it (`conn.readAppData`), accumulate, and pump every complete frame. A text / binary frame invokes `on_frame`, ping is auto-ponged, close is auto-echoed. Outbound frames flow through the stream sink (`fdWriteAll` -> `conn.writeAppData`), so each pump pass encrypts its coalesced frames as one record.
+- `zix.Http1` reuses its existing frame codec (`parseFrame` / `pump` / `send`) and the `requestWebSocket` / `takeWebSocket` handoff. `zix.Http` gains the engine-driven pieces (`WsFrameFn`, `send`, `pump`, the handoff, `upgradeFd`) so the same `on_frame(fd, opcode, payload)` shape and `serveTls` entry work on both engines.
+
+**Rationale:** The frame codec is unchanged, only the transport moves from a raw fd / stream to the TLS session. Running the loop inline in the connection thread fits the thread-per-connection model the https path already uses (a WS connection is long-lived and owns its thread), and reusing the ADR-054 stream sink means the same `fdWriteAll` chokepoint encrypts both SSE events and WS frames.
+
+**Consequences:**
+- WebSocket is served over TLS on the thread-per-connection path (`.ASYNC` / `.POOL` / `.MIXED`) for both engines. The multiplexed `tls_mux` path (`.EPOLL` / `.URING`) stays request / response only and drops any erroneous handoff.
+- Rooms / broadcast are not served over TLS: each connection has its own TLS session, so a frame must be encrypted per connection. WS over TLS is per-connection (echo / point-to-point), the cleartext arena example keeps the room model.
+- New examples `examples/tls/tls_http1_ws.zig` (port 9074) and `examples/tls/tls_http_ws.zig` (port 9075). Verified end-to-end with the native `zix.Tls` client (handshake, WS upgrade, encrypted `101`, masked frame, decrypted echo), green on Zig 0.16 and 0.17.
 
 ---
 

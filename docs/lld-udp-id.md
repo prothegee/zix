@@ -37,7 +37,7 @@ Identitas client adalah alamat remote. Index bersifat informatif, tidak stabil l
       msg = socket.receiveTimeout(io, buf, poll_timeout)
       if Timeout:
         now = Timestamp.now(io, .awake)
-        checkDisconnections(clients, now, disconnect_timeout_ms)
+        checkDisconnections(clients, now, conn_timeout_ms)
         last_check = now
         continue
       if msg.flags.trunc or msg.data.len != @sizeOf(Packet):

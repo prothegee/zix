@@ -289,10 +289,10 @@ Content-Type and Date are written with `@memcpy` of the literal prefix plus the 
 4. writeAll("\r\n")
 5. flush()
 6. set res.streaming = true
-7. return SseWriter{ .out = req.server.out }
+7. return SseWriter{ .fd = fd }
 ```
 
-`SseWriter` holds a `*std.Io.Writer` pointer to the connection's write buffer. Each write method flushes immediately so events reach the client without buffering.
+`SseWriter` holds the connection fd. Each write method calls `fdWriteAll` so events reach the client without buffering. Over TLS (ADR-054) the per-connection stream sink is armed: step 1 detaches the buffered capture sink instead of flushing it (its bytes are replaced by the stream), and `fdWriteAll` routes each header and event through the stream sink, encrypting one TLS record per write. In cleartext the writes go straight to the socket.
 
 ```
 writeEvent(data):      writeAll("data: ") + writeAll(data) + writeAll("\n\n") + flush
@@ -411,7 +411,9 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 
 ---
 
-## upload.zig: MultipartParser
+## multipart.zig: Parser
+
+The parser lives in `src/utils/multipart.zig` (`zix.utils.multipart`), shared by `zix.Http` and `zix.Http1`. `zix.Http.Multipart` remains as a thin alias.
 
 ### Parsing algorithm
 
@@ -420,7 +422,7 @@ rooms: std.StringHashMap(std.array_list.Managed(*Conn))
 2. Between delimiters: parse header block (Content-Disposition, Content-Type)
 3. Extract name, filename from Content-Disposition
 4. Slice data between end-of-headers and next delimiter
-5. Append MultipartField to fields slice
+5. Append a multipart.Field to fields slice
 ```
 
 All slices reference the original body bytes (no copy). `deinit()` frees only the fields slice.
@@ -441,7 +443,11 @@ Default values:
 | `max_response_body` | 4 MB | Yes, via `allocRemaining` |
 | `follow_redirects` | true | Yes |
 | `max_redirects` | 3 | Yes |
+| `h2_max_read_rounds` | 4096 | Yes, bounds the HTTP/2 client read-loop |
 | `user_agent` | "zix/1" | Yes, via `Request.Headers.user_agent` |
+| `version` | `.HTTP_1` | Yes. `.HTTP_2` routes through the native h2-over-TLS path (`requestHttp2` / `h2_client.zig`) |
+| `tls_ca_path` | null | Yes, on the https path (extra CA PEM, null = system roots) |
+| `tls_verify` | true | Yes, on the `.HTTP_2` native path |
 
 ---
 

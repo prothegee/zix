@@ -17,7 +17,7 @@ Remaining sites (`extra_buf`, `fields`, `conns`, ...). When any becomes a throug
 <br>
 
 **OoP (Object-oriented Patterns):**<br>
-Most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `MultipartParser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
+Most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `multipart.Parser`, ...) follow this shape. Idiomatic in Zig and fine as the baseline.
 
 > Keep it as the default. Reach past it only when encapsulation shows up as a throughput cost.
 

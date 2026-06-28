@@ -35,7 +35,7 @@ Use `zix.Http` when handlers need an allocator, static file serving, or the rich
 
 ## Runtime Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Default: `.ASYNC`.
+Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default).
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -139,8 +139,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
 | `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
 | `zix.Http1.RawFn` | type | Raw handler given the fd and parsed head, owns the wire directly (custom framing, streaming) |
-| `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, headers, flags) |
-| `zix.Http1.Header` | struct | `{ name: []const u8, value: []const u8 }` |
+| `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, raw_headers, flags) |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` from `parseRange` |
 | `zix.Http1.ServeOpts` | struct | `serveConn` options: `nodelay`, `handler_timeout_ms` |
 | `zix.Http1.ConnOutcome` | enum | `.keep_alive` or `.close` (EPOLL one-shot result) |
@@ -160,6 +159,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` into a `Range` |
 | `zix.Http1.fdWriteAll` | fn | Write all bytes to fd (sink-aware, handles EINTR/EAGAIN) |
 | `zix.Http1.flushPending` | fn | Flush staged response bytes before raw fd writes (pipelining order) |
+| `zix.Http1.beginStream` | fn | Begin a streaming response (SSE), detaches the sink so writes flush per event (cleartext + TLS) |
 | `zix.Http1.writeSimple` | fn | Full response with Content-Length body |
 | `zix.Http1.writeSimpleNoBody` | fn | Headers-only response (HEAD method) |
 | `zix.Http1.writeJson` | fn | `writeSimple` shorthand with `application/json` |
@@ -179,23 +179,25 @@ pub const Http1ServerConfig = struct {
     io:                 std.Io,                // from process.io, listen/accept plumbing only
     ip:                 []const u8,
     port:               u16,                   // must be non-zero
-    dispatch_model:     DispatchModel = .ASYNC,
+    dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 16 * 1024,     // per-connection buffer (.EPOLL only, see note)
+    large_body_rcvbuf:  usize = 256 * 1024,    // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
     ws_recv_buf:        usize = 0,             // .EPOLL WebSocket buffer, 0 = max_recv_buf
     compression:          bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via core.writeNegotiated (.EPOLL/.URING)
     compression_min_size: usize = 256,           // skip bodies under this floor
     compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
-    max_headers:        u8    = 16,            // informational: parse cap is core.MAX_HEADERS
+    max_headers:        u8    = 16,            // no-op, kept for source compatibility
     workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL only
     handler_timeout_ms: u32   = 0,             // per-handler budget, 0 = disabled
     send_date_header:   bool  = true,          // emit Date header, false saves 37 bytes/response
+    tls:                ?*Tls.Context = null,  // non-null serves HTTP/1.1 over TLS (native https), else cleartext
     logger:             ?*Logger = null,       // lifecycle lines only, see Logging section
 };
 ```
 
-Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. The `compression`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.writeNegotiated` instead of `writeSimple`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` remains informational, mirroring `core.MAX_HEADERS`.
+Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compression`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.writeNegotiated` instead of `writeSimple`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` is a no-op kept for source compatibility (the lazy engine has no header-count cap).
 
 Note: `ws_recv_buf` sizes the per-connection buffer for a connection promoted to WebSocket under `.EPOLL`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate pipelined frames before the engine compacts and re-reads on a fill.
 
@@ -252,8 +254,7 @@ try server.run();
 | `method` | `[]const u8` | Verb as sent (`"GET"`, `"POST"`, ...) |
 | `path` | `[]const u8` | Target stripped of query string |
 | `query` | `[]const u8` | Raw query string after `?`, `""` if absent |
-| `headers` | `[MAX_HEADERS]Header` | First `header_count` entries valid |
-| `header_count` | `usize` | Parsed header count (cap 16, exceeding returns 400) |
+| `raw_headers` | `[]const u8` | Raw header block, scanned on demand via `getHeader` (no count cap) |
 | `version_minor` | `u8` | 1 for HTTP/1.1, 0 for HTTP/1.0 |
 | `keep_alive` | `bool` | Version default, overridden by `Connection` header |
 | `content_length` | `u64` | 0 when absent or unparseable |
@@ -393,8 +394,9 @@ sequenceDiagram
 - Ping is auto-ponged and close is auto-echoed by the engine. The callback only ever sees text and binary frames.
 - Frames sent during one pump pass coalesce into a single `write()`.
 - Promotion is honored under `.EPOLL` only. Under `.ASYNC` / `.POOL` / `.MIXED` the handoff is cleared and the connection ends after the handler returns (use `zix.Http` for handler-owned WebSocket loops on those models).
+- Over TLS (`config.tls`, the thread-per-connection path), call `WebSocket.serveTls(fd, key, on_frame)` instead (ADR-055): the `101` and every frame encrypt through the ADR-054 stream sink, and the https thread runs the frame loop inline over the TLS session. Rooms / broadcast are cleartext-only (per-session encryption), so wss is per-connection.
 
-See `examples/http1_websocket.zig`.
+See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zig` (wss).
 
 ---
 
@@ -423,15 +425,15 @@ Per-request access logging is the handler's responsibility: the Http1 handler wr
 
 | Limit | Behaviour |
 | :- | :- |
-| Request headers | Max 16 (`core.MAX_HEADERS`). Exceeding returns `400` (parse error path) |
 | Header block size | Max 16 KB (`core.BUF_SIZE`, or `max_recv_buf` under .EPOLL). Exceeding returns `431` and closes |
-| Body under .ASYNC/.POOL/.MIXED | Buffered up to 8 KB. A larger Content-Length body is truncated to 8 KB, the remainder corrupts the next keep-alive request |
-| Body under .EPOLL | Must fit `max_recv_buf` minus the head. A larger body dispatches the handler with an empty body slice, then the engine drains the remainder off the socket (`MSG_TRUNC`) keeping the connection usable |
+| Body under .ASYNC/.POOL/.MIXED | The handler sees up to 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable (the handler reads `head.content_length`, not the bytes) |
+| Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body dispatches the handler with an empty body slice, then the engine drains the remainder off the socket (`MSG_TRUNC`) keeping the connection usable |
+| Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
 | Chunked request body | Decoded into the body buffer, excess discarded |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
-| TLS | Out of scope, terminate TLS at the proxy layer (same policy as `zix.Http`) |
+| TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` / `.POOL` / `.MIXED` terminate per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
-Endpoints that accept large uploads should rely on `head.content_length` and stream from the fd themselves, or run under `.EPOLL` where the oversize path is well-defined.
+Endpoints that accept large uploads rely on `head.content_length` (the bytes are drained, not buffered).
 
 For the full-featured HTTP layer see [`docs/hld-http-en.md`](hld-http-en.md). For implementation details see [`docs/lld-http1-en.md`](lld-http1-en.md).
 

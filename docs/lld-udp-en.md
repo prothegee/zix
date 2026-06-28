@@ -37,7 +37,7 @@ Client identity is the remote address. The index is informational, it is not sta
       msg = socket.receiveTimeout(io, buf, poll_timeout)
       if Timeout:
         now = Timestamp.now(io, .awake)
-        checkDisconnections(clients, now, disconnect_timeout_ms)
+        checkDisconnections(clients, now, conn_timeout_ms)
         last_check = now
         continue
       if msg.flags.trunc or msg.data.len != @sizeOf(Packet):

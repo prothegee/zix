@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-tls-en.md`](hld-tls-en.md) and ADR-045 / 046 / 047.
 
-`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop. Http1 is thread-per-connection in `tcp/http1/tls_serve.zig`. Http2 and Grpc select between two paths by `dispatch_model` (ADR-052): `.EPOLL` / `.URING` use the per-core multiplexed `tcp/http2/tls_epoll.zig` and `tcp/http2/grpc/tls_epoll.zig` over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig`.
+`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop. Http1 is thread-per-connection in `tcp/http1/tls_serve.zig`. Http2 and Grpc select between two paths by `dispatch_model` (ADR-052): `.EPOLL` / `.URING` use the per-core multiplexed `tcp/http2/tls_mux.zig` and `tcp/http2/grpc/tls_mux.zig` over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig`.
 
 ---
 
@@ -23,7 +23,7 @@ pub const CipherSuite = enum(u16) {
     _,
 };
 pub const NamedGroup = enum(u16) { SECP256R1 = 0x0017, X25519 = 0x001d, _ };
-pub const SignatureScheme = enum(u16) { ECDSA_SECP256R1_SHA256 = 0x0403, ED25519 = 0x0807, _ };
+pub const SignatureScheme = enum(u16) { RSA_PKCS1_SHA256 = 0x0401, ECDSA_SECP256R1_SHA256 = 0x0403, RSA_PSS_RSAE_SHA256 = 0x0804, ED25519 = 0x0807, _ };
 ```
 
 `server_cipher_prefs = {AES_128_GCM_SHA256}` and `server_group_prefs = {X25519, SECP256R1}` are the built-in defaults.
@@ -103,7 +103,7 @@ Rejects empty curve / cipher lists, any curve outside {X25519, SECP256R1}, any c
 
 ## rsa.zig
 
-The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` parses a two-prime RSAPrivateKey (RFC 8017 A.1.2): a PKCS#8 wrapper is unwrapped to its inner OCTET STRING first, then the modulus `n` and private exponent `d` are copied into owned fixed buffers (leading-zero stripped). `signPkcs1v15(message, out)` is the deterministic EMSA-PKCS1-v1_5 path (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` is EMSA-PSS (RFC 8017 9.1) with MGF1, the salt injected by the caller so the encoding is deterministic and unit-testable. Both end in RSASP1, `s = m^d mod n` via `std.crypto.ff.Modulus.powWithEncodedExponent` (constant-time, so `d` does not leak), then I2OSP to `k` bytes. The CRT primes are parsed but unused (the plain `m^d mod n` path needs only `n` and `d`).
+The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` parses a two-prime RSAPrivateKey (RFC 8017 A.1.2): a PKCS#8 wrapper is unwrapped to its inner OCTET STRING first, then the modulus `n` and private exponent `d` are copied into owned fixed buffers (leading-zero stripped). `signPkcs1v15(message, out)` is the deterministic EMSA-PKCS1-v1_5 path (RFC 8017 9.2): `0x00 01 PS 00 || DigestInfo || SHA256(message)`. `signPss(message, salt, out)` is EMSA-PSS (RFC 8017 9.1) with MGF1, the salt injected by the caller so the encoding is deterministic and unit-testable. Both end in RSASP1 via the Chinese Remainder Theorem (RFC 8017 5.1.2): two half-width modexps over the primes `p` and `q` (the CRT factors are now used, not just `n` and `d`), each run through the constant-time Montgomery modexp in `montgomery.zig` (a fused ADCX / ADOX asm path on x86_64+ADX, a portable CIOS otherwise), then recombined and I2OSP to `k` bytes. `std.crypto.ff.Modulus.powWithEncodedExponent` is the fallback for prime widths the Montgomery path does not cover.
 
 ## cert_verify.zig
 
@@ -121,21 +121,29 @@ The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` 
 
 `readRecord` / `readAll` / `writeAll` use `std.os.linux.read` / `write` with an errno switch (no std.posix wrapper for portability across 0.16 / 0.17).
 
+### SSE / streaming over TLS (ADR-054)
+
+The thread-per-connection path also serves a streaming handler (SSE) over TLS, on both `zix.Http1` (`core.zig`) and `zix.Http` (`response.zig`). `serveRequests` arms a per-connection `TlsStreamSink`, a type-erased writer (`StreamSinkFor(@TypeOf(conn))`) holding the live connection and fd: each write encrypts one TLS record (`conn.writeAppData`) and sends it. `fdWriteAll` checks the buffered capture sink first, then the stream sink, so a normal response keeps the buffered fast path. A handler opts into streaming with `res.stream()` (`zix.Http`, unchanged surface) or `beginStream()` (`zix.Http1`, a no-op in cleartext), which detaches the capture sink so the next writes fall through to the stream sink. `runHandlerToBuffer` / `processRequestToBuffer` report the streamed outcome (the capture sink was detached) so the loop closes after the stream ends. The multiplexed `tls_mux` path stays request / response only.
+
+### WebSocket over TLS (ADR-055)
+
+WebSocket builds on the same stream sink for the write half and adds the read half (decrypt records, parse frames). A handler served over TLS calls `WebSocket.serveTls(fd, key, on_frame)`: it detaches the capture, writes the `101` through the stream sink (encrypted), and registers a handoff (`requestWebSocket` / `takeWebSocket`, shared with the cleartext `.EPOLL` path on `zix.Http1`, added to `zix.Http`). After the handler returns, `serveRequests` takes the handoff and runs `serveWsTls`: read one ciphertext record, decrypt (`conn.readAppData`), accumulate, then `WebSocket.pump` the complete frames (text / binary -> `on_frame`, ping auto-ponged, close auto-echoed). `pump` coalesces the pass's outbound frames and flushes via `fdWriteAll`, which the stream sink encrypts as one record. `send` over TLS routes the same way. `zix.Http` gains the engine-driven pieces (`WsFrameFn`, `send`, `pump`, `upgradeFd`, the handoff) so both engines share the `on_frame(fd, opcode, payload)` shape. Rooms / broadcast are cleartext-only (each connection has its own TLS session), so wss is per-connection. The multiplexed `tls_mux` path drops any handoff (WS is thread-per-connection only).
+
 ## tcp/tls/h2_terminator.zig (shared h2-over-TLS terminator)
 
 `serveConnTls(fd, ctx, driver)` is the engine-agnostic terminator used by the `.ASYNC` / `.POOL` / `.MIXED` path of both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`, which takes the same `driver`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), verifies the client Finished, then calls `driver.drive(fd, &conn, &record_buf)`. The driver owns the connection until close: it runs the resumable h2 mux inline over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook. No socketpair, no second thread.
 
 ## tcp/http2/tls_serve.zig and tcp/http2/grpc/tls_serve.zig
 
-These are the `.ASYNC` / `.POOL` / `.MIXED` path. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread, which calls `serveConnTls` with a `MuxDriver(routes)`. The driver's `drive` is what differs: Http2 runs `mux.processRing` over a `mux.MuxConn`, Grpc runs `core.grpcMuxProcessRing` over a `GrpcMuxConn` then `flushStage` to cork the staged reply. Both seal frames into TLS records through `frame.write_hook`, the same resumable state machine as the cleartext `.EPOLL` / `.URING` models, so there are no per-stream write races. The `.EPOLL` / `.URING` dispatch models instead use the multiplexed `tls_epoll.zig` below.
+These are the `.ASYNC` / `.POOL` / `.MIXED` path. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread, which calls `serveConnTls` with a `MuxDriver(routes)`. The driver's `drive` is what differs: Http2 runs `mux.processRing` over a `mux.MuxConn`, Grpc runs `core.grpcMuxProcessRing` over a `GrpcMuxConn` then `flushStage` to cork the staged reply. Both seal frames into TLS records through `frame.write_hook`, the same resumable state machine as the cleartext `.EPOLL` / `.URING` models, so there are no per-stream write races. The `.EPOLL` / `.URING` dispatch models instead use the multiplexed `tls_mux.zig` below.
 
 ## tcp/tls/tls_session.zig (resumable TLS 1.3 server session)
 
 The linchpin of the multiplexed path (ADR-052). A sans-blocking-I/O TLS 1.3 server session that one epoll worker drives for many connections at once. `Session.init(cert_der, signing_key, alpn_prefs)` seeds the randoms. `feed(input, to_send_buf, plain_buf)` accumulates ciphertext in an internal `rbuf`, processes each complete record, and returns a `FeedResult{ to_send, plaintext, outcome }`. The `Phase` state machine runs `hello -> finished -> established -> closed`: in `hello` it calls `serverHandshake` and emits the flight, in `finished` it verifies the client Finished, in `established` it decrypts application data. `encrypt` seals plaintext into a record, `closeNotify` emits the close alert. TLS 1.3 only: a 1.2-only ClientHello is refused with a fatal alert (the 1.2 fallback stays on `tls_serve.zig`).
 
-## tcp/http2/tls_epoll.zig and tcp/http2/grpc/tls_epoll.zig (multiplexed dispatch)
+## tcp/http2/tls_mux.zig and tcp/http2/grpc/tls_mux.zig (multiplexed dispatch)
 
-The `.EPOLL` / `.URING` path (ADR-052). `runTlsEpoll` spawns one worker per core, each with its own `SO_REUSEPORT` listener and epoll instance. A `TlsConn` slab (indexed by fd) holds the `tls_session.Session`, the h2 / gRPC mux, and a staged outbound-ciphertext buffer that arms `EPOLLOUT` on `EAGAIN` for backpressure. `onReadable` reads ciphertext, calls `session.feed`, sends the handshake flight, and on the established outcome feeds the decrypted plaintext into the mux (`processRing` / `grpcMuxProcessRing`), whose frames are sealed back into records via `frame.write_hook` pointed at `hookWrite`. One worker multiplexes many connections, so high concurrency does not spawn a thread per connection.
+The `.EPOLL` / `.URING` path (ADR-052). `runTlsMux` spawns one worker per core, each with its own `SO_REUSEPORT` listener and epoll instance. A `TlsConn` slab (indexed by fd) holds the `tls_session.Session`, the h2 / gRPC mux, and a staged outbound-ciphertext buffer that arms `EPOLLOUT` on `EAGAIN` for backpressure. `onReadable` reads ciphertext, calls `session.feed`, sends the handshake flight, and on the established outcome feeds the decrypted plaintext into the mux (`processRing` / `grpcMuxProcessRing`), whose frames are sealed back into records via `frame.write_hook` pointed at `hookWrite`. One worker multiplexes many connections, so high concurrency does not spawn a thread per connection.
 
 ## tls12_*.zig
 

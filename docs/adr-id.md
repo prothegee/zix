@@ -106,13 +106,13 @@ Setiap ADR mencatat satu keputusan desain yang signifikan: konteks yang membuatn
 
 **Konteks:** UDP tidak punya state koneksi. Tidak ada padanan FIN TCP di tingkat OS. Satu-satunya cara andal mendeteksi bahwa klien berhenti mengirim adalah ketiadaan trafik selama periode yang dapat dikonfigurasi.
 
-**Keputusan:** Lacak klien berdasarkan alamat remote dalam list `Managed(ClientRecord)`. Perbarui `last_seen` pada setiap paket. Saat `receiveTimeout` berakhir (interval poll) dan setelah tiap burst paket (cek dengan rate-limit), pindai klien yang `last_seen`-nya lebih tua dari `disconnect_timeout_ms` lalu hapus.
+**Keputusan:** Lacak klien berdasarkan alamat remote dalam list `Managed(ClientRecord)`. Perbarui `last_seen` pada setiap paket. Saat `receiveTimeout` berakhir (interval poll) dan setelah tiap burst paket (cek dengan rate-limit), pindai klien yang `last_seen`-nya lebih tua dari `conn_timeout_ms` lalu hapus.
 
 **Konsekuensi:**
-- Penundaan deteksi kasus terburuk adalah `disconnect_timeout_ms + poll_timeout_ms`. Ini didokumentasikan dan dapat dikonfigurasi.
+- Penundaan deteksi kasus terburuk adalah `conn_timeout_ms + poll_timeout_ms`. Ini didokumentasikan dan dapat dikonfigurasi.
 - Klien yang crash lalu restart dari port baru diperlakukan sebagai klien baru.
 - Klien yang restart dari port yang sama diregistrasi ulang pada paket berikutnya.
-- Positif palsu (klien yang sebentar diam) dibatasi oleh `disconnect_timeout_ms`.
+- Positif palsu (klien yang sebentar diam) dibatasi oleh `conn_timeout_ms`.
 
 ---
 
@@ -423,7 +423,7 @@ Dua lapisan ini ortogonal: D memicu jika klien macet sebelum handler bahkan mula
 **Konsekuensi:**
 - Satu alokasi heap ekstra per request (salin byte head via `gpa.dupe`). Ukurannya adalah head mentah (status line + header), tipikal beberapa ratus byte.
 - `ClientResponse` tidak aman dipakai setelah `deinit()`.
-- TLS (HTTPS) di luar lingkup zix. Library ini adalah backend jaringan: terminasi TLS didelegasikan ke proxy hulu (nginx, HAProxy, Envoy). `std.http.Client` mendukung TLS secara internal, tetapi zix tidak mengekspos, mengonfigurasi, atau mengujinya. HTTP polos pada jaringan internal adalah pemakaian yang dituju.
+- TLS (HTTPS) di luar lingkup `zix.Http.Client`. Library ini adalah backend jaringan: untuk wrapper client, terminasi TLS didelegasikan ke reverse proxy hulu. `std.http.Client` mendukung TLS secara internal, tetapi wrapper-nya tidak mengekspos, mengonfigurasi, atau mengujinya. HTTP polos pada jaringan internal adalah pemakaian yang dituju. (Server TLS zix native menyusul: ADR-045 sampai ADR-048.)
 - `response_timeout_ms` dan `read_timeout_ms` disimpan di config dan didokumentasikan sebagai "v1: belum ditegakkan" sehingga pemanggil dapat menyetelnya sekarang dan mendapat penegakan di rilis mendatang tanpa perubahan API.
 
 ---
@@ -498,7 +498,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 
 **Konteks:** Protokol FIX (Financial Information eXchange) adalah standar pesan dominan untuk sistem trading finansial. Ia memakai SOH (0x01) sebagai delimiter field, bukan prefiks panjang, yang membuatnya tidak kompatibel dengan pola recv `readSliceShort` yang dipakai HTTP. Server mandiri yang mengikuti pola config dan model-dispatch yang sama dengan `zix.Tcp` diperlukan, dengan lapisan sesi (penanganan Logon/Logout/Heartbeat) terbangun di dalam sehingga pemanggil tidak mengimplementasikannya sendiri.
 
-**Keputusan:** Implementasikan `zix.Fix` di `src/tcp/fix/`. `serveConn` adalah loop inti: ia mengakumulasi byte via `takeByte` hingga `findMessageEnd` mendeteksi pesan lengkap, lalu mendispatch secara internal berdasarkan MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest ditangani otomatis, semua pesan lain di-echo. Tidak ada callback handler yang dibutuhkan. State sesi (comp_id, seq_num) bersifat stack-lokal terhadap `serveConn`, tanpa alokasi heap dalam loop pesan. Keempat model dispatch berlaku. `.ASYNC` adalah default karena sesi FIX berumur panjang. `.EPOLL` berjalan native di Linux (loop accept epoll tunggal, ring buffer `FdQueue`, worker pool menahan tiap koneksi selama masa hidup penuhnya, pola sama dengan `zix.Grpc`). Non-Linux jatuh kembali ke `.POOL`.
+**Keputusan:** Implementasikan `zix.Fix` di `src/tcp/fix/`. `serveConn` adalah loop inti: ia mengakumulasi byte via `takeByte` hingga `findMessageEnd` mendeteksi pesan lengkap, lalu mendispatch secara internal berdasarkan MsgType (tag 35). Logon/Logout/Heartbeat/TestRequest ditangani otomatis, semua pesan lain di-echo. Tidak ada callback handler yang dibutuhkan. State sesi (comp_id, seq_num) bersifat stack-lokal terhadap `serveConn`, tanpa alokasi heap dalam loop pesan. Keempat model dispatch berlaku. `.ASYNC` cocok untuk sesi FIX karena berumur panjang. `.EPOLL` berjalan native di Linux (loop accept epoll tunggal, ring buffer `FdQueue`, worker pool menahan tiap koneksi selama masa hidup penuhnya, pola sama dengan `zix.Grpc`). Non-Linux jatuh kembali ke `.POOL`.
 
 **Konsekuensi:**
 - `takeByte` dalam loop menghindari deadlock `readSliceShort`: buffer internal reader menyerap segmen TCP penuh, panggilan `takeByte` berikutnya mengurasnya tanpa syscall ekstra.
@@ -1046,14 +1046,15 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Konteks:** ADR-045 membiarkan RSA signing opsional: certificate ECDSA P-256 atau Ed25519 menutup autentikasi di jalur signing std, dan std memverifikasi RSA tetapi tidak bisa menandatangani dengan private key RSA. Sebuah deployment yang harus melayani certificate RSA-2048 yang sudah diterbitkan (bentuk yang umum, misalnya certificate bersama yang di-mount oleh harness eksternal) tidak bisa dilayani, karena zix tidak punya RSA signing.
 
-**Keputusan:** Implementasikan RSA signing secara pure-Zig di atas `std.crypto`, sisi server saja, untuk certificate server RSA. Primitive-nya adalah modular exponentiation `std.crypto.ff.Modulus` (rutin constant-time yang sama dengan yang dipakai RSA verify std, di sini dengan private exponent), zix menulis padding-nya: EMSA-PKCS1-v1_5 (RFC 8017 9.2) dan EMSA-PSS plus MGF1 (RFC 8017 9.1), serta parse DER private-key PKCS#1 / PKCS#8. `Tls.Context.init` mendeteksi certificate `rsaEncryption`, mem-parse key-nya, dan menolak di bawah RSA-2048. RSA mengautentikasi CertificateVerify TLS 1.3 dengan `rsa_pss_rsae_sha256`, sehingga certificate RSA membutuhkan TLS 1.3: jalur ServerKeyExchange 1.2 tetap ECDSA-only, dan context RSA yang bertemu klien 1.2-only mengembalikan error. Tipe certificate default tidak berubah (ECDSA P-256), RSA hanya aktif saat certificate RSA dimuat.
+**Keputusan:** Implementasikan RSA signing secara pure-Zig di atas `std.crypto`, sisi server saja, untuk certificate server RSA. Primitive-nya adalah modular exponentiation constant-time: Montgomery modexp khusus di `montgomery.zig` (CIOS portable plus jalur asm ADCX / ADOX fused di x86_64+ADX), dengan `std.crypto.ff.Modulus` sebagai fallback untuk lebar prime yang tidak dicakup. zix menulis padding-nya: EMSA-PKCS1-v1_5 (RFC 8017 9.2) dan EMSA-PSS plus MGF1 (RFC 8017 9.1), serta parse DER private-key PKCS#1 / PKCS#8. `Tls.Context.init` mendeteksi certificate `rsaEncryption`, mem-parse key-nya, dan menolak di bawah RSA-2048. RSA mengautentikasi CertificateVerify TLS 1.3 dengan `rsa_pss_rsae_sha256`, sehingga certificate RSA membutuhkan TLS 1.3: jalur ServerKeyExchange 1.2 tetap ECDSA-only, dan context RSA yang bertemu klien 1.2-only mengembalikan error. Tipe certificate default tidak berubah (ECDSA P-256), RSA hanya aktif saat certificate RSA dimuat.
 
-**Alasan:** Bignum bukan gap-nya (`std.crypto.ff` sudah menyediakan modexp constant-time), hanya padding PKCS#1 dan parse DER key yang belum ada, jadi pekerjaannya pure-Zig tanpa dependency baru, menjaga postur ADR-045. PSS (bukan v1.5) di jalur 1.3 karena RFC 8446 hanya mengizinkan `rsa_pss_rsae_sha256` untuk CertificateVerify RSA. Floor 2048-bit adalah minimum modern. Sisi server saja, tanpa RSA di klien (`zix.Tls.Client` tetap menawarkan dan memverifikasi ECDSA plus Ed25519), karena pendorongnya adalah melayani certificate RSA, bukan mengonsumsinya. ECDSA tetap default karena signature-nya lebih kecil dan cepat.
+**Alasan:** Bignum bukan gap-nya (`std.crypto.ff` sudah menyediakan modexp constant-time), hanya padding PKCS#1 dan parse DER key yang belum ada, jadi pekerjaannya pure-Zig tanpa dependency baru, menjaga postur ADR-045. Modexp-nya kemudian pindah ke rutin Montgomery constant-time khusus (`montgomery.zig`) untuk menaikkan sign rate di bawah handshake storm TLS (ff tetap fallback), tetap pure-Zig. PSS (bukan v1.5) di jalur 1.3 karena RFC 8446 hanya mengizinkan `rsa_pss_rsae_sha256` untuk CertificateVerify RSA. Floor 2048-bit adalah minimum modern. Sisi server saja, tanpa RSA di klien (`zix.Tls.Client` tetap menawarkan dan memverifikasi ECDSA plus Ed25519), karena pendorongnya adalah melayani certificate RSA, bukan mengonsumsinya. ECDSA tetap default karena signature-nya lebih kecil dan cepat.
 
 **Config:** tidak ada yang baru. Certificate RSA dipilih dengan mengarahkan `Tls.Context.Config.cert_path` / `key_path` ke certificate dan key RSA, `Tls.Context.init` mendeteksi tipenya. Floor context ke TLS 1.3 untuk certificate RSA (`min_version = .TLS_1_3`).
 
 **Konsekuensi:**
 - `src/tls/rsa.zig` adalah signer-nya (parse key, EMSA-PKCS1-v1_5, EMSA-PSS, salt diinjeksi oleh pemanggil). `certificate.SigningKey` mendapat varian `rsa` dengan `scheme()` mengembalikan `rsa_pss_rsae_sha256`. `handshake.SignatureScheme` mendapat `rsa_pkcs1_sha256` (0x0401) dan `rsa_pss_rsae_sha256` (0x0804).
+- `src/tls/montgomery.zig` adalah modexp-nya: rutin Montgomery constant-time (CIOS portable, plus jalur asm ADCX / ADOX fused di x86_64+ADX yang dipilih build `+adx`), dipakai untuk dua half-exponentiation CRT pada sign. `std.crypto.ff` tetap fallback. Sign-nya constant-time di kedua jalur.
 - Salt PSS di-thread per koneksi seperti random lainnya: getrandom jalur serve ke `Tls.Context.handshakeOptions`, lalu `HandshakeOptions.pss_salt`, lalu `buildCertificateVerify`.
 - Terverifikasi: byte-exact terhadap `openssl dgst -sign` untuk v1.5, RSA verify std untuk PSS, dan sebuah integration test memuat certificate RSA, menandatangani signature PSS yang terverifikasi std, dan menolak key 1024-bit. Hijau di Zig 0.16 dan 0.17.
 - RSA di atas TLS 1.2 di luar scope: jalur 1.2 ECDSA-only, jadi context RSA melayani 1.3 saja.
@@ -1070,7 +1071,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Alasan:** Batched syscall (`recvmmsg` / `sendmmsg`) dan worker `SO_REUSEPORT` per-core adalah pengungkit throughput datagram yang sebenarnya, jadi membangunnya sebagai kapabilitas `zix.Udp` kelas-satu berguna di luar QUIC dan menjaga lapisan QUIC mendatang fokus ke semantik transport ketimbang mengakali engine messaging berstruktur-tetap. Bentuk handler-plus-`Sink` membuat batching tak terlihat: balasan masuk antrian ke send batch dan seluruh batch keluar sebagai satu `sendmmsg`, dan balasan ke pengirim memakai ulang address yang diisi kernel tanpa konversi. Memakai ulang enum `DispatchModel` TCP dan folder dispatch ADR-043 menjaga konsistensi keluarga engine. GSO (`UDP_SEGMENT`), GRO (`UDP_GRO`), ECN, dan jalur submission io_uring khusus di balik `.URING` ditunda: offload itu butuh jalur control-data per-message yang kebenarannya bergantung hardware (GRO menggabungkan beberapa datagram jadi satu buffer, jadi mengaktifkannya tanpa splitter akan menyerahkan super-datagram salah ke handler), maka `.URING` di-fold ke loop per-core `recvmmsg` untuk sekarang.
 
-**Config:** field `UdpServerConfig` baru, semua additive dengan default aman, dipakai jalur raw: `dispatch_model` (default `.ASYNC`), `workers` (0 = satu per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (ukuran batch mmsg), dan `max_recv_buf` (buffer per-datagram, jalur typed tetap `@sizeOf(Packet)`). Tidak ada `kernel_backlog`: UDP tidak punya backlog `listen`.
+**Config:** field `UdpServerConfig` baru, semua additive dengan default aman, dipakai jalur raw: `dispatch_model` (wajib, tidak ada default), `workers` (0 = satu per CPU), `reuse_address` (SO_REUSEADDR + SO_REUSEPORT), `recv_batch` / `send_batch` (ukuran batch mmsg), dan `max_recv_buf` (buffer per-datagram, jalur typed tetap `@sizeOf(Packet)`). Tidak ada `kernel_backlog`: UDP tidak punya backlog `listen`.
 
 **Konsekuensi:**
 - `src/udp/datagram.zig` baru (socket raw-fd, `recvmmsg` dengan `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, konversi address), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus satu file per model), dan `src/udp/raw.zig` (facade `Raw` dan `run()` switch). Socket memakai syscall `std.os.linux` mentah, karena `std.posix` tidak lagi membungkus `socket` / `bind` / `close`.
@@ -1126,7 +1127,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Context:** TLS untuk Http2 dan gRPC dilayani oleh terminator ADR-046: jalankan handshake, lalu jalankan engine h2 di belakang socketpair dengan worker thread kedua, satu thread per koneksi. Bentuk itu thrash di konkurensi tinggi. Pada 512 atau 1024 koneksi dengan core count jauh di bawahnya, scheduler churn satu thread per koneksi dan throughput kolaps (engine cleartext EPOLL dan URING sudah memultipleks banyak koneksi per core, tapi jalur TLS belum). Socketpair plus thread kedua adalah biayanya, bukan kriptonya.
 
-**Decision:** Untuk dispatch model `.EPOLL` dan `.URING`, terminasi TLS di tempat pada event loop multipleks. Satu listener `SO_REUSEPORT` plus satu instance epoll per worker (jumlah worker adalah core count), tiap worker memegang banyak koneksi TLS lewat session TLS 1.3 resumable (`src/tcp/tls/tls_session.zig`): ia mengakumulasi ciphertext, memproses tiap record lengkap, menggerakkan mux h2 / gRPC resumable di atas plaintext terdekripsi, dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. File baru adalah `src/tcp/http2/tls_epoll.zig` dan `src/tcp/http2/grpc/tls_epoll.zig`. Socketpair dan thread kedua per koneksi dihapus di semua tempat: jalur `.ASYNC` / `.POOL` / `.MIXED` tetap memakai accept loop thread-per-koneksi tapi menjalankan driver inline-mux yang sama di `tcp/tls/h2_terminator.zig` (juga tanpa socketpair), dan jalur itu juga melayani fallback TLS 1.2. `server.run` mengarahkan `.EPOLL` / `.URING` dengan `config.tls` ke `runTlsEpoll`, kasus lainnya ke `runTls`.
+**Decision:** Untuk dispatch model `.EPOLL` dan `.URING`, terminasi TLS di tempat pada event loop multipleks. Satu listener `SO_REUSEPORT` plus satu instance epoll per worker (jumlah worker adalah core count), tiap worker memegang banyak koneksi TLS lewat session TLS 1.3 resumable (`src/tcp/tls/tls_session.zig`): ia mengakumulasi ciphertext, memproses tiap record lengkap, menggerakkan mux h2 / gRPC resumable di atas plaintext terdekripsi, dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. File baru adalah `src/tcp/http2/tls_mux.zig` dan `src/tcp/http2/grpc/tls_mux.zig`. Socketpair dan thread kedua per koneksi dihapus di semua tempat: jalur `.ASYNC` / `.POOL` / `.MIXED` tetap memakai accept loop thread-per-koneksi tapi menjalankan driver inline-mux yang sama di `tcp/tls/h2_terminator.zig` (juga tanpa socketpair), dan jalur itu juga melayani fallback TLS 1.2. `server.run` mengarahkan `.EPOLL` / `.URING` dengan `config.tls` ke `runTlsMux`, kasus lainnya ke `runTls`.
 
 **Rationale:** Terminator thread-per-koneksi benar tapi tidak scale, jadi https adalah latency-by-construction di konkurensi tinggi. Memultipleks TLS dengan cara yang sama seperti engine cleartext sudah memultipleks cocok dengan bentuk yang terbukti, jadi satu worker per core memegang ribuan handshake setengah-terbuka dan koneksi established tanpa satu thread tiap-tiap. Session sans-I/O resumable adalah linchpin yang memungkinkannya. Menjaga kasus konkurensi-rendah dan 1.2 pada driver inline-mux menghindari fork state machine mux. Terbukti lokal di 6 core (worst case terhadap box 64-core): Http2 RSA pada 512 koneksi dan gRPC pada 512 dan 1024 koneksi melayani dengan satu worker thread per core, bukan per koneksi, dan tanpa hang, di mana jalur lama thrash (load average ratusan, butuh menit untuk selesai).
 
@@ -1136,6 +1137,71 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - `.URING` dengan `config.tls` saat ini diarahkan ke loop epoll-multipleks yang sama. Loop TLS io_uring native adalah optimasi berikutnya.
 - TLS Http1 masih thread-per-koneksi (`tcp/http1/tls_serve.zig`), yang dipakai json-tls. Mem-port dispatch yang sama ke Http1 adalah langkah tersisa.
 - Example baru `examples/tls/tls_grpc_basic.zig` (port 9070, ECDSA P-256) dan runner `tests/runner/tls_grpc_basic_runner.zig` (panggilan unary gRPC nyata melalui TLS), hijau di Zig 0.16 dan 0.17.
+- Worker TLS Http2 dan gRPC yang multipleks kini pin ke slot CPU-nya (sadar cgroup-mask) dan menghitung worker count dari cpuset yang tersedia, menyamai `tls_mux` Http1. Tanpa itu worker men-spawn thread sebanyak host tanpa pin, jadi cpuset yang di-pin oleh cgroup meng-oversubscribe satu core di bawah handshake storm (collapse yang sama yang sudah diperbaiki untuk Http1).
+
+---
+
+## ADR-053: jalur serve https untuk zix.Http
+
+**Status:** Accepted
+
+**Konteks:** `zix.Http` (arena engine) hanya melayani cleartext. Http1, Http2, dan gRPC memperoleh TLS (ADR-046, ADR-052), tetapi arena engine tidak punya jalur https, jadi deployment yang menstandarkan ke `zix.Http` tidak bisa opt-in TLS tanpa proxy hulu.
+
+**Keputusan:** Tambahkan jalur serve TLS ber-gate ke `zix.Http`, opt-in via `config.tls` (sebuah `*Tls.Context`), meniru Http1. Response router ditangkap ke buffer lalu dienkripsi: alih-alih menulis sink baru, jalur ini memakai ulang hook response-coalescing `RespSink` / `tl_resp_sink` milik arena engine (dibangun untuk jalur URING, ADR-037) dengan memasang sink ber-fd-sentinel (-1) di atas buffer output dan menjalankan `processRequest` normal dengan fd -1, jadi setiap penulisan Response (jalur cepat send, `fdWriteAll`, file statis, 404) di-serialize ke buffer bukan ke socket, tanpa kebocoran plaintext dan tanpa branch hot-path cleartext baru. Cert / key / policy dimuat sekali di `Tls.Context.init`. Dua jalur eksekusi berbagi capture ini, dipilih oleh `dispatch_model`:
+- `.ASYNC` / `.POOL` / `.MIXED`: thread-per-koneksi (`src/tcp/http/tls_serve.zig`). Setiap koneksi memperoleh worker thread-nya sendiri untuk handshake (TLS 1.3, dengan fallback 1.2 ECDSA) dan loop keep-alive.
+- `.EPOLL` / `.URING`: multipleks event-driven (`src/tcp/http/tls_mux.zig`). Satu worker epoll SO_REUSEPORT per core, banyak koneksi tiap worker, state machine handshake / record yang resumable per koneksi (`src/tcp/tls/tls_session.zig`). Jumlah worker sadar-cpuset (`getAvailableCpuCount`) dan tiap worker pin ke core-nya (`pinToCpu`), collapse-fix yang sama seperti Http1 / Http2 / gRPC (ADR-052).
+
+`server.run` mengarahkan `config.tls` ke worker multipleks untuk `.EPOLL` / `.URING` dan ke jalur thread-per-koneksi untuk selainnya.
+
+**Alasan:** Memakai ulang sink yang ada menjaga jalur cleartext tidak tersentuh (cek null `tl_resp_sink` sudah dibayar untuk coalescing URING), jadi https tidak menambah overhead di luar jalur TLS. Fd sentinel -1 membuat penulisan socket yang lepas gagal dengan aman bukan membocorkan plaintext melewati TLS. Worker multipleks adalah jalur throughput (paritas dengan Http1), jalur thread-per-koneksi adalah model yang lebih sederhana dan rumah untuk kerja handler-blocking (SSE / streaming, WebSocket).
+
+**Konsekuensi:**
+- Request / response dilayani di kedua jalur. Pada cut ini SSE / streaming dan WebSocket tidak kompatibel dengan buffered-capture (handler menulis incremental dan tidak pernah return, buffer baru flush setelah handler keluar), jadi keduanya melepas sink (`res.stream` me-null-kan `tl_resp_sink`), muncul sebagai `StreamingNotSupported`, dan close bersih. ADR-054 mendaratkan SSE / streaming melalui TLS (streaming write hook di bawah), jadi ini tidak lagi berlaku untuk SSE di jalur thread-per-koneksi. WebSocket melalui TLS adalah ADR-055.
+- Jalur solusi untuk SSE / streaming melalui TLS (diwujudkan di ADR-054): streaming TLS write hook di jalur thread-per-koneksi. Alih-alih sink ter-buffer, pasang writer thread-local yang memegang TLS session hidup dan fd, jadi tiap `fdWriteAll` mengenkripsi potongan itu menjadi TLS record dan menulis ciphertext-nya seketika (vs buffered capture yang mengakumulasi plaintext dan mengenkripsi sekali). `res.stream` memasang writer ini alih-alih me-null-kan sink, jadi loop tulis SSE yang ada mengalir tanpa perubahan, tiap event terenkripsi saat diproduksi. WebSocket (ADR-055) mengirim response upgrade-nya lewat stream sink yang sama, lalu menjalankan loop frame baca / tulis lewat session yang sama. Ini menjadi milik jalur thread-per-koneksi karena, seperti SSE cleartext, ia butuh handler blocking, yang tidak bisa di-host worker multipleks (satu core, banyak koneksi). `tls_mux` multipleks tetap request / response saja, cocok dengan `.EPOLL` / `.URING` cleartext yang juga tidak melayani SSE handler-blocking.
+- `HttpServerConfig` memperoleh `tls: ?*Tls.Context = null`. Cert bisa ECDSA P-256, Ed25519, atau RSA (dideteksi dari cert), Ed25519 dan RSA membutuhkan TLS 1.3.
+- Example baru `examples/tls/tls_http_basic.zig` (port 9071). Diverifikasi end-to-end (curl + openssl: TLS 1.3, ALPN http/1.1, ECDSA P-256), baik worker multipleks `.EPOLL` (keep-alive dan koneksi konkuren ter-multipleks di satu worker) maupun jalur thread-per-koneksi, hijau di Zig 0.16 dan 0.17.
+
+---
+
+## ADR-054: SSE / streaming melalui TLS untuk zix.Http dan zix.Http1
+
+**Status:** Accepted
+
+**Konteks:** Jalur serve https (ADR-053 untuk `zix.Http`, jalur approach-A untuk `zix.Http1`) menangkap response plaintext dari handler ke sebuah buffer di balik sentinel fd `-1`, mengenkripsinya sekali, lalu mengirimnya. Itu cocok untuk request / response tapi tidak untuk handler streaming (SSE): ia berloop memancarkan event dan tidak pernah return, jadi buffered capture deadlock atau overflow. ADR-053 menyisihkan SSE / streaming melalui TLS dari scope karena alasan ini.
+
+**Keputusan:** Di jalur https thread-per-koneksi, tambahkan stream sink per-koneksi yang mengenkripsi satu TLS record per write dan mengirimnya seketika, menggantikan buffered capture hanya ketika sebuah handler memilih streaming.
+- Sebuah `TlsStreamSink` thread-local (type-erased atas koneksi hidup, jadi jalur TLS 1.3 dan 1.2 berbagi) memegang koneksi dan fd. Write-nya mengenkripsi satu record dan mengirimnya. Ia ada di `src/tcp/http/response.zig` (`zix.Http`) dan `src/tcp/http1/core.zig` (`zix.Http1`).
+- Prioritas `fdWriteAll`: buffered capture sink dulu, lalu stream sink, lalu raw fd. Selama buffered capture keduanya terpasang dan capture menang. Switch opt-in melepas capture, jadi write jatuh ke stream sink.
+- Switch opt-in: `zix.Http` memakai ulang `res.stream()` (sudah melepas sink, kini ia menjaga stream sink aktif melalui TLS, jadi tanpa simbol publik baru). `zix.Http1` memperoleh satu call, `beginStream()`, no-op di cleartext, jadi fd-handler yang sama melayani cleartext dan TLS.
+- `serveRequests` memasang stream sink per koneksi dan mendeteksi outcome streamed (capture sink dilepas) untuk close setelah stream selesai.
+
+**Rasional:** Memakai ulang `fdWriteAll` sebagai satu chokepoint menjaga jalur cepat ter-buffer untuk response normal tetap utuh (capture sink tetap menang sampai sebuah handler streaming), jadi SSE tidak menambah apa pun di luar jalur streaming. Handler streaming mem-park thread per-koneksinya sendiri, persis model thread-per-koneksi yang sudah dipakai jalur https, jadi tidak butuh model eksekusi baru.
+
+**Konsekuensi:**
+- SSE / streaming dilayani melalui TLS di jalur thread-per-koneksi (`.ASYNC` / `.POOL` / `.MIXED`) untuk kedua engine. Jalur `tls_mux` multipleks (`.EPOLL` / `.URING`) tetap request / response saja: meng-host stream long-lived di sana butuh kerja state-machine event-loop, di luar scope. SSE di `zix.Http` sudah butuh model thread-per-koneksi di cleartext, jadi TLS tidak menambah batasan baru.
+- Ukuran per-event dibatasi satu TLS record (~16 KiB plaintext), cukup luas untuk satu event SSE.
+- Example baru `examples/tls/tls_http_sse.zig` (port 9072) dan `examples/tls/tls_http1_sse.zig` (port 9073). `examples/http1_sse.zig` kini memanggil `beginStream()` jadi satu handler melayani cleartext dan TLS. Diverifikasi end-to-end dengan client `zix.Tls` native (handshake, GET /events, dekripsi, `Content-Type: text/event-stream` plus event pertama), hijau di Zig 0.16 dan 0.17.
+- WebSocket melalui TLS (bidirectional, jalur baca) dibangun di atas stream sink ini dan adalah ADR-055.
+
+---
+
+## ADR-055: WebSocket melalui TLS untuk zix.Http dan zix.Http1
+
+**Status:** Accepted
+
+**Konteks:** SSE melalui TLS (ADR-054) menambah streaming write hook di jalur https thread-per-koneksi. WebSocket adalah saudara bidirectional-nya: setelah upgrade `101` ia butuh write half (mengenkripsi frame keluar) dan read half (mendekripsi record masuk, parse frame). Jalur WS cleartext tidak bisa melayani TLS: `WebSocket.serve` milik `zix.Http1` menyerahkan raw fd ke engine `.EPOLL` (tidak ada engine loop di jalur thread-per-koneksi), dan `WebSocket.upgrade` milik `zix.Http` menulis ke stream `std.Io` lalu handler membaca raw stream. Melalui TLS fd-nya adalah sentinel `-1` dan stream-nya palsu, jadi keduanya tidak jalan.
+
+**Keputusan:** Tambahkan jalur WebSocket-over-TLS engine-driven di loop https thread-per-koneksi, dibangun di atas ADR-054 stream sink untuk write half dan inline frame loop untuk read half. Handler yang dilayani melalui TLS memanggil `WebSocket.serveTls(fd, key, on_frame)` alih-alih `serve` / `upgrade` cleartext:
+- `serveTls` melepas buffered capture (ADR-054 stream sink mengambil alih), menulis `101` lewatnya (terenkripsi), dan mendaftarkan handoff (`requestWebSocket`).
+- Setelah handler return, `serveRequests` memanggil `takeWebSocket` dan menjalankan inline frame loop (`serveWsTls`): baca satu ciphertext record, dekripsi (`conn.readAppData`), akumulasi, lalu pump tiap frame lengkap. Frame text / binary memanggil `on_frame`, ping di-auto-pong, close di-auto-echo. Frame keluar mengalir lewat stream sink (`fdWriteAll` -> `conn.writeAppData`), jadi tiap pump pass mengenkripsi frame ter-coalesce sebagai satu record.
+- `zix.Http1` memakai ulang frame codec-nya (`parseFrame` / `pump` / `send`) dan handoff `requestWebSocket` / `takeWebSocket`. `zix.Http` memperoleh bagian engine-driven (`WsFrameFn`, `send`, `pump`, handoff, `upgradeFd`) jadi bentuk `on_frame(fd, opcode, payload)` dan entry `serveTls` yang sama jalan di kedua engine.
+
+**Rasional:** Frame codec tak berubah, hanya transport yang pindah dari raw fd / stream ke TLS session. Menjalankan loop inline di connection thread cocok dengan model thread-per-koneksi yang sudah dipakai jalur https (koneksi WS long-lived dan memiliki thread-nya sendiri), dan memakai ulang ADR-054 stream sink berarti chokepoint `fdWriteAll` yang sama mengenkripsi event SSE dan frame WS.
+
+**Konsekuensi:**
+- WebSocket dilayani melalui TLS di jalur thread-per-koneksi (`.ASYNC` / `.POOL` / `.MIXED`) untuk kedua engine. Jalur `tls_mux` multipleks (`.EPOLL` / `.URING`) tetap request / response saja dan membuang handoff yang keliru.
+- Rooms / broadcast tidak dilayani melalui TLS: tiap koneksi punya TLS session sendiri, jadi frame harus dienkripsi per koneksi. WS melalui TLS adalah per-koneksi (echo / point-to-point), example arena cleartext mempertahankan model room.
+- Example baru `examples/tls/tls_http1_ws.zig` (port 9074) dan `examples/tls/tls_http_ws.zig` (port 9075). Diverifikasi end-to-end dengan client `zix.Tls` native (handshake, WS upgrade, `101` terenkripsi, masked frame, echo terdekripsi), hijau di Zig 0.16 dan 0.17.
 
 ---
 

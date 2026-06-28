@@ -4,7 +4,7 @@
 
 - gRPC h2c (HTTP/2 cleartext) server and client implemented without C FFI.
 - All 4 RPC types: unary, server streaming, client streaming, bidirectional streaming.
-- All 5 dispatch models: ASYNC (default), POOL, MIXED, EPOLL (Linux-only), URING (Linux-only).
+- All 5 dispatch models: ASYNC, POOL, MIXED, EPOLL (Linux-only), URING (Linux-only). Required, no default.
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
 - grpc-timeout header parsing, grpc-status trailer serialization.
 - Native TLS (TLS 1.3 / 1.2, ALPN h2) via a `Tls.Context`, additive over the h2c default. A reverse proxy (nginx, haproxy) stays an option for offloading.
@@ -29,7 +29,10 @@ graph LR
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (blocking models), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplexed `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: ASYNC, POOL, MIXED (blocking pool), EPOLL (multiplexed `epollMuxWorker` + `GrpcConnTable`) |
+| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: thin `run()` switch that dispatches to the per-model files under `dispatch/` (and to the TLS serve paths when `cfg.tls != null`) |
+| `src/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplexed `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (shared helpers) |
+| `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: blocking TLS handler path (per-connection) |
+| `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: multiplexed TLS dispatch path |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | `GrpcPrefix` struct, `readGrpcPrefix`, `writeGrpcPrefix`, `send*`/`build*` frame helpers (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), comptime cached reply blocks |
 | `src/tcp/http2/grpc/proto.zig` | `WT_*` wire type constants, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
@@ -48,7 +51,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` (sends UNIMPLEMENTED if no route matches) |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0 (default), POOL=1, MIXED=2, EPOLL=3 (Linux-only), URING=4 (Linux-only) |
+| `zix.Grpc.DispatchModel` | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 (Linux-only), URING=4 (Linux-only), required with no default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
@@ -301,7 +304,7 @@ When the handler calls `ctx.finish(status, msg)` without sending any data, the s
 
 | Model | Accept threads | Connection dispatch | Notes |
 | :- | :- | :- | :- |
-| `.ASYNC` (default) | 1 | `io.async()` per connection | preferred for unbounded or long-lived streams |
+| `.ASYNC` | 1 | `io.async()` per connection | preferred for unbounded or long-lived streams |
 | `.POOL` | cpu_count | shared `ConnQueue` + blocking pool | workers and pool_size apply |
 | `.MIXED` | cpu_count | `io.async()` per accept thread | no ConnQueue, pool_size ignored |
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
@@ -376,14 +379,14 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_epoll.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
 
 ```mermaid
 graph LR
     C[gRPC client\nTLS/port 8443] -->|grpc over tls| Z[zix.Grpc server\nTLS terminator + h2c engine]
 ```
 
-A reverse proxy stays an alternative when TLS offload, routing, or sharing a port with other services is wanted. See [`docs/hld-grpc-proxy.md`](hld-grpc-proxy.md) for nginx and haproxy configuration examples.
+A reverse proxy stays an alternative when TLS offload, routing, or sharing a port with other services is wanted. See [`docs/hld-proxy-en.md`](hld-proxy-en.md) for nginx and haproxy configuration examples.
 
 ## Examples
 

@@ -200,11 +200,13 @@ Blok diproduksi dengan menjalankan `HpackEncoder` asli di comptime, jadi byte-ny
 
 ---
 
-## server.zig
+## server.zig dan dispatch/
 
 ### Dispatch (run)
 
-`run()` switch pada `dispatch_model`. `.ASYNC` / `.POOL` / `.MIXED` mempertahankan struktur accept-thread + pool `io.async` / `ConnQueue` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `runEpoll`.
+`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` / `.POOL` / `.MIXED` mempertahankan struktur accept-thread + pool `io.async` / `ConnQueue` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi).
+
+Simbol `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, dan `runEpoll` di bawah semuanya berada di `dispatch/epoll.zig`.
 
 ### GrpcConnTable
 
@@ -214,9 +216,9 @@ Map fd ke `*GrpcMuxConn` privat per worker, ber-indeks langsung berdasarkan fd (
 
 Menguras `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` sampai `EAGAIN` (level-triggered). Tiap fd yang diterima mendapat `TCP_NODELAY`, sebuah `GrpcMuxConn`, dan registrasi `EPOLL.IN | RDHUP`. Saat alokasi atau registrasi gagal, fd ditutup.
 
-### epollMuxWorker(ctx)
+### epollMuxWorkerFn(routes)(ctx)
 
-Satu thread worker:
+`epollMuxWorkerFn(comptime routes)` mengembalikan fungsi entry worker. Satu thread worker:
 
 ```
 1. listener SO_REUSEPORT privat pada ip:port; setNonBlock
@@ -229,9 +231,9 @@ Satu thread worker:
                       jika .close -> epoll_ctl DEL, table.free, close
 ```
 
-### runEpoll(self, io)
+### runEpoll(comptime routes, cfg)
 
-`worker_count = pool_size` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorker` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
+`worker_count = pool_size` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorkerFn(routes)` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
 
 ---
 

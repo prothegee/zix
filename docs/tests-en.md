@@ -33,7 +33,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (dispatch_model=.ASYNC, kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0), `TcpClientConfig` defaults (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0) with dispatch_model required (set explicitly), `TcpClientConfig` defaults (max_msg_len=4096) |
 | `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -49,7 +49,6 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
-| `tcp/http/upload.zig` | `refAllDecls` + behavioral: MultipartParser parse + getField |
 | `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
 | `tcp/http/context.zig` | `refAllDecls` + behavioral: `timedOut` null deadline returns false, `isExpired` null deadline returns false |
 | `tcp/http/server.zig` | `refAllDecls` + behavioral: `EpollConnTable` slab alloc / free lifecycle, filled-bytes accounting, out-of-range fd returns null, `getAvailableCpuCount` returns at least 1, `effectiveCacheEntries` honors the memory ceiling, EPOLL `processRequest` serves a cache miss then a hit |
@@ -100,7 +99,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model defaults to ASYNC, workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model required (set explicitly), workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
 | `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
 | `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
@@ -113,7 +112,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/frame.zig` | `refAllDecls` + behavioral: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, `writeFrameHeader`/`readFrameHeader` roundtrip via pipe, PREFACE starts with `PRI`, `sendSettings` writes a valid 9-byte SETTINGS frame via pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
-| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model defaults to ASYNC, workers/pool_size default to 0, max_streams=16 and max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers/pool_size default to 0, max_streams=16 and max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
 
 ### zix.Grpc
@@ -157,6 +156,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | Module | Coverage |
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + behavioral: extension, save |
+| `utils/multipart.zig` | `refAllDecls` + behavioral: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
 
 ### zix.Multiplexers
@@ -359,7 +359,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `TcpServerConfig` dispatch_model default | `.ASYNC` |
+| `TcpServerConfig` dispatch_model is required (set explicitly) | `.ASYNC` stored as set |
 | `TcpServerConfig` kernel_backlog default | 4096 |
 | `TcpServerConfig` max_msg_len default | 4096 |
 | `TcpServerConfig` workers default | 0 (auto) |
@@ -417,7 +417,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Buffer size defaults | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` all 4096 |
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` defaults to `.ASYNC` | explicit field default in `HttpServerConfig` |
+| `dispatch_model` is required (no default) | caller must set it in `HttpServerConfig` |
 | Worker pool defaults to auto-size | `workers == 0`, `pool_size == 0` |
 | `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
 | `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
@@ -449,7 +449,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `UdpServerConfig` disconnect_timeout_ms | default 5000 |
+| `UdpServerConfig` conn_timeout_ms | default 5000 |
 | `UdpServerConfig` poll_timeout_ms | default 2000 |
 | `UdpServerConfig` auto_ack | default false |
 | `UdpServerConfig` broadcast | default false |
@@ -528,7 +528,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `Http2ServerConfig` dispatch_model defaults to ASYNC | `.ASYNC` is the zero-value default |
+| `Http2ServerConfig` dispatch_model is required (no default) | caller must set it explicitly |
 | `Http2ServerConfig` max_streams defaults to 16 | `max_streams == 16` invariant |
 | `Http2ServerConfig` max_frame_size defaults to 16384 | `max_frame_size == 16384` invariant |
 | `Http2` HandlerFn can be assigned to a local variable | `zix.Http2.HandlerFn` type assignment compiles |

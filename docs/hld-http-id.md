@@ -23,7 +23,7 @@ HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
 
 ## Model Runtime
 
-Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Nilai default: `.ASYNC`.
+Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
 
 ### .POOL: Work-Queue Thread Pool
 
@@ -155,7 +155,7 @@ graph TD
     Http --> context["context.zig\nContext"]
     Http --> middleware["middleware.zig"]
     Http --> static["static.zig"]
-    Http --> upload["upload.zig\nMultipartParser"]
+    Http --> multipart["utils/multipart.zig\nParser + Field"]
     Http --> websocket["websocket.zig\nWebSocket"]
     Http --> method["method.zig\nMethod.Code"]
     Http --> status["status.zig\nStatus.Code"]
@@ -221,14 +221,14 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) `.URING`(4, io_uring Linux saja, fallback `.POOL` otomatis yang sama di luar Linux) |
 | `zix.Http.RequestHeaderSize` | union(enum) | Batas header request: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | String user agent client dari `build.zig.zon` (contoh: `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Batas header response: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
 | `zix.Http.ContentType` | enum | Representasi MIME bertipe aman |
 | `zix.Http.Content` | namespace | `typeFromExtension(ext)`, `fromExtension(ext)` |
-| `zix.Http.Multipart` | struct | Parse body `multipart/form-data` |
-| `zix.Http.MultipartField` | struct | `{ name, filename, content_type, data, is_file }` |
+| `zix.Http.Multipart` | struct | Parse body `multipart/form-data` (alias dari `zix.utils.multipart.Parser`) |
+| `zix.Http.MultipartField` | struct | `{ name, filename, content_type, data, is_file }` (alias dari `zix.utils.multipart.Field`) |
 | `zix.Http.WebSocket` | namespace | Parsing frame, handshake, broadcast room |
 | `zix.Http.WebSocket.Opcode` | enum | continuation text binary close ping pong |
 | `zix.Http.WebSocket.Frame` | struct | `{ fin, opcode, payload }` |
@@ -238,6 +238,8 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http.WebSocket.buildFrame` | fn | Serialisasi frame server-ke-client (tanpa mask) |
 | `zix.Http.WebSocket.acceptKey` | fn | Hitung `Sec-WebSocket-Accept` dari `Sec-WebSocket-Key` |
 | `zix.Http.WebSocket.upgrade` | fn | Tulis `101 Switching Protocols` ke `ctx.stream` |
+| `zix.Http.WebSocket.serveTls` | fn | WebSocket melalui TLS (wss): `101` terenkripsi + inline frame loop engine-driven (ADR-055) |
+| `zix.Http.WebSocket.send` | fn | Kirim satu server frame, ter-coalesce sink (dipakai dari callback `on_frame` melalui TLS) |
 | `zix.utils.file.save` | fn | Tulis bytes ke `dir/filename`, membuat direktori bila belum ada |
 | `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
 | `zix.Tcp.Http.Status.Code` | enum | Status code HTTP lengkap 1xx--5xx |
@@ -251,9 +253,10 @@ pub const HttpServerConfig = struct {
     io:                   ?std.Io           = null,      // caller-provided io backend. null = internal Threaded
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel     = .ASYNC,    // ASYNC (default), POOL, MIXED, or EPOLL (Linux-only)
+    dispatch_model:       DispatchModel,    // required: ASYNC, POOL, MIXED, EPOLL, or URING (EPOLL/URING Linux-only)
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
+    large_body_rcvbuf:    usize             = 256 * 1024, // SO_RCVBUF pada jalur large-body/upload, 0 = default kernel
     compression:          bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (.EPOLL/.URING)
     compression_min_size: usize             = 256,        // lewati body di bawah floor ini
     compression_max_out:  usize             = 256 * 1024, // cap output terkompresi codec-agnostic
@@ -485,10 +488,10 @@ flowchart TD
 
 ## Upload
 
-`zix.Http.Multipart` mem-parse body `multipart/form-data` menjadi field. `zix.utils.file.save` menulis bytes ke disk. Keduanya tidak dihubungkan ke server secara otomatis (handler memanggilnya langsung).
+`zix.utils.multipart.Parser` mem-parse body `multipart/form-data` menjadi field (juga tersedia sebagai alias `zix.Http.Multipart`). `zix.utils.file.save` menulis bytes ke disk. Keduanya tidak dihubungkan ke server secara otomatis (handler memanggilnya langsung).
 
 ```zig
-var parser = zix.Http.Multipart.init(ctx.allocator, boundary);
+var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
 defer parser.deinit();
 try parser.parse(try req.body());
 
@@ -765,7 +768,11 @@ pub const HttpClientConfig = struct {
     max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
+    h2_max_read_rounds:  usize = 4096,                       // bound read-loop client HTTP/2, max frame-read rounds
     user_agent:          []const u8 = zon_options.user_agent, // library version string (e.g. "zix/0.1.0"); "" omits
+    version:             Version = .HTTP_1,                  // .HTTP_1 (std client) atau .HTTP_2 (h2 over TLS 1.3, https saja)
+    tls_ca_path:         ?[]const u8 = null,                 // CA PEM tambahan untuk https. null = system roots
+    tls_verify:          bool = true,                        // verifikasi chain cert server + hostname pada https
 };
 ```
 
@@ -826,7 +833,7 @@ Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice 
 | :- | :- |
 | Penerapan `response_timeout_ms` | v1: field tersimpan, belum diterapkan |
 | Penerapan `read_timeout_ms` | v1: field tersimpan, belum diterapkan |
-| TLS / HTTPS | di luar cakupan: terminasi TLS dilakukan di lapisan proxy (nginx, HAProxy, Envoy). zix berbicara HTTP biasa di belakang proxy |
+| TLS / HTTPS (client) | https via `version = .HTTP_2` (h2 over TLS 1.3, `h2_client.zig`), mempercayai cert server lewat `tls_ca_path` / `tls_verify`. Jalur client HTTP/1 bersifat cleartext |
 | Reuse koneksi keep-alive pool | diwarisi dari pool `std.http.Client` (aktif secara default) |
 
 ---
@@ -836,7 +843,7 @@ Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice 
 | Fitur | Lokasi | Catatan |
 | :- | :- | :- |
 | Chain runner middleware | `middleware.zig` | Pola wrapper comptime adalah pendekatan saat ini |
-| HTTP/2 / TLS (server) | di luar cakupan: terminasi TLS adalah tanggung jawab proxy upstream (nginx, HAProxy, Envoy). zix adalah library backend jaringan dan tidak menghadap internet secara langsung. | n/a |
+| TLS (server high-level ini) | proxy-terminated secara desain: jalankan nginx / haproxy di depan (lihat [`docs/hld-proxy-id.md`](hld-proxy-id.md)). Untuk TLS in-process pakai `zix.Http1` (native https/1.1), `zix.Http2` (native h2 over TLS), atau `zix.Grpc`, yang semuanya melayani TLS langsung. | n/a |
 | Penerapan timeout response/baca (client) | `client.zig` | Field konfigurasi tersimpan. Pemasangan level IO ditangguhkan |
 
 Untuk desain UDP lihat [`docs/hld-udp-id.md`](hld-udp-id.md). Untuk UDS lihat [`docs/hld-uds-id.md`](hld-uds-id.md).
