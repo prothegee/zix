@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("../core.zig");
+const frame = @import("../frame.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
 const Route = core.Route;
 
@@ -81,6 +82,82 @@ pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
         SO_BUSY_POLL,
         std.mem.asBytes(&@as(c_int, @intCast(us))),
     ) catch {};
+}
+
+// --------------------------------------------------------- //
+
+/// Per-worker write-coalescing buffer for the cleartext h2 mux. Installed as the frame write hook
+/// (`frame.write_hook`) around one readable batch, so every frame the mux writes (HEADERS, DATA,
+/// SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write per batch instead of
+/// one write per frame. With TCP_NODELAY on, the unbatched path emitted a separate tiny TCP segment
+/// per frame, so a 100-stream h2load batch cost about 200 segments and trailed the TLS mux (which
+/// already coalesces into TLS records). The buffer flushes when full and writes an oversized frame
+/// straight through, so correctness never depends on the buffer being large enough. One worker thread
+/// owns it, so no synchronization is needed.
+const MUX_COALESCE_BUF: usize = 64 * 1024;
+
+const MuxCoalesceSink = struct {
+    fd: std.posix.fd_t = -1,
+    len: usize = 0,
+    failed: bool = false,
+    buf: [MUX_COALESCE_BUF]u8 = undefined,
+
+    fn append(self: *MuxCoalesceSink, bytes: []const u8) void {
+        if (bytes.len > self.buf.len) {
+            self.flush();
+            frame.fdWriteAllRaw(self.fd, bytes) catch {
+                self.failed = true;
+            };
+
+            return;
+        }
+
+        if (self.len + bytes.len > self.buf.len) self.flush();
+
+        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    fn flush(self: *MuxCoalesceSink) void {
+        if (self.len == 0) return;
+
+        frame.fdWriteAllRaw(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+        self.len = 0;
+    }
+};
+
+/// Per-worker coalescing sink. A threadlocal so each mux worker owns one, reused across the
+/// connections it serves (only one connection's batch is in flight at a time on a worker).
+threadlocal var tl_mux_sink: MuxCoalesceSink = .{};
+
+fn muxCoalesceWrite(ctx: *anyopaque, bytes: []const u8) void {
+    const sink: *MuxCoalesceSink = @ptrCast(@alignCast(ctx));
+    sink.append(bytes);
+}
+
+/// Install the per-worker coalescing sink as the frame write hook for one readable batch. Pair every
+/// call with endCoalesce (use defer). While installed, mux frame writes stage instead of hitting the
+/// socket per frame.
+pub fn beginCoalesce(fd: std.posix.fd_t) void {
+    tl_mux_sink.fd = fd;
+    tl_mux_sink.len = 0;
+    tl_mux_sink.failed = false;
+    frame.write_hook = muxCoalesceWrite;
+    frame.write_hook_ctx = &tl_mux_sink;
+}
+
+/// Flush the staged batch and uninstall the hook.
+///
+/// Return:
+/// - bool (true when a write failed during the batch, so the caller should close the connection)
+pub fn endCoalesce() bool {
+    tl_mux_sink.flush();
+    frame.write_hook = null;
+    frame.write_hook_ctx = null;
+
+    return tl_mux_sink.failed;
 }
 
 // --------------------------------------------------------- //
@@ -295,4 +372,61 @@ test "zix test: http2 effectiveCacheEntries honors the memory ceiling" {
     var tiny = base;
     tiny.cache_max_total_bytes = 1;
     try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
+}
+
+test "zix test: http2 MuxCoalesceSink stages small writes and flushes them in order" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var sink = MuxCoalesceSink{ .fd = fds[1] };
+
+    // Two small appends stay buffered (coalesced), nothing on the wire yet.
+    sink.append("AAAA");
+    sink.append("BBBB");
+    try std.testing.expectEqual(@as(usize, 8), sink.len);
+    try std.testing.expect(!sink.failed);
+
+    // Flush sends both in one ordered write.
+    sink.flush();
+    var recv: [16]u8 = undefined;
+    const n = try std.posix.read(fds[0], recv[0..]);
+    try std.testing.expectEqual(@as(usize, 8), n);
+    try std.testing.expectEqualStrings("AAAABBBB", recv[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), sink.len);
+}
+
+test "zix test: http2 MuxCoalesceSink flushes the buffer then writes an oversized frame straight through" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var sink = MuxCoalesceSink{ .fd = fds[1] };
+
+    // A staged prefix, then a frame larger than the whole buffer: the prefix flushes first to keep
+    // wire order, then the oversized frame is written directly. The reader (a stream socket) sees the
+    // prefix ahead of the large frame.
+    sink.append("PFX");
+    var big: [MUX_COALESCE_BUF + 16]u8 = undefined;
+    @memset(&big, 'Z');
+    sink.append(&big);
+    try std.testing.expectEqual(@as(usize, 0), sink.len);
+    try std.testing.expect(!sink.failed);
+
+    var got: usize = 0;
+    var first3: [3]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    while (got < 3 + big.len) {
+        const n = try std.posix.read(fds[0], scratch[0..]);
+        if (n == 0) break;
+        if (got < 3) {
+            const take = @min(3 - got, n);
+            @memcpy(first3[got..][0..take], scratch[0..take]);
+        }
+        got += n;
+    }
+    try std.testing.expectEqual(@as(usize, 3 + big.len), got);
+    try std.testing.expectEqualStrings("PFX", first3[0..3]);
 }

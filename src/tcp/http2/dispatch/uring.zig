@@ -215,8 +215,14 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
 
                 uc.conn.rend += @intCast(cqe.res);
 
-                // The handler writes its reply straight to the fd during processing.
-                if (mux.processRing(routes, uc.conn) == .close) {
+                // Coalesce every frame this batch writes into one send instead of one write per frame
+                // (HEADERS + DATA per stream, times the streams in the batch). The handler still writes
+                // its reply during processing, but the frames stage into the per-worker sink and leave
+                // as a single write when the batch ends.
+                common.beginCoalesce(uc.conn.fd);
+                const outcome = mux.processRing(routes, uc.conn);
+                const write_failed = common.endCoalesce();
+                if (outcome == .close or write_failed) {
                     self.closeConn(uc);
                     return;
                 }

@@ -128,6 +128,13 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
         return;
     }
 
+    return fdWriteAllRaw(fd, data);
+}
+
+/// Hook-bypassing blocking write-all. A coalescing sink installed as the write hook flushes its
+/// staged bytes through this so the flush does not re-enter the hook (which would recurse). Polls on
+/// EAGAIN for a non-blocking socket. Identical to fdWriteAll minus the hook check.
+pub fn fdWriteAllRaw(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
