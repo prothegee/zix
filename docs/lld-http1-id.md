@@ -23,7 +23,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection .EPOLL (`ConnTable.alloc`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
-| `ws_recv_buf` | ukuran buffer per-connection WebSocket .EPOLL, 0 jatuh ke `max_recv_buf` |
+| `ws_recv_buf` | ukuran buffer per-connection WebSocket, 0 jatuh ke `max_recv_buf`. .EPOLL menentukan ukuran buffer recv, .URING menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask |
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
