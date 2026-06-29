@@ -73,9 +73,20 @@ const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 /// Idle-pool warm floor (A2). The minimum number of closed connections kept warm
 /// (buffers resident, allocation-free to reuse) when the worker is otherwise idle,
 /// so a trickle of new connections after a quiet spell still skips the allocator.
-/// The effective warm cap is derived per worker as max(live_count, this floor),
+/// The effective warm cap is clamped between this floor and URING_IDLE_POOL_CEILING,
 /// see UringWorker.idleCap.
 const URING_IDLE_POOL_FLOOR: usize = 64;
+
+/// Idle-pool warm ceiling (A2). The absolute upper bound on the warm pool per
+/// worker, regardless of live concurrency. The earlier cap tracked live_count, so
+/// at very high concurrency (thousands of live connections on one worker) the pool
+/// kept a full reconnect of the working set warm: that doubled the resident set
+/// (recv plus send buffers for every warm connection on top of the live ones) and
+/// the L2/L3 plus TLB pressure cost more throughput than the spared allocations
+/// won back. A few hundred warm connections already absorb steady churn, so the
+/// ceiling holds the warm set below live_count where it would otherwise blow up,
+/// and the rest is returned to the OS through evictColdTail. See idleCap.
+const URING_IDLE_POOL_CEILING: usize = 256;
 
 /// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
 /// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
@@ -211,6 +222,10 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// constant directly) so tests can drive the eviction path with a small
         /// pool.
         idle_floor: usize = URING_IDLE_POOL_FLOOR,
+        /// Absolute warm pool ceiling. See URING_IDLE_POOL_CEILING. A field (not
+        /// the constant directly) so tests can drive the cap with a small pool and
+        /// the entry can tune it for the host concurrency.
+        idle_ceiling: usize = URING_IDLE_POOL_CEILING,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -308,14 +323,15 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             return conn;
         }
 
-        /// Warm idle-pool cap, derived from this worker's live concurrency. The
-        /// pool keeps up to one full reconnect of the live working set warm, so
-        /// steady connection churn always finds a resident buffer at the head. The
-        /// floor keeps a small warm reserve when the worker is idle. Deriving from
-        /// live_count (not a flat constant) makes the cap scale with the per-worker
-        /// concurrency, which differs by how many workers split the host.
+        /// Warm idle-pool cap. The pool tracks live concurrency so steady churn
+        /// finds a resident buffer at the head, but it is clamped on both ends: the
+        /// floor keeps a small warm reserve when the worker is idle, and the ceiling
+        /// bounds the warm set so it never holds a full reconnect of a large working
+        /// set. At low concurrency the cap is live_count (or the floor when idle); at
+        /// high concurrency the ceiling holds the warm set below live_count, which is
+        /// where the unclamped cap doubled the resident set and cost throughput.
         fn idleCap(self: *const Self) usize {
-            return @max(self.live_count, self.idle_floor);
+            return @min(self.idle_ceiling, @max(self.live_count, self.idle_floor));
         }
 
         /// Evict the least-recently-used warm connection (the tail) to the cold
@@ -912,14 +928,26 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 
             const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
 
+            // Per-connection recv buffer size. WebSocket connections accumulate
+            // frame bytes in conn.buf and unmask into ws_payload_buf, so both honor
+            // config.ws_recv_buf when set (the URING analog of the EPOLL per-
+            // connection WS recv buffer): a WS deployment gives frames room
+            // independent of the small request max_recv_buf, so a deep pipelined
+            // burst that spans several provided-buffer ring deliveries accumulates
+            // in one connection buffer instead of forcing an early flush. 0 falls
+            // back to max_recv_buf. The ring stays at WS_RING_BUF_SIZE, well below
+            // conn.buf, so a carried partial frame always has room.
+            const conn_buf_size = @max(config.max_recv_buf, config.ws_recv_buf);
+
             // Per-worker scratch for unmasking WebSocket payloads. Sized to the
-            // recv buffer, the largest frame a connection can accumulate.
-            const ws_payload_buf = std.heap.smp_allocator.alloc(u8, config.max_recv_buf) catch return;
+            // connection buffer, the largest frame a connection can accumulate.
+            const ws_payload_buf = std.heap.smp_allocator.alloc(u8, conn_buf_size) catch return;
 
             // Per-worker scratch for a decoded chunked request body. Sized to the
-            // recv buffer, since a chunked body must be fully present in conn.buf
-            // to decode and its decoded form is always shorter than the raw bytes.
-            const body_buf = std.heap.smp_allocator.alloc(u8, config.max_recv_buf) catch return;
+            // connection buffer, since a chunked body must be fully present in
+            // conn.buf to decode and its decoded form is always shorter than the raw
+            // bytes.
+            const body_buf = std.heap.smp_allocator.alloc(u8, conn_buf_size) catch return;
 
             const Worker = UringWorker(handler_fn, raw_fn);
             var worker = Worker{
@@ -927,9 +955,10 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .slots = slots,
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
-                .recv_buf_size = config.max_recv_buf,
+                .recv_buf_size = conn_buf_size,
                 .send_buf_size = config.uring_send_buf_size,
                 .idle_floor = config.uring_idle_pool_floor,
+                .idle_ceiling = config.uring_idle_pool_ceiling,
                 .handler_timeout_ms = config.handler_timeout_ms,
                 .busy_poll_us = config.busy_poll_us,
                 .ws_payload_buf = ws_payload_buf,
@@ -1105,6 +1134,63 @@ fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) v
     core.writeSimple(fd, 200, "text/plain", "ok") catch {};
 }
 
+// Echo every WebSocket text/binary frame back to the connection, staging through
+// the active send sink that wsHandleBuf installs.
+fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    ws.send(fd, @enumFromInt(opcode), payload) catch {};
+}
+
+test "zix http1: URING wsHandleBuf accumulates a frame split across ring deliveries" {
+    var payload_buf: [256]u8 = undefined;
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 256,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &payload_buf,
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+    };
+
+    // A connection whose conn.buf (256) is larger than a single ring delivery, so a
+    // frame whose payload arrives in a later delivery accumulates across passes
+    // instead of being dropped. This is exactly the room config.ws_recv_buf buys.
+    var conn_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var conn = UringConn{ .fd = -1, .gen = 1, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false, .ws = testWsEcho };
+
+    // Two masked client text frames, "hi" then "yo". The first ring delivery carries
+    // all of frame 1 and only the header plus mask of frame 2 (its payload is still
+    // in flight), so frame 2 is a partial that must be carried into conn.buf.
+    const frame1 = [_]u8{ 0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02 };
+    const frame2 = [_]u8{ 0x81, 0x82, 0x05, 0x06, 0x07, 0x08, 'y' ^ 0x05, 'o' ^ 0x06 };
+
+    const close1 = worker.wsHandleBuf(&conn, frame1 ++ frame2[0..6]);
+    try std.testing.expect(!close1);
+    // Frame 1 echoed already, frame 2's 6 header+mask bytes carried for the next pass.
+    try std.testing.expectEqual(@as(usize, 6), conn.filled);
+    const staged_after_first = conn.staged;
+    try std.testing.expect(staged_after_first > 0);
+
+    // The second delivery brings frame 2's payload: it appends to the carry, the now
+    // complete frame is pumped, and its echo stages after frame 1's.
+    const close2 = worker.wsHandleBuf(&conn, frame2[6..8]);
+    try std.testing.expect(!close2);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expect(conn.staged > staged_after_first);
+
+    // Both echoes are well-formed server frames carrying the original payloads.
+    var scratch: [64]u8 = undefined;
+    const first = ws.parseFrame(send_buf[0..conn.staged], &scratch).?;
+    try std.testing.expectEqualStrings("hi", first.frame.payload);
+
+    const second = ws.parseFrame(send_buf[first.consumed..conn.staged], &scratch).?;
+    try std.testing.expectEqualStrings("yo", second.frame.payload);
+}
+
 test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
@@ -1226,7 +1312,7 @@ test "zix http1: URING releaseConn pools warm under cap, acquireConn reuses LIFO
     try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
 }
 
-test "zix http1: URING idleCap holds the floor when idle and tracks live concurrency under load" {
+test "zix http1: URING idleCap clamps between the floor and the ceiling as live concurrency moves" {
     const Worker = UringWorker(testOkHandler, null);
     var worker = Worker{
         .ring = undefined,
@@ -1239,16 +1325,74 @@ test "zix http1: URING idleCap holds the floor when idle and tracks live concurr
         .body_buf = &[_]u8{},
         .ws_bufs = null,
         .idle_floor = 8,
+        .idle_ceiling = 256,
     };
 
     // Idle: the cap is the floor, so a quiet worker still keeps a small warm pool.
     try std.testing.expectEqual(@as(usize, 8), worker.idleCap());
 
-    // Under load: the cap rises to the live connection count, so the pool can keep
-    // a full reconnect of the working set warm and never reclaims a buffer it is
-    // about to reuse.
-    worker.live_count = 700;
-    try std.testing.expectEqual(@as(usize, 700), worker.idleCap());
+    // Moderate load below the ceiling: the cap tracks the live connection count, so
+    // the pool keeps a full reconnect of the working set warm.
+    worker.live_count = 200;
+    try std.testing.expectEqual(@as(usize, 200), worker.idleCap());
+
+    // High load: the ceiling holds the warm set below live_count, so the worker does
+    // not keep thousands of closed connections resident on top of the live ones.
+    worker.live_count = 4096;
+    try std.testing.expectEqual(@as(usize, 256), worker.idleCap());
+}
+
+test "zix http1: URING releaseConn past the ceiling evicts even when live_count is high" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    const page = std.heap.page_allocator;
+
+    // Ceiling of 1 with a high live_count: the old cap (max(live, floor)) would keep
+    // both warm, the ceiling forces an eviction of the LRU tail on the second release.
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 1,
+        .idle_ceiling = 1,
+        .live_count = 4096,
+    };
+
+    // Without the ceiling, idleCap would be max(4096, 1) = 4096 and never evict.
+    try std.testing.expectEqual(@as(usize, 1), worker.idleCap());
+
+    const lru = try page.create(UringConn);
+    lru.* = .{ .fd = 20, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
+    const mru = try page.create(UringConn);
+    mru.* = .{ .fd = 21, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        page.free(lru.buf);
+        page.free(lru.send_buf);
+        page.destroy(lru);
+        page.free(mru.buf);
+        page.free(mru.send_buf);
+        page.destroy(mru);
+    }
+
+    @memset(lru.buf, 0xAA);
+    @memset(mru.buf, 0xAA);
+
+    worker.releaseConn(lru);
+    worker.releaseConn(mru);
+
+    // The warm set is held at the ceiling (1), and the LRU tail was evicted cold and
+    // its pages returned, so the resident warm set does not track the 4096 live.
+    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringConn, mru), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringConn, lru), worker.cold_head);
+    try std.testing.expectEqual(@as(u8, 0), lru.buf[0]);
 }
 
 test "zix http1: URING releaseConn shrinks a grown send_buf back to the base size" {

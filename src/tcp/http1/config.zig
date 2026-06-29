@@ -32,10 +32,16 @@ pub const Http1ServerConfig = struct {
     /// this box). Set it only to FORCE a window larger than autotuning, at the cost of per-connection
     /// memory while a large body is in flight. Small-request cells never touch this path.
     large_body_rcvbuf: usize = 0,
-    /// Per-connection receive buffer size for WebSocket connections in EPOLL
-    /// mode. 0 falls back to max_recv_buf. Set larger than max_recv_buf to
-    /// give WS connections more room to accumulate pipelined frames without
-    /// forcing a compact+re-read on every fill.
+    /// Per-connection receive buffer size for WebSocket connections. 0 falls back to
+    /// max_recv_buf. Set larger than max_recv_buf to give WS connections more room to
+    /// accumulate pipelined frames without forcing a compact and re-read on every fill.
+    ///
+    /// Note:
+    /// - Under .EPOLL this sizes the per-connection WS recv buffer directly.
+    /// - Under .URING this sizes the per-connection frame-accumulation buffer (conn.buf)
+    ///   and the unmask scratch, so a deep pipelined burst spanning several provided-
+    ///   buffer ring deliveries accumulates in one buffer. The provided-buffer ring stays
+    ///   at its internal size, below conn.buf, so a carried partial frame always has room.
     ws_recv_buf: usize = 0,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
     /// half of the per-connection footprint (max_recv_buf covers recv). A response larger
@@ -44,9 +50,18 @@ pub const Http1ServerConfig = struct {
     uring_send_buf_size: usize = 16 * 1024,
     /// Warm idle-connection pool floor for the .URING dispatch model (A2): the minimum
     /// number of closed connections kept warm (buffers resident) per worker when otherwise
-    /// idle, so a trickle of new connections skips the allocator. The effective warm cap is
-    /// max(live_count, this). No effect under the other dispatch models.
+    /// idle, so a trickle of new connections skips the allocator. No effect under the other
+    /// dispatch models.
     uring_idle_pool_floor: usize = 64,
+    /// Warm idle-connection pool ceiling for the .URING dispatch model (A2): the absolute
+    /// upper bound on warm connections per worker, regardless of live concurrency. The warm
+    /// cap is clamp(live_count, floor, ceiling). At high concurrency the ceiling holds the
+    /// warm set below live_count so the worker does not keep a full reconnect of a large
+    /// working set resident (recv plus send buffers per warm connection), which otherwise
+    /// doubles the resident set and costs throughput through cache and TLB pressure. A few
+    /// hundred warm connections already absorb steady churn. No effect under the other
+    /// dispatch models.
+    uring_idle_pool_ceiling: usize = 256,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
     /// brotli). Default false. Compression spends CPU to shrink the body, which only
     /// pays off over a real network: on a loopback benchmark it is a pure CPU add, so
@@ -144,6 +159,7 @@ test "zix http1: Http1ServerConfig URING knob defaults" {
     const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+    try std.testing.expectEqual(@as(usize, 256), cfg.uring_idle_pool_ceiling);
 }
 
 test "zix http1: Http1ServerConfig worker stack defaults" {
