@@ -119,7 +119,7 @@ pub fn UdpClient(comptime Packet: type) type {
                 return if (msg.data[0] == 0x06) .ack else .nack;
             }
             if (msg.data.len == @sizeOf(Packet)) {
-                const wire_pkt: Packet = @bitCast(buf);
+                const wire_pkt: Packet = std.mem.bytesToValue(Packet, &buf);
                 return .{ .packet = pkt.fromEndian(Packet, wire_pkt, self.config.endianness) };
             }
             return error.UnexpectedPacketSize;
