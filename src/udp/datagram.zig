@@ -106,6 +106,32 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
     return fd;
 }
 
+/// Request larger kernel socket buffers on a UDP socket. A QUIC / HTTP/3 worker drains datagrams in
+/// recvmmsg batches, so between batches the kernel must hold a burst of arriving packets: a small
+/// SO_RCVBUF drops the overflow, which shows up as loss and retransmits on a syscall-bound loopback
+/// run. Larger send and receive buffers absorb the burst. The kernel caps each request at
+/// net.core.rmem_max / wmem_max (and doubles it internally for bookkeeping), so an oversized request
+/// is silently clamped, never an error. 0 leaves the kernel default untouched.
+///
+/// Param:
+/// fd     - posix.socket_t
+/// rcvbuf - usize (requested SO_RCVBUF in bytes, 0 to skip)
+/// sndbuf - usize (requested SO_SNDBUF in bytes, 0 to skip)
+///
+/// Return:
+/// - void
+pub fn setSocketBuffers(fd: posix.socket_t, rcvbuf: usize, sndbuf: usize) void {
+    if (rcvbuf > 0) {
+        const want = std.mem.toBytes(@as(c_int, @intCast(@min(rcvbuf, std.math.maxInt(c_int)))));
+        posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVBUF, &want) catch {};
+    }
+
+    if (sndbuf > 0) {
+        const want = std.mem.toBytes(@as(c_int, @intCast(@min(sndbuf, std.math.maxInt(c_int)))));
+        posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.SNDBUF, &want) catch {};
+    }
+}
+
 /// Close a raw socket descriptor.
 pub fn close(fd: posix.socket_t) void {
     _ = linux.close(fd);
@@ -474,6 +500,48 @@ fn testPeer(port: u16) posix.sockaddr.in6 {
     var s = std.mem.zeroes(posix.sockaddr.in6);
     s.port = port;
     return s;
+}
+
+test "zix test: setSocketBuffers reads back a raised SO_RCVBUF on a real socket" {
+    if (!is_linux) return error.SkipZigTest;
+
+    const fd = open("::1", 0, false) catch return error.SkipZigTest;
+    defer close(fd);
+
+    // Read the kernel default, request a larger buffer, then confirm the kernel raised it. The kernel
+    // doubles the request internally and caps at rmem_max, so the result is at least the prior value.
+    const before = getRcvBuf(fd) orelse return error.SkipZigTest;
+
+    setSocketBuffers(fd, 4 * 1024 * 1024, 4 * 1024 * 1024);
+
+    const after = getRcvBuf(fd) orelse return error.SkipZigTest;
+    try std.testing.expect(after >= before);
+    try std.testing.expect(after > 0);
+}
+
+test "zix test: setSocketBuffers leaves the kernel default when asked for zero" {
+    if (!is_linux) return error.SkipZigTest;
+
+    const fd = open("::1", 0, false) catch return error.SkipZigTest;
+    defer close(fd);
+
+    const before = getRcvBuf(fd) orelse return error.SkipZigTest;
+
+    // 0 for both: no setsockopt is issued, so the buffer is unchanged.
+    setSocketBuffers(fd, 0, 0);
+
+    const after = getRcvBuf(fd) orelse return error.SkipZigTest;
+    try std.testing.expectEqual(before, after);
+}
+
+/// Read SO_RCVBUF via the raw getsockopt syscall (test helper). Null when the syscall errors.
+fn getRcvBuf(fd: posix.socket_t) ?c_int {
+    var val: c_int = 0;
+    var len: u32 = @sizeOf(c_int);
+    const rc = linux.syscall5(.getsockopt, @as(usize, @intCast(fd)), linux.SOL.SOCKET, linux.SO.RCVBUF, @intFromPtr(&val), @intFromPtr(&len));
+    if (posix.errno(rc) != .SUCCESS) return null;
+
+    return val;
 }
 
 test "zix test: gsoGroupLen coalesces a same-peer run with a shorter final segment" {

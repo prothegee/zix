@@ -269,6 +269,10 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
 
     setBusyPoll(fd, config.busy_poll_us);
 
+    // Enlarge the kernel socket buffers so a burst arriving between recvmmsg batches is not dropped
+    // (loss on a syscall-bound run shows up as retransmits). Capped by the host rmem_max / wmem_max.
+    datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
+
     const table = config.allocator.create(ConnTable) catch return;
     defer config.allocator.destroy(table);
     table.* = .{};

@@ -47,6 +47,15 @@ pub const Http3ServerConfig = struct {
     /// Worker thread stack size in bytes for the per-core workers (EPOLL / URING). Thread stacks are
     /// demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
+    /// Requested SO_RCVBUF in bytes for each per-core UDP socket. A worker drains datagrams in recvmmsg
+    /// batches, so the kernel buffer must hold a burst arriving between batches: a small buffer drops
+    /// the overflow, which surfaces as loss and retransmits on a syscall-bound run. The kernel caps the
+    /// request at net.core.rmem_max (silently), so an oversized value is clamped, never an error. 0
+    /// leaves the kernel default. 4 MiB is a broad QUIC default that sits under typical rmem_max.
+    socket_rcvbuf: usize = 4 * 1024 * 1024,
+    /// Requested SO_SNDBUF in bytes for each per-core UDP socket. Sized so a coalesced GSO send flight
+    /// is never throttled by a small send buffer. Capped at net.core.wmem_max. 0 leaves the default.
+    socket_sndbuf: usize = 4 * 1024 * 1024,
     /// Enable UDP GSO (UDP_SEGMENT) on the send path: a multi-packet response flight to one peer is
     /// coalesced into one sendmsg, so the kernel segments it into wire datagrams from one syscall.
     /// Default true: HTTP/3 is syscall-bound on the send path and a response flight is multi-packet,
@@ -98,6 +107,8 @@ test "zix test: Http3ServerConfig default field values" {
     try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expect(cfg.gso_enabled); // default on: GSO is a broad HTTP/3 win
+    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), cfg.socket_rcvbuf);
+    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), cfg.socket_sndbuf);
     try std.testing.expectEqual(@as(u8, 8), cfg.cid_len);
     try std.testing.expectEqual(@as(u32, 30000), cfg.max_idle_ms);
     try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);
