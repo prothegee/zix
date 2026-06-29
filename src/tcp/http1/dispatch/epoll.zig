@@ -29,6 +29,51 @@ const EPOLL_MAX_EVENTS: usize = 4096;
 /// room for a full pipelined burst without mid-burst flushes.
 const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
+/// Max write-pending staging buffers kept on the per-worker pool. Past this a released buffer is
+/// freed instead of pooled, so a pathological backpressure storm cannot grow the pool without bound.
+const WRITE_POOL_CAP: usize = 64;
+
+/// Per-worker pool of write-pending staging buffers (A3). When a response does not fully flush on
+/// EAGAIN (a slow client), the remainder is staged in a buffer until EPOLLOUT drains it. Rather than
+/// allocate and free one per stall, the worker recycles a small free-list of EPOLL_OUT_BUF_SIZE
+/// buffers (the max a single flush can stage, since the staged remainder never exceeds the sink
+/// buffer), so a backpressure burst reuses allocations instead of churning the allocator. One worker
+/// thread owns it (threadlocal), so no synchronization is needed.
+const WritePendingPool = struct {
+    bufs: [WRITE_POOL_CAP][]u8 = undefined,
+    count: usize = 0,
+
+    /// Take a staging buffer: pop one from the free-list, else allocate. Null only on alloc failure.
+    fn acquire(self: *WritePendingPool) ?[]u8 {
+        if (self.count > 0) {
+            self.count -= 1;
+
+            return self.bufs[self.count];
+        }
+
+        return std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch null;
+    }
+
+    /// Return a drained buffer to the free-list, or free it when the pool is already full.
+    fn release(self: *WritePendingPool, buf: []u8) void {
+        if (self.count < WRITE_POOL_CAP) {
+            self.bufs[self.count] = buf;
+            self.count += 1;
+
+            return;
+        }
+
+        std.heap.smp_allocator.free(buf);
+    }
+
+    fn deinit(self: *WritePendingPool) void {
+        for (self.bufs[0..self.count]) |buf| std.heap.smp_allocator.free(buf);
+        self.count = 0;
+    }
+};
+
+threadlocal var tl_write_pool: WritePendingPool = .{};
+
 // --------------------------------------------------------- //
 // EPOLL model (Linux only): shared-nothing, one listener + epoll per worker.
 //
@@ -58,6 +103,7 @@ const Conn = struct {
     drain: usize = 0,
     drain_close: bool = false,
     write_pending: []u8 = &.{},
+    write_pending_len: usize = 0,
     write_pending_off: usize = 0,
     write_pending_close: bool = false,
 };
@@ -124,7 +170,9 @@ const ConnTable = struct {
         const conn = &self.slots[idx];
         if (conn.buf.len == 0) return;
 
-        if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
+        // Recycle a still-staged write buffer to the per-worker pool (A3) rather than freeing it, so a
+        // connection that closes mid-stall hands its buffer to the next stall instead of the allocator.
+        if (conn.write_pending.len > 0) tl_write_pool.release(conn.write_pending);
         slab.releaseSlabPages(conn.buf);
         conn.* = std.mem.zeroes(Conn);
     }
@@ -184,9 +232,10 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, 
 
         if (written < sink.len) {
             const remaining = sink.buf[written..sink.len];
-            const staged = std.heap.smp_allocator.alloc(u8, remaining.len) catch return .close;
-            @memcpy(staged, remaining);
+            const staged = tl_write_pool.acquire() orelse return .close;
+            @memcpy(staged[0..remaining.len], remaining);
             conn.write_pending = staged;
+            conn.write_pending_len = remaining.len;
             conn.write_pending_off = 0;
             conn.write_pending_close = (outcome == .close);
 
@@ -218,14 +267,15 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, 
 fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     const linux = std.os.linux;
 
-    const pending = conn.write_pending[conn.write_pending_off..];
+    const pending = conn.write_pending[conn.write_pending_off..conn.write_pending_len];
     const written = core.fdWriteNonBlock(conn.fd, pending) orelse return .close;
     conn.write_pending_off += written;
 
-    if (conn.write_pending_off < conn.write_pending.len) return .keep_alive;
+    if (conn.write_pending_off < conn.write_pending_len) return .keep_alive;
 
-    std.heap.smp_allocator.free(conn.write_pending);
+    tl_write_pool.release(conn.write_pending);
     conn.write_pending = &.{};
+    conn.write_pending_len = 0;
     conn.write_pending_off = 0;
     const should_close = conn.write_pending_close;
     conn.write_pending_close = false;
@@ -473,6 +523,11 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             const ws_buf_size = if (config.ws_recv_buf > config.max_recv_buf) config.ws_recv_buf else config.max_recv_buf;
             var table = ConnTable.init(ws_buf_size) catch return;
             defer table.deinit();
+
+            // Free the per-worker write-pending staging pool (A3) when the worker exits. table.deinit
+            // frees buffers still attached to live connections, this frees the recycled free-list, two
+            // disjoint sets, so the order of these defers does not matter.
+            defer tl_write_pool.deinit();
 
             const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
             defer std.heap.smp_allocator.free(body_buf);
@@ -743,4 +798,42 @@ test "zix http1: serveEpollWs drains pipelined frames to EAGAIN in one call" {
 
     const second = ws.parseFrame(recv[first.consumed..n], &scratch).?;
     try std.testing.expectEqualStrings("yo", second.frame.payload);
+}
+
+test "zix http1: EPOLL WritePendingPool recycles a released buffer instead of reallocating" {
+    var pool = WritePendingPool{};
+    defer pool.deinit();
+
+    // First acquire allocates, release returns it to the free-list, the next acquire hands back the
+    // very same buffer with no new allocation. That reuse is the whole point on a backpressure burst.
+    const first = pool.acquire().?;
+    try std.testing.expectEqual(@as(usize, EPOLL_OUT_BUF_SIZE), first.len);
+
+    pool.release(first);
+    try std.testing.expectEqual(@as(usize, 1), pool.count);
+
+    const second = pool.acquire().?;
+    try std.testing.expectEqual(first.ptr, second.ptr);
+    try std.testing.expectEqual(@as(usize, 0), pool.count);
+
+    pool.release(second);
+}
+
+test "zix http1: EPOLL WritePendingPool frees beyond the cap instead of growing unbounded" {
+    var pool = WritePendingPool{};
+    defer pool.deinit();
+
+    // Fill the free-list to the cap.
+    var i: usize = 0;
+    while (i < WRITE_POOL_CAP) : (i += 1) {
+        const buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch unreachable;
+        pool.release(buf);
+    }
+    try std.testing.expectEqual(WRITE_POOL_CAP, pool.count);
+
+    // One more release is freed directly (release owns it past the cap), so the pool never grows past
+    // the cap and the buffer is not leaked.
+    const extra = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch unreachable;
+    pool.release(extra);
+    try std.testing.expectEqual(WRITE_POOL_CAP, pool.count);
 }
