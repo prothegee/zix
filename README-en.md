@@ -424,8 +424,10 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 ## Requirements
 
 - [Zig](https://ziglang.org/):
-    - [x] 0.16.x
-    - [ ] 0.17.x (Experimental)
+    - [x] 0.16.x:
+        - 0.16.0
+    - [ ] 0.17.x (Experimental):
+        - 0.17.0-dev.986+f3544a707
 
 <br>
 

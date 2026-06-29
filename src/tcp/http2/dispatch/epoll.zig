@@ -199,8 +199,15 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
                     const conn = table.get(ev.data.fd) orelse continue;
                     const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                         mux.ConnOutcome.close
-                    else
-                        mux.onReadable(routes, conn);
+                    else blk: {
+                        // Coalesce every frame this readable batch writes into one send instead of one
+                        // write per frame (HEADERS + DATA per stream, times the streams in the batch).
+                        common.beginCoalesce(conn.fd);
+                        const oc = mux.onReadable(routes, conn);
+                        if (common.endCoalesce()) break :blk mux.ConnOutcome.close;
+
+                        break :blk oc;
+                    };
 
                     if (outcome == .close) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);

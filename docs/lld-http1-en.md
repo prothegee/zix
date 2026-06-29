@@ -23,7 +23,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | .EPOLL per-connection buffer size (`ConnTable.alloc`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
-| `ws_recv_buf` | .EPOLL WebSocket per-connection buffer size, 0 falls back to `max_recv_buf` |
+| `ws_recv_buf` | WebSocket per-connection buffer size, 0 falls back to `max_recv_buf`. .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch |
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |

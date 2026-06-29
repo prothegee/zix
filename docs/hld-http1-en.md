@@ -183,7 +183,7 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 16 * 1024,     // per-connection buffer (.EPOLL only, see note)
     large_body_rcvbuf:  usize = 256 * 1024,    // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
-    ws_recv_buf:        usize = 0,             // .EPOLL WebSocket buffer, 0 = max_recv_buf
+    ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
     compression:          bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via core.writeNegotiated (.EPOLL/.URING)
     compression_min_size: usize = 256,           // skip bodies under this floor
     compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
@@ -199,7 +199,7 @@ pub const Http1ServerConfig = struct {
 
 Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compression`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.writeNegotiated` instead of `writeSimple`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` is a no-op kept for source compatibility (the lazy engine has no header-count cap).
 
-Note: `ws_recv_buf` sizes the per-connection buffer for a connection promoted to WebSocket under `.EPOLL`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate pipelined frames before the engine compacts and re-reads on a fill.
+Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
 Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false` on hot paths where the client does not consume `Date` to drop the header (37 bytes per response). The managed write helpers honor the flag.
 
