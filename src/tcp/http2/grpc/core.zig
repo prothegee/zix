@@ -194,9 +194,21 @@ pub const GrpcContext = struct {
         self._flushHeaders(content_type);
 
         var head: [14]u8 = undefined;
-        _ = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
-        h2.fdWriteAll(self.fd, &head) catch {};
-        h2.fdWriteAll(self.fd, payload) catch {};
+        const head_len = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
+
+        // Small message (the common server-streaming case): coalesce the DATA header and
+        // payload into one write, so each message costs one syscall instead of two and one
+        // TLS record instead of two under the stream sink hook. A larger payload keeps the
+        // two-write path so it is never copied through the stack buffer.
+        if (head_len + payload.len <= grpc_stream_inline_cap) {
+            var one: [grpc_stream_inline_cap]u8 = undefined;
+            @memcpy(one[0..head_len], head[0..head_len]);
+            @memcpy(one[head_len..][0..payload.len], payload);
+            h2.fdWriteAll(self.fd, one[0 .. head_len + payload.len]) catch {};
+        } else {
+            h2.fdWriteAll(self.fd, head[0..head_len]) catch {};
+            h2.fdWriteAll(self.fd, payload) catch {};
+        }
         self._sent_bytes += payload.len;
     }
 
@@ -439,6 +451,14 @@ const CONN_WINDOW_BUMP: u31 = 1 << 30;
 /// connections that move more than CONN_WINDOW_BUMP bytes from stalling, while staying ~0
 /// updates per request for the small-body case.
 const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;
+
+/// Streaming-path coalescing cap. A server-streaming DATA frame whose 14-byte header plus
+/// payload fits under this is written in one syscall (one TLS record under the stream sink
+/// hook) instead of a separate header write and payload write. Server-streaming messages are
+/// small (events, rows), so this halves the per-message syscall count on the streaming hot
+/// path. A larger payload keeps the two-write path so it is never copied through the stack
+/// buffer. The unary path already coalesces through the cork buffer, so this is streaming only.
+const grpc_stream_inline_cap: usize = 4096;
 
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
@@ -2188,4 +2208,73 @@ test "zix grpc: response cache keys separate distinct paths and bodies" {
     try std.testing.expect(key_a != key_b);
     try std.testing.expect(key_a != key_c);
     try std.testing.expect(key_b != key_c);
+}
+
+// Counts writes routed through the frame write hook and captures the bytes (up to
+// its buffer) so a test can assert the streaming DATA frame is coalesced and well
+// formed. Used by the streaming-coalesce tests below.
+const WriteHookProbe = struct {
+    count: usize = 0,
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+};
+
+fn writeHookProbe(ctx: *anyopaque, bytes: []const u8) void {
+    const probe: *WriteHookProbe = @ptrCast(@alignCast(ctx));
+    probe.count += 1;
+
+    if (probe.len + bytes.len <= probe.buf.len) {
+        @memcpy(probe.buf[probe.len..][0..bytes.len], bytes);
+        probe.len += bytes.len;
+    }
+}
+
+test "zix grpc: streaming sendMessage coalesces a small DATA frame into one write" {
+    const h2_frame = @import("../frame.zig");
+
+    var probe = WriteHookProbe{};
+    h2_frame.write_hook = writeHookProbe;
+    h2_frame.write_hook_ctx = &probe;
+    defer {
+        h2_frame.write_hook = null;
+        h2_frame.write_hook_ctx = null;
+    }
+
+    // Streaming path: no cork (_out null) and no write mutex, so sendMessage writes
+    // directly. Headers pre-marked sent so only the DATA frame goes through the hook.
+    var ctx = GrpcContext{ .fd = -1, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+
+    ctx.sendMessage("application/grpc", "pong");
+
+    // One write: the 14-byte header and the 4-byte payload were coalesced.
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+    try std.testing.expectEqual(@as(usize, 14 + 4), probe.len);
+
+    // The single write is a valid DATA frame on stream 1 carrying the payload.
+    const fh = h2_frame.parseFrameHeader(probe.buf[0..9]);
+    try std.testing.expectEqual(@as(u8, h2_frame.FRAME_TYPE_DATA), fh.frame_type);
+    try std.testing.expectEqual(@as(u31, 1), fh.stream_id);
+    try std.testing.expectEqualStrings("pong", probe.buf[14..18]);
+}
+
+test "zix grpc: streaming sendMessage past the inline cap keeps the two-write path" {
+    const h2_frame = @import("../frame.zig");
+
+    var probe = WriteHookProbe{};
+    h2_frame.write_hook = writeHookProbe;
+    h2_frame.write_hook_ctx = &probe;
+    defer {
+        h2_frame.write_hook = null;
+        h2_frame.write_hook_ctx = null;
+    }
+
+    var ctx = GrpcContext{ .fd = -1, .stream_id = 3, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+
+    // A payload larger than the inline cap is written as header then payload (two
+    // writes), so it is never copied through the stack buffer.
+    var big: [grpc_stream_inline_cap + 1]u8 = undefined;
+    @memset(&big, 'x');
+    ctx.sendMessage("application/grpc", &big);
+
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
 }
