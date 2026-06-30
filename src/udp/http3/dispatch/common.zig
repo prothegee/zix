@@ -465,6 +465,14 @@ fn ackTake(ack_pending: *?u64) ?u64 {
     return value;
 }
 
+/// Take the pending MAX_STREAMS credit (consume it so only one packet of a call carries it).
+fn maxStreamsTake(max_streams_pending: *?u64) ?u64 {
+    const value = max_streams_pending.*;
+    max_streams_pending.* = null;
+
+    return value;
+}
+
 /// Apply the flow control advertisements in a decrypted 1-RTT payload: MAX_DATA (0x10) raises the
 /// connection-wide send limit, MAX_STREAM_DATA (0x11) raises a tracked stream's limit. A limit only
 /// ever increases (RFC 9000 4.1), so a smaller value is ignored. Every other frame is walked past.
@@ -512,7 +520,7 @@ fn applyFlowControl(conn: *Connection, payload: []const u8) void {
 /// The connection's first response packet carries HANDSHAKE_DONE + the server control SETTINGS, and
 /// the first packet sent this call carries the pending ACK. A completed stream frees its slot. Returns
 /// true when at least one packet was sent.
-fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, config: Http3ServerConfig) bool {
+fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, max_streams_pending: *?u64, config: Http3ServerConfig) bool {
     var prefix_buf: [32]u8 = undefined;
     const prefix_len = response.buildStreamPrefix(&prefix_buf, stream.status, stream.body.len) orelse {
         stream.active = false;
@@ -551,6 +559,8 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
         }
 
         if (ackTake(ack_pending)) |largest| p += response.buildAck(payload[p..], largest);
+
+        if (maxStreamsTake(max_streams_pending)) |granted| p += response.buildMaxStreams(payload[p..], granted);
 
         // STREAM frame on the request stream: type OFF | LEN (| FIN), id, offset, length, then data.
         payload[p] = 0x0e | @as(u8, if (is_last) 0x01 else 0x00);
@@ -607,6 +617,17 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
 
     var reqs: [request.max_requests_per_packet]request.StreamRequest = undefined;
     const count = request.parseRequests(payload_view, &reqs);
+
+    // Extend the client's request-stream credit before it runs out (RFC 9000 4.6): find the highest
+    // bidi request stream this packet opened and decide whether a MAX_STREAMS must ride a reply. Without
+    // it the connection stalls at the one-time handshake allowance. Rides the first reply, like the ACK.
+    var highest_bidi_id: ?u64 = null;
+    for (reqs[0..count]) |stream_req| {
+        if (stream_req.stream_id % 4 != 0) continue;
+        if (highest_bidi_id == null or stream_req.stream_id > highest_bidi_id.?) highest_bidi_id = stream_req.stream_id;
+    }
+    var max_streams_pending: ?u64 = if (highest_bidi_id) |hid| conn.replenishBidiStreams(hid, config.max_streams) else null;
+
     for (reqs[0..count]) |stream_req| {
         // A retransmit of a request already being streamed: leave its progress, the pump continues it.
         if (conn.findSendStream(stream_req.stream_id) != null) continue;
@@ -615,10 +636,12 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
         var res = core.Response{};
         handler(&req, &res);
 
-        // HANDSHAKE_DONE + the server control SETTINGS ride the connection's first response only.
+        // HANDSHAKE_DONE + the server control SETTINGS ride the connection's first response only, and a
+        // due MAX_STREAMS rides the first reply this call sends (cleared once a packet carries it).
         const framing = response.Framing{
             .handshake_done = !conn.first_response_sent,
             .control = !conn.first_response_sent,
+            .max_streams_bidi = max_streams_pending,
         };
 
         var payload: [2048]u8 = undefined;
@@ -626,6 +649,7 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
             // The whole response fits one packet (the common small-body case).
             sealAndQueue(conn, tx, fd, peer, payload[0..payload_len]);
             conn.first_response_sent = true;
+            max_streams_pending = null;
             logSystem(config, "sent 1-RTT response on stream {d}: HTTP/3 status {d}", .{ stream_req.stream_id, res.status });
         } else if (conn.reserveSendStream(stream_req.stream_id)) |slot| {
             // The body spans more than one packet: register it, the pump below sends within flow control.
@@ -643,6 +667,7 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
             const len = response.buildResponse(&payload, stream_req.stream_id, 500, "", ackTake(&ack_pending), framing) orelse continue;
             sealAndQueue(conn, tx, fd, peer, payload[0..len]);
             conn.first_response_sent = true;
+            max_streams_pending = null;
         }
     }
 
@@ -651,16 +676,22 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
     applyFlowControl(conn, payload_view);
 
     // Pump every active large stream: new ones, and ones this packet's MAX_STREAM_DATA just unblocked.
+    // A due MAX_STREAMS rides the first pumped packet when no small reply above already carried it.
     for (&conn.send_streams) |*stream| {
-        if (stream.active) _ = pumpStream(conn, stream, tx, fd, peer, &ack_pending, config);
+        if (stream.active) _ = pumpStream(conn, stream, tx, fd, peer, &ack_pending, &max_streams_pending, config);
     }
 
-    // Nothing carried the ACK (a bare ACK / flow-control packet that made no progress): acknowledge so
-    // the client stops retransmitting and keeps extending flow control.
-    if (ackTake(&ack_pending)) |largest| {
+    // A trailing packet for anything no reply carried: the ACK (a bare ACK / flow-control packet that
+    // made no progress), and a still-due MAX_STREAMS (this packet's requests were all retransmits, so no
+    // reply was built to ride it). Either keeps the client unblocked.
+    const trailing_ack = ackTake(&ack_pending);
+    const trailing_max_streams = maxStreamsTake(&max_streams_pending);
+    if (trailing_ack != null or trailing_max_streams != null) {
         var payload: [64]u8 = undefined;
-        const ack_len = response.buildAck(&payload, largest);
-        if (ack_len != 0) sealAndQueue(conn, tx, fd, peer, payload[0..ack_len]);
+        var p: usize = 0;
+        if (trailing_ack) |largest| p += response.buildAck(payload[p..], largest);
+        if (trailing_max_streams) |granted| p += response.buildMaxStreams(payload[p..], granted);
+        if (p != 0) sealAndQueue(conn, tx, fd, peer, payload[0..p]);
     }
 
     tx.flush(fd) catch {};
