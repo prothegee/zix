@@ -100,6 +100,14 @@ pub const Connection = struct {
     client_max_data: u64 = 0,
     // Running total of stream bytes the server has sent on this connection, against client_max_data.
     conn_data_sent: u64 = 0,
+    // Client request-stream (bidirectional) credit. The handshake advertises an initial allowance
+    // (config.max_streams), which is a ONE-TIME budget until the server raises it with MAX_STREAMS
+    // (RFC 9000 4.6). bidi_streams_granted is the cumulative limit advertised so far (0 until the first
+    // request seeds it from the window), bidi_stream_high_water is the most request streams the client
+    // has opened. replenishBidiStreams keeps the grant ahead of the high water so the connection never
+    // stalls once the initial allowance is spent.
+    bidi_streams_granted: u64 = 0,
+    bidi_stream_high_water: u64 = 0,
     // Large responses still being sent across packets, resumed as the client extends flow control.
     send_streams: [max_send_streams]SendStream = @splat(.{}),
 
@@ -150,6 +158,31 @@ pub const Connection = struct {
 
         return null;
     }
+
+    /// Track the client's highest request stream and extend its bidirectional stream credit when the
+    /// one-time handshake allowance is running low (RFC 9000 4.6 / 19.11). Without this a connection
+    /// stalls once the client has opened `window` request streams, which is the HTTP/3 throughput
+    /// collapse on a long-lived connection. Call once per received packet with the highest client bidi
+    /// stream id it carried.
+    ///
+    /// Param:
+    /// highest_bidi_id - u64 (the largest client-initiated bidi stream id seen, id % 4 == 0)
+    /// window - u64 (request streams to keep available ahead of the client, the config.max_streams allowance)
+    ///
+    /// Return:
+    /// - ?u64 (the new cumulative MAX_STREAMS value to advertise, or null when the grant still has room)
+    pub fn replenishBidiStreams(self: *Connection, highest_bidi_id: u64, window: u64) ?u64 {
+        const opened = highest_bidi_id / 4 + 1;
+        if (opened > self.bidi_stream_high_water) self.bidi_stream_high_water = opened;
+
+        if (self.bidi_streams_granted == 0) self.bidi_streams_granted = window;
+
+        if (self.bidi_stream_high_water + window / 2 < self.bidi_streams_granted) return null;
+
+        self.bidi_streams_granted = self.bidi_stream_high_water + window;
+
+        return self.bidi_streams_granted;
+    }
 };
 
 // --------------------------------------------------------------- //
@@ -169,4 +202,30 @@ test "zix test: Connection init derives Initial keys from DCID (RFC 9001 A.1)" {
     // Before address validation the 3x cap applies once bytes have been received.
     conn.anti_amplification.onReceive(1200);
     try std.testing.expect(conn.maySend(3600) and !conn.maySend(3601));
+}
+
+test "zix test: replenishBidiStreams raises the grant past the one-time allowance so a connection never stalls" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var conn = Connection.init(&dcid, 1200);
+
+    const window: u64 = 128;
+
+    // Early streams stay inside the seeded allowance (128), so no MAX_STREAMS is due. Stream id 0 is
+    // the first request stream (1 opened), id 4 the second, and so on.
+    try std.testing.expect(conn.replenishBidiStreams(0, window) == null);
+    try std.testing.expectEqual(@as(u64, 128), conn.bidi_streams_granted);
+
+    // Crossing half the window (64 streams opened, highest bidi id 4*63 = 252) raises the grant ahead
+    // of the client: 64 + 128 = 192, already past the one-time 128 cap.
+    try std.testing.expectEqual(@as(u64, 192), conn.replenishBidiStreams(4 * 63, window).?);
+
+    // Continuing past the old 128 cap keeps replenishing, so the client can open well beyond 128
+    // request streams on the one connection (the stall this fixes).
+    try std.testing.expectEqual(@as(u64, 256), conn.replenishBidiStreams(4 * 127, window).?);
+    try std.testing.expectEqual(@as(u64, 384), conn.replenishBidiStreams(4 * 255, window).?);
+    try std.testing.expect(conn.bidi_stream_high_water > 128);
+
+    // A packet that opens no new stream (a lower id, a retransmit) does not lower the grant.
+    try std.testing.expect(conn.replenishBidiStreams(0, window) == null);
+    try std.testing.expectEqual(@as(u64, 384), conn.bidi_streams_granted);
 }
