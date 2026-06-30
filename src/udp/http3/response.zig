@@ -69,21 +69,21 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
     const data_len = 1 + varint.encodedLen(body.len) + body.len;
     if (headers_len + data_len > out.len) return null;
 
-    var p: usize = 0;
-    out[p] = 0x01; // HEADERS frame type
-    p += 1;
-    p += varint.write(out[p..], fp);
-    @memcpy(out[p..][0..fp], fields[0..fp]);
-    p += fp;
+    var pos: usize = 0;
+    out[pos] = 0x01; // HEADERS frame type
+    pos += 1;
+    pos += varint.write(out[pos..], fp);
+    @memcpy(out[pos..][0..fp], fields[0..fp]);
+    pos += fp;
 
     // DATA frame: type 0x00, length, body.
-    out[p] = 0x00; // DATA frame type
-    p += 1;
-    p += varint.write(out[p..], body.len);
-    @memcpy(out[p..][0..body.len], body);
-    p += body.len;
+    out[pos] = 0x00; // DATA frame type
+    pos += 1;
+    pos += varint.write(out[pos..], body.len);
+    @memcpy(out[pos..][0..body.len], body);
+    pos += body.len;
 
-    return p;
+    return pos;
 }
 
 /// Build the HTTP/3 response stream prefix: the HEADERS frame (`:status`) plus the DATA frame header
@@ -106,18 +106,18 @@ pub fn buildStreamPrefix(out: []u8, status: u16, body_len: usize) ?usize {
     const data_header_len = 1 + varint.encodedLen(body_len);
     if (headers_len + data_header_len > out.len) return null;
 
-    var p: usize = 0;
-    out[p] = 0x01; // HEADERS frame type
-    p += 1;
-    p += varint.write(out[p..], fp);
-    @memcpy(out[p..][0..fp], fields[0..fp]);
-    p += fp;
+    var pos: usize = 0;
+    out[pos] = 0x01; // HEADERS frame type
+    pos += 1;
+    pos += varint.write(out[pos..], fp);
+    @memcpy(out[pos..][0..fp], fields[0..fp]);
+    pos += fp;
 
-    out[p] = 0x00; // DATA frame type
-    p += 1;
-    p += varint.write(out[p..], body_len);
+    out[pos] = 0x00; // DATA frame type
+    pos += 1;
+    pos += varint.write(out[pos..], body_len);
 
-    return p;
+    return pos;
 }
 
 /// Build an ACK-only 1-RTT payload acknowledging packets 0..largest (RFC 9000 19.3): one contiguous
@@ -128,15 +128,15 @@ pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
     const ack_len = 1 + varint.encodedLen(largest) + 1 + 1 + varint.encodedLen(largest);
     if (ack_len > out.len) return 0;
 
-    var p: usize = 0;
-    out[p] = 0x02; // ACK frame type
-    p += 1;
-    p += varint.write(out[p..], largest); // Largest Acknowledged
-    p += varint.write(out[p..], 0); // ACK Delay
-    p += varint.write(out[p..], 0); // ACK Range Count
-    p += varint.write(out[p..], largest); // First ACK Range (largest down to 0)
+    var pos: usize = 0;
+    out[pos] = 0x02; // ACK frame type
+    pos += 1;
+    pos += varint.write(out[pos..], largest); // Largest Acknowledged
+    pos += varint.write(out[pos..], 0); // ACK Delay
+    pos += varint.write(out[pos..], 0); // ACK Range Count
+    pos += varint.write(out[pos..], largest); // First ACK Range (largest down to 0)
 
-    return p;
+    return pos;
 }
 
 /// Build a MAX_STREAMS frame for bidirectional streams (RFC 9000 19.11, type 0x12): raise the
@@ -148,10 +148,10 @@ pub fn buildMaxStreams(out: []u8, max_streams: u64) usize {
     if (frame_len > out.len) return 0;
 
     out[0] = 0x12; // MAX_STREAMS (bidirectional)
-    var p: usize = 1;
-    p += varint.write(out[p..], max_streams);
+    var pos: usize = 1;
+    pos += varint.write(out[pos..], max_streams);
 
-    return p;
+    return pos;
 }
 
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response.
@@ -192,50 +192,50 @@ pub const Framing = struct {
 /// - null when the response does not fit in `out` (the v1 single-packet limit, caller falls back)
 pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, ack_largest: ?u64, framing: Framing) ?usize {
     // ACK the client's 1-RTT packets so it stops retransmitting (RFC 9000 19.3).
-    var p: usize = buildAck(out, ack_largest);
+    var pos: usize = buildAck(out, ack_largest);
 
     // HANDSHAKE_DONE (RFC 9001 7.5): confirm the handshake to the client so it finalizes the
     // connection rather than waiting. First response of the connection only.
     if (framing.handshake_done) {
-        if (p + 1 > out.len) return null;
-        out[p] = 0x1e;
-        p += 1;
+        if (pos + 1 > out.len) return null;
+        out[pos] = 0x1e;
+        pos += 1;
     }
 
     // Server control stream: the stream type (0x00) followed by an empty SETTINGS frame (0x04, 0).
     if (framing.control) {
         const control_content = [_]u8{ 0x00, 0x04, 0x00 };
-        if (!writeStreamFrame(out, &p, server_control_stream, false, &control_content)) return null;
+        if (!writeStreamFrame(out, &pos, server_control_stream, false, &control_content)) return null;
     }
 
     // MAX_STREAMS (RFC 9000 19.11): extend the client's request-stream credit so a long-lived
     // connection does not stall once its one-time handshake allowance is spent. Rides this packet only
     // when replenishment is due.
     if (framing.max_streams_bidi) |max_streams| {
-        const written = buildMaxStreams(out[p..], max_streams);
+        const written = buildMaxStreams(out[pos..], max_streams);
         if (written == 0) return null;
 
-        p += written;
+        pos += written;
     }
 
     // The response on the request stream, with FIN.
     var content: [1024]u8 = undefined;
     const content_len = buildRequestStreamContent(&content, status, body) orelse return null;
-    if (!writeStreamFrame(out, &p, stream_id, true, content[0..content_len])) return null;
+    if (!writeStreamFrame(out, &pos, stream_id, true, content[0..content_len])) return null;
 
     // Application CONNECTION_CLOSE (RFC 9000 19.19, type 0x1d): H3_NO_ERROR with an empty reason, so
     // the client finalizes the connection after the response instead of waiting.
     if (framing.close) {
         const close_len = 1 + varint.encodedLen(0x0100) + varint.encodedLen(0);
-        if (p + close_len > out.len) return null;
+        if (pos + close_len > out.len) return null;
 
-        out[p] = 0x1d; // CONNECTION_CLOSE (application)
-        p += 1;
-        p += varint.write(out[p..], 0x0100); // H3_NO_ERROR
-        p += varint.write(out[p..], 0); // Reason Phrase Length
+        out[pos] = 0x1d; // CONNECTION_CLOSE (application)
+        pos += 1;
+        pos += varint.write(out[pos..], 0x0100); // H3_NO_ERROR
+        pos += varint.write(out[pos..], 0); // Reason Phrase Length
     }
 
-    return p;
+    return pos;
 }
 
 // --------------------------------------------------------------- //

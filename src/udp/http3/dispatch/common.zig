@@ -539,39 +539,39 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
         const is_last = (stream.sent + chunk == stream.content_len); // FIN only when fully sent
 
         var payload: [1500]u8 = undefined;
-        var p: usize = 0;
+        var pos: usize = 0;
 
         if (!conn.first_response_sent) {
-            payload[p] = 0x1e; // HANDSHAKE_DONE
-            p += 1;
+            payload[pos] = 0x1e; // HANDSHAKE_DONE
+            pos += 1;
 
             // Server control stream (id 3): stream type 0x00 then an empty SETTINGS frame.
-            payload[p] = 0x0a; // STREAM | LEN
-            p += 1;
-            p += varint.write(payload[p..], 3);
-            p += varint.write(payload[p..], 3);
-            payload[p] = 0x00;
-            payload[p + 1] = 0x04;
-            payload[p + 2] = 0x00;
-            p += 3;
+            payload[pos] = 0x0a; // STREAM | LEN
+            pos += 1;
+            pos += varint.write(payload[pos..], 3);
+            pos += varint.write(payload[pos..], 3);
+            payload[pos] = 0x00;
+            payload[pos + 1] = 0x04;
+            payload[pos + 2] = 0x00;
+            pos += 3;
 
             conn.first_response_sent = true;
         }
 
-        if (ackTake(ack_pending)) |largest| p += response.buildAck(payload[p..], largest);
+        if (ackTake(ack_pending)) |largest| pos += response.buildAck(payload[pos..], largest);
 
-        if (maxStreamsTake(max_streams_pending)) |granted| p += response.buildMaxStreams(payload[p..], granted);
+        if (maxStreamsTake(max_streams_pending)) |granted| pos += response.buildMaxStreams(payload[pos..], granted);
 
         // STREAM frame on the request stream: type OFF | LEN (| FIN), id, offset, length, then data.
-        payload[p] = 0x0e | @as(u8, if (is_last) 0x01 else 0x00);
-        p += 1;
-        p += varint.write(payload[p..], stream.stream_id);
-        p += varint.write(payload[p..], stream.sent);
-        p += varint.write(payload[p..], chunk);
-        copyStreamSlice(prefix, stream.body, stream.sent, payload[p..][0..chunk]);
-        p += chunk;
+        payload[pos] = 0x0e | @as(u8, if (is_last) 0x01 else 0x00);
+        pos += 1;
+        pos += varint.write(payload[pos..], stream.stream_id);
+        pos += varint.write(payload[pos..], stream.sent);
+        pos += varint.write(payload[pos..], chunk);
+        copyStreamSlice(prefix, stream.body, stream.sent, payload[pos..][0..chunk]);
+        pos += chunk;
 
-        sealAndQueue(conn, tx, fd, peer, payload[0..p]);
+        sealAndQueue(conn, tx, fd, peer, payload[0..pos]);
         stream.sent += chunk;
         conn.conn_data_sent += chunk;
         sent_any = true;
@@ -688,10 +688,10 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
     const trailing_max_streams = maxStreamsTake(&max_streams_pending);
     if (trailing_ack != null or trailing_max_streams != null) {
         var payload: [64]u8 = undefined;
-        var p: usize = 0;
-        if (trailing_ack) |largest| p += response.buildAck(payload[p..], largest);
-        if (trailing_max_streams) |granted| p += response.buildMaxStreams(payload[p..], granted);
-        if (p != 0) sealAndQueue(conn, tx, fd, peer, payload[0..p]);
+        var pos: usize = 0;
+        if (trailing_ack) |largest| pos += response.buildAck(payload[pos..], largest);
+        if (trailing_max_streams) |granted| pos += response.buildMaxStreams(payload[pos..], granted);
+        if (pos != 0) sealAndQueue(conn, tx, fd, peer, payload[0..pos]);
     }
 
     tx.flush(fd) catch {};
