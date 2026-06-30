@@ -139,6 +139,21 @@ pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
     return p;
 }
 
+/// Build a MAX_STREAMS frame for bidirectional streams (RFC 9000 19.11, type 0x12): raise the
+/// cumulative number of client-initiated bidi (request) streams the peer may open. A connection
+/// advertises a one-time allowance in the handshake, so without periodic MAX_STREAMS the client stalls
+/// once it is spent. Returns 0 when the frame does not fit in `out` (nothing is written).
+pub fn buildMaxStreams(out: []u8, max_streams: u64) usize {
+    const frame_len = 1 + varint.encodedLen(max_streams);
+    if (frame_len > out.len) return 0;
+
+    out[0] = 0x12; // MAX_STREAMS (bidirectional)
+    var p: usize = 1;
+    p += varint.write(out[p..], max_streams);
+
+    return p;
+}
+
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response.
 ///
 /// Param:
@@ -157,6 +172,9 @@ pub const Framing = struct {
     handshake_done: bool = true,
     control: bool = true,
     close: bool = false,
+    /// When set, a MAX_STREAMS (bidi) frame raising the client's request-stream credit to this
+    /// cumulative value rides this packet (RFC 9000 19.11). Set only when replenishment is due.
+    max_streams_bidi: ?u64 = null,
 };
 
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response on `stream_id`.
@@ -188,6 +206,16 @@ pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, a
     if (framing.control) {
         const control_content = [_]u8{ 0x00, 0x04, 0x00 };
         if (!writeStreamFrame(out, &p, server_control_stream, false, &control_content)) return null;
+    }
+
+    // MAX_STREAMS (RFC 9000 19.11): extend the client's request-stream credit so a long-lived
+    // connection does not stall once its one-time handshake allowance is spent. Rides this packet only
+    // when replenishment is due.
+    if (framing.max_streams_bidi) |max_streams| {
+        const written = buildMaxStreams(out[p..], max_streams);
+        if (written == 0) return null;
+
+        p += written;
     }
 
     // The response on the request stream, with FIN.
@@ -242,6 +270,26 @@ test "zix test: response with ack and close carries both frames" {
 
     // Ends with an application CONNECTION_CLOSE (0x1d) carrying H3_NO_ERROR (0x0100 = varint 4100).
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x1d, 0x41, 0x00, 0x00 }) != null);
+}
+
+test "zix test: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse rides it" {
+    // The frame is type 0x12 then the cumulative limit as a varint (192 = 0x40c0 two-byte varint).
+    var frame: [8]u8 = undefined;
+    const len = buildMaxStreams(&frame, 192);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x12, 0x40, 0xc0 }, frame[0..len]);
+
+    // A small destination that cannot hold the frame reports 0 and writes nothing.
+    var tiny: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), buildMaxStreams(&tiny, 192));
+
+    // A response with max_streams_bidi set carries the 0x12 frame, a lean response without it does not.
+    var out: [1024]u8 = undefined;
+    const with = buildResponse(&out, 4, 200, "hi", null, .{ .handshake_done = false, .control = false, .max_streams_bidi = 192 }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out[0..with], &[_]u8{ 0x12, 0x40, 0xc0 }) != null);
+
+    var out2: [1024]u8 = undefined;
+    const without = buildResponse(&out2, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x12}) == null);
 }
 
 test "zix test: a body larger than the buffer returns null, never overflows" {
