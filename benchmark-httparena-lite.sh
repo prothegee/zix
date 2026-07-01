@@ -31,6 +31,11 @@
 # The wrapper cds into the HttpArena folder, runs the bench, then returns to
 # the original directory.
 #
+# Rootless by default: benchmark-lite.sh's system tune (root: restarts the Docker
+# daemon, writes sysctl) is neutralized in the disposable patched copy, and the
+# loadgens already run in containers, so a plain user can run it. Set TUNE=true to
+# keep the tuned path and run it under sudo.
+#
 # Local source (--source local) keeps every artefact temporary and removes them
 # on exit, so no tracked HttpArena file is ever modified: the local zix tree is
 # rsynced into the gitignored frameworks/<framework>/vendor/zix, a local
@@ -243,6 +248,23 @@ sed -E \
 
 # Redirect the benchmark-lite copy to source the patched framework.sh above.
 sed -i "s|^source \"\$SOURCE_DIR/framework\.sh\"|source \"$FW_PATCHED\"|" "$PATCHED"
+
+# Rootless by default. benchmark-lite.sh calls system_tune unconditionally (it
+# restarts the Docker daemon and writes sysctl, both root) and has no SKIP_TUNE
+# knob, so neutralize that call and the system_restore trap in the disposable
+# copy. The load generators already run in containers (benchmark-lite.sh forces
+# LOADGEN_DOCKER=true), so the bench runs fine as a plain user. TUNE=true keeps
+# the tuned path and runs the copy under sudo instead.
+if [ "${TUNE:-false}" != "true" ]; then
+    sed -i \
+        -e 's/^[[:space:]]*system_tune[[:space:]]*$/true  # system_tune skipped (rootless)/' \
+        -e "s/trap 'cleanup_all; system_restore' EXIT/trap 'cleanup_all' EXIT/" \
+        "$PATCHED"
+fi
 chmod +x "$PATCHED"
 
-sudo "$PATCHED" --load-threads "$LOAD_THREADS" "$FRAMEWORK"
+if [ "${TUNE:-false}" = "true" ]; then
+    sudo -E "$PATCHED" --load-threads "$LOAD_THREADS" "$FRAMEWORK"
+else
+    "$PATCHED" --load-threads "$LOAD_THREADS" "$FRAMEWORK"
+fi

@@ -79,8 +79,15 @@
 set -euo pipefail
 
 # ----------------------------------------------------------------------------- #
-# Root: re-exec under sudo so the whole lifecycle (quiesce + restore) is root.
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+# Rootless by default. The quiesce + restore lifecycle (governor, boost, fixed
+# freq, c-states, THP, irqbalance, lo mtu, perf_event_paranoid) needs root. When
+# not root we skip ONLY those host-wide writes and still run the bench, the
+# server/loadgen pinning (cpuset is delegated to the user slice) and the memory
+# sampler, all of which work rootless. Set ISOLATE_SUDO=true, or run under sudo,
+# for the full quiesced low-noise path.
+IS_ROOT=0
+[ "${EUID:-$(id -u)}" -eq 0 ] && IS_ROOT=1
+if [ "$IS_ROOT" -ne 1 ] && [ "${ISOLATE_SUDO:-false}" = "true" ]; then
     exec sudo -E -- "$0" "$@"
 fi
 
@@ -255,6 +262,9 @@ restore_state() {
     [ "$RESTORED" -eq 1 ] && return 0
     RESTORED=1
 
+    # Rootless: nothing was quiesced, so there is nothing to restore.
+    [ "${IS_ROOT:-0}" -ne 1 ] && return 0
+
     echo "[isolate] restoring host state" >&2
 
     if [ -n "$SAVED_GOVERNOR" ]; then
@@ -311,6 +321,13 @@ trap 'exit 130' INT TERM
 
 # ----------------------------------------------------------------------------- #
 quiesce() {
+    # Rootless: the host-wide writes below all need root. Skip them with one
+    # notice instead of failing every guarded write. The pinning still applies.
+    if [ "${IS_ROOT:-0}" -ne 1 ]; then
+        echo "[isolate] not root, skipping host quiesce (governor/sysctl/mtu/etc.), pinning still applied" >&2
+        return 0
+    fi
+
     echo "[isolate] quiescing host" >&2
 
     cpupower frequency-set -g performance >/dev/null 2>&1 || true
@@ -557,12 +574,12 @@ start_mem_sampler() {
 # ----------------------------------------------------------------------------- #
 # Lifecycle.
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
-START_HUMAN="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
+START="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
 RESULT_TXT="$RESULT_DIR/isolate-${FRAMEWORK}-${RUN_STAMP}.txt"
 
 # Start banner: announced to the terminal and written as the first line of the
 # result file, so a saved .txt opens with when the run began (millisecond stamp).
-START_BANNER="Isolate: $FRAMEWORK bench start $START_HUMAN"
+START_BANNER="Isolate: $FRAMEWORK bench start $START"
 echo "[isolate] $START_BANNER" >&2
 echo "[isolate] command: $INVOCATION" >&2
 
