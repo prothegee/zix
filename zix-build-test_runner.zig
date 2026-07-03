@@ -60,7 +60,7 @@ pub fn addSteps(
         .{ "test-runner-fix-epoll", "tests/runner/fix_runner.zig", "tr-server-fix-epoll", "examples/fix_server_4_epoll.zig", "9051", "", "", "" },
         .{ "test-runner-fix-uring", "tests/runner/fix_runner.zig", "tr-server-fix-uring", "examples/fix_server_5_uring.zig", "9052", "", "", "" },
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9054", "", "", "" },
-        .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_raw_echo.zig", "9064", "", "", "" },
+        .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_server_raw.zig", "9064", "", "", "" },
         .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/tls/http3_basic.zig", "9063", "", "", "" },
         .{ "test-runner-uds", "tests/runner/uds_runner.zig", "tr-server-uds", "examples/uds_server.zig", "0", "", "", "" },
         // http feature runners (http_get_runner: arg4=route, arg5=origin, arg6=expected)
@@ -262,7 +262,7 @@ pub fn addSteps(
             .{ "tr-all-server-http2-epoll", "examples/http2_basic_4_epoll.zig" },
             .{ "tr-all-server-http2-uring", "examples/http2_basic_5_uring.zig" },
             .{ "tr-all-server-udp", "examples/udp_server.zig" },
-            .{ "tr-all-server-udp-raw", "examples/udp_raw_echo.zig" },
+            .{ "tr-all-server-udp-raw", "examples/udp_server_raw.zig" },
             .{ "tr-all-server-uds", "examples/uds_server.zig" },
             // http feature servers (11)
             .{ "tr-all-server-http-json", "examples/http_json.zig" },
