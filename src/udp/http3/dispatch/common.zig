@@ -740,6 +740,21 @@ fn decodePath(conn: *Connection, req: request.DecodedRequest) []const u8 {
     return req.path;
 }
 
+/// Expand a request `accept-encoding` into a plain slice: Huffman-decoded into `scratch` when a custom
+/// literal value arrived Huffman-coded, otherwise the value as decoded (the common indexed form,
+/// `gzip, deflate, br`, is already plain). The slice is only read during the handler call, so a
+/// caller-owned stack scratch is enough. Returns empty on a malformed Huffman code, which the handler
+/// then treats as no accept-encoding (identity).
+fn decodeAcceptEncoding(scratch: []u8, req: request.DecodedRequest) []const u8 {
+    if (req.accept_encoding_huffman) {
+        const len = huffman.decode(scratch, req.accept_encoding) orelse return "";
+
+        return scratch[0..len];
+    }
+
+    return req.accept_encoding;
+}
+
 /// Copy `dst.len` bytes of the logical response stream (the HTTP/3 prefix followed by the body) into
 /// `dst`, starting at stream offset `off`. The prefix and body stay separate, so a large body is
 /// never concatenated into one buffer.
@@ -760,10 +775,12 @@ fn copyStreamSlice(prefix: []const u8, body: []const u8, off: usize, dst: []u8) 
     }
 }
 
-/// The total HTTP/3 stream length for a response: the prefix (HEADERS + DATA header) plus the body.
-fn streamContentLen(status: u16, body: []const u8) usize {
+/// The total HTTP/3 stream length for a response: the prefix (HEADERS + DATA header) plus the body. The
+/// content coding is part of the prefix (one field line), so it must match the coding the pump emits or
+/// the flow-control accounting would drift by a byte.
+fn streamContentLen(status: u16, content_encoding: response.ContentEncoding, body: []const u8) usize {
     var buf: [32]u8 = undefined;
-    const prefix_len = response.buildStreamPrefix(&buf, status, body.len) orelse 0;
+    const prefix_len = response.buildStreamPrefix(&buf, status, content_encoding, body.len) orelse 0;
 
     return prefix_len + body.len;
 }
@@ -904,7 +921,7 @@ fn pumpLimit(fc_limit: usize, sent: usize, congestion_window: u64, bytes_in_flig
 /// slot. Returns true when at least one packet was sent.
 fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, max_streams_pending: *?u64, config: Http3ServerConfig, stats: ?*WorkerStats) bool {
     var prefix_buf: [32]u8 = undefined;
-    const prefix_len = response.buildStreamPrefix(&prefix_buf, stream.status, stream.body.len) orelse {
+    const prefix_len = response.buildStreamPrefix(&prefix_buf, stream.status, stream.content_encoding, stream.body.len) orelse {
         stream.active = false;
         return false;
     };
@@ -1099,12 +1116,17 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
         // A retransmit of a request already being streamed: leave its progress, the pump continues it.
         if (conn.findSendStream(stream_req.stream_id) != null) continue;
 
-        var req = core.Request{ .method = stream_req.request.method, .path = decodePath(conn, stream_req.request) };
+        var ae_scratch: [128]u8 = undefined;
+        var req = core.Request{
+            .method = stream_req.request.method,
+            .path = decodePath(conn, stream_req.request),
+            .accept_encoding = decodeAcceptEncoding(&ae_scratch, stream_req.request),
+        };
         var res = core.Response{};
         handler(&req, &res);
 
         var content: [1024]u8 = undefined;
-        const content_len = response.buildRequestStreamContent(&content, res.status, res.body) orelse {
+        const content_len = response.buildRequestStreamContent(&content, res.status, res.content_encoding, res.body) orelse {
             // A body too large for one packet: register a send stream the pump fragments within flow
             // control, or answer 500 (packed like a small response) when no slot is free.
             if (conn.reserveSendStream(stream_req.stream_id)) |slot| {
@@ -1113,12 +1135,13 @@ fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx
                     .stream_id = stream_req.stream_id,
                     .status = res.status,
                     .body = res.body,
-                    .content_len = streamContentLen(res.status, res.body),
+                    .content_encoding = res.content_encoding,
+                    .content_len = streamContentLen(res.status, res.content_encoding, res.body),
                     .sent = 0,
                     .stream_limit = conn.client_max_stream_data,
                 };
             } else {
-                const five = response.buildRequestStreamContent(&content, 500, "") orelse continue;
+                const five = response.buildRequestStreamContent(&content, 500, .identity, "") orelse continue;
                 packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, stream_req.stream_id, content[0..five]);
             }
             continue;

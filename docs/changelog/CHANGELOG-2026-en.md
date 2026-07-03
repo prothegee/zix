@@ -140,6 +140,13 @@ __*Update:*__
 - gRPC server-streaming DATA-frame coalescing (ADR-057):
     - `zix.Grpc` server-streaming packs consecutive messages into fewer, larger HTTP/2 DATA frames (up to the 16 KiB default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. The fix lives in the shared `muxDispatch`, so `.URING`, `.EPOLL`, and both TLS mux paths inherit it. Unary keeps one frame per message and is byte-for-byte unchanged. The thread path (`.ASYNC` / `.POOL` / `.MIXED`) is not coalesced yet.
 
+    ---
+
+- HTTP/3 content-encoding negotiation:
+    - `zix.Http3` gains content-negotiation on the response. `req.accept_encoding` exposes the client's Accept-Encoding (decoded from the QPACK static entry 31 or a literal, Huffman expanded), and a handler calls `res.setContentEncoding(.br)` / `.gzip`, which emits the `content-encoding` response header as one QPACK indexed line (static index 42 br / 43 gzip). The engine never compresses on the send path: the handler serves an already-compressed body (a pre-built `.br` / `.gz` file), so there is no per-request codec cost and the perf / memory rule holds. Serving the smaller pre-compressed variant is fewer packets per response, the static-serving lever.
+    - The QPACK static table extends from indices 0..28 to 0..43 (RFC 9204 Appendix A), covering `accept-encoding` (31) and `content-encoding` br / gzip (42 / 43). The request decoder scans past the pseudo-headers to capture `accept-encoding`, and `buildRequestStreamContent` / `buildStreamPrefix` emit the `content-encoding` line (`SendStream` stores the coding so a resumed multi-packet body keeps its header). The change lives in the shared `dispatch/common.zig`, so every dispatch model inherits it.
+    - `zix.Http3.ContentEncoding` is exported. `examples/tls/http3_basic.zig` gains a `/negotiated` route that serves a brotli-precompressed body with `content-encoding: br` when the client accepts br. Docs `hld-http3`, `lld-http3` (en and -id) updated.
+
 <br>
 
 __*Fix:*__

@@ -135,7 +135,7 @@ Seal (send):
 Field line static-table QPACK (RFC 9204). Field section static-only memakai prefix Required-Insert-Count-0 / Base-0 (dua byte nol).
 
 - `decodePrefixedInt` / `encodePrefixedInt`: prefixed integer RFC 7541 5.1 yang ditumpangi setiap representasi.
-- `static_table`: 29 entri terdepan (indeks 0..28) dari RFC 9204 Appendix A, mencakup pseudo-header plus field umum (`:method` GET/POST/dll pada 17..21, `:status` 200/304/404/503 pada 25..28, `:path` pada 1, `:authority` pada 0).
+- `static_table`: 44 entri terdepan (indeks 0..43) dari RFC 9204 Appendix A, mencakup pseudo-header plus field umum (`:method` GET/POST/dll pada 17..21, `:status` 200/304/404/503 pada 25..28, `:path` pada 1, `:authority` pada 0), dan entri content-negotiation yang dipakai jalur serve: `accept-encoding` (indeks 31, input request) dan `content-encoding` br / gzip (indeks 42 / 43, output response).
 - `decodeIndexedFieldLine` (RFC 9204 4.5.2) dan `decodeLiteralNameRef` (4.5.4) untuk decode, `encodeStaticIndexedFieldLine` untuk encode.
 - `StreamRegistry`: pengecekan at-most-one encoder / decoder stream (terimplementasi, belum dienforce).
 
@@ -158,15 +158,15 @@ Decoder Huffman RFC 7541 Appendix B yang QPACK bagi dengan HPACK, dipakai untuk 
 Mendekode request dari payload 1-RTT terdekripsi.
 
 - `parseRequests(payload, out)`: memindai STREAM frame bidi yang diinisiasi client (`stream.id & 0x03 == 0`), mendekode masing-masing dalam urutan kedatangan sampai `max_requests_per_packet` (96). `parseRequest` mengembalikan yang pertama.
-- `decodeRequestStream` menelusuri frame HTTP/3 di dalam data stream untuk HEADERS frame pertama (type 0x01), dan `decodeHeaders` mendekode-QPACK field section-nya, membaca prefix RIC / Base lalu field line indexed atau literal-name-ref, berhenti begitu `:method` dan `:path` keduanya ditemukan.
-- `DecodedRequest { method, path, path_huffman }` membawa flag Huffman, didekode belakangan oleh `decodePath`.
+- `decodeRequestStream` menelusuri frame HTTP/3 di dalam data stream untuk HEADERS frame pertama (type 0x01), dan `decodeHeaders` mendekode-QPACK field section-nya, membaca prefix RIC / Base lalu field line indexed atau literal-name-ref. Ia menangkap `:method` dan `:path` (pseudo-header, di depan) dan `accept-encoding` (field biasa, jadi scan berlanjut melewati pseudo-header untuk mencapainya), berhenti begitu ketiganya di tangan.
+- `DecodedRequest { method, path, path_huffman, accept_encoding, accept_encoding_huffman }` membawa flag Huffman, diperluas belakangan oleh `decodePath` / `decodeAcceptEncoding`.
 
 ### response.zig (live)
 
 Menserialisasi payload QUIC 1-RTT penuh.
 
 - `buildResponse(...)` merakit, berurutan: ACK frame opsional (`buildAck` / `buildAckRanges`), HANDSHAKE_DONE opsional (0x1e), control stream server opsional (stream id 3) membawa byte stream-type 0x00 plus SETTINGS frame kosong `{0x04, 0x00}`, MAX_STREAMS opsional (`buildMaxStreams`, type 0x12), lalu isi request-stream, dan opsional application CONNECTION_CLOSE (0x1d, H3_NO_ERROR = 0x0100).
-- `buildRequestStreamContent`: HTTP/3 HEADERS frame (type 0x01) dengan prefix QPACK static-only (RIC 0 / Base 0) plus indexed `:status` line (`statusIndexedFieldLine` memetakan 103/200/304/404/503 ke indeks static 24..28, default 200), diikuti DATA frame (type 0x00) dengan body, dibungkus dalam STREAM frame dengan FIN.
+- `buildRequestStreamContent`: HTTP/3 HEADERS frame (type 0x01) dengan prefix QPACK static-only (RIC 0 / Base 0) plus indexed `:status` line (`statusIndexedFieldLine` memetakan 103/200/304/404/503 ke indeks static 24..28, default 200) dan, saat handler menyetelnya, indexed `content-encoding` line (`contentEncodingFieldLine` memancarkan indeks static 42 untuk br / 43 untuk gzip, tidak ada untuk identity), diikuti DATA frame (type 0x00) dengan body, dibungkus dalam STREAM frame dengan FIN. `buildStreamPrefix` (jalur large-body) mengambil `content_encoding` yang sama, jadi body multi-packet yang di-resume tetap membawa header-nya. Engine memancarkan field tapi tidak pernah mengompresi: handler yang memiliki body ter-coded.
 
 ### h3.zig (ditunda)
 
@@ -183,7 +183,7 @@ Fase handshake dilacak oleh flag yang diset di jalur kirim (di `dispatch/common.
 Field dan method kunci:
 - `dcid`, `our_scid`, `peer_scid`, `peer_addr` (ditimpa per datagram diterima, jadi perubahan 4-tuple secara transparan mentargetkan-ulang kiriman), `initial_client` / `initial_server`, `hs_keys`, `app_keys`, `handshake_transcript`.
 - `AckTracker { largest_pn, received_mask: u64 }`: bitmask geser 64-bit dari packet number yang diterima (bit 0 = largest), jadi server memancarkan range ACK yang jujur.
-- `SendStream` (sampai 64 per connection): body response yang distream lintas packet (`stream_id`, `body`, `sent`, `high_water`, `unacked`, `stream_limit`).
+- `SendStream` (sampai 64 per connection): body response yang distream lintas packet (`stream_id`, `body`, `content_encoding`, `sent`, `high_water`, `unacked`, `stream_limit`). Prefix dibangun ulang per packet, jadi `content_encoding` disimpan agar header `content-encoding` tetap konsisten lintas body yang di-resume.
 - Ring `SentRange` (128 entri): loss-detection log. `recordSentRange` menimpa slot tertua, mengurangi `bytes_in_flight` dan `unacked` stream pemilik dulu jika masih in-flight (mencegah leak / truncation).
 - `replenishBidiStreams(highest_bidi_id, window)`: rolling credit MAX_STREAMS. Melacak request stream tertinggi client, dan begitu ia memakai lebih dari separuh window saat ini, menaikkan grant kumulatif ke `high_water + window` dan mengembalikan nilai baru (jika tidak `null`), jadi connection tak pernah stall setelah allowance awal habis.
 - `onAckFrame(ack, now_us)`: mengambil sampel RTT dari packet yang cocok dengan `ack.largest`, memensiunkan range yang di-ack, mengkredit `cc.onAckedBytes`, mereset PTO backoff, dan mendeklarasikan loss untuk range terdahulu yang masih outstanding (`recovery.packetLost`), memundurkan stream-stream itu dan memanggil `cc.onCongestionEvent()` sekali per ACK jika ada loss.

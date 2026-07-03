@@ -17,6 +17,11 @@ pub const DecodedRequest = struct {
     method: []const u8,
     path: []const u8,
     path_huffman: bool = false,
+    /// The client's `accept-encoding` value, or empty when absent. Set from the QPACK static entry 31
+    /// (`gzip, deflate, br`) for the indexed form, or from the literal value for a custom one. When
+    /// `accept_encoding_huffman` is set the value is still Huffman-encoded and the serve path expands it.
+    accept_encoding: []const u8 = "",
+    accept_encoding_huffman: bool = false,
 };
 
 /// A decoded request paired with the client bidi stream it arrived on, so the response goes back on
@@ -224,6 +229,8 @@ fn decodeHeaders(section: []const u8) ?DecodedRequest {
     var method: []const u8 = "";
     var path: []const u8 = "";
     var path_huffman = false;
+    var accept_encoding: []const u8 = "";
+    var accept_encoding_huffman = false;
 
     while (pos < section.len) {
         const lead = section[pos];
@@ -237,6 +244,7 @@ fn decodeHeaders(section: []const u8) ?DecodedRequest {
                 if (qpack.staticEntry(idx.index)) |entry| {
                     if (std.mem.eql(u8, entry.name, ":method")) method = entry.value;
                     if (std.mem.eql(u8, entry.name, ":path")) path = entry.value;
+                    if (std.mem.eql(u8, entry.name, "accept-encoding")) accept_encoding = entry.value;
                 }
             }
         } else if (lead & 0xc0 == 0x40) {
@@ -251,20 +259,32 @@ fn decodeHeaders(section: []const u8) ?DecodedRequest {
                         path = lit.value;
                         path_huffman = lit.huffman;
                     }
+                    if (std.mem.eql(u8, entry.name, "accept-encoding")) {
+                        accept_encoding = lit.value;
+                        accept_encoding_huffman = lit.huffman;
+                    }
                 }
             }
         } else {
-            // A representation this minimal decoder does not model. Pseudo-headers come first, so if
-            // :method and :path are already in hand the rest does not matter.
+            // A representation this minimal decoder does not model. The pseudo-headers and the
+            // static-referenced regular fields it needs come first, so what remains does not matter.
             break;
         }
 
-        if (method.len != 0 and path.len != 0) break;
+        // accept-encoding is a regular field (after the pseudo-headers), so the scan continues past
+        // :method and :path to reach it, stopping once all three are in hand.
+        if (method.len != 0 and path.len != 0 and accept_encoding.len != 0) break;
     }
 
     if (method.len == 0 or path.len == 0) return null;
 
-    return .{ .method = method, .path = path, .path_huffman = path_huffman };
+    return .{
+        .method = method,
+        .path = path,
+        .path_huffman = path_huffman,
+        .accept_encoding = accept_encoding,
+        .accept_encoding_huffman = accept_encoding_huffman,
+    };
 }
 
 // --------------------------------------------------------------- //
@@ -287,6 +307,28 @@ test "zix test: parseRequest decodes method and path past a leading ACK" {
     try std.testing.expectEqualSlices(u8, "GET", decoded.method);
     try std.testing.expectEqualSlices(u8, "/baseline2", decoded.path);
     try std.testing.expect(!decoded.path_huffman);
+}
+
+test "zix test: parseRequest captures accept-encoding from the indexed static entry" {
+    // Like the test above but the HEADERS field section adds accept-encoding as an indexed static line
+    // (0xdf = static index 31, value "gzip, deflate, br"). Field section is now 16 bytes (0x10), so the
+    // HEADERS frame is 0x12 and the STREAM length 0x12. The scan runs past :method / :path to reach it.
+    const payload = h("0200000000" ++ "0a0012" ++ "0110" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "df");
+
+    const decoded = parseRequest(&payload).?;
+    try std.testing.expectEqualSlices(u8, "GET", decoded.method);
+    try std.testing.expectEqualSlices(u8, "/baseline2", decoded.path);
+    try std.testing.expectEqualSlices(u8, "gzip, deflate, br", decoded.accept_encoding);
+    try std.testing.expect(!decoded.accept_encoding_huffman);
+}
+
+test "zix test: parseRequest leaves accept-encoding empty when the client sends none" {
+    // The original request shape (no accept-encoding field): the value stays empty, and the serve path
+    // then falls back to an identity response.
+    const payload = h("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532");
+
+    const decoded = parseRequest(&payload).?;
+    try std.testing.expectEqual(@as(usize, 0), decoded.accept_encoding.len);
 }
 
 test "zix test: parseRequest returns null when no request stream is present" {

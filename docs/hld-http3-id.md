@@ -230,8 +230,8 @@ Sertifikat bisa ECDSA P-256, Ed25519, atau RSA, dari `Tls.Context` yang sama sep
 
 Jalur live memakai QPACK static table plus literal saja (RFC 9204). Request didekode, response diencode, keduanya dengan field-section prefix Required-Insert-Count-0 / Base-0 (prefix dua-byte-nol static-only).
 
-- Decode request: menarik `:method` dan `:path` dari field section HEADERS (indexed field line, atau literal field line dengan static name reference). `:path` yang ter-Huffman-encode didekode (RFC 7541 Appendix B) ke scratch per-connection.
-- Encode response: memetakan status code ke indeks static table untuk `{103, 200, 304, 404, 503}` (default 200), di dalam HTTP/3 HEADERS frame diikuti DATA frame.
+- Decode request: menarik `:method`, `:path`, dan `accept-encoding` dari field section HEADERS (indexed field line, atau literal field line dengan static name reference). Nilai `:path` atau `accept-encoding` yang ter-Huffman-encode didekode (RFC 7541 Appendix B) ke scratch. `accept-encoding` adalah yang dipakai handler untuk menegosiasi response pre-compressed.
+- Encode response: memetakan status code ke indeks static table untuk `{103, 200, 304, 404, 503}` (default 200) dan, saat handler menyetel `content_encoding`, menambahkan indexed `content-encoding` line (indeks static 42 br / 43 gzip), di dalam HTTP/3 HEADERS frame diikuti DATA frame. Engine hanya memancarkan header: ia tidak pernah mengompresi, handler menyajikan body yang sudah ter-coded.
 
 QPACK dynamic table terimplementasi penuh dan teruji tetapi belum diwire ke jalur serve: tidak ada config dynamic-capacity non-zero, jadi encoder / decoder tetap static-only.
 
