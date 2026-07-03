@@ -86,6 +86,7 @@
 | :- | :- |
 | [`docs/hld-http-id.md`](docs/hld-http-id.md) | HTTP: tujuan, model runtime, API, router, WebSocket, SSE, model memori |
 | [`docs/hld-http1-id.md`](docs/hld-http1-id.md) | HTTP/1: tujuan engine ramping, model dispatch, model handler, router, WebSocket, model memori |
+| [`docs/hld-http2-id.md`](docs/hld-http2-id.md) | HTTP/2: tujuan, model dispatch, mux state machine, HPACK, flow control, TLS, model memori |
 | [`docs/hld-tcp-id.md`](docs/hld-tcp-id.md) | TCP stream mentah: tujuan, API, format frame, model dispatch |
 | [`docs/hld-udp-id.md`](docs/hld-udp-id.md) | UDP: tujuan, model runtime, API, model paket, endianness, disconnect |
 | [`docs/hld-uds-id.md`](docs/hld-uds-id.md) | UDS: tujuan, API, format frame, siklus hidup server/client |
@@ -98,6 +99,7 @@
 | [`docs/hld-http3-id.md`](docs/hld-http3-id.md) | HTTP/3 (QUIC): tujuan, runtime model, API, router, dispatch model, handshake, QPACK, memory model |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
+| [`docs/lld-http2-id.md`](docs/lld-http2-id.md) | HTTP/2: mux state machine, pool slot stream per worker, cache HPACK, frame loop, flow control, dispatch |
 | [`docs/lld-tcp-id.md`](docs/lld-tcp-id.md) | TCP: struktur data internal dan algoritma |
 | [`docs/lld-udp-id.md`](docs/lld-udp-id.md) | UDP: struktur data internal dan algoritma |
 | [`docs/lld-uds-id.md`](docs/lld-uds-id.md) | UDS: struktur server/client internal dan penanganan frame |
@@ -419,7 +421,7 @@ Jalur raw (`zix.Udp.Raw`, ADR-049) mengalokasikan recv / send batch dan array wo
 
 ### HTTP/2 dan gRPC
 
-Keduanya menggunakan array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos: handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
+Mux `.EPOLL` / `.URING` HTTP/2 memakai pool slot stream per worker, jadi memori stream residen mengikuti stream konkuren, bukan `max_streams` per koneksi. gRPC dan model thread-path HTTP/2 tetap memakai array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos: handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
 
 Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) dan [`docs/hld-udp-id.md`](docs/hld-udp-id.md). Untuk model threading lihat [`docs/concurrency-id.md`](docs/concurrency-id.md).
 

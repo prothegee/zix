@@ -35,8 +35,9 @@ const MuxPhase = enum { await_preface, await_upgrade, await_preface2, h2 };
 
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
-/// One stream within a multiplexed connection. `body` / `header_scratch` are slices into the
-/// connection's shared backing buffers, sized by the serve options.
+/// One stream within a multiplexed connection, borrowed from the per-worker pool while open. `body` /
+/// `header_scratch` are the pooled stream's own buffers, sized by the serve options and reused across
+/// borrows. `next_free` links the stream into the pool freelist while it is idle.
 const MuxStream = struct {
     id: u31 = 0,
     state: StreamState = .IDLE,
@@ -51,10 +52,13 @@ const MuxStream = struct {
     /// Send-side flow control (RFC 7540 6.9). send_window is the peer's remaining receive window for
     /// this stream. pending_body is the still-unsent tail of a response body whose send was capped by
     /// a window. It points into caller-owned memory that must outlive the stream (the static cache),
-    /// the slot stays allocated until pending_body drains, and a WINDOW_UPDATE resumes it.
+    /// the slot stays borrowed until pending_body drains, and a WINDOW_UPDATE resumes it.
     send_window: i64 = 65535,
     pending_body: []const u8 = &.{},
     pending_end: bool = false,
+
+    /// Freelist link, valid only while this stream sits idle in the per-worker pool.
+    next_free: ?*MuxStream = null,
 };
 
 /// Per-connection h2 state for the multiplexed models. Heap-owned, one per fd, private to the
@@ -69,10 +73,11 @@ pub const MuxConn = struct {
 
     hpack_dec: hpack.HpackDecoder,
 
-    streams: []MuxStream,
+    /// Per-connection slot table. `streams[i]` is a stream borrowed from the per-worker pool, valid only
+    /// while `slots[i]` is set. The array holds pointers (not inline stream state), so an idle
+    /// connection reserves `max_streams` pointers, not `max_streams` full stream buffers.
+    streams: []*MuxStream,
     slots: []bool,
-    bodies: []u8,
-    scratches: []u8,
 
     last_stream_id: u31,
     phase: MuxPhase,
@@ -94,7 +99,7 @@ pub const MuxConn = struct {
             a.destroy(conn);
             return null;
         };
-        const streams = a.alloc(MuxStream, opts.max_streams) catch {
+        const streams = a.alloc(*MuxStream, opts.max_streams) catch {
             a.free(rbuf);
             a.destroy(conn);
             return null;
@@ -105,28 +110,11 @@ pub const MuxConn = struct {
             a.destroy(conn);
             return null;
         };
-        const bodies = a.alloc(u8, opts.max_body * opts.max_streams) catch {
-            a.free(slots);
-            a.free(streams);
-            a.free(rbuf);
-            a.destroy(conn);
-            return null;
-        };
-        const scratches = a.alloc(u8, opts.max_header_scratch * opts.max_streams) catch {
-            a.free(bodies);
-            a.free(slots);
-            a.free(streams);
-            a.free(rbuf);
-            a.destroy(conn);
-            return null;
-        };
 
+        // Slots start free. The heavy per-stream state (header table plus body / scratch buffers) is not
+        // reserved here, it is borrowed from the per-worker pool on stream open. `streams[i]` is only
+        // read while `slots[i]` is set, so the pointers stay unset until a slot is claimed.
         @memset(slots, false);
-        for (streams, 0..) |*s, i| {
-            s.* = .{};
-            s.body = bodies[i * opts.max_body ..][0..opts.max_body];
-            s.header_scratch = scratches[i * opts.max_header_scratch ..][0..opts.max_header_scratch];
-        }
 
         conn.* = .{
             .fd = fd,
@@ -137,8 +125,6 @@ pub const MuxConn = struct {
             .hpack_dec = hpack.HpackDecoder.init(),
             .streams = streams,
             .slots = slots,
-            .bodies = bodies,
-            .scratches = scratches,
             .last_stream_id = 0,
             .phase = .await_preface,
         };
@@ -148,8 +134,12 @@ pub const MuxConn = struct {
 
     pub fn deinit(self: *MuxConn) void {
         const a = std.heap.smp_allocator;
-        a.free(self.scratches);
-        a.free(self.bodies);
+
+        // Return any still-open stream to the per-worker pool before freeing the connection's own arrays.
+        for (self.slots, 0..) |in_use, slot| {
+            if (in_use) releaseStream(self.streams[slot]);
+        }
+
         a.free(self.slots);
         a.free(self.streams);
         a.free(self.rbuf);
@@ -158,12 +148,86 @@ pub const MuxConn = struct {
 };
 
 // --------------------------------------------------------- //
+// Per-worker stream-slot pool. A worker drives many connections from one thread, and each connection
+// borrows a MuxStream (its inline header table plus body / header-scratch buffers) only while a stream
+// is open, returning it on close. The freelist is threadlocal (shared-nothing per worker, no atomics),
+// so resident stream memory tracks concurrent streams on the worker, not connections times max_streams.
+// Buffers are allocated once per pooled stream and reused across borrows, so the steady state does no
+// per-stream allocation.
 
-fn slotFor(stream_id: u31, streams: []MuxStream, used: []bool) ?usize {
-    for (used, 0..) |slot_in_use, i| {
+threadlocal var stream_pool: ?*MuxStream = null;
+
+/// Borrow a stream from the per-worker pool, growing the pool with a fresh allocation when the freelist
+/// is empty. The returned stream is reset to defaults (a pooled stream was cleared on release) with its
+/// body / header-scratch buffers sized to at least the serve options.
+///
+/// Return:
+/// - *MuxStream (clean, buffers ready)
+/// - null when a growth allocation failed (the caller refuses the stream)
+fn acquireStream(opts: core.ServeOpts) ?*MuxStream {
+    const a = std.heap.smp_allocator;
+
+    if (stream_pool) |st| {
+        stream_pool = st.next_free;
+        if (st.body.len >= opts.max_body and st.header_scratch.len >= opts.max_header_scratch) return st;
+
+        // A borrower asking for a larger cap than this slot was sized to (non-uniform serve options on
+        // one worker, never in normal use) drops the slot and falls through to a fresh allocation.
+        a.free(st.body);
+        a.free(st.header_scratch);
+        a.destroy(st);
+    }
+
+    const st = a.create(MuxStream) catch return null;
+    const body = a.alloc(u8, opts.max_body) catch {
+        a.destroy(st);
+        return null;
+    };
+    const scratch = a.alloc(u8, opts.max_header_scratch) catch {
+        a.free(body);
+        a.destroy(st);
+        return null;
+    };
+
+    st.* = .{};
+    st.body = body;
+    st.header_scratch = scratch;
+
+    return st;
+}
+
+/// Return a stream to the per-worker pool, resetting its state to defaults while keeping its buffers so
+/// the next borrower reuses them. LIFO, so a hot stream is reused first.
+fn releaseStream(st: *MuxStream) void {
+    const body = st.body;
+    const scratch = st.header_scratch;
+
+    st.* = .{};
+    st.body = body;
+    st.header_scratch = scratch;
+    st.next_free = stream_pool;
+
+    stream_pool = st;
+}
+
+/// Free a connection slot: mark it unused and return its borrowed stream to the pool.
+fn releaseSlot(conn: *MuxConn, slot: usize) void {
+    conn.slots[slot] = false;
+    releaseStream(conn.streams[slot]);
+}
+
+/// Claim a free slot for a new stream, borrowing a stream from the pool. Returns the slot index, or
+/// null when the connection is at max_streams or a pool allocation failed (the caller refuses the
+/// stream).
+fn slotFor(conn: *MuxConn, stream_id: u31) ?usize {
+    for (conn.slots, 0..) |slot_in_use, i| {
         if (!slot_in_use) {
-            used[i] = true;
-            streams[i].id = stream_id;
+            const st = acquireStream(conn.opts) orelse return null;
+            st.id = stream_id;
+
+            conn.streams[i] = st;
+            conn.slots[i] = true;
+
             return i;
         }
     }
@@ -171,7 +235,7 @@ fn slotFor(stream_id: u31, streams: []MuxStream, used: []bool) ?usize {
     return null;
 }
 
-fn findSlot(stream_id: u31, streams: []MuxStream, used: []bool) ?usize {
+fn findSlot(stream_id: u31, streams: []*MuxStream, used: []bool) ?usize {
     for (used, 0..) |slot_in_use, i| {
         if (slot_in_use and streams[i].id == stream_id) return i;
     }
@@ -192,7 +256,7 @@ fn sendServerSettings(conn: *MuxConn) void {
 /// Extract method / path from the decoded pseudo-headers and dispatch the stream. The reply is
 /// written straight to the fd by the handler (via `frame.sendResponse`).
 fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void {
-    const s = &conn.streams[slot];
+    const s = conn.streams[slot];
     var method: []const u8 = "GET";
     var path: []const u8 = "/";
     for (s.headers[0..s.header_count]) |h| {
@@ -219,7 +283,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void
     active_conn = null;
 
     // Free the slot unless the response body is parked on a window, then a WINDOW_UPDATE resumes it.
-    if (s.pending_body.len == 0) conn.slots[slot] = false;
+    if (s.pending_body.len == 0) releaseSlot(conn, slot);
 }
 
 /// Send DATA for `body` up to the connection and stream send windows and the max frame size. What
@@ -259,11 +323,11 @@ fn pumpBody(conn: *MuxConn, stream: *MuxStream, body: []const u8, end: bool) voi
 
 /// Resume one parked stream after its window grew. Frees the slot once the body fully drains.
 fn resumeStream(conn: *MuxConn, slot: usize) void {
-    const stream = &conn.streams[slot];
+    const stream = conn.streams[slot];
     if (stream.pending_body.len == 0) return;
 
     pumpBody(conn, stream, stream.pending_body, stream.pending_end);
-    if (stream.pending_body.len == 0) conn.slots[slot] = false;
+    if (stream.pending_body.len == 0) releaseSlot(conn, slot);
 }
 
 /// Resume every parked stream after the connection window grew.
@@ -276,18 +340,10 @@ fn resumeAll(conn: *MuxConn) void {
 /// Write the response HEADERS frame (status, content-type, optional content-encoding, content-length).
 fn sendRespHeaders(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, content_length: usize, end_stream: bool) void {
     var hdr_buf: [frame.HPACK_ENCODE_SCRATCH]u8 = undefined;
-    var enc = hpack.HpackEncoder.init(&hdr_buf);
 
-    var status_str: [4]u8 = undefined;
-    const status_s = std.fmt.bufPrint(&status_str, "{d}", .{status}) catch "200";
-    enc.writeHeader(":status", status_s) catch return;
-    if (content_type.len > 0) enc.writeHeader("content-type", content_type) catch return;
-    if (content_encoding.len > 0) enc.writeHeader("content-encoding", content_encoding) catch return;
-    var cl_buf: [20]u8 = undefined;
-    const cl_s = std.fmt.bufPrint(&cl_buf, "{d}", .{content_length}) catch "0";
-    enc.writeHeader("content-length", cl_s) catch return;
-
-    const hblock = enc.encoded();
+    // The [:status, content-type, content-encoding] prefix is served from a per-triple cache, only
+    // content-length (which varies) is encoded per call. This path always carries content-length.
+    const hblock = hdr_buf[0..hpack.respHeaderBlock(&hdr_buf, status, content_type, content_encoding, content_length)];
     const flags: u8 = if (end_stream) frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM else frame.FLAG_END_HEADERS;
 
     frame.writeFrameHeader(fd, .{ .length = @intCast(hblock.len), .frame_type = frame.FRAME_TYPE_HEADERS, .flags = flags, .stream_id = sid }) catch return;
@@ -308,7 +364,7 @@ pub fn sendResponseStream(fd: std.posix.fd_t, sid: u31, status: u16, content_typ
         return;
     };
     const slot = if (conn.fd == fd) findSlot(sid, conn.streams, conn.slots) else null;
-    const s = if (slot) |sl| &conn.streams[sl] else {
+    const s = if (slot) |sl| conn.streams[sl] else {
         frame.sendResponseEncoded(fd, sid, status, content_type, content_encoding, body) catch {};
         return;
     };
@@ -493,11 +549,11 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                 }
                 conn.last_stream_id = @max(conn.last_stream_id, sid);
 
-                const slot = slotFor(sid, conn.streams, conn.slots) orelse {
+                const slot = slotFor(conn, sid) orelse {
                     frame.sendRstStream(conn.fd, sid, frame.ERR_REFUSED_STREAM) catch {};
                     continue;
                 };
-                const s = &conn.streams[slot];
+                const s = conn.streams[slot];
                 s.id = sid;
                 s.state = .OPEN;
                 s.header_count = 0;
@@ -526,7 +582,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 
                 s.header_count = conn.hpack_dec.decode(block, &s.headers, s.header_scratch) catch {
                     frame.sendRstStream(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
-                    conn.slots[slot] = false;
+                    releaseSlot(conn, slot);
                     continue;
                 };
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
@@ -543,10 +599,10 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 };
-                const s = &conn.streams[slot];
+                const s = conn.streams[slot];
                 const count = conn.hpack_dec.decode(payload, s.headers[s.header_count..], s.header_scratch) catch {
                     frame.sendRstStream(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
-                    conn.slots[slot] = false;
+                    releaseSlot(conn, slot);
                     continue;
                 };
                 s.header_count += count;
@@ -566,7 +622,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     frame.sendRstStream(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 };
-                const s = &conn.streams[slot];
+                const s = conn.streams[slot];
 
                 var data = payload;
                 var pad_len: usize = 0;
@@ -596,7 +652,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             },
 
             frame.FRAME_TYPE_RST_STREAM => {
-                if (findSlot(fh.stream_id, conn.streams, conn.slots)) |slot| conn.slots[slot] = false;
+                if (findSlot(fh.stream_id, conn.streams, conn.slots)) |slot| releaseSlot(conn, slot);
             },
 
             frame.FRAME_TYPE_GOAWAY => return .close,
@@ -663,8 +719,8 @@ test "zix test: mux sendResponseStream paces a large body by the send window" {
     conn.send_window = 100;
     conn.peer_init_window = 100;
 
-    const slot = slotFor(1, conn.streams, conn.slots).?;
-    const s = &conn.streams[slot];
+    const slot = slotFor(conn, 1).?;
+    const s = conn.streams[slot];
     s.id = 1;
     s.state = .OPEN;
     s.send_window = 100;
@@ -817,4 +873,64 @@ test "zix test: mux passes the accept-encoding request header to the handler" {
     _ = muxFrameLoop(&ae_routes, conn);
 
     try std.testing.expectEqualStrings("br;q=1, gzip;q=0.8", ae_seen_buf[0..ae_seen_len]);
+}
+
+test "zix test: mux pooled stream is reused and reset clean on release" {
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
+
+    // a fresh borrow carries buffers sized to at least the serve options
+    const first = acquireStream(opts) orelse return error.OutOfMemory;
+    try std.testing.expect(first.body.len >= 128);
+    try std.testing.expect(first.header_scratch.len >= 64);
+
+    // dirty every field a request would touch, then return the stream to the pool
+    first.id = 7;
+    first.state = .OPEN;
+    first.header_count = 3;
+    first.body_len = 99;
+    first.pending_body = "parked";
+    first.send_window = 12;
+    releaseStream(first);
+
+    // the next borrow is LIFO, so it is the same object, now reset to defaults with buffers retained
+    const again = acquireStream(opts) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(first, again);
+    try std.testing.expectEqual(@as(u31, 0), again.id);
+    try std.testing.expectEqual(StreamState.IDLE, again.state);
+    try std.testing.expectEqual(@as(usize, 0), again.header_count);
+    try std.testing.expectEqual(@as(usize, 0), again.body_len);
+    try std.testing.expectEqual(@as(usize, 0), again.pending_body.len);
+    try std.testing.expectEqual(@as(i64, 65535), again.send_window);
+    try std.testing.expect(again.body.len >= 128);
+
+    releaseStream(again);
+}
+
+test "zix test: mux stream slots are pooled across connections" {
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    // connection A borrows a slot, then releases it back to the per-worker pool
+    const conn_a = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const slot_a = slotFor(conn_a, 1).?;
+    const stream_a = conn_a.streams[slot_a];
+    try std.testing.expect(conn_a.slots[slot_a]);
+
+    releaseSlot(conn_a, slot_a);
+    try std.testing.expect(!conn_a.slots[slot_a]);
+    conn_a.deinit();
+
+    // a second connection reuses the same pooled stream (LIFO), so stream memory is shared per worker
+    // and does not scale with the connection count
+    const conn_b = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn_b.deinit();
+
+    const slot_b = slotFor(conn_b, 3).?;
+    try std.testing.expectEqual(stream_a, conn_b.streams[slot_b]);
+    try std.testing.expectEqual(@as(u31, 3), conn_b.streams[slot_b].id);
+
+    releaseSlot(conn_b, slot_b);
 }

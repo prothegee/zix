@@ -201,11 +201,46 @@ fn flushPlain(conn: *TlsConn) void {
     if (!sendRaw(conn, ct)) conn.wclose = true;
 }
 
-/// The frame write hook: the mux writes plaintext h2 frames here. Accumulate, sealing in record-sized
-/// chunks. `ctx` is the *TlsConn the worker set before driving the mux.
+/// Seal-in-place toggle. true: seal a full record straight from source via the gather encrypt, so a
+/// large DATA payload is not copied into `plain` first. false: accumulate into `plain` and seal there
+/// (the pre-seal-in-place path). Comptime, so the effect can be A/B'd against an otherwise identical
+/// build without changing any other behavior.
+const seal_in_place = true;
+
+/// Seal one full record (the staged prefix gathered with a slice of the source) and send. Avoids
+/// copying the source slice into `plain` first. prefix.len + tail.len == plain.len (a full record).
+/// Ordering matches flushPlain: records leave in sequence order through sendRaw.
+fn sealGather(conn: *TlsConn, prefix: []const u8, tail: []const u8) void {
+    var sealed: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
+    const ct = conn.tls.encrypt2(prefix, tail, &sealed);
+    if (!sendRaw(conn, ct)) conn.wclose = true;
+}
+
+/// The frame write hook: the mux writes plaintext h2 frames here. With seal_in_place a full record (the
+/// staged prefix plus this write) is sealed straight from source, so a large DATA payload is not copied
+/// into `plain` first, only the sub-record remainder is staged. Otherwise the plaintext accumulates
+/// into `plain` and seals when it fills. `ctx` is the *TlsConn the worker set before driving the mux.
 fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
     const conn: *TlsConn = @ptrCast(@alignCast(ctx));
     var rest = bytes;
+
+    if (seal_in_place) {
+        // Seal every full record that the staged prefix plus `rest` completes, gathering the staged
+        // bytes with a slice of `rest` straight from source (no bulk copy of the payload into `plain`).
+        while (conn.plain_len + rest.len >= conn.plain.len) {
+            const take = conn.plain.len - conn.plain_len;
+            sealGather(conn, conn.plain[0..conn.plain_len], rest[0..take]);
+            conn.plain_len = 0;
+            rest = rest[take..];
+        }
+
+        @memcpy(conn.plain[conn.plain_len..][0..rest.len], rest[0..rest.len]);
+        conn.plain_len += rest.len;
+
+        return;
+    }
+
+    // Accumulate-then-seal: stage into `plain`, flushing a full record when it fills.
     while (rest.len > 0) {
         if (conn.plain_len == conn.plain.len) flushPlain(conn);
 

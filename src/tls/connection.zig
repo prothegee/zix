@@ -87,6 +87,16 @@ pub const Connection = struct {
         return rec;
     }
 
+    /// Encrypt two application-data slices as one record under the server application key. The gather
+    /// form of writeAppData: the send path seals a staged frame-header prefix (a) with the source
+    /// payload (b) without copying b into a contiguous buffer first.
+    pub fn writeAppData2(self: *Connection, a: []const u8, b: []const u8, out: []u8) []const u8 {
+        const rec = record.protect2(out, a, b, .APPLICATION_DATA, self.server_app_key, self.server_app_iv, self.server_app_seq);
+        self.server_app_seq += 1;
+
+        return rec;
+    }
+
     /// readAppData error set: record-layer failures plus the two post-handshake inner-type
     /// conditions a TLS 1.3 server must distinguish (RFC 8446 6, 5.1).
     pub const ReadError = record.Error || error{ PeerClosed, UnexpectedMessage };
@@ -1017,6 +1027,33 @@ test "zix test: connection, readAppData classifies post-handshake inner types (R
     conn.client_app_seq = 2;
     const alert_rec = record.protect(&rec_buf, &[_]u8{ 1, 0 }, .ALERT, key, iv, 2);
     try std.testing.expectError(error.PeerClosed, conn.readAppData(alert_rec, &out));
+}
+
+test "zix test: connection, writeAppData2 gather round-trips through readAppData" {
+    // Server encrypts a gathered (prefix, payload); a peer with the same app key decrypts prefix||payload.
+    var server: Connection = undefined;
+    server.server_app_key = @splat(0x24);
+    server.server_app_iv = @splat(0x68);
+    server.server_app_seq = 0;
+
+    var client: Connection = undefined;
+    client.client_app_key = @splat(0x24);
+    client.client_app_iv = @splat(0x68);
+    client.client_app_seq = 0;
+
+    const prefix = "\x00\x00\x05\x00\x01\x00\x00\x00\x03";
+    const payload = "abcde";
+
+    var rec_buf: [256]u8 = undefined;
+    const rec = server.writeAppData2(prefix, payload, &rec_buf);
+    try std.testing.expectEqual(@as(u64, 1), server.server_app_seq);
+
+    var expect: [64]u8 = undefined;
+    @memcpy(expect[0..prefix.len], prefix);
+    @memcpy(expect[prefix.len..][0..payload.len], payload);
+
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, expect[0 .. prefix.len + payload.len], try client.readAppData(rec, &out));
 }
 
 test "zix test: connection, encryptedAlert emits a fatal alert decryptable as an ALERT record" {
