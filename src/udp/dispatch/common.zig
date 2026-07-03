@@ -1,9 +1,12 @@
 //! zix udp raw-bytes dispatch helpers (ADR-049), shared by the per-model run files.
 //!
 //! What:
-//! - The recvmmsg worker loop and the two run shapes the models map to: `runSingle` (one worker on
-//!   the calling thread) and `runPerCore` (one SO_REUSEPORT worker per CPU). The non-Linux fallback
-//!   lives here too. Each `dispatch/<model>.zig` is a thin wrapper over one of these.
+//! - Only what the per-model files share: the per-datagram serve (`serveDatagram`), the recvmmsg worker
+//!   loop (`workerLoop`) plus its two run shapes (`runSingle`, one worker for ASYNC; `runMulti`, one
+//!   SO_REUSEPORT worker per CPU for POOL / MIXED, which ADR-050 defines as multi-core), the worker
+//!   helpers (`effectiveWorkers` / `pinToCpu` / `setBusyPoll`), and the non-Linux fallback. The per-core
+//!   EPOLL and URING workers own their own loops in `epoll.zig` and `uring.zig` (ADR-050: each model is
+//!   independently tunable, .URING is a real io_uring ring, not an alias of .EPOLL).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,7 +15,6 @@ const Config = @import("../config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const core = @import("../core.zig");
 const datagram = @import("../datagram.zig");
-const Logger = @import("../../logger/logger.zig").Logger;
 
 const posix = std.posix;
 const IpAddress = std.Io.net.IpAddress;
@@ -98,6 +100,15 @@ pub fn setBusyPoll(fd: posix.socket_t, us: u32) void {
     ) catch {};
 }
 
+/// Serve one received datagram to the raw handler: present the peer address and a Sink over the send
+/// batch, then invoke the handler. Shared by the single-worker loop (workerLoop) and the per-core epoll
+/// / io_uring workers (epoll.zig / uring.zig), so the handler-invocation shape lives in one place.
+pub fn serveDatagram(comptime handler: core.HandlerFn, dg: datagram.Datagram, tx: *datagram.SendBatch, fd: posix.socket_t) void {
+    const peer = datagram.sockaddr6ToIp(dg.from);
+    var sink = core.Sink{ .batch = tx, .fd = fd, .sender = dg.from };
+    handler(dg.data, &peer, &sink);
+}
+
 /// One worker: a recvmmsg batch in, handler per datagram, sendmmsg out. `reuse` sets SO_REUSEPORT
 /// (required when several workers bind the same port). Per-core mode (reuse == true) pins this worker
 /// to its assigned CPU. The single-worker mode (reuse == false) stays unpinned.
@@ -127,12 +138,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
             continue;
         };
 
-        for (0..count) |i| {
-            const dg = rx.get(i);
-            const peer = datagram.sockaddr6ToIp(dg.from);
-            var sink = core.Sink{ .batch = &tx, .fd = fd, .sender = dg.from };
-            handler(dg.data, &peer, &sink);
-        }
+        for (0..count) |i| serveDatagram(handler, rx.get(i), &tx, fd);
 
         tx.flush(fd) catch |err| {
             if (config.logger) |lg| lg.system(.WARN, "udp", "raw send error: {}", .{err});
@@ -141,7 +147,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
     }
 }
 
-/// Single worker on the calling thread. Used by the ASYNC / POOL / MIXED models.
+/// Single worker on the calling thread. Used by the ASYNC model (POOL / MIXED run multi-core).
 pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
@@ -149,13 +155,16 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !voi
     workerLoop(handler, config, config.reuse_address, 0);
 }
 
-/// One SO_REUSEPORT worker per CPU. Used by the EPOLL / URING models. Per-core workers each bind the
-/// same port, so SO_REUSEPORT is forced on regardless of the reuse_address flag.
-pub fn runPerCore(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
+/// One SO_REUSEPORT blocking-recvmmsg worker per CPU (POOL / MIXED, which ADR-050 defines as multi-core
+/// everywhere). Per-core workers each bind the same port, so SO_REUSEPORT is forced on regardless of the
+/// reuse_address flag, and each pins to its CPU and owns its own send / recv batches (shared-nothing), so
+/// the kernel load-balances datagrams by 4-tuple. The .EPOLL / .URING siblings add readiness / completion
+/// on top of the same per-core shape (epoll.zig / uring.zig).
+pub fn runMulti(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
     const want = effectiveWorkers(config);
-    logSystem(config, "raw listening on {s}:{d} ({d} workers)", .{ config.ip, config.port, want });
+    logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + recvmmsg)", .{ config.ip, config.port, want });
 
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
