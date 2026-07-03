@@ -322,6 +322,7 @@ Two consequences differ from the other models:
 
 - `pool_size` is the multiplexing worker count for `.EPOLL` (the optimal value is around cpu count), not a blocking pool size. Oversubscribing it only adds scheduler churn.
 - Every route, including server-streaming, is dispatched inline on the worker (no per-stream thread). A streaming handler runs on the event loop, so it must be bounded - a long-running or unbounded stream blocks the other connections on that worker. Use `.ASYNC` for unbounded streaming. The per-stream thread spawn still applies to server-streaming routes under `.ASYNC`, `.POOL`, and `.MIXED`.
+- Server-streaming replies coalesce many gRPC messages into each HTTP/2 DATA frame (up to the 16 KiB default max frame size) instead of one frame per message, so a chatty stream costs far fewer frames on the wire and far less per-frame parsing on the client. See the LLD for the mechanism.
 
 The advertised `max_streams` must be at least the client's concurrent-stream count. A client (for example a benchmark with 100 parallel streams per connection) opens streams optimistically before it sees the server SETTINGS, and any beyond `max_streams` are answered with `REFUSED_STREAM`.
 
