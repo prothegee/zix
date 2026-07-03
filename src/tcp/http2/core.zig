@@ -211,14 +211,15 @@ pub fn Router(comptime routes: []const Route) type {
 }
 
 pub const ServeOpts = struct {
-    /// Maximum concurrent streams per connection.
-    max_streams: usize = 16,
+    /// Maximum concurrent streams per connection (advertised SETTINGS_MAX_CONCURRENT_STREAMS). Each
+    /// stream's slot is borrowed from a per-worker pool, so this is not reserved per connection.
+    max_streams: usize = 128,
     /// MAX_FRAME_SIZE sent in server SETTINGS.
     max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE,
     /// HPACK scratch buffer size per connection (header string storage).
     max_header_scratch: usize = 4096,
-    /// Maximum body buffer per stream in bytes.
-    max_body: usize = 65536,
+    /// Maximum request body buffered per stream in bytes. A larger request body is truncated to this.
+    max_body: usize = 16384,
     /// Per-connection read buffer floor in bytes. The reader is sized to the larger of this and
     /// one max frame, so a larger floor cuts read() and compaction for big frames.
     conn_read_buf_min: usize = 32 * 1024,
@@ -625,7 +626,7 @@ fn dispatchStream(comptime routes: []const Route, stream: *Stream, fd: std.posix
 
 test "zix test: ServeOpts defaults" {
     const opts = ServeOpts{};
-    try std.testing.expectEqual(@as(usize, 16), opts.max_streams);
+    try std.testing.expectEqual(@as(usize, 128), opts.max_streams);
     try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, opts.max_frame_size);
 }
 

@@ -42,14 +42,16 @@ pub const Http2ServerConfig = struct {
     /// unchanged. Mirrors zix.Http1's busy_poll_us: set to e.g. 50 to opt in. No-op when the kernel
     /// lacks SO_BUSY_POLL.
     busy_poll_us: u32 = 0,
-    /// Maximum concurrent streams per connection.
-    max_streams: u32 = 16,
+    /// Maximum concurrent streams per connection, advertised as SETTINGS_MAX_CONCURRENT_STREAMS. The
+    /// .EPOLL / .URING mux borrows each stream's slot from a per-worker pool, so this bounds concurrency
+    /// without reserving the full count per connection.
+    max_streams: u32 = 128,
     /// MAX_FRAME_SIZE setting sent to clients (bytes).
     max_frame_size: u32 = 16384,
     /// HPACK scratch buffer size per connection.
     max_header_scratch: usize = 4096,
-    /// Maximum body buffer per stream (bytes).
-    max_body: usize = 65536,
+    /// Maximum request body buffered per stream (bytes). A larger request body is truncated to this.
+    max_body: usize = 16384,
     /// Per-connection receive buffer in bytes (.EPOLL / .URING mux). Used as a floor: the reader is
     /// sized to the larger of this and one max frame, so a larger value cuts read() and compaction
     /// for big frames.
@@ -121,9 +123,9 @@ test "zix test: Http2ServerConfig stream and frame defaults" {
     defer threaded.deinit();
     const io = threaded.io();
     const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
-    try std.testing.expectEqual(@as(u32, 16), cfg.max_streams);
+    try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);
     try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
-    try std.testing.expectEqual(@as(usize, 65536), cfg.max_body);
+    try std.testing.expectEqual(@as(usize, 16384), cfg.max_body);
 }
 
 test "zix test: Http2ServerConfig logger defaults to null" {
