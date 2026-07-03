@@ -196,9 +196,9 @@ The typed messaging path runs a single async receive loop. The batch and worker 
 | io | required | std.Io backend | | | | | |
 | allocator | required | backing allocator, must be general-purpose | | | | | ArenaAllocator leaks broadcast snapshots |
 | ip | required | bind address | | | | | |
-| port | required | bind port, non-zero for REQUIRED | | | | | zero rejected under REQUIRED |
-| port_mode | `.REQUIRED` | how the port is sourced: REQUIRED (config) or CONFIGURABLE (CLI with fallback) | startup validation | `.CONFIGURABLE` to read --port at runtime | | | REQUIRED rejects a zero port at init |
-| endianness | `.LITTLE` | wire endianness on every send and receive | per-packet conversion | `.LITTLE` for cross-language clients, `.BIG` for network order | | | must match across clients and server |
+| port | required | bind port, must be non-zero | | | | | zero rejected at init |
+| allow_args | false | when true, init reads `--ip` / `--port` from the args it is passed | startup only | set true to override ip and port at runtime | | | args are ignored when false |
+| endianness | `.LITTLE` | wire endianness contract with clients (the typed server relays raw bytes without decoding, the client applies it on every send and receive) | client-side per-packet conversion | `.LITTLE` for cross-language clients, `.BIG` for network order | | | must match across clients and server |
 | conn_timeout_ms | 5000 | ms of silence before a client is considered disconnected | liveness tracking | lower for faster disconnect detection | clients dropped sooner | dead clients linger | too low drops slow but live clients |
 | poll_timeout_ms | 2000 | receive poll interval in ms, sets disconnect check frequency | wakeup frequency | lower for more responsive checks | more frequent wakeups | slower disconnect detection | trades CPU for responsiveness |
 | auto_ack | false | send a 0x06 ACK byte on successful receipt | one extra send per packet | enable for at-least-once feedback | | | adds reply traffic |
@@ -226,7 +226,7 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | allocator | required | backing allocator, general-purpose | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | required | concurrency, EPOLL/URING run one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC/POOL/MIXED run a single worker with CID demux |
+| dispatch_model | required | concurrency: .EPOLL is an epoll readiness loop, .URING an io_uring completion loop, each one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC runs a single worker with CID demux, POOL/MIXED/EPOLL/URING run one per core. .URING falls back to .EPOLL when io_uring is unavailable |
 | workers | 0 | worker count for per-core models, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | only for EPOLL/URING |
 | recv_batch | 32 | datagrams received per recvmmsg syscall | syscalls per batch | raise to cut syscalls | more syscalls | larger buffers | too low loses batching |
 | send_batch | 32 | packets coalesced per sendmmsg flush | syscalls per flush | raise to cut syscalls | more flushes | larger buffers | too low loses batching |
@@ -240,9 +240,10 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | cid_len | 8 | server-issued connection ID length in bytes (RFC 9000) | per-packet CID handling | leave at 8, fixed length enables per-core steering | shorter, fewer distinct CIDs | longer CID overhead per packet | enables future per-core CID steering |
 | max_idle_ms | 30000 | connection idle timeout in ms (RFC 9000 10.1) | liveness | lower for faster reclaim of idle connections | idle connections closed sooner | idle connections linger | too low closes slow but live connections |
 | max_streams | 128 | max concurrent request streams (RFC 9000 4.6) | per-conn stream state | raise for highly multiplexed clients | clients blocked sooner | more per-conn state | too low serializes a multiplexed client |
-| max_datagram_size | 1200 | datagram size in bytes for new connections (initial congestion-window basis) | packet sizing and cwnd, hot | keep at or below path MTU | smaller packets, more per-byte overhead | fragmentation or black-holing above path MTU | 1200 is the QUIC minimum |
-| max_stream_chunk | 1200 | max STREAM-frame payload bytes per 1-RTT packet | bytes per packet, hot | tie to max_datagram_size | more packets per response | fragmentation risk | keep aligned with max_datagram_size |
-| disable_active_migration | false | forbid connection migration (QUIC transport parameter) | | enable to pin connections to a 4-tuple | | | blocks clients that change network path |
+| max_datagram_size | 1200 | wire size targeted for a 1-RTT response datagram, effective size is min(this, client max_udp_payload_size, 16 KiB ceiling) | packet sizing and cwnd, hot | raise (e.g. 8192) only where path MTU is known large (loopback, jumbo LAN): fewer packets per response, so less per-packet header/AEAD/ack work (the static-h3 wall) | smaller packets, more per-packet work | fewer packets, less per-packet work, but a value above the real path MTU fragments on a WAN | never over-sends past the client's advertised limit, also the initial cwnd basis, 1200 is the QUIC minimum |
+| max_stream_chunk | 0 (derive) | explicit cap on STREAM-frame payload bytes per 1-RTT packet, 0 derives it from the datagram size | bytes per packet, hot | leave 0 so raising max_datagram_size widens packets automatically | a small non-zero value forces more packets per response | a large non-zero value approaches the datagram size | 0 means datagram size minus the frame and tag room |
+| max_inflight_packets | 128 | response packets in flight per connection before waiting for acks (congestion-window ceiling and loss-detection ring depth) | multi-packet response throughput, hot | raise for higher per-connection throughput on large responses | smaller send bursts, gentler on a constrained client receive buffer, lower per-conn throughput | bigger window, a large response streams in fewer ACK-clocked rounds, more send bookkeeping | clamped to the compile-time ring capacity (128 packets, connection.zig max_sent_ranges), raising past it needs that bumped and a rebuild |
+| initial_window_packets | 32 | initial congestion window in packets, how much of a response goes out before the first ack (RFC 9002 7.2) | first-flight latency, hot | raise on a low-loss path so a response needs fewer ACK-clocked rounds | smaller first burst, more rounds for a big response | larger first burst, fewer rounds, risk of loss and bufferbloat on a real lossy network | effective first burst is min of this, max_inflight_packets, and the ring capacity |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | |
 
 ## FIX (`FixServerConfig`)
