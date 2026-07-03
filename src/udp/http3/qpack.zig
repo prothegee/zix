@@ -7,6 +7,10 @@
 //! - For a static-only field section the Encoded Field Section Prefix is Required Insert Count 0 /
 //!   Base 0 (two zero bytes). The dynamic table and decoder instructions live in qpack_dynamic.zig.
 //! - Proven against the RFC 7541 Appendix C.1 integer vectors and RFC 9204 representations below.
+//!
+//! Note:
+//! - The static-table encoding is live. StreamRegistry (the at-most-one encoder / decoder stream
+//!   check) is implemented and tested but not enforced in the serve path yet (deferred).
 
 const std = @import("std");
 
