@@ -227,12 +227,12 @@ blocked on a platform.
 
 | Tier | Shape | Best for |
 | :- | :- | :- |
-| A: v1 single | one recv point, inline handling | dev boxes, any OS |
+| A: v1 single | one recv point, inline handling | development hosts, any OS |
 | B: v1 pooled | recv point + CID to worker-pool dispatch | macOS / Windows scaling, mid Linux |
 | C: v2 per-core | per-core SO_REUSEPORT + eBPF CID steering | big Linux (64c class) |
 
-Same engine, the tier follows the machine: a 12-core dev box or any non-Linux host lands on A or B,
-the 64-core Linux box engages C. The user pins it through `dispatch_model` plus the steering knob,
+Same engine, the tier follows the machine: a 12-core host or any non-Linux host lands on A or B,
+the 64-core Linux host engages C. The user pins it through `dispatch_model` plus the steering knob,
 and zix folds down a tier when the platform cannot honor the request.
 
 ### Splitting the dispatch models
