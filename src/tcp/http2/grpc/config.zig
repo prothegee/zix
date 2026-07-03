@@ -41,7 +41,7 @@ pub const GrpcServerConfig = struct {
     /// lacks SO_BUSY_POLL.
     busy_poll_us: u32 = 0,
     /// Maximum concurrent h2 streams per connection.
-    max_streams: usize = 16,
+    max_streams: u32 = 16,
     /// MAX_FRAME_SIZE setting sent to clients (bytes).
     max_frame_size: u32 = 16384,
     /// HPACK scratch buffer size per connection.
@@ -144,7 +144,7 @@ test "zix grpc: GrpcServerConfig stream and body defaults" {
     defer threaded.deinit();
     const io = threaded.io();
     const cfg = GrpcServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC };
-    try std.testing.expectEqual(@as(usize, 16), cfg.max_streams);
+    try std.testing.expectEqual(@as(u32, 16), cfg.max_streams);
     try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
     try std.testing.expectEqual(@as(usize, 65536), cfg.max_body);
 }
