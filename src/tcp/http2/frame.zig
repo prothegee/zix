@@ -285,22 +285,11 @@ pub fn sendResponseEncoded(
 ) !void {
     const hpack = @import("hpack.zig");
     var hdr_buf: [HPACK_ENCODE_SCRATCH]u8 = undefined;
-    var enc = hpack.HpackEncoder.init(&hdr_buf);
 
-    var status_str: [4]u8 = undefined;
-    const status_s = std.fmt.bufPrint(&status_str, "{d}", .{status}) catch "200";
-    try enc.writeHeader(":status", status_s);
-    if (content_type.len > 0)
-        try enc.writeHeader("content-type", content_type);
-    if (content_encoding.len > 0)
-        try enc.writeHeader("content-encoding", content_encoding);
-    if (body.len > 0) {
-        var cl_buf: [20]u8 = undefined;
-        const cl_s = std.fmt.bufPrint(&cl_buf, "{d}", .{body.len}) catch "0";
-        try enc.writeHeader("content-length", cl_s);
-    }
-
-    const hblock = enc.encoded();
+    // The [:status, content-type, content-encoding] prefix is served from a per-triple cache, only
+    // content-length (which varies) is encoded per call. A bodyless response omits content-length.
+    const content_length: ?u64 = if (body.len > 0) body.len else null;
+    const hblock = hdr_buf[0..hpack.respHeaderBlock(&hdr_buf, status, content_type, content_encoding, content_length)];
     const end_stream_flag: u8 = if (body.len == 0) FLAG_END_STREAM | FLAG_END_HEADERS else FLAG_END_HEADERS;
 
     try writeFrameHeader(fd, .{

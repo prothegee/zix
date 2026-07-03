@@ -697,6 +697,132 @@ pub const HpackEncoder = struct {
 };
 
 // --------------------------------------------------------- //
+// Response-header prefix cache
+
+/// Cached HPACK encoding of a response prefix [:status, content-type, content-encoding] for a hot
+/// triple. HpackEncoder is stateless (static table plus literal-without-indexing, never the dynamic
+/// table or a size update), so this block is byte-identical on every connection, and a per-request
+/// content-length field is valid HPACK appended after it. The cache skips the repeated static-table
+/// scans and the Huffman encode of the same content-type on every response. Append-only: readers scan
+/// 0..count lock-free (count published release-ordered after the slot is fully written), the spinlock
+/// serializes only the rare insert (one per distinct triple).
+const RESP_PREFIX_MAX = 32;
+const RESP_CT_MAX = 64;
+const RESP_CE_MAX = 32;
+const RESP_BLOCK_MAX = 96;
+
+const RespPrefix = struct {
+    status: u16,
+    ct_len: u8,
+    ce_len: u8,
+    block_len: u8,
+    ct: [RESP_CT_MAX]u8,
+    ce: [RESP_CE_MAX]u8,
+    block: [RESP_BLOCK_MAX]u8,
+};
+
+var g_resp_prefix: [RESP_PREFIX_MAX]RespPrefix = undefined;
+var g_resp_prefix_count: usize = 0;
+var g_resp_prefix_lock: std.atomic.Value(bool) = .init(false);
+
+fn respPrefixLookup(status: u16, content_type: []const u8, content_encoding: []const u8, count: usize) ?*const RespPrefix {
+    for (g_resp_prefix[0..count]) |*entry| {
+        if (entry.status == status and
+            std.mem.eql(u8, entry.ct[0..entry.ct_len], content_type) and
+            std.mem.eql(u8, entry.ce[0..entry.ce_len], content_encoding)) return entry;
+    }
+
+    return null;
+}
+
+/// Encode [:status, content-type, content-encoding] into dst, returning the byte length. An empty
+/// content_type or content_encoding omits that header, matching writeHeader-based encoding.
+fn encodePrefixInto(dst: []u8, status: u16, content_type: []const u8, content_encoding: []const u8) usize {
+    var enc = HpackEncoder.init(dst);
+
+    var status_str: [4]u8 = undefined;
+    const status_s = std.fmt.bufPrint(&status_str, "{d}", .{status}) catch "200";
+    enc.writeHeader(":status", status_s) catch return enc.pos;
+    if (content_type.len > 0) enc.writeHeader("content-type", content_type) catch return enc.pos;
+    if (content_encoding.len > 0) enc.writeHeader("content-encoding", content_encoding) catch return enc.pos;
+
+    return enc.pos;
+}
+
+/// Write the [:status, content-type, content-encoding] prefix into dst, using the cache for a hot
+/// triple. Encodes and caches on a miss. Falls back to a direct, uncached encode when the triple is
+/// too long to cache or the cache is full, so correctness never depends on a cache hit.
+fn writeRespPrefix(dst: []u8, status: u16, content_type: []const u8, content_encoding: []const u8) usize {
+    const count = @atomicLoad(usize, &g_resp_prefix_count, .acquire);
+    if (respPrefixLookup(status, content_type, content_encoding, count)) |entry| {
+        @memcpy(dst[0..entry.block_len], entry.block[0..entry.block_len]);
+        return entry.block_len;
+    }
+
+    if (content_type.len > RESP_CT_MAX or content_encoding.len > RESP_CE_MAX)
+        return encodePrefixInto(dst, status, content_type, content_encoding);
+
+    while (g_resp_prefix_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+    defer g_resp_prefix_lock.store(false, .release);
+
+    // Re-check under the lock: another worker may have inserted this triple since the load above.
+    const now = @atomicLoad(usize, &g_resp_prefix_count, .acquire);
+    if (respPrefixLookup(status, content_type, content_encoding, now)) |entry| {
+        @memcpy(dst[0..entry.block_len], entry.block[0..entry.block_len]);
+        return entry.block_len;
+    }
+    if (now == RESP_PREFIX_MAX)
+        return encodePrefixInto(dst, status, content_type, content_encoding);
+
+    var scratch: [256]u8 = undefined;
+    const n = encodePrefixInto(&scratch, status, content_type, content_encoding);
+    if (n == 0 or n > RESP_BLOCK_MAX)
+        return encodePrefixInto(dst, status, content_type, content_encoding);
+
+    const entry = &g_resp_prefix[now];
+    entry.status = status;
+    entry.ct_len = @intCast(content_type.len);
+    entry.ce_len = @intCast(content_encoding.len);
+    entry.block_len = @intCast(n);
+    @memcpy(entry.ct[0..content_type.len], content_type);
+    @memcpy(entry.ce[0..content_encoding.len], content_encoding);
+    @memcpy(entry.block[0..n], scratch[0..n]);
+
+    @atomicStore(usize, &g_resp_prefix_count, now + 1, .release);
+
+    @memcpy(dst[0..n], scratch[0..n]);
+    return n;
+}
+
+/// Encode a response header block [:status, content-type, content-encoding, content-length] into dst,
+/// returning its length. The [:status, content-type, content-encoding] prefix is served from a
+/// per-triple cache (byte-identical, the encoder is stateless), only content-length is encoded per
+/// call. A null content_length omits the content-length field (a bodyless END_STREAM response).
+///
+/// Param:
+/// dst - []u8 (destination, must hold the encoded block, e.g. HPACK_ENCODE_SCRATCH)
+/// status - u16 (response status, e.g. 200)
+/// content_type - []const u8 (empty omits the header)
+/// content_encoding - []const u8 (empty omits the header)
+/// content_length - ?u64 (null omits the header)
+///
+/// Return:
+/// - usize (encoded block length in dst)
+pub fn respHeaderBlock(dst: []u8, status: u16, content_type: []const u8, content_encoding: []const u8, content_length: ?u64) usize {
+    var pos = writeRespPrefix(dst, status, content_type, content_encoding);
+
+    if (content_length) |len| {
+        var enc = HpackEncoder{ .buf = dst, .pos = pos };
+        var cl_buf: [20]u8 = undefined;
+        const cl_s = std.fmt.bufPrint(&cl_buf, "{d}", .{len}) catch "0";
+        enc.writeHeader("content-length", cl_s) catch return pos;
+        pos = enc.pos;
+    }
+
+    return pos;
+}
+
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix test: huffEncode and huffDecode roundtrip ascii" {
@@ -831,4 +957,72 @@ test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
 test "zix test: HPACK_STATIC index 8 is :status 200" {
     try std.testing.expectEqualStrings(":status", HPACK_STATIC[8].name);
     try std.testing.expectEqualStrings("200", HPACK_STATIC[8].value);
+}
+
+test "zix test: respHeaderBlock matches writeHeader byte-for-byte" {
+    // Reference: encode the four fields directly through writeHeader.
+    var ref: [256]u8 = undefined;
+    var enc = HpackEncoder.init(&ref);
+    try enc.writeHeader(":status", "200");
+    try enc.writeHeader("content-type", "application/json");
+    try enc.writeHeader("content-length", "1234");
+    const expect = enc.encoded();
+
+    var got: [256]u8 = undefined;
+    const n1 = respHeaderBlock(&got, 200, "application/json", "", 1234);
+    try std.testing.expectEqualSlices(u8, expect, got[0..n1]);
+
+    // Second call serves the cached prefix, output must stay byte-identical.
+    var got2: [256]u8 = undefined;
+    const n2 = respHeaderBlock(&got2, 200, "application/json", "", 1234);
+    try std.testing.expectEqualSlices(u8, expect, got2[0..n2]);
+
+    // Same triple, different content-length: prefix cached, length re-encoded.
+    var ref3: [256]u8 = undefined;
+    var enc3 = HpackEncoder.init(&ref3);
+    try enc3.writeHeader(":status", "200");
+    try enc3.writeHeader("content-type", "application/json");
+    try enc3.writeHeader("content-length", "7");
+    var got3: [256]u8 = undefined;
+    const n3 = respHeaderBlock(&got3, 200, "application/json", "", 7);
+    try std.testing.expectEqualSlices(u8, enc3.encoded(), got3[0..n3]);
+}
+
+test "zix test: respHeaderBlock with content-encoding and bodyless response" {
+    // With a content-encoding header and a content-length.
+    var ref: [256]u8 = undefined;
+    var enc = HpackEncoder.init(&ref);
+    try enc.writeHeader(":status", "200");
+    try enc.writeHeader("content-type", "text/plain");
+    try enc.writeHeader("content-encoding", "br");
+    try enc.writeHeader("content-length", "9");
+    var got: [256]u8 = undefined;
+    const n = respHeaderBlock(&got, 200, "text/plain", "br", 9);
+    try std.testing.expectEqualSlices(u8, enc.encoded(), got[0..n]);
+
+    // Bodyless: null content-length omits the field, prefix only.
+    var ref2: [256]u8 = undefined;
+    var enc2 = HpackEncoder.init(&ref2);
+    try enc2.writeHeader(":status", "404");
+    try enc2.writeHeader("content-type", "text/plain");
+    var got2: [256]u8 = undefined;
+    const n2 = respHeaderBlock(&got2, 404, "text/plain", "", null);
+    try std.testing.expectEqualSlices(u8, enc2.encoded(), got2[0..n2]);
+}
+
+test "zix test: respHeaderBlock round-trips through the decoder" {
+    var block: [256]u8 = undefined;
+    const n = respHeaderBlock(&block, 200, "application/json", "", 42);
+
+    var dec = HpackDecoder.init();
+    var out: [8]Header = undefined;
+    var scratch: [256]u8 = undefined;
+    const count = try dec.decode(block[0..n], &out, &scratch);
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqualStrings(":status", out[0].name);
+    try std.testing.expectEqualStrings("200", out[0].value);
+    try std.testing.expectEqualStrings("content-type", out[1].name);
+    try std.testing.expectEqualStrings("application/json", out[1].value);
+    try std.testing.expectEqualStrings("content-length", out[2].name);
+    try std.testing.expectEqualStrings("42", out[2].value);
 }
