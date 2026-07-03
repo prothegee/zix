@@ -230,8 +230,8 @@ The certificate can be ECDSA P-256, Ed25519, or RSA, from the same `Tls.Context`
 
 The live path uses the QPACK static table plus literals only (RFC 9204). Requests are decoded, responses encoded, both with a Required-Insert-Count-0 / Base-0 field-section prefix (the two-zero-byte static-only prefix).
 
-- Request decode: pulls `:method` and `:path` out of the HEADERS field section (indexed field line, or literal field line with a static name reference). A Huffman-encoded `:path` is decoded (RFC 7541 Appendix B) into per-connection scratch.
-- Response encode: maps the status code to a static-table index for `{103, 200, 304, 404, 503}` (default 200), inside an HTTP/3 HEADERS frame followed by a DATA frame.
+- Request decode: pulls `:method`, `:path`, and `accept-encoding` out of the HEADERS field section (indexed field line, or literal field line with a static name reference). A Huffman-encoded `:path` or `accept-encoding` value is decoded (RFC 7541 Appendix B) into scratch. `accept-encoding` is what a handler negotiates a pre-compressed response against.
+- Response encode: maps the status code to a static-table index for `{103, 200, 304, 404, 503}` (default 200) and, when the handler set `content_encoding`, appends the indexed `content-encoding` line (static index 42 br / 43 gzip), inside an HTTP/3 HEADERS frame followed by a DATA frame. The engine emits the header only: it never compresses, the handler serves an already-coded body.
 
 The QPACK dynamic table is fully implemented and tested but not wired into the serve path: there is no non-zero dynamic-capacity config, so the encoder / decoder stay static-only.
 
