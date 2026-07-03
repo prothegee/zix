@@ -140,6 +140,13 @@ __*Update:*__
 - DATA-frame coalescing untuk gRPC server-streaming (ADR-057):
     - Server-streaming `zix.Grpc` memadatkan pesan berurutan menjadi DATA frame HTTP/2 yang lebih sedikit dan lebih besar (hingga max frame size default 16 KiB) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di klien. Perbaikan ini ada di `muxDispatch` bersama, jadi `.URING`, `.EPOLL`, dan kedua jalur mux TLS mewarisinya. Unary tetap satu frame per pesan dan byte-nya persis sama. Jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) belum dipadatkan.
 
+    ---
+
+- Negosiasi content-encoding HTTP/3:
+    - `zix.Http3` mendapat content-negotiation pada response. `req.accept_encoding` mengekspos Accept-Encoding klien (didekode dari QPACK static entry 31 atau literal, Huffman diperluas), dan handler memanggil `res.setContentEncoding(.br)` / `.gzip`, yang memancarkan header response `content-encoding` sebagai satu QPACK indexed line (indeks static 42 br / 43 gzip). Engine tidak pernah mengompresi di jalur kirim: handler menyajikan body yang sudah ter-compressed (file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request dan aturan perf / memory tetap terpenuhi. Menyajikan varian pre-compressed yang lebih kecil berarti lebih sedikit packet per response, lever untuk static-serving.
+    - Static table QPACK diperluas dari indeks 0..28 ke 0..43 (RFC 9204 Appendix A), mencakup `accept-encoding` (31) dan `content-encoding` br / gzip (42 / 43). Decoder request menelusuri melewati pseudo-header untuk menangkap `accept-encoding`, dan `buildRequestStreamContent` / `buildStreamPrefix` memancarkan line `content-encoding` (`SendStream` menyimpan coding-nya agar body multi-packet yang di-resume tetap membawa header-nya). Perubahan ini ada di `dispatch/common.zig` bersama, jadi setiap dispatch model mewarisinya.
+    - `zix.Http3.ContentEncoding` diekspor. `examples/tls/http3_basic.zig` mendapat route `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br. Docs `hld-http3`, `lld-http3` (en dan -id) diperbarui.
+
 <br>
 
 __*Fix:*__
