@@ -96,6 +96,12 @@ pub const GrpcContext = struct {
     /// in the initial HEADERS frame. Set at dispatch when opts.compress is enabled and
     /// the client advertised grpc-accept-encoding: gzip.
     _resp_gzip: bool = false,
+    /// Server-streaming DATA-frame coalescing buffer. When set (the mux streaming path), sendMessage
+    /// packs gRPC-framed messages here and emits them as one h2 DATA frame per grpc_stream_coalesce_cap
+    /// worth of payload, instead of one tiny DATA frame per message. Null on the unary and thread
+    /// paths, which keep one frame per message. _coal_len is the bytes currently packed.
+    _coal: ?[]u8 = null,
+    _coal_len: usize = 0,
 
     /// Read the next gRPC message from the buffered request stream.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
@@ -174,9 +180,50 @@ pub const GrpcContext = struct {
         self._sendDataFrame(content_type, data, false);
     }
 
+    /// Emit the packed coalesce buffer as one h2 DATA frame into the cork, then reset it. No-op when
+    /// nothing is packed. The frame length is known up front, so no back-patch is needed and the cork
+    /// may flush freely between frames.
+    fn _emitCoalesced(self: *GrpcContext, out: *ReplyStage) void {
+        if (self._coal_len == 0) return;
+
+        const coal = self._coal.?;
+        var hdr: [h2.FRAME_HEADER_LEN]u8 = undefined;
+        h2.encodeFrameHeader(&hdr, .{
+            .length = @intCast(self._coal_len),
+            .frame_type = h2.FRAME_TYPE_DATA,
+            .flags = 0,
+            .stream_id = self.stream_id,
+        });
+        out.append(&hdr);
+        out.append(coal[0..self._coal_len]);
+
+        self._coal_len = 0;
+    }
+
     fn _sendDataFrame(self: *GrpcContext, content_type: []const u8, payload: []const u8, compress: bool) void {
         if (self._out) |out| {
             self._flushHeaders(content_type);
+
+            // Streaming path: pack the gRPC-framed message (5-byte prefix + payload) into the
+            // coalesce buffer, flushing it to a DATA frame first when this message would overflow.
+            // Messages that fit the buffer ride out under one shared frame header.
+            if (self._coal) |coal| {
+                const framed = frame.grpc_prefix_len + payload.len;
+                if (framed <= coal.len) {
+                    if (self._coal_len + framed > coal.len) self._emitCoalesced(out);
+
+                    frame.writeGrpcPrefix(coal[self._coal_len..][0..frame.grpc_prefix_len], compress, @intCast(payload.len));
+                    @memcpy(coal[self._coal_len + frame.grpc_prefix_len ..][0..payload.len], payload);
+                    self._coal_len += framed;
+                    self._sent_bytes += payload.len;
+
+                    return;
+                }
+
+                // A single message larger than the coalesce buffer: flush what is packed, then let it
+                // ride out as its own DATA frame below (preserving wire order).
+                self._emitCoalesced(out);
+            }
 
             var head: [14]u8 = undefined;
             _ = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
@@ -219,6 +266,8 @@ pub const GrpcContext = struct {
         const status_code = self._grpc_status;
 
         if (self._out) |out| {
+            if (self._coal != null) self._emitCoalesced(out);
+
             var buf: [frame.headers_frame_scratch]u8 = undefined;
             const n = if (self._hdr_sent)
                 frame.buildGrpcTrailer(&buf, self.stream_id, status_code, grpc_message)
@@ -459,6 +508,14 @@ const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;
 /// path. A larger payload keeps the two-write path so it is never copied through the stack
 /// buffer. The unary path already coalesces through the cork buffer, so this is streaming only.
 const grpc_stream_inline_cap: usize = 4096;
+
+/// Server-streaming DATA-frame coalescing cap (mux cork path). A server-streaming reply is many
+/// tiny gRPC messages; emitting one h2 DATA frame per message spends a 9-byte frame header (and a
+/// client-side frame parse) on every 2-to-a-few-byte payload. Instead, consecutive messages are
+/// packed into one DATA frame up to this many payload bytes, cutting frame headers and client
+/// parses by the pack factor. Kept at the HTTP/2 default SETTINGS_MAX_FRAME_SIZE (16 KiB) so the
+/// coalesced frame never exceeds what a client that did not raise its max frame size will accept.
+const grpc_stream_coalesce_cap: usize = 16384;
 
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
@@ -1481,6 +1538,10 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
 
     const resp_gzip = conn.opts.compress and headersAcceptGzip(stream.headers[0..stream.header_count]);
 
+    // Server-streaming replies pack many messages per DATA frame through this buffer (see
+    // _sendDataFrame). Unary keeps one frame per message, so it gets no coalesce buffer.
+    var coal_buf: [grpc_stream_coalesce_cap]u8 = undefined;
+
     var ctx = GrpcContext{
         .fd = conn.fd,
         .stream_id = stream.id,
@@ -1494,6 +1555,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
         ._write_mutex = null,
         ._out = &conn.stage,
         ._resp_gzip = resp_gzip,
+        ._coal = if (is_streaming) &coal_buf else null,
     };
 
     if (is_streaming) setTcpCork(conn.fd, true);
@@ -2115,6 +2177,89 @@ test "zix grpc: ReplyStage payload larger than buf writes directly" {
     var out: [16]u8 = undefined;
     const n = try std.posix.read(fds[0], &out);
     try std.testing.expectEqualStrings("hello world", out[0..n]);
+}
+
+// Walk staged h2 frames, counting DATA frames and the gRPC messages packed inside them, and the
+// largest DATA payload seen. Used by the coalescing tests below.
+const StagedFrames = struct { data_frames: usize, messages: usize, max_data_payload: usize };
+
+fn walkStagedDataFrames(buf: []const u8) StagedFrames {
+    var out = StagedFrames{ .data_frames = 0, .messages = 0, .max_data_payload = 0 };
+    var pos: usize = 0;
+    while (pos + h2.FRAME_HEADER_LEN <= buf.len) {
+        const flen = (@as(usize, buf[pos]) << 16) | (@as(usize, buf[pos + 1]) << 8) | buf[pos + 2];
+        const ftype = buf[pos + 3];
+        const payload = buf[pos + h2.FRAME_HEADER_LEN ..][0..flen];
+        pos += h2.FRAME_HEADER_LEN + flen;
+
+        if (ftype != h2.FRAME_TYPE_DATA) continue;
+
+        out.data_frames += 1;
+        if (flen > out.max_data_payload) out.max_data_payload = flen;
+
+        var mp: usize = 0;
+        while (mp + frame.grpc_prefix_len <= payload.len) {
+            const mlen = std.mem.readInt(u32, payload[mp + 1 ..][0..4], .big);
+            mp += frame.grpc_prefix_len + mlen;
+            out.messages += 1;
+        }
+    }
+    return out;
+}
+
+test "zix grpc: server-streaming packs many messages into one DATA frame" {
+    var backing: [4096]u8 = undefined;
+    var stage = ReplyStage{ .fd = -1, .buf = &backing };
+    var coal: [grpc_stream_coalesce_cap]u8 = undefined;
+
+    var ctx = GrpcContext{
+        .fd = -1,
+        .stream_id = 1,
+        ._body = &.{},
+        ._pos = 0,
+        ._hdr_sent = true, // skip HEADERS so the stage holds only DATA frames and the trailer
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        ._out = &stage,
+        ._coal = &coal,
+    };
+
+    ctx.sendMessage("application/grpc", "aa");
+    ctx.sendMessage("application/grpc", "bb");
+    ctx.sendMessage("application/grpc", "cc");
+    ctx.finish(.OK, "");
+
+    const walked = walkStagedDataFrames(stage.buf[0..stage.len]);
+    try std.testing.expectEqual(@as(usize, 1), walked.data_frames);
+    try std.testing.expectEqual(@as(usize, 3), walked.messages);
+}
+
+test "zix grpc: server-streaming DATA coalescing respects the frame cap" {
+    var backing: [4096]u8 = undefined;
+    var stage = ReplyStage{ .fd = -1, .buf = &backing };
+    var coal: [16]u8 = undefined; // holds two framed 2-byte messages (7 bytes each), then must flush
+
+    var ctx = GrpcContext{
+        .fd = -1,
+        .stream_id = 1,
+        ._body = &.{},
+        ._pos = 0,
+        ._hdr_sent = true,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        ._out = &stage,
+        ._coal = &coal,
+    };
+
+    var sent: usize = 0;
+    while (sent < 5) : (sent += 1) ctx.sendMessage("application/grpc", "xy");
+    ctx.finish(.OK, "");
+
+    // Five 7-byte messages under a 16-byte cap pack two-per-frame: 3 DATA frames, none over the cap.
+    const walked = walkStagedDataFrames(stage.buf[0..stage.len]);
+    try std.testing.expectEqual(@as(usize, 3), walked.data_frames);
+    try std.testing.expectEqual(@as(usize, 5), walked.messages);
+    try std.testing.expect(walked.max_data_payload <= coal.len);
 }
 
 test "zix grpc: serveCached is a no-op without a cache or with an empty path" {

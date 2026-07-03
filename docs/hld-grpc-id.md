@@ -322,6 +322,7 @@ Dua konsekuensi berbeda dari model lain:
 
 - `pool_size` adalah jumlah worker multiplex untuk `.EPOLL` (nilai optimal sekitar jumlah cpu), bukan ukuran pool blocking. Memberi nilai terlalu besar hanya menambah churn scheduler.
 - Setiap route, termasuk server-streaming, di-dispatch inline pada worker (tanpa thread per stream). Handler streaming berjalan di event loop, jadi harus terbatas - stream yang berjalan lama atau tak terbatas memblokir koneksi lain pada worker itu. Gunakan `.ASYNC` untuk streaming tak terbatas. Spawn thread per stream tetap berlaku untuk route server-streaming pada `.ASYNC`, `.POOL`, dan `.MIXED`.
+- Reply server-streaming memadatkan banyak pesan gRPC ke tiap DATA frame HTTP/2 (hingga max frame size default 16 KiB) alih-alih satu frame per pesan, jadi stream yang banyak-pesan memakai jauh lebih sedikit frame di wire dan jauh lebih sedikit parsing per-frame di klien. Lihat LLD untuk mekanismenya.
 
 `max_streams` yang diiklankan harus minimal sebanyak jumlah stream konkuren client. Sebuah client (misalnya benchmark dengan 100 stream paralel per koneksi) membuka stream secara optimistis sebelum melihat SETTINGS server, dan yang melebihi `max_streams` dijawab dengan `REFUSED_STREAM`.
 

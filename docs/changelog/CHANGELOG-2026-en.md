@@ -135,6 +135,11 @@ __*Update:*__
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` on `zix.Udp` (`UdpServerConfig`), used by the raw path (`zix.Udp.Raw`, ADR-049). Additive, the typed `Server(Packet)` is unchanged.
     - `public_dir` and `public_dir_upload` on `zix.Http1` (`Http1ServerConfig`), static file serving for unmatched routes mirroring `zix.Http`. A non-empty `public_dir` is validated at `run()` and yields `error.PublicDirNotFound` when absent.
 
+    ---
+
+- gRPC server-streaming DATA-frame coalescing (ADR-057):
+    - `zix.Grpc` server-streaming packs consecutive messages into fewer, larger HTTP/2 DATA frames (up to the 16 KiB default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. The fix lives in the shared `muxDispatch`, so `.URING`, `.EPOLL`, and both TLS mux paths inherit it. Unary keeps one frame per message and is byte-for-byte unchanged. The thread path (`.ASYNC` / `.POOL` / `.MIXED`) is not coalesced yet.
+
 <br>
 
 __*Fix:*__

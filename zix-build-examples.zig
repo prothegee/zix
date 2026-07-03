@@ -8,7 +8,8 @@ pub fn addSteps(
 ) void {
     // Examples: not built by default. Third field is the group tag used to wire
     // per-category steps. `zig build examples` builds all, `zig build example-<group>`
-    // builds one category, `zig build example-<name>` builds and runs a single one.
+    // builds one category, `zig build example-<name>` builds a single one (run the
+    // built binary from zig-out/bin).
     const examples = .{
         .{ "example-tcp_server_1_async", "examples/tcp_server_1_async.zig", "tcp" },
         .{ "example-tcp_server_2_pool", "examples/tcp_server_2_pool.zig", "tcp" },
@@ -170,11 +171,14 @@ pub fn addSteps(
         else
             @compileError("unknown example group tag: " ++ pair[2]);
 
-        group.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        const install = b.addInstallArtifact(exe, .{});
+        group.dependOn(&install.step);
 
-        const run = b.addRunArtifact(exe);
-        const run_step = b.step(pair[0], "Run " ++ pair[0]);
-        run_step.dependOn(&run.step);
+        // `example-<name>` builds and installs the binary to zig-out/bin. It does not run it, so
+        // building one (or all, via `zig build examples`) never blocks on a server example. Run a
+        // built example with `./zig-out/bin/example-<name>`.
+        const build_step = b.step(pair[0], "Build " ++ pair[0]);
+        build_step.dependOn(&install.step);
     }
 
     // --------------------------------------------------------- //

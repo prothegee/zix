@@ -1234,4 +1234,21 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-057: gRPC server-streaming DATA-frame coalescing
+
+**Status:** Accepted
+
+**Context:** gRPC server-streaming emitted one HTTP/2 DATA frame per message. Each `sendMessage` wrote a 9-byte frame header plus a 5-byte gRPC prefix wrapping the payload, so a `count = 5000` reply was 5000 tiny DATA frames, about 45 KiB of frame headers, and 5000 frame parses on the client. On the HttpArena gRPC benchmark the server-streaming cells (`stream-grpc` / `stream-grpc-tls`) left the server at 5 to 10 percent CPU, idle, with throughput well below what that headroom allowed. The wall was the load client parsing frames, not zix. A first attempt to grow the reply cork (to avoid a mid-handler blocking flush) did not move throughput and was reverted, because the worker was never parked on that flush.
+
+**Decision:** Coalesce consecutive gRPC messages into fewer, larger DATA frames on the mux cork path. `GrpcContext` gains an optional coalesce buffer (`_coal`). `muxDispatch` installs one for a server-streaming route. `sendMessage` packs each gRPC-framed message into the buffer and emits one DATA frame per `grpc_stream_coalesce_cap` (16 KiB, the HTTP/2 default `SETTINGS_MAX_FRAME_SIZE`), flushing the remainder at `finish()`. The frame length is known before the frame is written (pack, then emit), so there is no back-patch and the cork may flush freely between frames. Unary and the thread path (`.ASYNC` / `.POOL` / `.MIXED`) keep one frame per message (`_coal` null), so unary is byte-for-byte unchanged.
+
+**Rationale:** The lever is the peer's per-frame cost, not the server's send. With the server idle and every send path already cheap, throughput was capped by the load client parsing HTTP/2 frames. Packing about 5000 messages into about 3 DATA frames cuts the frame-header bytes on the wire roughly in half and the client's frame-parse count by about 1600x. The 16 KiB cap keeps every emitted frame within a client's default max frame size, so no client reconfiguration is needed, and the message stream inside the DATA payload is unchanged (a conformant gRPC client reassembles length-prefixed messages regardless of frame boundaries). The fix lives in the shared `muxDispatch`, so `.URING`, `.EPOLL`, and both TLS mux paths inherit it in the one change.
+
+**Consequences:**
+- `stream-grpc` and `stream-grpc-tls` throughput rose about 44 to 50 percent (roughly 2.3M to 3.4M messages per second), with the server still at roughly 6 to 9 percent CPU.
+- Unary is unchanged: one message, one frame.
+- Deferred: the thread path (`.ASYNC` / `.POOL` / `.MIXED`) still emits one frame per message. It has no cork to pack into and needs its own per-context accumulator, deferred until the URING and EPOLL sweep across the other engines lands.
+
+---
+
 ###### end of adr

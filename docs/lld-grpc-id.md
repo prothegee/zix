@@ -105,7 +105,7 @@ pub const GrpcMuxConn = struct {
 
 `rbuf` berukuran `max(32 KB, max_frame_size + 256 + 9)`.
 
-`init` memanggil `buildSettingsFrame(&settings_frame, opts)` sekali untuk meng-encode blob SETTINGS server 33 byte (header 9 byte + 4 param), dan mengarahkan `stage.buf` ke `stage_buf` 64 KB. Handshake menambahkan `settings_frame` apa adanya (tanpa loop encode per koneksi), dan stage lebih besar membuat reply streaming ~5000 pesan (~85 KB puncak) flush dalam dua write dan ~100 reply unary konkuren (~6 KB) digabung menjadi satu write.
+`init` memanggil `buildSettingsFrame(&settings_frame, opts)` sekali untuk meng-encode blob SETTINGS server 33 byte (header 9 byte + 4 param), dan mengarahkan `stage.buf` ke `stage_buf` 64 KB. Handshake menambahkan `settings_frame` apa adanya (tanpa loop encode per koneksi). Stage 64 KB menggabungkan ~100 reply unary konkuren (~6 KB) menjadi satu write, dan reply server-streaming memadatkan pesan-pesannya menjadi DATA frame yang lebih sedikit dan lebih besar (lihat `muxDispatch`), sehingga reply ~5000 pesan pun tetap jauh di bawah stage dan keluar dalam satu write.
 
 ### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
 
@@ -162,6 +162,8 @@ Frame kontrol di-stage via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageG
 ### muxDispatch(comptime routes, conn, stream)
 
 Membangun `GrpcContext` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), lalu `Router(routes).dispatch`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
+
+Reply server-streaming dipadatkan pada lapisan gRPC. `muxDispatch` memberi route streaming sebuah buffer coalesce per-call (`ctx._coal`), dan `sendMessage` memadatkan pesan-pesan yang sudah ber-frame gRPC ke dalamnya, mengeluarkan satu DATA frame HTTP/2 per `grpc_stream_coalesce_cap` (16 KiB, max frame size default HTTP/2) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di sisi klien. Unary tetap satu frame per pesan (`_coal` null), jadi byte-nya persis sama.
 
 Untuk route streaming (dideteksi oleh `routeIsStreaming(routes, path)`), dispatch dibungkus dalam `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP. Route unary tidak di-cork (sudah keluar dalam satu write). `setTcpCork` no-op pada target non-Linux.
 

@@ -503,7 +503,7 @@ The real entry points are the named steps. List them any time with `zig build -l
 | `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
 | `zig build examples` | Build every example into `zig-out/bin/`. |
 | `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
-| `zig build example-<name>` | Build and run one example, for example `example-http1_websocket`. |
+| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. Run it from there. |
 | `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-epoll`. |
 | `zig build test-runner-all` | Run every server-plus-client integration runner. |
 

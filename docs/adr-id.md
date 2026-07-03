@@ -1234,4 +1234,21 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-057: DATA-frame coalescing untuk gRPC server-streaming
+
+**Status:** Accepted
+
+**Konteks:** gRPC server-streaming mengeluarkan satu DATA frame HTTP/2 per pesan. Tiap `sendMessage` menulis header frame 9 byte plus prefix gRPC 5 byte yang membungkus payload, jadi reply `count = 5000` adalah 5000 DATA frame kecil, sekitar 45 KiB header frame, dan 5000 parse frame di klien. Pada benchmark gRPC HttpArena, cell server-streaming (`stream-grpc` / `stream-grpc-tls`) membuat server hanya 5 sampai 10 persen CPU, idle, dengan throughput jauh di bawah headroom itu. Dindingnya adalah klien beban yang mem-parse frame, bukan zix. Percobaan pertama menumbuhkan reply cork (untuk menghindari blocking flush di tengah handler) tidak menggeser throughput dan di-revert, karena worker tidak pernah terparkir pada flush itu.
+
+**Keputusan:** Padatkan pesan gRPC berurutan menjadi DATA frame yang lebih sedikit dan lebih besar pada jalur mux cork. `GrpcContext` mendapat buffer coalesce opsional (`_coal`). `muxDispatch` memasangnya untuk route server-streaming. `sendMessage` memadatkan tiap pesan ber-frame gRPC ke dalam buffer dan mengeluarkan satu DATA frame per `grpc_stream_coalesce_cap` (16 KiB, `SETTINGS_MAX_FRAME_SIZE` default HTTP/2), mem-flush sisanya pada `finish()`. Panjang frame diketahui sebelum frame ditulis (pack, lalu emit), jadi tidak ada back-patch dan cork boleh flush bebas antar frame. Unary dan jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) tetap satu frame per pesan (`_coal` null), jadi unary byte-nya persis sama.
+
+**Rasional:** Levernya adalah biaya per-frame di peer, bukan send server. Dengan server idle dan tiap jalur send sudah murah, throughput dibatasi oleh klien beban yang mem-parse frame HTTP/2. Memadatkan sekitar 5000 pesan menjadi sekitar 3 DATA frame memangkas byte header frame di wire kira-kira setengah dan jumlah parse frame di klien sekitar 1600x. Cap 16 KiB menjaga tiap frame yang dikeluarkan tetap dalam max frame size default klien, jadi tidak perlu rekonfigurasi klien, dan aliran pesan di dalam payload DATA tidak berubah (klien gRPC yang conformant merakit ulang pesan length-prefixed terlepas dari batas frame). Perbaikan ini ada di `muxDispatch` bersama, jadi `.URING`, `.EPOLL`, dan kedua jalur mux TLS mewarisinya dalam satu perubahan.
+
+**Konsekuensi:**
+- Throughput `stream-grpc` dan `stream-grpc-tls` naik sekitar 44 sampai 50 persen (kira-kira 2.3M sampai 3.4M pesan per detik), dengan server tetap sekitar 6 sampai 9 persen CPU.
+- Unary tidak berubah: satu pesan, satu frame.
+- Ditunda: jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) masih mengeluarkan satu frame per pesan. Ia tidak punya cork untuk dipadatkan dan butuh akumulator per-context sendiri, ditunda sampai sweep URING dan EPOLL lintas engine lain mendarat.
+
+---
+
 ###### end of adr
