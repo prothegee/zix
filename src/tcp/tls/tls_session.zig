@@ -199,6 +199,12 @@ pub const Session = struct {
         return self.conn.writeAppData(plaintext, out);
     }
 
+    /// Gather form of encrypt: seal a staged prefix (a) followed by source bytes (b) as one
+    /// application_data record, so the send path need not copy b into a contiguous buffer first.
+    pub fn encrypt2(self: *Session, a: []const u8, b: []const u8, out: []u8) []const u8 {
+        return self.conn.writeAppData2(a, b, out);
+    }
+
     /// The close_notify alert record, sent before closing a healthy connection.
     pub fn closeNotify(self: *Session, out: []u8) []const u8 {
         return self.conn.closeNotify(out);

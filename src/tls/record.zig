@@ -99,6 +99,43 @@ pub fn protect(out: []u8, plaintext: []const u8, inner_type: ContentType, key: [
     return out[0 .. 5 + record_length];
 }
 
+/// Protect two plaintext slices as one TLS 1.3 record: AEAD-seal (a || b || inner content type). This
+/// is the gather form of `protect`: it avoids the caller concatenating `a` and `b` into one buffer
+/// first (the send path stages only a small frame-header prefix in `a` and passes the large payload as
+/// `b` straight from source). Byte-identical to `protect` on the concatenation.
+///
+/// Param:
+/// out - []u8 (must hold 5 + a.len + b.len + 1 + tag_length bytes)
+/// a - the first plaintext slice (e.g. a staged frame-header prefix)
+/// b - the second plaintext slice (e.g. the source payload)
+/// inner_type - the true content type (travels inside the AEAD)
+/// key - the AES-128-GCM key
+/// iv - the static iv
+/// sequence - the record sequence number for this key
+///
+/// Return:
+/// - []const u8 (the wire record)
+pub fn protect2(out: []u8, a: []const u8, b: []const u8, inner_type: ContentType, key: [key_length]u8, iv: [iv_length]u8, sequence: u64) []const u8 {
+    const plaintext_len = a.len + b.len;
+    const inner_length = plaintext_len + 1;
+    const record_length = inner_length + tag_length;
+
+    out[0] = @intFromEnum(ContentType.APPLICATION_DATA);
+    std.mem.writeInt(u16, out[1..3], legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @intCast(record_length), .big);
+
+    var inner: [max_plaintext + 1]u8 = undefined;
+    @memcpy(inner[0..a.len], a);
+    @memcpy(inner[a.len..][0..b.len], b);
+    inner[plaintext_len] = @intFromEnum(inner_type);
+
+    var tag: [tag_length]u8 = undefined;
+    Aes128Gcm.encrypt(out[5 .. 5 + inner_length], &tag, inner[0..inner_length], out[0..5], nonce(iv, sequence), key);
+    @memcpy(out[5 + inner_length .. 5 + inner_length + tag_length], &tag);
+
+    return out[0 .. 5 + record_length];
+}
+
 /// Deprotect a wire record: AEAD-open into `out`, strip the zero padding and inner content type,
 /// and return the true type + data. record_overflow and bad_record_mac per RFC 8446 5.2.
 ///
@@ -146,6 +183,35 @@ test "record protect/deprotect round trip" {
     const opened = try deprotect(&plain_buf, record, key, iv, 0);
     try std.testing.expectEqual(ContentType.APPLICATION_DATA, opened.inner_type);
     try std.testing.expectEqualSlices(u8, message, opened.data);
+}
+
+test "record protect2 gather equals protect on the concatenation and round-trips" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    // A staged 9-byte frame-header prefix plus a source payload, the shape the send path gathers.
+    const prefix = "\x00\x00\x05\x00\x01\x00\x00\x00\x03";
+    const payload = "abcde";
+
+    var gathered_buf: [256]u8 = undefined;
+    const gathered = protect2(&gathered_buf, prefix, payload, .APPLICATION_DATA, key, iv, 7);
+
+    // Reference: protect on the pre-concatenated plaintext at the same sequence.
+    var concat: [64]u8 = undefined;
+    @memcpy(concat[0..prefix.len], prefix);
+    @memcpy(concat[prefix.len..][0..payload.len], payload);
+    var ref_buf: [256]u8 = undefined;
+    const ref = protect(&ref_buf, concat[0 .. prefix.len + payload.len], .APPLICATION_DATA, key, iv, 7);
+
+    try std.testing.expectEqualSlices(u8, ref, gathered);
+
+    // And the gathered record deprotects back to prefix || payload.
+    var plain_buf: [256]u8 = undefined;
+    const opened = try deprotect(&plain_buf, gathered, key, iv, 7);
+    try std.testing.expectEqual(ContentType.APPLICATION_DATA, opened.inner_type);
+    try std.testing.expectEqualSlices(u8, concat[0 .. prefix.len + payload.len], opened.data);
 }
 
 test "record deprotect failures: bad tag, wrong seq, overflow" {
