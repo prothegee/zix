@@ -135,7 +135,7 @@ Seal (send):
 QPACK static-table field lines (RFC 9204). A static-only field section uses a Required-Insert-Count-0 / Base-0 prefix (two zero bytes).
 
 - `decodePrefixedInt` / `encodePrefixedInt`: the RFC 7541 5.1 prefixed integer every representation rides on.
-- `static_table`: the leading 29 entries (indices 0..28) of RFC 9204 Appendix A, covering the pseudo-headers plus common fields (`:method` GET/POST/etc. at 17..21, `:status` 200/304/404/503 at 25..28, `:path` at 1, `:authority` at 0).
+- `static_table`: the leading 44 entries (indices 0..43) of RFC 9204 Appendix A, covering the pseudo-headers plus common fields (`:method` GET/POST/etc. at 17..21, `:status` 200/304/404/503 at 25..28, `:path` at 1, `:authority` at 0), and the content-negotiation entries used by the serve path: `accept-encoding` (index 31, request input) and `content-encoding` br / gzip (indices 42 / 43, response output).
 - `decodeIndexedFieldLine` (RFC 9204 4.5.2) and `decodeLiteralNameRef` (4.5.4) for decode, `encodeStaticIndexedFieldLine` for encode.
 - `StreamRegistry`: the at-most-one encoder / decoder stream check (implemented, not enforced yet).
 
@@ -158,15 +158,15 @@ The RFC 7541 Appendix B Huffman decoder QPACK shares with HPACK, used for string
 Decodes a request out of a decrypted 1-RTT payload.
 
 - `parseRequests(payload, out)`: scans for client-initiated bidi STREAM frames (`stream.id & 0x03 == 0`), decoding each in arrival order up to `max_requests_per_packet` (96). `parseRequest` returns the first.
-- `decodeRequestStream` walks the HTTP/3 frames inside the stream data for the first HEADERS frame (type 0x01), and `decodeHeaders` QPACK-decodes the field section, reading the RIC / Base prefix and then indexed or literal-name-ref field lines, stopping as soon as `:method` and `:path` are both found.
-- `DecodedRequest { method, path, path_huffman }` carries the Huffman flag through, decoded later by `decodePath`.
+- `decodeRequestStream` walks the HTTP/3 frames inside the stream data for the first HEADERS frame (type 0x01), and `decodeHeaders` QPACK-decodes the field section, reading the RIC / Base prefix and then indexed or literal-name-ref field lines. It captures `:method` and `:path` (the pseudo-headers, first) and `accept-encoding` (a regular field, so the scan continues past the pseudo-headers to reach it), stopping once all three are in hand.
+- `DecodedRequest { method, path, path_huffman, accept_encoding, accept_encoding_huffman }` carries the Huffman flags through, expanded later by `decodePath` / `decodeAcceptEncoding`.
 
 ### response.zig (live)
 
 Serializes a full 1-RTT QUIC payload.
 
 - `buildResponse(...)` assembles, in order: an optional ACK frame (`buildAck` / `buildAckRanges`), an optional HANDSHAKE_DONE (0x1e), an optional server control stream (stream id 3) carrying the stream-type byte 0x00 plus an empty SETTINGS frame `{0x04, 0x00}`, an optional MAX_STREAMS (`buildMaxStreams`, type 0x12), then the request-stream content, and optionally an application CONNECTION_CLOSE (0x1d, H3_NO_ERROR = 0x0100).
-- `buildRequestStreamContent`: an HTTP/3 HEADERS frame (type 0x01) with a static-only QPACK prefix (RIC 0 / Base 0) plus the indexed `:status` line (`statusIndexedFieldLine` maps 103/200/304/404/503 to static indices 24..28, default 200), followed by a DATA frame (type 0x00) with the body, wrapped in a STREAM frame with FIN.
+- `buildRequestStreamContent`: an HTTP/3 HEADERS frame (type 0x01) with a static-only QPACK prefix (RIC 0 / Base 0) plus the indexed `:status` line (`statusIndexedFieldLine` maps 103/200/304/404/503 to static indices 24..28, default 200) and, when the handler set one, an indexed `content-encoding` line (`contentEncodingFieldLine` emits static index 42 for br / 43 for gzip, nothing for identity), followed by a DATA frame (type 0x00) with the body, wrapped in a STREAM frame with FIN. `buildStreamPrefix` (the large-body path) takes the same `content_encoding`, so a resumed multi-packet body keeps its header. The engine emits the field but never compresses: the handler owns the coded body.
 
 ### h3.zig (deferred)
 
@@ -183,7 +183,7 @@ Handshake phase is tracked by flags set on the send path (in `dispatch/common.zi
 Key fields and methods:
 - `dcid`, `our_scid`, `peer_scid`, `peer_addr` (overwritten per received datagram, so a 4-tuple change transparently retargets sends), `initial_client` / `initial_server`, `hs_keys`, `app_keys`, `handshake_transcript`.
 - `AckTracker { largest_pn, received_mask: u64 }`: a 64-bit sliding bitmask of received packet numbers (bit 0 = largest), so the server emits honest ACK ranges.
-- `SendStream` (up to 64 per connection): a response body streamed across packets (`stream_id`, `body`, `sent`, `high_water`, `unacked`, `stream_limit`).
+- `SendStream` (up to 64 per connection): a response body streamed across packets (`stream_id`, `body`, `content_encoding`, `sent`, `high_water`, `unacked`, `stream_limit`). The prefix is rebuilt per packet, so `content_encoding` is stored to keep the `content-encoding` header consistent across a resumed body.
 - `SentRange` ring (128 entries): the loss-detection log. `recordSentRange` overwrites the oldest slot, decrementing `bytes_in_flight` and the owning stream's `unacked` first if it was still in flight (prevents a leak / truncation).
 - `replenishBidiStreams(highest_bidi_id, window)`: the rolling MAX_STREAMS credit. Tracks the client's highest request stream, and once it has used more than half the current window, raises the cumulative grant to `high_water + window` and returns the new value (else `null`), so the connection never stalls once the initial allowance is spent.
 - `onAckFrame(ack, now_us)`: samples RTT from the packet matching `ack.largest`, retires acked ranges, credits `cc.onAckedBytes`, resets the PTO backoff, and declares loss for still-outstanding earlier ranges (`recovery.packetLost`), rewinding those streams and calling `cc.onCongestionEvent()` once per ACK if any loss occurred.
