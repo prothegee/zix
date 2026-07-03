@@ -110,16 +110,17 @@ __*Update:*__
 - Mode datagram UDP raw-bytes `zix.Udp.Raw` (ADR-049):
     - `zix.Udp.Raw(handler)` melayani datagram variable-length (hingga `max_recv_buf`) berdampingan dengan typed `zix.Udp.Server(Packet)`. Handler menerima byte datagram, peer, dan `Sink` untuk membalas. Di Linux ia mem-batch receive / send via `recvmmsg` / `sendmmsg`, balasan digabung jadi satu `sendmmsg` per batch yang diterima, dengan worker `SO_REUSEPORT` per-core di bawah `.EPOLL` / `.URING` (satu worker di bawah `.ASYNC` / `.POOL` / `.MIXED`).
     - Dispatch dipartisi sesuai ADR-043: `src/udp/dispatch/` (satu file per model plus `common.zig`) dengan `run()` switch tipis, plus `src/udp/datagram.zig` (socket raw-fd + primitive `recvmmsg` / `sendmmsg`) dan `src/udp/core.zig` (`HandlerFn`, `Sink`). Typed `Server(Packet)` tidak berubah, `dispatch_model` non-ASYNC padanya di-fold dengan notice yang dicatat. Non-Linux jatuh ke satu loop `std.Io.net`.
-    - Example baru `examples/udp_raw_echo.zig` (port 9064) dengan runner step `test-runner-udp-raw`, dilipat ke `test-runner-all`. GSO / GRO / ECN dan jalur submission io_uring khusus di balik `.URING` ditunda (`.URING` di-fold ke loop per-core recvmmsg).
+    - Example baru `examples/udp_server_raw.zig` (port 9064) dengan runner step `test-runner-udp-raw`, dilipat ke `test-runner-all`. GSO / GRO / ECN dan jalur submission io_uring khusus di balik `.URING` ditunda (`.URING` di-fold ke loop per-core recvmmsg).
 
     ---
 
 - Engine HTTP/3 melalui QUIC `zix.Http3`, pure-Zig di atas `std.crypto`, di substrate `zix.Udp`:
     - `zix.Http3.Http3(handler)` melayani HTTP/3 (RFC 9114) melalui QUIC (RFC 9000 / 9001 / 9002), dengan comptime `zix.Http3.Router` yang mengikuti `zix.Http1` / `zix.Http2` (EXACT / PARAM / PREFIX, query di-strip sebelum matching). TLS 1.3 wajib, dikonfigurasi oleh `Tls.Context` user-owned yang sama dengan engine TCP.
     - Layer QUIC / TLS / QPACK yang deterministik adalah pure-Zig dari RFC: packet protection (header protection plus AEAD), key schedule (Initial / Handshake / 1-RTT), handshake TLS 1.3 di atas CRYPTO-stream (ServerHello plus flight EE / Certificate / CertificateVerify / Finished), QPACK static-table field line, dan decoder Huffman RFC 7541 untuk request path.
-    - Engine v1 menjalankan satu recv loop single-worker dengan demux connection-id internal (migration-safe). `.EPOLL` / `.URING` di-fold ke worker v1 sampai per-core CID steering hadir (ADR-049 phase 3, ADR-050).
-    - `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`), cara yang sama `zix.Http2` mengekspor primitive frame / HPACK-nya, sehingga sebuah peer bisa membangun sisi lain dari wire.
-    - Example baru `examples/http3_basic.zig` (port 9063). Runner menggerakkan client QUIC native yang hermetic, hand-rolled dari primitive itu (tanpa tool eksternal), dengan runner step `test-runner-http3` dilipat ke `test-runner-all`.
+    - Dispatch model (Linux-only): `.ASYNC` menjalankan satu recv loop single-worker dengan demux connection-id internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 phase 3, ADR-050).
+    - `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`), cara yang sama `zix.Http2` mengekspor primitive frame / HPACK-nya, sehingga sebuah peer bisa membangun sisi lain dari wire.
+    - Example baru `examples/tls/http3_basic.zig` (port 9063). Runner menggerakkan client QUIC native yang hermetic, hand-rolled dari primitive itu (tanpa tool eksternal), dengan runner step `test-runner-http3` dilipat ke `test-runner-all`.
+    - Docs: `docs/hld-http3-id.md` / `docs/lld-http3-id.md` (dan -en).
 
     ---
 
