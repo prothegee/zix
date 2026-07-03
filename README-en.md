@@ -68,11 +68,13 @@
         - [Rules and conditions](./README-en.md#rules-and-conditions)
     - [HTTP/2](./README-en.md#http2)
         - [gRPC h2c](./README-en.md#grpc-h2c)
+    - [TLS (https / h2)](./README-en.md#tls-https--h2)
     - [Raw TCP](./README-en.md#raw-tcp)
     - [FIX 4.x](./README-en.md#fix-4x)
     - [UDS (Unix Domain Sockets)](./README-en.md#uds-unix-domain-sockets)
     - [Channel](./README-en.md#channel)
     - [UDP](./README-en.md#udp)
+    - [HTTP/3](./README-en.md#http3)
     - [Logger](./README-en.md#logger)
 - [Benchmark](./README-en.md#benchmark)
 
@@ -93,6 +95,7 @@
 | [`docs/hld-proxy-en.md`](docs/hld-proxy-en.md) | Reverse proxy (nginx, haproxy) for zix.Http1, zix.Http, zix.Grpc |
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
 | [`docs/hld-tls-en.md`](docs/hld-tls-en.md) | TLS: goals, version policy, Tls.Context, handshake flow, engine integration, client |
+| [`docs/hld-http3-en.md`](docs/hld-http3-en.md) | HTTP/3 (QUIC): goals, runtime model, API, router, dispatch models, handshake, QPACK, memory model |
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
 | [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
 | [`docs/lld-tcp-en.md`](docs/lld-tcp-en.md) | TCP: internal data structures and algorithms |
@@ -102,6 +105,7 @@
 | [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
 | [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
+| [`docs/lld-http3-en.md`](docs/lld-http3-en.md) | HTTP/3 (QUIC): per-layer internals (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/zix-deploy-en.md`](docs/zix-deploy-en.md) | Deployment: build a Docker image (zig fetch or vendor) and configure the TLS context for Ed25519 / ECDSA P-256 / RSA |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
 | [`docs/design-considerations-en.md`](docs/design-considerations-en.md) | Design considerations, design patterns, and naming conventions |
@@ -1825,18 +1829,19 @@ const Packet = extern struct {
 const MyServer = zix.Udp.Server(Packet);
 
 pub fn main(process: std.process.Init) !void {
+    // Pass process.minimal.args and set .allow_args = true to read --ip / --port overrides.
     var server = try MyServer.init(.{
         .io         = process.io,
         .allocator  = std.heap.smp_allocator,
         .ip         = "127.0.0.1",
         .port       = 9100,
-        .port_mode  = .REQUIRED,
+        .dispatch_model = .ASYNC, // typed server runs a single async loop
         .endianness = .LITTLE,
         .broadcast  = true,   // relay each packet to all connected clients
         .auto_ack   = false,
         .conn_timeout_ms = 5000,
-        .poll_timeout_ms       = 2000,
-    });
+        .poll_timeout_ms = 2000,
+    }, .{});
     defer server.deinit();
     try server.run();
 }
@@ -1849,14 +1854,14 @@ const MyClient = zix.Udp.Client(Packet);
 
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
+    // Pass process.minimal.args and set .allow_args = true to read
+    // --bind-ip / --bind-port / --server-port overrides.
     var client = try MyClient.init(.{
-        .server_ip   = "127.0.0.1",
+        .ip          = "127.0.0.1", // server address
         .server_port = 9100,
         .bind_port   = 9101,
-        .port_mode   = .REQUIRED,
         .endianness  = .LITTLE,
-        .send_every  = 1000,
-    }, io);
+    }, io, .{});
     defer client.deinit();
 
     // spawn receive task alongside send loop
@@ -1886,7 +1891,7 @@ pub fn main(process: std.process.Init) !void {
         .ip        = "0.0.0.0",
         .port      = 9064,
         .dispatch_model = .EPOLL, // per-core SO_REUSEPORT workers (.ASYNC = single worker)
-    });
+    }, .{});
     defer server.deinit();
     try server.run();
 }
@@ -1897,9 +1902,67 @@ pub fn main(process: std.process.Init) !void {
 **Examples:**
 - [examples/udp_server.zig](examples/udp_server.zig) - typed server, full working example with broadcast and configurable ports
 - [examples/udp_client.zig](examples/udp_client.zig) - matching client
-- [examples/udp_raw_echo.zig](examples/udp_raw_echo.zig) - raw-bytes echo server (recvmmsg / sendmmsg batching, dispatch models)
+- [examples/udp_server_raw.zig](examples/udp_server_raw.zig) - raw-bytes echo server (recvmmsg / sendmmsg batching, dispatch models)
 
 [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for details.
+
+<br>
+
+### HTTP/3
+
+HTTP/3 runs over QUIC, which runs over UDP, so `zix.Http3` sits on the same `zix.Udp` datagram substrate above, not on the TCP / TLS stack. It is a pure-Zig HTTP/3 server over QUIC (RFC 9114 / 9000 / 9001 / 9002). The QUIC transport, packet protection, TLS 1.3 handshake glue, and QPACK header compression are all written from the RFCs and proven byte-exact against the RFC worked examples. TLS 1.3 is folded into the QUIC handshake (there is no cleartext mode and no TLS record layer), configured by the same `zix.Tls.Context` as the TCP engines, so an ECDSA P-256, Ed25519, or RSA cert all work.
+
+Routes are a comptime table (`zix.Http3.Router`), the same shape as `zix.Http1` / `zix.Http2`, dispatched on the decoded request path.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+fn home(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+    res.send("hello over http/3\n");
+}
+
+const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
+    .{ .path = "/", .handler = home },
+});
+
+pub fn main(process: std.process.Init) !void {
+    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+        .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    });
+    defer tls.deinit();
+
+    const Server = zix.Http3.Http3(Routes.dispatch);
+    var server = try Server.init(.{
+        .io             = process.io,
+        .allocator      = std.heap.smp_allocator,
+        .ip             = "127.0.0.1",
+        .port           = 9063,
+        .dispatch_model = .ASYNC,
+        .tls            = &tls,
+    });
+    defer server.deinit();
+
+    try server.run();
+}
+```
+
+```sh
+# Test with a curl built with HTTP/3 (run from the repo root so the cert path resolves)
+curl --http3-only -k https://127.0.0.1:9063/
+```
+
+**HandlerFn:** `fn(req: *const zix.Http3.Request, res: *zix.Http3.Response) void`
+
+- `req.method` and `req.path` are populated from the wire. The response body handed to `res.send` is copied after the handler returns, so it may point at static or handler-owned memory.
+- `init` requires a non-zero port and a TLS context: it returns `error.PortNotConfigured` or `error.TlsRequired` otherwise.
+
+**Dispatch models** (Linux-only): `.ASYNC` runs one single-worker recv loop with internal connection-id demux (migration-safe). `.POOL` / `.MIXED` run one SO_REUSEPORT recvmmsg worker per core, and `.EPOLL` / `.URING` add epoll readiness / io_uring completion on that per-core shape (`.URING` folds to the epoll worker loop when io_uring is unavailable). Per-core connection-id steering is deferred (ADR-049 phase 3).
+
+**Example:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) serves `/`, a query-sum `/baseline2`, and a 256 KiB `/big` that exercises the multi-packet streamed send path.
+
+See [`docs/hld-http3-en.md`](docs/hld-http3-en.md) and [`docs/lld-http3-en.md`](docs/lld-http3-en.md) for the full design and per-layer internals.
 
 <br>
 
