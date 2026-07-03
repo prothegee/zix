@@ -47,7 +47,7 @@ Changed (scope, not rename, to keep typed code working):
 | `endianness`, `auto_ack`, `auto_echo`, `broadcast`, `error_report` | apply to typed mode only, no meaning in raw mode |
 | `allocator` "no arena, per-packet snapshots" caveat | raw mode allocates a per-worker buffer / connection pool, not a per-packet heap snapshot |
 
-Unchanged: `io`, `ip`, `port`, `port_mode`, `logger`, the timeout fields.
+Unchanged: `io`, `ip`, `port`, `allow_args`, `logger`, the timeout fields.
 
 Not added: `kernel_backlog`. UDP has no `listen()` backlog, so the TCP field does not carry over.
 Stated here so nobody mirrors it blindly.
@@ -133,7 +133,7 @@ models fold to the v1 demux path with a logged notice. Independent of phase 2.
 - Typed `Server(Packet)` keeps its single async receive loop. The new config fields are additive,
   and a non-ASYNC `dispatch_model` on the typed path folds with a logged notice (not a silent
   no-op), since the per-core models belong to the raw path.
-- Example `examples/udp_raw_echo.zig` (port 9064, `.ASYNC` shown explicitly), runner
+- Example `examples/udp_server_raw.zig` (port 9064, `.ASYNC` shown explicitly), runner
   `tests/runner/udp_raw_runner.zig`, plus a `udp-raw` case in `all_runner.zig`. Green on Zig 0.16 +
   0.17 across unit-test, `test-runner-udp-raw`, and `test-runner-all` (60 protocols).
 
