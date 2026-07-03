@@ -6,6 +6,10 @@
 //!   does not permit it is a PROTOCOL_VIOLATION (12.5, Table 3).
 //! - The frame type MUST use its shortest encoding (12.4), so a non-minimal type varint is rejected.
 //!   Proven against crafted frames and the Table 3 permission matrix in the tests below.
+//!
+//! Note:
+//! - parseFrame is live. framePermittedIn (the Table 3 per-space permission matrix) plus Space and
+//!   FrameError are implemented and tested but not enforced in the serve path yet (deferred).
 
 const std = @import("std");
 
@@ -15,7 +19,8 @@ const varint = @import("varint.zig");
 pub const Space = enum { initial, handshake, zero_rtt, one_rtt };
 
 /// A parsed frame, the Q2 subset (RFC 9000 19). The rest decode the same way and arrive in later
-/// modules (ACK in flow.zig, the connection-id and close frames in stream.zig / close.zig).
+/// modules (ACK in flow.zig, close frames in close.zig). Connection-id frames are modeled in
+/// stream.zig, not yet wired into the serve path (NEW_CONNECTION_ID is skipped for now).
 pub const Frame = union(enum) {
     /// A run of PADDING bytes (19.1), coalesced into one length.
     padding: usize,
