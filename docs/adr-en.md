@@ -137,11 +137,11 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** The original design stored custom response headers in a fixed `[32]HttpHeader` buffer. This caused an out-of-bounds write when `max_response_headers = .LARGE` (64 slots) and more than 32 headers were added. A compile-time cap was insufficient because the cap is runtime-configurable per server instance.
 
-**Decision:** In `Response.init()`, allocate `extra_buf = arena.alloc(HttpHeader, max_headers)` from the per-request arena. `max_headers` comes from `ServerConfig.max_response_headers.value()`. The `max_headers` field on `Response` was removed, `extra_buf.len` is the cap.
+**Decision:** Store custom response headers in `extra_buf: ?[]HttpHeader`, allocated from the per-request arena and sized to `max_headers` (from `ServerConfig.max_response_headers.value()`). Allocation is lazy: `Response.init()` leaves `extra_buf = null` and the buffer is allocated on the first `addHeader()` call, so `Response` keeps a `max_headers` field as the cap.
 
 **Consequences:**
 - The cap is exact: no `@min(..., 128)` clamp, no wasted slots.
-- `Response.init()` is now fallible (`!Response`) because `arena.alloc` can fail.
+- `Response.init()` stays non-fallible: the allocation moved to the first `addHeader()`, which returns `error.TooManyHeaders` on allocation failure or past the cap. A response that adds no custom header never allocates the buffer.
 - The arena lifetime guarantees the buffer is valid for the request and reclaimed automatically.
 
 ---
@@ -152,7 +152,7 @@ Each ADR records a significant design decision: the context that made it necessa
 
 **Context:** Unix Domain Sockets are the standard IPC mechanism on Linux and macOS for same-host communication. A `zix.Uds` namespace following the same pattern as `zix.Udp` would complete the trilogy of transport protocols.
 
-**Decision:** Implemented in `src/uds/`. Namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `lib.zig`. Stream mode only (datagram requires raw `std.posix`, not exposed via `std.Io.net.UnixAddress`, and is deferred). Frame format: 4-byte `u32` length header (native little-endian) followed by payload bytes. `UdsClient.sendMsg`/`recvMsg` and `echoHandler` all use this frame contract.
+**Decision:** Implemented in `src/uds/`. Namespace aggregator at `src/uds/Uds.zig`, exported as `pub const Uds = @import("uds/Uds.zig")` in `lib.zig`. Stream mode only (datagram requires raw `std.posix`, not exposed via `std.Io.net.UnixAddress`, and is deferred). Frame format: 4-byte `u32` length header (big-endian, network byte order) followed by payload bytes. `UdsClient.sendMsg`/`recvMsg` and `echoHandler` all use this frame contract.
 
 **`std.Io.net` API used:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` on WASI: both `Server.init()` and `Client.connect()` emit `@compileError` on unsupported platforms.
 
@@ -279,14 +279,14 @@ var server = try MyServer.init(.{
 
 **Context:** The original Model 2 used `io.concurrent()` to dispatch connections from each worker thread. This added scheduler overhead (condvar wakeup per connection) that caused ~4x higher latency than a comparable blocking-thread HTTP server (334 us vs ~88 us) despite matching throughput (~145K req/s). A blocking-thread architecture (dedicated accept thread + OS thread pool + synchronous I/O) eliminates the fiber scheduler from the hot path entirely.
 
-**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar + `ArrayListUnmanaged`). Accept threads (`worker_count`, default 2) only call `accept()` and `queue.push()` (they never handle I/O). Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives. `std.Thread.Mutex` does not exist in this version).
+**Decision:** Replace per-worker `io.concurrent()` dispatch with a shared `ConnQueue` (mutex + condvar, backed by a heap ring buffer with O(1) push and pop). Accept threads (`workers`, `0` = cpu_count) only call `accept()` and `queue.push()` (they never handle I/O). Pool threads (`pool_size`, default `max(10, cpu_count * 2)`) call `queue.pop()` and then handle each connection synchronously with blocking I/O. `std.Io.Mutex` and `std.Io.Condition` are used (Zig 0.14 sync primitives. `std.Thread.Mutex` does not exist in this version).
 
 **Consequences:**
 - Pool threads handle connections with pure blocking I/O: no condvar dispatch overhead per request, no fiber wakeup latency.
 - Throughput ~143-144K req/s, latency ~92 us avg. A ~3-5K req/s gap and ~4 us latency gap vs comparable blocking-thread servers remains, attributed to `std.http.Server` parsing overhead and the per-connection arena vs direct POSIX allocators.
 - `pool_size` is now a configurable field in `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
-- Accept threads are fast enough that 2 is sufficient to saturate the kernel accept queue, `workers = N` allows explicit override.
-- `io.concurrent()` is still used in Model 1 (`workers = 1`) (unaffected).
+- Accept threads are lightweight, so `workers = 0` (cpu_count) saturates the kernel accept queue, `workers = N` allows explicit override.
+- `io.concurrent()` is still used by the `.ASYNC` model (unaffected).
 
 ---
 
@@ -434,9 +434,9 @@ The two layers are orthogonal: D fires if the client stalls before the handler e
 
 **Context:** The original `HttpServerConfig` used `workers: usize` to select between two concurrency modes: `workers = 1` for single-accept `io.async()` dispatch and `workers = 0` / `workers = N` for the work-queue thread pool. A third mode (N accept threads each dispatching via `io.async()` without a ConnQueue) existed as a natural middle ground. The `workers` field was overloaded: a value of `1` changed the dispatch strategy entirely rather than setting an accept thread count. This was non-obvious and not self-documenting at call sites.
 
-**Decision:** Introduce `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` as a named field `dispatch_model: DispatchModel = .POOL` in `HttpServerConfig`. The three models are:
+**Decision:** Introduce `DispatchModel = enum(u8) { ASYNC = 0, POOL = 1, MIXED = 2 }` as a named field `dispatch_model: DispatchModel` in `HttpServerConfig`. The three models are:
 
-- `.POOL` (default): N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count. `pool_size` controls pool thread count.
+- `.POOL`: N accept threads push to a shared `ConnQueue`. M pool threads pop and handle connections with synchronous blocking I/O. Best throughput under high connection counts. `workers` controls accept thread count. `pool_size` controls pool thread count.
 - `.ASYNC`: Single accept thread dispatches each connection via `io.async()`. Preferred for SSE and WebSocket: long-lived connections do not hold pool threads. `workers` and `pool_size` are ignored.
 - `.MIXED`: N accept threads each dispatch via `io.async()` directly, no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
 
@@ -449,6 +449,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - `dispatch_model` is self-documenting at the call site. The three strategies are explicit enum variants, not magic `usize` values.
 - `pool_size` is silently ignored for `.ASYNC` and `.MIXED` (no error, documented in `HttpServerConfig`).
 - Enum backing type `u8` follows the project convention for all named enums.
+- Later evolution: `.EPOLL` (ADR-034) and `.URING` (ADR-037) joined the enum as `EPOLL = 3` / `URING = 4`, and `dispatch_model` became a required field with no default (`.ASYNC = 0` is the zero-init value), so a config names its model explicitly. See ADR-050 for the whole-family taxonomy.
 
 ---
 
@@ -465,7 +466,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - `TcpServer.run(io)` / `runWith(io, handler)`: io is passed as a parameter (not stored in config). The caller controls the `std.Io` backend lifetime.
 - All three dispatch models (POOL, ASYNC, MIXED) apply with the same `ConnQueue` + thread spawn pattern from `zix.Http.Server`. `DispatchModel` is defined once in `src/tcp/config.zig` and imported by `src/tcp/http/config.zig` (single source of truth for all TCP-based protocols).
 - Frame format: `[u32 big-endian payload_len][payload bytes]`. Big-endian (network byte order) is chosen for TCP because it is the network convention and matches what other protocol libraries expect. `zix.Uds` uses little-endian by contrast (local only, no interop requirement).
-- `initArgs()` on the server and `connectArgs()` on the client parse `--ip` and `--port` from CLI args, following the `zix.Udp.Server.initArgs()` pattern.
+- `initArgs()` on the server and `connectArgs()` on the client parse `--ip` and `--port` from CLI args, following the same CLI-arg override pattern used across the engines.
 
 **Consequences:**
 - `zix.Tcp.Http.*` and `zix.Tcp.Server`/`Client` coexist under the same `zix.Tcp` namespace: HTTP is the high-level protocol, raw TCP is the low-level stream layer.
@@ -582,7 +583,7 @@ The old `workers = 1` shorthand for single-accept dispatch is removed. Callers w
 - The handler signature stays `fn(head, body, fd) void`. No breaking change to `Router` or existing examples.
 - The deadline is per-worker-thread, which matches the shared-nothing dispatch model (each connection is served by one thread for the call's duration).
 - `handler_timeout_ms == 0` leaves the thread-local at 0, so `isExpired()` is a cheap always-false check with no clock syscall on the disabled path.
-- `serveConnOne` (a niche public helper) is left unarmed. Callers using it directly arm their own deadline via `setTimeout()`.
+- All current dispatch entry points arm the deadline (`serveConn` via `ServeOpts`, `serveEpollConn` via a parameter). A handler that overrides its own budget calls `setTimeout()` directly.
 
 ---
 
@@ -645,6 +646,7 @@ The blocking `serveGrpcConn` and `serveGrpcLoop` are retained unchanged for `.AS
 - Cost is one `epoll_event` array per worker growing from ~6 KB to ~12 KB of stack. Negligible against the 512 KB worker stacks.
 - No public API change. The constant is private and not configurable. The value is a tuned default, not a knob.
 - The c2048+ throughput collapse seen on a shared-core loopback box is environmental (load generator and server contend for the same cores). It is neither caused nor addressed by this constant.
+- Later evolution: the constant is now named `n` per dispatch file, and the shared value diverged as engines were tuned individually. `zix.Tcp` / `zix.Fix` / `zix.Http2` / `zix.Grpc` stay at 512, `zix.Http` uses 1024, and `zix.Http1` uses 4096 (the TLS mux paths also use 4096). The unify decision held, per-engine tuning later raised two of the five.
 
 ---
 
@@ -952,7 +954,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - Each new file needs its own `std.testing.refAllDecls` line in `src/lib.zig` (refAllDecls is not recursive), else its tests silently never run. Tests move into the file of the model they cover.
 - The `zix.Http1` pilot landed green: `server.zig` shrank from 2,624 lines to 154, the five models live under `dispatch/` (with `common.zig` for the shared helpers), and `zig build`, `test-all`, and `test-runner-all` (all 56 protocols) pass with the 25 http1 tests preserved.
 - The four A2 idle-pool variants are preserved as full-server snapshots in `rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a cross-reference manifest.
-- The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, each an independent equivalent move, all green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). The comptime-route engines (`zix.Http2`, `zix.Grpc`, `zix.Http`) thread routes through a `common.Dispatch(...)` generic so the moved bodies stay byte-identical, the runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
+- The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, each an independent equivalent move, all green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` and `zix.Grpc` thread routes through a `common.Dispatch(...)` generic, and `zix.Http` bakes them into a `HttpServerImpl(stack_threshold, routes)` factory (its dispatch functions take `server: anytype`), so the moved bodies stay byte-identical, the runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
 - `zix.Udp` is excluded by design. The dispatch models abstract connection lifecycle (accept, then per-fd multiplex, then close). UDP is connectionless: one bound datagram socket, no per-connection fds, clients tracked as application-level address records, and concurrency is per-datagram (`io.concurrent`) not per-connection. There are no models to partition. A `dispatch/` split would be revisited only if a second datagram serve strategy is added (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
 
 ---
@@ -961,7 +963,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Status:** Accepted
 
-**Context:** zix is developed on Zig 0.16.0 while the rolling `zig` toolchain has moved to 0.17.0-dev, and the two differ in std and build APIs in ways that break compilation outright. The roadmap framed a version bump as blocking the 0.5.x campaign because it was assumed to force a re-baseline and an io_uring rewrite. Two findings removed that: the feared io_uring rewrite is a non-issue (the raw `std.os.linux.IoUring` is unchanged in 0.17, so the ring engines compile as-is), and every other difference is either a single parse-level operator change or a semantic API change that a comptime branch can carry on both versions at once. The full difference inventory is in `regression-zig-0.16-to-zig-0.17-diff.md`.
+**Context:** zix is developed on Zig 0.16.0 while the rolling `zig` toolchain has moved to 0.17.0-dev, and the two differ in std and build APIs in ways that break compilation outright. The roadmap framed a version bump as blocking the 0.5.x campaign because it was assumed to force a re-baseline and an io_uring rewrite. Two findings removed that: the feared io_uring rewrite is a non-issue (the raw `std.os.linux.IoUring` is unchanged in 0.17, so the ring engines compile as-is), and every other difference is either a single parse-level operator change or a semantic API change that a comptime branch can carry on both versions at once. The full difference inventory was catalogued during the port.
 
 **Decision:** Build on BOTH 0.16.x and 0.17.x from one source tree, gated by `ZIG_SEMVER`, a named comptime constant (`MAJOR` / `MINOR` / `PATCH`) over `builtin.zig_version`. It exists in exactly two places, because `build.zig` and the zix module are separate compilation contexts and `build.zig` cannot import the module: a build-only copy in `build.zig` (for the `ensureSupportedZig` guard and the `dirExists` build-root branch) and the public `zix.ZIG_SEMVER` in `src/lib.zig` (for source-code gates and external consumers). Semantic differences are gated `if (comptime ZIG_SEMVER.MINOR == 16) { 0.16 code } else { 0.17 form }`, where the comptime-dead branch is never analyzed so neither version sees the other's API. `ensureSupportedZig` fails fast with a readable message outside the 0.16.x / 0.17.x range.
 
@@ -1076,9 +1078,9 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 **Consequences:**
 - New `src/udp/datagram.zig` (raw-fd socket, `recvmmsg` with `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, address conversion), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus one file per model), and `src/udp/raw.zig` (the `Raw` facade and `run()` switch). Sockets are raw `std.os.linux` syscalls, since `std.posix` no longer wraps `socket` / `bind` / `close`.
 - `zix.Udp` exports `Raw`, `Sink`, `HandlerFn`, and `DispatchModel`. The typed `Server(Packet)` is unchanged except for the fold notice.
-- New example `examples/udp_raw_echo.zig` (port 9064) and runner `tests/runner/udp_raw_runner.zig`, plus a `udp-raw` case folded into `test-runner-all`.
+- New example `examples/udp_server_raw.zig` (port 9064) and runner `tests/runner/udp_raw_runner.zig`, plus a `udp-raw` case folded into `test-runner-all`.
 - Non-Linux targets fall back to a single `std.Io.net` receive loop (no `recvmmsg` / `sendmmsg`).
-- Phase two: a dedicated io_uring submission path behind `.URING`, and GSO / GRO / ECN.
+- Phase two: a dedicated io_uring submission path behind `.URING` and GSO landed in ADR-056 (`src/udp/dispatch/uring.zig` real recv ring, `datagram.zig` `UDP_SEGMENT`). GRO / ECN stay deferred. ADR-056 also makes `.POOL` / `.MIXED` genuinely multi-core, correcting the "run a single worker" wording above.
 - Phase three: optional connection-affinity steering. The `.EPOLL` / `.URING` per-core mapping is stateless fan-out (the kernel hashes datagrams by 4-tuple), correct for echo / DNS / telemetry but not for a connection-oriented protocol that needs datagram-to-owner affinity, since a QUIC connection migration changes the 4-tuple and can reach a worker without the connection state. Such a protocol runs the single-worker shape and demuxes internally, or sets an optional `steering` knob that routes by a protocol-supplied byte-range key (an `SO_REUSEPORT` eBPF program parameterized by offset and length), `zix.Udp` staying protocol-agnostic. Where steering is unavailable the per-core models fall back to the single-demux path.
 - Green on Zig 0.16 and 0.17 (unit-test plus the 60-protocol test-runner-all).
 
@@ -1086,7 +1088,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ## ADR-050: dispatch-model taxonomy and cross-platform backend matrix
 
-**Status:** Proposed
+**Status:** Accepted (`.KQUEUE` / `.IOCP` reserved, not yet implemented)
 
 **Context:** The `DispatchModel` enum is shared across the engine family, but its values mix two axes: a concurrency shape (single or multi-core) and, for the per-core models, an OS-specific I/O backend (`.EPOLL` and `.URING` are Linux-only). Today some values alias (in `zix.Udp` raw mode `.POOL` and `.MIXED` both run a single worker), and an off-platform selection silently falls back to `.POOL`. As macOS (`kqueue`) and Windows (IOCP) support approaches, the family needs one predictable rule for what each model means and which OS runs it, so a developer never has to guess the core behavior or hunt for the backend.
 
@@ -1096,7 +1098,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Consequences:**
 - `.KQUEUE` and `.IOCP` are reserved names, documented but not yet implemented. They are not created as empty source files: the reservation lives in this ADR and the concurrency reference.
-- `zix.Udp` raw mode's current `.POOL` / `.MIXED` aliasing to a single worker becomes a gap to close: both must be multi-core under the contract.
+- `zix.Udp` raw mode's `.POOL` / `.MIXED` aliasing to a single worker was the gap to close: both must be multi-core under the contract. Closed in ADR-056 (both run multi-core via `common.runMulti`), which makes this contract real and moves this ADR to Accepted.
 - The existing non-Linux silent fallback of `.EPOLL` to `.POOL` is replaced, once the OS backends land, by the OS-native backend plus the category-error rule.
 - The taxonomy is whole-family. `zix.Udp` and the HTTP/3 work (ADR-049 and `src/udp/http3/`) are one consumer.
 
@@ -1110,14 +1112,15 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 **Decision:** Author HTTP/3 pure-Zig from the RFCs (9000 transport, 9001 QUIC-TLS, 9002 recovery, 9114 HTTP/3, 9204 QPACK) as `zix.Http3`, on the `zix.Udp` datagram substrate. The TLS 1.3 handshake reuses `src/tls` (key schedule, handshake messages, certificate), carried over QUIC CRYPTO frames in place of the TLS record layer, so there is one handshake implementation across TCP and QUIC. The deterministic layers are built and proven bottom-up against the RFCs' own worked-example vectors before assembly. The engine ships as v1: one single-worker recv loop with internal connection-id demux (keyed by the client's Destination Connection ID, with a Source-CID fallback for post-handshake packets), which is migration-safe by construction. `.EPOLL` / `.URING` fold to the v1 worker until per-core `SO_REUSEPORT` CID steering lands (v2, ADR-049 phase 3). Routing is a comptime `Router`, the same shape as `zix.Http1` / `zix.Http2`. The live path uses the QPACK static table and the RFC 7541 Huffman decoder for request paths. TLS 1.3 is mandatory, configured by the same user-owned `Tls.Context` as the TCP engines (ADR-047).
 
-**Rationale:** Pure-Zig keeps the no-C-library rule and the single-handshake reuse, since QUIC-TLS differs from TLS-over-TCP only in record framing. Building and vector-proving each deterministic layer (crypto, transport, QPACK, HTTP/3, recovery) before assembly de-risks the largest protocol surface in the project and localizes any failure to the layer under test. The v1 single-worker shape is correct under connection migration without an eBPF steering asset, so it ships first and per-core scaling is a later, isolated change (the same fold pattern `zix.Http2` and `zix.Udp` raw mode already use). Mirroring the `zix.Http2` precedent, `zix.Http3` exports its low-level primitives (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`) so a peer can build the other side of the wire, which is what lets the test runner drive a hermetic native QUIC client with no external tool.
+**Rationale:** Pure-Zig keeps the no-C-library rule and the single-handshake reuse, since QUIC-TLS differs from TLS-over-TCP only in record framing. Building and vector-proving each deterministic layer (crypto, transport, QPACK, HTTP/3, recovery) before assembly de-risks the largest protocol surface in the project and localizes any failure to the layer under test. The v1 single-worker shape is correct under connection migration without an eBPF steering asset, so it ships first and per-core scaling is a later, isolated change (the same fold pattern `zix.Http2` and `zix.Udp` raw mode already use). Mirroring the `zix.Http2` precedent, `zix.Http3` exports its low-level primitives (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`) so a peer can build the other side of the wire, which is what lets the test runner drive a hermetic native QUIC client with no external tool.
 
 **Consequences:**
 - New `src/udp/http3/`: the deterministic layers as tested library modules (crypto, protection, keyschedule, qpack, huffman, packet, varint, frame, recovery, h3), plus the engine layer (config, core, demux, connection, server, `dispatch/` per model) and the live-handshake driver (serverhello, flight, response, request, router). RFC vectors live in `test {}` blocks.
 - `zix.Http3` exports the server type, the comptime `Router` / `Route`, and the low-level QUIC / TLS / QPACK primitives.
-- New example `examples/http3_basic.zig` (port 9063, ECDSA P-256). The round trip is validated by `curl --http3` (HTTP/3 200, clean exit) during development and, hermetically, by a native QUIC client hand-rolled from the exported primitives in `tests/runner/http3_client.zig`, wired as `test-runner-http3` and folded into `test-runner-all`.
+- New example `examples/tls/http3_basic.zig` (port 9063, ECDSA P-256). The round trip is validated by `curl --http3` (HTTP/3 200, clean exit) during development and, hermetically, by a native QUIC client hand-rolled from the exported primitives in `tests/runner/http3_client.zig`, wired as `test-runner-http3` and folded into `test-runner-all`.
 - Green on Zig 0.16 and 0.17 (unit-test plus the 66-protocol test-runner-all).
-- Deferred: per-core CID steering (v2, ADR-049 phase 3), dynamic-table QPACK / loss-and-congestion in the hot path / key update / connection migration beyond the v1 demux, the QUIC Interop Runner and qlog traces, and the 64-core HttpArena throughput / memory gate.
+- Deferred: cross-core CID steering for mid-connection migration (v2, ADR-049 phase 3), dynamic-table QPACK / key update / connection migration beyond the v1 demux, the QUIC Interop Runner and qlog traces, and the multi-core HttpArena throughput / memory gate.
+- Superseded in part by ADR-056: `.EPOLL` / `.URING` now run as real per-core `SO_REUSEPORT` workers (not folded to the v1 worker), and RFC 9002 loss recovery plus NewReno congestion control now run on the serve hot path. Cross-core CID steering for mid-connection migration is the remaining v2 item.
 
 ---
 
@@ -1202,6 +1205,32 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - WebSocket is served over TLS on the thread-per-connection path (`.ASYNC` / `.POOL` / `.MIXED`) for both engines. The multiplexed `tls_mux` path (`.EPOLL` / `.URING`) stays request / response only and drops any erroneous handoff.
 - Rooms / broadcast are not served over TLS: each connection has its own TLS session, so a frame must be encrypted per connection. WS over TLS is per-connection (echo / point-to-point), the cleartext arena example keeps the room model.
 - New examples `examples/tls/tls_http1_ws.zig` (port 9074) and `examples/tls/tls_http_ws.zig` (port 9075). Verified end-to-end with the native `zix.Tls` client (handshake, WS upgrade, encrypted `101`, masked frame, decrypted echo), green on Zig 0.16 and 0.17.
+
+---
+
+## ADR-056: HTTP/3 hot-path loss recovery, congestion control, and real per-core .EPOLL / .URING
+
+**Status:** Accepted
+
+**Context:** ADR-051 shipped HTTP/3 v1 as one single-worker recv loop with internal connection-id demux, and it deferred two things: loss recovery / congestion control on the serving hot path, and per-core scaling (`.EPOLL` / `.URING` folded to the single v1 worker). Two problems followed under sustained multi-connection large-body load. One worker is the throughput ceiling because a single core drains every datagram. And without loss recovery a dropped tail packet stalls a whole response: no later packet acknowledges it, so nothing re-pumps the lost bytes and the stream hangs until the idle timeout. The deterministic `recovery.zig` layer already carried an RTT estimator, a Probe Timeout, and a NewReno controller (proven against RFC 9002 vectors), but the serve path did not drive them.
+
+**Decision:** Bring RFC 9002 loss recovery and NewReno congestion control onto the `zix.Http3` serve path, and run `.EPOLL` / `.URING` as real per-core `SO_REUSEPORT` workers instead of folding to the v1 worker.
+- Loss recovery and NewReno run on the serve path: `recovery.zig` (RTT estimator, PTO with backoff up to `connection.max_pto_backoff` = 6, `CongestionController` congestion-event handling, persistent congestion), driven by `connection.onAckFrame`. Only ack-detected loss cuts the congestion window.
+- A timer-driven maintenance sweep (`dispatch/common.sweepMaintenance`) runs every `maintenance_interval_us` (5 ms), armed by a bounded `epoll_wait` timeout on `.EPOLL` and a timeout SQE on `.URING`. It declares a timed-out in-flight range lost and re-pumps it (`resumeStreams`).
+- A Probe Timeout is not a congestion signal: `connection.onMaintenance` retransmits and bumps `pto_backoff` only. It does NOT reduce cwnd (RFC 9002 6.2). A prior attempt that halved cwnd on every PTO collapsed the window and pinned connections congestion-window-blocked, and was reverted.
+- Eviction policy: `onMaintenance` frees a connection (via `demux.remove`) only when the close state is draining or closed (CONNECTION_CLOSE, frames `0x1c` / `0x1d`) or the peer has been idle past `max_idle_ms` (tracked by `last_activity_us`). Loss never evicts a live-but-lossy peer.
+- Table slot reuse: `demux` gained `remove` / `freeSlot` / `at` / an `occupied` map with a tombstone sentinel (`maxInt(u32)`) that probe chains skip past, so a reclaimed slot is reused without growing the index.
+- Per-core `.EPOLL` / `.URING`: `server.run` routes `.POOL` / `.MIXED` to `common.runMulti`, `.EPOLL` to `dispatch/epoll.runEpoll`, `.URING` to `dispatch/uring.runUring`, and only `.ASYNC` stays single-core. Each worker owns its own CID table (shared-nothing, the kernel load-balancing by 4-tuple). `.URING` is a real io_uring ring (recvmsg SQEs, replies through the sendmmsg batch), falling back to the `.EPOLL` loop when io_uring is unavailable.
+- `zix.Udp` raw gains ADR-049 phase two on the same cut: `src/udp/dispatch/uring.zig` is a real recvmsg io_uring ring, and `datagram.zig` adds UDP GSO (`UDP_SEGMENT`) via `probeGso` / `flushGso` / `submitUring`.
+
+**Rationale:** The recovery machinery already existed and was vector-proven, so wiring it onto the serve path (rather than authoring it fresh) is low-risk and localizes the change to `connection` and the dispatch sweep. Retransmitting on PTO without cutting cwnd is the RFC 9002 6.2 rule and the reverted halve-on-PTO experiment is the evidence for why: a probe is a suspicion of loss, not a confirmation, so treating it as a congestion signal starves the window. Reclaiming a slot only on close or idle (never on loss) keeps a lossy-but-live peer connected, which is the whole point of recovery. Per-core `SO_REUSEPORT` workers match the shape the cleartext TCP engines and `zix.Udp` raw already use, so scaling HTTP/3 needs no new execution model, and per-core CID tables are correct as long as a connection's 4-tuple is stable (cross-core migration is the one case left to v2).
+
+**Consequences:**
+- Superseding ADR-051: the ".EPOLL / .URING fold to the v1 worker" shape (now real per-core) and the "loss-and-congestion in the hot path" deferral (now shipped) are both superseded. Cross-core CID steering for mid-connection migration remains the only v2 item from ADR-051.
+- Superseding ADR-049: this lands phase two (a dedicated io_uring submission path behind `.URING` plus GSO) for `zix.Udp` raw, and corrects the ".POOL / .MIXED run a single worker" wording (both are multi-core via `runMulti`). GRO and ECN stay deferred.
+- ADR-050: closes the "zix.Udp raw .POOL / .MIXED aliasing to a single worker" gap. This ADR is the second consumer that makes ADR-050's contract real.
+- Correctness gate: full-body byte-exact under heavy fragmentation (~218 packets per response) plus recovery after an overload burst, green on Zig 0.16 and 0.17.
+- Deferred: send pacing to spread a congestion window over the RTT instead of one burst (the residual `.EPOLL` throughput gap under sustained large-body load, `.URING` paces implicitly through completions), cross-core CID steering (eBPF) for mid-connection migration, GRO / ECN, and key update.
 
 ---
 
