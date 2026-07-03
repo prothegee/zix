@@ -503,7 +503,7 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
 | `zig build examples` | Membangun setiap example ke `zig-out/bin/`. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
-| `zig build example-<name>` | Membangun dan menjalankan satu example, misalnya `example-http1_websocket`. |
+| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-epoll`. |
 | `zig build test-runner-all` | Menjalankan setiap runner integrasi server plus client. |
 
