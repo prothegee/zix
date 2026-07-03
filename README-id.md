@@ -384,7 +384,7 @@ Beberapa perbedaan disengaja, bukan drift:
 
 - `zix.Http1` tidak punya `conn_timeout_ms`: ia tidak menjalankan timer thread connection-registry (lihat catatan Timeout di docs LLD HTTP/1).
 - `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
-- Response compression (`compression*`) ada di `zix.Http1` dan `zix.Http`, engine yang melayani respons HTTP dengan negosiasi Accept-Encoding. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
+- Kompresi response runtime (`compression*`, engine mengompresi secara langsung) ada di `zix.Http1` dan `zix.Http`, yang menegosiasi terhadap Accept-Encoding dan mengompresi body sendiri. `zix.Http3` juga menegosiasi tapi tidak membawa codec runtime: handler membaca `req.accept_encoding` dan menyetel `res.content_encoding` pada body yang sudah ter-compressed (menyajikan file `.br` / `.gz`), jadi tidak ada config `compression*` padanya. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
 - `zix.Udp` (datagram) membawa `ip` / `port` / `logger` untuk jalur typed, plus knob jalur raw `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, dipakai `zix.Udp.Raw`). `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya. Tiap engine hanya mengambil subset yang berlaku.
 
 Untuk referensi per-field lengkap (tiap field config dengan default-nya, apa yang dipengaruhi, kapan dinaikkan atau diturunkan, dan trade-off-nya), lihat [`docs/zix-config-id.md`](./docs/zix-config-id.md).
@@ -1956,11 +1956,12 @@ curl --http3-only -k https://127.0.0.1:9063/
 **HandlerFn:** `fn(req: *const zix.Http3.Request, res: *zix.Http3.Response) void`
 
 - `req.method` dan `req.path` diisi dari wire. Body response yang diserahkan ke `res.send` disalin setelah handler kembali, jadi boleh menunjuk ke memori static atau milik handler.
+- `req.accept_encoding` membawa Accept-Encoding klien (kosong jika tidak ada). Handler menegosiasi body pre-compressed terhadapnya lalu memanggil `res.setContentEncoding(.br)` (atau `.gzip`), yang memancarkan header response `content-encoding`. Engine tidak pernah mengompresi di jalur kirim: `res.body` harus sudah ter-encode (menyajikan file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request.
 - `init` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak.
 
 **Dispatch model** (Linux-only): `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 fase 3).
 
-**Contoh:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) menyajikan `/`, query-sum `/baseline2`, dan `/big` 256 KiB yang menguji jalur kirim streamed multi-packet.
+**Contoh:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) menyajikan `/`, query-sum `/baseline2`, `/big` 256 KiB yang menguji jalur kirim streamed multi-packet, dan `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br.
 
 Lihat [`docs/hld-http3-id.md`](docs/hld-http3-id.md) dan [`docs/lld-http3-id.md`](docs/lld-http3-id.md) untuk desain lengkap dan internal per-layer.
 

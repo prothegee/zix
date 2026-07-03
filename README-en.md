@@ -384,7 +384,7 @@ A few differences are by design, not drift:
 
 - `zix.Http1` has no `conn_timeout_ms`: it runs no connection-registry timer thread (see the Timeouts note in the HTTP/1 LLD docs).
 - `zix.Grpc` sizes inbound data with protocol-specific fields (`max_body`, `max_frame_size`, `max_header_scratch`) instead of `max_recv_buf`.
-- Response compression (`compression*`) lives on `zix.Http1` and `zix.Http`, the engines that serve HTTP responses with Accept-Encoding negotiation. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
+- Runtime response compression (`compression*`, the engine compresses on the fly) lives on `zix.Http1` and `zix.Http`, which negotiate against Accept-Encoding and compress the body themselves. `zix.Http3` negotiates too but does not carry a runtime codec: a handler reads `req.accept_encoding` and sets `res.content_encoding` on an already-compressed body (serve a `.br` / `.gz` file), so there is no `compression*` config on it. `zix.Grpc` uses its own per-message `grpc-encoding` compression instead, and the raw transports (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) have no HTTP content negotiation.
 - `zix.Udp` (datagram) carries `ip` / `port` / `logger` for the typed path, plus the raw-path knobs `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, used by `zix.Udp.Raw`). `zix.Uds` (local socket) carries `kernel_backlog` / `max_recv_buf` / `logger` plus its socket path. Each engine takes only the subset that applies.
 
 For the full per-field reference (every config field with its default, what it affects, when to raise or lower it, and the trade-offs), see [`docs/zix-config-en.md`](./docs/zix-config-en.md).
@@ -1956,11 +1956,12 @@ curl --http3-only -k https://127.0.0.1:9063/
 **HandlerFn:** `fn(req: *const zix.Http3.Request, res: *zix.Http3.Response) void`
 
 - `req.method` and `req.path` are populated from the wire. The response body handed to `res.send` is copied after the handler returns, so it may point at static or handler-owned memory.
+- `req.accept_encoding` carries the client's Accept-Encoding (empty when absent). A handler negotiates a pre-compressed body against it and calls `res.setContentEncoding(.br)` (or `.gzip`), which emits the `content-encoding` response header. The engine never compresses on the send path: `res.body` must already be encoded (serve a pre-built `.br` / `.gz` file), so there is no per-request codec cost.
 - `init` requires a non-zero port and a TLS context: it returns `error.PortNotConfigured` or `error.TlsRequired` otherwise.
 
 **Dispatch models** (Linux-only): `.ASYNC` runs one single-worker recv loop with internal connection-id demux (migration-safe). `.POOL` / `.MIXED` run one SO_REUSEPORT recvmmsg worker per core, and `.EPOLL` / `.URING` add epoll readiness / io_uring completion on that per-core shape (`.URING` folds to the epoll worker loop when io_uring is unavailable). Per-core connection-id steering is deferred (ADR-049 phase 3).
 
-**Example:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) serves `/`, a query-sum `/baseline2`, and a 256 KiB `/big` that exercises the multi-packet streamed send path.
+**Example:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) serves `/`, a query-sum `/baseline2`, a 256 KiB `/big` that exercises the multi-packet streamed send path, and a `/negotiated` that serves a brotli-precompressed body with `content-encoding: br` when the client accepts br.
 
 See [`docs/hld-http3-en.md`](docs/hld-http3-en.md) and [`docs/lld-http3-en.md`](docs/lld-http3-en.md) for the full design and per-layer internals.
 
