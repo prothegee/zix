@@ -51,15 +51,10 @@ pub const HttpServerConfig = struct {
     /// allocation rather than making three heap allocations. The pool cap scales with this worker's
     /// live concurrency, with this value as the floor when the worker is idle. Mirrors zix.Http1.
     uring_idle_pool_floor: usize = 64,
-    /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
-    /// brotli). Default false. Compression spends CPU to shrink the body, which only
-    /// pays off over a real network, so leaving it off keeps the perf gate untouched.
+    /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default false.
+    /// Compression spends CPU to shrink the body and only pays off over a real network, so leaving it off
+    /// keeps the perf gate untouched. Active under .EPOLL and .URING. A handler opts in via resp.sendNegotiated.
     /// Same field set and names as Http1, for config consistency.
-    ///
-    /// Note:
-    /// - Active under the .EPOLL and .URING dispatch models (shared-nothing, one owner
-    ///   per worker), like the response cache. A handler opts in by calling
-    ///   resp.sendNegotiated(req, body) instead of resp.send(body).
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body
     /// under this floor is sent uncompressed, since the header and CPU cost outweighs
