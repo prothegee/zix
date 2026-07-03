@@ -577,7 +577,7 @@ Some protocols skip the length prefix and scan for a sentinel byte instead:
 
 Delimiter scanning requires reading byte-by-byte or buffering until the sentinel appears,
 slower than length-prefix for large payloads. Suitable for text protocols where
-human-readability matters more than throughput.
+readability matters more than throughput.
 
 ### PoC files
 
