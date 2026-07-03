@@ -78,6 +78,14 @@ __*Update:*__
 
     ---
 
+- Optimasi memori dan throughput `zix.Http2`:
+    - Pool slot stream per worker (`src/tcp/http2/mux.zig`): mux `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, jadi memori stream residen mengikuti stream konkuren, bukan `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjaman). Pada 4096 koneksi ini memangkas memori baseline-h2c sekitar 6x sambil menaikkan throughput 8 sampai 20 persen, karena slot hot yang di-pool punya cache working set lebih rapat dibanding tabel per-koneksi lama yang sparse.
+    - Cache prefix header respons HPACK (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): blok `[:status, content-type, content-encoding]` untuk triple yang hot di-encode sekali dan dipakai ulang byte-identik lintas koneksi (encoder stateless, tidak pernah dynamic table), hanya `content-length` yang di-encode per balasan. Menaikkan cell body-kecil 18 sampai 26 persen pada CPU lebih rendah.
+    - Seal-in-place pada jalur record TLS 1.3 (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): gather-encrypt yang menyegel dua slice plaintext ke satu record tanpa copy staging.
+    - Default config: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
+
+    ---
+
 - gRPC over TLS dan terminator h2-over-TLS bersama:
     - `zix.Grpc` melayani TLS native (TLS 1.3, dengan fallback 1.2, ALPN h2) via `tls: ?*Tls.Context`, aditif di atas default h2c. Jalur TLS menggerakkan mux state machine gRPC resumable (`grpcMuxProcessRing`) langsung di atas record terdekripsi, engine single-owner yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak punya race write per-stream.
     - Terminator h2-over-TLS difaktorkan ke `src/tcp/tls/h2_terminator.zig` yang bersama dan engine-agnostic (handshake 1.3 / 1.2, ALPN h2). Ia menjalankan driver inline-mux dari pemanggil di atas record terdekripsi dan menyegel frame engine kembali ke record TLS lewat write hook thread-local, tanpa socketpair dan tanpa thread kedua. `tls_serve.zig` `zix.Http2` dan `zix.Grpc` adalah wrapper tipis yang menyuplai driver.

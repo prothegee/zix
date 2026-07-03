@@ -78,6 +78,14 @@ __*Update:*__
 
     ---
 
+- `zix.Http2` memory and throughput optimization:
+    - Per-worker stream-slot pool (`src/tcp/http2/mux.zig`): the `.EPOLL` / `.URING` mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 4096 connections this cut baseline-h2c memory about 6x while lifting throughput 8 to 20 percent, because the pooled hot slots have a tighter cache working set than the old sparse per-connection table.
+    - HPACK response-header prefix cache (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): the `[:status, content-type, content-encoding]` block for a hot triple is encoded once and reused byte-identical across connections (a stateless encoder, never the dynamic table), only `content-length` is encoded per reply. Lifted the small-body cells 18 to 26 percent at lower CPU.
+    - Seal-in-place on the TLS 1.3 record path (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): a gather-encrypt that seals two plaintext slices into one record without a staging copy.
+    - Config defaults: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
+
+    ---
+
 - gRPC over TLS and a shared h2-over-TLS terminator:
     - `zix.Grpc` serves native TLS (TLS 1.3, with a 1.2 fallback, ALPN h2) via `tls: ?*Tls.Context`, additive over the h2c default. The TLS path drives the resumable gRPC mux state machine (`grpcMuxProcessRing`) directly over the decrypted records, the same single-owner engine as the cleartext `.EPOLL` / `.URING` models, so it has no per-stream write races.
     - The h2-over-TLS terminator is factored into a shared, engine-agnostic `src/tcp/tls/h2_terminator.zig` (handshake 1.3 / 1.2, ALPN h2). It runs a caller-supplied inline-mux driver over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook, with no socketpair and no second thread. `zix.Http2` and `zix.Grpc` `tls_serve.zig` are thin wrappers supplying the driver.
