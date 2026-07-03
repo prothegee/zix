@@ -105,7 +105,7 @@ pub const GrpcMuxConn = struct {
 
 `rbuf` is sized `max(32 KB, max_frame_size + 256 + 9)`.
 
-`init` calls `buildSettingsFrame(&settings_frame, opts)` once to encode the 33-byte server SETTINGS blob (9-byte header + 4 params), and points `stage.buf` at the 64 KB `stage_buf`. The handshake appends `settings_frame` as-is (no per-connection encode loop), and the larger stage lets a ~5000-message streaming reply (~85 KB peak) flush in two writes and ~100 concurrent unary replies (~6 KB) coalesce into one write.
+`init` calls `buildSettingsFrame(&settings_frame, opts)` once to encode the 33-byte server SETTINGS blob (9-byte header + 4 params), and points `stage.buf` at the 64 KB `stage_buf`. The handshake appends `settings_frame` as-is (no per-connection encode loop). The 64 KB stage coalesces ~100 concurrent unary replies (~6 KB) into one write, and a server-streaming reply packs its messages into fewer, larger DATA frames (see `muxDispatch`), so even a ~5000-message reply stays well under the stage and leaves in one write.
 
 ### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
 
@@ -162,6 +162,8 @@ Control frames are staged via `muxStageFrame` / `muxStageWindowUpdate` / `muxSta
 ### muxDispatch(comptime routes, conn, stream)
 
 Builds a `GrpcContext` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), then `Router(routes).dispatch`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
+
+Server-streaming replies coalesce at the gRPC layer. `muxDispatch` gives a streaming route a per-call coalesce buffer (`ctx._coal`), and `sendMessage` packs consecutive gRPC-framed messages into it, emitting one HTTP/2 DATA frame per `grpc_stream_coalesce_cap` (16 KiB, the HTTP/2 default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. Unary keeps one frame per message (`_coal` is null), so it is byte-for-byte unchanged.
 
 For a streaming route (detected by `routeIsStreaming(routes, path)`), the dispatch is wrapped in `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments. Unary routes are not corked (they already leave in one write). `setTcpCork` is a no-op on non-Linux targets.
 
