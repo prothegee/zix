@@ -141,7 +141,7 @@ logger: ?*Logger = null,
 
 ## 5. Code formatting (blank line between phases)
 
-Run `zig fmt .` before any commit. Beyond formatting, distinct phases of a function body are separated by one blank line for human readability, even without a comment. The phase boundaries:
+Run `zig fmt .` before any commit. Beyond formatting, distinct phases of a function body are separated by one blank line for readability, even without a comment. The phase boundaries:
 
 | Boundary | Blank line before |
 | :- | :- |
