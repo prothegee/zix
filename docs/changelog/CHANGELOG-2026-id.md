@@ -135,6 +135,11 @@ __*Update:*__
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` pada `zix.Udp` (`UdpServerConfig`), dipakai jalur raw (`zix.Udp.Raw`, ADR-049). Additive, typed `Server(Packet)` tidak berubah.
     - `public_dir` dan `public_dir_upload` pada `zix.Http1` (`Http1ServerConfig`), static file serving untuk route yang tidak match, meniru `zix.Http`. `public_dir` yang non-empty divalidasi saat `run()` dan menghasilkan `error.PublicDirNotFound` jika tidak ada.
 
+    ---
+
+- DATA-frame coalescing untuk gRPC server-streaming (ADR-057):
+    - Server-streaming `zix.Grpc` memadatkan pesan berurutan menjadi DATA frame HTTP/2 yang lebih sedikit dan lebih besar (hingga max frame size default 16 KiB) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di klien. Perbaikan ini ada di `muxDispatch` bersama, jadi `.URING`, `.EPOLL`, dan kedua jalur mux TLS mewarisinya. Unary tetap satu frame per pesan dan byte-nya persis sama. Jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) belum dipadatkan.
+
 <br>
 
 __*Fix:*__
