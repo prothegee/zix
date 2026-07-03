@@ -36,10 +36,16 @@ fn baseline(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
     res.send(text);
 }
 
-const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
-    .{ .path = "/", .handler = home },
-    .{ .path = "/baseline2", .handler = baseline },
-});
+// A large (256 KiB) response body, static for the process lifetime so the slice handed to `res.send`
+// stays valid. It exercises the streamed multi-packet send path (one response fragmented across many
+// 1-RTT packets within the congestion window), which the single-packet routes above do not, and is what
+// the full-body correctness gate fetches (rnd/0.5.x/h3-fullbody-gate.sh, verify-http3-fullbody.md).
+const big_body: [262144]u8 = @splat('Z');
+
+// GET /big -> the 256 KiB body, to demonstrate and check large multi-packet responses over HTTP/3.
+fn big(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+    res.send(&big_body);
+}
 
 // Parse `?...&name=<int>&...` out of a request path. Returns null when absent or not an integer.
 fn queryInt(path: []const u8, name: []const u8) ?i64 {
@@ -57,6 +63,16 @@ fn queryInt(path: []const u8, name: []const u8) ?i64 {
 }
 
 // --------------------------------------------------------- //
+
+// Try it (needs a curl built with HTTP/3, run from the repo root so the cert path resolves):
+// - curl --http3-only -k https://127.0.0.1:9063/ -> "hello over http/3"
+// - curl --http3-only -k "https://127.0.0.1:9063/baseline2?a=20&b=22" -> "42"
+// - curl --http3-only -k https://127.0.0.1:9063/big -o /dev/null -w '%{size_download}\n' -> 262144
+const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
+    .{ .path = "/", .handler = home },
+    .{ .path = "/baseline2", .handler = baseline },
+    .{ .path = "/big", .handler = big },
+});
 
 pub fn main(process: std.process.Init) !void {
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
