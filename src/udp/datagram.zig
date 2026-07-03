@@ -114,7 +114,7 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
 /// is silently clamped, never an error. 0 leaves the kernel default untouched.
 ///
 /// Param:
-/// fd     - posix.socket_t
+/// fd - posix.socket_t
 /// rcvbuf - usize (requested SO_RCVBUF in bytes, 0 to skip)
 /// sndbuf - usize (requested SO_SNDBUF in bytes, 0 to skip)
 ///
@@ -151,7 +151,6 @@ pub const RecvBatch = struct {
     iovs: []posix.iovec,
     hdrs: []linux.mmsghdr,
     slot_size: usize,
-    received: usize = 0,
 
     /// Allocate a batch of `count` slots, each `slot_size` bytes wide.
     pub fn init(allocator: std.mem.Allocator, count: usize, slot_size: usize) !RecvBatch {
@@ -204,7 +203,20 @@ pub const RecvBatch = struct {
             else => return error.RecvFailed,
         }
 
-        self.received = rc;
+        return rc;
+    }
+
+    /// Like `recv` but never blocks (MSG_DONTWAIT): returns 0 immediately when no datagram is queued.
+    /// A userspace busy-poll loop spins on this to reap a datagram the instant it arrives, shaving the
+    /// scheduler wake-up latency. Unlike SO_BUSY_POLL (a NIC NAPI poll, a no-op on loopback) this works
+    /// on any socket and needs no privilege.
+    pub fn recvNow(self: *RecvBatch, fd: posix.socket_t) !usize {
+        const rc = linux.recvmmsg(fd, self.hdrs.ptr, @intCast(self.hdrs.len), linux.MSG.DONTWAIT, null);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR, .AGAIN => return 0,
+            else => return error.RecvFailed,
+        }
 
         return rc;
     }
@@ -215,7 +227,7 @@ pub const RecvBatch = struct {
     }
 };
 
-/// A reusable send batch: queued replies copied into a backing buffer and flushed via sendmmsg. The
+/// A reusable send batch: queued replies copied into a backing buffer and flushed via sendmmsg, or a coalesced sendmsg per peer-run when GSO is on. The
 /// copy keeps replies valid even when the handler hands back bytes that live in the receive buffer.
 pub const SendBatch = struct {
     allocator: std.mem.Allocator,
@@ -230,6 +242,17 @@ pub const SendBatch = struct {
     /// with a UDP_SEGMENT (GSO) control message, so the kernel splits the buffer into wire datagrams.
     /// Set by the worker only after probeGso confirms kernel support. Off keeps the plain sendmmsg path.
     gso: bool = false,
+    /// How many queued replies (or, with gso set, how many queued replies the already-formed GSO
+    /// groups cover) submitUring has already turned into io_uring SQEs. flush / flushGso only send
+    /// the remainder, so a caller that falls back to a blocking flush mid-cycle (the batch filled
+    /// before every queued reply could ride an SQE) never re-sends what is already in flight on the
+    /// ring. Zero for a caller that never calls submitUring, so this changes nothing for them.
+    ring_sent: usize = 0,
+    /// Per-GSO-group scratch for submitUring, indexed by the group's starting queue position (so
+    /// concurrent groups across calls never alias). Only touched when gso is set, otherwise unused.
+    gso_iovs: []posix.iovec_const,
+    gso_msgs: []linux.msghdr_const,
+    gso_controls: []GsoControl,
 
     /// Allocate a batch holding up to `count` replies totalling `buf_bytes` payload bytes.
     pub fn init(allocator: std.mem.Allocator, count: usize, buf_bytes: usize) !SendBatch {
@@ -245,7 +268,26 @@ pub const SendBatch = struct {
         const hdrs = try allocator.alloc(linux.mmsghdr, count);
         errdefer allocator.free(hdrs);
 
-        return .{ .allocator = allocator, .data = data, .names = names, .iovs = iovs, .hdrs = hdrs, .cap = count };
+        const gso_iovs = try allocator.alloc(posix.iovec_const, count);
+        errdefer allocator.free(gso_iovs);
+
+        const gso_msgs = try allocator.alloc(linux.msghdr_const, count);
+        errdefer allocator.free(gso_msgs);
+
+        const gso_controls = try allocator.alloc(GsoControl, count);
+        errdefer allocator.free(gso_controls);
+
+        return .{
+            .allocator = allocator,
+            .data = data,
+            .names = names,
+            .iovs = iovs,
+            .hdrs = hdrs,
+            .cap = count,
+            .gso_iovs = gso_iovs,
+            .gso_msgs = gso_msgs,
+            .gso_controls = gso_controls,
+        };
     }
 
     pub fn deinit(self: *SendBatch) void {
@@ -253,17 +295,42 @@ pub const SendBatch = struct {
         self.allocator.free(self.names);
         self.allocator.free(self.iovs);
         self.allocator.free(self.hdrs);
+        self.allocator.free(self.gso_iovs);
+        self.allocator.free(self.gso_msgs);
+        self.allocator.free(self.gso_controls);
     }
 
-    /// Queue one reply to `dest`. Returns false when the batch is full (by count or by payload
-    /// bytes), signalling the caller to flush and retry.
+    /// Queue one reply to `dest` by copying `bytes` into the batch. Returns false when the batch is full
+    /// (by count or by payload bytes), signalling the caller to flush and retry. A caller that can write
+    /// the reply straight into the batch (e.g. seal a packet in place) should use reserve + commit
+    /// instead to skip this copy.
     pub fn queue(self: *SendBatch, dest: posix.sockaddr.in6, bytes: []const u8) bool {
         if (self.count >= self.cap) return false;
         if (self.used + bytes.len > self.data.len) return false;
 
         @memcpy(self.data[self.used..][0..bytes.len], bytes);
+        self.commit(dest, bytes.len);
+
+        return true;
+    }
+
+    /// Reserve the free tail of the batch for the caller to write a reply into directly (seal in place),
+    /// avoiding the copy queue() does. Returns a writable region of at least `needed` bytes, or null when
+    /// the batch is full by count or lacks that much contiguous room, signalling the caller to flush and
+    /// retry. Pair with commit() once the real written length is known.
+    pub fn reserve(self: *SendBatch, needed: usize) ?[]u8 {
+        if (self.count >= self.cap) return null;
+        if (self.used + needed > self.data.len) return null;
+
+        return self.data[self.used..];
+    }
+
+    /// Record a reply of `len` bytes now sitting at the batch's current tail (either copied by queue or
+    /// written in place after reserve) to `dest`: wire its iovec / msghdr and advance the batch. `len`
+    /// MUST be within the room a preceding reserve() confirmed, so the bytes lie inside the buffer.
+    pub fn commit(self: *SendBatch, dest: posix.sockaddr.in6, len: usize) void {
         self.names[self.count] = dest;
-        self.iovs[self.count] = .{ .base = self.data.ptr + self.used, .len = bytes.len };
+        self.iovs[self.count] = .{ .base = self.data.ptr + self.used, .len = len };
         self.hdrs[self.count] = .{
             .hdr = .{
                 .name = @ptrCast(&self.names[self.count]),
@@ -277,15 +344,15 @@ pub const SendBatch = struct {
             .len = 0,
         };
 
-        self.used += bytes.len;
+        self.used += len;
         self.count += 1;
-
-        return true;
     }
 
     /// Send every queued reply, then reset the batch. Handles partial sends and signal interruption.
     /// With gso set, consecutive same-destination replies are coalesced (see flushGso), otherwise the
-    /// replies go out one-per-datagram batched into a single sendmmsg.
+    /// replies go out one-per-datagram batched into a single sendmmsg. Skips the prefix submitUring
+    /// already put on the ring (ring_sent), so a caller that mixes the two never re-sends a reply
+    /// twice.
     pub fn flush(self: *SendBatch, fd: posix.socket_t) !void {
         if (self.gso) {
             try self.flushGso(fd);
@@ -293,7 +360,7 @@ pub const SendBatch = struct {
             return;
         }
 
-        var sent: usize = 0;
+        var sent: usize = self.ring_sent;
         while (sent < self.count) {
             const rc = linux.sendmmsg(fd, self.hdrs.ptr + sent, @intCast(self.count - sent), 0);
             switch (posix.errno(rc)) {
@@ -317,7 +384,7 @@ pub const SendBatch = struct {
     /// to one peer. A per-peer-single-packet batch falls back to one sendmsg each (enable gso for
     /// multi-packet workloads). The caller resets the batch.
     fn flushGso(self: *SendBatch, fd: posix.socket_t) !void {
-        var i: usize = 0;
+        var i: usize = self.ring_sent;
         while (i < self.count) {
             const run = gsoGroupLen(self.iovs[0..self.count], self.names[0..self.count], i);
 
@@ -331,10 +398,82 @@ pub const SendBatch = struct {
         }
     }
 
+    /// Submit every reply queued since the last submitUring / reset as sendmsg SQEs on `ring`,
+    /// tagging each with `tag` instead of a blocking sendmmsg syscall. Does not wait for completions
+    /// and does not reset the batch: the messages (and, with gso set, the coalesced groups) live in
+    /// this batch's own storage, so the caller must reap one ring completion per SQE this call
+    /// reports submitted before it resets or reuses the batch. A ring momentarily too full to accept
+    /// every SQE still returns the count actually submitted, leaving the rest for the next call.
+    ///
+    /// Param:
+    /// ring - *linux.IoUring (the caller's ring, one per uring worker)
+    /// fd - posix.socket_t (the UDP socket the SQEs send on)
+    /// tag - u64 (the user_data every submitted SQE carries, for the caller's completion bookkeeping)
+    ///
+    /// Return:
+    /// - usize (the number of SQEs submitted this call)
+    pub fn submitUring(self: *SendBatch, ring: *linux.IoUring, fd: posix.socket_t, tag: u64) usize {
+        if (self.gso) return self.submitUringGso(ring, fd, tag);
+
+        var submitted: usize = 0;
+        for (self.hdrs[self.ring_sent..self.count]) |*hdr| {
+            const sqe = uringGetSqeRetrying(ring) orelse break;
+            sqe.prep_sendmsg(fd, @ptrCast(&hdr.hdr), 0);
+            sqe.user_data = tag;
+            submitted += 1;
+        }
+        self.ring_sent += submitted;
+
+        return submitted;
+    }
+
+    /// submitUring's gso branch: forms the same coalesced runs as flushGso, but each run becomes one
+    /// persistent (not stack-local) iovec + msghdr + control message in this batch's own gso_* arrays
+    /// indexed by the run's starting queue position, so the SQE's pointers stay valid across the
+    /// async gap between submit and completion.
+    fn submitUringGso(self: *SendBatch, ring: *linux.IoUring, fd: posix.socket_t, tag: u64) usize {
+        var submitted: usize = 0;
+        var i: usize = self.ring_sent;
+        while (i < self.count) {
+            const run = gsoGroupLen(self.iovs[0..self.count], self.names[0..self.count], i);
+
+            const seg_size: u16 = if (run >= 2) @intCast(self.iovs[i].len) else 0;
+            var total: usize = 0;
+            for (i..i + run) |k| total += self.iovs[k].len;
+
+            self.gso_iovs[i] = .{ .base = self.iovs[i].base, .len = total };
+            self.gso_msgs[i] = .{
+                .name = @ptrCast(&self.names[i]),
+                .namelen = sockaddr_in6_len,
+                .iov = self.gso_iovs[i..][0..1].ptr,
+                .iovlen = 1,
+                .control = null,
+                .controllen = 0,
+                .flags = 0,
+            };
+            if (seg_size > 0) {
+                self.gso_controls[i] = .{ .hdr = .{ .len = GSO_CMSG_LEN, .level = linux.IPPROTO.UDP, .type = linux.UDP.SEGMENT }, .seg = seg_size };
+                self.gso_msgs[i].control = &self.gso_controls[i];
+                self.gso_msgs[i].controllen = GSO_CMSG_LEN;
+            }
+
+            const sqe = uringGetSqeRetrying(ring) orelse break;
+            sqe.prep_sendmsg(fd, &self.gso_msgs[i], 0);
+            sqe.user_data = tag;
+            submitted += 1;
+
+            i += run;
+        }
+        self.ring_sent = i;
+
+        return submitted;
+    }
+
     /// Drop all queued replies without sending.
     pub fn reset(self: *SendBatch) void {
         self.used = 0;
         self.count = 0;
+        self.ring_sent = 0;
     }
 };
 
@@ -348,6 +487,18 @@ const GsoControl = extern struct {
     hdr: linux.cmsghdr,
     seg: u16,
 };
+
+/// Get a submission-queue entry for submitUring, submitting the backlog and retrying once when the
+/// SQ is momentarily full. Null when the ring cannot accept a submission at all right now. Mirrors
+/// the io_uring worker's own uringGetSqe (dispatch/uring.zig): duplicated rather than shared because
+/// this file has no dependency on the http3 uring module, and the helper is four lines.
+fn uringGetSqeRetrying(ring: *linux.IoUring) ?*linux.io_uring_sqe {
+    return ring.get_sqe() catch {
+        _ = ring.submit() catch return null;
+
+        return ring.get_sqe() catch null;
+    };
+}
 
 /// True when two addresses name the same peer (address bytes and port).
 fn sameAddr(addr_a: posix.sockaddr.in6, addr_b: posix.sockaddr.in6) bool {
@@ -486,6 +637,35 @@ test "zix test: SendBatch rejects an oversized payload" {
     try std.testing.expect(!batch.queue(dest, "x"));
 }
 
+test "zix test: SendBatch reserve + commit writes a reply in place with no copy, like queue" {
+    var batch = try SendBatch.init(std.testing.allocator, 2, 32);
+    defer batch.deinit();
+
+    const dest = try parseBind("127.0.0.1", 1234);
+
+    // Reserve the tail (asks for room >= what we write), write straight into it, commit the real length.
+    const slot = batch.reserve(8) orelse return error.TestUnexpectedResult;
+    @memcpy(slot[0..2], "ab");
+    batch.commit(dest, 2);
+
+    // A second in-place reply packs contiguously after the first, exactly as queue would have.
+    const slot2 = batch.reserve(8) orelse return error.TestUnexpectedResult;
+    @memcpy(slot2[0..3], "cde");
+    batch.commit(dest, 3);
+
+    try std.testing.expectEqual(@as(usize, 2), batch.count);
+    try std.testing.expectEqualStrings("abcde", batch.data[0..batch.used]);
+    try std.testing.expectEqual(@as(usize, 2), batch.iovs[0].len);
+    try std.testing.expectEqual(@as(usize, 3), batch.iovs[1].len);
+
+    // Full by count (2-slot cap) and full by bytes are both reported as null, the flush-and-retry signal.
+    try std.testing.expect(batch.reserve(1) == null);
+
+    batch.reset();
+    try std.testing.expect(batch.reserve(64) == null); // 64 > 32-byte buffer: no contiguous room
+    try std.testing.expect(batch.reserve(32) != null); // exactly the buffer fits
+}
+
 test "zix test: RecvBatch allocates slots and wires headers" {
     var batch = try RecvBatch.init(std.testing.allocator, 4, 1500);
     defer batch.deinit();
@@ -497,9 +677,9 @@ test "zix test: RecvBatch allocates slots and wires headers" {
 }
 
 fn testPeer(port: u16) posix.sockaddr.in6 {
-    var s = std.mem.zeroes(posix.sockaddr.in6);
-    s.port = port;
-    return s;
+    var addr = std.mem.zeroes(posix.sockaddr.in6);
+    addr.port = port;
+    return addr;
 }
 
 test "zix test: setSocketBuffers reads back a raised SO_RCVBUF on a real socket" {
@@ -637,4 +817,72 @@ test "zix test: SendBatch GSO send is accepted by the kernel and delivers over l
         try std.testing.expectEqual(@as(usize, 1200), first.data.len);
         try std.testing.expectEqual(@as(u8, 'A'), first.data[0]);
     }
+}
+
+test "zix test: SendBatch.submitUring puts a queued reply on a real io_uring ring, not sendmmsg" {
+    if (comptime !is_linux) return;
+
+    var ring = linux.IoUring.init(8, 0) catch return; // skip where io_uring is unavailable
+    defer ring.deinit();
+
+    const r_fd = open("127.0.0.1", 19075, false) catch return; // skip if the port is busy
+    defer close(r_fd);
+    const s_fd = open("127.0.0.1", 19076, false) catch return;
+    defer close(s_fd);
+
+    const dest = ipToSockaddr6(try std.Io.net.IpAddress.parse("127.0.0.1", 19075));
+
+    var tx = try SendBatch.init(std.testing.allocator, 4, 64);
+    defer tx.deinit();
+    try std.testing.expect(tx.queue(dest, "hello"));
+
+    // submitUring only queues the SQE: the reply does not land until the ring is submitted and the
+    // completion reaped, unlike flush's synchronous sendmmsg.
+    try std.testing.expectEqual(@as(usize, 1), tx.submitUring(&ring, s_fd, 42));
+    try std.testing.expectEqual(@as(usize, 1), tx.ring_sent);
+
+    _ = try ring.submit_and_wait(1);
+    var cqes: [4]linux.io_uring_cqe = undefined;
+    const reaped = try ring.copy_cqes(&cqes, 0);
+    try std.testing.expect(reaped >= 1);
+    try std.testing.expectEqual(@as(u64, 42), cqes[0].user_data);
+
+    var rx = try RecvBatch.init(std.testing.allocator, 4, 64);
+    defer rx.deinit();
+    const n = try rx.recv(r_fd);
+    try std.testing.expect(n >= 1);
+    try std.testing.expectEqualStrings("hello", rx.get(0).data);
+}
+
+test "zix test: SendBatch.flush skips the ring_sent prefix so mixing submitUring and flush never resends" {
+    if (comptime !is_linux) return;
+
+    const r_fd = open("127.0.0.1", 19077, false) catch return;
+    defer close(r_fd);
+    const s_fd = open("127.0.0.1", 19078, false) catch return;
+    defer close(s_fd);
+
+    const fl = linux.fcntl(r_fd, posix.F.GETFL, 0);
+    const nb: u32 = @bitCast(posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(r_fd, posix.F.SETFL, fl | @as(usize, nb));
+
+    const dest = ipToSockaddr6(try std.Io.net.IpAddress.parse("127.0.0.1", 19077));
+
+    var tx = try SendBatch.init(std.testing.allocator, 4, 64);
+    defer tx.deinit();
+    try std.testing.expect(tx.queue(dest, "first"));
+    try std.testing.expect(tx.queue(dest, "second"));
+
+    // Pretend submitUring already put the first reply on a ring: flush must send only the tail.
+    tx.ring_sent = 1;
+    try tx.flush(s_fd);
+
+    var rx = try RecvBatch.init(std.testing.allocator, 4, 64);
+    defer rx.deinit();
+    const n = rx.recv(r_fd) catch 0;
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqualStrings("second", rx.get(0).data);
+
+    // reset (called by flush) clears ring_sent too, so the batch starts its next cycle fresh.
+    try std.testing.expectEqual(@as(usize, 0), tx.ring_sent);
 }

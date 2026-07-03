@@ -67,7 +67,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `udp/config.zig` | `refAllDecls` + default: `UdpServerConfig`, `UdpClientConfig`, nilai backing enum `PortMode` dan `Endianness` |
+| `udp/config.zig` | `refAllDecls` + default: `UdpServerConfig`, `UdpClientConfig`, default `allow_args`, dan nilai backing enum `Endianness` |
 | `udp/packet.zig` | `refAllDecls` + perilaku: NATIVE tanpa operasi, array u8 tidak ditukar, round-trip LITTLE/BIG, non-native menukar elemen integer dan float array, semua varian `FeedbackResult` |
 | `udp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, port bukan-nol berhasil, field konfigurasi tersimpan |
 | `udp/client.zig` | `refAllDecls` |
@@ -448,10 +448,10 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | `UdpServerConfig` auto_ack | default false |
 | `UdpServerConfig` broadcast | default false |
 | `UdpServerConfig` endianness | default LITTLE |
-| `UdpServerConfig` port_mode | default REQUIRED |
-| `UdpClientConfig` send_once | default false |
-| `UdpClientConfig` send_every | default 99 |
+| `UdpServerConfig` allow_args | default false |
+| Re-export `Udp.DispatchModel` | resolve ke enum dispatch bersama |
 | `UdpClientConfig` endianness | default LITTLE |
+| `UdpClientConfig` recv_timeout_ms | default 0 (nonaktif) |
 
 #### `packet_test.zig`
 
@@ -631,10 +631,8 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Nilai backing `PortMode.CONFIGURABLE` | sama dengan 0 |
-| Nilai backing `PortMode.REQUIRED` | sama dengan 1 |
-| Port nol dengan mode `REQUIRED` | `UdpServer.init` menghasilkan `error.PortNotConfigured` |
-| Port bukan-nol dengan mode `REQUIRED` | `UdpServer.init` berhasil |
+| Port nol | `UdpServer.init` menghasilkan `error.PortNotConfigured` |
+| Port bukan-nol | `UdpServer.init` berhasil |
 
 #### `packet_test.zig`
 

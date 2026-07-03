@@ -141,7 +141,7 @@ logger: ?*Logger = null,
 
 ## 5. Formatting kode (baris kosong antar fase)
 
-Jalankan `zig fmt .` sebelum commit apa pun. Di luar formatting, fase berbeda dalam body sebuah function dipisah satu baris kosong demi keterbacaan manusia, bahkan tanpa komentar. Batas fasenya:
+Jalankan `zig fmt .` sebelum commit apa pun. Di luar formatting, fase berbeda dalam body sebuah function dipisah satu baris kosong demi keterbacaan, bahkan tanpa komentar. Batas fasenya:
 
 | Batas | Baris kosong sebelum |
 | :- | :- |

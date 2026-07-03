@@ -68,11 +68,13 @@
         - [Aturan dan kondisi](./README-id.md#aturan-dan-kondisi)
     - [HTTP/2 h2c](./README-id.md#http2-h2c)
         - [gRPC h2c](./README-id.md#grpc-h2c)
+    - [TLS (https / h2)](./README-id.md#tls-https--h2)
     - [Raw TCP](./README-id.md#raw-tcp)
     - [FIX 4.x](./README-id.md#fix-4x)
     - [UDS (Unix Domain Sockets)](./README-id.md#uds-unix-domain-sockets)
     - [Channel](./README-id.md#channel)
     - [UDP](./README-id.md#udp)
+    - [HTTP/3](./README-id.md#http3)
     - [Logger](./README-id.md#logger)
 - [Benchmark](./README-id.md#benchmark)
 
@@ -93,6 +95,7 @@
 | [`docs/hld-proxy-id.md`](docs/hld-proxy-id.md) | Reverse proxy (nginx, haproxy) untuk zix.Http1, zix.Http, zix.Grpc |
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
 | [`docs/hld-tls-id.md`](docs/hld-tls-id.md) | TLS: tujuan, version policy, Tls.Context, alur handshake, integrasi engine, client |
+| [`docs/hld-http3-id.md`](docs/hld-http3-id.md) | HTTP/3 (QUIC): tujuan, runtime model, API, router, dispatch model, handshake, QPACK, memory model |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
 | [`docs/lld-tcp-id.md`](docs/lld-tcp-id.md) | TCP: struktur data internal dan algoritma |
@@ -102,6 +105,7 @@
 | [`docs/lld-channel-id.md`](docs/lld-channel-id.md) | Channel: internal ring buffer, locking, algoritma send/recv |
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
 | [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
+| [`docs/lld-http3-id.md`](docs/lld-http3-id.md) | HTTP/3 (QUIC): internal per-layer (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/zix-deploy-id.md`](docs/zix-deploy-id.md) | Deployment: bangun Docker image (zig fetch atau vendor) dan konfigurasi TLS context untuk Ed25519 / ECDSA P-256 / RSA |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: POOL, ASYNC, MIXED, EPOLL. Jumlah thread, kecocokan protokol. |
 | [`docs/design-considerations-id.md`](docs/design-considerations-id.md) | Pertimbangan desain, design pattern, dan konvensi penamaan |
@@ -1825,18 +1829,19 @@ const Packet = extern struct {
 const MyServer = zix.Udp.Server(Packet);
 
 pub fn main(process: std.process.Init) !void {
+    // Berikan process.minimal.args dan set .allow_args = true untuk membaca override --ip / --port.
     var server = try MyServer.init(.{
         .io         = process.io,
         .allocator  = std.heap.smp_allocator,
         .ip         = "127.0.0.1",
         .port       = 9100,
-        .port_mode  = .REQUIRED,
+        .dispatch_model = .ASYNC, // typed server menjalankan satu async loop
         .endianness = .LITTLE,
         .broadcast  = true,   // relay setiap paket ke semua client yang terhubung
         .auto_ack   = false,
         .conn_timeout_ms = 5000,
-        .poll_timeout_ms       = 2000,
-    });
+        .poll_timeout_ms = 2000,
+    }, .{});
     defer server.deinit();
     try server.run();
 }
@@ -1849,14 +1854,14 @@ const MyClient = zix.Udp.Client(Packet);
 
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
+    // Berikan process.minimal.args dan set .allow_args = true untuk membaca
+    // override --bind-ip / --bind-port / --server-port.
     var client = try MyClient.init(.{
-        .server_ip   = "127.0.0.1",
+        .ip          = "127.0.0.1", // alamat server
         .server_port = 9100,
         .bind_port   = 9101,
-        .port_mode   = .REQUIRED,
         .endianness  = .LITTLE,
-        .send_every  = 1000,
-    }, io);
+    }, io, .{});
     defer client.deinit();
 
     // spawn tugas receive bersamaan dengan loop send
@@ -1886,7 +1891,7 @@ pub fn main(process: std.process.Init) !void {
         .ip        = "0.0.0.0",
         .port      = 9064,
         .dispatch_model = .EPOLL, // worker SO_REUSEPORT per-core (.ASYNC = satu worker)
-    });
+    }, .{});
     defer server.deinit();
     try server.run();
 }
@@ -1897,9 +1902,67 @@ pub fn main(process: std.process.Init) !void {
 **Contoh:**
 - [examples/udp_server.zig](examples/udp_server.zig) - server typed, contoh lengkap dengan broadcast dan port yang dapat dikonfigurasi
 - [examples/udp_client.zig](examples/udp_client.zig) - client yang cocok
-- [examples/udp_raw_echo.zig](examples/udp_raw_echo.zig) - server echo raw-bytes (batching recvmmsg / sendmmsg, dispatch model)
+- [examples/udp_server_raw.zig](examples/udp_server_raw.zig) - server echo raw-bytes (batching recvmmsg / sendmmsg, dispatch model)
 
 [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk detail.
+
+<br>
+
+### HTTP/3
+
+HTTP/3 berjalan di atas QUIC, yang berjalan di atas UDP, jadi `zix.Http3` berada pada substrat datagram `zix.Udp` yang sama di atas, bukan pada stack TCP / TLS. Ini adalah server HTTP/3 pure-Zig di atas QUIC (RFC 9114 / 9000 / 9001 / 9002). Transport QUIC, packet protection, glue handshake TLS 1.3, dan kompresi header QPACK semuanya ditulis dari RFC dan dibuktikan byte-exact terhadap worked example RFC. TLS 1.3 dilipat ke dalam handshake QUIC (tidak ada mode cleartext dan tidak ada TLS record layer), dikonfigurasi oleh `zix.Tls.Context` yang sama seperti engine TCP, jadi cert ECDSA P-256, Ed25519, atau RSA semuanya bekerja.
+
+Route adalah table comptime (`zix.Http3.Router`), berbentuk sama seperti `zix.Http1` / `zix.Http2`, di-dispatch pada path request terdekode.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+fn home(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+    res.send("hello over http/3\n");
+}
+
+const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
+    .{ .path = "/", .handler = home },
+});
+
+pub fn main(process: std.process.Init) !void {
+    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+        .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    });
+    defer tls.deinit();
+
+    const Server = zix.Http3.Http3(Routes.dispatch);
+    var server = try Server.init(.{
+        .io             = process.io,
+        .allocator      = std.heap.smp_allocator,
+        .ip             = "127.0.0.1",
+        .port           = 9063,
+        .dispatch_model = .ASYNC,
+        .tls            = &tls,
+    });
+    defer server.deinit();
+
+    try server.run();
+}
+```
+
+```sh
+# Uji dengan curl yang dibangun dengan HTTP/3 (jalankan dari root repo agar path cert resolve)
+curl --http3-only -k https://127.0.0.1:9063/
+```
+
+**HandlerFn:** `fn(req: *const zix.Http3.Request, res: *zix.Http3.Response) void`
+
+- `req.method` dan `req.path` diisi dari wire. Body response yang diserahkan ke `res.send` disalin setelah handler kembali, jadi boleh menunjuk ke memori static atau milik handler.
+- `init` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak.
+
+**Dispatch model** (Linux-only): `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 fase 3).
+
+**Contoh:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) menyajikan `/`, query-sum `/baseline2`, dan `/big` 256 KiB yang menguji jalur kirim streamed multi-packet.
+
+Lihat [`docs/hld-http3-id.md`](docs/hld-http3-id.md) dan [`docs/lld-http3-id.md`](docs/lld-http3-id.md) untuk desain lengkap dan internal per-layer.
 
 <br>
 

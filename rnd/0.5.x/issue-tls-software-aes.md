@@ -36,9 +36,6 @@ NOT include `aes` or `pclmul` (they are separate optional features, not part of 
 So zix compiles the pure-software AES plus software GHASH. baseline-h2 hides it (tiny bodies keep up),
 static-h2 exposes it (large bodies saturate the software cipher, the worker never returns to read).
 
-ref-server (OpenSSL) and ref-server-2 (rustls / ring) are unaffected: they detect AES-NI at RUNTIME and dispatch
-to it regardless of the build target. zix decides at comptime, so the build must declare the features.
-
 ## Measured (AES-128-GCM, 16 KiB blocks, one core, zig-0.16 musl ReleaseFast)
 
 | Build target | Backend | Throughput |
@@ -52,7 +49,7 @@ to it regardless of the build target. zix decides at comptime, so the build must
 ## Fix
 
 Build with a CPU target that includes the features. In the entry Dockerfile, `x86_64_v3` becomes
-`x86_64_v3+aes+pclmul`. Safe: every `x86_64_v3`-capable CPU (and the bench 3995WX Zen2) has AES-NI and
+`x86_64_v3+aes+pclmul`. Safe: every `x86_64_v3`-capable CPU has AES-NI and
 PCLMUL (both shipped years before AVX2), so v3 portability is unchanged. On aarch64 the equivalent is
 `+aes` (ARM Crypto Extensions, no `pclmul` there).
 

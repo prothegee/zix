@@ -2,8 +2,8 @@
 //!
 //! What:
 //! - `Http3(handler)` binds a UDP socket and serves QUIC / HTTP-3 on the zix.Udp datagram substrate.
-//!   The dispatch model selects the worker shape per the ADR-050 contract: `.ASYNC` / `.POOL` /
-//!   `.MIXED` run a single-worker recv with internal CID demux, and `.EPOLL` / `.URING` run one
+//!   The dispatch model selects the worker shape per the ADR-050 contract: `.ASYNC` runs a
+//!   single-worker recv with internal CID demux. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one
 //!   SO_REUSEPORT worker per core, the kernel load-balancing connections by 4-tuple.
 //!
 //! Usage:

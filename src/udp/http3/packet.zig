@@ -7,6 +7,12 @@
 //! - Validates the version-1 invariants: Fixed Bit MUST be 1 (else discard) and a long header
 //!   connection ID length MUST NOT exceed 20 (else drop). Proven against RFC 9000 Appendix A.2 / A.3
 //!   plus crafted headers in the tests below.
+//!
+//! Note:
+//! - parseLongHeader and decodePacketNumber are live. packetNumberLength, ShortHeader, and
+//!   parseShortHeader are implemented and tested but unused: the send path uses a simpler inline
+//!   packet-number-length rule and protection.zig parses the short header inline. Kept as the
+//!   full-RFC reference (deferred).
 
 const std = @import("std");
 
@@ -26,6 +32,13 @@ pub fn packetNumberLength(full_pn: u64, largest_acked: ?u64) usize {
 
 /// Recover the full packet number from the truncated wire value (RFC 9000 17.1, Appendix A.3):
 /// pick the candidate closest to the next expected packet number.
+///
+/// Note:
+/// - The RFC pseudocode uses arbitrary-precision integers, so `expected_pn - pn_hwin` may go negative
+///   (any time the expected number is below half a window, e.g. the first ~128 packets on a 1-byte
+///   stream). The window comparisons are therefore done in signed i128, not u64: doing them in u64
+///   underflows and wrongly shifts small packet numbers up by a whole window (turning packet 1 into
+///   257), which would corrupt the AEAD nonce for every early packet.
 pub fn decodePacketNumber(largest_pn: u64, truncated_pn: u64, pn_nbits: u6) u64 {
     const expected_pn = largest_pn + 1;
     const pn_win: u64 = @as(u64, 1) << pn_nbits;
@@ -33,11 +46,16 @@ pub fn decodePacketNumber(largest_pn: u64, truncated_pn: u64, pn_nbits: u6) u64 
     const pn_mask = pn_win - 1;
 
     const candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
-    if (candidate_pn <= expected_pn - pn_hwin and candidate_pn < (@as(u64, 1) << 62) - pn_win) {
-        return candidate_pn + pn_win;
+
+    const candidate: i128 = candidate_pn;
+    const expected: i128 = expected_pn;
+    const window: i128 = pn_win;
+    const half_window: i128 = pn_hwin;
+    if (candidate <= expected - half_window and candidate < (@as(i128, 1) << 62) - window) {
+        return @intCast(candidate + window);
     }
-    if (candidate_pn > expected_pn + pn_hwin and candidate_pn >= pn_win) {
-        return candidate_pn - pn_win;
+    if (candidate > expected + half_window and candidate >= window) {
+        return @intCast(candidate - window);
     }
 
     return candidate_pn;
@@ -144,6 +162,17 @@ test "zix test: RFC 9000 A.2 / A.3 packet number encode length and decode" {
     try std.testing.expectEqual(@as(usize, 3), packetNumberLength(0xace8fe, 0xabe8b3));
 
     try std.testing.expectEqual(@as(u64, 0xa82f9b32), decodePacketNumber(0xa82f30ea, 0x9b32, 16));
+
+    // Small packet numbers: expected_pn is below half a window, so the window math must not underflow.
+    // These are the early-connection cases that a u64 subtraction turned into off-by-a-window (packet 1
+    // decoded as 257), corrupting the nonce for the first packets of every connection.
+    try std.testing.expectEqual(@as(u64, 1), decodePacketNumber(0, 1, 8));
+    try std.testing.expectEqual(@as(u64, 2), decodePacketNumber(1, 2, 8));
+    try std.testing.expectEqual(@as(u64, 0), decodePacketNumber(0, 0, 8));
+    // Crossing the 1-byte boundary: largest 255, wire byte 0x00 means packet 256, not 0.
+    try std.testing.expectEqual(@as(u64, 256), decodePacketNumber(255, 0x00, 8));
+    // And a step further: largest 300, wire byte 0x2d (=45) resolves to 301, the in-window candidate.
+    try std.testing.expectEqual(@as(u64, 301), decodePacketNumber(300, 0x2d, 8));
 }
 
 test "zix test: RFC 9000 17.2 long header parse and invariants" {

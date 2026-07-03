@@ -12,6 +12,9 @@
 //! - Cryptography is std.crypto throughout. HKDF-Expand-Label is the TLS 1.3 form (RFC 8446 7.1).
 //! - Connection state (retained old keys, two receive-key sets across a phase flip) lives in
 //!   connection.zig, not here. This module is pure functions plus the usage-accounting struct.
+//! - The live path is AES-128-GCM only. The Retry tag, key-update ratchet, ChaCha20-Poly1305 mask,
+//!   AeadId, and the AEAD usage-limit helpers are implemented and tested but not wired yet
+//!   (deferred, RFC-completeness).
 
 const std = @import("std");
 

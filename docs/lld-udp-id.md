@@ -183,14 +183,17 @@ Kedua fungsi mengembalikan nilai baru sementara nilai aslinya tidak dimodifikasi
 
 ---
 
-## config.zig: PortMode / Endianness / Config
+## config.zig: allow_args / Endianness / Config
+
+### Gate allow_args
+
+Kedua config membawa `allow_args: bool = false`. `init(config, args)` membaca `--ip` / `--port` (server) atau `--bind-ip` / `--bind-port` / `--server-port` (client) dari `args` hanya saat flag diset, lewat `applyServerArgs` / `applyClientArgs`. Flag yang hilang atau tidak dikenali mempertahankan nilai konfigurasi. Parse args hanya di-compile saat `args` berupa `std.process.Args` nyata, jadi memberikan `.{}` (tanpa CLI) melewatinya saat comptime. Guard port tetap jalan: port hasil bernilai nol menghasilkan `error.PortNotConfigured`.
 
 ### Nilai backing enum
 
-`PortMode` dan `Endianness` adalah `enum(u8)`. Nilai integer-nya bersifat stabil dan diuji secara eksplisit untuk mendeteksi pengurutan ulang yang tidak disengaja.
+`Endianness` adalah `enum(u8)`. Nilai integer-nya bersifat stabil dan diuji secara eksplisit untuk mendeteksi pengurutan ulang yang tidak disengaja.
 
 ```
-PortMode:   CONFIGURABLE=0, REQUIRED=1
 Endianness: NATIVE=0, LITTLE=1, BIG=2
 ```
 
@@ -204,8 +207,8 @@ Server datagram raw-bytes (`zix.Udp.Raw`) terpisah dari engine typed di atas dan
 
 - `datagram.zig`: primitive raw-fd. `open` memakai syscall `std.os.linux` mentah (`socket` / `bind`, karena `std.posix` tidak lagi membungkusnya setelah migrasi std.Io) plus safe wrapper `std.posix.setsockopt` untuk SO_REUSEADDR / SO_REUSEPORT. `RecvBatch` membagi satu backing buffer jadi `recv_batch` slot MTU yang disambungkan ke array `mmsghdr` / `iovec` / name untuk `recvmmsg`, dipanggil dengan `MSG_WAITFORONE` agar kembali pada datagram pertama ketimbang menunggu seluruh batch. `SendBatch.queue` menyalin tiap balasan ke backing buffer-nya sendiri (jadi balasan yang menunjuk ke receive buffer tetap valid), dan `flush` menguras antrian dengan `sendmmsg`, menangani partial send. `errno` dibaca dari return syscall mentah via `std.posix.errno`.
 - `core.zig`: `HandlerFn` dan `Sink`. `Sink.reply` memakai ulang `sockaddr.in` pengirim yang diisi kernel tanpa konversi, `Sink.replyTo` mengonversi `std.Io.net.IpAddress`. Batch yang penuh di-flush di tengah handler lalu di-queue ulang.
-- `dispatch/common.zig`: `workerLoop` (recvmmsg masuk, handler per datagram, sendmmsg keluar), `runSingle` (satu worker di thread pemanggil), `runPerCore` (satu `std.Thread` per CPU, masing-masing dengan socket SO_REUSEPORT sendiri), dan `runFallback` (non-Linux, satu loop `std.Io.net`). `dispatch/{async,pool,mixed}.zig` mendelegasikan ke `runSingle`, `dispatch/{epoll,uring}.zig` ke `runPerCore` (uring mencatat notice fold).
-- `raw.zig`: `Raw(comptime handler)` dengan `init` / `initArgs` / `deinit` dan `run()` yang switch atas `config.dispatch_model`.
+- `dispatch/common.zig`: `workerLoop` (recvmmsg masuk, handler per datagram, sendmmsg keluar), `runSingle` (satu worker di thread pemanggil, ASYNC), `runMulti` (satu `std.Thread` per CPU, masing-masing dengan socket SO_REUSEPORT sendiri, POOL / MIXED), dan `runFallback` (non-Linux, satu loop `std.Io.net`). `dispatch/async.zig` mendelegasikan ke `runSingle`, `dispatch/{pool,mixed}.zig` ke `runMulti`. `dispatch/epoll.zig` dan `dispatch/uring.zig` memiliki loop per-core sendiri (`workerLoopEpoll`, dan `workerLoopUring` ring io_uring nyata dengan fallback epoll).
+- `raw.zig`: `Raw(comptime handler)` dengan `init` / `deinit` dan `run()` yang switch atas `config.dispatch_model`.
 
 ---
 

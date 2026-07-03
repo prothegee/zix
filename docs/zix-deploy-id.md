@@ -151,6 +151,11 @@ Catatan:
   sign. Pada CPU atau arch tanpa itu, hilangkan flag tersebut dan zix memakai fallback portable-nya.
 - Untuk server TLS, mount certificate dan key ke runtime container (misalnya
   `-v /path/to/certs:/certs:ro`) dan arahkan config ke sana, bukan membakar secret ke dalam image.
+- Server HTTP/3 dengan `dispatch_model = .URING` menjalankan io_uring receive loop yang nyata. io_uring
+  butuh `RLIMIT_MEMLOCK` (cap `ulimit -l`) yang cukup tinggi untuk meregistrasi ring: container atau host
+  dengan cap terlalu rendah, kernel lama, atau sandbox seccomp membuat ring tidak tersedia, dan tiap
+  worker lalu fallback ke `.EPOLL` readiness loop sendiri (tanpa ubah config, tanpa gagal startup).
+  Untuk mempertahankan jalur io_uring, naikkan cap-nya, misalnya `--ulimit memlock=-1` pada container.
 
 ## Mengonfigurasi TLS
 

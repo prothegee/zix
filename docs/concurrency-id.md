@@ -328,7 +328,7 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 | SSE | tidak direkomendasikan (menghabiskan pool thread) | ya, direkomendasikan | ya | n/a |
 | WebSocket | tidak direkomendasikan (koneksi berumur panjang) | ya, direkomendasikan | ya | n/a |
 | HTTP/2 (h2c) | ya | ya (default) | ya | n/a |
-| HTTP/3 (QUIC) | v1 single worker | v1 single worker (default) | v1 single worker | folds ke v1 worker |
+| HTTP/3 (QUIC) | ya | ya (single worker) | ya | ya, Linux-only |
 | gRPC (h2c) | ya | ya (default) | ya | ya, Linux-only |
 | TCP (raw stream) | ya | ya (default) | ya | ya, Linux-only |
 | FIX 4.x | ya | ya (default) | ya | ya, Linux-only |

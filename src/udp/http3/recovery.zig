@@ -21,6 +21,21 @@ pub const persistent_congestion_threshold: u64 = 3;
 /// The initial RTT used before a sample exists (RFC 9002 6.2.2), in microseconds.
 pub const initial_rtt_us: u64 = 333_000;
 
+/// The peer's maximum ACK delay (RFC 9000 18.2 transport parameter 0x0a) when it advertises none.
+/// The client's actual max_ack_delay is not parsed (a completeness gap noted alongside the loss
+/// recovery this constant supports): this is the RFC-recommended default, used as a fallback.
+pub const default_max_ack_delay_us: u64 = 25_000;
+
+/// The current monotonic time in microseconds (CLOCK_MONOTONIC), the timebase every RTT sample and
+/// sent-packet record in this engine uses. Monotonic rather than wall-clock, so a system time step
+/// never corrupts an RTT measurement or a loss-detection deadline.
+pub fn nowUs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+
+    return @as(u64, @intCast(ts.sec)) * std.time.us_per_s + @as(u64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_us)));
+}
+
 // --------------------------------------------------------------- //
 
 /// The RTT estimator for one path (RFC 9002 5). All times are microseconds.
@@ -96,8 +111,10 @@ pub fn ptoWithBackoff(base_pto: u64, backoff_count: u6) u64 {
 
 // --------------------------------------------------------------- //
 
-/// The initial congestion window (RFC 9002 7.2): ten datagrams, capped to the larger of 14,720 bytes
-/// or two datagrams.
+/// The RFC 9002 7.2 initial congestion window: ten datagrams, capped to the larger of 14,720 bytes or
+/// two datagrams. The reference value. A server on a known low-loss path (a benchmark loopback) may
+/// start higher via config.initial_window_packets, which the controller takes as a byte count that
+/// bypasses this RFC ceiling: this function stays the RFC default other code can compare against.
 pub fn initialWindow(max_datagram_size: u64) u64 {
     return @min(10 * max_datagram_size, @max(2 * max_datagram_size, 14_720));
 }
@@ -113,12 +130,22 @@ pub const CongestionController = struct {
     congestion_window: u64,
     ssthresh: u64,
 
-    /// Start in slow start with the initial window and an unbounded slow-start threshold (RFC 9002
-    /// 7.3 / appendix B.3).
-    pub fn init(max_datagram_size: u64) CongestionController {
+    /// Start in slow start with `initial_window` bytes (floored at the minimum window) and an unbounded
+    /// slow-start threshold (RFC 9002 7.3 / appendix B.3). The caller supplies the window in bytes
+    /// (config.initial_window_packets times the datagram size), so a known low-loss path can start
+    /// above the RFC initialWindow default without changing the controller. Pass initialWindow(mds) for
+    /// the RFC default.
+    ///
+    /// Param:
+    /// max_datagram_size - u64 (the path MTU estimate, the congestion-avoidance step unit)
+    /// initial_window - u64 (the starting window in bytes, floored at minimumWindow)
+    ///
+    /// Return:
+    /// - CongestionController
+    pub fn init(max_datagram_size: u64, initial_window: u64) CongestionController {
         return .{
             .max_datagram_size = max_datagram_size,
-            .congestion_window = initialWindow(max_datagram_size),
+            .congestion_window = @max(initial_window, minimumWindow(max_datagram_size)),
             .ssthresh = std.math.maxInt(u64),
         };
     }
@@ -206,7 +233,7 @@ test "zix test: RFC 9002 7 NewReno congestion control" {
     try std.testing.expectEqual(@as(u64, 14_720), initialWindow(1472));
     try std.testing.expectEqual(@as(u64, 2400), minimumWindow(1200));
 
-    var cc = CongestionController.init(1200);
+    var cc = CongestionController.init(1200, initialWindow(1200));
     try std.testing.expect(cc.inSlowStart());
     try std.testing.expectEqual(@as(u64, 12_000), cc.congestion_window);
 
@@ -226,4 +253,28 @@ test "zix test: RFC 9002 7 NewReno congestion control" {
 
     try std.testing.expectEqual(@as(u64, 3), persistent_congestion_threshold);
     try std.testing.expectEqual(@as(u64, 333_000), initial_rtt_us);
+}
+
+test "zix test: a configured initial window starts above the RFC ceiling and floors at the minimum" {
+    // A benchmark-tuned window (64 packets * 1200 = 76,800 bytes) starts well above the RFC 14,720-byte
+    // ceiling, so a large static response streams in one flight instead of ramping over several rounds.
+    const wide = CongestionController.init(1200, 64 * 1200);
+    try std.testing.expectEqual(@as(u64, 76_800), wide.congestion_window);
+    try std.testing.expect(wide.inSlowStart());
+
+    // The moderate library default (32 packets) sits between the RFC default and a full flight.
+    const mid = CongestionController.init(1200, 32 * 1200);
+    try std.testing.expectEqual(@as(u64, 38_400), mid.congestion_window);
+
+    // A window below the two-datagram minimum is floored up to it (never start below minimumWindow).
+    const tiny = CongestionController.init(1200, 500);
+    try std.testing.expectEqual(minimumWindow(1200), tiny.congestion_window);
+}
+
+test "zix test: nowUs is monotonic and moves in microseconds, not stuck at zero" {
+    const first = nowUs();
+    const second = nowUs();
+
+    try std.testing.expect(second >= first);
+    try std.testing.expect(first > 0);
 }

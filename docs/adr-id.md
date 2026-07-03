@@ -137,11 +137,11 @@ Setiap ADR mencatat satu keputusan desain yang signifikan: konteks yang membuatn
 
 **Konteks:** Desain awal menyimpan header respons kustom dalam buffer tetap `[32]HttpHeader`. Ini menyebabkan penulisan out-of-bounds ketika `max_response_headers = .LARGE` (64 slot) dan lebih dari 32 header ditambahkan. Cap saat compile-time tidak cukup karena cap dapat dikonfigurasi runtime per instansi server.
 
-**Keputusan:** Di `Response.init()`, alokasikan `extra_buf = arena.alloc(HttpHeader, max_headers)` dari arena per request. `max_headers` berasal dari `ServerConfig.max_response_headers.value()`. Field `max_headers` pada `Response` dihapus, `extra_buf.len` adalah cap-nya.
+**Keputusan:** Simpan custom response header di `extra_buf: ?[]HttpHeader`, dialokasikan dari arena per request dan diukur sebesar `max_headers` (dari `ServerConfig.max_response_headers.value()`). Alokasi bersifat lazy: `Response.init()` membiarkan `extra_buf = null` dan buffer dialokasikan pada panggilan `addHeader()` pertama, jadi `Response` mempertahankan field `max_headers` sebagai cap-nya.
 
 **Konsekuensi:**
 - Cap-nya tepat: tidak ada clamp `@min(..., 128)`, tidak ada slot terbuang.
-- `Response.init()` kini fallible (`!Response`) karena `arena.alloc` dapat gagal.
+- `Response.init()` tetap non-fallible: alokasinya pindah ke `addHeader()` pertama, yang mengembalikan `error.TooManyHeaders` saat alokasi gagal atau melewati cap. Response yang tidak menambah custom header tidak pernah mengalokasikan buffer.
 - Masa hidup arena menjamin buffer valid selama request dan direklamasi otomatis.
 
 ---
@@ -152,7 +152,7 @@ Setiap ADR mencatat satu keputusan desain yang signifikan: konteks yang membuatn
 
 **Konteks:** Unix Domain Socket adalah mekanisme IPC standar di Linux dan macOS untuk komunikasi sesama host. Namespace `zix.Uds` yang mengikuti pola sama dengan `zix.Udp` akan melengkapi trilogi protokol transport.
 
-**Keputusan:** Diimplementasikan di `src/uds/`. Agregator namespace di `src/uds/Uds.zig`, diekspos sebagai `pub const Uds = @import("uds/Uds.zig")` di `lib.zig`. Mode stream saja (datagram butuh `std.posix` mentah, tidak diekspos via `std.Io.net.UnixAddress`, dan ditangguhkan). Format frame: header panjang `u32` 4 byte (little-endian native) diikuti byte payload. `UdsClient.sendMsg`/`recvMsg` dan `echoHandler` semua memakai kontrak frame ini.
+**Keputusan:** Diimplementasikan di `src/uds/`. Agregator namespace di `src/uds/Uds.zig`, diekspos sebagai `pub const Uds = @import("uds/Uds.zig")` di `lib.zig`. Mode stream saja (datagram butuh `std.posix` mentah, tidak diekspos via `std.Io.net.UnixAddress`, dan ditangguhkan). Format frame: header panjang `u32` 4 byte (big-endian, network byte order) diikuti byte payload. `UdsClient.sendMsg`/`recvMsg` dan `echoHandler` semua memakai kontrak frame ini.
 
 **API `std.Io.net` yang dipakai:** `std.Io.net.UnixAddress.init(path)`, `.listen(io, opts) !Server`, `.connect(io) !Stream`. `has_unix_sockets = false` di WASI: baik `Server.init()` maupun `Client.connect()` memunculkan `@compileError` di platform yang tidak didukung.
 
@@ -279,14 +279,14 @@ var server = try MyServer.init(.{
 
 **Konteks:** Model 2 awal memakai `io.concurrent()` untuk mendispatch koneksi dari tiap thread worker. Ini menambah overhead scheduler (wakeup condvar per koneksi) yang menyebabkan latensi ~4x lebih tinggi daripada server HTTP berbasis blocking-thread yang sebanding (334 us vs ~88 us) meski throughput setara (~145K req/s). Arsitektur blocking-thread (thread accept khusus + thread pool OS + I/O sinkron) menghapus scheduler fiber dari hot path sepenuhnya.
 
-**Keputusan:** Ganti dispatch `io.concurrent()` per worker dengan `ConnQueue` bersama (mutex + condvar + `ArrayListUnmanaged`). Thread accept (`worker_count`, default 2) hanya memanggil `accept()` dan `queue.push()` (tidak pernah menangani I/O). Thread pool (`pool_size`, default `max(10, cpu_count * 2)`) memanggil `queue.pop()` lalu menangani tiap koneksi secara sinkron dengan I/O memblokir. `std.Io.Mutex` dan `std.Io.Condition` dipakai (primitif sinkronisasi Zig 0.14. `std.Thread.Mutex` tidak ada di versi ini).
+**Keputusan:** Ganti dispatch `io.concurrent()` per worker dengan `ConnQueue` bersama (mutex + condvar, di-back oleh ring buffer heap dengan push dan pop O(1)). Thread accept (`workers`, `0` = cpu_count) hanya memanggil `accept()` dan `queue.push()` (tidak pernah menangani I/O). Thread pool (`pool_size`, default `max(10, cpu_count * 2)`) memanggil `queue.pop()` lalu menangani tiap koneksi secara sinkron dengan I/O memblokir. `std.Io.Mutex` dan `std.Io.Condition` dipakai (primitif sinkronisasi Zig 0.14. `std.Thread.Mutex` tidak ada di versi ini).
 
 **Konsekuensi:**
 - Thread pool menangani koneksi dengan I/O memblokir murni: tanpa overhead dispatch condvar per request, tanpa latensi wakeup fiber.
 - Throughput ~143-144K req/s, latensi ~92 us rata-rata. Gap ~3-5K req/s dan gap latensi ~4 us vs server blocking-thread yang sebanding tetap ada, dikaitkan dengan overhead parsing `std.http.Server` dan arena per koneksi vs allocator POSIX langsung.
 - `pool_size` kini field yang dapat dikonfigurasi di `HttpServerConfig` (`0` = auto `max(10, cpu_count * 2)`).
-- Thread accept cukup cepat sehingga 2 sudah memadai untuk menjenuhkan antrian accept kernel, `workers = N` memungkinkan timpaan eksplisit.
-- `io.concurrent()` masih dipakai di Model 1 (`workers = 1`) (tidak terpengaruh).
+- Thread accept ringan, jadi `workers = 0` (cpu_count) menjenuhkan antrian accept kernel, `workers = N` memungkinkan timpaan eksplisit.
+- `io.concurrent()` masih dipakai oleh model `.ASYNC` (tidak terpengaruh).
 
 ---
 
@@ -434,9 +434,9 @@ Dua lapisan ini ortogonal: D memicu jika klien macet sebelum handler bahkan mula
 
 **Konteks:** `HttpServerConfig` awal memakai `workers: usize` untuk memilih antara dua mode konkurensi: `workers = 1` untuk dispatch `io.async()` single-accept dan `workers = 0` / `workers = N` untuk thread pool work-queue. Mode ketiga (N thread accept yang masing-masing mendispatch via `io.async()` tanpa ConnQueue) ada sebagai jalan tengah alami. Field `workers` kelebihan beban: nilai `1` mengubah strategi dispatch sepenuhnya alih-alih menyetel jumlah thread accept. Ini tidak jelas dan tidak swa-dokumentasi di call site.
 
-**Keputusan:** Perkenalkan `DispatchModel = enum(u8) { POOL = 0, ASYNC = 1, MIXED = 2 }` sebagai field bernama `dispatch_model: DispatchModel = .POOL` di `HttpServerConfig`. Tiga model:
+**Keputusan:** Perkenalkan `DispatchModel = enum(u8) { ASYNC = 0, POOL = 1, MIXED = 2 }` sebagai field bernama `dispatch_model: DispatchModel` di `HttpServerConfig`. Tiga model:
 
-- `.POOL` (default): N thread accept mendorong ke `ConnQueue` bersama. M thread pool mengambil dan menangani koneksi dengan I/O sinkron memblokir. Throughput terbaik di bawah jumlah koneksi tinggi. `workers` mengendalikan jumlah thread accept, `pool_size` mengendalikan jumlah thread pool.
+- `.POOL`: N thread accept mendorong ke `ConnQueue` bersama. M thread pool mengambil dan menangani koneksi dengan I/O sinkron memblokir. Throughput terbaik di bawah jumlah koneksi tinggi. `workers` mengendalikan jumlah thread accept, `pool_size` mengendalikan jumlah thread pool.
 - `.ASYNC`: Satu thread accept mendispatch tiap koneksi via `io.async()`. Dipilih untuk SSE dan WebSocket, koneksi berumur panjang tidak menahan thread pool. `workers` dan `pool_size` diabaikan.
 - `.MIXED`: N thread accept masing-masing mendispatch via `io.async()` langsung, tanpa `ConnQueue`. Throughput dan latensi seimbang. `pool_size` diabaikan.
 
@@ -449,6 +449,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - `dispatch_model` swa-dokumentasi di call site. Tiga strategi adalah varian enum eksplisit, bukan nilai `usize` ajaib.
 - `pool_size` diabaikan diam-diam untuk `.ASYNC` dan `.MIXED`, tanpa error, didokumentasikan di `HttpServerConfig`.
 - Tipe backing enum `u8` mengikuti konvensi proyek untuk semua enum bernama.
+- Evolusi kemudian: `.EPOLL` (ADR-034) dan `.URING` (ADR-037) bergabung ke enum sebagai `EPOLL = 3` / `URING = 4`, dan `dispatch_model` jadi field wajib tanpa default (`.ASYNC = 0` adalah nilai zero-init), jadi sebuah config menamai model-nya secara eksplisit. Lihat ADR-050 untuk taksonomi whole-family.
 
 ---
 
@@ -465,7 +466,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - `TcpServer.run(io)` / `runWith(io, handler)`, io diteruskan sebagai parameter (tidak disimpan di config). Pemanggil mengendalikan masa hidup backend `std.Io`.
 - Ketiga model dispatch (POOL, ASYNC, MIXED) berlaku dengan pola `ConnQueue` + spawn thread yang sama dari `zix.Http.Server`. `DispatchModel` didefinisikan sekali di `src/tcp/config.zig` dan diimpor oleh `src/tcp/http/config.zig`, satu sumber kebenaran untuk semua protokol berbasis TCP.
 - Format frame: `[u32 big-endian payload_len][payload bytes]`. Big-endian (network byte order) dipilih untuk TCP karena itu konvensi jaringan dan cocok dengan ekspektasi library protokol lain. `zix.Uds` memakai little-endian sebagai kontras (lokal saja, tanpa kebutuhan interop).
-- `initArgs()` pada server dan `connectArgs()` pada client mem-parse `--ip` dan `--port` dari arg CLI, mengikuti pola `zix.Udp.Server.initArgs()`.
+- `initArgs()` pada server dan `connectArgs()` pada client mem-parse `--ip` dan `--port` dari arg CLI, mengikuti pola CLI-arg override yang sama di semua engine.
 
 **Konsekuensi:**
 - `zix.Tcp.Http.*` dan `zix.Tcp.Server`/`Client` berdampingan di bawah namespace `zix.Tcp` yang sama, HTTP adalah protokol tingkat tinggi, TCP mentah adalah lapisan stream tingkat rendah.
@@ -582,7 +583,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - Tanda tangan handler tetap `fn(head, body, fd) void`. Tidak ada perubahan breaking pada `Router` atau contoh yang ada.
 - Deadline bersifat per-worker-thread, yang cocok dengan model dispatch shared-nothing (tiap koneksi dilayani satu thread selama durasi panggilan).
 - `handler_timeout_ms == 0` membiarkan thread-local di 0, sehingga `isExpired()` adalah cek murah yang selalu-false tanpa syscall clock pada jalur nonaktif.
-- `serveConnOne` (helper publik niche) dibiarkan tanpa diarm. Pemanggil yang memakainya langsung mengarm deadline sendiri via `setTimeout()`.
+- Semua entry point dispatch saat ini mengarm deadline (`serveConn` via `ServeOpts`, `serveEpollConn` via parameter). Handler yang menimpa budget-nya sendiri memanggil `setTimeout()` langsung.
 
 ---
 
@@ -645,6 +646,7 @@ Shorthand lama `workers = 1` untuk dispatch single-accept dihapus. Pemanggil yan
 - Biayanya adalah satu array `epoll_event` per worker tumbuh dari ~6 KB ke ~12 KB stack. Diabaikan terhadap stack worker 512 KB.
 - Tidak ada perubahan API publik. Konstanta bersifat privat dan tidak dapat dikonfigurasi. Nilainya adalah default tertala, bukan knob.
 - Keruntuhan throughput c2048+ yang terlihat pada box loopback shared-core bersifat lingkungan (generator beban dan server berebut core yang sama). Ia tidak disebabkan maupun ditangani oleh konstanta ini.
+- Evolusi kemudian: konstanta ini kini bernama `n` per file dispatch, dan nilai bersamanya berbeda saat engine dituning masing-masing. `zix.Tcp` / `zix.Fix` / `zix.Http2` / `zix.Grpc` tetap 512, `zix.Http` memakai 1024, dan `zix.Http1` memakai 4096 (path TLS mux juga 4096). Keputusan unify tetap berlaku, tuning per-engine kemudian menaikkan dua dari lima.
 
 ---
 
@@ -952,7 +954,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Tiap file baru perlu baris `std.testing.refAllDecls`-nya sendiri di `src/lib.zig` (refAllDecls tidak rekursif), jika tidak test-nya diam-diam tidak pernah jalan. Test pindah ke file model yang diujinya.
 - Pilot `zix.Http1` mendarat hijau: `server.zig` menyusut dari 2.624 baris ke 154, kelima model berada di bawah `dispatch/` (dengan `common.zig` untuk helper bersama), dan `zig build`, `test-all`, serta `test-runner-all` (semua 56 protokol) lulus dengan 25 test http1 terjaga.
 - Keempat varian idle-pool A2 disimpan sebagai snapshot server-penuh di `rnd/0.5.x/a2-variants/` (hanya berbeda di kode pool `.URING`) dengan manifest cross-reference.
-- Engine connection-oriented (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) mendarat dengan pemisahan yang sama, masing-masing pemindahan independen yang setara, semua hijau di Zig 0.16.x dan 0.17.x (`test-all`, `examples`, `test-runner-all`). Engine route-comptime (`zix.Http2`, `zix.Grpc`, `zix.Http`) menyalurkan route lewat generic `common.Dispatch(...)` agar body yang dipindah tetap byte-identical, engine route-runtime (`zix.Tcp`, `zix.Fix`) menyalurkan handler saat runtime.
+- Engine connection-oriented (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) mendarat dengan pemisahan yang sama, masing-masing pemindahan independen yang setara, semua hijau di Zig 0.16.x dan 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` dan `zix.Grpc` menyalurkan route lewat generic `common.Dispatch(...)`, dan `zix.Http` membakukannya ke factory `HttpServerImpl(stack_threshold, routes)` (fungsi dispatch-nya menerima `server: anytype`), agar body yang dipindah tetap byte-identical, engine route-runtime (`zix.Tcp`, `zix.Fix`) menyalurkan handler saat runtime.
 - `zix.Udp` dikecualikan secara desain. Dispatch model mengabstraksi connection lifecycle (accept, lalu multiplex per-fd, lalu close). UDP itu connectionless: satu datagram socket yang di-bind, tanpa per-connection fd, client dilacak sebagai record alamat di level aplikasi, dan concurrency-nya per-datagram (`io.concurrent`) bukan per-connection. Tidak ada model untuk dipartisi. Pemisahan `dispatch/` baru ditinjau ulang jika strategi serve datagram kedua ditambahkan (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
 
 ---
@@ -1076,9 +1078,9 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 **Konsekuensi:**
 - `src/udp/datagram.zig` baru (socket raw-fd, `recvmmsg` dengan `MSG_WAITFORONE`, `sendmmsg`, `SO_REUSEPORT`, konversi address), `src/udp/core.zig` (`HandlerFn`, `Sink`), `src/udp/dispatch/` (`common.zig` plus satu file per model), dan `src/udp/raw.zig` (facade `Raw` dan `run()` switch). Socket memakai syscall `std.os.linux` mentah, karena `std.posix` tidak lagi membungkus `socket` / `bind` / `close`.
 - `zix.Udp` meng-export `Raw`, `Sink`, `HandlerFn`, dan `DispatchModel`. Typed `Server(Packet)` tidak berubah selain notice fold.
-- Example baru `examples/udp_raw_echo.zig` (port 9064) dan runner `tests/runner/udp_raw_runner.zig`, plus kasus `udp-raw` yang dilipat ke `test-runner-all`.
+- Example baru `examples/udp_server_raw.zig` (port 9064) dan runner `tests/runner/udp_raw_runner.zig`, plus kasus `udp-raw` yang dilipat ke `test-runner-all`.
 - Target non-Linux jatuh ke satu loop receive `std.Io.net` (tanpa `recvmmsg` / `sendmmsg`).
-- Fase dua: jalur submission io_uring khusus di balik `.URING`, dan GSO / GRO / ECN.
+- Fase dua: jalur submission io_uring khusus di balik `.URING` dan GSO dirilis di ADR-056 (`src/udp/dispatch/uring.zig` recv ring sungguhan, `datagram.zig` `UDP_SEGMENT`). GRO / ECN tetap ditunda. ADR-056 juga membuat `.POOL` / `.MIXED` benar-benar multi-core, mengoreksi kalimat "menjalankan satu worker" di atas.
 - Fase tiga: connection-affinity steering opsional. Pemetaan per-core `.EPOLL` / `.URING` adalah stateless fan-out (kernel meng-hash datagram berdasarkan 4-tuple), benar untuk echo / DNS / telemetry tapi tidak untuk protokol connection-oriented yang butuh affinity datagram-ke-owner, karena QUIC connection migration mengubah 4-tuple dan bisa sampai ke worker tanpa state koneksinya. Protokol seperti itu menjalankan bentuk single-worker dan mendemux secara internal, atau menyetel knob `steering` opsional yang me-route berdasarkan byte-range key dari protokol (program eBPF `SO_REUSEPORT` yang diparameter offset dan length), `zix.Udp` tetap protocol-agnostic. Di tempat steering tak tersedia, model per-core jatuh ke jalur single-demux.
 - Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 60 protokol).
 
@@ -1086,7 +1088,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ## ADR-050: taksonomi model dispatch dan matriks backend lintas-platform
 
-**Status:** Proposed
+**Status:** Accepted (`.KQUEUE` / `.IOCP` dipesan, belum diimplementasikan)
 
 **Konteks:** Enum `DispatchModel` dipakai bersama di seluruh keluarga engine, tapi nilainya mencampur dua sumbu: bentuk konkurensi (single atau multi-core) dan, untuk model per-core, sebuah I/O backend OS-specific (`.EPOLL` dan `.URING` hanya Linux). Saat ini sebagian nilai beralias (di mode raw `zix.Udp`, `.POOL` dan `.MIXED` sama-sama menjalankan satu worker), dan pemilihan di luar platform diam-diam fallback ke `.POOL`. Saat dukungan macOS (`kqueue`) dan Windows (IOCP) mendekat, keluarga ini butuh satu aturan yang bisa diprediksi tentang arti tiap model dan OS mana yang menjalankannya, sehingga developer tidak pernah perlu menebak perilaku core atau mencari backend-nya.
 
@@ -1096,7 +1098,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Konsekuensi:**
 - `.KQUEUE` dan `.IOCP` adalah nama yang dipesan, didokumentasikan tapi belum diimplementasikan. Keduanya tidak dibuat sebagai file source kosong: pemesanannya ada di ADR ini dan referensi concurrency.
-- Aliasing `.POOL` / `.MIXED` ke satu worker di mode raw `zix.Udp` saat ini jadi gap yang harus ditutup: keduanya harus multi-core di bawah kontrak.
+- Aliasing `.POOL` / `.MIXED` ke satu worker di mode raw `zix.Udp` adalah gap yang harus ditutup: keduanya harus multi-core di bawah kontrak. Ditutup di ADR-056 (keduanya jalan multi-core via `common.runMulti`), yang membuat kontrak ini nyata dan memindahkan ADR ini ke Accepted.
 - Silent fallback non-Linux `.EPOLL` ke `.POOL` yang ada sekarang digantikan, begitu OS backend hadir, oleh backend OS-native plus aturan category-error.
 - Taksonomi ini whole-family. `zix.Udp` dan pekerjaan HTTP/3 (ADR-049 dan `src/udp/http3/`) adalah salah satu consumer.
 
@@ -1110,14 +1112,15 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 **Decision:** Tulis HTTP/3 pure-Zig dari RFC (9000 transport, 9001 QUIC-TLS, 9002 recovery, 9114 HTTP/3, 9204 QPACK) sebagai `zix.Http3`, di atas substrate datagram `zix.Udp`. Handshake TLS 1.3 memakai ulang `src/tls` (key schedule, handshake message, certificate), dibawa di atas QUIC CRYPTO frame menggantikan TLS record layer, jadi ada satu implementasi handshake untuk TCP dan QUIC. Layer deterministik dibangun dan dibuktikan bottom-up terhadap worked-example vector milik RFC sebelum perakitan. Engine dikirim sebagai v1: satu recv loop single-worker dengan demux connection-id internal (di-key oleh Destination Connection ID milik client, dengan fallback Source-CID untuk packet pasca-handshake), yang migration-safe by construction. `.EPOLL` / `.URING` di-fold ke worker v1 sampai per-core `SO_REUSEPORT` CID steering hadir (v2, ADR-049 phase 3). Routing adalah comptime `Router`, bentuk yang sama dengan `zix.Http1` / `zix.Http2`. Jalur live memakai static table QPACK dan decoder Huffman RFC 7541 untuk request path. TLS 1.3 wajib, dikonfigurasi oleh `Tls.Context` user-owned yang sama dengan engine TCP (ADR-047).
 
-**Rationale:** Pure-Zig menjaga aturan no-C-library dan reuse satu handshake, karena QUIC-TLS berbeda dari TLS-over-TCP hanya pada record framing. Membangun dan membuktikan-vector tiap layer deterministik (crypto, transport, QPACK, HTTP/3, recovery) sebelum perakitan men-de-risk surface protokol terbesar di proyek dan melokalkan kegagalan ke layer yang sedang diuji. Bentuk single-worker v1 benar di bawah connection migration tanpa aset eBPF steering, jadi dikirim lebih dulu dan scaling per-core jadi perubahan terisolasi berikutnya (pola fold yang sama yang sudah dipakai `zix.Http2` dan mode raw `zix.Udp`). Mengikuti precedent `zix.Http2`, `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_handshake` / `tls_key_schedule`) sehingga sebuah peer bisa membangun sisi lain dari wire, yang membuat test runner bisa menggerakkan client QUIC native yang hermetic tanpa tool eksternal.
+**Rationale:** Pure-Zig menjaga aturan no-C-library dan reuse satu handshake, karena QUIC-TLS berbeda dari TLS-over-TCP hanya pada record framing. Membangun dan membuktikan-vector tiap layer deterministik (crypto, transport, QPACK, HTTP/3, recovery) sebelum perakitan men-de-risk surface protokol terbesar di proyek dan melokalkan kegagalan ke layer yang sedang diuji. Bentuk single-worker v1 benar di bawah connection migration tanpa aset eBPF steering, jadi dikirim lebih dulu dan scaling per-core jadi perubahan terisolasi berikutnya (pola fold yang sama yang sudah dipakai `zix.Http2` dan mode raw `zix.Udp`). Mengikuti precedent `zix.Http2`, `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`) sehingga sebuah peer bisa membangun sisi lain dari wire, yang membuat test runner bisa menggerakkan client QUIC native yang hermetic tanpa tool eksternal.
 
 **Konsekuensi:**
 - Baru `src/udp/http3/`: layer deterministik sebagai modul library yang ber-test (crypto, protection, keyschedule, qpack, huffman, packet, varint, frame, recovery, h3), plus layer engine (config, core, demux, connection, server, `dispatch/` per model) dan driver live-handshake (serverhello, flight, response, request, router). Vector RFC ada di blok `test {}`.
 - `zix.Http3` mengekspor tipe server, comptime `Router` / `Route`, dan primitive low-level QUIC / TLS / QPACK.
-- Example baru `examples/http3_basic.zig` (port 9063, ECDSA P-256). Round trip divalidasi oleh `curl --http3` (HTTP/3 200, exit bersih) saat pengembangan dan, secara hermetic, oleh client QUIC native yang hand-rolled dari primitive yang diekspor di `tests/runner/http3_client.zig`, di-wire sebagai `test-runner-http3` dan dilipat ke `test-runner-all`.
+- Example baru `examples/tls/http3_basic.zig` (port 9063, ECDSA P-256). Round trip divalidasi oleh `curl --http3` (HTTP/3 200, exit bersih) saat pengembangan dan, secara hermetic, oleh client QUIC native yang hand-rolled dari primitive yang diekspor di `tests/runner/http3_client.zig`, di-wire sebagai `test-runner-http3` dan dilipat ke `test-runner-all`.
 - Hijau di Zig 0.16 dan 0.17 (unit-test plus test-runner-all 66-protokol).
-- Ditunda: per-core CID steering (v2, ADR-049 phase 3), QPACK dynamic-table / loss-and-congestion di hot path / key update / connection migration di luar demux v1, QUIC Interop Runner dan qlog trace, serta gate throughput / memory HttpArena 64-core.
+- Ditunda: cross-core CID steering untuk migrasi di tengah koneksi (v2, ADR-049 phase 3), QPACK dynamic-table / key update / connection migration di luar demux v1, QUIC Interop Runner dan qlog trace, serta gate throughput / memory HttpArena multi-core.
+- Digantikan sebagian oleh ADR-056: `.EPOLL` / `.URING` kini jalan sebagai worker `SO_REUSEPORT` per-core sungguhan (tidak melipat ke worker v1), dan loss recovery RFC 9002 plus congestion control NewReno kini jalan di hot-path serve. Cross-core CID steering untuk migrasi di tengah koneksi adalah item v2 yang tersisa.
 
 ---
 
@@ -1202,6 +1205,32 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - WebSocket dilayani melalui TLS di jalur thread-per-koneksi (`.ASYNC` / `.POOL` / `.MIXED`) untuk kedua engine. Jalur `tls_mux` multipleks (`.EPOLL` / `.URING`) tetap request / response saja dan membuang handoff yang keliru.
 - Rooms / broadcast tidak dilayani melalui TLS: tiap koneksi punya TLS session sendiri, jadi frame harus dienkripsi per koneksi. WS melalui TLS adalah per-koneksi (echo / point-to-point), example arena cleartext mempertahankan model room.
 - Example baru `examples/tls/tls_http1_ws.zig` (port 9074) dan `examples/tls/tls_http_ws.zig` (port 9075). Diverifikasi end-to-end dengan client `zix.Tls` native (handshake, WS upgrade, `101` terenkripsi, masked frame, echo terdekripsi), hijau di Zig 0.16 dan 0.17.
+
+---
+
+## ADR-056: loss recovery hot-path HTTP/3, congestion control, dan .EPOLL / .URING per-core sungguhan
+
+**Status:** Accepted
+
+**Konteks:** ADR-051 merilis HTTP/3 v1 sebagai satu recv loop single-worker dengan connection-id demux internal, dan menunda dua hal: loss recovery / congestion control di hot-path serving, dan penskalaan per-core (`.EPOLL` / `.URING` melipat ke worker v1 tunggal). Dua masalah menyusul di bawah beban multi-koneksi body besar yang berkelanjutan. Satu worker jadi plafon throughput karena satu core menguras setiap datagram. Dan tanpa loss recovery, satu packet ekor yang hilang menghentikan seluruh response: tidak ada packet berikutnya yang meng-acknowledge-nya, jadi tidak ada yang me-re-pump byte yang hilang dan stream menggantung sampai idle timeout. Layer deterministik `recovery.zig` sudah membawa RTT estimator, Probe Timeout, dan controller NewReno (terbukti terhadap vektor RFC 9002), tapi jalur serve belum menggerakkannya.
+
+**Keputusan:** Bawa loss recovery RFC 9002 dan congestion control NewReno ke jalur serve `zix.Http3`, dan jalankan `.EPOLL` / `.URING` sebagai worker `SO_REUSEPORT` per-core sungguhan alih-alih melipat ke worker v1.
+- Loss recovery dan NewReno jalan di jalur serve: `recovery.zig` (RTT estimator, PTO dengan backoff hingga `connection.max_pto_backoff` = 6, penanganan congestion-event `CongestionController`, persistent congestion), digerakkan oleh `connection.onAckFrame`. Hanya loss yang terdeteksi via ack yang memotong congestion window.
+- Maintenance sweep yang digerakkan timer (`dispatch/common.sweepMaintenance`) jalan tiap `maintenance_interval_us` (5 ms), di-arm oleh timeout `epoll_wait` bertepi pada `.EPOLL` dan timeout SQE pada `.URING`. Ia menyatakan range in-flight yang timeout sebagai hilang dan me-re-pump-nya (`resumeStreams`).
+- Probe Timeout bukan sinyal congestion: `connection.onMaintenance` me-retransmit dan hanya menaikkan `pto_backoff`. Ia TIDAK mengurangi cwnd (RFC 9002 6.2). Percobaan sebelumnya yang menghalvekan cwnd di tiap PTO meruntuhkan window dan memaku koneksi ke kondisi congestion-window-blocked, lalu di-revert.
+- Kebijakan eviction: `onMaintenance` membebaskan koneksi (via `demux.remove`) hanya saat close state draining atau closed (CONNECTION_CLOSE, frame `0x1c` / `0x1d`) atau peer idle melewati `max_idle_ms` (dilacak `last_activity_us`). Loss tidak pernah meng-evict peer yang hidup tapi lossy.
+- Penggunaan ulang slot table: `demux` memperoleh `remove` / `freeSlot` / `at` / map `occupied` dengan tombstone sentinel (`maxInt(u32)`) yang dilewati probe chain, jadi slot yang direklaim dipakai ulang tanpa menumbuhkan index.
+- `.EPOLL` / `.URING` per-core: `server.run` merutekan `.POOL` / `.MIXED` ke `common.runMulti`, `.EPOLL` ke `dispatch/epoll.runEpoll`, `.URING` ke `dispatch/uring.runUring`, dan hanya `.ASYNC` yang tetap single-core. Tiap worker memiliki CID table-nya sendiri (shared-nothing, kernel me-load-balance per 4-tuple). `.URING` adalah io_uring ring sungguhan (recvmsg SQE, reply lewat sendmmsg batch), fallback ke loop `.EPOLL` saat io_uring tak tersedia.
+- `zix.Udp` raw memperoleh ADR-049 fase dua di cut yang sama: `src/udp/dispatch/uring.zig` adalah recvmsg io_uring ring sungguhan, dan `datagram.zig` menambah UDP GSO (`UDP_SEGMENT`) via `probeGso` / `flushGso` / `submitUring`.
+
+**Rasional:** Mesin recovery-nya sudah ada dan terbukti-vektor, jadi mengaitkannya ke jalur serve (bukan menulis ulang dari awal) berisiko rendah dan melokalisasi perubahan ke `connection` dan sweep dispatch. Me-retransmit saat PTO tanpa memotong cwnd adalah aturan RFC 9002 6.2 dan eksperimen halve-on-PTO yang di-revert adalah buktinya: sebuah probe adalah kecurigaan loss, bukan konfirmasi, jadi memperlakukannya sebagai sinyal congestion membuat window kelaparan. Mereklaim slot hanya saat close atau idle (tidak pernah saat loss) menjaga peer yang lossy-tapi-hidup tetap terkoneksi, yang justru inti dari recovery. Worker `SO_REUSEPORT` per-core cocok dengan bentuk yang sudah dipakai engine TCP cleartext dan `zix.Udp` raw, jadi menskalakan HTTP/3 tidak butuh model eksekusi baru, dan CID table per-core benar selama 4-tuple sebuah koneksi stabil (migrasi lintas-core adalah satu kasus yang tersisa untuk v2).
+
+**Konsekuensi:**
+- Menggantikan sebagian ADR-051: bentuk ".EPOLL / .URING melipat ke worker v1" (kini per-core sungguhan) dan penundaan "loss-and-congestion di hot-path" (kini dirilis) keduanya digantikan. Cross-core CID steering untuk migrasi di tengah koneksi tetap satu-satunya item v2 dari ADR-051.
+- Menggantikan sebagian ADR-049: ini merilis fase dua (jalur submission io_uring khusus di balik `.URING` plus GSO) untuk `zix.Udp` raw, dan mengoreksi kalimat ".POOL / .MIXED jalan satu worker" (keduanya multi-core via `runMulti`). GRO dan ECN tetap ditunda.
+- ADR-050: menutup gap "zix.Udp raw .POOL / .MIXED aliasing ke satu worker". ADR ini adalah konsumen kedua yang membuat kontrak ADR-050 nyata.
+- Correctness gate: body penuh byte-exact di bawah fragmentation berat (~218 packet per response) plus recovery setelah overload burst, hijau di Zig 0.16 dan 0.17.
+- Ditunda: send pacing untuk menyebar congestion window sepanjang RTT alih-alih satu burst (sisa gap throughput `.EPOLL` di bawah beban body besar berkelanjutan, `.URING` melakukan pacing implisit lewat completion), cross-core CID steering (eBPF) untuk migrasi di tengah koneksi, GRO / ECN, dan key update.
 
 ---
 

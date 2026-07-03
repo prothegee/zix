@@ -3,27 +3,15 @@
 const std = @import("std");
 const Config = @import("config.zig");
 const UdpClientConfig = Config.UdpClientConfig;
-const PortMode = Config.PortMode;
 const pkt = @import("packet.zig");
-
-// --------------------------------------------------------- //
-
-fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32) void {
-    if (recv_ms == 0) return;
-
-    const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
-    std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
-}
-
-// --------------------------------------------------------- //
 
 /// UDP client typed to a user-defined extern struct packet.
 ///
 /// Usage:
 /// ```zig
 /// const MyClient = zix.Udp.Client(MyPacket);
-/// var client = try MyClient.init(config, io);           // REQUIRED mode
-/// var client = try MyClient.initArgs(config, io, args); // CONFIGURABLE mode
+/// var client = try MyClient.init(config, io, .{});      // config-only
+/// // set config.allow_args = true + pass args to read --bind-ip / --bind-port / --server-port
 /// defer client.deinit();
 /// try client.send(my_packet);
 /// const fb = try client.receiveFeedback();
@@ -46,39 +34,33 @@ pub fn UdpClient(comptime Packet: type) type {
 
         // --------------------------------------------------------- //
 
-        /// Initialize in REQUIRED mode: bind_port and server_port must be set non-zero in config.
-        /// Binds the socket and resolves the server address.
+        /// Initialize. When `config.allow_args` is set, `--bind-ip` / `--bind-port` / `--server-port`
+        /// from `args` override the config, otherwise `args` is ignored. Binds the socket and resolves
+        /// the server address.
+        ///
+        /// Param:
+        /// config - UdpClientConfig
+        /// io - std.Io
+        /// args - process args, or `.{}` when not reading CLI
         ///
         /// Return:
         /// - error.PortNotConfigured if bind_port or server_port is zero
-        pub fn init(config: UdpClientConfig, io: std.Io) !Self {
-            if (config.bind_port == 0 or config.server_port == 0) return error.PortNotConfigured;
-
-            const bind_addr = try std.Io.net.IpAddress.parse(config.bind_ip, config.bind_port);
-            const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
-
-            const dest = try std.Io.net.IpAddress.parse(config.ip, config.server_port);
-
-            return .{ .config = config, .socket = socket, .dest = dest, .io = io };
-        }
-
-        /// Initialize in CONFIGURABLE mode: reads --bind-port and --server-port from CLI args.
-        /// Falls back to config defaults if args are absent.
-        pub fn initArgs(config: UdpClientConfig, io: std.Io, args: anytype) !Self {
+        pub fn init(config: UdpClientConfig, io: std.Io, args: anytype) !Self {
             var cfg = config;
-            var it = std.process.Args.Iterator.init(args);
-            _ = it.skip();
-            while (it.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--bind-ip")) {
-                    if (it.next()) |val| cfg.bind_ip = val;
-                } else if (std.mem.eql(u8, arg, "--bind-port")) {
-                    if (it.next()) |val| cfg.bind_port = std.fmt.parseInt(u16, val, 10) catch cfg.bind_port;
-                } else if (std.mem.eql(u8, arg, "--server-port")) {
-                    if (it.next()) |val| cfg.server_port = std.fmt.parseInt(u16, val, 10) catch cfg.server_port;
-                }
+            // The parse only compiles when args is a real std.process.Args. Passing `.{}` (no CLI)
+            // skips it at comptime, so the empty case does not need a process.Args value.
+            if (comptime @TypeOf(args) == std.process.Args) {
+                if (cfg.allow_args) cfg = Config.applyClientArgs(cfg, args);
             }
 
-            return init(cfg, io);
+            if (cfg.bind_port == 0 or cfg.server_port == 0) return error.PortNotConfigured;
+
+            const bind_addr = try std.Io.net.IpAddress.parse(cfg.bind_ip, cfg.bind_port);
+            const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+
+            const dest = try std.Io.net.IpAddress.parse(cfg.ip, cfg.server_port);
+
+            return .{ .config = cfg, .socket = socket, .dest = dest, .io = io };
         }
 
         /// Close the bound socket.
@@ -128,34 +110,11 @@ pub fn UdpClient(comptime Packet: type) type {
 }
 
 // --------------------------------------------------------- //
-// --------------------------------------------------------- //
 
-test "zix test: applySocketTimeout udp, zero ms is a no-op on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
+test "zix test: UdpClient init rejects a zero port" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
 
-    applySocketTimeout(sock_fd, 0);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
-}
-
-test "zix test: applySocketTimeout udp, sets SO_RCVTIMEO on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 3000);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 3), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
+    const Client = UdpClient(extern struct { value: u32 });
+    try std.testing.expectError(error.PortNotConfigured, Client.init(.{ .ip = "127.0.0.1", .server_port = 0, .bind_port = 0 }, threaded.io(), .{}));
 }

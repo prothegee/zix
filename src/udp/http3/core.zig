@@ -21,6 +21,8 @@ pub const Request = struct {
 pub const Response = struct {
     status: u16 = 200,
     body: []const u8 = "",
+    /// Content type. A handler may set it, but the v1 HTTP/3 response path does not emit it on the
+    /// wire yet (only `:status` is QPACK-encoded). Kept for the handler API and for when it is wired.
     content_type: []const u8 = "text/plain",
 
     /// Set the HTTP status code.
@@ -28,7 +30,7 @@ pub const Response = struct {
         self.status = status;
     }
 
-    /// Set the response body and (optionally) its content type.
+    /// Set the response body.
     pub fn send(self: *Response, body: []const u8) void {
         self.body = body;
     }

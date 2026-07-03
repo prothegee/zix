@@ -153,6 +153,11 @@ Notes:
 - For a TLS server, mount the certificate and key into the runtime container (for example
   `-v /path/to/certs:/certs:ro`) and point the config at them, rather than baking secrets into the
   image.
+- The HTTP/3 server with `dispatch_model = .URING` drives a real io_uring receive loop. io_uring
+  needs a high enough `RLIMIT_MEMLOCK` (the `ulimit -l` cap) to register the ring: a container or host
+  with the cap too low, an old kernel, or a seccomp sandbox makes the ring unavailable, and each worker
+  then falls back to the `.EPOLL` readiness loop on its own (no config change, no startup failure). To
+  keep the io_uring path, raise the cap, for example `--ulimit memlock=-1` on the container.
 
 ## Configure TLS
 

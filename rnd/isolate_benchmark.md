@@ -122,7 +122,7 @@ constant. Then the laptop and the 64-CPU box land on the same axis.
 
 Split the physical cores in half. Each physical core contributes all of its
 logical threads to the same side, so an SMT pair is never split across the
-server and loadgen halves. On the 3995WX a physical core is logical `N` and
+server and loadgen halves. On the high a physical core is logical `N` and
 `N+64`, so the server half becomes `0-31,64-95` automatically. On a 6-core
 laptop the pairs are `0/6, 1/7, ...`, so the server half becomes `0,6,1,7,2,8`.
 
@@ -187,7 +187,7 @@ Raw throughput is not.
 | laptop | 12 | 6 | `0,6,1,7,2,8` | `3,9,4,10,5,11` | 6 * 64 = 384 |
 | server | 128 | 64 | `0-31,64-95` | `32-63,96-127` | 64 * 64 = 4096 |
 
-The 64-CPU column reproduces the documented 3995WX split, and the 4096 cap
+The 64-CPU column reproduces the documented split, and the 4096 cap
 matches the existing high-conn runs. The same `derive_split` produces both.
 
 ## Verify test before benching

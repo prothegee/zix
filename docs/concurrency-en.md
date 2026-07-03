@@ -335,14 +335,14 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 | SSE | not recommended (exhausts pool threads) | yes, preferred | yes | n/a |
 | WebSocket | not recommended (long-lived connections) | yes, preferred | yes | n/a |
 | HTTP/2 (h2c) | yes | yes (default) | yes | n/a |
-| HTTP/3 (QUIC) | v1 single worker | v1 single worker (default) | v1 single worker | folds to v1 worker |
+| HTTP/3 (QUIC) | yes | yes (single worker) | yes | yes, Linux-only |
 | gRPC (h2c) | yes | yes (default) | yes | yes, Linux-only |
 | TCP (raw stream) | yes | yes (default) | yes | yes, Linux-only |
 | FIX 4.x | yes | yes (default) | yes | yes, Linux-only |
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | yes (io.concurrent() per connection) | n/a | n/a |
 
-`.URING` (Linux-only) matches the `.EPOLL` column per protocol: native for HTTP, gRPC, TCP, and FIX, n/a for SSE / WebSocket / UDP / UDS, Http2 falls back to `.POOL`, and Http3 folds to its v1 single worker (per-core CID steering is v2, ADR-049 phase 3).
+`.URING` (Linux-only) matches the `.EPOLL` column per protocol: native for HTTP, gRPC, TCP, and FIX, n/a for SSE / WebSocket / UDP / UDS, Http2 falls back to `.POOL`, and Http3 runs real per-core workers (cross-core CID steering for mid-connection migration is v2, ADR-049 phase 3).
 
 ---
 

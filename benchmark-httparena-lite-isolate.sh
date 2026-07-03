@@ -1,112 +1,67 @@
-
 #!/usr/bin/env bash
-# benchmark-httparena-lite-isolate - low-noise wrapper around benchmark-httparena-lite.
+# benchmark-httparena-lite-isolate - Low-noise wrapper for benchmark-httparena-lite.sh.
 #
-# Default:
-#   ./benchmark-httparena-lite-isolate zix_http_epoll ../HttpArena --source local --probe --sample-mem
+# Runs the lite bench in a quiesced, pinned environment to reduce jitter, then
+# restores all global knobs. The tracked script is unmodified.
+# See rnd/isolate_benchmark.md for methodology.
 #
-# What:
-#   Runs the existing lite HttpArena bench inside a quiesced, pinned environment
-#   so the engine signal clears the machine jitter band, then restores every
-#   global knob it touched. The tracked benchmark-httparena-lite is never
-#   modified: this script wraps it and only sets host state around the call.
-#   Methodology and rationale live in rnd/isolate_benchmark.md, the apply-time
-#   verification lives in rnd/isolate_benchmark-check.md.
+# Lifecycle (trap-driven, runs on EXIT/Ctrl-C):
+#   save    -> snapshot global knobs
+#   quiesce -> perf governor, boost off, fixed freq, shallow C-states, THP never,
+#              stop irqbalance, lo mtu 65536, perf_event_paranoid -1
+#   pin     -> SMT-aware split: GCANNON_CPUS=LOADGEN half, docker update for SERVER half
+#   bench   -> call benchmark-httparena-lite.sh with passthrough args
+#   settle  -> wait --settle seconds (default 5)
+#   restore -> revert all saved values. Box ends exactly as started.
 #
-# Lifecycle (the reset is mandatory and trap-driven, it runs on EXIT even on
-# failure or Ctrl-C):
-#   save   -> snapshot every global knob's pre-run value
-#   quiesce-> governor performance, boost off, fixed freq, shallow C-states,
-#             THP never, stop irqbalance, lo mtu 65536, perf_event_paranoid -1
-#   pin    -> derive_split (SMT-aware), export GCANNON_CPUS=LOADGEN half, and
-#             hold the framework container on the SERVER half via docker update
-#   bench  -> call ./benchmark-httparena-lite with the passthrough arguments
-#   settle -> wait --settle seconds (default 5) for the box to quiet down
-#   restore-> write every saved value back, restart irqbalance, re-enable idle
-#             states. The box ends exactly as it started.
+# Isolate-specific flags (others pass through to benchmark-httparena-lite.sh):
+#   --settle SECS   Wait before restore (default: 5).
+#   --freq HZ       Fixed freq to pin (default: cpu0 base or max).
+#   --probe         Run spin.c noise-floor gate; abort if stddev > 1%.
+#   --sample-mem    Poll container cgroup (total, anon/sock/slab, smaps) during bench.
+#   --no-quiesce    Skip quiesce/pin (measure noisy baseline).
+#   --out-dir DIR   Result directory (default: logs/benchmark).
 #
-# Isolate-specific flags (everything else is passed through unchanged to
-# benchmark-httparena-lite):
-#   --settle SECONDS  wait between the bench finishing and the restore. Default 5.
-#   --freq HZ         the fixed frequency to pin (min == max). Default: the cpu0
-#                     base_frequency if exposed, else the current scaling_max_freq.
-#   --probe           run the spin.c noise-floor gate before benching and abort
-#                     when relative stddev is over 1% (the box is not quiet).
-#   --sample-mem      poll the framework container cgroup while the bench runs:
-#                     total memory (peak + steady median), the anon/sock/slab
-#                     split (process vs kernel-socket memory), a periodic
-#                     smaps_rollup, and a one-shot full smaps captured at the
-#                     peak-memory moment (saved to isolate-smaps-<fw>-<stamp>.txt,
-#                     with a top-regions summary in the result). Best-effort,
-#                     cgroup v2.
-#   --no-quiesce      skip the quiesce and pin, only run the bench. Useful to
-#                     measure the noisy baseline the isolate path is meant to fix.
-#   --out-dir DIR     where the result .txt and memory log are written. Default:
-#                     logs/benchmark next to this script.
+# Passthrough args: <framework> (required), [httparena-dir], --load-threads N,
+# --source MODE, --zix-dir DIR. If --load-threads is omitted, defaults to half
+# the logical CPUs (matching loadgen half).
 #
-# Passthrough flags (see benchmark-httparena-lite): <framework> is required,
-# [httparena-dir] is the HttpArena folder (defaults to this script's folder),
-# --load-threads N, --source MODE, --zix-dir DIR. Everything not listed under
-# "Isolate-specific flags" above is forwarded to benchmark-httparena-lite as-is.
-# When --load-threads is omitted this wrapper injects a default of half the
-# machine's logical CPUs (whole number, at least 1), matching the loadgen half.
-#
-# Usage (sudo is optional, the script re-execs itself under sudo when needed):
-#   # minimal: framework + HttpArena folder, full quiesce + restore
+# Usage (re-execs under sudo if needed):
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena
-#
-#   # same, but gate on the noise floor and sample container memory
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --probe --sample-mem
-#
-#   # typical local-source run (build the image from this zix checkout)
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --source local --load-threads 12
-#
-#   # send results somewhere other than logs/benchmark
-#   ./benchmark-httparena-lite-isolate zix ../HttpArena --out-dir /tmp/isolate-runs
-#
-#   # measure the noisy baseline the isolate path is meant to fix (no quiesce/pin)
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --no-quiesce
 #
-# Note:
-# - Must run as root (it writes sysfs, sysctl and systemd state). It re-execs
-#   itself under sudo when not already root.
-# - isolcpus / nohz_full / rcu_nocbs are kernel-cmdline (boot-time) and are NOT
-#   set or reset here. Treat them as preconditions, the preflight in
-#   rnd/isolate_benchmark.md checks for them.
-# - numactl and taskset are per-process launch flags with nothing global to undo,
-#   so they are never part of the restore.
+# Notes:
+# - Requires root for sysfs/sysctl/systemd (re-execs via sudo). Rootless skips
+#   host quiesce but still applies pinning and memory sampling.
+# - isolcpus/nohz_full/rcu_nocbs are boot-time preconditions (not set here).
 
 set -euo pipefail
 
-# ----------------------------------------------------------------------------- #
-# Root: re-exec under sudo so the whole lifecycle (quiesce + restore) is root.
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+# Root check: re-exec under sudo if ISOLATE_SUDO=true. Otherwise, rootless mode
+# skips host-wide quiesce but keeps pinning and memory sampling.
+IS_ROOT=0
+[ "${EUID:-$(id -u)}" -eq 0 ] && IS_ROOT=1
+if [ "$IS_ROOT" -ne 1 ] && [ "${ISOLATE_SUDO:-false}" = "true" ]; then
     exec sudo -E -- "$0" "$@"
 fi
 
-# Record the full invocation as a re-runnable shell command, captured before the
-# argument parsing consumes "$@". After the sudo re-exec above, $0 and "$@" are
-# still the original path and arguments, so the result file is self-documenting
-# (it shows exactly what was run, including --probe / --sample-mem or their
-# absence). printf %q keeps it copy-paste safe.
+# Record full invocation for self-documenting result files (copy-paste safe).
 INVOCATION="$(printf '%q ' "$0" "$@")"
 INVOCATION="${INVOCATION% }"
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LITE="$SELF_DIR/benchmark-httparena-lite"
+LITE="$SELF_DIR/benchmark-httparena-lite.sh"
 if [ ! -x "$LITE" ]; then
     echo "error: $LITE not found or not executable (this script wraps it)" >&2
     exit 1
 fi
 
-# Result directory default. Overridable with --out-dir, resolved after argument
-# parsing so the flag can win. Every run writes a timestamped .txt here (bench
-# output plus an isolate header), the memory sampler log lands here too.
+# Default result directory (overridable via --out-dir).
 DEFAULT_RESULT_DIR="$SELF_DIR/logs/benchmark"
 
-# ----------------------------------------------------------------------------- #
-# Parse isolate flags, collect everything else as benchmark-httparena-lite
-# passthrough. The framework name is needed here too, to find its container.
+# Parse isolate flags; collect rest as passthrough for benchmark-httparena-lite.sh.
 SETTLE=5
 FREQ_HZ=
 DO_PROBE=0
@@ -129,7 +84,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Resolve the result directory: the flag wins, else the default beside the script.
+# Resolve result directory.
 RESULT_DIR="${OUT_DIR:-$DEFAULT_RESULT_DIR}"
 mkdir -p "$RESULT_DIR"
 if [ "${#PASSTHROUGH[@]}" -eq 0 ]; then
@@ -138,10 +93,7 @@ if [ "${#PASSTHROUGH[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# The framework name is the first non-flag passthrough word, mirroring how
-# benchmark-httparena-lite resolves it. The value of a known value-flag
-# (--load-threads, --source, --zix-dir) is skipped so it is never mistaken for
-# the framework when a flag precedes the positional arguments.
+# Extract <framework> from passthrough args (skip known flag values).
 FRAMEWORK=""
 skip_next=0
 for arg in "${PASSTHROUGH[@]}"; do
@@ -156,9 +108,7 @@ for arg in "${PASSTHROUGH[@]}"; do
     esac
 done
 
-# Default the load-generator thread count to half the machine's logical CPUs
-# (a whole number, at least 1) when the user did not pass --load-threads. This
-# matches the loadgen core half the isolate split assigns to the generator.
+# Default --load-threads to half logical CPUs if not provided.
 has_load_threads=0
 for arg in "${PASSTHROUGH[@]}"; do
     case "$arg" in
@@ -174,10 +124,7 @@ if [ "$has_load_threads" -eq 0 ]; then
     echo "[isolate] --load-threads not set, defaulting to $default_load_threads (half of $avail_cpus logical CPUs)" >&2
 fi
 
-# ----------------------------------------------------------------------------- #
-# SMT-aware half-split. Each physical core sends all its logical threads to one
-# side, so an SMT pair is never split across the server and loadgen halves.
-# Mirrors derive_split in rnd/isolate_benchmark.md.
+# SMT-aware half-split: keeps SMT pairs together on server or loadgen side.
 derive_split() {
     local -A core_to_siblings
     local order=()
@@ -210,8 +157,7 @@ derive_split() {
     LOADGEN_CPUS=$(IFS=,; echo "${loadgen[*]}")
 }
 
-# ----------------------------------------------------------------------------- #
-# Saved pre-run state. Empty means "was not readable, do not restore".
+# Saved pre-run state (empty = unreadable, skip restore).
 SAVED_GOVERNOR=""
 SAVED_BOOST=""
 SAVED_MIN_FREQ=""
@@ -249,11 +195,12 @@ save_state() {
     SAVED_PARANOID="$(sysctl -n kernel.perf_event_paranoid 2>/dev/null || true)"
 }
 
-# Restore is idempotent and best-effort: a failing knob must never abort the
-# trap or leave a later knob unrestored, so every line tolerates failure.
+# Idempotent, best-effort restore (tolerates failures to ensure all knobs run).
 restore_state() {
     [ "$RESTORED" -eq 1 ] && return 0
     RESTORED=1
+
+    [ "${IS_ROOT:-0}" -ne 1 ] && return 0
 
     echo "[isolate] restoring host state" >&2
 
@@ -288,12 +235,10 @@ restore_state() {
     fi
 }
 
-# Stop the background helpers, then restore. Single trap for the whole lifecycle.
+# Cleanup: stop background helpers, then restore state.
 PINNER_PID=""
 SAMPLER_PID=""
 
-# Outcomes surfaced into the result .txt. PROBE_RESULT is the gate verdict,
-# MEM_LOG is the raw sample file the summary is computed from.
 PROBE_RESULT=""
 MEM_LOG=""
 SMAPS_FILE=""
@@ -304,13 +249,17 @@ cleanup() {
     restore_state
 }
 
-# cleanup runs once on any exit. Signals route through it by exiting, so Ctrl-C
-# aborts the run (and still restores) instead of resuming after the settle sleep.
+# Trap cleanup on EXIT; route INT/TERM through exit to ensure restore on Ctrl-C.
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# ----------------------------------------------------------------------------- #
 quiesce() {
+    # Skip host-wide writes if not root (pinning still applies).
+    if [ "${IS_ROOT:-0}" -ne 1 ]; then
+        echo "[isolate] not root, skipping host quiesce (governor/sysctl/mtu/etc.), pinning still applied" >&2
+        return 0
+    fi
+
     echo "[isolate] quiescing host" >&2
 
     cpupower frequency-set -g performance >/dev/null 2>&1 || true
@@ -319,8 +268,7 @@ quiesce() {
         echo 0 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || true
     fi
 
-    # Pin a fixed frequency so cores cannot drift mid-run. Prefer the exposed
-    # base clock, fall back to the current max, allow an explicit override.
+    # Pin fixed frequency (prefer base clock, fallback to max, allow override).
     local pin="$FREQ_HZ"
     if [ -z "$pin" ]; then
         if [ -r /sys/devices/system/cpu/cpu0/cpufreq/base_frequency ]; then
@@ -346,12 +294,8 @@ quiesce() {
     sysctl -w kernel.perf_event_paranoid=-1 >/dev/null 2>&1 || true
 }
 
-# ----------------------------------------------------------------------------- #
-# Noise-floor gate. A fixed compute kernel pinned to one server core, repeated.
-# Each run is timed with the shell clock (date +%s.%N), so GNU /usr/bin/time is
-# not required (it is often absent). The gate skips loudly when its tools are
-# missing rather than blocking the bench, and aborts only when it actually
-# measures a relative stddev over 1% (the box is not quiet enough to trust).
+# Noise-floor gate: times a pinned compute kernel. Aborts if relative stddev > 1%.
+# Skips gracefully if tools (cc, taskset) are missing.
 probe_gate() {
     local probe_core=${SERVER_CPUS%%,*}
 
@@ -361,8 +305,7 @@ probe_gate() {
         return 0
     fi
 
-    # Private temp dir, removed when the gate returns. Avoids a predictable /tmp
-    # path that a prior root run could leave behind un-overwritable.
+    # Private temp dir for probe build (avoids predictable /tmp paths).
     local probe_tmp src bin
     probe_tmp="$(mktemp -d)"
     src="$probe_tmp/spin.c"
@@ -383,7 +326,7 @@ EOF
         return 0
     fi
 
-    # taskset is preferred (pins to the probe core), fall back to a bare run.
+    # Prefer taskset to pin probe core; fallback to bare run.
     local runner=("$bin")
     command -v taskset >/dev/null 2>&1 && runner=(taskset -c "$probe_core" "$bin")
 
@@ -396,7 +339,7 @@ EOF
         samples+=("$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.6f", b - a }')")
     done
 
-    # The binary is no longer needed, drop the temp dir on every later path.
+    # Cleanup probe binary.
     rm -rf "$probe_tmp"
 
     local rel
@@ -420,15 +363,12 @@ EOF
 
     echo "[isolate] noise-floor relative stddev: ${rel}%" >&2
 
-    # awk exits 0 when rel > 1.0 (box not quiet). An if guard keeps the abort in
-    # the then-branch, so a quiet box falls through and the function returns 0
-    # (a bare `awk && { exit 1; }` would make the PASS case return awk's 1 and
-    # set -e would kill the run right after a good probe).
+    # Abort if stddev > 1.0%. (awk exits 0 when > 1.0 to trigger the if-branch).
     if awk -v r="$rel" 'BEGIN { exit !(r > 1.0) }'; then
         PROBE_RESULT="${rel}% (ABORT, box not quiet >1%)"
         echo "[isolate] box is not quiet (>1%), aborting before bench" >&2
 
-        # Record the aborted probe so the run is not lost (no bench will follow).
+        # Record aborted probe run.
         {
             echo "$START_BANNER"
             echo
@@ -443,13 +383,8 @@ EOF
     PROBE_RESULT="${rel}% (PASS, <=1%)"
 }
 
-# ----------------------------------------------------------------------------- #
-# Hold the framework container on the server half without touching
-# benchmark-httparena-lite. The lite profiles leave cpu_limit empty (no server
-# pin) and there is no env hook for it, so the only non-invasive lever is to
-# watch for the container and re-apply the cpuset whenever it appears (the
-# harness starts and stops it per profile). Confirmed against ../HttpArena:
-# framework.sh names the running container httparena-bench-<framework>.
+# Pin framework container to server CPUs. Watches for container creation and
+# applies cpuset, as lite profiles leave cpu_limit empty.
 start_server_pinner() {
     [ -z "$SERVER_CPUS" ] && return 0
     command -v docker >/dev/null 2>&1 || { echo "[isolate] docker absent, server not pinned" >&2; return 0; }
@@ -470,15 +405,9 @@ start_server_pinner() {
     PINNER_PID=$!
 }
 
-# Best-effort memory sampler for the memory-squeeze claim. Per second it records
-# the container cgroup total (memory.current) plus the cgroup memory.stat split,
-# so process memory (anon) is separated from kernel socket buffers (sock), which
-# is the term buf_size tuning cannot touch. Every 15 ticks it also dumps the
-# server's process memory map (smaps_rollup, per-region RSS) via the container's
-# host pid. cgroup memory.stat is preferred over ss -m because it is the
-# per-container socket total (ss under --network host is host-wide and noisy).
-# All reads fall back to the host cgroup scope path. Container name confirmed
-# against ../HttpArena (httparena-bench-<fw>).
+# Memory sampler: polls container cgroup (total, anon/sock/slab split) every 1s.
+# Dumps smaps_rollup every 15s and full smaps at peak memory. Uses cgroup stats
+# over `ss` for accurate per-container socket totals.
 start_mem_sampler() {
     command -v docker >/dev/null 2>&1 || return 0
 
@@ -491,24 +420,17 @@ start_mem_sampler() {
         while true; do
             local id ts both scope host_pid
             local cur=0 anon=0 file=0 sock=0 slab=0 kstack=0
-            # Full (untruncated) id, so the host cgroup scope path matches. The
-            # systemd cgroup driver names the scope docker-<full64>.scope.
+            # Full ID for systemd cgroup scope path (docker-<full64>.scope).
             id=$(docker ps -q --no-trunc --filter "name=$name" 2>/dev/null | head -1 || true)
             if [ -n "$id" ]; then
                 ts=$(date +%s)
                 scope="/sys/fs/cgroup/system.slice/docker-$id.scope"
 
-                # Read memory.current and memory.stat in ONE shot so the total and
-                # its split come from the same instant. Two separate reads skew
-                # against each other when memory changes fast (anon could read
-                # larger than current, which is impossible at one instant). cat
-                # concatenates: line 1 is memory.current, the rest is memory.stat.
+                # Read memory.current and memory.stat atomically to prevent skew.
                 both=$(docker exec "$id" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat' 2>/dev/null ||
                        cat "$scope/memory.current" "$scope/memory.stat" 2>/dev/null || true)
 
-                # The trailing newline matters: read returns non-zero on a line
-                # without it, which under set -e would kill this sampler. The
-                # `|| true` and the defaults above are belt-and-suspenders.
+                # `|| true` prevents set -e from killing sampler on missing trailing newline.
                 read -r cur anon file sock slab kstack < <(printf '%s\n' "$both" | awk '
                     NR == 1              { cur = $1 }
                     $1 == "anon"         { a = $2 }
@@ -520,12 +442,10 @@ start_mem_sampler() {
 
                 [ "$cur" != 0 ] && echo "$ts current=$cur anon=$anon file=$file sock=$sock slab=$slab kstack=$kstack" >> "$MEM_LOG"
 
-                # Server host pid (works regardless of the in-container pid, and
-                # we are root on the host). Used for both the rollup and the full
-                # smaps below.
+                # Server host PID for smaps access.
                 host_pid=$(docker inspect -f '{{.State.Pid}}' "$id" 2>/dev/null || true)
 
-                # Periodic smaps_rollup (per-region RSS totals) into the mem log.
+                # Periodic smaps_rollup.
                 if [ $(( tick % 15 )) -eq 0 ] && [ -n "$host_pid" ] && [ -r "/proc/$host_pid/smaps_rollup" ]; then
                     {
                         echo "# smaps_rollup pid=$host_pid @${ts}"
@@ -534,10 +454,7 @@ start_mem_sampler() {
                     } >> "$MEM_LOG"
                 fi
 
-                # Full per-region smaps captured at the highest-memory moment,
-                # overwritten on each new peak, so the file ends up holding the
-                # peak-memory map. This itemizes the fixed base (stacks, heap,
-                # slab, mappings) that the rollup only totals.
+                # Full smaps at peak memory (overwritten on new peaks).
                 if [ -n "$cur" ] && [ "${cur:-0}" -gt "$peak_cur" ] && [ -n "$host_pid" ] && [ -r "/proc/$host_pid/smaps" ]; then
                     peak_cur=$cur
                     {
@@ -554,15 +471,13 @@ start_mem_sampler() {
     SAMPLER_PID=$!
 }
 
-# ----------------------------------------------------------------------------- #
 # Lifecycle.
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
-START_HUMAN="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
+START="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
 RESULT_TXT="$RESULT_DIR/isolate-${FRAMEWORK}-${RUN_STAMP}.txt"
 
-# Start banner: announced to the terminal and written as the first line of the
-# result file, so a saved .txt opens with when the run began (millisecond stamp).
-START_BANNER="Isolate: $FRAMEWORK bench start $START_HUMAN"
+# Start banner for terminal and result file.
+START_BANNER="Isolate: $FRAMEWORK bench start $START"
 echo "[isolate] $START_BANNER" >&2
 echo "[isolate] command: $INVOCATION" >&2
 
@@ -586,14 +501,10 @@ if [ "$DO_SAMPLE_MEM" -eq 1 ]; then
     start_mem_sampler
 fi
 
-# Pin the load generator to its half. Confirmed against ../HttpArena: common.sh
-# and benchmark-lite.sh both take GCANNON_CPUS as ${GCANNON_CPUS:-default}, so a
-# pre-set value is honored (not overridden), and the load tools taskset onto it
-# plus the gcannon container gets --cpuset-cpus=$GCANNON_CPUS.
+# Pin load generator to its half via GCANNON_CPUS (honored by benchmark-lite.sh).
 export GCANNON_CPUS="$LOADGEN_CPUS"
 
-# Header captures the exact isolate context the numbers were taken under, so a
-# result .txt is self-describing without the surrounding shell.
+# Write self-describing header to result file.
 {
     echo "$START_BANNER"
     echo
@@ -612,9 +523,7 @@ export GCANNON_CPUS="$LOADGEN_CPUS"
 } > "$RESULT_TXT"
 
 echo "[isolate] running bench, result -> $RESULT_TXT" >&2
-# Tolerate a non-zero bench exit (the lite bench returns non-zero on skipped
-# tests). Without this, set -e would abort here and skip the settle, the memory
-# summary, and the result-saved notice. The EXIT trap still restores the host.
+# Tolerate non-zero bench exit (e.g., skipped tests) to ensure settle and summary run.
 bench_rc=0
 "$LITE" "${PASSTHROUGH[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
 [ "$bench_rc" -eq 0 ] || echo "[isolate] note: bench exited $bench_rc, continuing to summary and restore" >&2
@@ -622,14 +531,13 @@ bench_rc=0
 echo "[isolate] settling ${SETTLE}s before restore" >&2
 sleep "$SETTLE"
 
-# Summarize the memory samples into the main log (peak + steady-state median).
-# The raw per-second samples stay in the separate mem file.
+# Summarize memory samples (peak + steady-state median) into main log.
 if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
     {
         echo
         echo "# memory (from $(basename "$MEM_LOG")):"
 
-        # Total cgroup memory: peak and steady-state median.
+        # Total cgroup memory stats.
         awk -F'current=' 'NF > 1 { print $2 + 0 }' "$MEM_LOG" | sort -n | awk '
             { a[n++] = $1 }
             END {
@@ -639,8 +547,7 @@ if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
                 printf "#   total: peak=%.1fMiB  steady_median=%.1fMiB  samples=%d\n", peak / 1048576, median / 1048576, n
             }'
 
-        # Split medians: anon = process memory (engine controllable), sock =
-        # kernel socket buffers (only SO_RCVBUF/SO_SNDBUF can move it), slab.
+        # Split medians (anon, sock, slab).
         for field in anon sock slab; do
             grep -ho "$field=[0-9]*" "$MEM_LOG" 2>/dev/null | cut -d= -f2 | sort -n | awk -v f="$field" '
                 { a[n++] = $1 }
@@ -651,8 +558,7 @@ if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
                 }' || true
         done
 
-        # Top process-memory regions at peak, summed per label (anon vs stack vs
-        # heap vs each mapping), to itemize the fixed base.
+        # Top process-memory regions at peak.
         if [ -n "$SMAPS_FILE" ] && [ -s "$SMAPS_FILE" ]; then
             echo "#   --- top regions at peak (from $(basename "$SMAPS_FILE")) ---"
             awk '
@@ -670,4 +576,4 @@ fi
 
 echo "[isolate] result saved: $RESULT_TXT" >&2
 
-# restore runs from the EXIT trap.
+# Restore runs via EXIT trap.

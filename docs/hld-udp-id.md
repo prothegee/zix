@@ -53,7 +53,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UdpClient(Packet).init(config, io)"] --> B["bind config.bind_ip:bind_port"]
+    A["UdpClient(Packet).init(config, io, args)"] --> B["bind config.bind_ip:bind_port"]
     B --> C["resolve server IpAddress"]
     C --> D["client ready"]
     D --> E["send(packet)"]
@@ -79,7 +79,7 @@ flowchart TD
 graph TD
     zix["src/lib.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
 
-    Udp --> config["config.zig\nPortMode, Endianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
+    Udp --> config["config.zig\nEndianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
     Udp --> packet["packet.zig\nFeedbackResult\ntoEndian, fromEndian"]
     Udp --> server["server.zig\nUdpServer(Packet) (typed)"]
     Udp --> client["client.zig\nUdpClient(Packet)"]
@@ -105,7 +105,6 @@ Akses melalui `const zix = @import("zix");`
 | `zix.Udp.DispatchModel` | enum(u8) | Sama dengan engine TCP, memilih bentuk worker jalur raw |
 | `zix.Udp.ServerConfig` | struct | Konfigurasi server |
 | `zix.Udp.ClientConfig` | struct | Konfigurasi client |
-| `zix.Udp.PortMode` | enum(u8) | `CONFIGURABLE` atau `REQUIRED` |
 | `zix.Udp.Endianness` | enum(u8) | `NATIVE`, `LITTLE`, `BIG` |
 | `zix.Udp.FeedbackResult(Packet)` | union(enum) | `.ack`, `.nack`, `.packet(Packet)` |
 | `zix.Udp.toEndian(Packet, pkt, end)` | fn | Terapkan endianness sebelum pengiriman ke jaringan |
@@ -115,8 +114,7 @@ Akses melalui `const zix = @import("zix");`
 
 | Metode | Deskripsi |
 | :- | :- |
-| `init(config)` | Mode REQUIRED: port harus bukan nol |
-| `initArgs(config, args)` | Mode CONFIGURABLE: membaca `--port` dari argumen CLI |
+| `init(config, args)` | Port harus bukan nol. Saat `config.allow_args` diset, membaca `--ip` / `--port` dari `args`, jika tidak berikan `.{}` dan args diabaikan |
 | `run()` | Bind socket (io dari config.io), masuk ke receive loop. Memblokir sampai terjadi error. |
 | `deinit()` | Lepaskan resource. |
 
@@ -124,8 +122,7 @@ Akses melalui `const zix = @import("zix");`
 
 | Metode | Deskripsi |
 | :- | :- |
-| `init(config, io)` | Mode REQUIRED: bind socket segera |
-| `initArgs(config, io, args)` | Mode CONFIGURABLE: membaca `--bind-port` dan `--server-port` |
+| `init(config, io, args)` | Bind socket segera. Saat `config.allow_args` diset, membaca `--bind-ip` / `--bind-port` / `--server-port` dari `args`, jika tidak berikan `.{}` dan args diabaikan |
 | `send(packet)` | Terapkan endianness dan kirim ke server |
 | `receiveFeedback()` | Penerimaan blocking: mengembalikan `FeedbackResult` |
 | `deinit()` | Tutup socket. |
@@ -140,9 +137,9 @@ pub const UdpServerConfig = struct {
     allocator:             std.mem.Allocator,          // caller-owned (client list + broadcast snapshots, raw batches)
     ip:                    []const u8,                 // bind address
     port:                  u16,                        // bind port & must be non-zero
-    port_mode:             PortMode   = .REQUIRED,
+    allow_args:            bool       = false,          // when true, init reads --ip / --port from args
     endianness:            Endianness = .LITTLE,
-    conn_timeout_ms: i64        = 5000, // silence before client considered disconnected
+    conn_timeout_ms:       u32        = 5000, // silence before client considered disconnected
     poll_timeout_ms:       i64        = 2000, // receiveTimeout interval for disconnect checks
     auto_ack:              bool       = false, // send 0x06 ACK to sender on receipt
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
@@ -159,6 +156,9 @@ pub const UdpServerConfig = struct {
     recv_batch:            usize         = 32,     // ukuran batch recvmmsg
     send_batch:            usize         = 32,     // ukuran batch sendmmsg
     max_recv_buf:          usize         = 1500,   // buffer datagram raw (typed pakai @sizeOf(Packet))
+    busy_poll_us:          u32           = 0,      // jendela spin SO_BUSY_POLL (0 = tidak diset)
+    worker_stack_size_bytes: usize       = 512 * 1024, // stack thread worker per-core
+    gso_enabled:           bool          = false,  // UDP GSO di jalur kirim
 };
 ```
 
@@ -174,15 +174,13 @@ pub const UdpClientConfig = struct {
     server_port: u16,        // server port & must be non-zero
     bind_ip:     []const u8 = "127.0.0.1", // local bind address, "0.0.0.0" for all interfaces
     bind_port:   u16,        // local port: server uses this to send responses back
-    port_mode:   PortMode   = .REQUIRED,
+    allow_args:  bool       = false, // when true, init reads --bind-ip / --bind-port / --server-port
     endianness:  Endianness = .LITTLE, // must match server
-    send_once:   bool       = false,
-    send_every:  u64        = 99, // milliseconds between sends in run loop
     recv_timeout_ms: u32    = 0,  // receive timeout via poll, 0 = blocking
 };
 ```
 
-`ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `bind_ip` default ke loopback (override dengan `--bind-ip` di mode CONFIGURABLE), dan `recv_timeout_ms` default ke receive blocking. `UdpClient` tidak melakukan heap allocation (semua buffer dialokasikan di stack), sehingga tidak dibutuhkan field `allocator`.
+`ip`, `server_port`, dan `bind_port` wajib diisi (tidak ada nilai default). `bind_ip` default ke loopback (override dengan `--bind-ip` saat `allow_args` diset), dan `recv_timeout_ms` default ke receive blocking. `UdpClient` tidak melakukan heap allocation (semua buffer dialokasikan di stack), sehingga tidak dibutuhkan field `allocator`.
 
 ---
 
@@ -212,14 +210,16 @@ zix memberlakukan batasan ini saat comptime (RFC 768):
 
 ---
 
-## Port Mode
+## allow_args
 
-| Mode | Perilaku | Kunci CLI |
+Satu `init(config, args)` menerima process args. Flag `allow_args` menentukan apakah args dibaca.
+
+| allow_args | Perilaku | Kunci CLI |
 | :- | :- | :- |
-| `REQUIRED` | Port dari struct konfigurasi. `init()` gagal dengan `error.PortNotConfigured` jika port bernilai nol. | tidak ada |
-| `CONFIGURABLE` | Port dibaca dari argumen CLI. Menggunakan default konfigurasi jika argumen tidak ada. Tidak pernah gagal karena argumen hilang. | `--port` (server), `--bind-port` / `--server-port` (client) |
+| `false` (default) | Args diabaikan. Port diambil dari struct konfigurasi. Berikan `.{}` untuk `args`. | tidak ada |
+| `true` | Flag yang dikenali menimpa konfigurasi. Flag yang hilang atau tidak dikenali mempertahankan nilai konfigurasi. | `--ip` / `--port` (server), `--bind-ip` / `--bind-port` / `--server-port` (client) |
 
-Validasi dilakukan saat `init()`, bukan saat `run()`.
+Guard port tidak bergantung pada `allow_args`: `init()` gagal dengan `error.PortNotConfigured` saat port hasil bernilai nol. Validasi dilakukan saat `init()`, bukan saat `run()`.
 
 ---
 
@@ -353,7 +353,7 @@ Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani data
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
 - I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
-- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing), `.ASYNC` / `.POOL` / `.MIXED` menjalankan satu worker. `.URING` di-fold ke loop per-core recvmmsg untuk sekarang.
+- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.ASYNC` menjalankan satu worker. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing). `.EPOLL` adalah epoll readiness loop, `.URING` io_uring completion loop nyata (fallback ke epoll saat io_uring tidak tersedia).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
@@ -361,11 +361,11 @@ fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sin
 }
 
 const Echo = zix.Udp.Raw(handler);
-var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064 });
+var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064, .dispatch_model = .ASYNC }, .{});
 try server.run();
 ```
 
-Lihat `examples/udp_raw_echo.zig` dan ADR-049 (`docs/adr-id.md`).
+Lihat `examples/udp_server_raw.zig` dan ADR-049 (`docs/adr-id.md`).
 
 ---
 
@@ -374,12 +374,9 @@ Lihat `examples/udp_raw_echo.zig` dan ADR-049 (`docs/adr-id.md`).
 | Fitur | Catatan |
 | :- | :- |
 | Batching `sendmmsg` di loop broadcast typed | Sudah ada di jalur raw (`zix.Udp.Raw`). Broadcast typed masih melakukan N `send()` berurutan |
-| GSO / GRO / ECN raw | Ditunda (ADR-049 fase 2): butuh jalur cmsg yang divalidasi hardware (GRO coalescing butuh splitter) |
-| Submission io_uring khusus untuk `.URING` raw | Ditunda: `.URING` di-fold ke loop per-core recvmmsg untuk sekarang |
-| Interval pengiriman sub-milidetik | `send_every` dalam milidetik, ganti nama ke nanodetik jika diperlukan |
+| GRO / ECN raw | Ditunda (ADR-049 fase 2): butuh jalur cmsg yang divalidasi hardware (GRO coalescing butuh splitter). GSO (UDP_SEGMENT) sudah diimplementasikan (`gso_enabled`) |
 | Struct feedback yang dapat dikonfigurasi | Saat ini echo mengirimkan kembali packet mentah. Produksi dapat menggunakan tagged result |
-
-<!-- tickrate 64 vs 128 -->
+| Preset tick-rate server (64 / 128 Hz) | Belum dibuat. Server game-loop perlu tick cadence tetap untuk loop kirimnya |
 
 ---
 

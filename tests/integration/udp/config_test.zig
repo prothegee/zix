@@ -17,7 +17,7 @@ test "zix integration: UdpServer.init, valid config succeeds" {
         .ip = "127.0.0.1",
         .port = 9200,
         .dispatch_model = .ASYNC,
-    });
+    }, .{});
     _ = server;
 }
 
@@ -28,7 +28,7 @@ test "zix integration: UdpServer.init, port zero returns error.PortNotConfigured
     const S = zix.Udp.Server(Pkt);
     try std.testing.expectError(
         error.PortNotConfigured,
-        S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
+        S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}),
     );
 }
 
@@ -38,7 +38,7 @@ test "zix integration: UdpClient.init, zero bind_port returns error.PortNotConfi
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        C.init(.{ .ip = "127.0.0.1", .server_port = 9200, .bind_port = 0 }, io),
+        C.init(.{ .ip = "127.0.0.1", .server_port = 9200, .bind_port = 0 }, io, .{}),
     );
 }
 
@@ -53,7 +53,7 @@ test "zix integration: UdpClient, recv_timeout_ms fires when no packet arrives" 
         .server_port = 9200,
         .bind_port = 9141,
         .recv_timeout_ms = 200,
-    }, io);
+    }, io, .{});
     defer client.deinit();
 
     const result = client.receiveFeedback();

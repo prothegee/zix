@@ -1,10 +1,11 @@
-//! zix HTTP/3 MIXED dispatch: the v1 single-worker recv with internal CID demux.
+//! zix HTTP/3 MIXED dispatch (ADR-050): multi-core, one SO_REUSEPORT recvmmsg worker per CPU, each owning
+//! its own CID table (the kernel load-balances connections by 4-tuple).
 
 const Config = @import("../config.zig");
 const core = @import("../core.zig");
 const common = @import("common.zig");
 
-/// Run the HTTP/3 server with the v1 single worker.
+/// Run the HTTP/3 server with one SO_REUSEPORT recvmmsg worker per CPU (multi-core).
 pub fn runMixed(comptime handler: core.HandlerFn, config: Config.Http3ServerConfig) !void {
-    return common.runSingle(handler, config);
+    return common.runMulti(handler, config);
 }

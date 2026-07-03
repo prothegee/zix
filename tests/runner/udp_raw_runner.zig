@@ -1,4 +1,4 @@
-// Test runner for zix.Udp.Raw (udp_raw_echo, UDP port 9064).
+// Test runner for zix.Udp.Raw (udp_server_raw, UDP port 9064).
 // Spawns the raw echo server, sends one datagram, asserts the exact bytes echo back, kills server.
 //
 // Invoked by `zig build test-runner-udp-raw`.

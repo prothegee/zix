@@ -2,8 +2,9 @@
 //!
 //! What:
 //! - `Raw(handler)` serves variable-length datagrams up to `max_recv_buf`. The handler receives the
-//!   datagram bytes, the peer address, and a `Sink` to reply through. Replies are coalesced and
-//!   leave as one sendmmsg per received batch. This file is the thin server facade: init plus a
+//!   datagram bytes, the peer address, and a `Sink` to reply through. Replies are coalesced and leave
+//!   as one sendmmsg per received batch (or coalesced sendmsg per peer-run when GSO is on). This file
+//!   is the thin server facade: init plus a
 //!   `run()` switch over `dispatch_model`, mirroring `src/tcp/http1/server.zig`. The worker loops
 //!   live in `dispatch/` and the handler / sink types in `core.zig`.
 //!
@@ -13,7 +14,7 @@
 //!     sink.reply(dg); // echo back to the sender
 //! }
 //! const EchoServer = zix.Udp.Raw(handler);
-//! var server = try EchoServer.init(config);
+//! var server = try EchoServer.init(config, .{}); // set config.allow_args + pass args for --ip / --port
 //! try server.run();
 //! ```
 
@@ -43,22 +44,15 @@ pub fn Raw(comptime handler: HandlerFn) type {
 
         config: UdpServerConfig,
 
-        /// Initialize in REQUIRED mode: port must be non-zero.
-        pub fn init(config: UdpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
-
-            return .{ .config = config };
-        }
-
-        /// Initialize in CONFIGURABLE mode: reads --port from CLI args, falls back to config.port.
-        pub fn initArgs(config: UdpServerConfig, args: anytype) !Self {
+        /// Initialize. When `config.allow_args` is set, `--ip` / `--port` from `args` override the
+        /// config, otherwise `args` is ignored. The final port must be non-zero. Pass `.{}` for `args`
+        /// when not reading CLI, or `process.minimal.args` (std.process.Args) to read `--ip` / `--port`.
+        pub fn init(config: UdpServerConfig, args: anytype) !Self {
             var cfg = config;
-            var it = std.process.Args.Iterator.init(args);
-            _ = it.skip();
-            while (it.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--port")) {
-                    if (it.next()) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
-                }
+            // The parse only compiles when args is a real std.process.Args. Passing `.{}` (no CLI)
+            // skips it at comptime, so the empty case does not need a process.Args value.
+            if (comptime @TypeOf(args) == std.process.Args) {
+                if (cfg.allow_args) cfg = Config.applyServerArgs(cfg, args);
             }
 
             if (cfg.port == 0) return error.PortNotConfigured;
@@ -70,8 +64,8 @@ pub fn Raw(comptime handler: HandlerFn) type {
             _ = self;
         }
 
-        /// Bind and serve. Blocks until an error occurs. The dispatch model selects the worker
-        /// shape: `.EPOLL` / `.URING` run per-core SO_REUSEPORT workers, the rest run a single worker.
+        /// Bind and serve. Blocks until an error occurs. The dispatch model selects the worker shape:
+        /// `.ASYNC` runs a single worker, `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one per CPU.
         pub fn run(self: *const Self) !void {
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(handler, self.config),
@@ -100,7 +94,7 @@ test "zix test: Raw init, port zero returns PortNotConfigured" {
         .ip = "127.0.0.1",
         .port = 0,
         .dispatch_model = .ASYNC,
-    }));
+    }, .{}));
 }
 
 test "zix test: Raw init, config preserved" {
@@ -116,7 +110,7 @@ test "zix test: Raw init, config preserved" {
         .dispatch_model = .EPOLL,
         .reuse_address = true,
         .recv_batch = 16,
-    });
+    }, .{});
     defer server.deinit();
 
     try std.testing.expectEqual(@as(u16, 9070), server.config.port);

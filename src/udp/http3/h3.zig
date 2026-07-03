@@ -8,6 +8,11 @@
 //! - Connection lifecycle and the error vocabulary (5.2 / 7.2.7 / 8.1): GOAWAY monotonicity,
 //!   MAX_PUSH_ID / PUSH_PROMISE direction, and the seventeen error codes plus the grease range.
 //! - Pure framing and validation logic, no crypto. Proven against the RFC rules in the tests below.
+//!
+//! Note:
+//! - Implemented and unit-tested, but not wired into the serve path yet (deferred). The live request
+//!   path handles the minimal HTTP/3 framing inline in dispatch/common.zig. Wiring the control
+//!   stream, GOAWAY, and message validation is v2 work.
 
 const std = @import("std");
 

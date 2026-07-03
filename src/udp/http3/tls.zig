@@ -13,13 +13,13 @@
 //! - The packet keys derive through crypto.zig (the same HKDF-Expand-Label as Layer C). The shipped
 //!   server drives the actual TLS 1.3 handshake through src/tls (key_schedule + handshake), only the
 //!   record layer differs, which is what this module replaces.
+//! - quicKey, clientInitialSecret, tlsVersionAcceptable, InitialKeys, and ZeroRttPolicy are
+//!   implemented and tested but not wired into the serve path yet (deferred): keys are derived
+//!   directly via crypto / keyschedule, with no TLS-version-floor check or 0-RTT path.
 
 const std = @import("std");
 
 const crypto = @import("crypto.zig");
-
-/// The four QUIC encryption levels (RFC 9001 4.1). Each has its own packet number space and keys.
-pub const EncryptionLevel = enum { initial, zero_rtt, handshake, application };
 
 /// Derive a level's packet-protection key with the "quic key" label (RFC 9001 5.1). The key width
 /// follows the negotiated AEAD: 16 bytes for AES-128-GCM, 32 for ChaCha20-Poly1305. The same

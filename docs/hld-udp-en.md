@@ -53,7 +53,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UdpClient(Packet).init(config, io)"] --> B["bind config.bind_ip:bind_port"]
+    A["UdpClient(Packet).init(config, io, args)"] --> B["bind config.bind_ip:bind_port"]
     B --> C["resolve server IpAddress"]
     C --> D["client ready"]
     D --> E["send(packet)"]
@@ -79,7 +79,7 @@ flowchart TD
 graph TD
     zix["src/lib.zig"] --> Udp["udp/Udp.zig\nzix.Udp"]
 
-    Udp --> config["config.zig\nPortMode, Endianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
+    Udp --> config["config.zig\nEndianness, DispatchModel\nUdpServerConfig, UdpClientConfig"]
     Udp --> packet["packet.zig\nFeedbackResult\ntoEndian, fromEndian"]
     Udp --> server["server.zig\nUdpServer(Packet) (typed)"]
     Udp --> client["client.zig\nUdpClient(Packet)"]
@@ -105,7 +105,6 @@ Access via `const zix = @import("zix");`
 | `zix.Udp.DispatchModel` | enum(u8) | Shared with the TCP engines, selects the raw worker shape |
 | `zix.Udp.ServerConfig` | struct | Server configuration |
 | `zix.Udp.ClientConfig` | struct | Client configuration |
-| `zix.Udp.PortMode` | enum(u8) | `CONFIGURABLE` or `REQUIRED` |
 | `zix.Udp.Endianness` | enum(u8) | `NATIVE`, `LITTLE`, `BIG` |
 | `zix.Udp.FeedbackResult(Packet)` | union(enum) | `.ack`, `.nack`, `.packet(Packet)` |
 | `zix.Udp.toEndian(Packet, pkt, end)` | fn | Apply endianness before wire send |
@@ -115,8 +114,7 @@ Access via `const zix = @import("zix");`
 
 | Method | Description |
 | :- | :- |
-| `init(config)` | REQUIRED mode: port must be non-zero |
-| `initArgs(config, args)` | CONFIGURABLE mode: reads `--port` from CLI args |
+| `init(config, args)` | Port must be non-zero. When `config.allow_args` is set, reads `--ip` / `--port` from `args`, otherwise pass `.{}` and args are ignored |
 | `run()` | Bind socket (io from config.io), enter receive loop. Blocks until error. |
 | `deinit()` | Release resources. |
 
@@ -124,8 +122,7 @@ Access via `const zix = @import("zix");`
 
 | Method | Description |
 | :- | :- |
-| `init(config, io)` | REQUIRED mode: binds socket immediately |
-| `initArgs(config, io, args)` | CONFIGURABLE mode: reads `--bind-port` and `--server-port` |
+| `init(config, io, args)` | Binds socket immediately. When `config.allow_args` is set, reads `--bind-ip` / `--bind-port` / `--server-port` from `args`, otherwise pass `.{}` and args are ignored |
 | `send(packet)` | Apply endianness and send to server |
 | `receiveFeedback()` | Blocking receive: returns `FeedbackResult` |
 | `deinit()` | Close socket. |
@@ -140,9 +137,9 @@ pub const UdpServerConfig = struct {
     allocator:             std.mem.Allocator,          // caller-owned (client list + broadcast snapshots, raw batches)
     ip:                    []const u8,                 // bind address
     port:                  u16,                        // bind port & must be non-zero
-    port_mode:             PortMode   = .REQUIRED,
+    allow_args:            bool       = false,          // when true, init reads --ip / --port from args
     endianness:            Endianness = .LITTLE,
-    conn_timeout_ms: i64        = 5000, // silence before client considered disconnected
+    conn_timeout_ms:       u32        = 5000, // silence before client considered disconnected
     poll_timeout_ms:       i64        = 2000, // receiveTimeout interval for disconnect checks
     auto_ack:              bool       = false, // send 0x06 ACK to sender on receipt
     error_report:          bool       = false, // send 0x15 NACK on malformed/oversized datagram
@@ -159,6 +156,9 @@ pub const UdpServerConfig = struct {
     recv_batch:            usize         = 32,     // recvmmsg batch size
     send_batch:            usize         = 32,     // sendmmsg batch size
     max_recv_buf:          usize         = 1500,   // raw datagram buffer (typed uses @sizeOf(Packet))
+    busy_poll_us:          u32           = 0,      // SO_BUSY_POLL spin window (0 = unset)
+    worker_stack_size_bytes: usize       = 512 * 1024, // per-core worker thread stack
+    gso_enabled:           bool          = false,  // UDP GSO on the send path
 };
 ```
 
@@ -174,15 +174,13 @@ pub const UdpClientConfig = struct {
     server_port: u16,        // server port & must be non-zero
     bind_ip:     []const u8 = "127.0.0.1", // local bind address, "0.0.0.0" for all interfaces
     bind_port:   u16,        // local port: server uses this to send responses back
-    port_mode:   PortMode   = .REQUIRED,
+    allow_args:  bool       = false, // when true, init reads --bind-ip / --bind-port / --server-port
     endianness:  Endianness = .LITTLE, // must match server
-    send_once:   bool       = false,
-    send_every:  u64        = 99, // milliseconds between sends in run loop
     recv_timeout_ms: u32    = 0,  // receive timeout via poll, 0 = blocking
 };
 ```
 
-`ip`, `server_port`, and `bind_port` are required (no defaults). `bind_ip` defaults to loopback (override with `--bind-ip` in CONFIGURABLE mode), and `recv_timeout_ms` defaults to a blocking receive. `UdpClient` makes no heap allocations (all buffers are stack-allocated), so no `allocator` field is needed.
+`ip`, `server_port`, and `bind_port` are required (no defaults). `bind_ip` defaults to loopback (override with `--bind-ip` when `allow_args` is set), and `recv_timeout_ms` defaults to a blocking receive. `UdpClient` makes no heap allocations (all buffers are stack-allocated), so no `allocator` field is needed.
 
 ---
 
@@ -212,14 +210,16 @@ zix enforces at comptime (RFC 768):
 
 ---
 
-## Port Mode
+## allow_args
 
-| Mode | Behavior | CLI key |
+A single `init(config, args)` takes the process args. The `allow_args` flag decides whether they are read.
+
+| allow_args | Behavior | CLI key |
 | :- | :- | :- |
-| `REQUIRED` | Port from config struct. `init()` fails with `error.PortNotConfigured` if port is zero. | none |
-| `CONFIGURABLE` | Port read from CLI args. Falls back to config default if arg absent. Never fails for missing arg. | `--port` (server), `--bind-port` / `--server-port` (client) |
+| `false` (default) | Args are ignored. Port comes from the config struct. Pass `.{}` for `args`. | none |
+| `true` | Recognized flags override the config. A missing or unknown flag keeps the config value. | `--ip` / `--port` (server), `--bind-ip` / `--bind-port` / `--server-port` (client) |
 
-Validation happens at `init()`, not at `run()`.
+The port guard is independent of `allow_args`: `init()` fails with `error.PortNotConfigured` when the resolved port is zero. Validation happens at `init()`, not at `run()`.
 
 ---
 
@@ -353,7 +353,7 @@ Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-len
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. It gets the bytes as received (up to `max_recv_buf`), the peer, and a `Sink`. `sink.reply(bytes)` answers the sender with no address conversion, `sink.replyTo(peer, bytes)` answers an explicit peer.
 - Batched I/O (Linux): receive in `recvmmsg` batches (`recv_batch`), send in `sendmmsg` batches (`send_batch`). Replies coalesce into one `sendmmsg` per received batch. Non-Linux falls back to a single `std.Io.net` receive loop.
-- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing), `.ASYNC` / `.POOL` / `.MIXED` run a single worker. `.URING` folds to the recvmmsg per-core loop for now.
+- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.ASYNC` runs a single worker. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing). `.EPOLL` is an epoll readiness loop, `.URING` a real io_uring completion loop (epoll fallback when io_uring is unavailable).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {
@@ -361,11 +361,11 @@ fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sin
 }
 
 const Echo = zix.Udp.Raw(handler);
-var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064 });
+var server = try Echo.init(.{ .io = io, .allocator = std.heap.smp_allocator, .ip = "0.0.0.0", .port = 9064, .dispatch_model = .ASYNC }, .{});
 try server.run();
 ```
 
-See `examples/udp_raw_echo.zig` and ADR-049 (`docs/adr-en.md`).
+See `examples/udp_server_raw.zig` and ADR-049 (`docs/adr-en.md`).
 
 ---
 
@@ -374,12 +374,9 @@ See `examples/udp_raw_echo.zig` and ADR-049 (`docs/adr-en.md`).
 | Feature | Note |
 | :- | :- |
 | `sendmmsg` batching in the typed broadcast loop | Done in the raw path (`zix.Udp.Raw`). The typed broadcast still does N sequential `send()` |
-| Raw GSO / GRO / ECN | Deferred (ADR-049 phase 2): need hardware-validated cmsg paths (GRO coalescing needs a splitter) |
-| Dedicated io_uring submission for raw `.URING` | Deferred: `.URING` folds to the recvmmsg per-core loop for now |
-| Sub-millisecond send interval | `send_every` is in milliseconds, rename to nanoseconds if needed |
+| Raw GRO / ECN | Deferred (ADR-049 phase 2): need hardware-validated cmsg paths (GRO coalescing needs a splitter). GSO (UDP_SEGMENT) is implemented (`gso_enabled`) |
 | Configurable feedback struct | Typed echo sends the raw packet back. Production could use a tagged result |
-
-<!-- tickrate 64 vs 128 -->
+| Server tick-rate presets (64 / 128 Hz) | Not yet built. A game-loop server would want a fixed tick cadence for its send loop |
 
 ---
 

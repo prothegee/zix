@@ -183,18 +183,21 @@ Both functions return a new value while the original is not modified.
 
 ---
 
-## config.zig: PortMode / Endianness / Configs
+## config.zig: allow_args / Endianness / Configs
+
+### allow_args gate
+
+Both configs carry `allow_args: bool = false`. `init(config, args)` reads `--ip` / `--port` (server) or `--bind-ip` / `--bind-port` / `--server-port` (client) from `args` only when the flag is set, through `applyServerArgs` / `applyClientArgs`. A missing or unrecognized flag keeps the config value. The arg parse is compiled only when `args` is a real `std.process.Args`, so passing `.{}` (no CLI) skips it at comptime. The port guard runs regardless: a zero resolved port yields `error.PortNotConfigured`.
 
 ### Enum backing values
 
-`PortMode` and `Endianness` are `enum(u8)`. Their integer values are stable and tested explicitly to catch accidental reordering.
+`Endianness` is `enum(u8)`. Its integer values are stable and tested explicitly to catch accidental reordering.
 
 ```
-PortMode:   CONFIGURABLE=0, REQUIRED=1
 Endianness: NATIVE=0, LITTLE=1, BIG=2
 ```
 
-Stability matters because these enums may appear in serialized configs or be compared across build versions.
+Stability matters because this enum may appear in serialized configs or be compared across build versions.
 
 ---
 
@@ -204,8 +207,8 @@ The raw-bytes datagram server (`zix.Udp.Raw`) is separate from the typed engine 
 
 - `datagram.zig`: the raw-fd primitives. `open` uses raw `std.os.linux` syscalls (`socket` / `bind`, since `std.posix` no longer wraps them after the std.Io migration) plus the `std.posix.setsockopt` safe wrapper for SO_REUSEADDR / SO_REUSEPORT. `RecvBatch` carves one backing buffer into `recv_batch` MTU slots wired into the `mmsghdr` / `iovec` / name arrays for `recvmmsg`, called with `MSG_WAITFORONE` so it returns on the first datagram instead of blocking for the whole batch. `SendBatch.queue` copies each reply into its own backing buffer (so a reply that points into the receive buffer stays valid), and `flush` drains the queue with `sendmmsg`, handling partial sends. `errno` is read from the raw syscall return via `std.posix.errno`.
 - `core.zig`: `HandlerFn` and `Sink`. `Sink.reply` reuses the kernel-filled sender `sockaddr.in` with no conversion, `Sink.replyTo` converts a `std.Io.net.IpAddress`. A full batch flushes mid-handler then re-queues.
-- `dispatch/common.zig`: `workerLoop` (recvmmsg in, handler per datagram, sendmmsg out), `runSingle` (one worker on the calling thread), `runPerCore` (one `std.Thread` per CPU, each with its own SO_REUSEPORT socket), and `runFallback` (non-Linux, single `std.Io.net` loop). `dispatch/{async,pool,mixed}.zig` delegate to `runSingle`, `dispatch/{epoll,uring}.zig` to `runPerCore` (uring logs a fold notice).
-- `raw.zig`: `Raw(comptime handler)` with `init` / `initArgs` / `deinit` and a `run()` that switches on `config.dispatch_model`.
+- `dispatch/common.zig`: `workerLoop` (recvmmsg in, handler per datagram, sendmmsg out), `runSingle` (one worker on the calling thread, ASYNC), `runMulti` (one `std.Thread` per CPU, each with its own SO_REUSEPORT socket, POOL / MIXED), and `runFallback` (non-Linux, single `std.Io.net` loop). `dispatch/async.zig` delegates to `runSingle`, `dispatch/{pool,mixed}.zig` to `runMulti`. `dispatch/epoll.zig` and `dispatch/uring.zig` own their own per-core loops (`workerLoopEpoll`, and `workerLoopUring` a real io_uring ring with epoll fallback).
+- `raw.zig`: `Raw(comptime handler)` with `init` / `deinit` and a `run()` that switches on `config.dispatch_model`.
 
 ---
 

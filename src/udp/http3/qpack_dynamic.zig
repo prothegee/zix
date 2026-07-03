@@ -10,6 +10,8 @@
 //! Note:
 //! - A server may run with dynamic-table capacity 0 and compress with the static table plus literals
 //!   alone. This module is the dynamic half for when capacity is advertised.
+//! - Implemented and unit-tested, but not wired into the serve path yet (deferred): the live path
+//!   uses only the static table, and there is no non-zero dynamic-capacity config to enable it.
 
 const std = @import("std");
 

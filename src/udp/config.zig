@@ -10,22 +10,11 @@ const Logger = @import("../logger/logger.zig").Logger;
 /// names concurrency the same way the rest of the family does.
 pub const DispatchModel = @import("../tcp/config.zig").DispatchModel;
 
-/// Port binding mode: governs how the port is sourced at init time.
-/// Validation happens at init(), not at run(). Enforces "explicit over implicit."
-pub const PortMode = enum(u8) {
-    /// Port is read from CLI args (--port / --bind-port / --server-port) at runtime.
-    /// Falls back to config.port default if the arg is absent, never fails for a missing arg.
-    CONFIGURABLE,
-    /// Port must be set explicitly and non-zero in the config struct.
-    /// No CLI arg parsing. Fails at init() with error.PortNotConfigured if port is zero.
-    REQUIRED,
-};
-
 // --------------------------------------------------------- //
 
-/// Wire endianness applied transparently on every send and receive.
-/// Set once in config, no manual conversion needed in user code.
-/// Must match across all clients and the server for correct decoding.
+/// Wire endianness for the typed path's packet conversion. The client applies it on every send and
+/// receive. The typed server relays raw bytes without decoding, so it does not apply it. Client and
+/// server config must agree for correct decoding.
 pub const Endianness = enum(u8) {
     /// Same machine only, unsafe across platforms or languages.
     NATIVE,
@@ -50,14 +39,15 @@ pub const UdpServerConfig = struct {
     allocator: std.mem.Allocator,
     /// Bind address.
     ip: []const u8,
-    /// Bind port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
+    /// Bind port. Must be non-zero (RFC 768). Can be supplied by `--port` when `allow_args` is set.
     port: u16,
-    /// How the port is sourced: REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
-    port_mode: PortMode = .REQUIRED,
-    /// Wire endianness applied on every send and receive.
+    /// When true, init() applies `--ip` / `--port` CLI overrides from the args it is passed.
+    allow_args: bool = false,
+    /// Wire endianness. Currently unused server-side (the typed server relays raw bytes without
+    /// decoding). Kept for symmetry with the client, which does apply it.
     endianness: Endianness = .LITTLE,
     /// Milliseconds of silence before a client is considered disconnected (idle connection timeout).
-    conn_timeout_ms: i64 = 5000,
+    conn_timeout_ms: u32 = 5000,
     /// Receive poll interval in milliseconds, controls disconnect check frequency.
     poll_timeout_ms: i64 = 2000,
     /// Send 0x06 ACK byte back to sender on successful packet receipt.
@@ -76,9 +66,10 @@ pub const UdpServerConfig = struct {
     // messaging path runs a single async receive loop: it folds a non-ASYNC `dispatch_model` with a
     // notice and does not use the batch / worker knobs.
 
-    /// Concurrency model for the raw path. `.EPOLL` / `.URING` run per-core SO_REUSEPORT workers
-    /// (the recvmmsg loop). `.ASYNC` / `.POOL` / `.MIXED` run a single worker. URING currently folds
-    /// to the recvmmsg loop (true io_uring submission is a later phase). Same enum as the TCP engines.
+    /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.POOL` / `.MIXED` /
+    /// `.EPOLL` / `.URING` run one worker per CPU (ADR-050): `.EPOLL` / `.URING` are per-core
+    /// SO_REUSEPORT (epoll readiness / real io_uring completion), `.POOL` / `.MIXED` the recvmmsg
+    /// loop. Same enum as the TCP engines.
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models. 0 means one per available CPU.
@@ -96,8 +87,8 @@ pub const UdpServerConfig = struct {
     /// SO_BUSY_POLL spin window in microseconds for the raw path's UDP socket (.EPOLL / .URING
     /// per-core workers). The kernel busy-spins this long before sleeping the worker, trading CPU for
     /// lower recvmmsg wake-up latency on saturated benchmarks. Default 0 leaves it unset, so the
-    /// current CPU profile is unchanged. Mirrors zix.Http1's busy_poll_us. No-op when the kernel
-    /// lacks SO_BUSY_POLL.
+    /// current CPU profile is unchanged. Same knob as zix.Http1's busy_poll_us (Http1 defaults to 50,
+    /// this to 0). No-op when the kernel lacks SO_BUSY_POLL.
     busy_poll_us: u32 = 0,
     /// Worker thread stack size in bytes for the per-core raw workers (.EPOLL / .URING). Thread
     /// stacks are demand-paged, so this costs little RSS until the depth is used.
@@ -115,23 +106,58 @@ pub const UdpServerConfig = struct {
 pub const UdpClientConfig = struct {
     /// Server address to send packets to.
     ip: []const u8,
-    /// Server port. Must be non-zero for REQUIRED. Used as fallback default for CONFIGURABLE.
+    /// Server port. Must be non-zero. Can be supplied by `--server-port` when `allow_args` is set.
     server_port: u16,
     /// Local bind address. Defaults to loopback. Set to "0.0.0.0" to accept responses on all interfaces.
     bind_ip: []const u8 = "127.0.0.1",
     /// Local bind port, server uses this to send responses back.
     bind_port: u16,
-    /// How the ports are sourced: REQUIRED (config struct) or CONFIGURABLE (CLI args with fallback).
-    port_mode: PortMode = .REQUIRED,
+    /// When true, init() applies `--bind-ip` / `--bind-port` / `--server-port` CLI overrides.
+    allow_args: bool = false,
     /// Wire endianness, must match the server's endianness config.
     endianness: Endianness = .LITTLE,
-    /// If true: send one packet then exit.
-    send_once: bool = false,
-    /// Milliseconds between sends in the run loop.
-    send_every: u64 = 99,
-    /// Socket receive timeout in milliseconds (SO_RCVTIMEO). 0 = disabled.
+    /// Receive timeout in milliseconds, applied via poll before the blocking receive. 0 = disabled.
     recv_timeout_ms: u32 = 0,
 };
+
+// --------------------------------------------------------- //
+
+/// Apply `--ip` / `--port` CLI overrides to a server config (space form, e.g. `--port 9000`). Called
+/// by `zix.Udp.Server` / `zix.Udp.Raw` init when `allow_args` is set. A missing arg keeps the config
+/// value.
+pub fn applyServerArgs(config: UdpServerConfig, args: anytype) UdpServerConfig {
+    var cfg = config;
+    var it = std.process.Args.Iterator.init(args);
+    _ = it.skip();
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--ip")) {
+            if (it.next()) |val| cfg.ip = val;
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            if (it.next()) |val| cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
+        }
+    }
+
+    return cfg;
+}
+
+/// Apply `--bind-ip` / `--bind-port` / `--server-port` CLI overrides to a client config (space form).
+/// Called by `zix.Udp.Client` init when `allow_args` is set. A missing arg keeps the config value.
+pub fn applyClientArgs(config: UdpClientConfig, args: anytype) UdpClientConfig {
+    var cfg = config;
+    var it = std.process.Args.Iterator.init(args);
+    _ = it.skip();
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--bind-ip")) {
+            if (it.next()) |val| cfg.bind_ip = val;
+        } else if (std.mem.eql(u8, arg, "--bind-port")) {
+            if (it.next()) |val| cfg.bind_port = std.fmt.parseInt(u16, val, 10) catch cfg.bind_port;
+        } else if (std.mem.eql(u8, arg, "--server-port")) {
+            if (it.next()) |val| cfg.server_port = std.fmt.parseInt(u16, val, 10) catch cfg.server_port;
+        }
+    }
+
+    return cfg;
+}
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -154,9 +180,9 @@ test "zix test: UdpServerConfig, default field values" {
     try std.testing.expectEqual(std.testing.allocator.ptr, cfg.allocator.ptr);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9100), cfg.port);
-    try std.testing.expectEqual(PortMode.REQUIRED, cfg.port_mode);
+    try std.testing.expect(!cfg.allow_args);
     try std.testing.expectEqual(Endianness.LITTLE, cfg.endianness);
-    try std.testing.expectEqual(@as(i64, 5000), cfg.conn_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 5000), cfg.conn_timeout_ms);
     try std.testing.expectEqual(@as(i64, 2000), cfg.poll_timeout_ms);
     try std.testing.expect(!cfg.auto_ack);
     try std.testing.expect(!cfg.error_report);
@@ -191,16 +217,9 @@ test "zix test: UdpClientConfig, default field values" {
     try std.testing.expectEqual(@as(u16, 9100), cfg.server_port);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.bind_ip);
     try std.testing.expectEqual(@as(u16, 9101), cfg.bind_port);
-    try std.testing.expectEqual(PortMode.REQUIRED, cfg.port_mode);
+    try std.testing.expect(!cfg.allow_args);
     try std.testing.expectEqual(Endianness.LITTLE, cfg.endianness);
-    try std.testing.expect(!cfg.send_once);
-    try std.testing.expectEqual(@as(u64, 99), cfg.send_every);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
-}
-
-test "zix test: PortMode, enum backing values are stable" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(PortMode.CONFIGURABLE));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(PortMode.REQUIRED));
 }
 
 test "zix test: Endianness enum backing values are stable" {

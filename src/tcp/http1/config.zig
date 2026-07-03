@@ -24,24 +24,16 @@ pub const Http1ServerConfig = struct {
     /// Max bytes to buffer per request header block and per HTTP connection
     /// in EPOLL mode.
     max_recv_buf: usize = 16 * 1024,
-    /// SO_RCVBUF (bytes) applied ONLY on the large-body path: a request whose body exceeds the read
-    /// buffer (uploads). Default 0 leaves the kernel default and its receive autotuning, which on a
-    /// box with a healthy net.core.rmem_max already sizes the upload window well. An explicit value
-    /// both caps the window AND disables autotuning, so a value BELOW what autotuning would grow to
-    /// actually slows uploads (measured: 256 KiB capped the window down for about 18% less upload on
-    /// this box). Set it only to FORCE a window larger than autotuning, at the cost of per-connection
-    /// memory while a large body is in flight. Small-request cells never touch this path.
+    /// SO_RCVBUF (bytes) applied ONLY on the large-body path: a request whose body exceeds the read buffer
+    /// (uploads). Default 0 keeps the kernel default and its receive autotuning, which with a healthy
+    /// net.core.rmem_max already sizes the upload window well. An explicit value both caps the window AND
+    /// disables autotuning, so a value below what autotuning would grow to slows uploads (an explicit 256 KiB
+    /// measured ~18% less upload). Set it only to FORCE a window larger than autotuning, at the cost of
+    /// per-connection memory while a large body is in flight. Small-request cells never touch this path.
     large_body_rcvbuf: usize = 0,
-    /// Per-connection receive buffer size for WebSocket connections. 0 falls back to
-    /// max_recv_buf. Set larger than max_recv_buf to give WS connections more room to
-    /// accumulate pipelined frames without forcing a compact and re-read on every fill.
-    ///
-    /// Note:
-    /// - Under .EPOLL this sizes the per-connection WS recv buffer directly.
-    /// - Under .URING this sizes the per-connection frame-accumulation buffer (conn.buf)
-    ///   and the unmask scratch, so a deep pipelined burst spanning several provided-
-    ///   buffer ring deliveries accumulates in one buffer. The provided-buffer ring stays
-    ///   at its internal size, below conn.buf, so a carried partial frame always has room.
+    /// Per-connection receive buffer for WebSocket connections in bytes. 0 falls back to max_recv_buf.
+    /// Set it larger to give WS connections room to accumulate pipelined frames without a compact-and-reread
+    /// each fill. Under .EPOLL it sizes the WS recv buffer, under .URING the frame-accumulation buffer (conn.buf).
     ws_recv_buf: usize = 0,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
     /// half of the per-connection footprint (max_recv_buf covers recv). A response larger
@@ -62,17 +54,9 @@ pub const Http1ServerConfig = struct {
     /// hundred warm connections already absorb steady churn. No effect under the other
     /// dispatch models.
     uring_idle_pool_ceiling: usize = 256,
-    /// Enable response compression with Accept-Encoding negotiation (gzip, deflate,
-    /// brotli). Default false. Compression spends CPU to shrink the body, which only
-    /// pays off over a real network: on a loopback benchmark it is a pure CPU add, so
-    /// leaving it off keeps the URING perf gate untouched.
-    ///
-    /// Note:
-    /// - Active under the .EPOLL and .URING dispatch models (shared-nothing, one owner
-    ///   per worker), installed into the write path from setCompression. A handler opts
-    ///   in by calling writeNegotiated instead of writeSimple. The compressed bytes are
-    ///   cached per (key, encoding) via cache.hashKeyEncoded (writeGzipCached / the cache-
-    ///   aware writeNegotiated), so a repeat request replays without recompressing.
+    /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default false.
+    /// Compression spends CPU to shrink the body and only pays off over a real network, so leaving it off
+    /// keeps the perf gate untouched. Active under .EPOLL and .URING. A handler opts in via writeNegotiated.
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body
     /// under this floor is sent uncompressed, since the header and CPU cost outweighs
@@ -104,15 +88,10 @@ pub const Http1ServerConfig = struct {
     /// Include the Date header in every response. Default true for RFC 7231 compliance.
     /// Set false to reduce response size by 37 bytes per response.
     send_date_header: bool = true,
-    /// Root directory for static file serving. Empty string (default) disables static serving.
-    /// When set, a request that matches no route is served as a file from this directory before
-    /// the 404 fallback. Paths containing ".." are rejected (no directory traversal). Range
-    /// requests (RFC 7233) yield 206 partial content. Mirrors zix.Http public_dir.
-    ///
-    /// Note:
-    /// - Active under every dispatch model (.ASYNC / .POOL / .MIXED / .EPOLL / .URING) and the
-    ///   https paths, since all of them route the unmatched request through the same router.
-    /// - Validated at run(): a non-empty directory that does not exist yields error.PublicDirNotFound.
+    /// Root directory for static file serving. Empty (default) disables it. When set, a request matching
+    /// no route is served as a file before the 404 fallback, under every dispatch model and the https paths.
+    /// ".." paths are rejected (no traversal). Range requests (RFC 7233) yield 206. Mirrors zix.Http public_dir.
+    /// Validated at run(): a non-empty directory that does not exist yields error.PublicDirNotFound.
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Declarative companion to public_dir: an upload
     /// handler saves received files here by convention. The engine does not auto-wire uploads,
@@ -140,15 +119,9 @@ pub const Http1ServerConfig = struct {
     /// carries the cert / key / alpn / version / curve / cipher / HSTS policy (Tls.Context.Config).
     /// Caller owns the Context and must ensure it outlives the server.
     tls: ?*Tls.Context = null,
-    /// Optional logger. When non-null, the server logs lifecycle lines (listening,
-    /// fallback notices) through it instead of std.debug.print.
-    ///
-    /// Note:
-    /// - The Http1 handler writes to the fd directly and returns void, so the server
-    ///   cannot observe response status or bytes. Per-request access logging is the
-    ///   handler's responsibility: call logger.access() inside the handler where the
-    ///   final status and byte count are known.
-    /// - Caller owns the Logger and must ensure it outlives the server.
+    /// Optional logger for server lifecycle lines (listening, fallback notices). null = std.debug.print.
+    /// The Http1 handler writes the fd and returns void, so per-request access logging is the handler's job:
+    /// call logger.access() inside the handler where status and byte count are known. Caller owns, must outlive.
     logger: ?*Logger = null,
 };
 

@@ -20,7 +20,8 @@ const server_control_stream: u64 = 3;
 /// Return:
 /// - true when the frame was written
 /// - false when it does not fit in `out` from `pos` (nothing is written, `pos` is unchanged)
-fn writeStreamFrame(out: []u8, pos: *usize, stream_id: u64, fin: bool, data: []const u8) bool {
+/// Public so the dispatch loop can pack several response stream frames into one coalesced 1-RTT packet.
+pub fn writeStreamFrame(out: []u8, pos: *usize, stream_id: u64, fin: bool, data: []const u8) bool {
     const frame_len = 1 + varint.encodedLen(stream_id) + varint.encodedLen(data.len) + data.len;
     if (pos.* + frame_len > out.len) return false;
 
@@ -54,8 +55,9 @@ fn statusIndexedFieldLine(out: []u8, status: u16) usize {
 ///
 /// Return:
 /// - usize (the number of bytes written)
-/// - null when the content does not fit in `out` (nothing is written)
-fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
+/// - null when the content does not fit in `out` (a body too large for one packet, the caller then
+///   registers it as a multi-packet send stream)
+pub fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
     // HEADERS frame: type 0x01, length, then the field section (RIC 0, Base 0, indexed :status).
     var fields: [16]u8 = undefined;
     var fp: usize = 0;
@@ -69,21 +71,21 @@ fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
     const data_len = 1 + varint.encodedLen(body.len) + body.len;
     if (headers_len + data_len > out.len) return null;
 
-    var p: usize = 0;
-    out[p] = 0x01; // HEADERS frame type
-    p += 1;
-    p += varint.write(out[p..], fp);
-    @memcpy(out[p..][0..fp], fields[0..fp]);
-    p += fp;
+    var pos: usize = 0;
+    out[pos] = 0x01; // HEADERS frame type
+    pos += 1;
+    pos += varint.write(out[pos..], fp);
+    @memcpy(out[pos..][0..fp], fields[0..fp]);
+    pos += fp;
 
     // DATA frame: type 0x00, length, body.
-    out[p] = 0x00; // DATA frame type
-    p += 1;
-    p += varint.write(out[p..], body.len);
-    @memcpy(out[p..][0..body.len], body);
-    p += body.len;
+    out[pos] = 0x00; // DATA frame type
+    pos += 1;
+    pos += varint.write(out[pos..], body.len);
+    @memcpy(out[pos..][0..body.len], body);
+    pos += body.len;
 
-    return p;
+    return pos;
 }
 
 /// Build the HTTP/3 response stream prefix: the HEADERS frame (`:status`) plus the DATA frame header
@@ -106,18 +108,18 @@ pub fn buildStreamPrefix(out: []u8, status: u16, body_len: usize) ?usize {
     const data_header_len = 1 + varint.encodedLen(body_len);
     if (headers_len + data_header_len > out.len) return null;
 
-    var p: usize = 0;
-    out[p] = 0x01; // HEADERS frame type
-    p += 1;
-    p += varint.write(out[p..], fp);
-    @memcpy(out[p..][0..fp], fields[0..fp]);
-    p += fp;
+    var pos: usize = 0;
+    out[pos] = 0x01; // HEADERS frame type
+    pos += 1;
+    pos += varint.write(out[pos..], fp);
+    @memcpy(out[pos..][0..fp], fields[0..fp]);
+    pos += fp;
 
-    out[p] = 0x00; // DATA frame type
-    p += 1;
-    p += varint.write(out[p..], body_len);
+    out[pos] = 0x00; // DATA frame type
+    pos += 1;
+    pos += varint.write(out[pos..], body_len);
 
-    return p;
+    return pos;
 }
 
 /// Build an ACK-only 1-RTT payload acknowledging packets 0..largest (RFC 9000 19.3): one contiguous
@@ -128,26 +130,77 @@ pub fn buildAck(out: []u8, ack_largest: ?u64) usize {
     const ack_len = 1 + varint.encodedLen(largest) + 1 + 1 + varint.encodedLen(largest);
     if (ack_len > out.len) return 0;
 
-    var p: usize = 0;
-    out[p] = 0x02; // ACK frame type
-    p += 1;
-    p += varint.write(out[p..], largest); // Largest Acknowledged
-    p += varint.write(out[p..], 0); // ACK Delay
-    p += varint.write(out[p..], 0); // ACK Range Count
-    p += varint.write(out[p..], largest); // First ACK Range (largest down to 0)
+    var pos: usize = 0;
+    out[pos] = 0x02; // ACK frame type
+    pos += 1;
+    pos += varint.write(out[pos..], largest); // Largest Acknowledged
+    pos += varint.write(out[pos..], 0); // ACK Delay
+    pos += varint.write(out[pos..], 0); // ACK Range Count
+    pos += varint.write(out[pos..], largest); // First ACK Range (largest down to 0)
 
-    return p;
+    return pos;
 }
 
-/// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response.
-///
-/// Param:
-/// out - []u8 (destination for the frame payload, sealed into a 1-RTT packet by the caller)
-/// request_stream_id - u64 (the client bidi stream the request arrived on)
-/// status - u16 (the HTTP status code)
-/// body - []const u8 (the response body)
-///
-/// The one-shot and terminal frames a response packet may carry around the request-stream content.
+/// Build an ACK frame (RFC 9000 19.3) from a received-packet window: Largest Acknowledged plus the First
+/// ACK Range and any (Gap, ACK Range Length) pairs the window's holes imply, so the client detects and
+/// retransmits a lost request packet instead of stalling on it. `mask` bit i set means (largest - i) was
+/// received, bit 0 is largest (always set). Returns 0 when nothing fits (nothing written).
+pub fn buildAckRanges(out: []u8, largest: u64, mask: u64) usize {
+    if (mask & 1 == 0 or out.len < 32) return 0;
+
+    var pos: usize = 0;
+    out[pos] = 0x02; // ACK frame type
+    pos += 1;
+    pos += varint.write(out[pos..], largest); // Largest Acknowledged
+    pos += varint.write(out[pos..], 0); // ACK Delay
+
+    // Range Count is patched in after the walk. One byte holds it: a 64-bit window has at most 31 ranges.
+    const range_count_pos = pos;
+    pos += 1;
+
+    // First ACK Range: contiguous received packets immediately below largest.
+    var bit: usize = 1;
+    var first_range: u64 = 0;
+    while (bit < 64 and (mask >> @intCast(bit)) & 1 == 1) : (bit += 1) first_range += 1;
+    pos += varint.write(out[pos..], first_range);
+
+    // Additional ranges: a gap of unreceived packets, then a run of received ones.
+    var range_count: u64 = 0;
+    while (bit < 64) {
+        var gap: u64 = 0;
+        while (bit < 64 and (mask >> @intCast(bit)) & 1 == 0) : (bit += 1) gap += 1;
+        if (bit >= 64) break;
+
+        var run: u64 = 0;
+        while (bit < 64 and (mask >> @intCast(bit)) & 1 == 1) : (bit += 1) run += 1;
+
+        if (pos + 16 > out.len) break;
+        pos += varint.write(out[pos..], gap - 1); // Gap encodes (unacked - 1)
+        pos += varint.write(out[pos..], run - 1); // ACK Range Length encodes (acked - 1)
+        range_count += 1;
+    }
+
+    out[range_count_pos] = @intCast(range_count);
+
+    return pos;
+}
+
+/// Build a MAX_STREAMS frame for bidirectional streams (RFC 9000 19.11, type 0x12): raise the
+/// cumulative number of client-initiated bidi (request) streams the peer may open. A connection
+/// advertises a one-time allowance in the handshake, so without periodic MAX_STREAMS the client stalls
+/// once it is spent. Returns 0 when the frame does not fit in `out` (nothing is written).
+pub fn buildMaxStreams(out: []u8, max_streams: u64) usize {
+    const frame_len = 1 + varint.encodedLen(max_streams);
+    if (frame_len > out.len) return 0;
+
+    out[0] = 0x12; // MAX_STREAMS (bidirectional)
+    var pos: usize = 1;
+    pos += varint.write(out[pos..], max_streams);
+
+    return pos;
+}
+
+/// Which one-shot and terminal frames a response packet carries around the request-stream content.
 ///
 /// Note:
 /// - `handshake_done` and `control` belong on the first 1-RTT response of a connection only. The
@@ -157,6 +210,9 @@ pub const Framing = struct {
     handshake_done: bool = true,
     control: bool = true,
     close: bool = false,
+    /// When set, a MAX_STREAMS (bidi) frame raising the client's request-stream credit to this
+    /// cumulative value rides this packet (RFC 9000 19.11). Set only when replenishment is due.
+    max_streams_bidi: ?u64 = null,
 };
 
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response on `stream_id`.
@@ -172,42 +228,56 @@ pub const Framing = struct {
 /// Return:
 /// - usize (the number of bytes written)
 /// - null when the response does not fit in `out` (the v1 single-packet limit, caller falls back)
+///
+/// Note:
+/// - Umbrella builder, exercised by the tests below. The live serve path composes the lower-level
+///   builders (buildAck / buildStreamPrefix / writeStreamFrame / buildMaxStreams) directly.
 pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, ack_largest: ?u64, framing: Framing) ?usize {
     // ACK the client's 1-RTT packets so it stops retransmitting (RFC 9000 19.3).
-    var p: usize = buildAck(out, ack_largest);
+    var pos: usize = buildAck(out, ack_largest);
 
     // HANDSHAKE_DONE (RFC 9001 7.5): confirm the handshake to the client so it finalizes the
     // connection rather than waiting. First response of the connection only.
     if (framing.handshake_done) {
-        if (p + 1 > out.len) return null;
-        out[p] = 0x1e;
-        p += 1;
+        if (pos + 1 > out.len) return null;
+        out[pos] = 0x1e;
+        pos += 1;
     }
 
     // Server control stream: the stream type (0x00) followed by an empty SETTINGS frame (0x04, 0).
     if (framing.control) {
         const control_content = [_]u8{ 0x00, 0x04, 0x00 };
-        if (!writeStreamFrame(out, &p, server_control_stream, false, &control_content)) return null;
+        if (!writeStreamFrame(out, &pos, server_control_stream, false, &control_content)) return null;
+    }
+
+    // MAX_STREAMS (RFC 9000 19.11): extend the client's request-stream credit so a long-lived
+    // connection does not stall once its one-time handshake allowance is spent. Rides this packet only
+    // when replenishment is due.
+    if (framing.max_streams_bidi) |max_streams| {
+        const written = buildMaxStreams(out[pos..], max_streams);
+        if (written == 0) return null;
+
+        pos += written;
     }
 
     // The response on the request stream, with FIN.
     var content: [1024]u8 = undefined;
     const content_len = buildRequestStreamContent(&content, status, body) orelse return null;
-    if (!writeStreamFrame(out, &p, stream_id, true, content[0..content_len])) return null;
+    if (!writeStreamFrame(out, &pos, stream_id, true, content[0..content_len])) return null;
 
     // Application CONNECTION_CLOSE (RFC 9000 19.19, type 0x1d): H3_NO_ERROR with an empty reason, so
     // the client finalizes the connection after the response instead of waiting.
     if (framing.close) {
         const close_len = 1 + varint.encodedLen(0x0100) + varint.encodedLen(0);
-        if (p + close_len > out.len) return null;
+        if (pos + close_len > out.len) return null;
 
-        out[p] = 0x1d; // CONNECTION_CLOSE (application)
-        p += 1;
-        p += varint.write(out[p..], 0x0100); // H3_NO_ERROR
-        p += varint.write(out[p..], 0); // Reason Phrase Length
+        out[pos] = 0x1d; // CONNECTION_CLOSE (application)
+        pos += 1;
+        pos += varint.write(out[pos..], 0x0100); // H3_NO_ERROR
+        pos += varint.write(out[pos..], 0); // Reason Phrase Length
     }
 
-    return p;
+    return pos;
 }
 
 // --------------------------------------------------------------- //
@@ -242,6 +312,43 @@ test "zix test: response with ack and close carries both frames" {
 
     // Ends with an application CONNECTION_CLOSE (0x1d) carrying H3_NO_ERROR (0x0100 = varint 4100).
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x1d, 0x41, 0x00, 0x00 }) != null);
+}
+
+test "zix test: buildAckRanges reports holes so the client retransmits the lost packet" {
+    var out: [64]u8 = undefined;
+
+    // 0..5 all received (largest 5): one contiguous range, no gaps. First ACK Range 5, range count 0.
+    const contiguous = buildAckRanges(&out, 5, 0b111111);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x05, 0x00, 0x00, 0x05 }, out[0..contiguous]);
+
+    // Packet 4 missing (largest 5, bit 1 clear): first range 0 (just 5), then one range with gap 0
+    // (one unacked, packet 4) and length 3 (packets 3,2,1,0). The gap is what makes the client resend 4.
+    const holed = buildAckRanges(&out, 5, 0b111101);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x05, 0x00, 0x01, 0x00, 0x00, 0x03 }, out[0..holed]);
+
+    // Only the largest in the window: range count 0, first range 0.
+    const lone = buildAckRanges(&out, 9, 1);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x09, 0x00, 0x00, 0x00 }, out[0..lone]);
+}
+
+test "zix test: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse rides it" {
+    // The frame is type 0x12 then the cumulative limit as a varint (192 = 0x40c0 two-byte varint).
+    var frame: [8]u8 = undefined;
+    const len = buildMaxStreams(&frame, 192);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x12, 0x40, 0xc0 }, frame[0..len]);
+
+    // A small destination that cannot hold the frame reports 0 and writes nothing.
+    var tiny: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), buildMaxStreams(&tiny, 192));
+
+    // A response with max_streams_bidi set carries the 0x12 frame, a lean response without it does not.
+    var out: [1024]u8 = undefined;
+    const with = buildResponse(&out, 4, 200, "hi", null, .{ .handshake_done = false, .control = false, .max_streams_bidi = 192 }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out[0..with], &[_]u8{ 0x12, 0x40, 0xc0 }) != null);
+
+    var out2: [1024]u8 = undefined;
+    const without = buildResponse(&out2, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x12}) == null);
 }
 
 test "zix test: a body larger than the buffer returns null, never overflows" {

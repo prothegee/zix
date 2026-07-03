@@ -43,6 +43,7 @@ pub const ServerInitial = struct {
 /// Param:
 /// out - []u8 (destination for the whole Initial packet)
 /// hello - *const handshake.ClientHello (the parsed client hello)
+/// client_hello_bytes - []const u8 (the raw ClientHello bytes, fed into the handshake transcript)
 /// server_keys - crypto.AesKeys (the server Initial key / iv / hp)
 /// dcid - []const u8 (the client's Source Connection ID, our Destination CID for the reply)
 /// scid - []const u8 (our chosen Source Connection ID)

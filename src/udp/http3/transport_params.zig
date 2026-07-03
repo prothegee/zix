@@ -25,7 +25,22 @@ pub const TransportParams = struct {
     /// Per-stream send limit for the request stream the server replies on (param 0x05, the client's
     /// initial_max_stream_data_bidi_local).
     initial_max_stream_data_bidi_local: u64 = 0,
+    /// The power-of-two divisor the client used to encode ACK Delay fields (param 0x0a), default 3
+    /// (RFC 9000 18.2) when the client sends none. Needed to decode the client's ACK frames for loss
+    /// recovery (RFC 9000 19.3).
+    ack_delay_exponent: u6 = 3,
+    /// The largest UDP payload the client will accept (param 0x03), so the server never sends a datagram
+    /// the client must drop (RFC 9000 18.2). Default 65527 when the client sends none (the RFC default),
+    /// clamped to at least 1200 (the QUIC minimum). Lets the response path send fewer, larger datagrams
+    /// on a path that allows it (a big-MTU loopback), cutting per-packet work on both ends.
+    max_udp_payload_size: u64 = 65527,
 };
+
+/// The RFC 9000 minimum a QUIC endpoint must accept, the floor for max_udp_payload_size.
+pub const min_udp_payload_size: u64 = 1200;
+
+/// The RFC 9000 default max_udp_payload_size when a peer advertises none.
+pub const default_max_udp_payload_size: u64 = 65527;
 
 /// Parse the body of the quic_transport_parameters extension (RFC 9000 18.1): a sequence of
 /// (id, length, value) entries, each varint-framed. Unknown ids are skipped. Integer parameters carry
@@ -47,8 +62,19 @@ pub fn parse(ext_body: []const u8) TransportParams {
         pos += value_len;
 
         switch (id.value) {
+            // A value below the 1200 minimum is a transport error, but a minimal client is likelier than
+            // a hostile one, so clamp up to the floor rather than drop the connection.
+            0x03 => if (varintValue(value)) |v| {
+                params.max_udp_payload_size = @max(v, min_udp_payload_size);
+            },
             0x04 => params.initial_max_data = varintValue(value) orelse params.initial_max_data,
             0x05 => params.initial_max_stream_data_bidi_local = varintValue(value) orelse params.initial_max_stream_data_bidi_local,
+            // The valid range is 0-20 (RFC 9000 18.2); a larger value is a transport error, but a
+            // minimal client is more likely than a hostile one here, so clamp rather than drop the
+            // connection.
+            0x0a => if (varintValue(value)) |v| {
+                params.ack_delay_exponent = @intCast(@min(v, 20));
+            },
             else => {},
         }
     }
@@ -144,6 +170,31 @@ test "zix test: parse defaults absent parameters to zero" {
 
     try std.testing.expectEqual(@as(u64, 1048576), params.initial_max_data);
     try std.testing.expectEqual(@as(u64, 0), params.initial_max_stream_data_bidi_local);
+    try std.testing.expectEqual(@as(u6, 3), params.ack_delay_exponent);
+    // Absent max_udp_payload_size defaults to the RFC value (accept large), not zero.
+    try std.testing.expectEqual(default_max_udp_payload_size, params.max_udp_payload_size);
+}
+
+test "zix test: parse extracts max_udp_payload_size and clamps below the 1200 floor" {
+    // 0x03 = 8192 (varint 80002000), so the server may send up to 8 KiB datagrams to this client.
+    const body = h("03" ++ "04" ++ "80002000");
+    try std.testing.expectEqual(@as(u64, 8192), parse(&body).max_udp_payload_size);
+
+    // A value under the RFC minimum (0x03 = 512, varint 4200) is clamped up to 1200, never below.
+    const tiny = h("03" ++ "02" ++ "4200");
+    try std.testing.expectEqual(min_udp_payload_size, parse(&tiny).max_udp_payload_size);
+}
+
+test "zix test: parse extracts ack_delay_exponent, clamped to the RFC 9000 18.2 valid range" {
+    const body = h("0a" ++ "01" ++ "06");
+    try std.testing.expectEqual(@as(u6, 6), parse(&body).ack_delay_exponent);
+
+    const oversized = h("0a" ++ "02" ++ "4064"); // varint 100, clamped to 20
+    try std.testing.expectEqual(@as(u6, 20), parse(&oversized).ack_delay_exponent);
+
+    // 0x0b is max_ack_delay, not ack_delay_exponent (RFC 9000 Table 6), so it must not set the exponent.
+    const max_ack_delay = h("0b" ++ "01" ++ "06");
+    try std.testing.expectEqual(@as(u6, 3), parse(&max_ack_delay).ack_delay_exponent);
 }
 
 // A 32-byte all-zero random, as the 64 hex chars the ClientHello test fixtures embed.

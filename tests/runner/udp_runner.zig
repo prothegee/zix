@@ -60,10 +60,9 @@ fn run(io: std.Io, server_path: []const u8) !void {
         .server_port = SERVER_PORT,
         .bind_ip = "127.0.0.1",
         .bind_port = BIND_PORT,
-        .port_mode = .REQUIRED,
         .endianness = .LITTLE,
         .recv_timeout_ms = 3000,
-    }, io);
+    }, io, .{});
     defer client.deinit();
 
     var my_id: [16]u8 = std.mem.zeroes([16]u8);

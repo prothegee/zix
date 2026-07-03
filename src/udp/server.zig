@@ -4,9 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
-const PortMode = Config.PortMode;
 const Logger = @import("../logger/logger.zig").Logger;
-const Dir = @import("../logger/logger.zig").Dir;
 
 // --------------------------------------------------------- //
 
@@ -28,8 +26,9 @@ fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) v
 /// Usage:
 /// ```zig
 /// const MyServer = zix.Udp.Server(MyPacket);
-/// var server = try MyServer.init(config);           // REQUIRED mode, config.io required
-/// var server = try MyServer.initArgs(config, args); // CONFIGURABLE mode
+/// var server = try MyServer.init(config, .{});   // config-only (config.io required)
+/// // set config.allow_args = true and pass process args to read --ip / --port:
+/// // var server = try MyServer.init(config, process.minimal.args);
 /// defer server.deinit();
 /// try server.run();
 /// ```
@@ -50,7 +49,7 @@ pub fn UdpServer(comptime Packet: type) type {
         };
 
         // PERF: peers is heap-allocated per packet, no fixed cap.
-        //       Allocated before io.concurrent() dispatc, freed inside processPacket after broadcast.
+        //       Allocated before io.concurrent() dispatch, freed inside processPacket after broadcast.
         // Note: socket is shared across concurrent tasks, UDP send is kernel-atomic per datagram.
         const Task = struct {
             buf: [@sizeOf(Packet)]u8,
@@ -59,7 +58,6 @@ pub fn UdpServer(comptime Packet: type) type {
             io: std.Io,
             config: UdpServerConfig,
             peers: []std.Io.net.IpAddress,
-            sender_index: usize,
             logger: ?*Logger,
         };
 
@@ -67,29 +65,26 @@ pub fn UdpServer(comptime Packet: type) type {
 
         // --------------------------------------------------------- //
 
-        /// Initialize in REQUIRED mode: port must be set non-zero in config.
+        /// Initialize. When `config.allow_args` is set, `--ip` / `--port` from `args` override the
+        /// config (a missing arg keeps the config value), otherwise `args` is ignored. The final port
+        /// must be non-zero.
+        ///
+        /// Param:
+        /// config - UdpServerConfig
+        /// args - std.process.Args (e.g. process.minimal.args), or `.{}` when not reading CLI
         ///
         /// Return:
-        /// - error.PortNotConfigured if config.port is zero
-        pub fn init(config: UdpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
-            return .{ .config = config };
-        }
-
-        /// Initialize in CONFIGURABLE mode: reads --port from CLI args, falls back to config.port.
-        /// Never fails for a missing arg, config.port is the default.
-        pub fn initArgs(config: UdpServerConfig, args: anytype) !Self {
+        /// - error.PortNotConfigured if the resolved port is zero
+        pub fn init(config: UdpServerConfig, args: anytype) !Self {
             var cfg = config;
-            var it = std.process.Args.Iterator.init(args);
-            _ = it.skip(); // skip argv[0]
-            while (it.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--port")) {
-                    if (it.next()) |val| {
-                        cfg.port = std.fmt.parseInt(u16, val, 10) catch cfg.port;
-                    }
-                }
+            // The parse only compiles when args is a real std.process.Args. Passing `.{}` (no CLI)
+            // skips it at comptime, so the empty case does not need a process.Args value.
+            if (comptime @TypeOf(args) == std.process.Args) {
+                if (cfg.allow_args) cfg = Config.applyServerArgs(cfg, args);
             }
+
             if (cfg.port == 0) return error.PortNotConfigured;
+
             return .{ .config = cfg };
         }
 
@@ -198,7 +193,6 @@ pub fn UdpServer(comptime Packet: type) type {
                     .io = io,
                     .config = self.config,
                     .peers = peers,
-                    .sender_index = sender_index,
                     .logger = self.config.logger,
                 };
 
@@ -266,8 +260,8 @@ pub fn UdpServer(comptime Packet: type) type {
 
         fn fmtAddr(from: std.Io.net.IpAddress, buf: []u8) []const u8 {
             return switch (from) {
-                .ip4 => |a| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
-                    a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
+                .ip4 => |addr| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
+                    addr.bytes[0], addr.bytes[1], addr.bytes[2], addr.bytes[3], addr.port,
                 }) catch "?",
                 .ip6 => "ipv6",
             };
@@ -289,7 +283,7 @@ test "zix test: UdpServer init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     const S = UdpServer(TestPkt);
-    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }));
+    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}));
 }
 
 test "zix test: UdpServer init, nonzero port succeeds" {
@@ -297,7 +291,7 @@ test "zix test: UdpServer init, nonzero port succeeds" {
     defer threaded.deinit();
 
     const S = UdpServer(TestPkt);
-    var server = try S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100, .dispatch_model = .ASYNC });
+    var server = try S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 9100, .dispatch_model = .ASYNC }, .{});
     server.deinit();
 }
 
@@ -314,7 +308,7 @@ test "zix test: UdpServer init, config fields are preserved" {
         .dispatch_model = .ASYNC,
         .broadcast = true,
         .auto_ack = true,
-    });
+    }, .{});
     defer server.deinit();
 
     try std.testing.expectEqual(std.testing.allocator.ptr, server.config.allocator.ptr);

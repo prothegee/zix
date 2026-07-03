@@ -7,7 +7,6 @@ const packet = @import("packet.zig");
 
 const raw = @import("raw.zig");
 
-pub const PortMode = config.PortMode;
 pub const Endianness = config.Endianness;
 pub const DispatchModel = config.DispatchModel;
 pub const ServerConfig = config.UdpServerConfig;
