@@ -45,6 +45,9 @@ pub const Ack = struct {
     ranges: [16]Range,
     range_len: usize,
     ecn: ?[3]u64,
+    /// Bytes of the input `data` this frame occupied, so the caller can advance past it in a payload
+    /// that coalesces more frames after the ACK.
+    consumed: usize,
 };
 
 /// The ACK errors an endpoint MUST raise (RFC 9000 19.3.1).
@@ -65,7 +68,7 @@ pub fn parseAck(data: []const u8, ack_delay_exponent: u6) AckError!Ack {
     const range_count = try field(data, &pos);
     const first_ack_range = try field(data, &pos);
 
-    var ack: Ack = .{ .largest = largest, .delay_us = delay << ack_delay_exponent, .ranges = undefined, .range_len = 0, .ecn = null };
+    var ack: Ack = .{ .largest = largest, .delay_us = delay << ack_delay_exponent, .ranges = undefined, .range_len = 0, .ecn = null, .consumed = 0 };
 
     if (first_ack_range > largest) return error.FrameEncodingError;
 
@@ -96,6 +99,8 @@ pub fn parseAck(data: []const u8, ack_delay_exponent: u6) AckError!Ack {
         const ce = try field(data, &pos);
         ack.ecn = .{ ect0, ect1, ce };
     }
+
+    ack.consumed = pos;
 
     return ack;
 }
@@ -157,14 +162,17 @@ test "zix test: RFC 9000 19.3 ACK frame parse and range arithmetic" {
     const ack_single = try parseAck(&h("020a000003"), 0);
     try std.testing.expectEqual(@as(u64, 10), ack_single.largest);
     try std.testing.expect(ack_single.range_len == 1 and ack_single.ranges[0].smallest == 7 and ack_single.ranges[0].largest == 10);
+    try std.testing.expectEqual(@as(usize, 5), ack_single.consumed);
 
     const ack_multi = try parseAck(&h("020a00010203" ++ "01"), 0);
     try std.testing.expectEqual(@as(usize, 2), ack_multi.range_len);
     try std.testing.expect(ack_multi.ranges[0].smallest == 8 and ack_multi.ranges[0].largest == 10);
     try std.testing.expect(ack_multi.ranges[1].smallest == 2 and ack_multi.ranges[1].largest == 3);
+    try std.testing.expectEqual(@as(usize, 7), ack_multi.consumed);
 
     const ack_ecn = try parseAck(&h("030a000003" ++ "010203"), 0);
     try std.testing.expect(ack_ecn.ecn != null and ack_ecn.ecn.?[0] == 1 and ack_ecn.ecn.?[1] == 2 and ack_ecn.ecn.?[2] == 3);
+    try std.testing.expectEqual(@as(usize, 8), ack_ecn.consumed);
 
     const ack_delay = try parseAck(&h("020a" ++ "4064" ++ "0000"), 3);
     try std.testing.expectEqual(@as(u64, 800), ack_delay.delay_us);
