@@ -79,6 +79,39 @@ const table = [256]Code{
     .{ .code = 0x7ffffee, .bits = 27 }, .{ .code = 0x7ffffef, .bits = 27 },  .{ .code = 0x7fffff0, .bits = 27 },  .{ .code = 0x3ffffee, .bits = 26 },
 };
 
+/// The longest code length in the RFC 7541 Appendix B table.
+const max_code_bits = 30;
+
+/// One table entry ordered into its bits-length bucket: decode already knows the exact bit length it
+/// just accumulated, so it only ever needs to compare against codes of that one length, never all 256.
+const BucketEntry = struct { code: u32, sym: u8 };
+
+/// `table` regrouped by code length: `sorted[bits_start[bits]..bits_start[bits + 1]]` holds every
+/// entry whose code is exactly `bits` bits long. Built once at compile time (a histogram-sort of the
+/// 256-entry table), so decode pays nothing for it at runtime.
+const HuffmanIndex = struct {
+    sorted: [table.len]BucketEntry,
+    bits_start: [max_code_bits + 2]usize,
+};
+
+const huffman_index: HuffmanIndex = blk: {
+    var counts: [max_code_bits + 1]usize = @splat(0);
+    for (table) |entry| counts[entry.bits] += 1;
+
+    var bits_start: [max_code_bits + 2]usize = undefined;
+    bits_start[0] = 0;
+    for (0..max_code_bits + 1) |bits| bits_start[bits + 1] = bits_start[bits] + counts[bits];
+
+    var sorted: [table.len]BucketEntry = undefined;
+    var cursor = bits_start;
+    for (table, 0..) |entry, sym| {
+        sorted[cursor[entry.bits]] = .{ .code = entry.code, .sym = @intCast(sym) };
+        cursor[entry.bits] += 1;
+    }
+
+    break :blk .{ .sorted = sorted, .bits_start = bits_start };
+};
+
 /// Decode a Huffman-encoded string (RFC 7541 Appendix B) into `out`. Returns the decoded length, or
 /// null if the output buffer is too small or a code does not resolve.
 ///
@@ -100,19 +133,21 @@ pub fn decode(out: []u8, input: []const u8) ?usize {
             acc = (acc << 1) | @as(u32, (byte >> @intCast(bit)) & 1);
             nbits += 1;
 
-            for (table, 0..) |entry, sym| {
-                if (entry.bits == nbits and entry.code == acc) {
+            // A code wider than the longest (30 bits) without a match is malformed. Checked before the
+            // bucket lookup below, not after: bits_start only has entries through max_code_bits + 1.
+            if (nbits > max_code_bits) return null;
+
+            const bucket = huffman_index.sorted[huffman_index.bits_start[nbits]..huffman_index.bits_start[nbits + 1]];
+            for (bucket) |entry| {
+                if (entry.code == acc) {
                     if (out_len >= out.len) return null;
-                    out[out_len] = @intCast(sym);
+                    out[out_len] = entry.sym;
                     out_len += 1;
                     acc = 0;
                     nbits = 0;
                     break;
                 }
             }
-
-            // A code wider than the longest (30 bits) without a match is malformed.
-            if (nbits > 30) return null;
         }
     }
 
@@ -145,4 +180,34 @@ test "zix test: Huffman decode of a path with digits and symbols" {
     const len = decode(&out, &encoded).?;
 
     try std.testing.expectEqualSlices(u8, "/baseline2?a=20&b=22", out[0..len]);
+}
+
+test "zix test: Huffman decode round-trips every symbol at every code length in the table" {
+    // Every one of the 256 symbols, individually encoded then padded with the all-ones EOS pattern to
+    // a byte boundary, must decode back to itself. This exercises every bits_start bucket boundary the
+    // table lookup relies on (5 through 30 bits), not just the handful of lengths the two tests above
+    // happen to touch.
+    for (table, 0..) |entry, sym| {
+        var bytes: [8]u8 = @splat(0xff);
+        var bit_pos: usize = 0;
+
+        var bits_left = entry.bits;
+        while (bits_left > 0) {
+            bits_left -= 1;
+
+            const bit: u1 = @truncate((entry.code >> @intCast(bits_left)) & 1);
+            const byte_idx = bit_pos / 8;
+            const bit_idx: u3 = @intCast(7 - bit_pos % 8);
+            if (bit == 1) bytes[byte_idx] |= @as(u8, 1) << bit_idx else bytes[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+
+            bit_pos += 1;
+        }
+
+        const total_bytes = (bit_pos + 7) / 8;
+
+        var out: [1]u8 = undefined;
+        const len = decode(&out, bytes[0..total_bytes]).?;
+        try std.testing.expectEqual(@as(usize, 1), len);
+        try std.testing.expectEqual(@as(u8, @intCast(sym)), out[0]);
+    }
 }
