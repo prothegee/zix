@@ -6,6 +6,11 @@
 //! - State machines are transition functions: a null result is an event that is not legal in that
 //!   state, which is how the terminal and invalid edges are proven. Validated against the RFC
 //!   diagrams and crafted NEW_CONNECTION_ID frames in the tests below.
+//!
+//! Note:
+//! - Implemented and unit-tested, but not wired into the serve path yet (deferred). It backs
+//!   connection migration and CID pooling, which the v1 engine does not use. NEW_CONNECTION_ID is
+//!   currently skipped in request.zig.
 
 const std = @import("std");
 
