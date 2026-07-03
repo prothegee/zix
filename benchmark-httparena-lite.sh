@@ -5,6 +5,7 @@
 # - Widen HTTP conn sweep to 4096 (stock stops at 512).
 # - Enable omitted ws/gRPC profiles (echo-ws-pipeline, stream-grpc[-tls]).
 # - Add json-tls (h1 https /json cell). Certs are already mounted.
+# - Add h2c cells (baseline-h2c, json-h2c) at the actual HttpArena sweeps.
 # The patched copy runs and is removed on exit; paths resolve correctly.
 #
 # Args (flags can appear anywhere, positionals are <framework> [httparena-dir]):
@@ -187,11 +188,14 @@ sed -E \
     -e 's/(\[json-comp\]="1\|0\|\|512\|json-compressed")/\1\n    [json-tls]="1|0||512,4096|json-tls"/' \
     -e 's/(\[upload\]="1\|0\|\|)128(\|upload")/\132,256\2/' \
     -e 's/(\[static\]="1\|10\|\|)512(\|static")/\11024,4096,6800\2/' \
+    -e 's/(\[baseline-h2\]="1\|0\|\|)512(\|h2")/\1256,1024\2/' \
+    -e 's/(\[static-h2\]="1\|0\|\|)512(\|static-h2")/\1256,1024\2\n    [baseline-h2c]="1|0||256,1024,4096|h2c"\n    [json-h2c]="1|0||1024,4096|json-h2c"/' \
     -e 's/(\[unary-grpc\]="1\|0\|\|)512(\|grpc")/\1256,1024\2/' \
     -e 's/(\[unary-grpc-tls\]="1\|0\|\|)512(\|grpc-tls")/\1256,1024\2/' \
     -e 's/(\[echo-ws\]="1\|0\|\|)512(\|ws-echo")/\1512,4096\2\n    [echo-ws-pipeline]="16|0||512,4096|ws-echo"\n    [stream-grpc]="1|0||64|grpc-stream"\n    [stream-grpc-tls]="1|0||64|grpc-stream-tls"/' \
     -e 's/^([[:space:]]*)echo-ws$/\1echo-ws echo-ws-pipeline\n\1stream-grpc stream-grpc-tls/' \
     -e 's/^([[:space:]]*)json json-comp$/\1json json-comp json-tls/' \
+    -e 's/^([[:space:]]*)baseline-h2 static-h2$/\1baseline-h2 static-h2 baseline-h2c json-h2c/' \
     "$SRC" > "$PATCHED"
 
 # Redirect benchmark-lite to source patched framework.sh.
