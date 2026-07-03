@@ -449,7 +449,9 @@ fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, body_out: 
         if (data.len == 0 or data[0] & 0x80 != 0) continue;
 
         var obuf: [2048]u8 = undefined;
-        const opened = protection.openShort(data, app_keys.server, CID_LEN, &obuf) catch continue;
+        // This test client does a single short round trip, so the server's packet numbers stay well
+        // under the truncation boundary: no prior-largest reconstruction is needed (null).
+        const opened = protection.openShort(data, app_keys.server, CID_LEN, null, &obuf) catch continue;
         if (responseBody(opened.payload, body_out)) |body| return body;
     }
 
