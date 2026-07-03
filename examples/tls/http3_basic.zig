@@ -47,6 +47,33 @@ fn big(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
     res.send(&big_body);
 }
 
+// Repeat `unit` `times` over at comptime, the compressible body below.
+fn repeatComptime(comptime unit: []const u8, comptime times: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (0..times) |_| out = out ++ unit;
+
+        return out;
+    }
+}
+
+// A compressible body and its brotli-precompressed form, built once at startup (g_br_body). The
+// /negotiated route serves the .br form with `Content-Encoding: br` when the client's Accept-Encoding
+// offers br, otherwise the identity form: the content-negotiation shape a static file server uses. The
+// codec runs once here, never on the send path, which just picks the smaller slice.
+const negotiated_body: []const u8 = repeatComptime("zix HTTP/3 content negotiation demo line. ", 64);
+var g_br_body: []const u8 = "";
+
+fn negotiated(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+    if (g_br_body.len != 0 and std.mem.indexOf(u8, req.accept_encoding, "br") != null) {
+        res.setContentEncoding(.br);
+        res.send(g_br_body);
+        return;
+    }
+
+    res.send(negotiated_body);
+}
+
 // Parse `?...&name=<int>&...` out of a request path. Returns null when absent or not an integer.
 fn queryInt(path: []const u8, name: []const u8) ?i64 {
     const query_at = std.mem.indexOfScalar(u8, path, '?') orelse return null;
@@ -68,13 +95,18 @@ fn queryInt(path: []const u8, name: []const u8) ?i64 {
 // - curl --http3-only -k https://127.0.0.1:9063/ -> "hello over http/3"
 // - curl --http3-only -k "https://127.0.0.1:9063/baseline2?a=20&b=22" -> "42"
 // - curl --http3-only -k https://127.0.0.1:9063/big -o /dev/null -w '%{size_download}\n' -> 262144
+// - curl --http3-only -k --compressed -D- https://127.0.0.1:9063/negotiated -> content-encoding: br
 const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
     .{ .path = "/", .handler = home },
     .{ .path = "/baseline2", .handler = baseline },
     .{ .path = "/big", .handler = big },
+    .{ .path = "/negotiated", .handler = negotiated },
 });
 
 pub fn main(process: std.process.Init) !void {
+    // Precompress the negotiated body once (identity stays available for clients that do not accept br).
+    g_br_body = zix.utils.compression.encode(std.heap.smp_allocator, .BR, negotiated_body, .DEFAULT) catch "";
+
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = CERT,
         .key_path = KEY,
