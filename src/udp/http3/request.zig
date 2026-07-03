@@ -26,10 +26,10 @@ pub const StreamRequest = struct {
     request: DecodedRequest,
 };
 
-/// The most request streams one decrypted packet can carry that the server answers in a single pass.
-/// A minimal request stream frame is ~20 bytes, so a path-MTU 1-RTT packet (under ~1500 bytes) cannot
-/// coalesce more than this. Anything beyond is left unacknowledged and the client retransmits it.
-pub const max_requests_per_packet = 32;
+/// The most request streams the server decodes from one packet, sized to hold a path-MTU 1-RTT packet
+/// densely packed with small requests. The packet is acknowledged whole, so any request left undecoded
+/// would be dropped-but-acked and its stream would stall.
+pub const max_requests_per_packet = 96;
 
 /// Find and decode the request from a decrypted 1-RTT payload. Returns null if no request HEADERS are
 /// present (for example a packet that only carries ACK / control-stream frames).
