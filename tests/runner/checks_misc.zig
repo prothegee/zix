@@ -53,10 +53,9 @@ pub fn runUdp(io: std.Io, server_path: []const u8) !void {
         .server_port = 9054,
         .bind_ip = "127.0.0.1",
         .bind_port = 9191,
-        .port_mode = .REQUIRED,
         .endianness = .LITTLE,
         .recv_timeout_ms = 3000,
-    }, io);
+    }, io, .{});
     defer client.deinit();
 
     var my_id: [16]u8 = @splat(0);
