@@ -67,7 +67,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `udp/config.zig` | `refAllDecls` + defaults: `UdpServerConfig`, `UdpClientConfig`, `PortMode` and `Endianness` enum backing values |
+| `udp/config.zig` | `refAllDecls` + defaults: `UdpServerConfig`, `UdpClientConfig`, `allow_args` default, and `Endianness` enum backing values |
 | `udp/packet.zig` | `refAllDecls` + behavioral: NATIVE no-op, u8 array not swapped, LITTLE/BIG round-trip, non-native swaps integers and float array elements, `FeedbackResult` all variants |
 | `udp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, nonzero port succeeds, config fields preserved |
 | `udp/client.zig` | `refAllDecls` |
@@ -454,10 +454,10 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `UdpServerConfig` auto_ack | default false |
 | `UdpServerConfig` broadcast | default false |
 | `UdpServerConfig` endianness | default LITTLE |
-| `UdpServerConfig` port_mode | default REQUIRED |
-| `UdpClientConfig` send_once | default false |
-| `UdpClientConfig` send_every | default 99 |
+| `UdpServerConfig` allow_args | default false |
+| `Udp.DispatchModel` re-export | resolves to the shared dispatch enum |
 | `UdpClientConfig` endianness | default LITTLE |
+| `UdpClientConfig` recv_timeout_ms | default 0 (disabled) |
 
 #### `packet_test.zig`
 
@@ -637,10 +637,8 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 
 | Test | What it verifies |
 | :- | :- |
-| `PortMode.CONFIGURABLE` backing value | equals 0 |
-| `PortMode.REQUIRED` backing value | equals 1 |
-| Port zero with `REQUIRED` mode | `UdpServer.init` returns `error.PortNotConfigured` |
-| Non-zero port with `REQUIRED` mode | `UdpServer.init` succeeds |
+| Port zero | `UdpServer.init` returns `error.PortNotConfigured` |
+| Non-zero port | `UdpServer.init` succeeds |
 
 #### `packet_test.zig`
 
