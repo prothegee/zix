@@ -7,6 +7,12 @@
 
 const std = @import("std");
 
+const response = @import("response.zig");
+
+/// The content coding a handler may set on its response body (`res.content_encoding`). Re-exported from
+/// the wire layer so a handler names it as `zix.Http3.ContentEncoding` without reaching into internals.
+pub const ContentEncoding = response.ContentEncoding;
+
 /// A decoded HTTP/3 request handed to the application handler. The slices point into the engine's
 /// per-connection decode buffer and are valid only for the duration of the handler call.
 pub const Request = struct {
@@ -14,6 +20,10 @@ pub const Request = struct {
     path: []const u8,
     authority: []const u8 = "",
     body: []const u8 = "",
+    /// The client's `accept-encoding` value, or empty when it sent none. A handler negotiates a
+    /// pre-compressed body against it (for example serving a `.br` variant when it contains `br`) and
+    /// sets `res.content_encoding` to match.
+    accept_encoding: []const u8 = "",
 };
 
 /// The response the handler fills. The body is copied into the engine's send path after the handler
@@ -22,8 +32,14 @@ pub const Response = struct {
     status: u16 = 200,
     body: []const u8 = "",
     /// Content type. A handler may set it, but the v1 HTTP/3 response path does not emit it on the
-    /// wire yet (only `:status` is QPACK-encoded). Kept for the handler API and for when it is wired.
+    /// wire yet (only `:status` and `content-encoding` are QPACK-encoded). Kept for the handler API
+    /// and for when it is wired.
     content_type: []const u8 = "text/plain",
+
+    /// The content coding of `body`. When not identity the serve path emits a `content-encoding`
+    /// response header (RFC 9114 4.1). The handler owns the coding: `body` must already be encoded
+    /// with it (the engine never compresses on the send path).
+    content_encoding: ContentEncoding = .identity,
 
     /// Set the HTTP status code.
     pub fn setStatus(self: *Response, status: u16) void {
@@ -33,6 +49,11 @@ pub const Response = struct {
     /// Set the response body.
     pub fn send(self: *Response, body: []const u8) void {
         self.body = body;
+    }
+
+    /// Set the content coding of the body (the handler must have encoded `body` accordingly).
+    pub fn setContentEncoding(self: *Response, encoding: ContentEncoding) void {
+        self.content_encoding = encoding;
     }
 };
 
@@ -47,6 +68,17 @@ fn echoHandler(req: *const Request, res: *Response) void {
     res.send(req.path);
 }
 
+// A handler that serves a pre-compressed brotli variant when the client accepts br, else identity: the
+// content-negotiation shape the static routes use.
+fn negotiateHandler(req: *const Request, res: *Response) void {
+    if (std.mem.indexOf(u8, req.accept_encoding, "br") != null) {
+        res.setContentEncoding(.br);
+        res.send("<brotli-bytes>");
+    } else {
+        res.send("<identity-bytes>");
+    }
+}
+
 test "zix test: Response setters and handler shape" {
     const req = Request{ .method = "GET", .path = "/hello", .authority = "example.com" };
     var res = Response{};
@@ -55,4 +87,16 @@ test "zix test: Response setters and handler shape" {
     try std.testing.expectEqual(@as(u16, 200), res.status);
     try std.testing.expectEqualSlices(u8, "/hello", res.body);
     try std.testing.expectEqualSlices(u8, "text/plain", res.content_type);
+    try std.testing.expectEqual(ContentEncoding.identity, res.content_encoding);
+}
+
+test "zix test: a handler negotiates content-encoding off the request accept-encoding" {
+    var br_res = Response{};
+    negotiateHandler(&.{ .method = "GET", .path = "/x", .accept_encoding = "gzip, deflate, br" }, &br_res);
+    try std.testing.expectEqual(ContentEncoding.br, br_res.content_encoding);
+    try std.testing.expectEqualSlices(u8, "<brotli-bytes>", br_res.body);
+
+    var plain_res = Response{};
+    negotiateHandler(&.{ .method = "GET", .path = "/x" }, &plain_res);
+    try std.testing.expectEqual(ContentEncoding.identity, plain_res.content_encoding);
 }

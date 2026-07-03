@@ -35,6 +35,8 @@ pub const HandlerFn = core.HandlerFn;
 pub const Request = core.Request;
 /// The response the handler fills (re-exported from core).
 pub const Response = core.Response;
+/// The content coding a handler sets on its response body (re-exported from core).
+pub const ContentEncoding = core.ContentEncoding;
 
 /// An HTTP/3 server bound to `handler`.
 pub fn Http3(comptime handler: HandlerFn) type {

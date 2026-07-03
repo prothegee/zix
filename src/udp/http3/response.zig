@@ -15,6 +15,24 @@ const qpack = @import("qpack.zig");
 /// The server-initiated unidirectional control stream id (RFC 9000 2.1: server uni ids are 3, 7, ...).
 const server_control_stream: u64 = 3;
 
+/// The content coding a handler selected for its response body. `identity` emits no `content-encoding`
+/// field. `gzip` / `br` are the two the QPACK static table carries as single indexed field lines
+/// (RFC 9204 Appendix A: 43 `content-encoding: gzip`, 42 `content-encoding: br`), so serving a
+/// pre-compressed body costs one extra header byte on the wire.
+pub const ContentEncoding = enum { identity, gzip, br };
+
+/// Emit the `content-encoding` field for `enc` as a QPACK indexed static field line, or nothing for
+/// identity. Returns the bytes written (0 for identity).
+fn contentEncodingFieldLine(out: []u8, enc: ContentEncoding) usize {
+    const index: u64 = switch (enc) {
+        .identity => return 0,
+        .br => 42,
+        .gzip => 43,
+    };
+
+    return qpack.encodeStaticIndexedFieldLine(out, index);
+}
+
 /// Write a STREAM frame (RFC 9000 19.8) at offset 0 with an explicit length. `fin` sets the FIN bit.
 ///
 /// Return:
@@ -57,8 +75,9 @@ fn statusIndexedFieldLine(out: []u8, status: u16) usize {
 /// - usize (the number of bytes written)
 /// - null when the content does not fit in `out` (a body too large for one packet, the caller then
 ///   registers it as a multi-packet send stream)
-pub fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usize {
-    // HEADERS frame: type 0x01, length, then the field section (RIC 0, Base 0, indexed :status).
+pub fn buildRequestStreamContent(out: []u8, status: u16, content_encoding: ContentEncoding, body: []const u8) ?usize {
+    // HEADERS frame: type 0x01, length, then the field section (RIC 0, Base 0, indexed :status, and an
+    // optional indexed content-encoding).
     var fields: [16]u8 = undefined;
     var fp: usize = 0;
     fields[fp] = 0x00; // Required Insert Count 0
@@ -66,6 +85,7 @@ pub fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usiz
     fields[fp] = 0x00; // Base 0
     fp += 1;
     fp += statusIndexedFieldLine(fields[fp..], status);
+    fp += contentEncodingFieldLine(fields[fp..], content_encoding);
 
     const headers_len = 1 + varint.encodedLen(fp) + fp;
     const data_len = 1 + varint.encodedLen(body.len) + body.len;
@@ -95,7 +115,7 @@ pub fn buildRequestStreamContent(out: []u8, status: u16, body: []const u8) ?usiz
 /// Return:
 /// - usize (the prefix length written into `out`)
 /// - null when the prefix does not fit in `out`
-pub fn buildStreamPrefix(out: []u8, status: u16, body_len: usize) ?usize {
+pub fn buildStreamPrefix(out: []u8, status: u16, content_encoding: ContentEncoding, body_len: usize) ?usize {
     var fields: [16]u8 = undefined;
     var fp: usize = 0;
     fields[fp] = 0x00; // Required Insert Count 0
@@ -103,6 +123,7 @@ pub fn buildStreamPrefix(out: []u8, status: u16, body_len: usize) ?usize {
     fields[fp] = 0x00; // Base 0
     fp += 1;
     fp += statusIndexedFieldLine(fields[fp..], status);
+    fp += contentEncodingFieldLine(fields[fp..], content_encoding);
 
     const headers_len = 1 + varint.encodedLen(fp) + fp;
     const data_header_len = 1 + varint.encodedLen(body_len);
@@ -260,9 +281,10 @@ pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, a
         pos += written;
     }
 
-    // The response on the request stream, with FIN.
+    // The response on the request stream, with FIN. The umbrella builder serves identity: a
+    // content-encoded body is composed through buildRequestStreamContent / buildStreamPrefix directly.
     var content: [1024]u8 = undefined;
-    const content_len = buildRequestStreamContent(&content, status, body) orelse return null;
+    const content_len = buildRequestStreamContent(&content, status, .identity, body) orelse return null;
     if (!writeStreamFrame(out, &pos, stream_id, true, content[0..content_len])) return null;
 
     // Application CONNECTION_CLOSE (RFC 9000 19.19, type 0x1d): H3_NO_ERROR with an empty reason, so
@@ -361,7 +383,7 @@ test "zix test: a body larger than the buffer returns null, never overflows" {
 
     // The content builder reports the same overflow against its own destination.
     var content: [1024]u8 = undefined;
-    try std.testing.expect(buildRequestStreamContent(&content, 200, &big) == null);
+    try std.testing.expect(buildRequestStreamContent(&content, 200, .identity, &big) == null);
 
     // A body that just fits is still built.
     var small: [16]u8 = undefined;
@@ -383,7 +405,7 @@ test "zix test: lean framing carries only the request stream, no HANDSHAKE_DONE 
 
 test "zix test: buildStreamPrefix emits HEADERS then a DATA header sized to the body" {
     var out: [32]u8 = undefined;
-    const len = buildStreamPrefix(&out, 200, 200000).?;
+    const len = buildStreamPrefix(&out, 200, .identity, 200000).?;
     const prefix = out[0..len];
 
     // HEADERS frame: type 0x01, length 3, RIC 0, Base 0, :status 200 (0xd9).
@@ -392,6 +414,28 @@ test "zix test: buildStreamPrefix emits HEADERS then a DATA header sized to the 
     // DATA frame header: type 0x00 then the body length as a varint (200000 = 0x80030d40).
     try std.testing.expectEqual(@as(u8, 0x00), prefix[5]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0x03, 0x0d, 0x40 }, prefix[6..10]);
+}
+
+test "zix test: content-encoding rides the HEADERS frame as one indexed field line" {
+    // A brotli-coded streamed body: the field section gains one byte (0xea = static index 42,
+    // content-encoding: br), so the HEADERS frame length is 4 and :status is followed by 0xea.
+    var out: [32]u8 = undefined;
+    const br_len = buildStreamPrefix(&out, 200, .br, 200000).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x04, 0x00, 0x00, 0xd9, 0xea }, out[0..6]);
+    try std.testing.expect(br_len > 6); // followed by the DATA frame header
+
+    // A gzip-coded single-packet body: the field section carries 0xeb (static index 43,
+    // content-encoding: gzip) after :status, then the DATA frame with the body.
+    var content: [64]u8 = undefined;
+    const clen = buildRequestStreamContent(&content, 200, .gzip, "hi").?;
+    const packed_content = content[0..clen];
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x04, 0x00, 0x00, 0xd9, 0xeb }, packed_content[0..6]);
+    try std.testing.expect(std.mem.indexOf(u8, packed_content, "hi") != null);
+
+    // identity keeps the lean 3-byte field section (no content-encoding line).
+    const id_len = buildStreamPrefix(&out, 200, .identity, 200000).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x03, 0x00, 0x00, 0xd9 }, out[0..5]);
+    try std.testing.expect(id_len < br_len); // identity prefix is one byte shorter
 }
 
 test "zix test: writeStreamFrame refuses a frame that would overflow the buffer" {

@@ -23,6 +23,7 @@ const h3 = @import("h3.zig");
 const demux = @import("demux.zig");
 const keyschedule = @import("keyschedule.zig");
 const transport_params = @import("transport_params.zig");
+const response = @import("response.zig");
 const ks = @import("../../tls/key_schedule.zig");
 
 /// The most concurrent large (multi-packet) response streams one connection tracks for resumption.
@@ -50,6 +51,9 @@ pub const SendStream = struct {
     stream_id: u64 = 0,
     status: u16 = 200,
     body: []const u8 = "",
+    /// The content coding of `body`, emitted in the rebuilt HEADERS prefix so a resumed large body
+    /// keeps its `content-encoding` across every packet (the prefix is not stored, so this is).
+    content_encoding: response.ContentEncoding = .identity,
     /// Total HTTP/3 stream length: the prefix length plus the body length.
     content_len: usize = 0,
     /// Stream offset already sent. A loss retransmission (Connection.onAckFrame) may rewind this

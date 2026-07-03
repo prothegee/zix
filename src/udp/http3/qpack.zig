@@ -69,8 +69,9 @@ pub fn encodePrefixedInt(out: []u8, prefix_bits: u4, high_bits: u8, value: u64) 
 /// A field line: a name and value (RFC 9204 Appendix A entries, and decoded representations).
 pub const Field = struct { name: []const u8, value: []const u8 };
 
-/// The leading subset of the RFC 9204 Appendix A static table (indices 0..28). Covers every
-/// pseudo-header and is enough for the common request / response shapes. The remaining Appendix A
+/// The leading block of the RFC 9204 Appendix A static table (indices 0..43). Covers every
+/// pseudo-header, `accept-encoding` (index 31, the request content-negotiation input), and
+/// `content-encoding` (indices 42 br / 43 gzip, the response codings served). The remaining Appendix A
 /// entries are reached as Literal Field Lines with Name Reference until the full table is carried.
 pub const static_table = [_]Field{
     .{ .name = ":authority", .value = "" }, // 0
@@ -102,6 +103,21 @@ pub const static_table = [_]Field{
     .{ .name = ":status", .value = "304" }, // 26
     .{ .name = ":status", .value = "404" }, // 27
     .{ .name = ":status", .value = "503" }, // 28
+    .{ .name = "accept", .value = "*/*" }, // 29
+    .{ .name = "accept", .value = "application/dns-message" }, // 30
+    .{ .name = "accept-encoding", .value = "gzip, deflate, br" }, // 31
+    .{ .name = "accept-ranges", .value = "bytes" }, // 32
+    .{ .name = "access-control-allow-headers", .value = "cache-control" }, // 33
+    .{ .name = "access-control-allow-headers", .value = "content-type" }, // 34
+    .{ .name = "access-control-allow-origin", .value = "*" }, // 35
+    .{ .name = "cache-control", .value = "max-age=0" }, // 36
+    .{ .name = "cache-control", .value = "max-age=2592000" }, // 37
+    .{ .name = "cache-control", .value = "max-age=604800" }, // 38
+    .{ .name = "cache-control", .value = "no-cache" }, // 39
+    .{ .name = "cache-control", .value = "no-store" }, // 40
+    .{ .name = "cache-control", .value = "public, max-age=31536000" }, // 41
+    .{ .name = "content-encoding", .value = "br" }, // 42
+    .{ .name = "content-encoding", .value = "gzip" }, // 43
 };
 
 /// The two QPACK unidirectional stream types (RFC 9204 4.2).
@@ -219,6 +235,12 @@ test "zix test: RFC 9204 Appendix A static table and 4.2 streams" {
     try std.testing.expect(fieldIs(static_table[17], ":method", "GET"));
     try std.testing.expect(fieldIs(static_table[23], ":scheme", "https"));
     try std.testing.expect(fieldIs(static_table[25], ":status", "200"));
+
+    // The content-negotiation entries: accept-encoding (request input) and content-encoding (served
+    // codings). staticEntry resolves them so request decode maps index 31 to accept-encoding.
+    try std.testing.expect(fieldIs(staticEntry(31).?, "accept-encoding", "gzip, deflate, br"));
+    try std.testing.expect(fieldIs(staticEntry(42).?, "content-encoding", "br"));
+    try std.testing.expect(fieldIs(staticEntry(43).?, "content-encoding", "gzip"));
 
     var registry = StreamRegistry{};
     try registry.register(encoder_stream_type);
