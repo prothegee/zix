@@ -18,8 +18,9 @@ pub const Route = struct {
     kind: RouteKind = .EXACT,
 };
 
-/// One matched path parameter (e.g. `:id` -> "alice").
-pub const PathParam = struct {
+/// One matched path parameter (e.g. `:id` -> "alice"). File-private: `pathParam` returns the value
+/// slice, this struct is only the internal `tl_params` element type.
+const PathParam = struct {
     name: []const u8,
     value: []const u8,
 };
