@@ -5,8 +5,8 @@
 // Run multiple instances with different --bind-port values to observe broadcast.
 // Each client will receive packets relayed from all other connected clients.
 //
-// The --bind-port and --server-port flags are only read when using initArgs()
-// (CONFIGURABLE mode). With init() (REQUIRED mode), ports come from CLIENT_BIND_PORT
+// The --bind-ip / --bind-port / --server-port flags are only read when allow_args is true.
+// With allow_args false (the default), args are ignored and ports come from CLIENT_BIND_PORT
 // and SERVER_PORT below.
 
 const std = @import("std");
@@ -70,28 +70,13 @@ fn receiveLoop(cap: ReceiveCapture) void {
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    // CONFIGURABLE mode: reads --bind-port and --server-port from CLI args.
-    // Falls back to CLIENT_BIND_PORT / SERVER_PORT if the args are absent.
-    // To use fixed ports instead, replace with:
-    // var client = try MyClient.init(.{
-    //     .server_ip   = SERVER_IP,
-    //     .server_port = SERVER_PORT,
-    //     .bind_port   = CLIENT_BIND_PORT,
-    //     .port_mode   = .REQUIRED,
-    //     ...
-    // }, io);
-    var client = try MyClient.initArgs(.{
+    // allow_args true: reads --bind-ip / --bind-port / --server-port, else keeps the config values.
+    var client = try MyClient.init(.{
         .ip = SERVER_IP,
         .server_port = SERVER_PORT,
         .bind_port = CLIENT_BIND_PORT,
-        .port_mode = .CONFIGURABLE,
-
-        // Must match the server's endianness config.
-        // Mismatch causes silent data corruption: field values will be garbage.
-        .endianness = .LITTLE,
-
-        .send_every = SEND_INTERVAL_MS,
-        .send_once = false,
+        .allow_args = true,
+        .endianness = .LITTLE, // must match the server, else silent data corruption
     }, io, process.minimal.args);
     defer client.deinit();
 
@@ -137,6 +122,6 @@ pub fn main(process: std.process.Init) !void {
             .{ p.packet_type, p.register, p.position[0], p.position[1], p.position[2] },
         );
 
-        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@as(i64, @intCast(client.config.send_every))), .awake);
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@as(i64, @intCast(SEND_INTERVAL_MS))), .awake);
     }
 }
