@@ -457,7 +457,7 @@ pub const Logger = struct {
     /// sender: SenderCompID from the message (tag 49).
     /// target: our TargetCompID (tag 56).
     /// seq: MsgSeqNum from the message (tag 34).
-    /// state: human label (e.g. "Logon", "Logout", "Heartbeat", "msg").
+    /// state: label (e.g. "Logon", "Logout", "Heartbeat", "msg").
     pub fn session(
         self: *Self,
         msg_type: []const u8,
