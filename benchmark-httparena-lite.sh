@@ -1,64 +1,36 @@
 #!/usr/bin/env bash
-# zix-bench-lite.sh - lite benchmark launcher with a widened profile set.
+# benchmark-httparena-lite.sh - Lite benchmark launcher with widened profiles.
 #
-# Wraps scripts/benchmark-lite.sh and patches its PROFILES so a run:
-#   - widens the HTTP conn sweep up to 4096 (stock lite stops at 512),
-#   - enables the ws + gRPC profiles lite normally omits
-#     (echo-ws-pipeline, stream-grpc, stream-grpc-tls), and
-#   - adds json-tls (the h1 https /json cell lite skips), so the TLS JSON
-#     profile can be measured locally. The shared cert is already mounted by
-#     framework.sh (-v certs:/certs:ro), only the schedule was missing.
-# The tracked script is left untouched: a patched copy is generated under
-# scripts/, run, then removed on exit. common.sh anchors ROOT_DIR/SCRIPT_DIR
-# to scripts/lib/, so the renamed copy resolves all paths the same way.
+# Wraps scripts/benchmark-lite.sh, patching PROFILES in a disposable copy to:
+# - Widen HTTP conn sweep to 4096 (stock stops at 512).
+# - Enable omitted ws/gRPC profiles (echo-ws-pipeline, stream-grpc[-tls]).
+# - Add json-tls (h1 https /json cell). Certs are already mounted.
+# The patched copy runs and is removed on exit; paths resolve correctly.
 #
-# Arguments:
-#   <framework>       required. Framework to benchmark (zix, zix-grpc, zix-ws,
-#                     ...). A missing first argument is rejected.
-#   [httparena-dir]   optional. The HttpArena folder to run in. Defaults to the
-#                     folder this wrapper sits in. Handy for ws, which lives on
-#                     the zix-0.4.x-ws branch (point at a separate worktree).
-#   --load-threads N  optional. Load-generator thread count (default 4). May
-#                     appear anywhere in the arguments.
-#   --source MODE     optional. Where the framework image gets its zix source:
-#                     "remote" (default) fetches the published ZIX_VERSION branch
-#                     just like the tracked Dockerfile, "local" builds from a
-#                     local zix checkout instead. May appear anywhere.
-#   --zix-dir DIR     optional. The local zix checkout used by --source local.
-#                     Defaults to the folder this wrapper sits in (the zix repo).
-#                     May appear anywhere.
+# Args (flags can appear anywhere, positionals are <framework> [httparena-dir]):
+#   <framework>       Required. Framework to benchmark (e.g., zix, zix-grpc).
+#   [httparena-dir]   Optional. HttpArena folder (default: script's directory).
+#   --load-threads N  Optional. Load-gen threads (default: 4).
+#   --source MODE     Optional. "remote" (default, fetches branch) or "local".
+#   --zix-dir DIR     Optional. Local zix checkout for --source local (default: script's dir).
 #
-# The wrapper cds into the HttpArena folder, runs the bench, then returns to
-# the original directory.
+# Rootless by default: neutralizes benchmark-lite.sh's root-only system_tune.
+# Set TUNE=true to keep tuning and run under sudo.
 #
-# Rootless by default: benchmark-lite.sh's system tune (root: restarts the Docker
-# daemon, writes sysctl) is neutralized in the disposable patched copy, and the
-# loadgens already run in containers, so a plain user can run it. Set TUNE=true to
-# keep the tuned path and run it under sudo.
-#
-# Local source (--source local) keeps every artefact temporary and removes them
-# on exit, so no tracked HttpArena file is ever modified: the local zix tree is
-# rsynced into the gitignored frameworks/<framework>/vendor/zix, a local
-# Dockerfile is generated with the network-fetch block swapped for a COPY of
-# that vendor dir, and a build.sh is dropped in the framework folder so the
-# HttpArena build hook (scripts/lib/framework.sh) runs it in place of the
-# default docker build.
+# --source local keeps artifacts temporary (removed on exit): rsyncs zix into
+# gitignored vendor/zix, swaps Dockerfile fetch for COPY, and drops a build.sh
+# for the HttpArena build hook.
 #
 # Usage:
-#   ./zix-bench-lite.sh zix                                     # this folder, 4 threads
-#   ./zix-bench-lite.sh zix-grpc                                # gRPC suite, this folder
-#   ./zix-bench-lite.sh zix --load-threads 6                    # override thread count
-#   ./zix-bench-lite.sh zix-ws /path/HttpArena                  # ws, in another folder
-#   ./zix-bench-lite.sh zix-ws /path/HttpArena --load-threads 6 # folder + threads
-#   ./zix-bench-lite.sh zix /path/HttpArena --source local      # build from this zix checkout
+#   ./zix-bench-lite.sh zix                              # this folder, 4 threads
+#   ./zix-bench-lite.sh zix-grpc                         # gRPC suite
+#   ./zix-bench-lite.sh zix --load-threads 6             # override threads
+#   ./zix-bench-lite.sh zix-ws /path/HttpArena           # ws, other folder
 #   ./zix-bench-lite.sh zix /path/HttpArena --source local --zix-dir /path/zix
-# Order does not matter: --load-threads N, --source MODE and --zix-dir DIR may
-# sit anywhere, the two remaining words are <framework> then [httparena-dir].
 
 set -euo pipefail
 
-# Parse arguments. --load-threads N, --source MODE and --zix-dir DIR (anywhere)
-# are flags, everything else is positional: <framework> then [httparena-dir].
+# Parse arguments: flags anywhere, positionals are <framework> [httparena-dir].
 LOAD_THREADS=4
 SOURCE=remote
 ZIX_DIR=
@@ -90,7 +62,7 @@ else
     set --
 fi
 
-# First argument is the framework name and is required.
+# <framework> is required.
 FRAMEWORK="${1:-}"
 if [ -z "$FRAMEWORK" ]; then
     echo "usage: $(basename "$0") <framework> [httparena-dir] [--load-threads N]" >&2
@@ -98,13 +70,11 @@ if [ -z "$FRAMEWORK" ]; then
     exit 1
 fi
 
-# Second argument is the HttpArena folder to run in. Defaults to the folder
-# this wrapper sits in.
+# [httparena-dir] defaults to this script's directory.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${2:-$SELF_DIR}"
 
-# The local zix checkout for --source local defaults to the folder this wrapper
-# sits in (the zix repo).
+# --zix-dir defaults to this script's directory.
 ZIX_DIR="${ZIX_DIR:-$SELF_DIR}"
 
 SRC="$REPO_DIR/scripts/benchmark-lite.sh"
@@ -119,17 +89,13 @@ FW_SRC="$REPO_DIR/scripts/lib/framework.sh"
 FW_PATCHED="$REPO_DIR/scripts/lib/.framework-grpcfix.$$.sh"
 ORIG_DIR="$PWD"
 
-# Local-source staging targets. The framework folder vendors zix under a
-# gitignored vendor/zix, the local Dockerfile is a temp sibling, and build.sh
-# is the fixed name the HttpArena build hook looks for. All are removed on exit.
+# Local-source staging targets (all removed on exit).
 FW_DIR="$REPO_DIR/frameworks/$FRAMEWORK"
 VENDOR_DIR="$FW_DIR/vendor/zix"
 LOCAL_DOCKERFILE="$FW_DIR/.Dockerfile.local.$$"
 LOCAL_BUILDSH="$FW_DIR/build.sh"
 
-# Validate --source local up front, before the trap is installed, so a
-# pre-existing build.sh (a tracked artefact we must not own) makes us bail out
-# without cleanup ever deleting it.
+# Validate --source local before trap to avoid deleting pre-existing tracked build.sh.
 if [ "$SOURCE" = "local" ]; then
     if [ ! -f "$ZIX_DIR/build.zig" ] || [ ! -f "$ZIX_DIR/build.zig.zon" ] || [ ! -f "$ZIX_DIR/src/lib.zig" ]; then
         echo "error: --zix-dir '$ZIX_DIR' is not a zix checkout (no build.zig, build.zig.zon or src/lib.zig)" >&2
@@ -161,14 +127,8 @@ trap cleanup EXIT
 
 cd "$REPO_DIR"
 
-# Stage the local zix source when --source local. The trap is installed, so any
-# partial staging below is cleaned up on exit. rsync mirrors the checkout into
-# the gitignored vendor/zix (dropping git, build caches and rnd to keep the
-# docker context small). The local Dockerfile is the framework Dockerfile with
-# its single vendor-fetch RUN block (the only RUN that mentions vendor/zix)
-# rewritten to a COPY of that staged tree. build.sh tags the same image name the
-# harness expects (httparena-<framework>) and builds the framework folder as the
-# context, so COPY vendor/zix resolves.
+# Stage local zix source. rsync mirrors checkout to vendor/zix (excluding caches).
+# Rewrites Dockerfile vendor-fetch RUN to COPY, and creates build.sh for the harness.
 if [ "$SOURCE" = "local" ]; then
     echo "staging local zix from $ZIX_DIR into $VENDOR_DIR" >&2
 
@@ -209,28 +169,16 @@ EOF
     chmod +x "$LOCAL_BUILDSH"
 fi
 
-# Patch the gRPC readiness probe. framework.sh runs the native ghz binary and
-# ignores docker mode (lite sets only GHZ_CMD), so the probe fails every attempt
-# and then falls through to an unset probe_url under set -u. The copy uses the
-# docker ghz command when present, and returns cleanly from the grpc case
-# instead of falling through. The benchmark-lite copy below is redirected to
-# source this patched framework.sh.
+# Patch gRPC readiness probe: use docker ghz command if present, return cleanly
+# to avoid falling through to unset probe_url under set -u.
 sed -E \
     -e 's/(            )_wait_grpc "\$endpoint" \&\& return 0/\1_wait_grpc "$endpoint"\n\1return/' \
     -e 's/if "\$GHZ" "\$flag"/if ${GHZ_CMD:-$GHZ} "$flag"/' \
     "$FW_SRC" > "$FW_PATCHED"
 
-# Patch the profiles. Each spec is
-#   pipeline | req_per_conn | cpu_limit | connections | endpoint
-# so HTTP rules rewrite only the connections field (between the empty cpu_limit
-# and the endpoint). The echo-ws rule also appends the three profiles lite omits
-# (echo-ws-pipeline, stream-grpc, stream-grpc-tls), and the PROFILE_ORDER rule
-# adds them to the run order so the loop actually reaches them. The json-comp
-# rule appends the json-tls profile (lite has no json-tls line at all) with an
-# empty cpu_limit (the isolate wrapper pins the server externally) and a 512,4096
-# sweep, and the json-order rule adds it to the run order. Values mirror the full
-# benchmark host sweep, trimmed for a laptop (ws caps at 4096, not 16384). gRPC
-# streaming endpoints are grpc-stream / grpc-stream-tls (ghz).
+# Patch profiles (format: pipeline|req_per_conn|cpu_limit|connections|endpoint).
+# Widens connection sweeps, adds omitted ws/gRPC profiles and json-tls.
+# Values mirror full benchmark sweep, trimmed for laptop (e.g., ws caps at 4096).
 sed -E \
     -e 's/(\[baseline\]="1\|0\|\|)512(\|")/\1512,4096\2/' \
     -e 's/(\[pipelined\]="16\|0\|\|)512(\|pipeline")/\1512,4096\2/' \
@@ -246,15 +194,11 @@ sed -E \
     -e 's/^([[:space:]]*)json json-comp$/\1json json-comp json-tls/' \
     "$SRC" > "$PATCHED"
 
-# Redirect the benchmark-lite copy to source the patched framework.sh above.
+# Redirect benchmark-lite to source patched framework.sh.
 sed -i "s|^source \"\$SOURCE_DIR/framework\.sh\"|source \"$FW_PATCHED\"|" "$PATCHED"
 
-# Rootless by default. benchmark-lite.sh calls system_tune unconditionally (it
-# restarts the Docker daemon and writes sysctl, both root) and has no SKIP_TUNE
-# knob, so neutralize that call and the system_restore trap in the disposable
-# copy. The load generators already run in containers (benchmark-lite.sh forces
-# LOADGEN_DOCKER=true), so the bench runs fine as a plain user. TUNE=true keeps
-# the tuned path and runs the copy under sudo instead.
+# Rootless by default: neutralize system_tune/restore (requires root) in the copy.
+# Loadgens run in containers, so plain users can run it. TUNE=true keeps tuning.
 if [ "${TUNE:-false}" != "true" ]; then
     sed -i \
         -e 's/^[[:space:]]*system_tune[[:space:]]*$/true  # system_tune skipped (rootless)/' \
