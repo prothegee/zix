@@ -152,7 +152,16 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
 /// Open a short-header (1-RTT) packet (RFC 9001 5.3 / 5.4). The Destination Connection ID length is
 /// not on the wire, the receiver knows the length it issued. `keys` are the 1-RTT keys for the
 /// sending direction (the client 1-RTT keys when a server opens a client request).
-pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, out: []u8) OpenError!Opened {
+///
+/// `largest_pn` is the largest 1-RTT packet number successfully decoded on this connection so far, or
+/// null when none has been (the first 1-RTT packet). QUIC senders truncate the packet number to the
+/// fewest bytes that disambiguate it from the largest the peer has acknowledged (RFC 9000 17.1), so
+/// the wire value is NOT the full number once the connection is established: the receiver MUST
+/// reconstruct it (RFC 9000 A.3). Skipping that reconstruction works only while the true number still
+/// fits in the bytes on the wire (roughly the first 256 packets on a 1-byte-truncated stream), after
+/// which the AEAD nonce is built from the wrong number and every packet fails to decrypt, stalling the
+/// connection. `largest_pn` feeds packet.decodePacketNumber to recover the full value.
+pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, largest_pn: ?u64, out: []u8) OpenError!Opened {
     if (data.len < 1 + dcid_len) return error.Truncated;
     if (data[0] & 0x80 != 0) return error.NotShort;
 
@@ -183,7 +192,9 @@ pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, out: [
         truncated_pn = (truncated_pn << 8) | b;
     }
 
-    const full_pn = truncated_pn;
+    // Reconstruct the full packet number from the truncated wire value (RFC 9000 A.3). The first 1-RTT
+    // packet has no prior largest, so its number is the wire value as-is.
+    const full_pn = if (largest_pn) |lp| packet.decodePacketNumber(lp, truncated_pn, @intCast(pn_len * 8)) else truncated_pn;
 
     const nonce = crypto.aeadNonce(keys.iv, full_pn);
     const ciphertext = data[header_len .. data.len - Aes128Gcm.tag_length];
@@ -277,6 +288,11 @@ fn sealLongHeader(out: []u8, keys: crypto.AesKeys, first_base: u8, dcid: []const
 
 /// Seal an outgoing short-header (1-RTT) packet (RFC 9001 5.3 / 5.4). `dcid` is the peer's connection
 /// id, placed raw with no length prefix. `keys` are the server 1-RTT keys.
+/// Upper bound on the bytes sealShort adds around a 1-RTT payload: the 1-byte short header, up to a
+/// 20-byte Destination Connection ID (the RFC 9000 5.1 maximum), up to a 4-byte packet number, and the
+/// 16-byte AEAD tag. A caller sealing in place reserves payload.len + this so the sealed packet fits.
+pub const short_seal_overhead_max: usize = 1 + 20 + 4 + Aes128Gcm.tag_length;
+
 pub fn sealShort(out: []u8, keys: crypto.AesKeys, dcid: []const u8, packet_number: u32, payload: []const u8) OpenError![]const u8 {
     const pn_len: usize = if (packet_number <= 0xff) 1 else if (packet_number <= 0xffff) 2 else 4;
 
@@ -427,10 +443,68 @@ test "zix test: sealShort then openShort round-trips the payload" {
     const sealed = try sealShort(&out, keys, &dcid, 0, &payload);
 
     var recovered: [256]u8 = undefined;
-    const opened = try openShort(sealed, keys, dcid.len, &recovered);
+    const opened = try openShort(sealed, keys, dcid.len, null, &recovered);
 
     try std.testing.expectEqual(@as(u64, 0), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
+}
+
+// Seal a short-header packet with the packet number FORCED to one wire byte while the AEAD nonce uses
+// the full number, exactly as a QUIC sender truncates once its largest-acked lets it (RFC 9000 17.1).
+// sealShort never does this (it sizes the field to the value), so this reproduces the peer behavior
+// that broke the receiver past packet 256.
+fn sealShortTruncated1(out: []u8, keys: crypto.AesKeys, dcid: []const u8, full_pn: u64, payload: []const u8) []const u8 {
+    var pos: usize = 0;
+    out[pos] = 0x40; // short form, fixed bit, pn length - 1 = 0 (one byte)
+    pos += 1;
+    @memcpy(out[pos..][0..dcid.len], dcid);
+    pos += dcid.len;
+
+    const pn_offset = pos;
+    out[pos] = @intCast(full_pn & 0xff); // one truncated byte
+    pos += 1;
+
+    const header_len = pos;
+    const nonce = crypto.aeadNonce(keys.iv, full_pn);
+    var tag: [Aes128Gcm.tag_length]u8 = undefined;
+    Aes128Gcm.encrypt(out[header_len .. header_len + payload.len], &tag, payload, out[0..header_len], nonce, keys.key);
+    @memcpy(out[header_len + payload.len ..][0..Aes128Gcm.tag_length], &tag);
+
+    const packet_len = header_len + payload.len + Aes128Gcm.tag_length;
+    var sample: [16]u8 = undefined;
+    @memcpy(&sample, out[pn_offset + 4 .. pn_offset + 4 + 16]);
+    const mask = crypto.headerMaskAes(keys.hp, sample);
+    out[0] ^= mask[0] & 0x1f;
+    out[pn_offset] ^= mask[1];
+
+    return out[0..packet_len];
+}
+
+test "zix test: openShort reconstructs a truncated packet number past 256 (the ~256-packet stall)" {
+    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const keys = crypto.AesKeys.fromSecret(secret);
+    const dcid = h("c0ffee0011223344");
+
+    // Full packet number 300: on a 1-byte-truncated stream the wire carries 300 & 0xff = 44. Without
+    // reconstruction the receiver builds the nonce from 44 and decryption fails, which is exactly the
+    // connection death after ~256 packets.
+    var payload: [40]u8 = @splat(0);
+    const frame = h("0800") ++ h("0102030405");
+    @memcpy(payload[0..frame.len], &frame);
+
+    var out: [256]u8 = undefined;
+    const sealed = sealShortTruncated1(&out, keys, &dcid, 300, &payload);
+
+    // With the largest-received number (299), openShort recovers 300 and decrypts.
+    var recovered: [256]u8 = undefined;
+    const opened = try openShort(sealed, keys, dcid.len, 299, &recovered);
+    try std.testing.expectEqual(@as(u64, 300), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
+
+    // Without reconstruction (the old behavior, largest_pn = null) the same packet fails to decrypt:
+    // proof this test guards the real regression, not a tautology.
+    var recovered2: [256]u8 = undefined;
+    try std.testing.expectError(error.Decrypt, openShort(sealed, keys, dcid.len, null, &recovered2));
 }
 
 test "zix test: openInitial rejects a tampered packet" {
