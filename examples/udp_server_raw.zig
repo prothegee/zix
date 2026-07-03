@@ -1,5 +1,5 @@
 // Usage:
-// zig run examples/udp_raw_echo.zig -- --port 9064
+// zig run examples/udp_server_raw.zig -- --port 9064
 //
 // A raw-bytes UDP echo server (ADR-049). Unlike zix.Udp.Server(Packet), there is no fixed packet
 // struct: the handler receives the datagram bytes as-is, the peer address, and a Sink to reply
@@ -35,20 +35,12 @@ pub fn main(process: std.process.Init) !void {
         .allocator = std.heap.smp_allocator,
         .ip = SERVER_IP,
         .port = SERVER_PORT,
-        .port_mode = .REQUIRED,
-
-        // Dispatch model selects the worker shape, shown explicitly even though .ASYNC is the
-        // default. .ASYNC / .POOL / .MIXED run a single recvmmsg worker. .EPOLL / .URING run one
-        // SO_REUSEPORT worker per CPU (per-core shared-nothing, the kernel load-balances datagrams).
-        .dispatch_model = .ASYNC,
-
-        // Batched syscalls: up to 32 datagrams per recvmmsg, replies coalesced per sendmmsg.
-        .recv_batch = 32,
-        .send_batch = 32,
-
-        // Variable-length datagrams up to the common Ethernet MTU.
-        .max_recv_buf = 1500,
-    });
+        .allow_args = false, // set true to read --ip / --port from the args passed below
+        .dispatch_model = .ASYNC, // .ASYNC / .POOL / .MIXED single worker, .EPOLL / .URING per-core
+        .recv_batch = 32, // datagrams per recvmmsg
+        .send_batch = 32, // replies coalesced per sendmmsg
+        .max_recv_buf = 1500, // datagram buffer, common Ethernet MTU
+    }, process.minimal.args);
     defer server.deinit();
 
     try server.run();
