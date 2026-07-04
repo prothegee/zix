@@ -22,7 +22,7 @@ fn nopHandler(
     _ = method;
     _ = headers;
     _ = body;
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "ok") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
 }
 
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
@@ -66,7 +66,7 @@ test "zix edge: bad PRI preface causes server to close connection" {
     const fd = try clientConnect(io, TEST_PORT);
     defer _ = std.posix.system.close(fd);
 
-    try zix.Http2.fdWriteAll(fd, "PRI * HTTP/2.0\r\nBAD PREFACE GARBAGE");
+    try zix.Http2.writeAllFD(fd, "PRI * HTTP/2.0\r\nBAD PREFACE GARBAGE");
 
     var buf: [256]u8 = undefined;
     const n = std.posix.read(fd, &buf) catch 0;
@@ -88,8 +88,8 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
     const fd = try clientConnect(io, TEST_PORT + 1);
     defer _ = std.posix.system.close(fd);
 
-    try zix.Http2.fdWriteAll(fd, zix.Http2.PREFACE);
-    try zix.Http2.sendSettings(fd, &.{});
+    try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
+    try zix.Http2.sendSettingsFD(fd, &.{});
 
     var payload_buf: [64]u8 = undefined;
     var got_settings = false;
@@ -98,12 +98,12 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
         const payload = payload_buf[0..fh.length];
         if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
         if (fh.frame_type == zix.Http2.FRAME_TYPE_SETTINGS and (fh.flags & zix.Http2.FLAG_ACK) == 0) {
-            try zix.Http2.sendSettingsAck(fd);
+            try zix.Http2.sendSettingsAckFD(fd);
             got_settings = true;
         }
     }
 
-    try zix.Http2.sendGoaway(fd, 0, zix.Http2.ERR_NO_ERROR);
+    try zix.Http2.sendGoawayFD(fd, 0, zix.Http2.ERR_NO_ERROR);
 
     t.join();
     ctx.listener.deinit(io);
@@ -138,7 +138,7 @@ test "zix edge: writeFrameHeader stream_id high bit is cleared on read" {
         .flags = 0,
         .stream_id = 0x7FFF_FFFF,
     };
-    try zix.Http2.writeFrameHeader(fds[1], orig);
+    try zix.Http2.writeFrameHeaderFD(fds[1], orig);
     _ = std.posix.system.close(fds[1]);
     const got = try zix.Http2.readFrameHeader(fds[0]);
     try std.testing.expectEqual(orig.stream_id, got.stream_id);

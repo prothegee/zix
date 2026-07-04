@@ -38,7 +38,7 @@ fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.
     const mux_conn = mux.MuxConn.init(fd, opts) orelse return;
     defer mux_conn.deinit();
 
-    // The mux writes plaintext through frame.fdWriteAll. The hook seals that plaintext into TLS records
+    // The mux writes plaintext through frame.writeAllFD. The hook seals that plaintext into TLS records
     // and writes them to the socket, so the unchanged mux serves a TLS connection.
     const Encryptor = struct {
         conn: @TypeOf(conn),
@@ -52,7 +52,7 @@ fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.
             if (self.plain_len == 0 or self.failed) return;
 
             const sealed = self.conn.writeAppData(self.plain[0..self.plain_len], &self.seal);
-            terminator.writeAll(self.fd, sealed) catch {
+            terminator.writeAllFD(self.fd, sealed) catch {
                 self.failed = true;
             };
             self.plain_len = 0;
@@ -121,7 +121,7 @@ fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.
 
     // close_notify so the client finalizes the connection cleanly.
     var close_buf: [64]u8 = undefined;
-    terminator.writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+    terminator.writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 }
 
 /// Terminator driver: drives the resumable h2 mux inline over the decrypted stream (no socketpair).

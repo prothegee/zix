@@ -105,7 +105,7 @@ const MuxCoalesceSink = struct {
     fn append(self: *MuxCoalesceSink, bytes: []const u8) void {
         if (bytes.len > self.buf.len) {
             self.flush();
-            frame.fdWriteAllRaw(self.fd, bytes) catch {
+            frame.writeAllRawFD(self.fd, bytes) catch {
                 self.failed = true;
             };
 
@@ -121,7 +121,7 @@ const MuxCoalesceSink = struct {
     fn flush(self: *MuxCoalesceSink) void {
         if (self.len == 0) return;
 
-        frame.fdWriteAllRaw(self.fd, self.buf[0..self.len]) catch {
+        frame.writeAllRawFD(self.fd, self.buf[0..self.len]) catch {
             self.failed = true;
         };
         self.len = 0;

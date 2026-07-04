@@ -22,7 +22,7 @@ fn echoHandler(
 ) void {
     _ = method;
     _ = headers;
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", body) catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", body) catch {};
 }
 
 fn helloHandler(
@@ -35,7 +35,7 @@ fn helloHandler(
     _ = method;
     _ = headers;
     _ = body;
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "Hello, World!") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "Hello, World!") catch {};
 }
 
 // --------------------------------------------------------- //
@@ -79,8 +79,8 @@ fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
 }
 
 fn sendPreface(fd: std.posix.fd_t) !void {
-    try zix.Http2.fdWriteAll(fd, zix.Http2.PREFACE);
-    try zix.Http2.sendSettings(fd, &.{});
+    try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
+    try zix.Http2.sendSettingsFD(fd, &.{});
 }
 
 fn sendRequest(
@@ -103,22 +103,22 @@ fn sendRequest(
     else
         zix.Http2.FLAG_END_HEADERS;
 
-    try zix.Http2.writeFrameHeader(fd, .{
+    try zix.Http2.writeFrameHeaderFD(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = zix.Http2.FRAME_TYPE_HEADERS,
         .flags = end_stream,
         .stream_id = sid,
     });
-    try zix.Http2.fdWriteAll(fd, hblock);
+    try zix.Http2.writeAllFD(fd, hblock);
 
     if (body) |b| {
-        try zix.Http2.writeFrameHeader(fd, .{
+        try zix.Http2.writeFrameHeaderFD(fd, .{
             .length = @intCast(b.len),
             .frame_type = zix.Http2.FRAME_TYPE_DATA,
             .flags = zix.Http2.FLAG_END_STREAM,
             .stream_id = sid,
         });
-        try zix.Http2.fdWriteAll(fd, b);
+        try zix.Http2.writeAllFD(fd, b);
     }
 }
 
@@ -136,14 +136,14 @@ fn recvResponse(fd: std.posix.fd_t, sid: u31, buf: []u8) ![]const u8 {
 
         switch (fh.frame_type) {
             zix.Http2.FRAME_TYPE_SETTINGS => {
-                if ((fh.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAck(fd);
+                if ((fh.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAckFD(fd);
             },
             zix.Http2.FRAME_TYPE_WINDOW_UPDATE => {},
             zix.Http2.FRAME_TYPE_PING => {
                 if ((fh.flags & zix.Http2.FLAG_ACK) == 0) {
                     var p8: [8]u8 = undefined;
                     @memcpy(&p8, payload[0..8]);
-                    try zix.Http2.sendPingAck(fd, p8);
+                    try zix.Http2.sendPingAckFD(fd, p8);
                 }
             },
             zix.Http2.FRAME_TYPE_HEADERS => {
@@ -215,7 +215,7 @@ test "zix integration: Http2 GET / returns Hello World over h2c direct" {
 
     try std.testing.expectEqualStrings("Hello, World!", body);
 
-    try zix.Http2.sendGoaway(fd, 1, zix.Http2.ERR_NO_ERROR);
+    try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -244,7 +244,7 @@ test "zix integration: Http2 POST /echo returns request body" {
 
     try std.testing.expectEqualStrings("ping from client", body);
 
-    try zix.Http2.sendGoaway(fd, 1, zix.Http2.ERR_NO_ERROR);
+    try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -277,7 +277,7 @@ test "zix integration: Http2 two sequential streams on same connection" {
     const b2 = try recvResponse(fd, 3, &buf2);
     try std.testing.expectEqualStrings("Hello, World!", b2);
 
-    try zix.Http2.sendGoaway(fd, 3, zix.Http2.ERR_NO_ERROR);
+    try zix.Http2.sendGoawayFD(fd, 3, zix.Http2.ERR_NO_ERROR);
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -304,7 +304,7 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
         "Connection: Upgrade\r\n" ++
         "Upgrade: h2c\r\n" ++
         "\r\n";
-    try zix.Http2.fdWriteAll(fd, upgrade_req);
+    try zix.Http2.writeAllFD(fd, upgrade_req);
 
     var resp101: [256]u8 = undefined;
     const n101 = try std.posix.read(fd, &resp101);
@@ -317,7 +317,7 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
 
     try std.testing.expectEqualStrings("Hello, World!", body);
 
-    try zix.Http2.sendGoaway(fd, 1, zix.Http2.ERR_NO_ERROR);
+    try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);

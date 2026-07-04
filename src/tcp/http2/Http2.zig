@@ -19,9 +19,9 @@ pub const ServeOpts = core_mod.ServeOpts;
 pub const serveConn = core_mod.serveConn;
 
 // Per-worker response cache (ADR-036), opt-in via ServerConfig.response_cache. A handler serves a hit
-// with serveCached and stores its reply with sendCached, both keyed by the current request.
+// with serveCached and stores its reply with sendCachedFD, both keyed by the current request.
 pub const serveCached = core_mod.serveCached;
-pub const sendCached = core_mod.sendCached;
+pub const sendCachedFD = core_mod.sendCachedFD;
 pub const cacheTtl = core_mod.cacheTtl;
 
 pub const Header = hpack_mod.Header;
@@ -34,21 +34,21 @@ pub const huffDecode = hpack_mod.huffDecode;
 pub const FrameHeader = frame_mod.FrameHeader;
 pub const readFrameHeader = frame_mod.readFrameHeader;
 pub const parseFrameHeader = frame_mod.parseFrameHeader;
-pub const writeFrameHeader = frame_mod.writeFrameHeader;
+pub const writeFrameHeaderFD = frame_mod.writeFrameHeaderFD;
 pub const encodeFrameHeader = frame_mod.encodeFrameHeader;
-pub const fdWriteAll = frame_mod.fdWriteAll;
+pub const writeAllFD = frame_mod.writeAllFD;
 pub const recvExact = frame_mod.recvExact;
-pub const sendResponse = frame_mod.sendResponse;
-pub const sendResponseEncoded = frame_mod.sendResponseEncoded;
+pub const sendResponseFD = frame_mod.sendResponseFD;
+pub const sendResponseEncodedFD = frame_mod.sendResponseEncodedFD;
 /// Flow-controlled response send for large, caller-owned bodies (paces by WINDOW_UPDATE). See
-/// mux.sendResponseStream: the body must outlive the stream.
-pub const sendResponseStream = mux_mod.sendResponseStream;
-pub const sendSettings = frame_mod.sendSettings;
-pub const sendSettingsAck = frame_mod.sendSettingsAck;
-pub const sendPingAck = frame_mod.sendPingAck;
-pub const sendGoaway = frame_mod.sendGoaway;
-pub const sendRstStream = frame_mod.sendRstStream;
-pub const sendWindowUpdate = frame_mod.sendWindowUpdate;
+/// mux.sendResponseStreamFD: the body must outlive the stream.
+pub const sendResponseStreamFD = mux_mod.sendResponseStreamFD;
+pub const sendSettingsFD = frame_mod.sendSettingsFD;
+pub const sendSettingsAckFD = frame_mod.sendSettingsAckFD;
+pub const sendPingAckFD = frame_mod.sendPingAckFD;
+pub const sendGoawayFD = frame_mod.sendGoawayFD;
+pub const sendRstStreamFD = frame_mod.sendRstStreamFD;
+pub const sendWindowUpdateFD = frame_mod.sendWindowUpdateFD;
 
 pub const PREFACE = frame_mod.PREFACE;
 pub const FRAME_HEADER_LEN = frame_mod.FRAME_HEADER_LEN;

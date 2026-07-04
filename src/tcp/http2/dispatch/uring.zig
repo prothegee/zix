@@ -5,8 +5,8 @@
 //!
 //! Note:
 //! - Unlike the gRPC ring, zix.Http2's handler writes the reply straight to the fd (via
-//!   `frame.sendResponse`), so there is no reply cork to ring-send: the ring owns accept and recv,
-//!   responses go direct-to-fd. The accepted fd is set non-blocking so `frame.fdWriteAll` polls on
+//!   `frame.sendResponseFD`), so there is no reply cork to ring-send: the ring owns accept and recv,
+//!   responses go direct-to-fd. The accepted fd is set non-blocking so `frame.writeAllFD` polls on
 //!   EAGAIN under backpressure instead of blocking the worker. One recv is in flight per connection.
 //! - Falls back to the .EPOLL shared-nothing loop when io_uring is unavailable (old kernel, seccomp
 //!   sandbox, or an RLIMIT_MEMLOCK cap too low for the ring), so selecting .URING never strands the
@@ -55,7 +55,7 @@ fn initUringRing() !IoUring {
     return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
 }
 
-/// Set a socket non-blocking so a direct `frame.fdWriteAll` reply polls on EAGAIN under backpressure
+/// Set a socket non-blocking so a direct `frame.writeAllFD` reply polls on EAGAIN under backpressure
 /// rather than blocking the worker thread.
 fn setNonBlock(fd: std.posix.fd_t) void {
     const linux = std.os.linux;
