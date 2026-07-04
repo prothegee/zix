@@ -421,7 +421,7 @@ The raw path (`zix.Udp.Raw`, ADR-049) allocates its recv / send batches and work
 
 ### HTTP/2 and gRPC
 
-HTTP/2's `.EPOLL` / `.URING` mux pools stream slots per worker, so resident stream memory tracks concurrent streams rather than `max_streams` per connection. gRPC and the HTTP/2 thread-path models keep a heap-allocated per-connection stream array (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed: handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
+HTTP/2 and gRPC `.EPOLL` / `.URING` mux both pool stream slots per worker, so resident stream memory tracks concurrent streams rather than `max_streams` per connection. The thread-path models (`.ASYNC` / `.POOL` / `.MIXED`) keep a heap-allocated per-connection stream array (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). No per-request allocator is exposed: handlers receive raw frame I/O via `GrpcContext` (gRPC) or `fd`/`sid` (HTTP/2).
 
 For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`docs/hld-udp-en.md`](docs/hld-udp-en.md). For threading models see [`docs/concurrency-en.md`](docs/concurrency-en.md).
 

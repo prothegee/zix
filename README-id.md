@@ -421,7 +421,7 @@ Jalur raw (`zix.Udp.Raw`, ADR-049) mengalokasikan recv / send batch dan array wo
 
 ### HTTP/2 dan gRPC
 
-Mux `.EPOLL` / `.URING` HTTP/2 memakai pool slot stream per worker, jadi memori stream residen mengikuti stream konkuren, bukan `max_streams` per koneksi. gRPC dan model thread-path HTTP/2 tetap memakai array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos: handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
+Mux `.EPOLL` / `.URING` HTTP/2 dan gRPC sama-sama memakai pool slot stream per worker, jadi memori stream residen mengikuti stream konkuren, bukan `max_streams` per koneksi. Model thread-path (`.ASYNC` / `.POOL` / `.MIXED`) tetap memakai array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Tidak ada allocator per-permintaan yang diekspos: handler menerima I/O frame mentah via `GrpcContext` (gRPC) atau `fd`/`sid` (HTTP/2).
 
 Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) dan [`docs/hld-udp-id.md`](docs/hld-udp-id.md). Untuk model threading lihat [`docs/concurrency-id.md`](docs/concurrency-id.md).
 
