@@ -1251,4 +1251,22 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-058: per-worker stream-slot pool for the multiplexed engines
+
+**Status:** Accepted
+
+**Context:** The multiplexed (`.EPOLL` / `.URING`) HTTP/2 and gRPC engines reserved a full stream table per connection at accept. `MuxConn` / `GrpcMuxConn` allocated `max_streams` stream slots, each carrying an inline header table plus body and scratch buffers, whether the connection was busy or idle. Resident memory therefore tracked connection count, not in-flight work. On the HttpArena benchmark `zix.Http2` held about 6x more memory than the work needed at 4096 connections (baseline-h2c), and `zix.Grpc` about 12x more at 1024 connections (unary-grpc, roughly 916 MiB). Buffer-size shrinks did not close it: the bulk was the table itself, provisioned at peak per connection.
+
+**Decision:** Borrow each stream's slot from a per-worker pool. A thread-local free-list of stream slots is shared across every connection on the worker (shared-nothing per worker, no atomics). A connection borrows a slot on stream open (`acquireStream` in `mux.zig`, `acquireGrpcStream` in `grpc/core.zig`) and returns it on close (`releaseStream` / `releaseGrpcStream`), reusing the slot's buffers, so the steady state does no per-stream allocation. `MuxConn.streams` / `GrpcMuxConn.streams` becomes a `max_streams`-wide pointer array (`[]*Stream`, about 1 KiB per connection) in place of the inline table, and the eager per-connection body / scratch backing is removed. Scoped to the multiplexed engines only: the blocking `.ASYNC` / `.POOL` / `.MIXED` paths keep their own per-connection arrays, since each connection is its own thread and a per-worker pool of one buys nothing.
+
+**Rationale:** One worker drives many connections, so the worker, not the connection, is the natural owner of stream state. Sizing that state to the concurrent streams on the worker instead of `connections * max_streams` makes memory track work. The change also lifted throughput 8 to 20 percent on the small-body cells, because the pooled hot slots (LIFO reuse) have a tight cache working set where the old sparse per-connection table was cache-thrashing, a both-axes result. Decoupling memory from `max_streams` lets the advertised stream concurrency default rise with no per-connection memory cost.
+
+**Consequences:**
+- `zix.Http2` 4096c baseline-h2c memory fell about 6x with throughput up 8 to 20 percent. `zix.Grpc` 1024c unary memory fell about 12x (roughly 916 to 77 MiB) with throughput up 8 to 11 percent. URING and EPOLL stay tied.
+- Config defaults folded as a direct consequence: `max_streams` 16 to 128 and `max_body` 64 KiB to 16 KiB on both `Http2ServerConfig` / `ServeOpts` and `GrpcServerConfig` / `GrpcServeOpts`. `max_header_scratch` stays 4 KiB.
+- The blocking `.ASYNC` / `.POOL` / `.MIXED` paths are unchanged. `zix.Http1` WebSocket, which reuses the Http1 slab (a different memory model), is a future candidate.
+- Post-pool read-buffer and body-buffer shrinks were demand-paged no-ops (the high-connection residual is kernel socket buffers, not app buffers), so the pool is the memory lever.
+
+---
+
 ###### end of adr

@@ -1251,4 +1251,22 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-058: pool slot-stream per-worker untuk engine multiplex
+
+**Status:** Accepted
+
+**Konteks:** Engine HTTP/2 dan gRPC multiplex (`.EPOLL` / `.URING`) mem-reserve tabel stream penuh per koneksi saat accept. `MuxConn` / `GrpcMuxConn` mengalokasikan `max_streams` slot stream, tiap slot membawa tabel header inline plus buffer body dan scratch, entah koneksi sibuk atau idle. Memori residen jadi mengikuti jumlah koneksi, bukan kerja in-flight. Pada benchmark HttpArena `zix.Http2` menahan sekitar 6x lebih banyak memori daripada yang dibutuhkan kerja pada 4096 koneksi (baseline-h2c), dan `zix.Grpc` sekitar 12x lebih banyak pada 1024 koneksi (unary-grpc, kira-kira 916 MiB). Pengecilan ukuran buffer tidak menutupnya: bulk-nya adalah tabel itu sendiri, di-provision pada puncak per koneksi.
+
+**Keputusan:** Pinjam slot tiap stream dari pool per-worker. Sebuah free-list thread-local berisi slot stream dibagi lintas setiap koneksi pada worker (shared-nothing per worker, tanpa atomic). Koneksi meminjam slot saat stream dibuka (`acquireStream` di `mux.zig`, `acquireGrpcStream` di `grpc/core.zig`) dan mengembalikannya saat ditutup (`releaseStream` / `releaseGrpcStream`), memakai ulang buffer slot, jadi steady state tidak melakukan alokasi per-stream. `MuxConn.streams` / `GrpcMuxConn.streams` menjadi array pointer selebar `max_streams` (`[]*Stream`, sekitar 1 KiB per koneksi) menggantikan tabel inline, dan backing body / scratch per koneksi yang eager dihapus. Dibatasi ke engine multiplex saja: jalur blocking `.ASYNC` / `.POOL` / `.MIXED` mempertahankan array per-koneksinya sendiri, karena tiap koneksi adalah thread-nya sendiri dan pool per-worker berisi satu tidak memberi apa-apa.
+
+**Rasional:** Satu worker menggerakkan banyak koneksi, jadi worker, bukan koneksi, adalah pemilik natural dari state stream. Mengukur state itu ke stream konkuren pada worker alih-alih `connections * max_streams` membuat memori mengikuti kerja. Perubahan ini juga menaikkan throughput 8 sampai 20 persen pada cell body-kecil, karena slot panas ter-pool (reuse LIFO) punya working set cache yang ketat di mana tabel per-koneksi lama yang jarang justru cache-thrashing, hasil dua-sumbu. Melepas ketergantungan memori dari `max_streams` membuat default concurrency stream yang diiklankan bisa naik tanpa biaya memori per koneksi.
+
+**Konsekuensi:**
+- Memori `zix.Http2` 4096c baseline-h2c turun sekitar 6x dengan throughput naik 8 sampai 20 persen. Memori `zix.Grpc` 1024c unary turun sekitar 12x (kira-kira 916 ke 77 MiB) dengan throughput naik 8 sampai 11 persen. URING dan EPOLL tetap seri.
+- Default config dilipat sebagai konsekuensi langsung: `max_streams` 16 ke 128 dan `max_body` 64 KiB ke 16 KiB pada `Http2ServerConfig` / `ServeOpts` maupun `GrpcServerConfig` / `GrpcServeOpts`. `max_header_scratch` tetap 4 KiB.
+- Jalur blocking `.ASYNC` / `.POOL` / `.MIXED` tak berubah. WebSocket `zix.Http1`, yang memakai ulang slab Http1 (model memori berbeda), adalah kandidat mendatang.
+- Pengecilan read-buffer dan body-buffer pasca-pool adalah no-op demand-paged (residual koneksi-tinggi adalah kernel socket buffer, bukan buffer app), jadi pool adalah lever memori.
+
+---
+
 ###### end of adr
