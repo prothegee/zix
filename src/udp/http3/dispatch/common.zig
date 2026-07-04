@@ -152,7 +152,7 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize, max_
         if (protection.openShort(data, conn.app_keys.client, conn.our_scid.len, largest_pn, &sbuf)) |opened| {
             conn.ack.record(opened.packet_number);
 
-            // Copy the decrypted payload onto the connection so sendResponse walks every request stream
+            // Copy the decrypted payload onto the connection so sendResponseFD walks every request stream
             // it carries without decrypting again. sbuf is stack-local to this call.
             const copied = @min(opened.payload.len, conn.app_payload_buf.len);
             @memcpy(conn.app_payload_buf[0..copied], opened.payload[0..copied]);
@@ -166,7 +166,7 @@ pub fn processDatagram(table: *ConnTable, data: []const u8, cid_len: usize, max_
 }
 
 /// Find a connection by the Destination Connection ID. After ServerHello the client addresses the
-/// connection by the Source CID the server issued (our_scid), which sendServerHello adds to the demux
+/// connection by the Source CID the server issued (our_scid), which sendServerHelloFD adds to the demux
 /// index as an alias, so both the original client DCID and our_scid resolve here in O(1).
 fn findConn(table: *ConnTable, dcid: *const demux.ConnId) ?*Connection {
     return table.find(dcid);
@@ -383,7 +383,7 @@ pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, dg: da
     switch (processDatagram(table, dg.data, config.cid_len, config.max_datagram_size, config.initial_window_packets)) {
         .client_hello => |n| {
             logSystem(config, "decrypted client Initial, parsed ClientHello ({d} bytes)", .{n});
-            sendServerHello(table, dg.data, tx, fd, dg.from, config);
+            sendServerHelloFD(table, dg.data, tx, fd, dg.from, config);
         },
         .initial_opened => |pn| logSystem(config, "decrypted client Initial, packet number {d} (ClientHello incomplete)", .{pn}),
         .parse_alert => logSystem(config, "decrypted client Initial but ClientHello parse raised an alert", .{}),
@@ -393,7 +393,7 @@ pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, dg: da
             if (stats) |st| st.requests += 1;
 
             logSystem(config, "decrypted client 1-RTT request (application keys correct, validated live)", .{});
-            sendResponse(handler, table, dg.data, tx, fd, dg.from, config.cid_len, config, stats);
+            sendResponseFD(handler, table, dg.data, tx, fd, dg.from, config.cid_len, config, stats);
         },
         else => {},
     }
@@ -625,7 +625,7 @@ fn dumpAllWorkerStats() void {
 
 /// Build and send the server's ServerHello Initial in reply to a decrypted ClientHello (handshake
 /// step 2). Idempotent per connection: sent once, skipped on retransmits.
-fn sendServerHello(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, config: Http3ServerConfig) void {
+fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, config: Http3ServerConfig) void {
     const hdr = packet.parseLongHeader(data) catch return;
     if (hdr.packet_type != 0) return;
 
@@ -804,7 +804,7 @@ fn maxStreamsTake(max_streams_pending: *?u64) ?u64 {
 /// Apply the acknowledgment content of a decrypted 1-RTT payload: an ACK frame (0x02 / 0x03) drives RTT
 /// sampling, range retirement, loss detection and retransmission, congestion control, and send-stream
 /// retirement (RFC 9002, Connection.onAckFrame). Every other frame is walked past. Run BEFORE request
-/// registration in sendResponse: a stream is now freed on ack (not on send), so an ACK that finishes an
+/// registration in sendResponseFD: a stream is now freed on ack (not on send), so an ACK that finishes an
 /// earlier stream must free its slot here, in time for a request riding the same datagram to claim it,
 /// or the pool (sized to the client's stream concurrency) could refuse it with a spurious 500.
 fn applyAcks(conn: *Connection, payload: []const u8) void {
@@ -1057,7 +1057,7 @@ fn sealAndQueue(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket
 /// a small response goes out in one packet, a large one is registered as a send stream and fragmented
 /// across packets within the client's flow control, resumed as MAX_STREAM_DATA / MAX_DATA arrive. A
 /// packet carrying no work is acknowledged so the client stops retransmitting.
-fn sendResponse(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
+fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     if (data.len < 1 + cid_len) return;
 
     const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
