@@ -288,33 +288,33 @@ pub fn buildGrpcError(out: []u8, stream_id: u31, grpc_status: u8, grpc_message: 
 }
 
 /// Send initial response HEADERS (:status 200, content-type). No END_STREAM.
-pub fn sendGrpcHeaders(fd: std.posix.fd_t, stream_id: u31, content_type: []const u8) !void {
+pub fn sendGrpcHeadersFD(fd: std.posix.fd_t, stream_id: u31, content_type: []const u8) !void {
     var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcHeaders(&buf, stream_id, content_type);
-    try h2.fdWriteAll(fd, buf[0..n]);
+    try h2.writeAllFD(fd, buf[0..n]);
 }
 
 /// Send one DATA frame with 5-byte gRPC prefix. No END_STREAM.
-pub fn sendGrpcData(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !void {
+pub fn sendGrpcDataFD(fd: std.posix.fd_t, stream_id: u31, message: []const u8) !void {
     var head: [14]u8 = undefined;
     _ = buildGrpcDataHeader(&head, stream_id, message.len, false);
 
-    try h2.fdWriteAll(fd, &head);
-    try h2.fdWriteAll(fd, message);
+    try h2.writeAllFD(fd, &head);
+    try h2.writeAllFD(fd, message);
 }
 
 /// Send trailer HEADERS (grpc-status, grpc-message). FLAG_END_STREAM.
-pub fn sendGrpcTrailer(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
+pub fn sendGrpcTrailerFD(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcTrailer(&buf, stream_id, grpc_status, grpc_message);
-    try h2.fdWriteAll(fd, buf[0..n]);
+    try h2.writeAllFD(fd, buf[0..n]);
 }
 
 /// Send trailers-only error response (no DATA frame). Includes :status 200 and content-type per gRPC spec.
-pub fn sendGrpcError(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
+pub fn sendGrpcErrorFD(fd: std.posix.fd_t, stream_id: u31, grpc_status: u8, grpc_message: []const u8) !void {
     var buf: [headers_frame_scratch]u8 = undefined;
     const n = buildGrpcError(&buf, stream_id, grpc_status, grpc_message);
-    try h2.fdWriteAll(fd, buf[0..n]);
+    try h2.writeAllFD(fd, buf[0..n]);
 }
 
 // --------------------------------------------------------- //
@@ -458,12 +458,12 @@ test "zix grpc: readGrpcPrefix exactly 5 bytes is valid" {
     try std.testing.expectEqual(@as(u32, 0), p.msg_len);
 }
 
-test "zix grpc: sendGrpcError includes content-type header" {
+test "zix grpc: sendGrpcErrorFD includes content-type header" {
     const pipe_fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(pipe_fds[0]);
     defer _ = std.posix.system.close(pipe_fds[1]);
 
-    try sendGrpcError(pipe_fds[1], 1, 3, "");
+    try sendGrpcErrorFD(pipe_fds[1], 1, 3, "");
 
     var buf: [256]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);

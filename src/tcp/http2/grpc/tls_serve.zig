@@ -5,7 +5,7 @@
 //!   thread, which runs the shared h2-over-TLS terminator (../../tls/h2_terminator.zig): the
 //!   handshake negotiates ALPN h2, then the inline-mux driver below drives the resumable gRPC h2
 //!   state machine (core.grpcMuxProcessRing) directly over the decrypted stream. The mux's frames are
-//!   sealed into TLS records through a thread-local hook on frame.fdWriteAll plus the staged reply
+//!   sealed into TLS records through a thread-local hook on frame.writeAllFD plus the staged reply
 //!   cork, so there is NO socketpair and NO second thread per connection. This is what lets the gRPC
 //!   TLS path scale to high connection counts instead of livelocking on a per-connection socketpair.
 //! - The cleartext dispatch models (ASYNC / POOL / MIXED / EPOLL / URING) are untouched. https is a
@@ -37,7 +37,7 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
     const mux_conn = core.GrpcMuxConn.init(fd, opts) orelse return;
     defer mux_conn.deinit();
 
-    // The mux's reply (staged cork + any direct frame.fdWriteAll) routes through this hook, which
+    // The mux's reply (staged cork + any direct frame.writeAllFD) routes through this hook, which
     // seals the plaintext into TLS records and writes them to the socket.
     const Encryptor = struct {
         conn: @TypeOf(conn),
@@ -51,7 +51,7 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
             if (self.plain_len == 0 or self.failed) return;
 
             const sealed = self.conn.writeAppData(self.plain[0..self.plain_len], &self.seal);
-            terminator.writeAll(self.fd, sealed) catch {
+            terminator.writeAllFD(self.fd, sealed) catch {
                 self.failed = true;
             };
             self.plain_len = 0;
@@ -114,14 +114,14 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
         mux_conn.rend += plain.len;
 
         const outcome = core.grpcMuxProcessRing(routes, mux_conn);
-        mux_conn.flushStage(); // staged reply -> frame.fdWriteAll -> hook -> enc
+        mux_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> enc
         enc.flush();
         if (enc.failed or outcome == .close) break;
     }
 
     // close_notify so the client finalizes the connection cleanly.
     var close_buf: [64]u8 = undefined;
-    terminator.writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+    terminator.writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 }
 
 /// Terminator driver: drives the resumable gRPC mux inline over the decrypted stream (no socketpair).

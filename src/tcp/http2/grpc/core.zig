@@ -134,9 +134,9 @@ pub const GrpcContext = struct {
             if (self._resp_gzip) {
                 var buf: [frame.headers_frame_scratch]u8 = undefined;
                 const n = frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type);
-                h2.fdWriteAll(self.fd, buf[0..n]) catch {};
+                h2.writeAllFD(self.fd, buf[0..n]) catch {};
             } else {
-                frame.sendGrpcHeaders(self.fd, self.stream_id, content_type) catch {};
+                frame.sendGrpcHeadersFD(self.fd, self.stream_id, content_type) catch {};
             }
         }
         self._hdr_sent = true;
@@ -251,10 +251,10 @@ pub const GrpcContext = struct {
             var one: [grpc_stream_inline_cap]u8 = undefined;
             @memcpy(one[0..head_len], head[0..head_len]);
             @memcpy(one[head_len..][0..payload.len], payload);
-            h2.fdWriteAll(self.fd, one[0 .. head_len + payload.len]) catch {};
+            h2.writeAllFD(self.fd, one[0 .. head_len + payload.len]) catch {};
         } else {
-            h2.fdWriteAll(self.fd, head[0..head_len]) catch {};
-            h2.fdWriteAll(self.fd, payload) catch {};
+            h2.writeAllFD(self.fd, head[0..head_len]) catch {};
+            h2.writeAllFD(self.fd, payload) catch {};
         }
         self._sent_bytes += payload.len;
     }
@@ -283,9 +283,9 @@ pub const GrpcContext = struct {
         }
 
         if (self._hdr_sent) {
-            frame.sendGrpcTrailer(self.fd, self.stream_id, status_code, grpc_message) catch {};
+            frame.sendGrpcTrailerFD(self.fd, self.stream_id, status_code, grpc_message) catch {};
         } else {
-            frame.sendGrpcError(self.fd, self.stream_id, status_code, grpc_message) catch {};
+            frame.sendGrpcErrorFD(self.fd, self.stream_id, status_code, grpc_message) catch {};
         }
     }
 
@@ -556,7 +556,7 @@ const ReplyStage = struct {
         if (bytes.len > self.buf.len - self.len) {
             self.flush();
             if (bytes.len > self.buf.len) {
-                h2.fdWriteAll(self.fd, bytes) catch {};
+                h2.writeAllFD(self.fd, bytes) catch {};
                 return;
             }
         }
@@ -568,7 +568,7 @@ const ReplyStage = struct {
     fn flush(self: *ReplyStage) void {
         if (self.len == 0) return;
 
-        h2.fdWriteAll(self.fd, self.buf[0..self.len]) catch {};
+        h2.writeAllFD(self.fd, self.buf[0..self.len]) catch {};
         self.len = 0;
     }
 };
@@ -913,10 +913,10 @@ fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: 
         @memcpy(preface[0..3], &peek);
         @memcpy(preface[3..], &rest);
         if (!std.mem.eql(u8, &preface, h2.PREFACE)) {
-            h2.sendGoaway(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
+            h2.sendGoawayFD(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
             return error.BadPreface;
         }
-        try h2.sendSettings(fd, &.{
+        try h2.sendSettingsFD(fd, &.{
             .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
             .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
             .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
@@ -961,11 +961,11 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     const hdr_end = std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n").? + 4;
 
     const upgrade_val = getHttp1Header(head_buf[0..hdr_end], "upgrade") orelse {
-        h2.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        h2.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return error.BadRequest;
     };
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_val, " "), "h2c")) {
-        h2.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        h2.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return error.BadRequest;
     }
 
@@ -975,7 +975,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         if (std.mem.indexOfScalar(u8, after, ' ')) |second_space| path = after[0..second_space];
     }
 
-    try h2.fdWriteAll(
+    try h2.writeAllFD(
         fd,
         "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n",
@@ -984,7 +984,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     var preface: [24]u8 = undefined;
     try h2.recvExact(fd, &preface);
     if (!std.mem.eql(u8, &preface, h2.PREFACE)) {
-        h2.sendGoaway(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
+        h2.sendGoawayFD(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
         return error.BadPreface;
     }
 
@@ -1008,7 +1008,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         }
     }
 
-    try h2.sendSettings(fd, &.{
+    try h2.sendSettingsFD(fd, &.{
         .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
         .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, STREAM_WINDOW_SIZE },
         .{ h2.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
@@ -1101,7 +1101,7 @@ fn serveGrpcLoop(
             {
                 conn_mutex.lock();
                 defer conn_mutex.unlock();
-                h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+                h2.sendGoawayFD(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
             }
             return error.FrameTooLarge;
         }
@@ -1125,8 +1125,8 @@ fn serveGrpcLoop(
                 {
                     conn_mutex.lock();
                     defer conn_mutex.unlock();
-                    try h2.sendSettingsAck(fd);
-                    try h2.sendWindowUpdate(fd, 0, CONN_WINDOW_BUMP);
+                    try h2.sendSettingsAckFD(fd);
+                    try h2.sendWindowUpdateFD(fd, 0, CONN_WINDOW_BUMP);
                 }
             },
 
@@ -1138,7 +1138,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 }
@@ -1147,7 +1147,7 @@ fn serveGrpcLoop(
                 {
                     conn_mutex.lock();
                     defer conn_mutex.unlock();
-                    try h2.sendPingAck(fd, ping_payload);
+                    try h2.sendPingAckFD(fd, ping_payload);
                 }
             },
 
@@ -1157,7 +1157,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 }
@@ -1165,7 +1165,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                        h2.sendRstStreamFD(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
                     }
                     continue;
                 }
@@ -1175,7 +1175,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendRstStream(fd, stream_id, h2.ERR_REFUSED_STREAM) catch {};
+                        h2.sendRstStreamFD(fd, stream_id, h2.ERR_REFUSED_STREAM) catch {};
                     }
                     continue;
                 };
@@ -1198,7 +1198,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 }
@@ -1208,7 +1208,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                        h2.sendRstStreamFD(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
                     }
                     stream_slots[slot] = false;
                     continue;
@@ -1228,7 +1228,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 };
@@ -1237,7 +1237,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendRstStream(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
+                        h2.sendRstStreamFD(fd, stream_id, h2.ERR_COMPRESSION_ERROR) catch {};
                     }
                     stream_slots[slot] = false;
                     continue;
@@ -1256,7 +1256,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 }
@@ -1264,7 +1264,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendRstStream(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
+                        h2.sendRstStreamFD(fd, stream_id, h2.ERR_STREAM_CLOSED) catch {};
                     }
                     continue;
                 };
@@ -1280,7 +1280,7 @@ fn serveGrpcLoop(
                     {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendGoaway(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+                        h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
                     return error.ProtocolError;
                 }
@@ -1294,7 +1294,7 @@ fn serveGrpcLoop(
                     if (conn_window_consumed >= CONN_REPLENISH_THRESHOLD) {
                         conn_mutex.lock();
                         defer conn_mutex.unlock();
-                        h2.sendWindowUpdate(fd, 0, @intCast(conn_window_consumed)) catch {};
+                        h2.sendWindowUpdateFD(fd, 0, @intCast(conn_window_consumed)) catch {};
                         conn_window_consumed = 0;
                     }
                 }
@@ -1429,7 +1429,7 @@ pub const GrpcMuxConn = struct {
         std.heap.smp_allocator.destroy(self);
     }
 
-    /// Flush the staged reply through `h2.fdWriteAll` (the URING / EPOLL loops send `stage.buf`
+    /// Flush the staged reply through `h2.writeAllFD` (the URING / EPOLL loops send `stage.buf`
     /// directly, but the inline TLS path drains it through the frame write hook to be encrypted).
     pub fn flushStage(self: *GrpcMuxConn) void {
         self.stage.flush();

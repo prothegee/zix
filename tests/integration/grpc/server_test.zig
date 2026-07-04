@@ -126,7 +126,7 @@ test "zix integration: gRPC unary returns greeting" {
     const resp = try client.unary("/svc.Svc/Greet", "application/grpc+proto", "world", &buf);
     try std.testing.expectEqualStrings("Hello, world!", resp);
 
-    zix.Http2.sendGoaway(client.fd, 1, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, 1, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -164,7 +164,7 @@ test "zix integration: gRPC server streaming sends multiple responses" {
     try std.testing.expect(fin == .status);
     try std.testing.expectEqual(zix.Grpc.Status.OK, fin.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -199,7 +199,7 @@ test "zix integration: gRPC client streaming collects all messages" {
     try std.testing.expect(fin == .status);
     try std.testing.expectEqual(zix.Grpc.Status.OK, fin.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -233,7 +233,7 @@ test "zix integration: gRPC bidirectional echoes each message" {
     const resp2 = try client.recvResponse(stream_id, &buf2);
     try std.testing.expectEqualStrings("pong", resp2.data);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -263,7 +263,7 @@ test "zix integration: gRPC unknown method returns UNIMPLEMENTED" {
     try std.testing.expect(resp == .status);
     try std.testing.expectEqual(zix.Grpc.Status.UNIMPLEMENTED, resp.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -293,7 +293,7 @@ test "zix integration: gRPC trailers-only error is received as INVALID_ARGUMENT"
     try std.testing.expect(resp == .status);
     try std.testing.expectEqual(zix.Grpc.Status.INVALID_ARGUMENT, resp.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -336,7 +336,7 @@ test "zix integration: gRPC two streams on same connection both return OK" {
     try std.testing.expect(status_bob == .status);
     try std.testing.expectEqual(zix.Grpc.Status.OK, status_bob.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id2, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id2, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
@@ -357,8 +357,8 @@ fn sendRawFrame(fd: std.posix.fd_t, frame_type: u8, flags: u8, stream_id: u31, p
     header[7] = @intCast((stream_id >> 8) & 0xFF);
     header[8] = @intCast(stream_id & 0xFF);
 
-    try zix.Http2.fdWriteAll(fd, &header);
-    if (payload.len > 0) try zix.Http2.fdWriteAll(fd, payload);
+    try zix.Http2.writeAllFD(fd, &header);
+    if (payload.len > 0) try zix.Http2.writeAllFD(fd, payload);
 }
 
 // sendGrpcDataFrame wraps a message in a 5-byte gRPC length-prefix and sends it as a DATA frame.
@@ -527,7 +527,7 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
     const fd = raw_stream.socket.handle;
     defer _ = std.posix.system.close(fd);
 
-    try zix.Http2.fdWriteAll(fd, zix.Http2.PREFACE);
+    try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
 
     // Send client SETTINGS (empty).
     try sendRawFrame(fd, 0x4, 0x00, 0, &.{});
