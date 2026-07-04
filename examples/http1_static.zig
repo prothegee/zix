@@ -67,7 +67,7 @@ fn detectContentType(path: []const u8) []const u8 {
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/plain", "home") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "home") catch {};
 }
 
 // POST /upload
@@ -88,28 +88,28 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // For multipart or large uploads, use the high-level zix.Http static server instead.
 fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
     const name = zix.Http1.queryParam(head, "name") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing query param: name\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing query param: name\"}") catch {};
         return;
     };
 
     if (std.mem.indexOf(u8, name, "..") != null or std.mem.indexOfScalar(u8, name, '/') != null) {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid filename\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"invalid filename\"}") catch {};
         return;
     }
 
     var path_buf: [512]u8 = undefined;
     const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ UPLOAD_DIR, name }) catch {
-        zix.Http1.writeJson(fd, 500, "{\"error\":\"path too long\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"path too long\"}") catch {};
         return;
     };
 
     const file = std.Io.Dir.cwd().createFile(g_io, file_path, .{}) catch {
-        zix.Http1.writeJson(fd, 500, "{\"error\":\"failed to create file\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"failed to create file\"}") catch {};
         return;
     };
     defer file.close(g_io);
@@ -117,7 +117,7 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     var write_buf: [8192]u8 = undefined;
     var writer = file.writer(g_io, &write_buf);
     writer.interface.writeAll(body) catch {
-        zix.Http1.writeJson(fd, 500, "{\"error\":\"failed to write file\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"failed to write file\"}") catch {};
         return;
     };
     writer.interface.flush() catch {};
@@ -128,7 +128,7 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         "{{\"file\":{{\"name\":\"{s}\",\"size\":{d},\"path\":\"{s}\"}}}}",
         .{ name, body.len, file_path },
     ) catch return;
-    zix.Http1.writeJson(fd, 200, resp) catch {};
+    zix.Http1.sendJsonFD(fd, 200, resp) catch {};
 }
 
 // POST /upload-multipart
@@ -148,18 +148,18 @@ fn uploadHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 // use the high-level zix.Http static server instead.
 fn uploadMultipartHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
     const content_type = zix.Http1.getHeader(head, "content-type") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing content-type\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing content-type\"}") catch {};
         return;
     };
 
     const boundary_prefix = "boundary=";
     const boundary_offset = std.mem.indexOf(u8, content_type, boundary_prefix) orelse {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing boundary in content-type\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing boundary in content-type\"}") catch {};
         return;
     };
     var boundary = content_type[boundary_offset + boundary_prefix.len ..];
@@ -173,23 +173,23 @@ fn uploadMultipartHandler(head: *const zix.Http1.ParsedHead, body: []const u8, f
     defer parser.deinit();
 
     parser.parse(body) catch {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid multipart body\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"invalid multipart body\"}") catch {};
         return;
     };
 
     const file_field = parser.getField("file") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"missing field: file\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing field: file\"}") catch {};
         return;
     };
 
     const filename = file_field.filename orelse "upload";
     if (std.mem.indexOf(u8, filename, "..") != null or std.mem.indexOfScalar(u8, filename, '/') != null) {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid filename\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"invalid filename\"}") catch {};
         return;
     }
 
     const saved_path = zix.utils.file.save(g_io, arena.allocator(), UPLOAD_DIR, filename, file_field.data) catch {
-        zix.Http1.writeJson(fd, 500, "{\"error\":\"failed to save file\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"failed to save file\"}") catch {};
         return;
     };
 
@@ -199,7 +199,7 @@ fn uploadMultipartHandler(head: *const zix.Http1.ParsedHead, body: []const u8, f
         "{{\"file\":{{\"name\":\"{s}\",\"size\":{d},\"path\":\"{s}\"}}}}",
         .{ filename, file_field.data.len, saved_path },
     ) catch return;
-    zix.Http1.writeJson(fd, 200, resp) catch {};
+    zix.Http1.sendJsonFD(fd, 200, resp) catch {};
 }
 
 // GET /secret/<file>?sec=abc123
@@ -220,7 +220,7 @@ fn uploadMultipartHandler(head: *const zix.Http1.ParsedHead, body: []const u8, f
 fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
@@ -228,41 +228,41 @@ fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
     const subpath = if (head.path.len > prefix.len and head.path[prefix.len] == '/') head.path[prefix.len + 1 ..] else "";
 
     if (subpath.len == 0 or std.mem.indexOf(u8, subpath, "..") != null) {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+        zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         return;
     }
 
     var path_buf: [512]u8 = undefined;
     const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ SECRET_DIR, subpath }) catch {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+        zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         return;
     };
 
     // Check file existence first: always 404 before revealing the sec requirement
     const file = std.Io.Dir.cwd().openFile(g_io, file_path, .{}) catch {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+        zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         return;
     };
     defer file.close(g_io);
 
     const stat = file.stat(g_io) catch {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+        zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         return;
     };
 
     if (stat.kind != .file) {
-        zix.Http1.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+        zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         return;
     }
 
     // File exists, now enforce sec param
     const sec = zix.Http1.queryParam(head, SEC_KEY) orelse {
-        zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 403, "{\"error\":\"forbidden\"}") catch {};
         return;
     };
 
     if (!std.mem.eql(u8, sec, SEC_VAL)) {
-        zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 403, "{\"error\":\"forbidden\"}") catch {};
         return;
     }
 
@@ -283,7 +283,7 @@ fn secretHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         remaining -= n;
     }
 
-    zix.Http1.writeSimple(fd, 200, content_type, all.items) catch {};
+    zix.Http1.sendSimpleFD(fd, 200, content_type, all.items) catch {};
 }
 
 // --------------------------------------------------------- //

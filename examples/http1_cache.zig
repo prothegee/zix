@@ -64,13 +64,13 @@ fn buildResponse(body: []const u8) []const u8 {
 fn cacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (zix.Http1.cacheLookup(head)) |cached| {
-        zix.Http1.fdWriteAll(fd, cached) catch {};
+        zix.Http1.writeAllFD(fd, cached) catch {};
         return;
     }
 
     const built = buildBody(kbFromQuery(head));
     const resp = buildResponse(built);
-    zix.Http1.writeWithCache(fd, head, resp, zix.Http1.cacheTtl()) catch {};
+    zix.Http1.sendWithCacheFD(fd, head, resp, zix.Http1.cacheTtl()) catch {};
 }
 
 // curl usage: curl "http://localhost:9031/nocache?kb=32"
@@ -78,14 +78,14 @@ fn nocacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.p
     _ = body;
     const built = buildBody(kbFromQuery(head));
     const resp = buildResponse(built);
-    zix.Http1.fdWriteAll(fd, resp) catch {};
+    zix.Http1.writeAllFD(fd, resp) catch {};
 }
 
 // curl usage: curl "http://localhost:9031/"
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/plain", "Hello, World!") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "Hello, World!") catch {};
 }
 
 // --------------------------------------------------------- //

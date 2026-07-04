@@ -22,7 +22,7 @@ const WORKERS: usize = 0;
 // client frame and calls this for text/binary only (ping is auto-ponged, close
 // is auto-echoed), so this just echoes the payload straight back.
 fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
-    zix.Http1.WebSocket.send(fd, @enumFromInt(opcode), payload) catch {};
+    zix.Http1.WebSocket.sendFD(fd, @enumFromInt(opcode), payload) catch {};
 }
 
 // GET /ws
@@ -40,7 +40,7 @@ fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.
     _ = body;
 
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
@@ -48,12 +48,12 @@ fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.
     const ws_key = zix.Http1.getHeader(head, "sec-websocket-key");
 
     if (!std.ascii.eqlIgnoreCase(upgrade_val, "websocket") or ws_key == null) {
-        zix.Http1.writeJson(fd, 400, "{\"error\":\"not a websocket upgrade request\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"not a websocket upgrade request\"}") catch {};
         return;
     }
 
     zix.Http1.WebSocket.serve(fd, ws_key.?, wsOnFrame) catch {
-        zix.Http1.writeJson(fd, 500, "{\"error\":\"handshake failed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"handshake failed\"}") catch {};
         return;
     };
 }

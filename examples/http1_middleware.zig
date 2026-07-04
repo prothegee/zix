@@ -45,7 +45,7 @@ fn withOriginCheck(comptime next: zix.Http1.HandlerFn) zix.Http1.HandlerFn {
         fn handle(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
             const origin = zix.Http1.getHeader(head, "origin") orelse "";
             if (!isAllowedOrigin(origin)) {
-                zix.Http1.writeJson(fd, 403, "{\"error\":\"forbidden origin\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 403, "{\"error\":\"forbidden origin\"}") catch {};
                 return;
             }
 
@@ -67,41 +67,41 @@ fn withBasicAuth(comptime next: zix.Http1.HandlerFn) zix.Http1.HandlerFn {
                     "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"zix\"\r\nContent-Type: application/json\r\nContent-Length: 30\r\n\r\n{{\"error\":\"authorization required\"}}",
                     .{},
                 ) catch return;
-                zix.Http1.fdWriteAll(fd, resp) catch {};
+                zix.Http1.writeAllFD(fd, resp) catch {};
                 return;
             };
 
             const prefix = "Basic ";
             if (!std.mem.startsWith(u8, auth_header, prefix)) {
-                zix.Http1.writeJson(fd, 400, "{\"error\":\"basic auth required\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"basic auth required\"}") catch {};
                 return;
             }
 
             const encoded = auth_header[prefix.len..];
             var decoded_buf: [256]u8 = undefined;
             const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch {
-                zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid base64 encoding\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"invalid base64 encoding\"}") catch {};
                 return;
             };
             if (decoded_len > decoded_buf.len) {
-                zix.Http1.writeJson(fd, 400, "{\"error\":\"credentials too long\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"credentials too long\"}") catch {};
                 return;
             }
             std.base64.standard.Decoder.decode(decoded_buf[0..decoded_len], encoded) catch {
-                zix.Http1.writeJson(fd, 400, "{\"error\":\"invalid base64 encoding\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"invalid base64 encoding\"}") catch {};
                 return;
             };
 
             const decoded = decoded_buf[0..decoded_len];
             const colon = std.mem.indexOfScalar(u8, decoded, ':') orelse {
-                zix.Http1.writeJson(fd, 401, "{\"error\":\"malformed credentials\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 401, "{\"error\":\"malformed credentials\"}") catch {};
                 return;
             };
             const user = decoded[0..colon];
             const pass = decoded[colon + 1 ..];
 
             if (!std.mem.eql(u8, user, AUTH_USER) or !std.mem.eql(u8, pass, AUTH_PASS)) {
-                zix.Http1.writeJson(fd, 401, "{\"error\":\"invalid credentials\"}") catch {};
+                zix.Http1.sendJsonFD(fd, 401, "{\"error\":\"invalid credentials\"}") catch {};
                 return;
             }
 
@@ -121,7 +121,7 @@ fn withBasicAuth(comptime next: zix.Http1.HandlerFn) zix.Http1.HandlerFn {
 fn publicHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeJson(fd, 200, "{\"message\":\"public resource (origin verified)\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"message\":\"public resource (origin verified)\"}") catch {};
 }
 
 // GET /private
@@ -134,7 +134,7 @@ fn publicHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 fn privateHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeJson(fd, 200, "{\"message\":\"private resource (origin and credentials verified)\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"message\":\"private resource (origin and credentials verified)\"}") catch {};
 }
 
 // --------------------------------------------------------- //

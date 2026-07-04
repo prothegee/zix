@@ -51,13 +51,13 @@ fn eventsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
         "Content-Type: text/event-stream\r\n" ++
         "Cache-Control: no-cache\r\n" ++
         "Connection: keep-alive\r\n\r\n";
-    zix.Http1.fdWriteAll(fd, headers) catch return;
+    zix.Http1.writeAllFD(fd, headers) catch return;
 
     var i: u32 = 0;
     while (true) : (i += 1) {
         var buf: [64]u8 = undefined;
         const event = std.fmt.bufPrint(&buf, "data: tick {d}\n\n", .{i}) catch return;
-        zix.Http1.fdWriteAll(fd, event) catch return;
+        zix.Http1.writeAllFD(fd, event) catch return;
 
         std.Io.sleep(g_io, std.Io.Duration.fromMilliseconds(1000), .awake) catch return;
     }
@@ -67,7 +67,7 @@ fn eventsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.po
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/html",
+    zix.Http1.sendSimpleFD(fd, 200, "text/html",
         \\<!DOCTYPE html>
         \\<html>
         \\<head><meta charset="utf-8"><title>zix http1 SSE</title></head>

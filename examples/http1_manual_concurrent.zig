@@ -23,7 +23,7 @@ const WORKERS: usize = 0; // ignored by .ASYNC
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/plain", "hello from zix http1 (manual concurrent)") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello from zix http1 (manual concurrent)") catch {};
 }
 
 // curl usage: curl -X GET "http://localhost:9030/info"
@@ -32,7 +32,7 @@ fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     _ = body;
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{{\"concurrent_limit\":{d}}}", .{CONCURRENT_LIMIT}) catch return;
-    zix.Http1.writeJson(fd, 200, msg) catch {};
+    zix.Http1.sendJsonFD(fd, 200, msg) catch {};
 }
 
 // --------------------------------------------------------- //

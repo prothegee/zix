@@ -17,7 +17,7 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 // --------------------------------------------------------- //
 
 fn handler(_: []const u8, _: []const zix.Http2.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello over h2 tls 1.3\n") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello over h2 tls 1.3\n") catch {};
 }
 
 const Routes = [_]zix.Http2.Route{

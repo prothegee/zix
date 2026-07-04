@@ -29,7 +29,7 @@ fn handler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) vo
         .{ body.len, HSTS_MAX_AGE_S, body },
     ) catch return;
 
-    zix.Http1.fdWriteAll(fd, w.buffered()) catch {};
+    zix.Http1.writeAllFD(fd, w.buffered()) catch {};
 }
 
 pub fn main(process: std.process.Init) !void {

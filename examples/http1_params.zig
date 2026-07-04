@@ -21,12 +21,12 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
         return;
     }
 
     if (head.query.len == 0) {
-        zix.Http1.writeJson(fd, 200, "null") catch {};
+        zix.Http1.sendJsonFD(fd, 200, "null") catch {};
         return;
     }
 
@@ -50,7 +50,7 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     }
     out.append(std.heap.smp_allocator, '}') catch return;
 
-    zix.Http1.writeJson(fd, 200, out.items) catch {};
+    zix.Http1.sendJsonFD(fd, 200, out.items) catch {};
 }
 
 // GET /greet?name=<value>
@@ -60,18 +60,18 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
         return;
     }
 
     const name = zix.Http1.queryParam(head, "name") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: name\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: name\"}") catch {};
         return;
     };
 
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"hello, {s}\"}}", .{name}) catch return;
-    zix.Http1.writeJson(fd, 200, json) catch {};
+    zix.Http1.sendJsonFD(fd, 200, json) catch {};
 }
 
 // GET /calc?a=<num>&b=<num>
@@ -82,31 +82,31 @@ fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
 fn calcHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
         return;
     }
 
     const a_str = zix.Http1.queryParam(head, "a") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: a\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: a\"}") catch {};
         return;
     };
     const b_str = zix.Http1.queryParam(head, "b") orelse {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: b\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: b\"}") catch {};
         return;
     };
 
     const a = std.fmt.parseInt(i64, a_str, 10) catch {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"Error: a must be a number\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: a must be a number\"}") catch {};
         return;
     };
     const b = std.fmt.parseInt(i64, b_str, 10) catch {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"Error: b must be a number\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: b must be a number\"}") catch {};
         return;
     };
 
     var buf: [128]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"{d} + {d} = {d}\"}}", .{ a, b, a + b }) catch return;
-    zix.Http1.writeJson(fd, 200, json) catch {};
+    zix.Http1.sendJsonFD(fd, 200, json) catch {};
 }
 
 // --------------------------------------------------------- //
