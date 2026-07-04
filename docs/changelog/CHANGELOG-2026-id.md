@@ -84,6 +84,10 @@ __*Update:*__
     - Seal-in-place pada jalur record TLS 1.3 (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): gather-encrypt yang menyegel dua slice plaintext ke satu record tanpa copy staging.
     - Default config: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
 
+- Optimasi memori dan throughput `zix.Grpc`:
+    - Pool slot-stream per-worker (`src/tcp/http2/grpc/core.zig`): mux gRPC `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, sehingga memori stream residen mengikuti stream konkuren alih-alih `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjam). Pada 1024 koneksi ini memangkas memori unary-grpc sekitar 12x (916 ke 77 MiB) sambil menaikkan throughput 8 sampai 11 persen, hasil dua-sumbu yang sama seperti pool Http2. Path blocking `.ASYNC` / `.POOL` / `.MIXED` mempertahankan array per-koneksinya sendiri, tak berubah.
+    - Default config: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
+
     ---
 
 - gRPC over TLS dan terminator h2-over-TLS bersama:
@@ -146,7 +150,7 @@ __*Update:*__
     ---
 
 - DATA-frame coalescing untuk gRPC server-streaming (ADR-057):
-    - Server-streaming `zix.Grpc` memadatkan pesan berurutan menjadi DATA frame HTTP/2 yang lebih sedikit dan lebih besar (hingga max frame size default 16 KiB) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di klien. Perbaikan ini ada di `muxDispatch` bersama, jadi `.URING`, `.EPOLL`, dan kedua jalur mux TLS mewarisinya. Unary tetap satu frame per pesan dan byte-nya persis sama. Jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) belum dipadatkan.
+    - Server-streaming `zix.Grpc` memadatkan pesan berurutan menjadi DATA frame HTTP/2 yang lebih sedikit dan lebih besar (hingga max frame size default 16 KiB) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di klien. Perbaikan ini ada di `muxDispatch` bersama, jadi `.URING`, `.EPOLL`, dan kedua jalur mux TLS mewarisinya. Unary tetap satu frame per pesan dan byte-nya persis sama. Jalur thread (`.ASYNC` / `.POOL` / `.MIXED`) belum dipadatkan. `zix.Grpc.Client` bawaan meng-unpack beberapa pesan dari satu DATA frame (tiap `recvResponse` menguras sisa frame sebelum membaca frame berikutnya), sesuai coalescing-nya.
 
     ---
 

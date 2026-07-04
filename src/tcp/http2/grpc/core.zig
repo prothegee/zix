@@ -449,13 +449,13 @@ pub fn Router(comptime routes: []const Route) type {
 
 pub const GrpcServeOpts = struct {
     /// Maximum concurrent streams per connection.
-    max_streams: usize = 16,
+    max_streams: usize = 128,
     /// MAX_FRAME_SIZE sent in server SETTINGS.
     max_frame_size: u32 = h2.DEFAULT_MAX_FRAME_SIZE,
     /// HPACK scratch buffer size per connection (header string storage).
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream in bytes.
-    max_body: usize = 65536,
+    max_body: usize = 16384,
     /// Per-connection read buffer floor in bytes. The reader is sized to the larger of this and
     /// one max frame, so a larger floor cuts read() and compaction for big frames.
     conn_read_buf_min: usize = 64 * 1024,
@@ -519,20 +519,25 @@ const grpc_stream_coalesce_cap: usize = 16384;
 
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
-/// Per-stream parse state. body and header_scratch are slices into per-connection
-/// backing buffers (sized to opts.max_body / opts.max_header_scratch), not inline arrays,
-/// so a connection's stream table costs O(max_streams * max_body) instead of a fixed
-/// ~70 KB per slot regardless of configured limits.
+/// Per-stream parse state. `body` and `header_scratch` are buffers sized to the serve options
+/// (opts.max_body / opts.max_header_scratch), not inline arrays, so the fixed part of a Stream stays
+/// small regardless of the configured body limit. On the multiplexed (.EPOLL / .URING) path a Stream is
+/// borrowed from the per-worker pool while open (its buffers reused across borrows) and `next_free` links
+/// it into the pool freelist while idle. On the blocking path the array is inline and `body` /
+/// `header_scratch` are slices into per-connection backing buffers.
 const Stream = struct {
-    id: u31,
-    state: StreamState,
-    headers: [h2.MAX_HEADERS]h2.Header,
-    header_count: usize,
-    body: []u8,
-    body_len: usize,
-    header_scratch: []u8,
-    end_headers: bool,
-    end_stream: bool,
+    id: u31 = 0,
+    state: StreamState = .IDLE,
+    headers: [h2.MAX_HEADERS]h2.Header = undefined,
+    header_count: usize = 0,
+    body: []u8 = &.{},
+    body_len: usize = 0,
+    header_scratch: []u8 = &.{},
+    end_headers: bool = false,
+    end_stream: bool = false,
+
+    /// Freelist link, valid only while this stream sits idle in the per-worker pool.
+    next_free: ?*Stream = null,
 };
 
 // --------------------------------------------------------- //
@@ -1341,10 +1346,11 @@ pub const GrpcMuxConn = struct {
 
     hpack_dec: h2.HpackDecoder,
 
-    streams: []Stream,
+    /// Per-connection slot table. `streams[i]` is a Stream borrowed from the per-worker pool, valid only
+    /// while `slots[i]` is set. The array holds pointers, not inline stream state, so an idle connection
+    /// reserves `max_streams` pointers, not `max_streams` full body / scratch buffers.
+    streams: []*Stream,
     slots: []bool,
-    bodies: []u8,
-    scratches: []u8,
 
     last_stream_id: u31,
     conn_window_consumed: usize,
@@ -1372,7 +1378,7 @@ pub const GrpcMuxConn = struct {
             std.heap.smp_allocator.destroy(conn);
             return null;
         };
-        const streams = std.heap.smp_allocator.alloc(Stream, opts.max_streams) catch {
+        const streams = std.heap.smp_allocator.alloc(*Stream, opts.max_streams) catch {
             std.heap.smp_allocator.free(rbuf);
             std.heap.smp_allocator.destroy(conn);
             return null;
@@ -1383,27 +1389,11 @@ pub const GrpcMuxConn = struct {
             std.heap.smp_allocator.destroy(conn);
             return null;
         };
-        const bodies = std.heap.smp_allocator.alloc(u8, opts.max_body * opts.max_streams) catch {
-            std.heap.smp_allocator.free(slots);
-            std.heap.smp_allocator.free(streams);
-            std.heap.smp_allocator.free(rbuf);
-            std.heap.smp_allocator.destroy(conn);
-            return null;
-        };
-        const scratches = std.heap.smp_allocator.alloc(u8, opts.max_header_scratch * opts.max_streams) catch {
-            std.heap.smp_allocator.free(bodies);
-            std.heap.smp_allocator.free(slots);
-            std.heap.smp_allocator.free(streams);
-            std.heap.smp_allocator.free(rbuf);
-            std.heap.smp_allocator.destroy(conn);
-            return null;
-        };
 
+        // Slots start free. The heavy per-stream state (body / header-scratch buffers) is not reserved
+        // here, it is borrowed from the per-worker pool on stream open. `streams[i]` is only read while
+        // `slots[i]` is set, so the pointers stay unset until a slot is claimed.
         @memset(slots, false);
-        for (streams, 0..) |*s, i| {
-            s.body = bodies[i * opts.max_body ..][0..opts.max_body];
-            s.header_scratch = scratches[i * opts.max_header_scratch ..][0..opts.max_header_scratch];
-        }
 
         conn.* = .{
             .fd = fd,
@@ -1414,8 +1404,6 @@ pub const GrpcMuxConn = struct {
             .hpack_dec = h2.HpackDecoder.init(),
             .streams = streams,
             .slots = slots,
-            .bodies = bodies,
-            .scratches = scratches,
             .last_stream_id = 0,
             .conn_window_consumed = 0,
             .phase = .await_preface,
@@ -1430,8 +1418,11 @@ pub const GrpcMuxConn = struct {
     }
 
     pub fn deinit(self: *GrpcMuxConn) void {
-        std.heap.smp_allocator.free(self.scratches);
-        std.heap.smp_allocator.free(self.bodies);
+        // Return any still-open stream to the per-worker pool before freeing the connection's own arrays.
+        for (self.slots, 0..) |in_use, slot| {
+            if (in_use) releaseGrpcStream(self.streams[slot]);
+        }
+
         std.heap.smp_allocator.free(self.slots);
         std.heap.smp_allocator.free(self.streams);
         std.heap.smp_allocator.free(self.rbuf);
@@ -1444,6 +1435,101 @@ pub const GrpcMuxConn = struct {
         self.stage.flush();
     }
 };
+
+// --------------------------------------------------------- //
+// Per-worker stream-slot pool for the multiplexed (.EPOLL / .URING) path. A worker drives many
+// connections from one thread, and each connection borrows a Stream (its body / header-scratch buffers)
+// only while a stream is open, returning it on close. The freelist is threadlocal (shared-nothing per
+// worker, no atomics), so resident stream memory tracks concurrent streams on the worker, not
+// connections times max_streams. Buffers are allocated once per pooled stream and reused across borrows,
+// so the steady state does no per-stream allocation.
+
+threadlocal var grpc_stream_pool: ?*Stream = null;
+
+/// Borrow a stream from the per-worker pool, growing it with a fresh allocation when the freelist is
+/// empty. The returned stream is reset to defaults (a pooled stream was cleared on release) with its
+/// body / header-scratch buffers sized to at least the serve options.
+///
+/// Return:
+/// - *Stream (clean, buffers ready)
+/// - null when a growth allocation failed (the caller refuses the stream)
+fn acquireGrpcStream(opts: GrpcServeOpts) ?*Stream {
+    const a = std.heap.smp_allocator;
+
+    if (grpc_stream_pool) |st| {
+        grpc_stream_pool = st.next_free;
+        if (st.body.len >= opts.max_body and st.header_scratch.len >= opts.max_header_scratch) return st;
+
+        // A borrower asking for a larger cap than this slot was sized to (non-uniform serve options on
+        // one worker, never in normal use) drops the slot and falls through to a fresh allocation.
+        a.free(st.body);
+        a.free(st.header_scratch);
+        a.destroy(st);
+    }
+
+    const st = a.create(Stream) catch return null;
+    const body = a.alloc(u8, opts.max_body) catch {
+        a.destroy(st);
+        return null;
+    };
+    const scratch = a.alloc(u8, opts.max_header_scratch) catch {
+        a.free(body);
+        a.destroy(st);
+        return null;
+    };
+
+    st.* = .{};
+    st.body = body;
+    st.header_scratch = scratch;
+
+    return st;
+}
+
+/// Return a stream to the per-worker pool, resetting its state to defaults while keeping its buffers so
+/// the next borrower reuses them. LIFO, so a hot stream is reused first.
+fn releaseGrpcStream(st: *Stream) void {
+    const body = st.body;
+    const scratch = st.header_scratch;
+
+    st.* = .{};
+    st.body = body;
+    st.header_scratch = scratch;
+    st.next_free = grpc_stream_pool;
+
+    grpc_stream_pool = st;
+}
+
+/// Free a connection slot: mark it unused and return its borrowed stream to the pool.
+fn muxReleaseSlot(conn: *GrpcMuxConn, slot: usize) void {
+    conn.slots[slot] = false;
+    releaseGrpcStream(conn.streams[slot]);
+}
+
+/// Claim a free slot for a new stream, borrowing a stream from the pool. Returns the slot index, or null
+/// when the connection is at max_streams or a pool allocation failed (the caller refuses the stream).
+fn muxSlotFor(conn: *GrpcMuxConn, stream_id: u31) ?usize {
+    for (conn.slots, 0..) |slot_in_use, i| {
+        if (!slot_in_use) {
+            const st = acquireGrpcStream(conn.opts) orelse return null;
+            st.id = stream_id;
+
+            conn.streams[i] = st;
+            conn.slots[i] = true;
+
+            return i;
+        }
+    }
+
+    return null;
+}
+
+fn muxFindSlot(stream_id: u31, streams: []*Stream, used: []bool) ?usize {
+    for (used, 0..) |slot_in_use, i| {
+        if (slot_in_use and streams[i].id == stream_id) return i;
+    }
+
+    return null;
+}
 
 /// Append a complete frame (9-byte header + payload) to the connection reply cork.
 fn muxStageFrame(conn: *GrpcMuxConn, frame_type: u8, flags: u8, stream_id: u31, payload: []const u8) void {
@@ -1712,11 +1798,11 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 }
                 conn.last_stream_id = @max(conn.last_stream_id, stream_id);
 
-                const slot = slotFor(stream_id, conn.streams, conn.slots) orelse {
+                const slot = muxSlotFor(conn, stream_id) orelse {
                     muxStageRst(conn, stream_id, h2.ERR_REFUSED_STREAM);
                     continue;
                 };
-                const stream = &conn.streams[slot];
+                const stream = conn.streams[slot];
                 stream.id = stream_id;
                 stream.state = .OPEN;
                 stream.body_len = 0;
@@ -1739,7 +1825,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
 
                 stream.header_count = conn.hpack_dec.decode(block, &stream.headers, stream.header_scratch) catch {
                     muxStageRst(conn, stream_id, h2.ERR_COMPRESSION_ERROR);
-                    conn.slots[slot] = false;
+                    muxReleaseSlot(conn, slot);
                     continue;
                 };
                 stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
@@ -1747,27 +1833,27 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
 
                 if (stream.end_headers and stream.end_stream) {
                     muxDispatch(routes, conn, stream);
-                    conn.slots[slot] = false;
+                    muxReleaseSlot(conn, slot);
                 }
             },
 
             h2.FRAME_TYPE_CONTINUATION => {
                 const stream_id = fh.stream_id;
-                const slot = findSlot(stream_id, conn.streams, conn.slots) orelse {
+                const slot = muxFindSlot(stream_id, conn.streams, conn.slots) orelse {
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
                     return .close;
                 };
-                const stream = &conn.streams[slot];
+                const stream = conn.streams[slot];
                 const count = conn.hpack_dec.decode(payload, stream.headers[stream.header_count..], stream.header_scratch) catch {
                     muxStageRst(conn, stream_id, h2.ERR_COMPRESSION_ERROR);
-                    conn.slots[slot] = false;
+                    muxReleaseSlot(conn, slot);
                     continue;
                 };
                 stream.header_count += count;
                 stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
                     muxDispatch(routes, conn, stream);
-                    conn.slots[slot] = false;
+                    muxReleaseSlot(conn, slot);
                 }
             },
 
@@ -1777,11 +1863,11 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                     muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
                     return .close;
                 }
-                const slot = findSlot(stream_id, conn.streams, conn.slots) orelse {
+                const slot = muxFindSlot(stream_id, conn.streams, conn.slots) orelse {
                     muxStageRst(conn, stream_id, h2.ERR_STREAM_CLOSED);
                     continue;
                 };
-                const stream = &conn.streams[slot];
+                const stream = conn.streams[slot];
 
                 var data = payload;
                 var pad_len: usize = 0;
@@ -1810,12 +1896,12 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
 
                 if (stream.end_stream) {
                     muxDispatch(routes, conn, stream);
-                    conn.slots[slot] = false;
+                    muxReleaseSlot(conn, slot);
                 }
             },
 
             h2.FRAME_TYPE_RST_STREAM => {
-                if (findSlot(fh.stream_id, conn.streams, conn.slots)) |slot| conn.slots[slot] = false;
+                if (muxFindSlot(fh.stream_id, conn.streams, conn.slots)) |slot| muxReleaseSlot(conn, slot);
             },
 
             h2.FRAME_TYPE_GOAWAY => return .close,
@@ -2047,9 +2133,9 @@ test "zix grpc: detectContentType grpc no subtype is PROTO" {
 
 test "zix grpc: GrpcServeOpts defaults" {
     const opts = GrpcServeOpts{};
-    try std.testing.expectEqual(@as(usize, 16), opts.max_streams);
+    try std.testing.expectEqual(@as(usize, 128), opts.max_streams);
     try std.testing.expectEqual(h2.DEFAULT_MAX_FRAME_SIZE, opts.max_frame_size);
-    try std.testing.expectEqual(@as(usize, 65536), opts.max_body);
+    try std.testing.expectEqual(@as(usize, 16384), opts.max_body);
     try std.testing.expectEqual(@as(u32, 0), opts.handler_timeout_ms);
     try std.testing.expect(opts.io == null);
 }
@@ -2422,4 +2508,64 @@ test "zix grpc: streaming sendMessage past the inline cap keeps the two-write pa
     ctx.sendMessage("application/grpc", &big);
 
     try std.testing.expectEqual(@as(usize, 2), probe.count);
+}
+
+test "zix grpc: pooled stream is reused and reset clean on release" {
+    const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
+
+    // A fresh borrow carries buffers sized to at least the serve options.
+    const first = acquireGrpcStream(opts) orelse return error.OutOfMemory;
+    try std.testing.expect(first.body.len >= 128);
+    try std.testing.expect(first.header_scratch.len >= 64);
+
+    // Dirty every field a request would touch, then return the stream to the pool.
+    first.id = 7;
+    first.state = .OPEN;
+    first.header_count = 3;
+    first.body_len = 99;
+    first.end_headers = true;
+    first.end_stream = true;
+    releaseGrpcStream(first);
+
+    // The next borrow is LIFO, so it is the same object, now reset to defaults with buffers retained.
+    const again = acquireGrpcStream(opts) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(first, again);
+    try std.testing.expectEqual(@as(u31, 0), again.id);
+    try std.testing.expectEqual(StreamState.IDLE, again.state);
+    try std.testing.expectEqual(@as(usize, 0), again.header_count);
+    try std.testing.expectEqual(@as(usize, 0), again.body_len);
+    try std.testing.expect(!again.end_headers);
+    try std.testing.expect(!again.end_stream);
+    try std.testing.expect(again.body.len >= 128);
+
+    releaseGrpcStream(again);
+}
+
+test "zix grpc: stream slots are pooled across connections" {
+    const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    // Connection A borrows a slot, then releases it back to the per-worker pool.
+    const conn_a = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const slot_a = muxSlotFor(conn_a, 1).?;
+    const stream_a = conn_a.streams[slot_a];
+    try std.testing.expect(conn_a.slots[slot_a]);
+
+    muxReleaseSlot(conn_a, slot_a);
+    try std.testing.expect(!conn_a.slots[slot_a]);
+    conn_a.deinit();
+
+    // A second connection reuses the same pooled stream (LIFO), so stream memory is shared per worker
+    // and does not scale with the connection count.
+    const conn_b = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn_b.deinit();
+
+    const slot_b = muxSlotFor(conn_b, 3).?;
+    try std.testing.expectEqual(stream_a, conn_b.streams[slot_b]);
+    try std.testing.expectEqual(@as(u31, 3), conn_b.streams[slot_b].id);
+
+    muxReleaseSlot(conn_b, slot_b);
 }

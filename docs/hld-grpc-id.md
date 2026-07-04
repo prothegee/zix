@@ -81,10 +81,10 @@ graph LR
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count accept thread (POOL dan MIXED) |
 | `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool thread. EPOLL: 0 -> cpu_count worker multiplex |
-| `max_streams` | 16 | maksimum stream HTTP/2 konkuren per koneksi |
+| `max_streams` | 128 | maksimum stream HTTP/2 konkuren per koneksi (SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan) |
 | `max_frame_size` | 16384 | ukuran frame HTTP/2 maksimum yang diiklankan |
-| `max_header_scratch` | 4096 | buffer scratch decode HPACK per koneksi |
-| `max_body` | 65536 | total maksimum body gRPC yang di-buffer per stream (semua frame DATA) |
+| `max_header_scratch` | 4096 | buffer scratch decode HPACK per stream (di-pool per worker) |
+| `max_body` | 16384 | total maksimum body gRPC yang di-buffer per stream (semua frame DATA), lebih besar dipotong |
 | `logger` | `null` | `*zix.Logger` opsional, jika diatur, mencatat setiap penutupan stream melalui `rpc()` dan startup/shutdown melalui `system()` |
 | `handler_timeout_ms` | 0 | batas timeout handler global (ms), 0 = dinonaktifkan. Digabungkan dengan `Route.timeout_ms` dan header `grpc-timeout` saat dispatch |
 

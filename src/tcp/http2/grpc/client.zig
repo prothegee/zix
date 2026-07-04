@@ -53,6 +53,13 @@ pub const GrpcClient = struct {
     resp_hdr_count: usize,
     payload_scratch: [65536 + 256]u8,
 
+    /// Unconsumed tail of the current DATA frame's payload (points into `payload_scratch`). A server may
+    /// pack several length-prefixed gRPC messages into one DATA frame, so `recvResponse` drains them one
+    /// per call from here before reading the next frame.
+    data_rest: []const u8,
+    /// Whether the DATA frame backing `data_rest` carried END_STREAM (report OK once its messages drain).
+    data_end_stream: bool,
+
     // --------------------------------------------------------- //
 
     /// Connect to a gRPC h2c server and perform the HTTP/2 preface exchange.
@@ -92,6 +99,8 @@ pub const GrpcClient = struct {
             .resp_hdrs = undefined,
             .resp_hdr_count = 0,
             .payload_scratch = undefined,
+            .data_rest = &.{},
+            .data_end_stream = false,
         };
     }
 
@@ -159,12 +168,40 @@ pub const GrpcClient = struct {
     // --------------------------------------------------------- //
 
     /// Receive the next event on the specified stream.
-    /// Handles SETTINGS, WINDOW_UPDATE, and PING frames transparently.
+    /// Handles SETTINGS, WINDOW_UPDATE, and PING frames transparently. A DATA frame may pack several
+    /// length-prefixed gRPC messages (a server-streaming server coalesces them), so each call returns the
+    /// next message, draining a frame's leftover before reading a new one.
     ///
     /// Return:
     /// - !GrpcClientResponse (.data for each gRPC response message, .status for the trailer)
     pub fn recvResponse(self: *Self, sid: u31, buf: []u8) !GrpcClientResponse {
         while (true) {
+            // Drain the next message still packed in the last DATA frame before reading a new one. A
+            // server may coalesce several length-prefixed gRPC messages into one DATA frame, so one frame
+            // can yield several recvResponse results.
+            if (self.data_rest.len >= frm.grpc_prefix_len) {
+                const compress_flag = self.data_rest[0] != 0;
+                const msg_len = std.mem.readInt(u32, self.data_rest[1..frm.grpc_prefix_len], .big);
+                const msg_end = frm.grpc_prefix_len + @as(usize, msg_len);
+                if (msg_end > self.data_rest.len) return error.TruncatedMessage;
+
+                const msg = self.data_rest[frm.grpc_prefix_len..msg_end];
+                self.data_rest = self.data_rest[msg_end..];
+
+                const data_len = try decodeMessage(compress_flag, msg, buf);
+
+                return .{ .data = buf[0..data_len] };
+            }
+
+            // The buffered frame is drained. If it carried END_STREAM, that is the OK result.
+            if (self.data_end_stream) {
+                self.data_end_stream = false;
+                self.data_rest = &.{};
+
+                return .{ .status = GrpcStatus.OK };
+            }
+            self.data_rest = &.{};
+
             const fh = try h2.readFrameHeader(self.fd);
             if (fh.length > self.payload_scratch.len) return error.FrameTooLarge;
             const payload = self.payload_scratch[0..fh.length];
@@ -201,33 +238,32 @@ pub const GrpcClient = struct {
                 },
                 h2.FRAME_TYPE_DATA => {
                     if (fh.stream_id != sid) continue;
-                    if (payload.len < 5) return error.TooShort;
-                    const compress_flag = payload[0] != 0;
-                    const msg_len = std.mem.readInt(u32, payload[1..5], .big);
-                    const msg_end = 5 + @as(usize, msg_len);
-                    if (msg_end > payload.len) return error.TruncatedMessage;
-                    const msg = payload[5..msg_end];
 
-                    var data_len: usize = undefined;
-                    if (compress_flag) {
-                        var in_reader = std.Io.Reader.fixed(msg);
-                        var decomp = std.compress.flate.Decompress.init(&in_reader, .gzip, &.{});
-                        var out_writer = std.Io.Writer.fixed(buf);
-                        data_len = decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
-                    } else {
-                        data_len = @min(msg.len, buf.len);
-                        @memcpy(buf[0..data_len], msg[0..data_len]);
-                    }
-
-                    if ((fh.flags & h2.FLAG_END_STREAM) != 0)
-                        return .{ .status = GrpcStatus.OK };
-                    return .{ .data = buf[0..data_len] };
+                    // Buffer the whole payload, the loop top drains its messages one per call.
+                    self.data_rest = payload;
+                    self.data_end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
                 },
                 h2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
                 h2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
                 else => {},
             }
         }
+    }
+
+    /// Decode one gRPC message body (optionally gzip-compressed) into `buf`, returning the byte length.
+    fn decodeMessage(compress_flag: bool, msg: []const u8, buf: []u8) !usize {
+        if (compress_flag) {
+            var in_reader = std.Io.Reader.fixed(msg);
+            var decomp = std.compress.flate.Decompress.init(&in_reader, .gzip, &.{});
+            var out_writer = std.Io.Writer.fixed(buf);
+
+            return decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
+        }
+
+        const data_len = @min(msg.len, buf.len);
+        @memcpy(buf[0..data_len], msg[0..data_len]);
+
+        return data_len;
     }
 
     // --------------------------------------------------------- //
@@ -322,4 +358,57 @@ test "zix test: applySocketTimeout grpc, short timeout does not fire when data a
     const n: usize = @intCast(std.os.linux.read(fds[0], &buf, buf.len));
     try std.testing.expect(n > 0);
     try std.testing.expectEqualSlices(u8, "data", buf[0..n]);
+}
+
+test "zix grpc: recvResponse drains multiple messages coalesced in one DATA frame" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    // One DATA frame (END_STREAM) carrying two length-prefixed messages, the shape a server-streaming
+    // server produces when it coalesces messages into a single frame.
+    var payload: [2 * (frm.grpc_prefix_len + 3)]u8 = undefined;
+    frm.writeGrpcPrefix(payload[0..frm.grpc_prefix_len], false, 3);
+    @memcpy(payload[frm.grpc_prefix_len..][0..3], "aaa");
+    frm.writeGrpcPrefix(payload[frm.grpc_prefix_len + 3 ..][0..frm.grpc_prefix_len], false, 3);
+    @memcpy(payload[2 * frm.grpc_prefix_len + 3 ..][0..3], "bbb");
+
+    try h2.writeFrameHeader(fds[1], .{
+        .length = @intCast(payload.len),
+        .frame_type = h2.FRAME_TYPE_DATA,
+        .flags = h2.FLAG_END_STREAM,
+        .stream_id = 1,
+    });
+    try h2.fdWriteAll(fds[1], &payload);
+
+    var client = GrpcClient{
+        .fd = fds[0],
+        .next_sid = 3,
+        .hdec = h2.HpackDecoder.init(),
+        .hdec_scratch = undefined,
+        .resp_hdrs = undefined,
+        .resp_hdr_count = 0,
+        .payload_scratch = undefined,
+        .data_rest = &.{},
+        .data_end_stream = false,
+    };
+
+    var buf: [32]u8 = undefined;
+
+    // First call reads the frame and returns the first message, the second drains the leftover, the
+    // third reports OK from the buffered END_STREAM without reading another frame.
+    const r1 = try client.recvResponse(1, &buf);
+    try std.testing.expect(r1 == .data);
+    try std.testing.expectEqualSlices(u8, "aaa", r1.data);
+
+    const r2 = try client.recvResponse(1, &buf);
+    try std.testing.expect(r2 == .data);
+    try std.testing.expectEqualSlices(u8, "bbb", r2.data);
+
+    const r3 = try client.recvResponse(1, &buf);
+    try std.testing.expect(r3 == .status);
+    try std.testing.expectEqual(GrpcStatus.OK, r3.status);
 }

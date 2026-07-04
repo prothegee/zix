@@ -84,6 +84,10 @@ __*Update:*__
     - Seal-in-place on the TLS 1.3 record path (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): a gather-encrypt that seals two plaintext slices into one record without a staging copy.
     - Config defaults: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
 
+- `zix.Grpc` memory and throughput optimization:
+    - Per-worker stream-slot pool (`src/tcp/http2/grpc/core.zig`): the `.EPOLL` / `.URING` gRPC mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 1024 connections this cut unary-grpc memory about 12x (916 to 77 MiB) while lifting throughput 8 to 11 percent, the same both-axes result as the Http2 pool. The blocking `.ASYNC` / `.POOL` / `.MIXED` path keeps its own per-connection arrays, unchanged.
+    - Config defaults: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
+
     ---
 
 - gRPC over TLS and a shared h2-over-TLS terminator:
@@ -146,7 +150,7 @@ __*Update:*__
     ---
 
 - gRPC server-streaming DATA-frame coalescing (ADR-057):
-    - `zix.Grpc` server-streaming packs consecutive messages into fewer, larger HTTP/2 DATA frames (up to the 16 KiB default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. The fix lives in the shared `muxDispatch`, so `.URING`, `.EPOLL`, and both TLS mux paths inherit it. Unary keeps one frame per message and is byte-for-byte unchanged. The thread path (`.ASYNC` / `.POOL` / `.MIXED`) is not coalesced yet.
+    - `zix.Grpc` server-streaming packs consecutive messages into fewer, larger HTTP/2 DATA frames (up to the 16 KiB default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. The fix lives in the shared `muxDispatch`, so `.URING`, `.EPOLL`, and both TLS mux paths inherit it. Unary keeps one frame per message and is byte-for-byte unchanged. The thread path (`.ASYNC` / `.POOL` / `.MIXED`) is not coalesced yet. The bundled `zix.Grpc.Client` unpacks multiple messages from one DATA frame (each `recvResponse` drains the frame's leftover before reading the next), matching the coalescing.
 
     ---
 

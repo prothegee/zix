@@ -45,7 +45,7 @@ Buffered frame reader used by `serveGrpcLoop`. `ensure(n)` blocks until `n` byte
 
 ### Stream
 
-Per-stream parse state. `body` and `header_scratch` are slices into per-connection backing buffers sized to `opts.max_body` / `opts.max_header_scratch`, not inline arrays, so the stream table costs `max_streams * max_body` per connection rather than a fixed ~70 KB per slot.
+Per-stream parse state. `body` and `header_scratch` are buffers sized to `opts.max_body` / `opts.max_header_scratch`, not inline arrays. On the multiplexed (`.EPOLL` / `.URING`) path a `Stream` is borrowed from a per-worker pool while open and returned on close (`next_free` links it into the freelist while idle), so resident stream memory tracks concurrent streams on the worker, not `connections * max_streams`. On the blocking path the array is inline and the buffers are slices into per-connection backing.
 
 ```zig
 const Stream = struct {
@@ -58,10 +58,11 @@ const Stream = struct {
     header_scratch: []u8,
     end_headers: bool,
     end_stream: bool,
+    next_free: ?*Stream,        // freelist link while idle in the per-worker pool
 };
 ```
 
-`slotFor(stream_id, streams, used)` claims the first free slot, `findSlot(stream_id, ...)` locates an open stream by id. Both are linear scans over `max_streams`.
+On the mux path `muxSlotFor(conn, stream_id)` borrows a `Stream` from the per-worker pool into the first free slot (`acquireGrpcStream` grows the freelist on a miss, `muxReleaseSlot` / `releaseGrpcStream` return it on close), and `muxFindSlot(stream_id, ...)` locates an open stream by id. The blocking path keeps the inline-array `slotFor` / `findSlot`. All are linear scans over `max_streams`.
 
 ### Flow-control constants
 
@@ -87,10 +88,8 @@ pub const GrpcMuxConn = struct {
     rend: usize,
 
     hpack_dec: h2.HpackDecoder,
-    streams: []Stream,
+    streams: []*Stream,         // max_streams-wide pointer table, slots borrowed from the per-worker pool
     slots: []bool,
-    bodies: []u8,               // backing for stream bodies
-    scratches: []u8,            // backing for stream header_scratch
     last_stream_id: u31,
     conn_window_consumed: usize,
     phase: MuxPhase,            // await_preface | await_upgrade | await_preface2 | h2
