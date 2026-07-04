@@ -479,13 +479,13 @@ pub fn runTlsMux(config: Config, handler: HandlerFn) !void {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-/// Test handler: write a fixed 200 response via the fd-handler write path (core.fdWriteAll, so the
+/// Test handler: write a fixed 200 response via the fd-handler write path (core.writeAllFD, so the
 /// response sink installed by runHandlerToBuffer captures it), ignoring the request.
 fn epollTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
     _ = head;
     _ = body;
 
-    core.fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
 }
 
 /// Read exactly one TLS record (5-byte header + body) from a blocking fd into buf, returning its full
@@ -565,7 +565,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
     std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
     @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
-    try writeAllFd(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+    try writeAllFD(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
 
     try std.testing.expect(onReadable(&conn)); // process ClientHello, emit the server flight
 
@@ -578,7 +578,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
 
     var fin_buf: [256]u8 = undefined;
     var finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
-    try writeAllFd(client_fd, finished.client_finished);
+    try writeAllFD(client_fd, finished.client_finished);
 
     // two keep-alive requests on the one connection: both get a 200 over the SAME session driven by
     // onReadable (no re-handshake), and onReadable keeps the connection alive (returns true).
@@ -588,7 +588,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     };
     for (keepalive_reqs) |req| {
         var enc: [512]u8 = undefined;
-        try writeAllFd(client_fd, finished.connection.writeAppData(req, &enc));
+        try writeAllFD(client_fd, finished.connection.writeAppData(req, &enc));
 
         try std.testing.expect(onReadable(&conn));
         try std.testing.expect(!conn.wclose);
@@ -603,7 +603,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     // the Connection: close request still gets its 200, but onReadable signals close (returns false)
     // and the loop ends. The response is sent before the close path.
     var enc: [512]u8 = undefined;
-    try writeAllFd(client_fd, finished.connection.writeAppData("GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", &enc));
+    try writeAllFD(client_fd, finished.connection.writeAppData("GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", &enc));
 
     try std.testing.expect(!onReadable(&conn));
     try std.testing.expect(conn.wclose);
@@ -617,7 +617,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
 
 const content_type_handshake_test: u8 = 22;
 
-fn writeAllFd(fd: posix.fd_t, bytes: []const u8) !void {
+fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(fd, bytes[off..].ptr, bytes.len - off);

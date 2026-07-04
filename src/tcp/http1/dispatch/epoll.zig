@@ -228,7 +228,7 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, 
     if (sink.failed) return .close;
 
     if (sink.len > 0) {
-        const written = core.fdWriteNonBlock(conn.fd, sink.buf[0..sink.len]) orelse return .close;
+        const written = core.writeNonBlockFD(conn.fd, sink.buf[0..sink.len]) orelse return .close;
 
         if (written < sink.len) {
             const remaining = sink.buf[written..sink.len];
@@ -268,7 +268,7 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     const linux = std.os.linux;
 
     const pending = conn.write_pending[conn.write_pending_off..conn.write_pending_len];
-    const written = core.fdWriteNonBlock(conn.fd, pending) orelse return .close;
+    const written = core.writeNonBlockFD(conn.fd, pending) orelse return .close;
     conn.write_pending_off += written;
 
     if (conn.write_pending_off < conn.write_pending_len) return .keep_alive;
@@ -313,7 +313,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
         const rem = conn.buf[consumed..conn.filled];
         const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
             if (rem.len >= conn.buf.len) {
-                core.fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                core.writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                 return .close;
             }
             break;
@@ -328,7 +328,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
 
         const parsed = parseGetFastPath(rem, header_end) orelse
             core.parseHeadAt(rem, header_end) catch {
-            core.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+            core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
             return .close;
         };
         const head = parsed.head;
@@ -618,7 +618,7 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     defer std.heap.smp_allocator.free(threads);
 
     // std.compress.flate.Compress is about 230 KB and is built on the handler's stack
-    // frame, so a compressing handler (writeNegotiated) needs more than the default
+    // frame, so a compressing handler (sendNegotiateCachedFD) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (config.compress) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
@@ -636,11 +636,11 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
 }
 
 fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    core.writeSimple(fd, 200, "text/plain", "ok") catch {};
+    core.sendSimpleFD(fd, 200, "text/plain", "ok") catch {};
 }
 
 fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
-    ws.send(fd, @enumFromInt(opcode), payload) catch {};
+    ws.sendFD(fd, @enumFromInt(opcode), payload) catch {};
 }
 
 test "zix http1: serveEpollConn answers a pipelined burst in order" {
@@ -678,11 +678,11 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
 
 fn testCacheHandler(head: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
     if (core.cacheLookup(head)) |bytes| {
-        core.fdWriteAll(fd, bytes) catch {};
+        core.writeAllFD(fd, bytes) catch {};
         return;
     }
 
-    core.writeWithCache(fd, head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl()) catch {};
+    core.sendWithCacheFD(fd, head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl()) catch {};
 }
 
 test "zix http1: EPOLL path serves a miss then a hit from the cache" {

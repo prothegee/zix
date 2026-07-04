@@ -2,7 +2,7 @@
 //!
 //! The Http1 handler signature carries only (head, body, fd), never io, so the router reads the
 //! configured public_dir and io from core threadlocals (core.setStatic, installed per worker) and
-//! calls serve here. Writes go through core.fdWriteAll, so the response-coalescing sink and the TLS
+//! calls serve here. Writes go through core.writeAllFD, so the response-coalescing sink and the TLS
 //! buffering path are honored the same as any other Http1 response.
 
 const std = @import("std");
@@ -29,7 +29,7 @@ const HEADER_STAGING_BUF: usize = 2048;
 ///
 /// Param:
 /// head - *const core.ParsedHead (request head, read for the Range header)
-/// fd - std.posix.fd_t (socket the response is written to, via core.fdWriteAll)
+/// fd - std.posix.fd_t (socket the response is written to, via core.writeAllFD)
 /// req_path - []const u8 (request path with the leading slash already stripped)
 /// public_dir - []const u8 (root directory, joined with req_path)
 /// io - std.Io (file open / stat / read)
@@ -70,7 +70,7 @@ pub fn serve(
             const length = end - start + 1;
 
             const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, length, start, end, stat.size }) catch return false;
-            core.fdWriteAll(fd, s) catch return false;
+            core.writeAllFD(fd, s) catch return false;
 
             var file_buf: [FILE_BUF_SIZE]u8 = undefined;
             var reader = f.reader(io, &file_buf);
@@ -88,7 +88,7 @@ pub fn serve(
                 const to_read = @min(remaining, copy_buf.len);
                 const n = reader.interface.readSliceShort(copy_buf[0..@intCast(to_read)]) catch break;
                 if (n == 0) break;
-                core.fdWriteAll(fd, copy_buf[0..n]) catch break;
+                core.writeAllFD(fd, copy_buf[0..n]) catch break;
                 remaining -= n;
             }
             return true;
@@ -96,7 +96,7 @@ pub fn serve(
     }
 
     const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, stat.size }) catch return false;
-    core.fdWriteAll(fd, s) catch return false;
+    core.writeAllFD(fd, s) catch return false;
 
     var file_buf: [FILE_BUF_SIZE]u8 = undefined;
     var reader = f.reader(io, &file_buf);
@@ -106,7 +106,7 @@ pub fn serve(
         const to_read = @min(remaining, copy_buf.len);
         const n = reader.interface.readSliceShort(copy_buf[0..to_read]) catch break;
         if (n == 0) break;
-        core.fdWriteAll(fd, copy_buf[0..n]) catch break;
+        core.writeAllFD(fd, copy_buf[0..n]) catch break;
         remaining -= n;
     }
     return true;

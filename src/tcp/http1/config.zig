@@ -23,7 +23,7 @@ pub const Http1ServerConfig = struct {
     busy_poll_us: u32 = 50,
     /// Max bytes to buffer per request header block and per HTTP connection
     /// in EPOLL mode.
-    max_recv_buf: usize = 16 * 1024,
+    max_recv_buf: usize = 6 * 1024,
     /// SO_RCVBUF (bytes) applied ONLY on the large-body path: a request whose body exceeds the read buffer
     /// (uploads). Default 0 keeps the kernel default and its receive autotuning, which with a healthy
     /// net.core.rmem_max already sizes the upload window well. An explicit value both caps the window AND
@@ -56,7 +56,7 @@ pub const Http1ServerConfig = struct {
     uring_idle_pool_ceiling: usize = 256,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default false.
     /// Compression spends CPU to shrink the body and only pays off over a real network, so leaving it off
-    /// keeps the perf gate untouched. Active under .EPOLL and .URING. A handler opts in via writeNegotiated.
+    /// keeps the perf gate untouched. Active under .EPOLL and .URING. A handler opts in via sendNegotiateCachedFD.
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body
     /// under this floor is sent uncompressed, since the header and CPU cost outweighs
@@ -98,7 +98,7 @@ pub const Http1ServerConfig = struct {
     /// the handler owns the write. Mirrors zix.Http public_dir_upload.
     public_dir_upload: []const u8 = "u",
     /// Enable the per-worker response cache (ADR-036). Default false. When off,
-    /// the handler cache API (cacheLookup / cacheStore / writeWithCache) degrades
+    /// the handler cache API (cacheLookup / cacheStore / sendWithCacheFD) degrades
     /// to a no-op. Active under the .EPOLL and .URING dispatch models (both are
     /// shared-nothing, one owner thread per cache).
     response_cache: bool = false,
