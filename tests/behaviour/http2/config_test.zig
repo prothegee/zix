@@ -14,13 +14,13 @@ test "zix behaviour: Http2ServerConfig dispatch_model is required and stored as 
     try std.testing.expectEqual(zix.Http2.DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix behaviour: Http2ServerConfig max_streams defaults to 16" {
+test "zix behaviour: Http2ServerConfig max_streams defaults to 128" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
     const cfg = zix.Http2.ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
-    try std.testing.expectEqual(@as(usize, 16), cfg.max_streams);
+    try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);
 }
 
 test "zix behaviour: Http2ServerConfig max_frame_size defaults to 16384" {
