@@ -54,7 +54,7 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POO
 fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/plain", "Hello, World!") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "Hello, World!") catch {};
 
     // Handler-side access logging (uncomment with g_logger above):
     // if (g_logger) |lg| {
@@ -70,14 +70,14 @@ fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeJson(fd, 200, "{\"status\":\"ok\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"status\":\"ok\"}") catch {};
 }
 
 // curl usage: curl -X GET "http://localhost:9018/about"
 fn aboutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeSimple(fd, 200, "text/plain", "zix http1 basic server example") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "zix http1 basic server example") catch {};
 }
 
 // --------------------------------------------------------- //

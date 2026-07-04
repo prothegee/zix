@@ -740,7 +740,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 const rem = conn.buf[consumed..conn.filled];
                 const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
                     if (rem.len >= conn.buf.len) {
-                        core.fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                        core.writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                         keep_alive = false;
                     }
 
@@ -756,7 +756,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
 
                 const parsed = parseGetFastPath(rem, header_end) orelse
                     core.parseHeadAt(rem, header_end) catch {
-                    core.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+                    core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
                     keep_alive = false;
                     break;
                 };
@@ -1027,7 +1027,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     defer std.heap.smp_allocator.free(threads);
 
     // std.compress.flate.Compress is about 230 KB and is built on the handler's stack
-    // frame, so a compressing handler (writeNegotiated) needs more than the default
+    // frame, so a compressing handler (sendNegotiateCachedFD) needs more than the default
     // 512 KB worker stack. Thread stacks are demand-paged, so the larger limit costs
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (config.compress) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
@@ -1051,7 +1051,7 @@ fn testEchoLenHandler(head: *const core.ParsedHead, body: []const u8, fd: std.po
     const n: u64 = if (head.content_length > 0) head.content_length else body.len;
     const out = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
 
-    core.writeSimple(fd, 200, "text/plain", out) catch {};
+    core.sendSimpleFD(fd, 200, "text/plain", out) catch {};
 }
 
 // Build a UringWorker instance for dispatch-level tests. dispatch() reads only
@@ -1131,13 +1131,13 @@ test "zix http1: URING dispatch arms drain for an oversized request body" {
 }
 
 fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    core.writeSimple(fd, 200, "text/plain", "ok") catch {};
+    core.sendSimpleFD(fd, 200, "text/plain", "ok") catch {};
 }
 
 // Echo every WebSocket text/binary frame back to the connection, staging through
 // the active send sink that wsHandleBuf installs.
 fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
-    ws.send(fd, @enumFromInt(opcode), payload) catch {};
+    ws.sendFD(fd, @enumFromInt(opcode), payload) catch {};
 }
 
 test "zix http1: URING wsHandleBuf accumulates a frame split across ring deliveries" {

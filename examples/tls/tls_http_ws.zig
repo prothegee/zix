@@ -29,7 +29,7 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 // Per-frame callback: the engine parses each client frame and calls this for text / binary only,
 // so this echoes the payload straight back. send() routes through the stream sink (encrypted).
 fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
-    zix.Http.WebSocket.send(fd, @enumFromInt(opcode), payload) catch {};
+    zix.Http.WebSocket.sendFD(fd, @enumFromInt(opcode), payload) catch {};
 }
 
 // GET /ws: validate the upgrade, then hand the connection to the https thread over TLS.

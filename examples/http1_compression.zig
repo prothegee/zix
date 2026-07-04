@@ -4,7 +4,7 @@ const zix = @import("zix");
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9058;
 // Compression is active under .EPOLL and .URING only (shared-nothing, one owner per
-// worker). Under .ASYNC / .POOL / .MIXED writeNegotiated falls back to uncompressed.
+// worker). Under .ASYNC / .POOL / .MIXED sendNegotiateCachedFD falls back to uncompressed.
 const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
@@ -21,11 +21,11 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL
 // paragraph is repeated below so every coding (brotli included) wins on the wire.
 const PARAGRAPH: []const u8 =
     \\zix response compression demo. This body is served through
-    \\zix.Http1.writeNegotiated, which reads the request Accept-Encoding header
+    \\zix.Http1.sendNegotiateCachedFD, which reads the request Accept-Encoding header
     \\and compresses with brotli, gzip, or deflate when the client accepts a
     \\coding, the body clears the size floor, and the compressed result is smaller
     \\than the original. Repetitive text like this compresses well, so the wire
-    \\payload shrinks while the handler stays a single writeNegotiated call.
+    \\payload shrinks while the handler stays a single sendNegotiateCachedFD call.
     \\Without a matching Accept-Encoding the very same bytes are sent uncompressed.
 ;
 
@@ -38,17 +38,17 @@ const BODY: []const u8 = PARAGRAPH ++ "\n\n" ++ PARAGRAPH ++ "\n\n" ++ PARAGRAPH
 //   (or) curl -H "Accept-Encoding: br" -v "http://localhost:9058/data"
 //   (or) curl -H "Accept-Encoding: gzip" -v "http://localhost:9058/data"
 //   (or) curl -H "Accept-Encoding: deflate" -v "http://localhost:9058/data"
-// writeNegotiated picks gzip, deflate, or brotli per the client (gzip leads at equal
+// sendNegotiateCachedFD picks gzip, deflate, or brotli per the client (gzip leads at equal
 // quality, brotli when the client asks for it), or identity when none is accepted, and
 // sets Content-Encoding plus Vary: Accept-Encoding when it compresses.
 fn dataHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeSimple(fd, 405, "text/plain", "method not allowed") catch {};
+        zix.Http1.sendSimpleFD(fd, 405, "text/plain", "method not allowed") catch {};
         return;
     }
 
-    zix.Http1.writeNegotiated(fd, head, 200, "text/plain", BODY) catch {};
+    zix.Http1.sendNegotiateCachedFD(fd, head, 200, "text/plain", BODY) catch {};
 }
 
 // curl usage: curl -H "Accept-Encoding: gzip" -v "http://localhost:9058/ping"
@@ -56,11 +56,11 @@ fn dataHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // when gzip is accepted.
 fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
-    zix.Http1.writeNegotiated(fd, head, 200, "text/plain", "pong") catch {};
+    zix.Http1.sendNegotiateCachedFD(fd, head, 200, "text/plain", "pong") catch {};
 }
 
 // Produce one specific coding explicitly through the codec facade (zix.utils.compression.encode), the
-// lower-level alternative to writeNegotiated. encode dispatches over every available coding
+// lower-level alternative to sendNegotiateCachedFD. encode dispatches over every available coding
 // (gzip, deflate, brotli), so the same helper serves all three: the route picks which.
 //
 // Note:
@@ -68,7 +68,7 @@ fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 //   request header. A real handler should negotiate from Accept-Encoding instead (see /data).
 fn serveCoding(fd: std.posix.fd_t, encoding: zix.utils.compression.Encoding) void {
     const encoded = zix.utils.compression.encode(std.heap.smp_allocator, encoding, BODY, .DEFAULT) catch {
-        zix.Http1.writeSimple(fd, 500, "text/plain", "encode failed") catch {};
+        zix.Http1.sendSimpleFD(fd, 500, "text/plain", "encode failed") catch {};
         return;
     };
     defer std.heap.smp_allocator.free(encoded);
@@ -80,8 +80,8 @@ fn serveCoding(fd: std.posix.fd_t, encoding: zix.utils.compression.Encoding) voi
         .{ encoding.contentEncoding().?, encoded.len },
     ) catch return;
 
-    zix.Http1.fdWriteAll(fd, header) catch return;
-    zix.Http1.fdWriteAll(fd, encoded) catch {};
+    zix.Http1.writeAllFD(fd, header) catch return;
+    zix.Http1.writeAllFD(fd, encoded) catch {};
 }
 
 // curl usage: curl -v "http://localhost:9058/gzip" | gunzip

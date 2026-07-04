@@ -97,7 +97,7 @@ pub fn fetch(
 
     var conn = try handshake(config, fd, host.bytes);
 
-    try sendRequest(fd, &conn, method, host.bytes, path, headers, body, config.user_agent);
+    try sendRequestFD(fd, &conn, method, host.bytes, path, headers, body, config.user_agent);
 
     return readResponse(gpa, fd, &conn, config.max_response_body, config.h2_max_read_rounds);
 }
@@ -113,7 +113,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     const started = try Tls.Client.start(.{ .client_random = seed[0..32].*, .ephemeral_secret = seed[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
 
-    try writeRecord(fd, 22, started.client_hello);
+    try writeRecordFD(fd, 22, started.client_hello);
 
     // server flight: ServerHello + ChangeCipherSpec + the encrypted flight (3 records).
     var flight_buf: [HANDSHAKE_FLIGHT_BUF]u8 = undefined;
@@ -138,7 +138,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
         try finished.verifyServerCert(anchor_der, host, nowSec());
     }
 
-    try writeAll(fd, finished.client_finished);
+    try writeAllFD(fd, finished.client_finished);
 
     return finished.connection;
 }
@@ -146,7 +146,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
 // --------------------------------------------------------- //
 // request: preface + SETTINGS + connection WINDOW_UPDATE + HEADERS [+ stream WINDOW_UPDATE] [+ DATA].
 
-fn sendRequest(
+fn sendRequestFD(
     fd: posix.fd_t,
     conn: *Tls.Client.ClientConnection,
     method: Method.Code,
@@ -196,12 +196,12 @@ fn sendRequest(
     n += putWindowUpdate(out[n..], 1, WINDOW_INCREMENT);
 
     var send_buf: [H2_SEND_BUF]u8 = undefined;
-    try writeAll(fd, conn.writeAppData(out[0..n], &send_buf));
+    try writeAllFD(fd, conn.writeAppData(out[0..n], &send_buf));
 
-    if (has_body) try sendBody(fd, conn, body.?);
+    if (has_body) try sendBodyFD(fd, conn, body.?);
 }
 
-fn sendBody(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const u8) !void {
+fn sendBodyFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const u8) !void {
     const chunk_max = 8 * 1024; // keep each DATA frame within one comfortable TLS record.
     var sent: usize = 0;
     while (sent < body.len) {
@@ -213,7 +213,7 @@ fn sendBody(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const u8
         const len = putFrame(&frame, Http2.FRAME_TYPE_DATA, flags, 1, body[sent..end]);
 
         var enc_buf: [chunk_max + 128]u8 = undefined;
-        try writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
+        try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
 
         sent = end;
     }
@@ -328,10 +328,10 @@ fn handleFrame(
             if (frame.flags & Http2.FLAG_END_STREAM != 0) stream_done.* = true;
         },
         Http2.FRAME_TYPE_SETTINGS => {
-            if (frame.flags & Http2.FLAG_ACK == 0) try sendControl(fd, conn, Http2.FRAME_TYPE_SETTINGS, Http2.FLAG_ACK, 0, &.{});
+            if (frame.flags & Http2.FLAG_ACK == 0) try sendControlFD(fd, conn, Http2.FRAME_TYPE_SETTINGS, Http2.FLAG_ACK, 0, &.{});
         },
         Http2.FRAME_TYPE_PING => {
-            if (frame.flags & Http2.FLAG_ACK == 0) try sendControl(fd, conn, Http2.FRAME_TYPE_PING, Http2.FLAG_ACK, 0, payload);
+            if (frame.flags & Http2.FLAG_ACK == 0) try sendControlFD(fd, conn, Http2.FRAME_TYPE_PING, Http2.FLAG_ACK, 0, payload);
         },
         Http2.FRAME_TYPE_RST_STREAM => {
             if (frame.stream_id == 1) return error.StreamReset;
@@ -393,12 +393,12 @@ fn putWindowUpdate(out: []u8, stream_id: u31, increment: u31) usize {
     return putFrame(out, Http2.FRAME_TYPE_WINDOW_UPDATE, 0, stream_id, &inc);
 }
 
-fn sendControl(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, frame_type: u8, flags: u8, stream_id: u31, payload: []const u8) !void {
+fn sendControlFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, frame_type: u8, flags: u8, stream_id: u31, payload: []const u8) !void {
     var frame: [Http2.FRAME_HEADER_LEN + 64]u8 = undefined;
     const len = putFrame(&frame, frame_type, flags, stream_id, payload);
 
     var enc_buf: [Http2.FRAME_HEADER_LEN + 128]u8 = undefined;
-    try writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
+    try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
 }
 
 // --------------------------------------------------------- //
@@ -434,15 +434,15 @@ fn nowSec() i64 {
 // --------------------------------------------------------- //
 // raw fd record framing (the TLS record layer is driven over the connected socket directly).
 
-fn writeRecord(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
+fn writeRecordFD(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
     var header: [5]u8 = undefined;
     header[0] = content_type;
     header[1] = 0x03;
     header[2] = 0x03;
     std.mem.writeInt(u16, header[3..5], @intCast(msg.len), .big);
 
-    try writeAll(fd, &header);
-    try writeAll(fd, msg);
+    try writeAllFD(fd, &header);
+    try writeAllFD(fd, msg);
 }
 
 fn readRecordInto(fd: posix.fd_t, buf: []u8) !usize {
@@ -468,7 +468,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     }
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
     const linux = std.os.linux;
     var written: usize = 0;
     while (written < bytes.len) {

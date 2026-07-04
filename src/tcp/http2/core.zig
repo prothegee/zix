@@ -17,7 +17,7 @@ const UPGRADE_HEAD_BUF: usize = 8192;
 // handler serves or stores an unframed response body that is re-framed per stream-id on a hit.
 
 /// Per-worker response cache installed by the EPOLL / URING mux worker. Null on workers without a
-/// cache, so the serveCached / sendCached API degrades to a plain send.
+/// cache, so the serveCached / sendCachedFD API degrades to a plain send.
 pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
 
 /// Default freshness in milliseconds for a stored response, set alongside tl_cache.
@@ -59,7 +59,7 @@ fn requestKey(path: []const u8, body: []const u8) u64 {
 /// fn handler(method: []const u8, headers: []const zix.Http2.Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void {
 ///     if (zix.Http2.serveCached(fd, sid, "application/json")) return;
 ///     const reply = buildExpensive();
-///     zix.Http2.sendCached(fd, sid, "application/json", reply);
+///     zix.Http2.sendCachedFD(fd, sid, "application/json", reply);
 /// }
 /// ```
 ///
@@ -71,15 +71,15 @@ pub fn serveCached(fd: std.posix.fd_t, sid: u31, content_type: []const u8) bool 
 
     const bytes = cache.lookup(requestKey(tl_req_path, tl_req_body), rc.nowMillis()) orelse return false;
 
-    frame.sendResponse(fd, sid, 200, content_type, bytes) catch {};
+    frame.sendResponseFD(fd, sid, 200, content_type, bytes) catch {};
 
     return true;
 }
 
 /// Send a response body and store it under the current request key for later serveCached hits.
 /// Storing is skipped when no cache is installed or the path is empty. The body is sent regardless.
-pub fn sendCached(fd: std.posix.fd_t, sid: u31, content_type: []const u8, data: []const u8) void {
-    frame.sendResponse(fd, sid, 200, content_type, data) catch {};
+pub fn sendCachedFD(fd: std.posix.fd_t, sid: u31, content_type: []const u8, data: []const u8) void {
+    frame.sendResponseFD(fd, sid, 200, content_type, data) catch {};
 
     const cache = tl_cache orelse return;
     if (tl_req_path.len == 0) return;
@@ -205,7 +205,7 @@ pub fn Router(comptime routes: []const Route) type {
                 return;
             }
 
-            frame.sendResponse(fd, sid, 404, "text/plain", "Not Found") catch {};
+            frame.sendResponseFD(fd, sid, 404, "text/plain", "Not Found") catch {};
         }
     };
 }
@@ -226,7 +226,7 @@ pub const ServeOpts = struct {
     /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial: usize = 16 * 1024,
-    /// Enable the per-worker response cache (ADR-036). When off, serveCached / sendCached degrade to
+    /// Enable the per-worker response cache (ADR-036). When off, serveCached / sendCachedFD degrade to
     /// a plain send. Active under .EPOLL and .URING (shared-nothing, one owner per worker).
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two by ResponseCache.init.
@@ -283,10 +283,10 @@ fn serveConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: Serv
         @memcpy(preface[0..3], &peek);
         @memcpy(preface[3..], &rest);
         if (!std.mem.eql(u8, &preface, frame.PREFACE)) {
-            frame.sendGoaway(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
+            frame.sendGoawayFD(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
             return error.BadPreface;
         }
-        try frame.sendSettings(fd, &.{
+        try frame.sendSettingsFD(fd, &.{
             .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
             .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
             .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
@@ -331,11 +331,11 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     const hdr_end = std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n").? + 4;
 
     const upgrade = getHttp1Header(head_buf[0..hdr_end], "upgrade") orelse {
-        frame.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        frame.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return error.BadRequest;
     };
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade, " "), "h2c")) {
-        frame.fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        frame.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return error.BadRequest;
     }
 
@@ -347,7 +347,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
         if (std.mem.indexOfScalar(u8, after, ' ')) |sp2| path = after[0..sp2];
     }
 
-    try frame.fdWriteAll(
+    try frame.writeAllFD(
         fd,
         "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n",
@@ -356,7 +356,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     var preface: [24]u8 = undefined;
     try frame.recvExact(fd, &preface);
     if (!std.mem.eql(u8, &preface, frame.PREFACE)) {
-        frame.sendGoaway(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
+        frame.sendGoawayFD(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
         return error.BadPreface;
     }
 
@@ -380,7 +380,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
         }
     }
 
-    try frame.sendSettings(fd, &.{
+    try frame.sendSettingsFD(fd, &.{
         .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
         .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
         .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
@@ -420,7 +420,7 @@ fn serveH2cLoop(
         const fh = try frame.readFrameHeader(fd);
 
         if (fh.length > max_payload) {
-            frame.sendGoaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
+            frame.sendGoawayFD(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
             return error.FrameTooLarge;
         }
 
@@ -440,8 +440,8 @@ fn serveH2cLoop(
                         hpack_dec.evictTo(val);
                     }
                 }
-                try frame.sendSettingsAck(fd);
-                try frame.sendWindowUpdate(fd, 0, frame.DEFAULT_WINDOW_SIZE);
+                try frame.sendSettingsAckFD(fd);
+                try frame.sendWindowUpdateFD(fd, 0, frame.DEFAULT_WINDOW_SIZE);
             },
 
             frame.FRAME_TYPE_WINDOW_UPDATE => {},
@@ -449,28 +449,28 @@ fn serveH2cLoop(
             frame.FRAME_TYPE_PING => {
                 if ((fh.flags & frame.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
                     return error.ProtocolError;
                 }
                 var p8: [8]u8 = undefined;
                 @memcpy(&p8, payload[0..8]);
-                try frame.sendPingAck(fd, p8);
+                try frame.sendPingAckFD(fd, p8);
             },
 
             frame.FRAME_TYPE_HEADERS => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
                 if (sid <= last_stream_id and sid % 2 == 1) {
-                    frame.sendRstStream(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
+                    frame.sendRstStreamFD(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 }
                 last_stream_id = @max(last_stream_id, sid);
 
                 const slot = slotFor(sid, streams, stream_slots) orelse {
-                    frame.sendRstStream(fd, sid, frame.ERR_REFUSED_STREAM) catch {};
+                    frame.sendRstStreamFD(fd, sid, frame.ERR_REFUSED_STREAM) catch {};
                     continue;
                 };
                 const s = &streams[slot];
@@ -489,13 +489,13 @@ fn serveH2cLoop(
                     offset += 5;
                 }
                 if (pad_len + offset > block.len) {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
                 block = block[offset .. block.len - pad_len];
 
                 s.header_count = hpack_dec.decode(block, &s.headers, &s.header_scratch) catch {
-                    frame.sendRstStream(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
+                    frame.sendRstStreamFD(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
                 };
@@ -511,12 +511,12 @@ fn serveH2cLoop(
             frame.FRAME_TYPE_CONTINUATION => {
                 const sid = fh.stream_id;
                 const slot = findSlot(sid, streams, stream_slots) orelse {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 };
                 const s = &streams[slot];
                 const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
-                    frame.sendRstStream(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
+                    frame.sendRstStreamFD(fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     stream_slots[slot] = false;
                     continue;
                 };
@@ -531,11 +531,11 @@ fn serveH2cLoop(
             frame.FRAME_TYPE_DATA => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
                 const slot = findSlot(sid, streams, stream_slots) orelse {
-                    frame.sendRstStream(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
+                    frame.sendRstStreamFD(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 };
                 const s = &streams[slot];
@@ -547,14 +547,14 @@ fn serveH2cLoop(
                     data = data[1..];
                 }
                 if (pad_len > data.len) {
-                    frame.sendGoaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return error.ProtocolError;
                 }
                 data = data[0 .. data.len - pad_len];
 
                 if (data.len > 0) {
-                    frame.sendWindowUpdate(fd, 0, @intCast(data.len)) catch {};
-                    frame.sendWindowUpdate(fd, sid, @intCast(data.len)) catch {};
+                    frame.sendWindowUpdateFD(fd, 0, @intCast(data.len)) catch {};
+                    frame.sendWindowUpdateFD(fd, sid, @intCast(data.len)) catch {};
                 }
 
                 const to_copy = @min(data.len, s.body.len - s.body_len);
@@ -722,7 +722,7 @@ test "zix test: Router PREFIX respects the segment boundary" {
     try std.testing.expectEqual(@as(u8, 0), tl_router_hit);
 }
 
-test "zix test: http2 response cache round-trips via sendCached then serveCached" {
+test "zix test: http2 response cache round-trips via sendCachedFD then serveCached" {
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 1024 });
     defer cache.deinit();
     setCache(&cache, 1000);
@@ -744,7 +744,7 @@ test "zix test: http2 response cache round-trips via sendCached then serveCached
 
     // store under the current request key, then a later request with the same key hits and is
     // re-framed for its own stream id
-    sendCached(fds[1], 1, "text/plain", "hello-cached");
+    sendCachedFD(fds[1], 1, "text/plain", "hello-cached");
     try std.testing.expect(serveCached(fds[1], 3, "text/plain"));
 
     // a different request key still misses

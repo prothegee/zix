@@ -20,7 +20,7 @@ const resp_mod = @import("../response.zig");
 const setCache = resp_mod.setCache;
 const setCompression = resp_mod.setCompression;
 const RespSink = resp_mod.RespSink;
-const fdWriteAll = resp_mod.fdWriteAll;
+const writeAllFD = resp_mod.writeAllFD;
 
 // --------------------------------------------------------- //
 
@@ -155,7 +155,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
             // is EPOLLOUT-armed only while write_pending holds bytes).
             if (conn.write_pending.len > conn.write_pending_off) {
                 const pending = conn.write_pending[conn.write_pending_off..];
-                const written = resp_mod.fdWriteNonBlock(conn_fd, pending) orelse {
+                const written = resp_mod.writeNonBlockFD(conn_fd, pending) orelse {
                     table.free(conn_fd);
                     _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, conn_fd, null);
                     _ = linux.close(conn_fd);
@@ -212,7 +212,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
             }
 
             if (!should_close and !found_headers and conn.filled >= conn.buf.len) {
-                fdWriteAll(conn_fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                writeAllFD(conn_fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                 should_close = true;
             }
 
@@ -238,7 +238,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
             // Flush the coalesced response. A partial write (EAGAIN) stages
             // the unwritten tail and arms EPOLLOUT instead of dropping it.
             if (!sink.failed and sink.len > 0) {
-                if (resp_mod.fdWriteNonBlock(conn_fd, sink.buf[0..sink.len])) |written| {
+                if (resp_mod.writeNonBlockFD(conn_fd, sink.buf[0..sink.len])) |written| {
                     if (written < sink.len) {
                         const remaining = sink.buf[written..sink.len];
                         if (std.heap.smp_allocator.alloc(u8, remaining.len)) |staged| {

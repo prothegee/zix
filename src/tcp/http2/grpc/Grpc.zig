@@ -37,10 +37,10 @@ pub const ClientResponse = client_mod.GrpcClientResponse;
 pub const Prefix = frame_mod.GrpcPrefix;
 pub const readPrefix = frame_mod.readGrpcPrefix;
 pub const writePrefix = frame_mod.writeGrpcPrefix;
-pub const sendHeaders = frame_mod.sendGrpcHeaders;
-pub const sendData = frame_mod.sendGrpcData;
-pub const sendTrailer = frame_mod.sendGrpcTrailer;
-pub const sendError = frame_mod.sendGrpcError;
+pub const sendHeadersFD = frame_mod.sendGrpcHeadersFD;
+pub const sendDataFD = frame_mod.sendGrpcDataFD;
+pub const sendTrailerFD = frame_mod.sendGrpcTrailerFD;
+pub const sendErrorFD = frame_mod.sendGrpcErrorFD;
 
 // --------------------------------------------------------- //
 

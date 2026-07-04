@@ -25,7 +25,7 @@ const resp_mod = @import("../response.zig");
 const setCache = resp_mod.setCache;
 const setCompression = resp_mod.setCompression;
 const RespSink = resp_mod.RespSink;
-const fdWriteAll = resp_mod.fdWriteAll;
+const writeAllFD = resp_mod.writeAllFD;
 const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 const IoUring = std.os.linux.IoUring;
@@ -414,7 +414,7 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
         fn process(worker: *W, conn: *UringHttpConn) HttpProcOutcome {
             if (parser.findHeaderEnd(conn.buf[0..conn.filled], 0) == null) {
                 if (conn.filled >= conn.buf.len) {
-                    fdWriteAll(conn.fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                    writeAllFD(conn.fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                     return .close;
                 }
 

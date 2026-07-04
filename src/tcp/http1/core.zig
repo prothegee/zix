@@ -57,7 +57,7 @@ pub const HandlerFn = *const fn (
 ///
 /// Return:
 /// - usize: consumed request length when the interceptor handled the request.
-///   The interceptor must write its response (via fdWriteAll or tl_resp_sink)
+///   The interceptor must write its response (via writeAllFD or tl_resp_sink)
 ///   before returning. HTTP/1.1 keep-alive is assumed.
 /// - null: fall through to the normal parse-and-dispatch path.
 pub const RawFn = *const fn (rem: []const u8, header_end: usize, fd: std.posix.fd_t) ?usize;
@@ -192,7 +192,7 @@ pub fn cacheTtl() u32 {
 }
 
 /// Whether response compression is enabled for this worker. Off unless the server
-/// installs it from config.compress. When off, writeNegotiated always writes
+/// installs it from config.compress. When off, sendNegotiateCachedFD always writes
 /// uncompressed.
 pub threadlocal var tl_compression: bool = false;
 
@@ -212,7 +212,7 @@ pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
 
 /// Look up a full cached response for this request. Returns the cached bytes
 /// when caching is enabled and a fresh entry exists, else null. The key is
-/// hash(method, path, query). Write the returned bytes with fdWriteAll.
+/// hash(method, path, query). Write the returned bytes with writeAllFD.
 pub fn cacheLookup(head: *const ParsedHead) ?[]const u8 {
     const c = tl_cache orelse return null;
     const key = cache.hashKey(head.method, head.path, head.query);
@@ -260,18 +260,18 @@ pub fn cacheStoreEncoded(head: *const ParsedHead, encoding: []const u8, bytes: [
 /// ```zig
 /// fn handler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
 ///     if (zix.Http1.cacheLookup(head)) |bytes| {
-///         zix.Http1.fdWriteAll(fd, bytes) catch {};
+///         zix.Http1.writeAllFD(fd, bytes) catch {};
 ///         return;
 ///     }
 ///
 ///     const resp = buildResponse(head, body);
-///     zix.Http1.writeWithCache(fd, head, resp, zix.Http1.cacheTtl()) catch {};
+///     zix.Http1.sendWithCacheFD(fd, head, resp, zix.Http1.cacheTtl()) catch {};
 /// }
 /// ```
-pub fn writeWithCache(fd: std.posix.fd_t, head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
+pub fn sendWithCacheFD(fd: std.posix.fd_t, head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
     cacheStore(head, bytes, ttl_ms);
 
-    return fdWriteAll(fd, bytes);
+    return writeAllFD(fd, bytes);
 }
 
 // --------------------------------------------------------- //
@@ -664,7 +664,7 @@ fn buildSimpleHeader(buf: *[HEADER_BUF_SIZE]u8, status: u16, content_type: []con
 // --------------------------------------------------------- //
 
 /// Coalescing sink for pipelined responses. While installed (tl_resp_sink),
-/// fdWriteAll appends to buf instead of hitting the socket, so a pipelined
+/// writeAllFD appends to buf instead of hitting the socket, so a pipelined
 /// burst of N responses costs one write() instead of N. Same pattern as the
 /// WebSocket SendSink, owned by the EPOLL request loop in server.zig.
 pub const RespSink = struct {
@@ -696,7 +696,7 @@ pub const RespSink = struct {
             }
 
             self.flush();
-            fdWriteAllDirect(self.fd, bytes) catch {
+            writeAllDirectFD(self.fd, bytes) catch {
                 self.failed = true;
             };
 
@@ -716,7 +716,7 @@ pub const RespSink = struct {
     pub fn flush(self: *RespSink) void {
         if (self.len == 0) return;
 
-        fdWriteAllDirect(self.fd, self.buf[0..self.len]) catch {
+        writeAllDirectFD(self.fd, self.buf[0..self.len]) catch {
             self.failed = true;
         };
         self.len = 0;
@@ -745,7 +745,7 @@ pub const RespSink = struct {
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 /// Streaming sink for the thread-per-connection https path (ADR-054). While installed
-/// (tl_tls_stream) and the buffered capture sink is detached, fdWriteAll encrypts each write as one
+/// (tl_tls_stream) and the buffered capture sink is detached, writeAllFD encrypts each write as one
 /// TLS record and sends it straight to the socket, so an SSE handler streams over TLS instead of
 /// buffering a whole response. Type-erased over the live connection (the 1.3 and 1.2 paths share
 /// it): writeFn casts ctx back to the concrete per-connection state and encrypts + writes.
@@ -768,12 +768,12 @@ pub const TlsStreamSink = struct {
 };
 
 /// Active streaming sink for the current worker thread (the thread-per-conn https path). null for
-/// cleartext and the buffered https path, so fdWriteAll never routes through it there.
+/// cleartext and the buffered https path, so writeAllFD never routes through it there.
 pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 
 /// Begin a streaming response (SSE) from an fd-handler, so one handler serves cleartext and TLS.
 ///
-/// Detaches any buffered capture / coalescing sink, so each subsequent fdWriteAll flushes
+/// Detaches any buffered capture / coalescing sink, so each subsequent writeAllFD flushes
 /// immediately: over TLS it hands writes to the live-session stream sink (one record per write), in
 /// cleartext it writes straight to the socket. An SSE handler never returns, so a buffered sink
 /// would never flush. A no-op when no sink is installed (the cleartext .ASYNC SSE path).
@@ -782,8 +782,8 @@ pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 /// ```zig
 /// fn eventsHandler(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
 ///     zix.Http1.beginStream();
-///     zix.Http1.fdWriteAll(fd, sse_headers) catch return;
-///     // ... emit events with fdWriteAll(fd, ...) ...
+///     zix.Http1.writeAllFD(fd, sse_headers) catch return;
+///     // ... emit events with writeAllFD(fd, ...) ...
 /// }
 /// ```
 pub fn beginStream() void {
@@ -805,7 +805,7 @@ pub fn flushPending(fd: std.posix.fd_t) void {
 /// Write as much of data to fd as possible without blocking.
 /// On EAGAIN returns the byte count written so far (caller stages the rest).
 /// On a permanent error returns null.
-pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
+pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -823,7 +823,7 @@ pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
     return written;
 }
 
-pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) {
             sink.append(data);
@@ -839,10 +839,10 @@ pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
         return if (strm.write(data)) {} else error.BrokenPipe;
     }
 
-    return fdWriteAllDirect(fd, data);
+    return writeAllDirectFD(fd, data);
 }
 
-fn fdWriteAllDirect(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
@@ -865,7 +865,7 @@ fn fdWriteAllDirect(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void
 }
 
 /// Response with Content-Length body.
-pub fn writeSimple(
+pub fn sendSimpleFD(
     fd: std.posix.fd_t,
     status: u16,
     content_type: []const u8,
@@ -902,7 +902,7 @@ pub fn writeSimple(
 
         // Skips that sink check entirely instead,
         // and write straight to the fd since code only reaches this line.
-        return fdWriteAllDirect(fd, buf[0 .. hdr.len + body.len]);
+        return writeAllDirectFD(fd, buf[0 .. hdr.len + body.len]);
     }
 
     var sent: usize = 0;
@@ -937,7 +937,7 @@ pub fn writeSimple(
 }
 
 /// Headers-only response (no body). Used for HEAD method responses.
-pub fn writeSimpleNoBody(
+pub fn sendSimpleNoBodyFD(
     fd: std.posix.fd_t,
     status: u16,
     content_type: []const u8,
@@ -946,17 +946,17 @@ pub fn writeSimpleNoBody(
     var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const hdr = buildSimpleHeader(&hdr_buf, status, content_type, content_length);
 
-    return fdWriteAll(fd, hdr);
+    return writeAllFD(fd, hdr);
 }
 
-/// JSON response. Shorthand for writeSimple with "application/json".
-pub fn writeJson(fd: std.posix.fd_t, status: u16, body: []const u8) !void {
-    return writeSimple(fd, status, "application/json", body);
+/// JSON response. Shorthand for sendSimpleFD with "application/json".
+pub fn sendJsonFD(fd: std.posix.fd_t, status: u16, body: []const u8) !void {
+    return sendSimpleFD(fd, status, "application/json", body);
 }
 
 /// Send 100 Continue before reading a large body.
-pub fn write100Continue(fd: std.posix.fd_t) !void {
-    try fdWriteAll(fd, "HTTP/1.1 100 Continue\r\n\r\n");
+pub fn send100ContinueFD(fd: std.posix.fd_t) !void {
+    try writeAllFD(fd, "HTTP/1.1 100 Continue\r\n\r\n");
 }
 
 /// Per-worker (threadlocal) gzip scratch, reused across requests so the response path never
@@ -974,8 +974,8 @@ threadlocal var tl_gzip_comp: std.Io.Writer.Error!std.compress.flate.Compress = 
 threadlocal var tl_gzip_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
 
 /// Build a complete gzip HTTP response (header + compressed body) into the per-worker buffer and
-/// return the slice. Reuses the threadlocal compressor, so it allocates nothing. Shared by writeGzip
-/// and writeGzipCached.
+/// return the slice. Reuses the threadlocal compressor, so it allocates nothing. Shared by sendGzipFD
+/// and sendGzipCachedFD.
 fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
     var out_w: std.Io.Writer = .fixed(&tl_gzip_out);
     tl_gzip_comp = std.compress.flate.Compress.init(
@@ -1003,20 +1003,20 @@ fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![
 }
 
 /// gzip-compressed response via std.compress.flate, reusing the per-worker compressor.
-pub fn writeGzip(fd: std.posix.fd_t, status: u16, content_type: []const u8, body: []const u8) !void {
-    try fdWriteAll(fd, try buildGzipResponse(status, content_type, body));
+pub fn sendGzipFD(fd: std.posix.fd_t, status: u16, content_type: []const u8, body: []const u8) !void {
+    try writeAllFD(fd, try buildGzipResponse(status, content_type, body));
 }
 
 /// gzip response with the per-(key, encoding) cache: on a hit replay the cached compressed response
 /// with zero compression work, on a miss compress once, store, and write. Deterministic bodies (the
 /// /json family) become a cache replay after the first request, the json-comp ceiling-raiser.
-pub fn writeGzipCached(fd: std.posix.fd_t, head: *const ParsedHead, status: u16, content_type: []const u8, body: []const u8, ttl_ms: u32) !void {
-    if (cacheLookupEncoded(head, "gzip")) |cached| return fdWriteAll(fd, cached);
+pub fn sendGzipCachedFD(fd: std.posix.fd_t, head: *const ParsedHead, status: u16, content_type: []const u8, body: []const u8, ttl_ms: u32) !void {
+    if (cacheLookupEncoded(head, "gzip")) |cached| return writeAllFD(fd, cached);
 
     const resp = try buildGzipResponse(status, content_type, body);
     cacheStoreEncoded(head, "gzip", resp, ttl_ms);
 
-    try fdWriteAll(fd, resp);
+    try writeAllFD(fd, resp);
 }
 
 /// Per-worker arena for negotiated-compression codec scratch (gzip / deflate / brotli), reset with
@@ -1041,10 +1041,10 @@ threadlocal var tl_neg_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
 /// worker has compression enabled, the client accepts a producible coding, the body
 /// clears the size floor and is not an already-compressed media type, and the
 /// compressed result is both smaller than the original and within the cap. In every
-/// other case the body is sent uncompressed, byte-identical to writeSimple.
+/// other case the body is sent uncompressed, byte-identical to sendSimpleFD.
 ///
 /// Note:
-/// - This is the negotiating replacement for a hand-called writeGzip. It uses the per-(key,
+/// - This is the negotiating replacement for a hand-called sendGzipFD. It uses the per-(key,
 ///   encoding) response cache: a hit replays the full compressed response with no compression
 ///   work, a miss compresses once then stores the assembled response under (key, encoding).
 /// - The compressed response sets Content-Encoding and Vary: Accept-Encoding.
@@ -1059,28 +1059,28 @@ threadlocal var tl_neg_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
 /// Return:
 /// - void
 /// - error.BrokenPipe on a failed write
-pub fn writeNegotiated(
+pub fn sendNegotiateCachedFD(
     fd: std.posix.fd_t,
     head: *const ParsedHead,
     status: u16,
     content_type: []const u8,
     body: []const u8,
 ) !void {
-    if (!tl_compression) return writeSimple(fd, status, content_type, body);
+    if (!tl_compression) return sendSimpleFD(fd, status, content_type, body);
 
     const accept = getHeader(head, "accept-encoding");
     const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
-        return writeSimpleNoBody(fd, 406, content_type, 0);
+        return sendSimpleNoBodyFD(fd, 406, content_type, 0);
     };
 
     if (encoding == .IDENTITY or !compression.shouldCompress(body.len, content_type, tl_compression_min_size)) {
-        return writeSimple(fd, status, content_type, body);
+        return sendSimpleFD(fd, status, content_type, body);
     }
 
     const token = encoding.contentEncoding().?;
 
     // Per-(key, encoding) cache hit: replay the full compressed response, no compression work.
-    if (cacheLookupEncoded(head, token)) |cached| return fdWriteAll(fd, cached);
+    if (cacheLookupEncoded(head, token)) |cached| return writeAllFD(fd, cached);
 
     // Per-worker arena for the codec scratch. gzip / deflate / brotli each allocate transient
     // buffers (brotli especially: input-sized hash tables, Huffman tables, command lists). A
@@ -1092,11 +1092,11 @@ pub fn writeNegotiated(
     defer _ = arena.reset(.retain_capacity);
 
     const encoded = compression.encode(arena.allocator(), encoding, body, .DEFAULT) catch {
-        return writeSimple(fd, status, content_type, body);
+        return sendSimpleFD(fd, status, content_type, body);
     };
 
     if (encoded.len > tl_compression_max_out or encoded.len >= body.len) {
-        return writeSimple(fd, status, content_type, body);
+        return sendSimpleFD(fd, status, content_type, body);
     }
 
     // Assemble the full response (header + encoded body) contiguously so it can be cached and
@@ -1113,42 +1113,42 @@ pub fn writeNegotiated(
         const full = tl_neg_resp[0..total];
         cacheStoreEncoded(head, token, full, cacheTtl());
 
-        return fdWriteAll(fd, full);
+        return writeAllFD(fd, full);
     }
 
     // Too large to assemble in the buffer: stream in two parts, skip the cache.
-    try fdWriteAll(fd, header);
-    try fdWriteAll(fd, encoded);
+    try writeAllFD(fd, header);
+    try writeAllFD(fd, encoded);
 }
 
-/// Start a chunked response. Call writeChunk for each chunk, then writeChunkedEnd.
-pub fn writeChunkedStart(fd: std.posix.fd_t, status: u16, content_type: []const u8) !void {
+/// Start a chunked response. Call sendChunkFD for each chunk, then sendChunkedEndFD.
+pub fn sendChunkedStartFD(fd: std.posix.fd_t, status: u16, content_type: []const u8) !void {
     var hdr: [HEADER_BUF_SIZE]u8 = undefined;
     const s = try std.fmt.bufPrint(
         &hdr,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nTransfer-Encoding: chunked\r\n\r\n",
         .{ status, statusPhrase(status), content_type },
     );
-    try fdWriteAll(fd, s);
+    try writeAllFD(fd, s);
 }
 
 /// Write one chunk: hex_len CRLF data CRLF.
-pub fn writeChunk(fd: std.posix.fd_t, data: []const u8) !void {
+pub fn sendChunkFD(fd: std.posix.fd_t, data: []const u8) !void {
     if (data.len == 0) return;
     var sz: [32]u8 = undefined;
     const s = try std.fmt.bufPrint(&sz, "{x}\r\n", .{data.len});
-    try fdWriteAll(fd, s);
-    try fdWriteAll(fd, data);
-    try fdWriteAll(fd, "\r\n");
+    try writeAllFD(fd, s);
+    try writeAllFD(fd, data);
+    try writeAllFD(fd, "\r\n");
 }
 
 /// Terminate the chunked body with the final zero-length chunk.
-pub fn writeChunkedEnd(fd: std.posix.fd_t) !void {
-    try fdWriteAll(fd, "0\r\n\r\n");
+pub fn sendChunkedEndFD(fd: std.posix.fd_t) !void {
+    try writeAllFD(fd, "0\r\n\r\n");
 }
 
 /// 206 Partial Content or 416 Range Not Satisfiable based on parseRange result.
-pub fn writeRange(
+pub fn sendRangeFD(
     fd: std.posix.fd_t,
     content_type: []const u8,
     full_body: []const u8,
@@ -1162,7 +1162,7 @@ pub fn writeRange(
             "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{d}\r\nContent-Length: 0\r\n\r\n",
             .{total},
         );
-        return fdWriteAll(fd, s);
+        return writeAllFD(fd, s);
     };
 
     const slice = full_body[range.start .. range.end + 1];
@@ -1172,8 +1172,8 @@ pub fn writeRange(
         "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Range: bytes {d}-{d}/{d}\r\nContent-Length: {d}\r\n\r\n",
         .{ content_type, range.start, range.end, total, slice.len },
     );
-    try fdWriteAll(fd, s);
-    try fdWriteAll(fd, slice);
+    try writeAllFD(fd, s);
+    try writeAllFD(fd, slice);
 }
 
 // --------------------------------------------------------- //
@@ -1337,19 +1337,19 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
     while (true) {
         const hdr = recvHead(fd, &recv_buf, leftover) catch |err| {
             if (err == error.HeaderTooLarge) {
-                fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+                writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
             }
             return;
         };
 
         const result = parseHead(recv_buf[0..hdr.filled]) catch {
-            fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+            writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
             return;
         };
         const head = result.head;
 
         if (head.expect_continue and (head.content_length > 0 or head.chunked_request)) {
-            write100Continue(fd) catch return;
+            send100ContinueFD(fd) catch return;
         }
 
         var body_len: usize = 0;
@@ -1521,7 +1521,7 @@ test "zix http1: buildSimpleHeaderInto baked status line is byte-identical acros
     try std.testing.expectEqualStrings("HTTP/1.1 599 Unknown\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n", buf[0..c]);
 }
 
-test "zix http1: writeSimple builds header directly into active sink without hdr_buf bounce" {
+test "zix http1: sendSimpleFD builds header directly into active sink without hdr_buf bounce" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1533,7 +1533,7 @@ test "zix http1: writeSimple builds header directly into active sink without hdr
     defer tl_resp_sink = null;
 
     const before = sink.len;
-    try writeSimple(fds[1], 200, "text/plain", "hi");
+    try sendSimpleFD(fds[1], 200, "text/plain", "hi");
 
     // Header was written directly into the sink: len advanced, nothing flushed yet.
     try std.testing.expect(sink.len > before);
@@ -1548,7 +1548,7 @@ test "zix http1: writeSimple builds header directly into active sink without hdr
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nhi"));
 }
 
-test "zix http1: RespSink stages fdWriteAll bytes until flush" {
+test "zix http1: RespSink stages writeAllFD bytes until flush" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1559,8 +1559,8 @@ test "zix http1: RespSink stages fdWriteAll bytes until flush" {
     tl_resp_sink = &sink;
     defer tl_resp_sink = null;
 
-    try fdWriteAll(fds[1], "alpha");
-    try fdWriteAll(fds[1], "beta");
+    try writeAllFD(fds[1], "alpha");
+    try writeAllFD(fds[1], "beta");
 
     // Both writes are staged, nothing has hit the socket yet.
     try std.testing.expectEqual(@as(usize, 9), sink.len);
@@ -1573,7 +1573,7 @@ test "zix http1: RespSink stages fdWriteAll bytes until flush" {
     try std.testing.expectEqualStrings("alphabeta", recv[0..n]);
 }
 
-test "zix http1: writeSimple writes directly into active sink without buf[4096] bounce" {
+test "zix http1: sendSimpleFD writes directly into active sink without buf[4096] bounce" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1584,7 +1584,7 @@ test "zix http1: writeSimple writes directly into active sink without buf[4096] 
     tl_resp_sink = &sink;
     defer tl_resp_sink = null;
 
-    try writeSimple(fds[1], 200, "text/plain", "ok");
+    try sendSimpleFD(fds[1], 200, "text/plain", "ok");
 
     // Bytes are staged in the sink, nothing sent to the socket yet.
     try std.testing.expect(sink.len > 0);
@@ -1599,13 +1599,13 @@ test "zix http1: writeSimple writes directly into active sink without buf[4096] 
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nok"));
 }
 
-test "zix http1: writeSimple with no active sink writes directly to fd" {
+test "zix http1: sendSimpleFD with no active sink writes directly to fd" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
 
-    try writeSimple(fds[1], 404, "text/plain", "not found");
+    try sendSimpleFD(fds[1], 404, "text/plain", "not found");
 
     var recv: [512]u8 = undefined;
     const n = try std.posix.read(fds[0], &recv);
@@ -1626,7 +1626,7 @@ test "zix http1: cache API is a no-op when no cache is installed" {
     try std.testing.expect(cacheLookup(&parsed.head) == null);
 }
 
-test "zix http1: writeWithCache stores then a later lookup hits with identical bytes" {
+test "zix http1: sendWithCacheFD stores then a later lookup hits with identical bytes" {
     var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer rc.deinit();
 
@@ -1645,7 +1645,7 @@ test "zix http1: writeWithCache stores then a later lookup hits with identical b
     defer _ = std.os.linux.close(fds[1]);
 
     const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
-    try writeWithCache(fds[1], &head, resp, cacheTtl());
+    try sendWithCacheFD(fds[1], &head, resp, cacheTtl());
 
     var recv: [128]u8 = undefined;
     const n = try std.posix.read(fds[0], &recv);
@@ -1663,12 +1663,12 @@ fn negotiatedRoundtrip(req: []const u8, content_type: []const u8, body: []const 
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
 
-    try writeNegotiated(fds[1], &parsed.head, 200, content_type, body);
+    try sendNegotiateCachedFD(fds[1], &parsed.head, 200, content_type, body);
 
     return std.posix.read(fds[0], out);
 }
 
-test "zix http1: writeNegotiated compresses when gzip is accepted" {
+test "zix http1: sendNegotiateCachedFD compresses when gzip is accepted" {
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1689,7 +1689,7 @@ test "zix http1: writeNegotiated compresses when gzip is accepted" {
     try std.testing.expectEqualSlices(u8, &body, restored);
 }
 
-test "zix http1: writeNegotiated sends uncompressed when compression is off" {
+test "zix http1: sendNegotiateCachedFD sends uncompressed when compression is off" {
     setCompression(false, 0, 0);
 
     var body: [512]u8 = undefined;
@@ -1705,7 +1705,7 @@ test "zix http1: writeNegotiated sends uncompressed when compression is off" {
     try std.testing.expectEqualSlices(u8, &body, resp[sep + 4 ..]);
 }
 
-test "zix http1: writeNegotiated does not compress without Accept-Encoding" {
+test "zix http1: sendNegotiateCachedFD does not compress without Accept-Encoding" {
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1719,7 +1719,7 @@ test "zix http1: writeNegotiated does not compress without Accept-Encoding" {
     try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Encoding") == null);
 }
 
-test "zix http1: writeNegotiated skips bodies under the size floor" {
+test "zix http1: sendNegotiateCachedFD skips bodies under the size floor" {
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1731,7 +1731,7 @@ test "zix http1: writeNegotiated skips bodies under the size floor" {
     try std.testing.expect(std.mem.endsWith(u8, resp, "hi"));
 }
 
-test "zix http1: writeNegotiated skips already-compressed media types" {
+test "zix http1: sendNegotiateCachedFD skips already-compressed media types" {
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1777,8 +1777,8 @@ test "zix http1: RespSink oversized payload writes through in order" {
 
     // "abc" stages, the oversized payload flushes it first then writes
     // through directly, so wire order matches call order.
-    try fdWriteAll(fds[1], "abc");
-    try fdWriteAll(fds[1], "0123456789");
+    try writeAllFD(fds[1], "abc");
+    try writeAllFD(fds[1], "0123456789");
     sink.flush();
     try std.testing.expect(!sink.failed);
 
@@ -1831,7 +1831,7 @@ test "zix http1: RespSink without a grow allocator does not grow" {
     try std.testing.expectEqual(@as(usize, 8), sink.buf.len);
 }
 
-test "zix http1: writeGzip reuses the threadlocal compressor across calls, valid gzip, no leak" {
+test "zix http1: sendGzipFD reuses the threadlocal compressor across calls, valid gzip, no leak" {
     const flate = @import("../../utils/compression/flate.zig");
     const linux = std.os.linux;
 
@@ -1847,7 +1847,7 @@ test "zix http1: writeGzip reuses the threadlocal compressor across calls, valid
     };
 
     for (bodies) |body| {
-        try writeGzip(pipe_fds[1], 200, "application/json", body);
+        try sendGzipFD(pipe_fds[1], 200, "application/json", body);
 
         var resp: [4096]u8 = undefined;
         const n = try std.posix.read(pipe_fds[0], &resp);
@@ -1860,7 +1860,7 @@ test "zix http1: writeGzip reuses the threadlocal compressor across calls, valid
     }
 }
 
-test "zix http1: writeGzipCached stores per-(key,encoding) and replays the same bytes on a hit" {
+test "zix http1: sendGzipCachedFD stores per-(key,encoding) and replays the same bytes on a hit" {
     const flate = @import("../../utils/compression/flate.zig");
     const linux = std.os.linux;
 
@@ -1880,7 +1880,7 @@ test "zix http1: writeGzipCached stores per-(key,encoding) and replays the same 
 
     // miss: compress + store, the response decompresses back to the body.
     try std.testing.expect(cacheLookupEncoded(&head, "gzip") == null);
-    try writeGzipCached(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    try sendGzipCachedFD(pipe_fds[1], &head, 200, "application/json", body, 60_000);
     try std.testing.expect(cacheLookupEncoded(&head, "gzip") != null);
 
     var resp1: [4096]u8 = undefined;
@@ -1891,7 +1891,7 @@ test "zix http1: writeGzipCached stores per-(key,encoding) and replays the same 
     try std.testing.expectEqualStrings(body, out1[0..d1]);
 
     // hit: replay the cached response, byte-identical to the first.
-    try writeGzipCached(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    try sendGzipCachedFD(pipe_fds[1], &head, 200, "application/json", body, 60_000);
     var resp2: [4096]u8 = undefined;
     const n2 = try std.posix.read(pipe_fds[0], &resp2);
     try std.testing.expectEqualSlices(u8, resp1[0..n1], resp2[0..n2]);
@@ -1910,7 +1910,7 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
         fn h(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
             _ = head;
             _ = body;
-            fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+            writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
         }
     };
     const Srv = struct {
@@ -1927,13 +1927,13 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     const big: usize = 64 * 1024;
     var head_buf: [128]u8 = undefined;
     const h1 = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
-    try fdWriteAll(client_fd, h1);
+    try writeAllFD(client_fd, h1);
 
     var chunk: [4096]u8 = @splat(0xAB);
     var body_sent: usize = 0;
     while (body_sent < big) {
         const n = @min(chunk.len, big - body_sent);
-        try fdWriteAll(client_fd, chunk[0..n]);
+        try writeAllFD(client_fd, chunk[0..n]);
         body_sent += n;
     }
 
@@ -1943,7 +1943,7 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
 
     // request 2 on the SAME connection (Connection: close so the server returns after it): served
     // cleanly only if the first body was fully drained, else the leftover bytes misparse as this one.
-    try fdWriteAll(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    try writeAllFD(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
 
     var resp2: [256]u8 = undefined;
     const n2 = try std.posix.read(client_fd, &resp2);

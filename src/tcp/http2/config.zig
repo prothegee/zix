@@ -60,7 +60,7 @@ pub const Http2ServerConfig = struct {
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache API
-    /// (serveCached / sendCached) degrades to a plain send. Active under .EPOLL and .URING.
+    /// (serveCached / sendCachedFD) degrades to a plain send. Active under .EPOLL and .URING.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker memory is
     /// cache_max_entries * cache_max_value_bytes, times the worker count.

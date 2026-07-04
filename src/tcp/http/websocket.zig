@@ -263,7 +263,7 @@ pub fn takeWebSocket() ?WsPending {
 }
 
 /// Coalesces every frame sent during one pump pass into a single write, so a burst flushes once.
-/// Over TLS the flush goes through response.fdWriteAll, which the stream sink encrypts into one
+/// Over TLS the flush goes through response.writeAllFD, which the stream sink encrypts into one
 /// record (ADR-054).
 const SendSink = struct {
     fd: std.posix.fd_t,
@@ -274,7 +274,7 @@ const SendSink = struct {
     fn append(self: *SendSink, bytes: []const u8) void {
         if (bytes.len > self.buf.len) {
             self.flush();
-            response.fdWriteAll(self.fd, bytes) catch {
+            response.writeAllFD(self.fd, bytes) catch {
                 self.failed = true;
             };
 
@@ -290,7 +290,7 @@ const SendSink = struct {
     fn flush(self: *SendSink) void {
         if (self.len == 0) return;
 
-        response.fdWriteAll(self.fd, self.buf[0..self.len]) catch {
+        response.writeAllFD(self.fd, self.buf[0..self.len]) catch {
             self.failed = true;
         };
         self.len = 0;
@@ -301,7 +301,7 @@ threadlocal var tl_send_sink: ?*SendSink = null;
 
 /// Build and write one unmasked server frame. During a pump pass the frame is staged into the send
 /// sink for a single batched, encrypted write, otherwise it goes out immediately through
-/// response.fdWriteAll (the stream sink encrypts it over TLS).
+/// response.writeAllFD (the stream sink encrypts it over TLS).
 ///
 /// Param:
 /// fd      - std.posix.fd_t (the sentinel fd over TLS)
@@ -310,7 +310,7 @@ threadlocal var tl_send_sink: ?*SendSink = null;
 ///
 /// Return:
 /// - !void (error.BrokenPipe on a dead peer)
-pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
+pub fn sendFD(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
     if (tl_send_sink) |sink| {
         var hdr: [ws_max_frame_header]u8 = undefined;
         const hdr_len = buildHeader(&hdr, opcode, payload.len);
@@ -325,14 +325,14 @@ pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
         var buf: [ws_send_inline_cap]u8 = undefined;
         const len = buildFrame(&buf, opcode, payload);
 
-        return response.fdWriteAll(fd, buf[0..len]);
+        return response.writeAllFD(fd, buf[0..len]);
     }
 
     var hdr: [ws_max_frame_header]u8 = undefined;
     const hdr_len = buildHeader(&hdr, opcode, payload.len);
 
-    try response.fdWriteAll(fd, hdr[0..hdr_len]);
-    try response.fdWriteAll(fd, payload);
+    try response.writeAllFD(fd, hdr[0..hdr_len]);
+    try response.writeAllFD(fd, payload);
 }
 
 /// Outcome of one pump pass over a connection's read buffer.
@@ -370,9 +370,9 @@ pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []
 
         switch (result.frame.opcode) {
             .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
-            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .ping => sendFD(fd, .pong, result.frame.payload) catch {},
             .close => {
-                send(fd, .close, &.{}) catch {};
+                sendFD(fd, .close, &.{}) catch {};
                 offset += result.consumed;
                 close = true;
                 break;
@@ -389,7 +389,7 @@ pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []
     return .{ .consumed = offset, .close = close or sink.failed };
 }
 
-/// Write the 101 Switching Protocols response through response.fdWriteAll (the fd / sink path), the
+/// Write the 101 Switching Protocols response through response.writeAllFD (the fd / sink path), the
 /// TLS counterpart of `upgrade` which writes onto a std.Io stream.
 pub fn upgradeFd(fd: std.posix.fd_t, accept: []const u8) !void {
     var hdr_buf: [HANDSHAKE_HEADER_BUF]u8 = undefined;
@@ -402,7 +402,7 @@ pub fn upgradeFd(fd: std.posix.fd_t, accept: []const u8) !void {
         .{accept},
     );
 
-    try response.fdWriteAll(fd, resp);
+    try response.writeAllFD(fd, resp);
 }
 
 /// Complete the handshake over TLS, then hand the connection to the https thread (ADR-055). Call
@@ -414,7 +414,7 @@ pub fn upgradeFd(fd: std.posix.fd_t, accept: []const u8) !void {
 ///
 /// Note:
 /// - Thread-per-connection only. `fd` is the sentinel (-1) the handler is given over TLS.
-/// - Rooms / broadcast are not served over TLS (each connection has its own session). Use `send`.
+/// - Rooms / broadcast are not served over TLS (each connection has its own session). Use `sendFD`.
 ///
 /// Param:
 /// fd       - std.posix.fd_t (the sentinel fd, from ctx.stream.socket.handle over TLS)

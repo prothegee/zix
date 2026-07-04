@@ -164,7 +164,7 @@ test "zix edge: gRPC finish-only handler delivers error status to client" {
     try std.testing.expect(resp == .status);
     try std.testing.expectEqual(zix.Grpc.Status.INVALID_ARGUMENT, resp.status);
 
-    zix.Http2.sendGoaway(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
     t.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);

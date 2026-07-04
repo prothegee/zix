@@ -19,7 +19,7 @@ const SERVER_PORT: u16 = 9068;
 // --------------------------------------------------------- //
 
 fn home(_: []const u8, _: []const zix.Http2.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello from zix h2c (epoll)\n") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello from zix h2c (epoll)\n") catch {};
 }
 
 const Routes = [_]zix.Http2.Route{

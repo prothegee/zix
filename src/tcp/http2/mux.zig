@@ -8,7 +8,7 @@
 //!
 //! Note:
 //! - Connection-management frames and responses write straight to the fd via the `frame.*` helpers,
-//!   which poll on EAGAIN for a non-blocking socket (see `frame.fdWriteAll`). Wire order is preserved
+//!   which poll on EAGAIN for a non-blocking socket (see `frame.writeAllFD`). Wire order is preserved
 //!   with no reply cork, and the existing `core` dispatch is reused unchanged. A handler runs inline
 //!   on the worker, so like the gRPC mux model it must stay bounded.
 //! - The h2c upgrade path (HTTP/1.1 `Upgrade: h2c`) is served minimally on the mux path: 101 then the
@@ -23,7 +23,7 @@ const core = @import("core.zig");
 const Route = core.Route;
 
 /// The connection whose handler is running on this worker thread, set around each dispatch so the
-/// flow-controlled send (`sendResponseStream`) can reach the connection's send windows. Null on the
+/// flow-controlled send (`sendResponseStreamFD`) can reach the connection's send windows. Null on the
 /// blocking non-mux serve paths, where the send falls back to an immediate, unmetered write.
 pub threadlocal var active_conn: ?*MuxConn = null;
 
@@ -245,7 +245,7 @@ fn findSlot(stream_id: u31, streams: []*MuxStream, used: []bool) ?usize {
 
 /// Send the server SETTINGS frame (the connection preface reply).
 fn sendServerSettings(conn: *MuxConn) void {
-    frame.sendSettings(conn.fd, &.{
+    frame.sendSettingsFD(conn.fd, &.{
         .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(conn.opts.max_streams)) },
         .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, 65535 },
         .{ frame.SETTINGS_MAX_FRAME_SIZE, conn.opts.max_frame_size },
@@ -254,7 +254,7 @@ fn sendServerSettings(conn: *MuxConn) void {
 }
 
 /// Extract method / path from the decoded pseudo-headers and dispatch the stream. The reply is
-/// written straight to the fd by the handler (via `frame.sendResponse`).
+/// written straight to the fd by the handler (via `frame.sendResponseFD`).
 fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void {
     const s = conn.streams[slot];
     var method: []const u8 = "GET";
@@ -299,13 +299,13 @@ fn pumpBody(conn: *MuxConn, stream: *MuxStream, body: []const u8, end: bool) voi
         const chunk = @min(body.len - off, @as(usize, @intCast(cap)));
         const is_last = end and (off + chunk == body.len);
 
-        frame.writeFrameHeader(conn.fd, .{
+        frame.writeFrameHeaderFD(conn.fd, .{
             .length = @intCast(chunk),
             .frame_type = frame.FRAME_TYPE_DATA,
             .flags = if (is_last) frame.FLAG_END_STREAM else 0,
             .stream_id = stream.id,
         }) catch break;
-        frame.fdWriteAll(conn.fd, body[off..][0..chunk]) catch break;
+        frame.writeAllFD(conn.fd, body[off..][0..chunk]) catch break;
 
         conn.send_window -= @intCast(chunk);
         stream.send_window -= @intCast(chunk);
@@ -338,7 +338,7 @@ fn resumeAll(conn: *MuxConn) void {
 }
 
 /// Write the response HEADERS frame (status, content-type, optional content-encoding, content-length).
-fn sendRespHeaders(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, content_length: usize, end_stream: bool) void {
+fn sendRespHeadersFD(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, content_length: usize, end_stream: bool) void {
     var hdr_buf: [frame.HPACK_ENCODE_SCRATCH]u8 = undefined;
 
     // The [:status, content-type, content-encoding] prefix is served from a per-triple cache, only
@@ -346,8 +346,8 @@ fn sendRespHeaders(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []co
     const hblock = hdr_buf[0..hpack.respHeaderBlock(&hdr_buf, status, content_type, content_encoding, content_length)];
     const flags: u8 = if (end_stream) frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM else frame.FLAG_END_HEADERS;
 
-    frame.writeFrameHeader(fd, .{ .length = @intCast(hblock.len), .frame_type = frame.FRAME_TYPE_HEADERS, .flags = flags, .stream_id = sid }) catch return;
-    frame.fdWriteAll(fd, hblock) catch return;
+    frame.writeFrameHeaderFD(fd, .{ .length = @intCast(hblock.len), .frame_type = frame.FRAME_TYPE_HEADERS, .flags = flags, .stream_id = sid }) catch return;
+    frame.writeAllFD(fd, hblock) catch return;
 }
 
 /// Send a response with HTTP/2 send-side flow control: HEADERS, then the body in DATA frames capped
@@ -355,21 +355,21 @@ fn sendRespHeaders(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []co
 ///
 /// Note:
 /// - The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache, not
-///   a per-request scratch buffer). For small transient bodies use frame.sendResponse instead.
+///   a per-request scratch buffer). For small transient bodies use frame.sendResponseFD instead.
 /// - With no active connection context (the blocking non-mux serve paths) it falls back to an
 ///   immediate, unmetered send.
-pub fn sendResponseStream(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, body: []const u8) void {
+pub fn sendResponseStreamFD(fd: std.posix.fd_t, sid: u31, status: u16, content_type: []const u8, content_encoding: []const u8, body: []const u8) void {
     const conn = active_conn orelse {
-        frame.sendResponseEncoded(fd, sid, status, content_type, content_encoding, body) catch {};
+        frame.sendResponseEncodedFD(fd, sid, status, content_type, content_encoding, body) catch {};
         return;
     };
     const slot = if (conn.fd == fd) findSlot(sid, conn.streams, conn.slots) else null;
     const s = if (slot) |sl| conn.streams[sl] else {
-        frame.sendResponseEncoded(fd, sid, status, content_type, content_encoding, body) catch {};
+        frame.sendResponseEncodedFD(fd, sid, status, content_type, content_encoding, body) catch {};
         return;
     };
 
-    sendRespHeaders(fd, sid, status, content_type, content_encoding, body.len, body.len == 0);
+    sendRespHeadersFD(fd, sid, status, content_type, content_encoding, body.len, body.len == 0);
     if (body.len == 0) return;
 
     pumpBody(conn, s, body, true);
@@ -388,11 +388,11 @@ fn muxHandleUpgrade(conn: *MuxConn) ConnOutcome {
     const upgrade_val = getHttp1Header(buf[0..hdr_end], "upgrade");
     const is_h2c = upgrade_val != null and std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_val.?, " "), "h2c");
     if (!is_h2c) {
-        frame.fdWriteAll(conn.fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        frame.writeAllFD(conn.fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return .close;
     }
 
-    frame.fdWriteAll(conn.fd, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n") catch {};
+    frame.writeAllFD(conn.fd, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n") catch {};
     conn.rstart += hdr_end;
     conn.phase = .await_preface2;
 
@@ -432,7 +432,7 @@ fn muxProcess(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             }
             if (avail < frame.PREFACE.len) return .keep_alive;
             if (!std.mem.eql(u8, conn.rbuf[conn.rstart..][0..frame.PREFACE.len], frame.PREFACE)) {
-                frame.sendGoaway(conn.fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
+                frame.sendGoawayFD(conn.fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
                 return .close;
             }
 
@@ -447,7 +447,7 @@ fn muxProcess(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             const avail = conn.rend - conn.rstart;
             if (avail < frame.PREFACE.len) return .keep_alive;
             if (!std.mem.eql(u8, conn.rbuf[conn.rstart..][0..frame.PREFACE.len], frame.PREFACE)) {
-                frame.sendGoaway(conn.fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
+                frame.sendGoawayFD(conn.fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
                 return .close;
             }
 
@@ -472,7 +472,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 
         const fh = frame.parseFrameHeader(conn.rbuf[conn.rstart..][0..9]);
         if (fh.length > max_payload) {
-            frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
+            frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
             return .close;
         }
         if (avail < 9 + fh.length) return .keep_alive;
@@ -504,13 +504,13 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                         }
                     }
                 }
-                frame.sendSettingsAck(conn.fd) catch {};
-                frame.sendWindowUpdate(conn.fd, 0, frame.DEFAULT_WINDOW_SIZE) catch {};
+                frame.sendSettingsAckFD(conn.fd) catch {};
+                frame.sendWindowUpdateFD(conn.fd, 0, frame.DEFAULT_WINDOW_SIZE) catch {};
             },
 
             frame.FRAME_TYPE_WINDOW_UPDATE => {
                 if (payload.len != 4) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
                     return .close;
                 }
                 const raw: u32 = (@as(u32, payload[0]) << 24) | (@as(u32, payload[1]) << 16) |
@@ -529,28 +529,28 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             frame.FRAME_TYPE_PING => {
                 if ((fh.flags & frame.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
                     return .close;
                 }
                 var p8: [8]u8 = undefined;
                 @memcpy(&p8, payload[0..8]);
-                frame.sendPingAck(conn.fd, p8) catch {};
+                frame.sendPingAckFD(conn.fd, p8) catch {};
             },
 
             frame.FRAME_TYPE_HEADERS => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 }
                 if (sid <= conn.last_stream_id and sid % 2 == 1) {
-                    frame.sendRstStream(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
+                    frame.sendRstStreamFD(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 }
                 conn.last_stream_id = @max(conn.last_stream_id, sid);
 
                 const slot = slotFor(conn, sid) orelse {
-                    frame.sendRstStream(conn.fd, sid, frame.ERR_REFUSED_STREAM) catch {};
+                    frame.sendRstStreamFD(conn.fd, sid, frame.ERR_REFUSED_STREAM) catch {};
                     continue;
                 };
                 const s = conn.streams[slot];
@@ -575,13 +575,13 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     offset += 5;
                 }
                 if (pad_len + offset > block.len) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 }
                 block = block[offset .. block.len - pad_len];
 
                 s.header_count = conn.hpack_dec.decode(block, &s.headers, s.header_scratch) catch {
-                    frame.sendRstStream(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
+                    frame.sendRstStreamFD(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     releaseSlot(conn, slot);
                     continue;
                 };
@@ -596,12 +596,12 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             frame.FRAME_TYPE_CONTINUATION => {
                 const sid = fh.stream_id;
                 const slot = findSlot(sid, conn.streams, conn.slots) orelse {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 };
                 const s = conn.streams[slot];
                 const count = conn.hpack_dec.decode(payload, s.headers[s.header_count..], s.header_scratch) catch {
-                    frame.sendRstStream(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
+                    frame.sendRstStreamFD(conn.fd, sid, frame.ERR_COMPRESSION_ERROR) catch {};
                     releaseSlot(conn, slot);
                     continue;
                 };
@@ -615,11 +615,11 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
             frame.FRAME_TYPE_DATA => {
                 const sid = fh.stream_id;
                 if (sid == 0) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 }
                 const slot = findSlot(sid, conn.streams, conn.slots) orelse {
-                    frame.sendRstStream(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
+                    frame.sendRstStreamFD(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 };
                 const s = conn.streams[slot];
@@ -631,14 +631,14 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     data = data[1..];
                 }
                 if (pad_len > data.len) {
-                    frame.sendGoaway(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+                    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
                     return .close;
                 }
                 data = data[0 .. data.len - pad_len];
 
                 if (data.len > 0) {
-                    frame.sendWindowUpdate(conn.fd, 0, @intCast(data.len)) catch {};
-                    frame.sendWindowUpdate(conn.fd, sid, @intCast(data.len)) catch {};
+                    frame.sendWindowUpdateFD(conn.fd, 0, @intCast(data.len)) catch {};
+                    frame.sendWindowUpdateFD(conn.fd, sid, @intCast(data.len)) catch {};
                 }
 
                 const to_copy = @min(data.len, s.body.len - s.body_len);
@@ -706,7 +706,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: mux sendResponseStream paces a large body by the send window" {
+test "zix test: mux sendResponseStreamFD paces a large body by the send window" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -730,7 +730,7 @@ test "zix test: mux sendResponseStream paces a large body by the send window" {
     @memset(&body, 'z');
 
     active_conn = conn;
-    sendResponseStream(fds[1], 1, 200, "text/plain", "", &body);
+    sendResponseStreamFD(fds[1], 1, 200, "text/plain", "", &body);
     active_conn = null;
 
     // 100 of 250 went out, 150 parked, slot retained, connection window drained to 0
@@ -784,7 +784,7 @@ test "zix test: mux sendResponseStream paces a large body by the send window" {
 var fc_test_body: [5000]u8 = undefined;
 
 fn fcTestHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    sendResponseStream(fd, sid, 200, "text/plain", "", &fc_test_body);
+    sendResponseStreamFD(fd, sid, 200, "text/plain", "", &fc_test_body);
 }
 
 const fc_test_routes = [_]Route{.{ .path = "/", .handler = fcTestHandler }};
@@ -847,7 +847,7 @@ fn aeCheckHandler(_: []const u8, headers: []const hpack.Header, _: []const u8, f
             ae_seen_len = h.value.len;
         }
     }
-    frame.sendResponse(fd, sid, 200, "text/plain", "ok") catch {};
+    frame.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
 }
 
 const ae_routes = [_]Route{.{ .path = "/static/x", .handler = aeCheckHandler }};

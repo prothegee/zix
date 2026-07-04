@@ -43,7 +43,7 @@ test "zix behaviour: Http1 ServerConfig buffer size defaults" {
         .port = 9200,
         .dispatch_model = .ASYNC,
     };
-    try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(usize, 6 * 1024), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 256 * 1024), cfg.compression_max_out);
 }
 

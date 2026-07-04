@@ -85,8 +85,8 @@ pub const GrpcClient = struct {
 
         applySocketTimeout(fd, config.recv_timeout_ms, config.send_timeout_ms);
 
-        try h2.fdWriteAll(fd, h2.PREFACE);
-        try h2.sendSettings(fd, &.{
+        try h2.writeAllFD(fd, h2.PREFACE);
+        try h2.sendSettingsFD(fd, &.{
             .{ h2.SETTINGS_INITIAL_WINDOW_SIZE, h2.DEFAULT_WINDOW_SIZE },
             .{ h2.SETTINGS_MAX_FRAME_SIZE, h2.DEFAULT_MAX_FRAME_SIZE },
         });
@@ -131,13 +131,13 @@ pub const GrpcClient = struct {
         try enc.writeHeader("grpc-accept-encoding", "identity,gzip");
         const hblock = enc.encoded();
 
-        try h2.writeFrameHeader(self.fd, .{
+        try h2.writeFrameHeaderFD(self.fd, .{
             .length = @intCast(hblock.len),
             .frame_type = h2.FRAME_TYPE_HEADERS,
             .flags = h2.FLAG_END_HEADERS,
             .stream_id = sid,
         });
-        try h2.fdWriteAll(self.fd, hblock);
+        try h2.writeAllFD(self.fd, hblock);
         return sid;
     }
 
@@ -145,19 +145,19 @@ pub const GrpcClient = struct {
     pub fn sendMessage(self: *Self, sid: u31, data: []const u8) !void {
         var prefix: [5]u8 = undefined;
         frm.writeGrpcPrefix(&prefix, false, @intCast(data.len));
-        try h2.writeFrameHeader(self.fd, .{
+        try h2.writeFrameHeaderFD(self.fd, .{
             .length = @intCast(5 + data.len),
             .frame_type = h2.FRAME_TYPE_DATA,
             .flags = 0,
             .stream_id = sid,
         });
-        try h2.fdWriteAll(self.fd, &prefix);
-        try h2.fdWriteAll(self.fd, data);
+        try h2.writeAllFD(self.fd, &prefix);
+        try h2.writeAllFD(self.fd, data);
     }
 
     /// Half-close the stream from the client side (empty DATA with END_STREAM).
     pub fn endStream(self: *Self, sid: u31) !void {
-        try h2.writeFrameHeader(self.fd, .{
+        try h2.writeFrameHeaderFD(self.fd, .{
             .length = 0,
             .frame_type = h2.FRAME_TYPE_DATA,
             .flags = h2.FLAG_END_STREAM,
@@ -209,7 +209,7 @@ pub const GrpcClient = struct {
 
             switch (fh.frame_type) {
                 h2.FRAME_TYPE_SETTINGS => {
-                    if ((fh.flags & h2.FLAG_ACK) == 0) try h2.sendSettingsAck(self.fd);
+                    if ((fh.flags & h2.FLAG_ACK) == 0) try h2.sendSettingsAckFD(self.fd);
                 },
                 h2.FRAME_TYPE_WINDOW_UPDATE => {},
                 h2.FRAME_TYPE_PING => {
@@ -217,7 +217,7 @@ pub const GrpcClient = struct {
                         var ping_payload: [8]u8 = undefined;
                         @memcpy(&ping_payload, payload[0..8]);
 
-                        try h2.sendPingAck(self.fd, ping_payload);
+                        try h2.sendPingAckFD(self.fd, ping_payload);
                     }
                 },
                 h2.FRAME_TYPE_HEADERS => {
@@ -376,13 +376,13 @@ test "zix grpc: recvResponse drains multiple messages coalesced in one DATA fram
     frm.writeGrpcPrefix(payload[frm.grpc_prefix_len + 3 ..][0..frm.grpc_prefix_len], false, 3);
     @memcpy(payload[2 * frm.grpc_prefix_len + 3 ..][0..3], "bbb");
 
-    try h2.writeFrameHeader(fds[1], .{
+    try h2.writeFrameHeaderFD(fds[1], .{
         .length = @intCast(payload.len),
         .frame_type = h2.FRAME_TYPE_DATA,
         .flags = h2.FLAG_END_STREAM,
         .stream_id = 1,
     });
-    try h2.fdWriteAll(fds[1], &payload);
+    try h2.writeAllFD(fds[1], &payload);
 
     var client = GrpcClient{
         .fd = fds[0],

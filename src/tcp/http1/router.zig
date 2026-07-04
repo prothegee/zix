@@ -193,7 +193,7 @@ pub fn Router(comptime routes: []const Route) type {
                 }
             }
 
-            core.writeSimple(fd, 404, "text/plain", "Not Found") catch {};
+            core.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
         }
     };
 }

@@ -4,7 +4,7 @@ const std = @import("std");
 const content = @import("content.zig");
 const file_utils = @import("../../utils/file.zig");
 const Request = @import("request.zig").Request;
-const fdWriteAll = @import("response.zig").fdWriteAll;
+const writeAllFD = @import("response.zig").writeAllFD;
 
 // --------------------------------------------------------- //
 
@@ -71,12 +71,12 @@ pub fn serve(
 
             if (start >= stat.size) {
                 const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{d}\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n", .{stat.size}) catch return false;
-                fdWriteAll(fd, s) catch return false;
+                writeAllFD(fd, s) catch return false;
                 return true;
             }
 
             const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, length, start, end, stat.size }) catch return false;
-            fdWriteAll(fd, s) catch return false;
+            writeAllFD(fd, s) catch return false;
 
             var file_buf: [FILE_BUF_SIZE]u8 = undefined;
             var reader = f.reader(io, &file_buf);
@@ -93,7 +93,7 @@ pub fn serve(
                 const to_read = @min(remaining, copy_buf.len);
                 const n = reader.interface.readSliceShort(copy_buf[0..@intCast(to_read)]) catch break;
                 if (n == 0) break;
-                fdWriteAll(fd, copy_buf[0..n]) catch break;
+                writeAllFD(fd, copy_buf[0..n]) catch break;
                 remaining -= n;
             }
             return true;
@@ -102,7 +102,7 @@ pub fn serve(
 
     // Full file response.
     const s = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\n\r\n", .{ content_type, stat.size }) catch return false;
-    fdWriteAll(fd, s) catch return false;
+    writeAllFD(fd, s) catch return false;
 
     var file_buf: [FILE_BUF_SIZE]u8 = undefined;
     var reader = f.reader(io, &file_buf);
@@ -112,7 +112,7 @@ pub fn serve(
         const to_read = @min(remaining, copy_buf.len);
         const n = reader.interface.readSliceShort(copy_buf[0..to_read]) catch break;
         if (n == 0) break;
-        fdWriteAll(fd, copy_buf[0..n]) catch break;
+        writeAllFD(fd, copy_buf[0..n]) catch break;
         remaining -= n;
     }
     return true;

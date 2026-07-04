@@ -107,34 +107,34 @@ pub fn encodeFrameHeader(buf: *[FRAME_HEADER_LEN]u8, fh: FrameHeader) void {
     buf[8] = @intCast(sid & 0xFF);
 }
 
-pub fn writeFrameHeader(fd: std.posix.fd_t, fh: FrameHeader) !void {
+pub fn writeFrameHeaderFD(fd: std.posix.fd_t, fh: FrameHeader) !void {
     var buf: [FRAME_HEADER_LEN]u8 = undefined;
     encodeFrameHeader(&buf, fh);
-    try fdWriteAll(fd, &buf);
+    try writeAllFD(fd, &buf);
 }
 
 // --------------------------------------------------------- //
 
-/// Thread-local output redirect. When set, `fdWriteAll` hands the plaintext to the hook instead of
+/// Thread-local output redirect. When set, `writeAllFD` hands the plaintext to the hook instead of
 /// writing it to the fd. The h2-over-TLS path uses this to encrypt the engine's frames before they
 /// reach the socket, so the resumable mux runs unchanged over a TLS connection (no socketpair, no
 /// second thread). Null on the cleartext path, where writes go straight to the fd.
 pub threadlocal var write_hook: ?*const fn (ctx: *anyopaque, bytes: []const u8) void = null;
 pub threadlocal var write_hook_ctx: ?*anyopaque = null;
 
-pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (write_hook) |hook| {
         hook(write_hook_ctx.?, data);
         return;
     }
 
-    return fdWriteAllRaw(fd, data);
+    return writeAllRawFD(fd, data);
 }
 
 /// Hook-bypassing blocking write-all. A coalescing sink installed as the write hook flushes its
 /// staged bytes through this so the flush does not re-enter the hook (which would recurse). Polls on
-/// EAGAIN for a non-blocking socket. Identical to fdWriteAll minus the hook check.
-pub fn fdWriteAllRaw(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+/// EAGAIN for a non-blocking socket. Identical to writeAllFD minus the hook check.
+pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
@@ -167,9 +167,9 @@ pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
 
 // --------------------------------------------------------- //
 
-pub fn sendSettings(fd: std.posix.fd_t, params: []const [2]u32) !void {
+pub fn sendSettingsFD(fd: std.posix.fd_t, params: []const [2]u32) !void {
     const payload_len: usize = params.len * 6;
-    try writeFrameHeader(fd, .{
+    try writeFrameHeaderFD(fd, .{
         .length = @intCast(payload_len),
         .frame_type = FRAME_TYPE_SETTINGS,
         .flags = 0,
@@ -185,12 +185,12 @@ pub fn sendSettings(fd: std.posix.fd_t, params: []const [2]u32) !void {
         buf[3] = @intCast((val >> 16) & 0xFF);
         buf[4] = @intCast((val >> 8) & 0xFF);
         buf[5] = @intCast(val & 0xFF);
-        try fdWriteAll(fd, &buf);
+        try writeAllFD(fd, &buf);
     }
 }
 
-pub fn sendSettingsAck(fd: std.posix.fd_t) !void {
-    try writeFrameHeader(fd, .{
+pub fn sendSettingsAckFD(fd: std.posix.fd_t) !void {
+    try writeFrameHeaderFD(fd, .{
         .length = 0,
         .frame_type = FRAME_TYPE_SETTINGS,
         .flags = FLAG_ACK,
@@ -198,18 +198,18 @@ pub fn sendSettingsAck(fd: std.posix.fd_t) !void {
     });
 }
 
-pub fn sendPingAck(fd: std.posix.fd_t, payload: [8]u8) !void {
-    try writeFrameHeader(fd, .{
+pub fn sendPingAckFD(fd: std.posix.fd_t, payload: [8]u8) !void {
+    try writeFrameHeaderFD(fd, .{
         .length = 8,
         .frame_type = FRAME_TYPE_PING,
         .flags = FLAG_ACK,
         .stream_id = 0,
     });
-    try fdWriteAll(fd, &payload);
+    try writeAllFD(fd, &payload);
 }
 
-pub fn sendGoaway(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
-    try writeFrameHeader(fd, .{
+pub fn sendGoawayFD(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
+    try writeFrameHeaderFD(fd, .{
         .length = 8,
         .frame_type = FRAME_TYPE_GOAWAY,
         .flags = 0,
@@ -225,11 +225,11 @@ pub fn sendGoaway(fd: std.posix.fd_t, last_stream: u31, error_code: u32) !void {
     buf[5] = @intCast((error_code >> 16) & 0xFF);
     buf[6] = @intCast((error_code >> 8) & 0xFF);
     buf[7] = @intCast(error_code & 0xFF);
-    try fdWriteAll(fd, &buf);
+    try writeAllFD(fd, &buf);
 }
 
-pub fn sendRstStream(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void {
-    try writeFrameHeader(fd, .{
+pub fn sendRstStreamFD(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void {
+    try writeFrameHeaderFD(fd, .{
         .length = 4,
         .frame_type = FRAME_TYPE_RST_STREAM,
         .flags = 0,
@@ -240,11 +240,11 @@ pub fn sendRstStream(fd: std.posix.fd_t, stream_id: u31, error_code: u32) !void 
     buf[1] = @intCast((error_code >> 16) & 0xFF);
     buf[2] = @intCast((error_code >> 8) & 0xFF);
     buf[3] = @intCast(error_code & 0xFF);
-    try fdWriteAll(fd, &buf);
+    try writeAllFD(fd, &buf);
 }
 
-pub fn sendWindowUpdate(fd: std.posix.fd_t, stream_id: u31, increment: u31) !void {
-    try writeFrameHeader(fd, .{
+pub fn sendWindowUpdateFD(fd: std.posix.fd_t, stream_id: u31, increment: u31) !void {
+    try writeFrameHeaderFD(fd, .{
         .length = 4,
         .frame_type = FRAME_TYPE_WINDOW_UPDATE,
         .flags = 0,
@@ -256,26 +256,26 @@ pub fn sendWindowUpdate(fd: std.posix.fd_t, stream_id: u31, increment: u31) !voi
     buf[1] = @intCast((inc >> 16) & 0xFF);
     buf[2] = @intCast((inc >> 8) & 0xFF);
     buf[3] = @intCast(inc & 0xFF);
-    try fdWriteAll(fd, &buf);
+    try writeAllFD(fd, &buf);
 }
 
 /// Send HEADERS + optional DATA for a complete response. Sets END_STREAM on DATA (or HEADERS when body is empty).
-/// Not suitable for multi-step responses (e.g. gRPC trailers). Use writeFrameHeader + fdWriteAll directly for those.
-pub fn sendResponse(
+/// Not suitable for multi-step responses (e.g. gRPC trailers). Use writeFrameHeaderFD + writeAllFD directly for those.
+pub fn sendResponseFD(
     fd: std.posix.fd_t,
     stream_id: u31,
     status: u16,
     content_type: []const u8,
     body: []const u8,
 ) !void {
-    return sendResponseEncoded(fd, stream_id, status, content_type, "", body);
+    return sendResponseEncodedFD(fd, stream_id, status, content_type, "", body);
 }
 
-/// sendResponse plus an optional content-encoding header (for serving a precompressed body). An empty
+/// sendResponseFD plus an optional content-encoding header (for serving a precompressed body). An empty
 /// content_encoding omits the header. The body is framed in <= DEFAULT_MAX_FRAME_SIZE DATA chunks.
 /// This is the immediate, unmetered send (no flow control). For large bodies that may exceed the
-/// peer's window use the multiplexed `mux.sendResponseStream`, which paces by WINDOW_UPDATE.
-pub fn sendResponseEncoded(
+/// peer's window use the multiplexed `mux.sendResponseStreamFD`, which paces by WINDOW_UPDATE.
+pub fn sendResponseEncodedFD(
     fd: std.posix.fd_t,
     stream_id: u31,
     status: u16,
@@ -292,13 +292,13 @@ pub fn sendResponseEncoded(
     const hblock = hdr_buf[0..hpack.respHeaderBlock(&hdr_buf, status, content_type, content_encoding, content_length)];
     const end_stream_flag: u8 = if (body.len == 0) FLAG_END_STREAM | FLAG_END_HEADERS else FLAG_END_HEADERS;
 
-    try writeFrameHeader(fd, .{
+    try writeFrameHeaderFD(fd, .{
         .length = @intCast(hblock.len),
         .frame_type = FRAME_TYPE_HEADERS,
         .flags = end_stream_flag,
         .stream_id = stream_id,
     });
-    try fdWriteAll(fd, hblock);
+    try writeAllFD(fd, hblock);
 
     if (body.len > 0) {
         // Frame the body in <= DEFAULT_MAX_FRAME_SIZE chunks: a single DATA frame larger than the
@@ -309,13 +309,13 @@ pub fn sendResponseEncoded(
             const chunk = @min(body.len - off, DEFAULT_MAX_FRAME_SIZE);
             const last = off + chunk == body.len;
 
-            try writeFrameHeader(fd, .{
+            try writeFrameHeaderFD(fd, .{
                 .length = @intCast(chunk),
                 .frame_type = FRAME_TYPE_DATA,
                 .flags = if (last) FLAG_END_STREAM else 0,
                 .stream_id = stream_id,
             });
-            try fdWriteAll(fd, body[off..][0..chunk]);
+            try writeAllFD(fd, body[off..][0..chunk]);
 
             off += chunk;
         }
@@ -324,12 +324,12 @@ pub fn sendResponseEncoded(
 
 // --------------------------------------------------------- //
 
-test "zix test: fdWriteAll delivers data on a blocking fd" {
+test "zix test: writeAllFD delivers data on a blocking fd" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
 
-    try fdWriteAll(fds[1], "frame");
+    try writeAllFD(fds[1], "frame");
     _ = std.posix.system.close(fds[1]);
 
     var buf: [8]u8 = undefined;
@@ -337,14 +337,14 @@ test "zix test: fdWriteAll delivers data on a blocking fd" {
     try std.testing.expectEqualStrings("frame", buf[0..n]);
 }
 
-test "zix test: sendResponse chunks a body past the max frame size, END_STREAM on the last" {
+test "zix test: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
 
     var body: [40000]u8 = undefined;
     @memset(&body, 'a');
-    try sendResponse(fds[1], 1, 200, "text/plain", &body);
+    try sendResponseFD(fds[1], 1, 200, "text/plain", &body);
     _ = std.posix.system.close(fds[1]);
 
     var buf: [64 * 1024]u8 = undefined;
@@ -387,7 +387,7 @@ test "zix test: frame constants, ERR_NO_ERROR is 0" {
     try std.testing.expectEqual(@as(u32, 0), ERR_NO_ERROR);
 }
 
-test "zix test: writeFrameHeader and readFrameHeader roundtrip via pipe" {
+test "zix test: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -398,7 +398,7 @@ test "zix test: writeFrameHeader and readFrameHeader roundtrip via pipe" {
         .flags = FLAG_END_HEADERS,
         .stream_id = 3,
     };
-    try writeFrameHeader(fds[1], fh);
+    try writeFrameHeaderFD(fds[1], fh);
     _ = std.posix.system.close(fds[1]);
 
     const got = try readFrameHeader(fds[0]);
@@ -413,12 +413,12 @@ test "zix test: PREFACE starts with PRI" {
     try std.testing.expectEqual(@as(usize, 24), PREFACE.len);
 }
 
-test "zix test: sendSettings empty params writes 9-byte SETTINGS frame via pipe" {
+test "zix test: sendSettingsFD empty params writes 9-byte SETTINGS frame via pipe" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
 
-    try sendSettings(fds[1], &.{});
+    try sendSettingsFD(fds[1], &.{});
     _ = std.posix.system.close(fds[1]);
 
     const fh = try readFrameHeader(fds[0]);

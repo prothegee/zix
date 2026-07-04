@@ -256,7 +256,7 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.Grpc
     frame.write_hook = hookWrite;
     frame.write_hook_ctx = conn;
     const outcome = core.grpcMuxProcessRing(routes, grpc_conn);
-    grpc_conn.flushStage(); // staged reply -> frame.fdWriteAll -> hook -> encrypt
+    grpc_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> encrypt
     flushPlain(conn);
     frame.write_hook = null;
     frame.write_hook_ctx = null;

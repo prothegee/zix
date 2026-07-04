@@ -11,7 +11,7 @@ const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
-// zix.Http1.writeSimple has no custom-header slots, so this example hand-builds
+// zix.Http1.sendSimpleFD has no custom-header slots, so this example hand-builds
 // the response with sendWithHeaders below. The cap and the CR/LF injection guard
 // are enforced by that helper, mirroring what zix.Http.Response.addHeader does.
 const MAX_XTRA_HEADERS: usize = 16;
@@ -62,7 +62,7 @@ fn sendWithHeaders(
     try w.writeAll("\r\n");
     try w.writeAll(body);
 
-    try zix.Http1.fdWriteAll(fd, w.buffered());
+    try zix.Http1.writeAllFD(fd, w.buffered());
 }
 
 // --------------------------------------------------------- //
@@ -116,7 +116,7 @@ fn overflowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.
     sendWithHeaders(fd, 200, "application/json", &headers, "{\"status\":\"ok\"}") catch |err| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\",\"note\":\"cap is 16\"}}", .{@errorName(err)}) catch return;
-        zix.Http1.writeJson(fd, 500, msg) catch {};
+        zix.Http1.sendJsonFD(fd, 500, msg) catch {};
     };
 }
 
@@ -133,7 +133,7 @@ fn injectGuardHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: s
     sendWithHeaders(fd, 200, "application/json", &headers, "{\"status\":\"ok\"}") catch |err| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\",\"note\":\"CR/LF in header value rejected\"}}", .{@errorName(err)}) catch return;
-        zix.Http1.writeJson(fd, 400, msg) catch {};
+        zix.Http1.sendJsonFD(fd, 400, msg) catch {};
     };
 }
 

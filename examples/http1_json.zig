@@ -24,11 +24,11 @@ const User = struct {
 fn statusHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
         return;
     }
 
-    zix.Http1.writeJson(fd, 200, "{\"ok\":true,\"message\":\"\",\"data\":{\"server\":\"zix\"}}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"ok\":true,\"message\":\"\",\"data\":{\"server\":\"zix\"}}") catch {};
 }
 
 // curl usage: curl -X GET "http://localhost:9020/echo?name=Alice"
@@ -38,30 +38,30 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"\",\"data\":{{\"hello\":\"{s}\"}}}}", .{name}) catch return;
-    zix.Http1.writeJson(fd, 200, json) catch {};
+    zix.Http1.sendJsonFD(fd, 200, json) catch {};
 }
 
 // curl usage: curl -X POST "http://localhost:9020/post" -d "hello"
 fn postHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
         return;
     }
 
     var buf: [128]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"\",\"data\":{{\"received\":{d}}}}}", .{body.len}) catch return;
-    zix.Http1.writeJson(fd, 200, json) catch {};
+    zix.Http1.sendJsonFD(fd, 200, json) catch {};
 }
 
 // curl usage: curl -X POST "http://localhost:9020/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
 fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
         return;
     }
 
     if (body.len == 0) {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"empty body\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"empty body\"}") catch {};
         return;
     }
 
@@ -71,7 +71,7 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
         body,
         .{ .ignore_unknown_fields = true },
     ) catch {
-        zix.Http1.writeJson(fd, 400, "{\"ok\":false,\"message\":\"invalid json\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"invalid json\"}") catch {};
         return;
     };
     defer parsed.deinit();
@@ -82,14 +82,14 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
         "{{\"ok\":true,\"message\":\"\",\"data\":{{\"name\":\"{s}\",\"age\":{d}}}}}",
         .{ parsed.value.name, parsed.value.age },
     ) catch return;
-    zix.Http1.writeJson(fd, 200, json) catch {};
+    zix.Http1.sendJsonFD(fd, 200, json) catch {};
 }
 
 // curl usage: curl -X GET "http://localhost:9020/users"
 fn usersHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = body;
     if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.writeJson(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
         return;
     }
 
@@ -99,7 +99,7 @@ fn usersHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
         "{\"name\":\"Bob\",\"age\":25}," ++
         "{\"name\":\"Carol\",\"age\":28}" ++
         "]}";
-    zix.Http1.writeJson(fd, 200, payload) catch {};
+    zix.Http1.sendJsonFD(fd, 200, payload) catch {};
 }
 
 // --------------------------------------------------------- //

@@ -67,7 +67,7 @@ const ws_record_plain_size: usize = 17 * 1024;
 const ws_payload_size: usize = 16 * 1024;
 const ws_out_size: usize = 32 * 1024;
 
-/// The sentinel fd handed to processRequest while a response sink is installed: every fdWriteAll and
+/// The sentinel fd handed to processRequest while a response sink is installed: every writeAllFD and
 /// the Response fast path target this fd, so nothing escapes to a real descriptor (no plaintext leak).
 const sink_fd: posix.fd_t = -1;
 
@@ -94,7 +94,7 @@ fn StreamSinkFor(comptime Conn: type) type {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
 
             const encrypted = self.conn.writeAppData(plaintext, self.enc);
-            writeAll(self.fd, encrypted) catch return false;
+            writeAllFD(self.fd, encrypted) catch return false;
 
             return true;
         }
@@ -204,7 +204,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
     var second_hello: []const u8 = &.{};
     if (Tls.serverHelloRetry(opts, client_hello_rec.body, &hrr_out)) |maybe_retry| {
         if (maybe_retry) |retry| {
-            try writeAll(fd, retry.to_send);
+            try writeAllFD(fd, retry.to_send);
 
             const ch2_rec = try readRecord(fd, &record_buf);
             if (ch2_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
@@ -215,7 +215,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
     } else |err| {
         if (err != error.UnsupportedTlsVersion) {
             var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
             return err;
         }
@@ -230,7 +230,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
             if (err == error.UnsupportedTlsVersion) {
                 if (!ctx.allowsTls12()) {
                     var ver_alert: [Tls.fatal_record_len]u8 = undefined;
-                    if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAll(fd, rec) catch {};
+                    if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAllFD(fd, rec) catch {};
 
                     return err;
                 }
@@ -244,11 +244,11 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
             }
 
             var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
             return err;
         };
-    try writeAll(fd, result.to_send);
+    try writeAllFD(fd, result.to_send);
     var conn = result.connection;
 
     // client ChangeCipherSpec (skipped) + Finished. A plaintext alert here means the peer aborted.
@@ -276,7 +276,7 @@ fn serveConnTls12(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.C
         .server_random = server_random,
         .alpn_prefs = ctx.alpn,
     }, client_hello, &flight_out);
-    try writeAll(fd, flight.to_send);
+    try writeAllFD(fd, flight.to_send);
     var state = flight.state;
 
     var record_buf: [record.max_record_wire]u8 = undefined;
@@ -299,7 +299,7 @@ fn serveConnTls12(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.C
 
     var finish_out: [server_finished_out_size]u8 = undefined;
     const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
-    try writeAll(fd, finish.to_send);
+    try writeAllFD(fd, finish.to_send);
     var conn = finish.connection;
 
     try serveRequests(server, io, fd, ctx, &conn, &record_buf);
@@ -325,7 +325,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
 
     // arm the streaming sink for this connection (ADR-054): a streaming handler (res.stream / SSE)
     // writes each event through it, encrypting one record per write, instead of buffering. A normal
-    // buffered handler never touches it (the capture sink wins in fdWriteAll).
+    // buffered handler never touches it (the capture sink wins in writeAllFD).
     const Stream = StreamSinkFor(@TypeOf(conn));
     var stream_state = Stream{ .conn = conn, .fd = fd, .enc = &encrypt_buf };
     const prev_stream = resp.tl_tls_stream;
@@ -372,8 +372,8 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
             const host = stripPort(host_raw);
             Tls.verifyCertIdentity(ctx.cert_der, host) catch {
                 const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
-                writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+                writeAllFD(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+                writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
                 return;
             };
@@ -381,7 +381,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
 
         const cap = processRequestToBuffer(server, io, rbuf[0..total], &response_buf, &arena) catch {
             // ResponseTooLarge / StreamingNotSupported: close the connection cleanly.
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         };
@@ -390,7 +390,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
             // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
             // Run the inline frame loop over this TLS session, then close.
             serveWsTls(conn, fd, handoff.on_frame, record_buf) catch {};
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
@@ -398,12 +398,12 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
         if (cap.streamed) {
             // the handler streamed the whole response over TLS (already encrypted + sent through the
             // stream sink). The stream owns the rest of the connection, so close after it returns.
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
 
-        try writeAll(fd, conn.writeAppData(cap.bytes, &encrypt_buf));
+        try writeAllFD(fd, conn.writeAppData(cap.bytes, &encrypt_buf));
 
         // slide any pipelined bytes down for the next request.
         const remaining = rlen - total;
@@ -411,7 +411,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
         rlen = remaining;
 
         if (cap.outcome == .close) {
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
@@ -421,7 +421,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
 /// Drive a WebSocket session over the established TLS connection (ADR-055). Each iteration reads one
 /// ciphertext record, decrypts it, accumulates the plaintext, and pumps every complete frame: a
 /// text / binary frame invokes on_frame, ping is auto-ponged, close is auto-echoed. Outbound frames
-/// flow through the ADR-054 stream sink (resp.fdWriteAll -> conn.writeAppData), so each pump pass
+/// flow through the ADR-054 stream sink (resp.writeAllFD -> conn.writeAppData), so each pump pass
 /// encrypts its coalesced frames as one record. Ends on a peer hangup, a close frame, or close_notify.
 fn serveWsTls(conn: anytype, fd: posix.fd_t, on_frame: ws.WsFrameFn, record_buf: []u8) !void {
     var acc: [ws_acc_size]u8 = undefined;
@@ -531,7 +531,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     }
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];

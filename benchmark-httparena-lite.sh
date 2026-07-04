@@ -23,11 +23,11 @@
 # for the HttpArena build hook.
 #
 # Usage:
-#   ./zix-bench-lite.sh zix                              # this folder, 4 threads
-#   ./zix-bench-lite.sh zix-grpc                         # gRPC suite
-#   ./zix-bench-lite.sh zix --load-threads 6             # override threads
-#   ./zix-bench-lite.sh zix-ws /path/HttpArena           # ws, other folder
-#   ./zix-bench-lite.sh zix /path/HttpArena --source local --zix-dir /path/zix
+#   ./benchmark-httparena-lite.sh zix                              # this folder, 4 threads
+#   ./benchmark-httparena-lite.sh zix-grpc                         # gRPC suite
+#   ./benchmark-httparena-lite.sh zix --load-threads 6             # override threads
+#   ./benchmark-httparena-lite.sh zix-ws /path/HttpArena           # ws, other folder
+#   ./benchmark-httparena-lite.sh zix /path/HttpArena --source local --zix-dir /path/zix
 
 set -euo pipefail
 

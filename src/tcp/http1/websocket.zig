@@ -197,7 +197,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
 }
 
 /// Perform the HTTP to WebSocket upgrade handshake on a raw fd.
-/// Writes the 101 Switching Protocols response directly via core.fdWriteAll.
+/// Writes the 101 Switching Protocols response directly via core.writeAllFD.
 ///
 /// Param:
 /// fd     - std.posix.fd_t
@@ -216,7 +216,7 @@ pub fn upgrade(fd: std.posix.fd_t, accept: []const u8) !void {
         .{accept},
     );
 
-    try core.fdWriteAll(fd, response);
+    try core.writeAllFD(fd, response);
 }
 
 // --------------------------------------------------------- //
@@ -244,7 +244,7 @@ const SendSink = struct {
     fn append(self: *SendSink, bytes: []const u8) void {
         if (bytes.len > self.buf.len) {
             self.flush();
-            core.fdWriteAll(self.fd, bytes) catch {
+            core.writeAllFD(self.fd, bytes) catch {
                 self.failed = true;
             };
             return;
@@ -259,7 +259,7 @@ const SendSink = struct {
     fn flush(self: *SendSink) void {
         if (self.len == 0) return;
 
-        core.fdWriteAll(self.fd, self.buf[0..self.len]) catch {
+        core.writeAllFD(self.fd, self.buf[0..self.len]) catch {
             self.failed = true;
         };
         self.len = 0;
@@ -285,7 +285,7 @@ threadlocal var tl_send_sink: ?*SendSink = null;
 ///
 /// Return:
 /// - !void (error.BrokenPipe on a dead peer)
-pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
+pub fn sendFD(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
     if (tl_send_sink) |sink| {
         var hdr: [ws_max_frame_header]u8 = undefined;
         const hdr_len = buildHeader(&hdr, opcode, payload.len);
@@ -300,14 +300,14 @@ pub fn send(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8) !void {
         var buf: [ws_send_inline_cap]u8 = undefined;
         const len = buildFrame(&buf, opcode, payload);
 
-        return core.fdWriteAll(fd, buf[0..len]);
+        return core.writeAllFD(fd, buf[0..len]);
     }
 
     var hdr: [ws_max_frame_header]u8 = undefined;
     const hdr_len = buildHeader(&hdr, opcode, payload.len);
 
-    try core.fdWriteAll(fd, hdr[0..hdr_len]);
-    try core.fdWriteAll(fd, payload);
+    try core.writeAllFD(fd, hdr[0..hdr_len]);
+    try core.writeAllFD(fd, payload);
 }
 
 /// Build one server frame and fan it out to every fd in conns. The frame is
@@ -341,7 +341,7 @@ pub fn broadcast(conns: []const std.posix.fd_t, opcode: Opcode, payload: []const
         const len = buildFrame(&buf, opcode, payload);
         const frame = buf[0..len];
 
-        for (conns) |fd| core.fdWriteAll(fd, frame) catch continue;
+        for (conns) |fd| core.writeAllFD(fd, frame) catch continue;
 
         return;
     }
@@ -353,8 +353,8 @@ pub fn broadcast(conns: []const std.posix.fd_t, opcode: Opcode, payload: []const
     const header = hdr[0..hdr_len];
 
     for (conns) |fd| {
-        core.fdWriteAll(fd, header) catch continue;
-        core.fdWriteAll(fd, payload) catch continue;
+        core.writeAllFD(fd, header) catch continue;
+        core.writeAllFD(fd, payload) catch continue;
     }
 }
 
@@ -394,7 +394,7 @@ pub fn serve(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
 /// - Thread-per-connection only, like SSE over TLS. `fd` is the sentinel (-1) the handler is given
 ///   over TLS, used only to match the send sink, never a real descriptor.
 /// - `broadcast` and rooms are not supported over TLS: each connection has its own TLS session, so
-///   a frame must be encrypted per connection. Use `send` (echo / per-connection) over TLS.
+///   a frame must be encrypted per connection. Use `sendFD` (echo / per-connection) over TLS.
 ///
 /// Param:
 /// fd       - std.posix.fd_t (the sentinel fd the handler received)
@@ -452,9 +452,9 @@ pub fn pump(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf: []
 
         switch (result.frame.opcode) {
             .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
-            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .ping => sendFD(fd, .pong, result.frame.payload) catch {},
             .close => {
-                send(fd, .close, &.{}) catch {};
+                sendFD(fd, .close, &.{}) catch {};
                 offset += result.consumed;
                 close = true;
                 break;
@@ -514,9 +514,9 @@ pub fn pumpRing(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf
 
         switch (result.frame.opcode) {
             .text, .binary => on_frame(fd, @intFromEnum(result.frame.opcode), result.frame.payload),
-            .ping => send(fd, .pong, result.frame.payload) catch {},
+            .ping => sendFD(fd, .pong, result.frame.payload) catch {},
             .close => {
-                send(fd, .close, &.{}) catch {};
+                sendFD(fd, .close, &.{}) catch {};
                 offset += result.consumed;
                 close = true;
                 break;
@@ -614,7 +614,7 @@ test "zix http1 ws: buildHeader matches buildFrame prefix" {
 }
 
 fn testEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
-    send(fd, @enumFromInt(opcode), payload) catch {};
+    sendFD(fd, @enumFromInt(opcode), payload) catch {};
 }
 
 test "zix http1 ws: pump echoes masked client frames over a socketpair" {

@@ -169,7 +169,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     var second_hello: []const u8 = &.{};
     if (Tls.serverHelloRetry(opts, client_hello_rec.body, &hrr_out)) |maybe_retry| {
         if (maybe_retry) |retry| {
-            try writeAll(fd, retry.to_send);
+            try writeAllFD(fd, retry.to_send);
 
             const ch2_rec = try readRecord(fd, &record_buf);
             if (ch2_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
@@ -181,7 +181,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
         // a malformed / non-1.3 ClientHello: 1.2 falls through to serverHandshake, else alert + close.
         if (err != error.UnsupportedTlsVersion) {
             var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
             return err;
         }
@@ -197,7 +197,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
             if (err == error.UnsupportedTlsVersion) {
                 if (!ctx.allowsTls12()) {
                     var ver_alert: [Tls.fatal_record_len]u8 = undefined;
-                    if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAll(fd, rec) catch {};
+                    if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAllFD(fd, rec) catch {};
 
                     return err;
                 }
@@ -212,11 +212,11 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
 
             // any other rejected ClientHello: send the fatal alert in the clear (no keys yet), then close.
             var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+            if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
             return err;
         };
-    try writeAll(fd, result.to_send);
+    try writeAllFD(fd, result.to_send);
     var conn = result.connection;
 
     // client ChangeCipherSpec (skipped) + Finished. A plaintext alert here means the peer aborted.
@@ -251,7 +251,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
 
     // arm the streaming sink for this connection (ADR-054): an SSE handler that called beginStream()
     // writes each event through it, encrypting one record per write. A normal handler never touches
-    // it (the capture sink wins in core.fdWriteAll).
+    // it (the capture sink wins in core.writeAllFD).
     const Stream = StreamSinkFor(@TypeOf(conn));
     var stream_state = Stream{ .conn = conn, .fd = fd, .enc = &encrypt_buf };
     const prev_stream = core.tl_tls_stream;
@@ -277,7 +277,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             if (comptime @hasDecl(@TypeOf(conn.*), "encryptedAlert")) {
                 if (err == error.UnexpectedMessage) {
                     var alert_buf: [encrypted_alert_size]u8 = undefined;
-                    writeAll(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
+                    writeAllFD(fd, conn.encryptedAlert(.UNEXPECTED_MESSAGE, &alert_buf)) catch {};
                 }
             }
 
@@ -294,8 +294,8 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             const host = stripPort(host_raw);
             Tls.verifyCertIdentity(ctx.cert_der, host) catch {
                 const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                writeAll(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
-                writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+                writeAllFD(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+                writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
                 return;
             };
@@ -307,7 +307,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
             // Run the inline frame loop over this TLS session, then close.
             serveWsTls(conn, fd, handoff.on_frame, record_buf) catch {};
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
@@ -315,16 +315,16 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
         if (result.streamed) {
             // the handler streamed the whole response over TLS (already encrypted + sent through the
             // stream sink). The stream owns the rest of the connection, so close after it returns.
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
 
-        try writeAll(fd, conn.writeAppData(result.bytes, &encrypt_buf));
+        try writeAllFD(fd, conn.writeAppData(result.bytes, &encrypt_buf));
 
         // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
         if (!head.keep_alive) {
-            writeAll(fd, conn.closeNotify(&close_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
             return;
         }
@@ -334,7 +334,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
 /// Drive a WebSocket session over the established TLS connection (ADR-055). Each iteration reads one
 /// ciphertext record, decrypts it, accumulates the plaintext, and pumps every complete frame: a
 /// text / binary frame invokes on_frame, ping is auto-ponged, close is auto-echoed. Outbound frames
-/// flow through the ADR-054 stream sink (fdWriteAll -> conn.writeAppData), so each pump pass encrypts
+/// flow through the ADR-054 stream sink (writeAllFD -> conn.writeAppData), so each pump pass encrypts
 /// its coalesced frames as one record. Ends on a peer hangup, a close frame, or a close_notify.
 fn serveWsTls(conn: anytype, fd: posix.fd_t, on_frame: core.WsFrameFn, record_buf: []u8) !void {
     var acc: [ws_acc_size]u8 = undefined;
@@ -417,7 +417,7 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
         .server_random = server_random,
         .alpn_prefs = ctx.alpn,
     }, client_hello, &flight_out);
-    try writeAll(fd, flight.to_send);
+    try writeAllFD(fd, flight.to_send);
     var state = flight.state;
 
     var record_buf: [record.max_record_wire]u8 = undefined;
@@ -442,14 +442,14 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
 
     var finish_out: [server_finished_out_size]u8 = undefined;
     const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
-    try writeAll(fd, finish.to_send);
+    try writeAllFD(fd, finish.to_send);
     var conn = finish.connection;
 
     // keep-alive request loop over the established 1.2 session.
     try serveRequests(fd, handler, ctx, &conn, &record_buf);
 }
 
-/// The sentinel fd handed to the fd-handler while a response sink is installed: its fdWriteAll
+/// The sentinel fd handed to the fd-handler while a response sink is installed: its writeAllFD
 /// calls match the sink by this fd and append to the buffer, they never touch a real descriptor.
 const sink_fd: posix.fd_t = -1;
 
@@ -462,7 +462,7 @@ pub const HandlerResult = struct {
 };
 
 /// Run the fd-handler with a response sink installed, returning the plaintext response it wrote into
-/// `out`. The handler's fdWriteAll appends to `out` directly (core.tl_resp_sink), so there is no
+/// `out`. The handler's writeAllFD appends to `out` directly (core.tl_resp_sink), so there is no
 /// pipe2 / read / close per request, just an in-memory copy. An overflowing response (the sink would
 /// flush to the sentinel fd, which fails) surfaces as error.ResponseTooLarge.
 ///
@@ -500,7 +500,7 @@ fn StreamSinkFor(comptime Conn: type) type {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
 
             const encrypted = self.conn.writeAppData(plaintext, self.enc);
-            writeAll(self.fd, encrypted) catch return false;
+            writeAllFD(self.fd, encrypted) catch return false;
 
             return true;
         }
@@ -541,7 +541,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     }
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];
@@ -579,7 +579,7 @@ fn keepAliveTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posi
     _ = head;
     _ = body;
 
-    core.fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
 }
 
 /// Test-only fixture: the localhost ECDSA P-256 cert DER (SAN localhost + 127.0.0.1), in hex. Public so
@@ -639,7 +639,7 @@ test "zix test: tls_serve, keep-alive serves many requests then honors Connectio
     std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
     std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
     @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
-    try writeAll(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+    try writeAllFD(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
 
     var flight_buf: [4096]u8 = undefined;
     var flen: usize = 0;
@@ -650,7 +650,7 @@ test "zix test: tls_serve, keep-alive serves many requests then honors Connectio
 
     var fin_buf: [256]u8 = undefined;
     var finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
-    try writeAll(client_fd, finished.client_finished);
+    try writeAllFD(client_fd, finished.client_finished);
 
     // three requests on the one connection: two keep-alive, then Connection: close. All three must
     // get a 200 over the SAME session (no re-handshake), proving keep-alive.
@@ -661,7 +661,7 @@ test "zix test: tls_serve, keep-alive serves many requests then honors Connectio
     };
     for (requests) |req| {
         var enc: [512]u8 = undefined;
-        try writeAll(client_fd, finished.connection.writeAppData(req, &enc));
+        try writeAllFD(client_fd, finished.connection.writeAppData(req, &enc));
 
         var resp_rec: [1024]u8 = undefined;
         const rec = try readRecord(client_fd, &resp_rec);
@@ -686,8 +686,8 @@ fn sseTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t
     _ = body;
 
     core.beginStream();
-    core.fdWriteAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
-    core.fdWriteAll(fd, "data: hello\n\n") catch return;
+    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.writeAllFD(fd, "data: hello\n\n") catch return;
 }
 
 /// Capture stream sink for the test: a streaming handler's writes land in `buf` instead of a socket.

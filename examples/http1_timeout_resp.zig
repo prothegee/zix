@@ -33,18 +33,18 @@ fn slowHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     // Step 1: 3s of simulated work.
     std.Io.sleep(g_io, std.Io.Duration.fromMilliseconds(3_000), .awake) catch {};
     if (zix.Http1.isExpired()) {
-        zix.Http1.writeJson(fd, 408, "{\"error\":\"timeout\",\"step\":1}") catch {};
+        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\",\"step\":1}") catch {};
         return;
     }
 
     // Step 2: 3s more (total 6s > 5s budget).
     std.Io.sleep(g_io, std.Io.Duration.fromMilliseconds(3_000), .awake) catch {};
     if (zix.Http1.isExpired()) {
-        zix.Http1.writeJson(fd, 408, "{\"error\":\"timeout\",\"step\":2}") catch {};
+        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\",\"step\":2}") catch {};
         return;
     }
 
-    zix.Http1.writeJson(fd, 200, "{\"result\":\"ok\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\"}") catch {};
 }
 
 // Demonstrates zix.Http1.setTimeout(): the handler overrides the server-wide
@@ -59,11 +59,11 @@ fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd:
 
     std.Io.sleep(g_io, std.Io.Duration.fromMilliseconds(1_500), .awake) catch {};
     if (zix.Http1.isExpired()) {
-        zix.Http1.writeJson(fd, 408, "{\"error\":\"timeout\",\"handler\":\"custom\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\",\"handler\":\"custom\"}") catch {};
         return;
     }
 
-    zix.Http1.writeJson(fd, 200, "{\"result\":\"ok\",\"handler\":\"custom\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\",\"handler\":\"custom\"}") catch {};
 }
 
 // Fast handler to confirm unrelated requests are served normally.
@@ -72,7 +72,7 @@ fn customTimeoutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd:
 fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
     _ = head;
     _ = body;
-    zix.Http1.writeJson(fd, 200, "{\"result\":\"pong\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"pong\"}") catch {};
 }
 
 // --------------------------------------------------------- //
