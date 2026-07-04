@@ -33,7 +33,7 @@ pub const HandlerFn = *const fn (stream: std.Io.net.Stream, io: std.Io) void;
 
 /// Per-frame callback for the framed engine (runFramed). Called once per
 /// length-prefixed frame (the engine drives the read/write loop, the callback
-/// just processes one payload and writes a reply via frameRespond / fdWriteAll).
+/// just processes one payload and writes a reply via frameRespond / writeAllFD).
 /// Unlike HandlerFn it does not own the connection and never blocks, so it can
 /// run on the single-threaded .URING completion ring (ADR-037).
 pub const FrameFn = *const fn (payload: []const u8, fd: std.posix.fd_t) void;
@@ -106,7 +106,7 @@ pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 /// Write raw bytes to the connection: into the sink when one is installed
 /// (coalesced ring send), otherwise straight to the fd.
-pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (tl_resp_sink) |sink| {
         sink.append(data);
 
@@ -122,8 +122,8 @@ pub fn frameRespond(fd: std.posix.fd_t, payload: []const u8) error{BrokenPipe}!v
     var hdr: [FRAME_LEN_PREFIX]u8 = undefined;
     std.mem.writeInt(u32, &hdr, @intCast(payload.len), .big);
 
-    try fdWriteAll(fd, &hdr);
-    try fdWriteAll(fd, payload);
+    try writeAllFD(fd, &hdr);
+    try writeAllFD(fd, payload);
 }
 
 // --------------------------------------------------------- //

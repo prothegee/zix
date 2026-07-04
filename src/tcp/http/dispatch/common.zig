@@ -12,7 +12,7 @@ const Router = @import("../router.zig").Router;
 const Route = @import("../router.zig").Route;
 const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
-const fdWriteAll = @import("../response.zig").fdWriteAll;
+const writeAllFD = @import("../response.zig").writeAllFD;
 const formatHttpDate = @import("../response.zig").formatHttpDate;
 const Context = @import("../context.zig").Context;
 const method = @import("../method.zig");
@@ -425,7 +425,7 @@ pub fn processRequest(
     @import("../request.zig").setBodyReadTimeout(cfg.body_read_timeout_ms);
 
     const head = parser.parse(buf, cfg.max_request_headers.value()) catch {
-        fdWriteAll(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
         return .close;
     } orelse return .close;
 
@@ -537,7 +537,7 @@ fn handleOneRequest(
 
     if (!found) {
         if (filled >= buf_read.len) {
-            fdWriteAll(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
+            writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
         }
         return .close;
     }

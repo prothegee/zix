@@ -103,7 +103,7 @@ pub const WsConn = struct {
         @memcpy(header[header_len..][0..ws_mask_len], &mask_key);
         header_len += ws_mask_len;
 
-        try fdWriteAll(self.fd, header[0..header_len]);
+        try writeAllFD(self.fd, header[0..header_len]);
 
         var byte_offset: usize = 0;
         var chunk: [WS_SEND_CHUNK]u8 = undefined;
@@ -111,7 +111,7 @@ pub const WsConn = struct {
         while (byte_offset < payload.len) {
             const batch_size = @min(payload.len - byte_offset, chunk.len);
             for (0..batch_size) |i| chunk[i] = payload[byte_offset + i] ^ mask_key[(byte_offset + i) % ws_mask_len];
-            try fdWriteAll(self.fd, chunk[0..batch_size]);
+            try writeAllFD(self.fd, chunk[0..batch_size]);
             byte_offset += batch_size;
         }
     }
@@ -238,7 +238,7 @@ pub const WsClient = struct {
             .{ parsed.path, parsed.host, parsed.port, ws_key },
         ) catch return error.HandshakeFailed;
 
-        fdWriteAll(fd, req) catch return error.HandshakeFailed;
+        writeAllFD(fd, req) catch return error.HandshakeFailed;
 
         var resp_buf: [HANDSHAKE_RESP_BUF]u8 = undefined;
         var resp_len: usize = 0;
@@ -323,7 +323,7 @@ fn parseWsUrl(url: []const u8) !WsUrlParsed {
     return WsUrlParsed{ .host = host, .port = port, .path = path_str };
 }
 
-fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
+fn writeAllFD(fd: std.posix.fd_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);

@@ -62,25 +62,25 @@ pub const SseWriter = struct {
 
     /// Sends: data: <data>\n\n
     pub fn writeEvent(self: SseWriter, data: []const u8) !void {
-        try fdWriteAll(self.fd, "data: ");
-        try fdWriteAll(self.fd, data);
-        try fdWriteAll(self.fd, "\n\n");
+        try writeAllFD(self.fd, "data: ");
+        try writeAllFD(self.fd, data);
+        try writeAllFD(self.fd, "\n\n");
     }
 
     /// Sends: event: <event>\ndata: <data>\n\n
     pub fn writeNamedEvent(self: SseWriter, event: []const u8, data: []const u8) !void {
-        try fdWriteAll(self.fd, "event: ");
-        try fdWriteAll(self.fd, event);
-        try fdWriteAll(self.fd, "\ndata: ");
-        try fdWriteAll(self.fd, data);
-        try fdWriteAll(self.fd, "\n\n");
+        try writeAllFD(self.fd, "event: ");
+        try writeAllFD(self.fd, event);
+        try writeAllFD(self.fd, "\ndata: ");
+        try writeAllFD(self.fd, data);
+        try writeAllFD(self.fd, "\n\n");
     }
 
     /// Sends: : <text>\n  (comment / keepalive heartbeat)
     pub fn comment(self: SseWriter, text: []const u8) !void {
-        try fdWriteAll(self.fd, ": ");
-        try fdWriteAll(self.fd, text);
-        try fdWriteAll(self.fd, "\n");
+        try writeAllFD(self.fd, ": ");
+        try writeAllFD(self.fd, text);
+        try writeAllFD(self.fd, "\n");
     }
 };
 
@@ -153,7 +153,7 @@ pub const Response = struct {
         // Sink path: when a coalescing sink is installed (.EPOLL/.URING), serialize
         // the response directly into the sink's free space. This is byte-identical to
         // the staging-buffer path (buildResponse is what the cache serializes too) and
-        // skips the stack buffer plus the copy that fdWriteAll -> RespSink.append makes.
+        // skips the stack buffer plus the copy that writeAllFD -> RespSink.append makes.
         if (tl_resp_sink) |sink| {
             if (sink.fd == self.fd and !sink.failed) {
                 if (self.buildResponse(body_data, sink.buf[sink.len..])) |written| {
@@ -236,7 +236,7 @@ pub const Response = struct {
                 @memcpy(fixed[offset..][0..body_data.len], body_data);
                 offset += body_data.len;
             }
-            fdWriteAll(fd, fixed[0..offset]) catch return;
+            writeAllFD(fd, fixed[0..offset]) catch return;
             return;
         }
 
@@ -251,10 +251,10 @@ pub const Response = struct {
             for (extra[0..self.extra_len]) |h| {
                 const s = std.fmt.bufPrint(slow[slow_off..], "{s}: {s}\r\n", .{ h.name, h.value }) catch {
                     // Extra header too large for staging buffer, write what we have and continue.
-                    fdWriteAll(fd, slow[0..slow_off]) catch return;
+                    writeAllFD(fd, slow[0..slow_off]) catch return;
                     slow_off = 0;
                     const header_str = std.fmt.bufPrint(&slow, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
-                    fdWriteAll(fd, header_str) catch return;
+                    writeAllFD(fd, header_str) catch return;
                     continue;
                 };
                 slow_off += s.len;
@@ -268,10 +268,10 @@ pub const Response = struct {
             // Body fits in the staging buffer, one write().
             @memcpy(slow[slow_off..][0..body_data.len], body_data);
             slow_off += body_data.len;
-            fdWriteAll(fd, slow[0..slow_off]) catch return;
+            writeAllFD(fd, slow[0..slow_off]) catch return;
         } else {
-            fdWriteAll(fd, slow[0..slow_off]) catch return;
-            if (body_data.len > 0) fdWriteAll(fd, body_data) catch return;
+            writeAllFD(fd, slow[0..slow_off]) catch return;
+            if (body_data.len > 0) writeAllFD(fd, body_data) catch return;
         }
     }
 
@@ -292,7 +292,7 @@ pub const Response = struct {
         //
         // Over TLS (ADR-054) the live-session stream sink is armed: drop the buffered capture (its
         // bytes are replaced by the stream, so it is discarded not flushed to the -1 sentinel) and
-        // let fdWriteAll route each event through the stream sink, encrypting one record per write.
+        // let writeAllFD route each event through the stream sink, encrypting one record per write.
         if (tl_tls_stream != null) {
             tl_resp_sink = null;
         } else if (tl_resp_sink) |sink| {
@@ -313,16 +313,16 @@ pub const Response = struct {
                 offset += written.len;
             } else |_| {}
         }
-        fdWriteAll(fd, fixed[0..offset]) catch return error.BrokenPipe;
+        writeAllFD(fd, fixed[0..offset]) catch return error.BrokenPipe;
 
         if (self.extra_buf) |extra| {
             for (extra[0..self.extra_len]) |h| {
                 var hbuf: [EXTRA_HEADER_BUF]u8 = undefined;
                 const s = std.fmt.bufPrint(&hbuf, "{s}: {s}\r\n", .{ h.name, h.value }) catch continue;
-                fdWriteAll(fd, s) catch return error.BrokenPipe;
+                writeAllFD(fd, s) catch return error.BrokenPipe;
             }
         }
-        fdWriteAll(fd, "\r\n") catch return error.BrokenPipe;
+        writeAllFD(fd, "\r\n") catch return error.BrokenPipe;
 
         self.streaming = true;
         return SseWriter{ .fd = fd };
@@ -441,7 +441,7 @@ pub const Response = struct {
         const bytes = cache.lookup(requestKey(req), rc.nowMillis()) orelse return false;
 
         self.bytes_written = bytes.len;
-        fdWriteAll(self.fd, bytes) catch return true;
+        writeAllFD(self.fd, bytes) catch return true;
 
         return true;
     }
@@ -475,7 +475,7 @@ pub const Response = struct {
         const ttl = if (ttl_ms == 0) tl_cache_ttl_ms else ttl_ms;
         _ = cache.store(requestKey(req), buf[0..len], ttl, rc.nowMillis());
 
-        return fdWriteAll(self.fd, buf[0..len]);
+        return writeAllFD(self.fd, buf[0..len]);
     }
 
     /// Send body_data with Accept-Encoding negotiation. Compresses only when the
@@ -579,7 +579,7 @@ fn requestKey(req: *const Request) u64 {
 ///
 /// Return:
 /// - error.BrokenPipe on any write failure (caller ignores or propagates)
-pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (tl_resp_sink) |sink| {
         sink.append(data);
 
@@ -621,7 +621,7 @@ fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 /// Return:
 /// - usize (bytes written so far, may be less than data.len on EAGAIN)
 /// - null on a permanent write error
-pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
+pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
     var written: usize = 0;
     while (written < data.len) {
         const write_result = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -641,7 +641,7 @@ pub fn fdWriteNonBlock(fd: std.posix.fd_t, data: []const u8) ?usize {
 }
 
 /// Coalescing sink for the .URING ring path (ADR-037 Phase 4 step 4). While
-/// installed (tl_resp_sink), fdWriteAll stages into buf instead of writing to the
+/// installed (tl_resp_sink), writeAllFD stages into buf instead of writing to the
 /// fd, so a whole response coalesces into one ring send. An oversize write flushes
 /// straight to the fd, which is safe under the ring's half-duplex guarantee (no
 /// send is in flight while a handler runs).
@@ -678,11 +678,11 @@ pub const RespSink = struct {
 };
 
 /// Active response sink for the current worker thread (the .URING ring path).
-/// null for every other dispatch model, so fdWriteAll writes straight to the fd.
+/// null for every other dispatch model, so writeAllFD writes straight to the fd.
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 /// Streaming sink for the thread-per-connection https path (ADR-054). While installed
-/// (tl_tls_stream) and the buffered capture sink is detached, fdWriteAll encrypts each write as one
+/// (tl_tls_stream) and the buffered capture sink is detached, writeAllFD encrypts each write as one
 /// TLS record and sends it straight to the socket, so an SSE handler streams over TLS instead of
 /// buffering a whole response. Type-erased over the live connection (the 1.3 and 1.2 paths share
 /// it): writeFn casts ctx back to the concrete per-connection state and encrypts + writes.
@@ -705,7 +705,7 @@ pub const TlsStreamSink = struct {
 };
 
 /// Active streaming sink for the current worker thread (the thread-per-conn https path). null for
-/// cleartext and the buffered https path, so fdWriteAll never routes through it there.
+/// cleartext and the buffered https path, so writeAllFD never routes through it there.
 pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 
 // --------------------------------------------------------- //
@@ -1062,7 +1062,7 @@ test "zix http response cache: distinct paths and queries are separate keys" {
     try std.testing.expect(res_a2.serveCached(&req_a));
 }
 
-test "zix http: fdWriteNonBlock stages a partial write then resumes after drain" {
+test "zix http: writeNonBlockFD stages a partial write then resumes after drain" {
     const linux = std.os.linux;
 
     // Nonblocking AF_UNIX stream pair with a tiny send/recv budget, so a large
@@ -1082,7 +1082,7 @@ test "zix http: fdWriteNonBlock stages a partial write then resumes after drain"
     @memset(payload, 'x');
 
     // First write makes progress but cannot drain the whole payload: a partial.
-    const first = fdWriteNonBlock(fds[0], payload) orelse return error.UnexpectedWriteError;
+    const first = writeNonBlockFD(fds[0], payload) orelse return error.UnexpectedWriteError;
     try std.testing.expect(first > 0);
     try std.testing.expect(first < payload.len);
 
@@ -1097,7 +1097,7 @@ test "zix http: fdWriteNonBlock stages a partial write then resumes after drain"
     }
 
     // The previously-blocked tail now makes forward progress.
-    const second = fdWriteNonBlock(fds[0], payload[first..]) orelse return error.UnexpectedWriteError;
+    const second = writeNonBlockFD(fds[0], payload[first..]) orelse return error.UnexpectedWriteError;
     try std.testing.expect(second > 0);
 }
 

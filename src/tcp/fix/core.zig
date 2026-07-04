@@ -361,7 +361,7 @@ pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 /// Write bytes to the connection: into the sink when installed (coalesced ring
 /// send), otherwise straight to the fd (the blocking serveConn path).
-pub fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (tl_resp_sink) |sink| {
         sink.append(data);
 
@@ -398,7 +398,7 @@ pub const FixContext = struct {
 
         // Routes through tl_resp_sink on the ring (coalesced send), direct
         // posix write under the blocking serveConn path (sink null).
-        fdWriteAll(self._fd, out_buf[0..n]) catch {};
+        writeAllFD(self._fd, out_buf[0..n]) catch {};
     }
 
     /// Return true if deadline_ns is set and the current wall clock has passed it.
@@ -710,12 +710,12 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
             };
             const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Logon, &extra) catch return .{ .consumed = consumed, .close = true };
             state.seq_out += 1;
-            fdWriteAll(fd, out_buf[0..n]) catch {};
+            writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logon");
         } else if (std.mem.eql(u8, msgtype, MsgType.Logout)) {
             const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Logout, &.{}) catch return .{ .consumed = consumed, .close = true };
             state.seq_out += 1;
-            fdWriteAll(fd, out_buf[0..n]) catch {};
+            writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Logout");
 
             return .{ .consumed = consumed, .close = true };
@@ -728,14 +728,14 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
             }
             const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Heartbeat, extra_buf[0..extra_len]) catch return .{ .consumed = consumed, .close = true };
             state.seq_out += 1;
-            fdWriteAll(fd, out_buf[0..n]) catch {};
+            writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "Heartbeat");
         } else if (std.mem.eql(u8, msgtype, MsgType.TestRequest)) {
             const test_req_id = getField(fslice, .TestReqID) orelse "0";
             const extra = [_]BuildField{.{ .tag = .TestReqID, .value = test_req_id }};
             const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, MsgType.Heartbeat, &extra) catch return .{ .consumed = consumed, .close = true };
             state.seq_out += 1;
-            fdWriteAll(fd, out_buf[0..n]) catch {};
+            writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
         } else if (opts.routes.len > 0 and state.peer_len > 0) {
             for (opts.routes) |route| {
@@ -774,7 +774,7 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
             }
             const n = buildMessage(&out_buf, comp_id, state.peer_comp_id[0..state.peer_len], state.seq_out, msgtype, body_fields[0..body_count]) catch return .{ .consumed = consumed, .close = true };
             state.seq_out += 1;
-            fdWriteAll(fd, out_buf[0..n]) catch {};
+            writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "msg");
         }
     }

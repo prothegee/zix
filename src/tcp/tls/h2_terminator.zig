@@ -85,7 +85,7 @@ pub fn serveConnTls(
         if (err == error.UnsupportedTlsVersion) {
             if (!ctx.allowsTls12()) {
                 var ver_alert: [Tls.fatal_record_len]u8 = undefined;
-                if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAll(fd, rec) catch {};
+                if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAllFD(fd, rec) catch {};
 
                 return err;
             }
@@ -101,11 +101,11 @@ pub fn serveConnTls(
         // any other rejected ClientHello (incl. no_application_protocol): send the fatal alert in
         // the clear (no keys yet), then close.
         var alert_buf: [Tls.fatal_record_len]u8 = undefined;
-        if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAll(fd, rec) catch {};
+        if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
         return err;
     };
-    try writeAll(fd, result.to_send);
+    try writeAllFD(fd, result.to_send);
     var conn = result.connection;
 
     // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3). Without it, end the connection
@@ -146,7 +146,7 @@ fn serveConnTls12(
         .server_random = server_random,
         .alpn_prefs = ctx.alpn,
     }, client_hello, &flight_out);
-    try writeAll(fd, flight.to_send);
+    try writeAllFD(fd, flight.to_send);
     var state = flight.state;
 
     // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3).
@@ -174,7 +174,7 @@ fn serveConnTls12(
 
     var finish_out: [256]u8 = undefined;
     const finish = try tls12.serverFinish(&state, client_key_exchange, finished_rec.full, &finish_out);
-    try writeAll(fd, finish.to_send);
+    try writeAllFD(fd, finish.to_send);
     var conn = finish.connection;
 
     driver.drive(fd, &conn, &record_buf);
@@ -214,7 +214,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     }
 }
 
-pub fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+pub fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];

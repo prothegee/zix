@@ -22,7 +22,7 @@ const Container = flate.Container;
 pub const Level = enum {
     /// Fastest, lowest ratio. For low-latency response paths.
     FASTEST,
-    /// Balanced default. Matches the Http1 writeGzip path.
+    /// Balanced default. Matches the Http1 sendGzipFD path.
     DEFAULT,
 };
 

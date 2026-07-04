@@ -541,7 +541,7 @@ fn readExactFd(fd: std.posix.fd_t, buf: []u8) !void {
     }
 }
 
-fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+fn writeAllFD(fd: std.posix.fd_t, bytes: []const u8) !void {
     const linux = std.os.linux;
     var n: usize = 0;
     while (n < bytes.len) {
@@ -584,7 +584,7 @@ test "zix test: tls client over a socketpair (real fds, full https/1.1 request)"
                 .ephemeral_secret = @splat(0x99),
                 .server_random = @splat(0x55),
             }, ch[5..], &out);
-            try writeAllFd(ctx.fd, res.to_send);
+            try writeAllFD(ctx.fd, res.to_send);
 
             var cf_buf: [256]u8 = undefined;
             const cf = try readRecordFd(ctx.fd, &cf_buf);
@@ -596,7 +596,7 @@ test "zix test: tls client over a socketpair (real fds, full https/1.1 request)"
             _ = try res.connection.readAppData(req_rec, &req_plain);
 
             var enc: [4096]u8 = undefined;
-            try writeAllFd(ctx.fd, res.connection.writeAppData("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", &enc));
+            try writeAllFD(ctx.fd, res.connection.writeAppData("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", &enc));
         }
     };
     const t = try std.Thread.spawn(.{}, Srv.run, .{ServerCtx{ .fd = server_fd, .key = server_key, .cert = cert_der }});
@@ -612,7 +612,7 @@ test "zix test: tls client over a socketpair (real fds, full https/1.1 request)"
     std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
     std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
     @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
-    try writeAllFd(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+    try writeAllFD(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
 
     // read the server flight: ServerHello + ChangeCipherSpec + the encrypted flight (3 records).
     var flight_buf: [4096]u8 = undefined;
@@ -624,11 +624,11 @@ test "zix test: tls client over a socketpair (real fds, full https/1.1 request)"
 
     var fin_buf: [256]u8 = undefined;
     var finished = try finish(&state, flight_buf[0..flen], &fin_buf);
-    try writeAllFd(client_fd, finished.client_finished);
+    try writeAllFD(client_fd, finished.client_finished);
 
     // send the request, read the response.
     var req_enc: [256]u8 = undefined;
-    try writeAllFd(client_fd, finished.connection.writeAppData("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", &req_enc));
+    try writeAllFD(client_fd, finished.connection.writeAppData("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", &req_enc));
 
     var resp_rec: [4096]u8 = undefined;
     const resp = try readRecordFd(client_fd, &resp_rec);

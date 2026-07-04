@@ -244,7 +244,7 @@ pub const SseClient = struct {
             .{ parsed.path, parsed.host, parsed.port },
         ) catch return error.InvalidUrl;
 
-        fdWriteAll(fd, req) catch return error.ConnectionFailed;
+        writeAllFD(fd, req) catch return error.ConnectionFailed;
 
         var head_buf: [RESPONSE_HEAD_BUF]u8 = undefined;
         var head_len: usize = 0;
@@ -324,7 +324,7 @@ fn splitField(line: []const u8, name: []const u8) ?[]const u8 {
     return value;
 }
 
-fn fdWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
+fn writeAllFD(fd: std.posix.fd_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
