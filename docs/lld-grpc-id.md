@@ -45,7 +45,7 @@ Pembaca frame ber-buffer yang dipakai `serveGrpcLoop`. `ensure(n)` blocking samp
 
 ### Stream
 
-State parse per stream. `body` dan `header_scratch` adalah slice ke buffer backing per koneksi berukuran `opts.max_body` / `opts.max_header_scratch`, bukan array inline, sehingga tabel stream berbiaya `max_streams * max_body` per koneksi alih-alih ~70 KB tetap per slot.
+State parse per stream. `body` dan `header_scratch` adalah buffer berukuran `opts.max_body` / `opts.max_header_scratch`, bukan array inline. Pada path multiplex (`.EPOLL` / `.URING`) sebuah `Stream` dipinjam dari pool per-worker selama terbuka dan dikembalikan saat ditutup (`next_free` menautkannya ke freelist selagi idle), sehingga memori stream residen mengikuti stream konkuren pada worker, bukan `connections * max_streams`. Pada path blocking array-nya inline dan buffer-nya adalah slice ke backing per koneksi.
 
 ```zig
 const Stream = struct {
@@ -58,10 +58,11 @@ const Stream = struct {
     header_scratch: []u8,
     end_headers: bool,
     end_stream: bool,
+    next_free: ?*Stream,        // tautan freelist selagi idle di pool per-worker
 };
 ```
 
-`slotFor(stream_id, streams, used)` mengklaim slot bebas pertama, `findSlot(stream_id, ...)` mencari stream terbuka berdasarkan id. Keduanya scan linear atas `max_streams`.
+Pada path mux `muxSlotFor(conn, stream_id)` meminjam `Stream` dari pool per-worker ke slot bebas pertama (`acquireGrpcStream` menumbuhkan freelist saat miss, `muxReleaseSlot` / `releaseGrpcStream` mengembalikannya saat ditutup), dan `muxFindSlot(stream_id, ...)` mencari stream terbuka berdasarkan id. Path blocking mempertahankan `slotFor` / `findSlot` array-inline. Semuanya scan linear atas `max_streams`.
 
 ### Konstanta flow-control
 
@@ -87,10 +88,8 @@ pub const GrpcMuxConn = struct {
     rend: usize,
 
     hpack_dec: h2.HpackDecoder,
-    streams: []Stream,
+    streams: []*Stream,         // tabel pointer selebar max_streams, slot dipinjam dari pool per-worker
     slots: []bool,
-    bodies: []u8,               // backing untuk body stream
-    scratches: []u8,            // backing untuk header_scratch stream
     last_stream_id: u31,
     conn_window_consumed: usize,
     phase: MuxPhase,            // await_preface | await_upgrade | await_preface2 | h2
