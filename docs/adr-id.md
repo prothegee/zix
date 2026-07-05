@@ -1269,4 +1269,31 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 
 ---
 
+## ADR-059: taksonomi penamaan send / write / FD untuk response-API
+
+**Status:** Accepted
+
+**Konteks:** Permukaan penulisan response tumbuh per engine tanpa satu aturan. Ide yang sama muncul sebagai `write*` di satu engine dan `send*` di engine lain, dan plumbing fd mentah (`fdWrite*`) bocor ke jalur response. Membaca call site tidak memberi tahu apakah ia membentuk response atau sekadar memindahkan byte, maupun apakah ia menyentuh fd mentah. Ambiguitas itu muncul lagi tiap kali compression atau engine baru dibahas.
+
+**Keputusan:** Namai tiap fungsi jalur response dengan dua sumbu independen. Sumbu verb: fungsi yang mengirim response, atau komunikasi keluar apa pun, adalah `send*`, sebuah write murni tanpa send adalah `write*`. Sumbu suffix: signature yang menerima parameter `fd` mentah diakhiri `FD`, sebuah fd yang ditahan di dalam struct (dijangkau lewat `self`) tidak dihitung, jadi method objek tetap bersih.
+
+| bucket | contoh |
+| :- | :- |
+| send + fd | `sendGzipFD(fd, ...)` |
+| send + tanpa fd | `Response.sendJson(...)` |
+| write + fd | `writeAllFD(fd, bytes)` |
+| write + tanpa fd | `wire.writeU16(...)` |
+
+Engine yang mampu compression mengekspos enam yang sama: `sendGzipFD`, `sendGzipCachedFD`, `sendBrotliFD`, `sendBrotliCachedFD`, `sendNegotiateFD`, `sendNegotiateCachedFD`. Negotiate merutekan secara internal lewat jalur gzip / brotli yang sama, jadi kebijakan compression ada di satu tempat. Primitif precompressed / caller-encoded (bentuk `sendResponseEncodedFD`) tetap menjadi lapisan yang dibangun keenam fungsi itu di atasnya.
+
+**Rasional:** Dua sumbu ortogonal membuat sebuah nama menjelaskan dirinya sendiri: verb menyatakan apakah byte keluar sebagai response, suffix menyatakan apakah fd mentah ada di signature. Pembaca mengklasifikasikan call apa pun sekilas tanpa membuka body-nya, dan aturan itu berskala ke tiap engine dan ke coding mendatang, jadi ide yang sama tak bisa lagi muncul dengan dua nama.
+
+**Konsekuensi:**
+- Rename luas tapi mekanis. Body dan parameter fungsi tak berubah, hanya nama dan teks doc / comment yang merujuknya.
+- Koreksi mendarat sebelum kode baru. Dua kembar brotli dan `sendNegotiateFD` yang uncached ditambahkan sesudahnya.
+- Entri HttpArena mengubah call site saja, tak pernah behavior.
+- Digulirkan engine demi engine (Http1, WebSocket, Http2, Grpc, Http3, lalu full server plus tls / dispatch bersama), tiap langkah di-gate oleh suite test penuh.
+
+---
+
 ###### end of adr

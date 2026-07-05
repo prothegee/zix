@@ -1269,4 +1269,31 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 
 ---
 
+## ADR-059: response-API send / write / FD naming taxonomy
+
+**Status:** Accepted
+
+**Context:** The response-writing surface grew per engine with no single rule. The same idea appeared as `write*` on one engine and `send*` on another, and raw fd plumbing (`fdWrite*`) leaked into response paths. Reading a call site did not tell you whether it shaped a response or just moved bytes, nor whether it touched a raw fd. That ambiguity resurfaced every time compression or a new engine was discussed.
+
+**Decision:** Name every response-path function by two independent axes. Verb axis: a function that sends a response, or any outbound communication, is `send*`, a pure write with no send is `write*`. Suffix axis: a signature that takes a raw `fd` parameter ends in `FD`, an fd held inside a struct (reached through `self`) does not count, so object methods stay clean.
+
+| bucket | example |
+| :- | :- |
+| send + fd | `sendGzipFD(fd, ...)` |
+| send + no fd | `Response.sendJson(...)` |
+| write + fd | `writeAllFD(fd, bytes)` |
+| write + no fd | `wire.writeU16(...)` |
+
+Compression-capable engines expose the same six: `sendGzipFD`, `sendGzipCachedFD`, `sendBrotliFD`, `sendBrotliCachedFD`, `sendNegotiateFD`, `sendNegotiateCachedFD`. Negotiate routes internally through the same gzip / brotli path, so the compression policy lives in one place. The precompressed / caller-encoded primitive (`sendResponseEncodedFD` shape) stays as the layer those six build on.
+
+**Rationale:** Two orthogonal axes make a name self-describing: the verb says whether bytes leave as a response, the suffix says whether a raw fd is in the signature. A reader classifies any call at a glance without opening the body, and the rule scales to every engine and to future codings, so the same idea can no longer surface under two names.
+
+**Consequences:**
+- Wide but mechanical rename. Function bodies and parameters are unchanged, only names and the doc / comment text that references them.
+- The correction lands before new code. The two brotli twins and the uncached `sendNegotiateFD` are added afterward.
+- HttpArena entries change call sites only, never behavior.
+- Rolled out engine by engine (Http1, WebSocket, Http2, Grpc, Http3, then the full server plus shared tls / dispatch), each step gated by the full test suite.
+
+---
+
 ###### end of adr
