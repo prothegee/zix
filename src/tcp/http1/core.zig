@@ -1019,6 +1019,48 @@ pub fn sendGzipCachedFD(fd: std.posix.fd_t, head: *const ParsedHead, status: u16
     try writeAllFD(fd, resp);
 }
 
+/// Build a complete brotli HTTP response (header + brotli body) into the per-worker negotiated buffer
+/// and return the slice. Brotli's encoder needs heap scratch (input-sized hash and Huffman tables),
+/// so it routes through the shared compression facade on the per-worker encode arena rather than a
+/// flate-style threadlocal compressor. Shared by sendBrotliFD and sendBrotliCachedFD.
+fn buildBrotliResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
+    const arena = encodeArena();
+    defer _ = arena.reset(.retain_capacity);
+
+    const encoded = try compression.encode(arena.allocator(), .BR, body, .DEFAULT);
+
+    const header = try std.fmt.bufPrint(
+        &tl_neg_resp,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: br\r\nContent-Length: {d}\r\n\r\n",
+        .{ status, statusPhrase(status), content_type, encoded.len },
+    );
+    const total = header.len + encoded.len;
+
+    if (total > tl_neg_resp.len) return error.ResponseTooLarge;
+
+    @memcpy(tl_neg_resp[header.len..total], encoded);
+
+    return tl_neg_resp[0..total];
+}
+
+/// brotli-compressed response via the shared compression facade on the per-worker encode arena. The
+/// forced-brotli sibling of sendGzipFD, for a caller that has already decided on brotli.
+pub fn sendBrotliFD(fd: std.posix.fd_t, status: u16, content_type: []const u8, body: []const u8) !void {
+    try writeAllFD(fd, try buildBrotliResponse(status, content_type, body));
+}
+
+/// brotli response with the per-(key, encoding) cache: a hit replays the cached compressed response
+/// with zero compression work, a miss compresses once, stores, and writes. The forced-brotli sibling
+/// of sendGzipCachedFD.
+pub fn sendBrotliCachedFD(fd: std.posix.fd_t, head: *const ParsedHead, status: u16, content_type: []const u8, body: []const u8, ttl_ms: u32) !void {
+    if (cacheLookupEncoded(head, "br")) |cached| return writeAllFD(fd, cached);
+
+    const resp = try buildBrotliResponse(status, content_type, body);
+    cacheStoreEncoded(head, "br", resp, ttl_ms);
+
+    try writeAllFD(fd, resp);
+}
+
 /// Per-worker arena for negotiated-compression codec scratch (gzip / deflate / brotli), reset with
 /// retained capacity after each response so the codecs reuse one backing allocation per worker
 /// instead of allocating per request. Lazily initialized on first use.
@@ -1117,6 +1159,67 @@ pub fn sendNegotiateCachedFD(
     }
 
     // Too large to assemble in the buffer: stream in two parts, skip the cache.
+    try writeAllFD(fd, header);
+    try writeAllFD(fd, encoded);
+}
+
+/// Response with Accept-Encoding negotiation, uncached sibling of sendNegotiateCachedFD: it compresses
+/// on every request and never stores or replays. Suits a body that is not deterministic (a per-(key,
+/// encoding) cache would only grow memory with no replay hit) or a lean, cache-free memory profile.
+/// Same negotiation, size floor, and identity fall-through as the cached variant.
+///
+/// Note:
+/// - The compressed response sets Content-Encoding and Vary: Accept-Encoding.
+/// - No response cache: each call runs the codec on the per-worker encode arena, then reclaims it.
+///
+/// Param:
+/// fd - std.posix.fd_t (connection)
+/// head - *const ParsedHead (for the Accept-Encoding header)
+/// status - u16 (response status)
+/// content_type - []const u8 (response Content-Type)
+/// body - []const u8 (uncompressed body)
+///
+/// Return:
+/// - void
+/// - error.BrokenPipe on a failed write
+pub fn sendNegotiateFD(
+    fd: std.posix.fd_t,
+    head: *const ParsedHead,
+    status: u16,
+    content_type: []const u8,
+    body: []const u8,
+) !void {
+    if (!tl_compression) return sendSimpleFD(fd, status, content_type, body);
+
+    const accept = getHeader(head, "accept-encoding");
+    const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
+        return sendSimpleNoBodyFD(fd, 406, content_type, 0);
+    };
+
+    if (encoding == .IDENTITY or !compression.shouldCompress(body.len, content_type, tl_compression_min_size)) {
+        return sendSimpleFD(fd, status, content_type, body);
+    }
+
+    const token = encoding.contentEncoding().?;
+
+    const arena = encodeArena();
+    defer _ = arena.reset(.retain_capacity);
+
+    const encoded = compression.encode(arena.allocator(), encoding, body, .DEFAULT) catch {
+        return sendSimpleFD(fd, status, content_type, body);
+    };
+
+    if (encoded.len > tl_compression_max_out or encoded.len >= body.len) {
+        return sendSimpleFD(fd, status, content_type, body);
+    }
+
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &hdr_buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
+        .{ status, statusPhrase(status), content_type, token, encoded.len },
+    );
+
     try writeAllFD(fd, header);
     try writeAllFD(fd, encoded);
 }
@@ -1895,6 +1998,134 @@ test "zix http1: sendGzipCachedFD stores per-(key,encoding) and replays the same
     var resp2: [4096]u8 = undefined;
     const n2 = try std.posix.read(pipe_fds[0], &resp2);
     try std.testing.expectEqualSlices(u8, resp1[0..n1], resp2[0..n2]);
+}
+
+test "zix http1: sendBrotliFD emits Content-Encoding br and decodes back to the body, no leak" {
+    const linux = std.os.linux;
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    // two different bodies back to back: the arena reset must clear codec state between calls.
+    const bodies = [_][]const u8{
+        "{\"a\":1,\"b\":2,\"msg\":\"world world world world world\"}",
+        "{\"different\":true,\"xs\":[1,2,3,4,5,6,7,8,9,10,11,12]}",
+    };
+
+    for (bodies) |body| {
+        try sendBrotliFD(pipe_fds[1], 200, "application/json", body);
+
+        var resp: [4096]u8 = undefined;
+        const n = try std.posix.read(pipe_fds[0], &resp);
+        try std.testing.expect(std.mem.indexOf(u8, resp[0..n], "Content-Encoding: br") != null);
+
+        const sep = std.mem.indexOf(u8, resp[0..n], "\r\n\r\n").?;
+        const restored = try compression.decode(std.testing.allocator, .BR, resp[sep + 4 .. n], 4096);
+        defer std.testing.allocator.free(restored);
+
+        try std.testing.expectEqualStrings(body, restored);
+    }
+}
+
+test "zix http1: sendBrotliCachedFD stores under br and replays the same bytes on a hit" {
+    const linux = std.os.linux;
+
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
+    defer rc.deinit();
+    setCache(&rc, 60_000);
+    defer setCache(null, 1000);
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const parsed = try parseHead("GET /json HTTP/1.1\r\nHost: x\r\n\r\n");
+    const head = parsed.head;
+    const body = "{\"msg\":\"hello hello hello hello hello hello hello\"}";
+
+    // miss: compress + store under the br key, the response decodes back to the body.
+    try std.testing.expect(cacheLookupEncoded(&head, "br") == null);
+    try sendBrotliCachedFD(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    try std.testing.expect(cacheLookupEncoded(&head, "br") != null);
+
+    var resp1: [4096]u8 = undefined;
+    const n1 = try std.posix.read(pipe_fds[0], &resp1);
+    const sep1 = std.mem.indexOf(u8, resp1[0..n1], "\r\n\r\n").?;
+    const restored = try compression.decode(std.testing.allocator, .BR, resp1[sep1 + 4 .. n1], 4096);
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(body, restored);
+
+    // hit: replay the cached response, byte-identical to the first.
+    try sendBrotliCachedFD(pipe_fds[1], &head, 200, "application/json", body, 60_000);
+    var resp2: [4096]u8 = undefined;
+    const n2 = try std.posix.read(pipe_fds[0], &resp2);
+    try std.testing.expectEqualSlices(u8, resp1[0..n1], resp2[0..n2]);
+}
+
+test "zix http1: sendNegotiateFD compresses without touching the cache" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
+    defer rc.deinit();
+    setCache(&rc, 60_000);
+    defer setCache(null, 1000);
+
+    const linux = std.os.linux;
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const parsed = try parseHead("GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const head = parsed.head;
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    try sendNegotiateFD(pipe_fds[1], &head, 200, "text/plain", &body);
+
+    var resp: [1024]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp[0..n], "Content-Encoding: gzip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp[0..n], "Vary: Accept-Encoding") != null);
+
+    // uncached: nothing was stored under the negotiated encoding.
+    try std.testing.expect(cacheLookupEncoded(&head, "gzip") == null);
+
+    const sep = std.mem.indexOf(u8, resp[0..n], "\r\n\r\n").?;
+    const restored = try compression.decode(std.testing.allocator, .GZIP, resp[sep + 4 .. n], 2048);
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualSlices(u8, &body, restored);
+}
+
+test "zix http1: sendNegotiateFD sends uncompressed when no coding is accepted" {
+    setCompression(true, 256, GZIP_OUT_SIZE);
+    defer setCompression(false, 0, 0);
+
+    const linux = std.os.linux;
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const parsed = try parseHead("GET /x HTTP/1.1\r\n\r\n");
+    const head = parsed.head;
+
+    var body: [512]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('a' + (index % 16));
+
+    try sendNegotiateFD(pipe_fds[1], &head, 200, "text/plain", &body);
+
+    var resp: [1024]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &resp);
+    try std.testing.expect(std.mem.indexOf(u8, resp[0..n], "Content-Encoding") == null);
+
+    const sep = std.mem.indexOf(u8, resp[0..n], "\r\n\r\n").?;
+    try std.testing.expectEqualSlices(u8, &body, resp[sep + 4 .. n]);
 }
 
 test "zix http1: serveConn drains an over-large body so the keep-alive connection survives" {
