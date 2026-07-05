@@ -6,6 +6,10 @@ const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
 
+/// Read, write, and payload buffer size for the default echo handler. A frame
+/// whose payload exceeds this closes the connection.
+const ECHO_BUF_SIZE: usize = 4096;
+
 /// Emit a server lifecycle line. Routes through config.logger when present.
 /// Without a logger it prints to stderr only in Debug builds (silent in release).
 fn logSystem(config: UdsServerConfig, comptime fmt: []const u8, args: anytype) void {
@@ -137,19 +141,18 @@ pub const UdsServer = struct {
 
 // Default handler: reads length-prefixed frames and echoes each back unchanged.
 // Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
-// Payloads larger than 4096 bytes close the connection.
+// Payloads larger than ECHO_BUF_SIZE close the connection.
 pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
 
-    var read_buf: [4096]u8 = undefined;
-    var write_buf: [4096]u8 = undefined;
-    var payload_buf: [4096]u8 = undefined;
+    var read_buf: [ECHO_BUF_SIZE]u8 = undefined;
+    var write_buf: [ECHO_BUF_SIZE]u8 = undefined;
+    var payload_buf: [ECHO_BUF_SIZE]u8 = undefined;
 
     var reader = stream.reader(io, &read_buf);
     var writer = stream.writer(io, &write_buf);
 
     while (true) {
-        // Read 4-byte length header
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
@@ -161,7 +164,6 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
         const len = std.mem.readInt(u32, &hdr, .big);
         if (len > payload_buf.len) return;
 
-        // Read payload
         n = 0;
         while (n < len) {
             const got = reader.interface.readSliceShort(payload_buf[n..len]) catch return;
@@ -169,7 +171,6 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
             n += got;
         }
 
-        // Echo: header + payload
         writer.interface.writeAll(&hdr) catch return;
         writer.interface.writeAll(payload_buf[0..len]) catch return;
         writer.interface.flush() catch return;
