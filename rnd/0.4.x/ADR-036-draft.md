@@ -1,6 +1,6 @@
 # ADR-036 (accepted record)
 
-Folded into `docs/adr-en.md` (before the `###### end of adr` footer) and mirrored into `docs/adr-id.md` as the accepted ADR-036, the multi-engine as-shipped version. Kept here as the rnd record alongside the PoC (`rnd/0.4.x/server_response_cache.zig`). No external benchmark framework is named, per project rule.
+Folded into `docs/adr-en.md` (before the `###### end of adr` footer) and mirrored into `docs/adr-id.md` as the accepted ADR-036, the multi-engine as-shipped version. Kept here as the rnd record alongside the PoC. No external benchmark framework is named, per project rule.
 
 ---
 
@@ -8,7 +8,7 @@ Folded into `docs/adr-en.md` (before the `###### end of adr` footer) and mirrore
 
 **Status:** Accepted
 
-**Context:** A handler re-runs and re-serializes its response on every request. For repeated idempotent calls whose response is expensive to build, that work dominates the userspace cost, while the kernel path is shared by every approach. The engine already proves a precompute-then-write pattern elsewhere (comptime gRPC reply blocks, the cached SETTINGS frame, the thread-local cached Date). A PoC (`rnd/0.4.x/server_response_cache.zig`) measured whether extending that to user handlers, as a per-key precomputed response cache, pays off. Loopback, AMD Ryzen 5 5600H (12 logical cores), zig 0.16.0, wrk 4.2.0, threads 6, duration 5s, c512 and c4096, twice each, avg Requests/sec:
+**Context:** A handler re-runs and re-serializes its response on every request. For repeated idempotent calls whose response is expensive to build, that work dominates the userspace cost, while the kernel path is shared by every approach. The engine already proves a precompute-then-write pattern elsewhere (comptime gRPC reply blocks, the cached SETTINGS frame, the thread-local cached Date). A PoC measured whether extending that to user handlers, as a per-key precomputed response cache, pays off. Loopback, AMD Ryzen 5 5600H (12 logical cores), zig 0.16.0, wrk 4.2.0, threads 6, duration 5s, c512 and c4096, twice each, avg Requests/sec:
 
 | Response | c512 nocache -> cache | c4096 nocache -> cache |
 | :- | :- | :- |
