@@ -47,7 +47,7 @@ __*Fix:*__
 ## 0.5.0 (TBD)
 
 __*Update:*__
-- Zig 0.17 (experimental) support.
+- Zig 0.17 (experimental) support: one source tree builds on Zig 0.16.x and 0.17.x, the few `std.Io` API divergences gated behind a comptime `ZIG_SEMVER` check (ADR-044).
 
 - Breaking: `dispatch_model` is now a required config field with no default. Every server config (`Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, `GrpcServerConfig`, `FixServerConfig`, `TcpServerConfig`, `UdpServerConfig`, `Http3ServerConfig`) drops the `.ASYNC` default, so the caller must set `dispatch_model` explicitly.
 
@@ -78,13 +78,13 @@ __*Update:*__
 
     ---
 
-- `zix.Http2` memory and throughput optimization:
+- `zix.Http2` memory and throughput optimization (per-worker stream-slot pool, ADR-058):
     - Per-worker stream-slot pool (`src/tcp/http2/mux.zig`): the `.EPOLL` / `.URING` mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 4096 connections this cut baseline-h2c memory about 6x while lifting throughput 8 to 20 percent, because the pooled hot slots have a tighter cache working set than the old sparse per-connection table.
     - HPACK response-header prefix cache (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): the `[:status, content-type, content-encoding]` block for a hot triple is encoded once and reused byte-identical across connections (a stateless encoder, never the dynamic table), only `content-length` is encoded per reply. Lifted the small-body cells 18 to 26 percent at lower CPU.
     - Seal-in-place on the TLS 1.3 record path (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): a gather-encrypt that seals two plaintext slices into one record without a staging copy.
     - Config defaults: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
 
-- `zix.Grpc` memory and throughput optimization:
+- `zix.Grpc` memory and throughput optimization (per-worker stream-slot pool, ADR-058):
     - Per-worker stream-slot pool (`src/tcp/http2/grpc/core.zig`): the `.EPOLL` / `.URING` gRPC mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 1024 connections this cut unary-grpc memory about 12x (916 to 77 MiB) while lifting throughput 8 to 11 percent, the same both-axes result as the Http2 pool. The blocking `.ASYNC` / `.POOL` / `.MIXED` path keeps its own per-connection arrays, unchanged.
     - Config defaults: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
 
@@ -122,14 +122,15 @@ __*Update:*__
 - Raw-bytes UDP datagram mode `zix.Udp.Raw` (ADR-049):
     - `zix.Udp.Raw(handler)` serves variable-length datagrams (up to `max_recv_buf`) alongside the typed `zix.Udp.Server(Packet)`. The handler takes the datagram bytes, the peer, and a `Sink` to reply through. On Linux it batches receive / send via `recvmmsg` / `sendmmsg`, replies coalescing into one `sendmmsg` per received batch, with per-core `SO_REUSEPORT` workers under `.EPOLL` / `.URING` (a single worker under `.ASYNC` / `.POOL` / `.MIXED`).
     - Dispatch is partitioned per ADR-043: `src/udp/dispatch/` (one file per model plus `common.zig`) with a thin `run()` switch, plus `src/udp/datagram.zig` (raw-fd socket + `recvmmsg` / `sendmmsg` primitives) and `src/udp/core.zig` (`HandlerFn`, `Sink`). The typed `Server(Packet)` is unchanged, a non-ASYNC `dispatch_model` on it folds with a logged notice. Non-Linux falls back to a single `std.Io.net` loop.
-    - New example `examples/udp_server_raw.zig` (port 9064) with runner step `test-runner-udp-raw`, folded into `test-runner-all`. GSO / GRO / ECN and a dedicated io_uring submission path behind `.URING` are deferred (`.URING` folds to the recvmmsg per-core loop).
+    - New example `examples/udp_server_raw.zig` (port 9064) with runner step `test-runner-udp-raw`, folded into `test-runner-all`. GSO and a dedicated io_uring submission path behind `.URING` land later with ADR-056 (below), GRO / ECN stay deferred.
 
     ---
 
-- HTTP/3 over QUIC engine `zix.Http3`, pure-Zig on `std.crypto`, on the `zix.Udp` substrate:
+- HTTP/3 over QUIC engine `zix.Http3`, pure-Zig on `std.crypto`, on the `zix.Udp` substrate (ADR-051):
     - `zix.Http3.Http3(handler)` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), with a comptime `zix.Http3.Router` mirroring `zix.Http1` / `zix.Http2` (EXACT / PARAM / PREFIX, query stripped before matching). TLS 1.3 is mandatory, configured by the same user-owned `Tls.Context` as the TCP engines.
     - The deterministic QUIC / TLS / QPACK layers are pure-Zig from the RFCs: packet protection (header protection plus AEAD), the key schedule (Initial / Handshake / 1-RTT), CRYPTO-stream TLS 1.3 handshake (ServerHello plus the EE / Certificate / CertificateVerify / Finished flight), QPACK static-table field lines, and the RFC 7541 Huffman decoder for request paths.
     - Dispatch models (Linux-only): `.ASYNC` runs one single-worker recv loop with internal connection-id demux (migration-safe). `.POOL` / `.MIXED` run one SO_REUSEPORT recvmmsg worker per core, and `.EPOLL` / `.URING` add epoll readiness / io_uring completion on that per-core shape (`.URING` folds to the epoll worker loop when io_uring is unavailable). Per-core connection-id steering is deferred (ADR-049 phase 3, ADR-050).
+    - Hot-path loss recovery and congestion control (ADR-056, superseding the ADR-051 deferrals): ACK-driven loss detection (RFC 9002), an RTT estimator, a Probe Timeout with backoff, and a NewReno congestion window now run on the serve path, so a lossy path recovers instead of a dropped tail packet stalling the whole response. A timer-driven maintenance sweep (every 5 ms) re-pumps a timed-out in-flight range. Only ack-detected loss cuts the congestion window, a PTO retransmits without reducing cwnd (RFC 9002 6.2). The `.EPOLL` and `.URING` models now run real per-core `SO_REUSEPORT` workers (each owns its own connection-id table, `.URING` a real io_uring ring falling back to the `.EPOLL` loop) instead of folding to the single v1 worker. A connection slot is reclaimed only on close or idle past `max_idle_ms`, never on loss, so a live-but-lossy peer stays connected. On the same cut `zix.Udp` raw gains its ADR-049 phase two (a real io_uring recv ring behind `.URING` plus UDP GSO). Cross-core connection-id steering for mid-connection migration stays deferred.
     - `zix.Http3` exports its low-level primitives (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`), the same way `zix.Http2` exports its frame / HPACK primitives, so a peer can build the other side of the wire.
     - New example `examples/tls/http3_basic.zig` (port 9063). The runner drives a hermetic native QUIC client hand-rolled from those primitives (no external tool), with runner step `test-runner-http3` folded into `test-runner-all`.
     - Docs: `docs/hld-http3-en.md` / `docs/lld-http3-en.md` (and -id).
@@ -142,10 +143,11 @@ __*Update:*__
     ---
 
 - Server config (knob) added:
-    - `compression` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
+    - `compress` (bool), `compression_min_size` (usize), and `compression_max_out` (usize) on `zix.Http1` and `zix.Http`. The gzip-specific `max_gzip_out` was renamed to the codec-agnostic `compression_max_out`.
     - `tls` (`?*Tls.Context`) on `zix.Http1`, `zix.Http2`, and `zix.Grpc`, the https opt-in gate. Replaces the flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / Http1 `hsts_max_age_s` fields (ADR-047).
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` on `zix.Udp` (`UdpServerConfig`), used by the raw path (`zix.Udp.Raw`, ADR-049). Additive, the typed `Server(Packet)` is unchanged.
     - `public_dir` and `public_dir_upload` on `zix.Http1` (`Http1ServerConfig`), static file serving for unmatched routes mirroring `zix.Http`. A non-empty `public_dir` is validated at `run()` and yields `error.PublicDirNotFound` when absent.
+    - `uring_send_buf_size` (default 16 KiB), `uring_idle_pool_floor` (default 8), and `uring_idle_pool_ceiling` (default 256) on `zix.Http1` (`Http1ServerConfig`), tuning the `.URING` per-connection send buffer and the warm reconnect-pool bounds (see the Http1 / Http memory optimization entry).
 
     ---
 
@@ -159,11 +161,31 @@ __*Update:*__
     - The QPACK static table extends from indices 0..28 to 0..43 (RFC 9204 Appendix A), covering `accept-encoding` (31) and `content-encoding` br / gzip (42 / 43). The request decoder scans past the pseudo-headers to capture `accept-encoding`, and `buildRequestStreamContent` / `buildStreamPrefix` emit the `content-encoding` line (`SendStream` stores the coding so a resumed multi-packet body keeps its header). The change lives in the shared `dispatch/common.zig`, so every dispatch model inherits it.
     - `zix.Http3.ContentEncoding` is exported. `examples/tls/http3_basic.zig` gains a `/negotiated` route that serves a brotli-precompressed body with `content-encoding: br` when the client accepts br. Docs `hld-http3`, `lld-http3` (en and -id) updated.
 
+    ---
+
+- Response-API send / write / FD naming taxonomy (ADR-059):
+    - The response-writing surface is renamed on two independent axes so a call site reads unambiguously: a function that sends a response, or any outbound communication, is `send*`, a pure write with no send is `write*`, and a signature that takes a raw `fd` parameter ends in `FD` (an fd held inside a struct, reached through `self`, does not count, so object methods stay clean).
+    - Breaking for code calling the response helpers directly. The core fd-level helpers rename across every engine: `fdWriteAll` -> `writeAllFD`, `fdWriteAllRaw` -> `writeAllRawFD`, `writeSimple` -> `sendSimpleFD`, `writeSimpleNoBody` -> `sendSimpleNoBodyFD`, `writeJson` -> `sendJsonFD`, `writeGzip` -> `sendGzipFD`, `writeGzipCached` -> `sendGzipCachedFD`, `writeBrotli` -> `sendBrotliFD`, `writeNegotiated` -> `sendNegotiateFD`, `writeChunkedStart` / `writeChunk` / `writeChunkedEnd` -> `sendChunkedStartFD` / `sendChunkFD` / `sendChunkedEndFD`, `writeRange` -> `sendRangeFD`, `write100Continue` -> `send100ContinueFD`. Function bodies and parameters are unchanged, only names and the doc / comment text that references them.
+    - Compression-capable engines expose the same six: `sendGzipFD`, `sendGzipCachedFD`, `sendBrotliFD`, `sendBrotliCachedFD`, `sendNegotiateFD`, `sendNegotiateCachedFD`. Negotiate routes internally through the shared gzip / brotli path, so the compression policy lives in one place, and the precompressed / caller-encoded primitive (`sendResponseEncodedFD`) stays as the layer those six build on.
+    - Rolled out engine by engine (`zix.Http1`, its WebSocket, `zix.Http2`, `zix.Grpc`, `zix.Http3`, then the full server plus shared tls / dispatch), each step gated by the full test suite. HttpArena entries and the bundled examples move to the new names (call sites only, no behavior change). Docs `hld-http1`, `lld-http1`, `lld-http`, `lld-http2`, `lld-grpc`, `lld-tls` (en and -id) updated. See ADR-059.
+
+    ---
+
+- `zix.Http1` and `zix.Http` memory optimization (EPOLL recv-slab compaction, URING idle-pool bound):
+    - EPOLL recv-slab compaction (`src/tcp/http1/dispatch/epoll.zig`, ported to `zix.Http`'s `dispatch/common.zig`): the per-worker receive slab was indexed by global fd (`slab[fd * buf_size]`), so touched pages scattered across the whole 64K-fd space and held far more resident than the live connection set needed. A compact per-worker slot free-list (each `Conn` carries a `slot`, `acquireSlot` reuses a closed slot before bumping a high-water mark, `free` returns the page-aligned stride via `MADV_DONTNEED`) packs resident memory to the live count regardless of fd values. At high connection counts this cut peak Http1 memory about 2.5x (roughly 704 to 281 MiB), bringing `.EPOLL` to `.URING` parity, with throughput held within loopback noise.
+    - URING idle-pool bound (`src/tcp/http1/dispatch/uring.zig`): the warm reconnect pool now evicts its least-recently-used tail (`evictColdTail`, a warm MRU list plus a cold stack) past a bound, shrinks a grown per-connection `send_buf` back to the base size on release, and prewarms a small resident floor at startup to avoid a cold-start page-fault storm. Reclaiming the cold tail (not the hot head a reconnect grabs next) keeps the reclaim off the churn hot path, so memory drops without a throughput cost. Bounded by the `uring_send_buf_size` / `uring_idle_pool_floor` / `uring_idle_pool_ceiling` config knobs above.
+
 <br>
 
 __*Fix:*__
 
-- n/a
+- `zix.Http1` large-body drain under the thread models:
+    - Under `.ASYNC` / `.POOL` / `.MIXED`, a request body larger than the receive buffer was truncated at the buffer boundary and its unread bytes corrupted the next keep-alive request on the connection. The thread path now drains the remainder before serving the next request, matching the `.EPOLL` / `.URING` behavior.
+
+    ---
+
+- `zix.Http` request-body truncation under `.EPOLL` / `.URING`:
+    - A multi-segment request body (a large or chunked upload split across reads) was truncated when `body()` / `readChunkedBody()` hit `EAGAIN` mid-body. The reader now polls the fd and retries up to `body_read_timeout_ms` (default 30s), so an upload is read in full. The hot GET path returns early and pays nothing.
 
 <br>
 
