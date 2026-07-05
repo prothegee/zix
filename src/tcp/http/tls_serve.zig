@@ -1,4 +1,4 @@
-//! zix http (arena engine) https serve path (RFC 8446 + 9112), the thread-per-connection models.
+//! zix http https serve path (RFC 8446 + 9112), the thread-per-connection models.
 //!
 //! Note:
 //! - Gated on config.tls (a *Tls.Context). The accept loop hands each connection to its own worker
