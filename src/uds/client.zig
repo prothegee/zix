@@ -4,6 +4,9 @@ const std = @import("std");
 const Config = @import("config.zig");
 const UdsClientConfig = Config.UdsClientConfig;
 
+/// Scratch buffer size backing the stream reader and writer for one framed message.
+const STREAM_BUF_SIZE: usize = 4096;
+
 // --------------------------------------------------------- //
 
 fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
@@ -58,7 +61,7 @@ pub const UdsClient = struct {
     /// Send a message as a length-prefixed frame.
     /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
-        var write_buf: [4096]u8 = undefined;
+        var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
         var writer = self.stream.writer(io, &write_buf);
 
         var hdr: [4]u8 = undefined;
@@ -88,7 +91,7 @@ pub const UdsClient = struct {
             if (ready == 0) return error.RecvTimeout;
         }
 
-        var read_buf: [4096]u8 = undefined;
+        var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
         var reader = self.stream.reader(io, &read_buf);
 
         var hdr: [4]u8 = undefined;
