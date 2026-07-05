@@ -219,6 +219,25 @@ test "zix http: EpollConnTable get returns null for out-of-range fd" {
     try std.testing.expectEqual(@as(?*common.EpollConn, null), table.alloc(common.MAX_FD));
 }
 
+test "zix http: EpollConnTable packs recv buffers into compact slots, not the fd range" {
+    var table = try common.EpollConnTable.init(4096);
+    defer table.deinit();
+
+    // Two connections on far-apart fds still draw adjacent low slab slots, so the
+    // resident recv slab tracks the live count, not the fd values.
+    const first = table.alloc(5000).?;
+    const second = table.alloc(60000).?;
+
+    const base = @intFromPtr(table.slab.ptr);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(first.buf.ptr) - base);
+    try std.testing.expectEqual(table.stride, @intFromPtr(second.buf.ptr) - base);
+
+    // A closed slot returns to the free-list and is reused before a never-used one.
+    table.free(5000);
+    const reused = table.alloc(123).?;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(reused.buf.ptr) - base);
+}
+
 test "zix http: getAvailableCpuCount returns at least 1" {
     const count = common.getAvailableCpuCount();
     try std.testing.expect(count >= 1);
