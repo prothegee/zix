@@ -1,7 +1,7 @@
 # ADR-040 (proposal record)
 
 Records the user-space hot-path optimization set for the zix engines, derived
-from the 0.4.x server-process perf profiles (`rnd/0.4.x/perfreport-*.txt`). Kept
+from the 0.4.x server-process perf profiles. Kept
 here as the rnd proposal. Folded into `docs/adr-en.md` (before the `end of adr`
 footer) and mirrored into `docs/adr-id.md` once the increments land and the A/B
 numbers are recorded. Unlike a pure consistency ADR, this one carries measured
@@ -15,7 +15,7 @@ before-numbers (the perf symbols) and will carry measured after-numbers.
 
 **Context:**
 
-The 0.4.x kernel-cycle pass (`rnd/0.4.x/accept-summary-kernel-20260616.txt`)
+The 0.4.x kernel-cycle pass
 showed loopback is ~94% kernel TCP, identical for `.EPOLL` and `.URING`. The
 io_uring syscall levers (direct descriptors, fixed buffers, send_zc, SQPOLL) are
 sub-noise on this box, and a probe of the top io_uring HTTP engines (ringzero,
@@ -89,7 +89,7 @@ consistency rule.
   test that diffs the new output / parse result against the legacy path for the
   common cases, so the optimization cannot silently change the wire bytes.
 - Verification: per increment the three build steps are green. After the full set,
-  the A/B percentages are recorded back into this file and the rnd/0.4.x summary.
+  the A/B percentages are recorded back into this file.
 
 ---
 
