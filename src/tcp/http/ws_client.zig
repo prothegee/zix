@@ -20,6 +20,9 @@ const ws_mask_len: usize = 4;
 const ws_len_64bit_field_size: usize = 8;
 const ws_max_frame_header: usize = 14;
 
+/// Buffer for the accept-key hash input (client key concatenated with the RFC 6455 GUID).
+const WS_ACCEPT_HASH_INPUT_SIZE: usize = 128;
+
 // --------------------------------------------------------- //
 
 /// RFC 6455 5.2 WebSocket opcodes.
@@ -282,7 +285,7 @@ pub const WsClient = struct {
 pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
     // RFC 6455 1.3: this GUID is mandated by the spec, do not change it.
     const rfc6455_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    var hash_input: [128]u8 = undefined;
+    var hash_input: [WS_ACCEPT_HASH_INPUT_SIZE]u8 = undefined;
     if (key.len + rfc6455_guid.len > hash_input.len) return error.KeyTooLong;
 
     @memcpy(hash_input[0..key.len], key);
