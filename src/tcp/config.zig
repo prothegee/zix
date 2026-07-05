@@ -25,16 +25,16 @@ pub const DispatchModel = enum(u8) {
     /// workers with no shared queue. Each connection is dispatched via io.async.
     /// Best for very high connection counts. Linux-only.
     /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
-    /// Http, Grpc, Fix, and Tcp implement natively on Linux (Http2 falls back to .POOL).
+    /// Http1, Http, Http2, Grpc, Fix, and Tcp implement natively on Linux.
     EPOLL = 3,
     /// Shared-nothing io_uring: each worker owns one SO_REUSEPORT listener and
     /// one completion ring (ADR-037). Same thread-per-core topology as .EPOLL,
     /// but completion-based instead of readiness-based, so most syscall
     /// transitions are batched away. Linux-only.
     /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
-    /// zix.Http1, zix.Http, zix.Grpc, and zix.Fix implement natively on Linux,
-    /// as do the WebSocket pump and the zix.Tcp framed path. Http2 folds to
-    /// .POOL, and the zix.Tcp per-connection handler folds to .EPOLL.
+    /// zix.Http1, zix.Http, zix.Http2, zix.Grpc, and zix.Fix implement natively on
+    /// Linux, as do the WebSocket pump and the zix.Tcp framed path. Each falls back
+    /// to .EPOLL when io_uring is unavailable, as does the zix.Tcp per-connection handler.
     URING = 4,
 }; // for all Tcp
 
