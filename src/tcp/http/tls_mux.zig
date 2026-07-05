@@ -1,4 +1,4 @@
-//! zix http (arena engine) https serve path, event-driven (https/1.1 over TLS 1.3, RFC 8446 + 9112).
+//! zix http https serve path, event-driven (https/1.1 over TLS 1.3, RFC 8446 + 9112).
 //!
 //! What:
 //! - One SO_REUSEPORT listener + epoll instance per worker, like the cleartext .EPOLL model, but each
