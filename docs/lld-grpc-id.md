@@ -33,7 +33,7 @@ const ReplyStage = struct {
     len: usize,
 
     fn append(self, bytes) void   // flush dulu jika akan overflow; payload > buf diteruskan langsung
-    fn flush(self) void           // satu fdWriteAll dari buf[0..len]; len = 0
+    fn flush(self) void           // satu writeAllFD dari buf[0..len]; len = 0
 };
 ```
 
@@ -176,7 +176,7 @@ Tidak berubah untuk `.ASYNC`, `.POOL`, `.MIXED`. `serveGrpcConn` mengeset `TCP_N
 
 ### build* / send*
 
-Fungsi `build*` mengenkode frame ke buffer pemanggil dan mengembalikan jumlah byte, `send*` membungkusnya dengan `fdWriteAll`.
+Fungsi `build*` mengenkode frame ke buffer pemanggil dan mengembalikan jumlah byte, `send*` membungkusnya dengan `writeAllFD`.
 
 ```zig
 pub fn buildGrpcHeaders(out, stream_id, content_type) usize     // HEADERS awal, tanpa END_STREAM
