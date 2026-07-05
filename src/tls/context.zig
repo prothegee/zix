@@ -22,7 +22,6 @@ const NamedGroup = handshake.NamedGroup;
 const CipherSuite = handshake.CipherSuite;
 const SigningKey = certificate.SigningKey;
 const HandshakeOptions = connection.HandshakeOptions;
-// RESERVED: RSA (Replace after implementation)
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
 
