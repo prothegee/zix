@@ -14,7 +14,7 @@ pub const UdsServerConfig = struct {
     path: []const u8,
     /// Backing allocator. Caller owns, must outlive the server.
     allocator: std.mem.Allocator,
-    /// TCP listen backlog: pending connections queued by the kernel before accept().
+    /// Listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 128,
     /// Maximum payload bytes accepted per frame. Frames larger than this close the connection.
     max_recv_buf: usize = 4096,
