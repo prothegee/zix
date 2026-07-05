@@ -28,6 +28,10 @@ const Http2 = @import("../http2/Http2.zig");
 const CLIENT_HELLO_BUF: usize = 600;
 /// TLS handshake flight buffer.
 const HANDSHAKE_FLIGHT_BUF: usize = 8192;
+/// TLS Finished (client) message output buffer.
+const FINISHED_BUF: usize = 256;
+/// Scratch buffer for lowercasing one request header name before HPACK encoding.
+const HEADER_NAME_BUF: usize = 256;
 /// CA certificate PEM read buffer and read limit.
 const CA_PEM_BUF: usize = 8192;
 /// HPACK header block buffer.
@@ -120,7 +124,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     var flen: usize = 0;
     for (0..3) |_| flen += try readRecordInto(fd, flight_buf[flen..]);
 
-    var fin_buf: [256]u8 = undefined;
+    var fin_buf: [FINISHED_BUF]u8 = undefined;
     const finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
     if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
 
@@ -166,7 +170,7 @@ fn sendRequestFD(
     try enc.writeHeader(":authority", host);
     if (user_agent.len > 0) try enc.writeHeader("user-agent", user_agent);
 
-    var name_buf: [256]u8 = undefined;
+    var name_buf: [HEADER_NAME_BUF]u8 = undefined;
     for (headers) |hdr| {
         if (skipRequestHeader(hdr.name)) continue;
         if (hdr.name.len > name_buf.len) continue;
