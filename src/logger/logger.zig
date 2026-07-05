@@ -12,6 +12,12 @@ const LINE_BUF_SIZE: usize = 4096;
 /// Stack buffer for formatting one system() message before it is written.
 const MSG_BUF_SIZE: usize = 2048;
 
+/// Stack buffer for building the per-day log directory path (sentinel-terminated for mkdirat).
+const DIR_PATH_BUF_SIZE: usize = 512;
+
+/// Stack buffer for building the full log file path.
+const FILE_PATH_BUF_SIZE: usize = 600;
+
 const Timestamp = struct {
     date: [10]u8,
     time: [12]u8,
@@ -184,14 +190,14 @@ pub const Logger = struct {
     }
 
     fn openFileLocked(self: *Self, date: *const [10]u8) void {
-        var dir_buf: [512:0]u8 = undefined;
+        var dir_buf: [DIR_PATH_BUF_SIZE:0]u8 = undefined;
         const dir_z = if (comptime ZIG_SEMVER.MINOR == 16)
             std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return
         else
             std.fmt.bufPrintSentinel(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }, 0) catch return;
         _ = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), dir_z, 0o755);
 
-        var file_buf: [600]u8 = undefined;
+        var file_buf: [FILE_PATH_BUF_SIZE]u8 = undefined;
         const file_path = std.fmt.bufPrint(
             &file_buf,
             "{s}/{s}/{s}-{d:0>6}.log",
