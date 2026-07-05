@@ -229,6 +229,9 @@ pub const MAX_FD: usize = 1 << 16;
 pub const EpollConn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
+    /// Compact slab slot backing buf, returned to the free-list on close so the
+    /// resident recv slab packs to the live connection count, not the fd range.
+    slot: u32 = 0,
     filled: usize,
     /// Response bytes staged when a write hit EAGAIN (send buffer full). The
     /// worker arms EPOLLOUT and drains this on the next writable event instead of
@@ -240,28 +243,62 @@ pub const EpollConn = struct {
     write_pending_close: bool = false,
 };
 
-/// Private per-worker fd to EpollConn map. The slab (MAX_FD * buf_size virtual
-/// bytes) is pre-allocated once at init, each accept assigns a slice from it with
-/// no heap call. Physical pages are demand-paged, so only active connections
-/// consume RAM.
+/// Private per-worker fd to EpollConn map. Not shared between workers: a
+/// connection fd is accepted and served by a single worker, and freed before its
+/// fd can be reused, so a stale slot is always zeroed by the time it is reused.
+///
+/// Recv buffers live in a per-worker slab carved into fixed-size slots. A
+/// connection draws a compact slot index from a free-list on accept (reusing a
+/// closed connection's slot first), not its fd, so the resident slab tracks the
+/// live connection count rather than the fd range. Indexing by fd instead spread
+/// the touched pages across the whole fd space (fds climb under load and churn),
+/// which held far more resident than the live set. Slots are page-aligned so a
+/// closed slot's pages reclaim cleanly. Empty fd slots are identified by buf.len == 0.
 pub const EpollConnTable = struct {
     slots: []EpollConn,
     slab: []u8,
+    /// Usable recv bytes per connection (config.max_recv_buf).
     buf_size: usize,
+    /// Slab bytes per slot: buf_size rounded up to a page so a released slot's
+    /// pages reclaim without touching a live neighbor slot.
+    stride: usize,
+    /// Stack of closed slot indices available for reuse, newest on top.
+    free_slots: []u32,
+    free_count: usize,
+    /// Next never-used slot index. Slots are handed out compactly from 0, so the
+    /// touched slab prefix bounds the resident recv memory.
+    slot_top: usize,
 
     pub fn init(buf_size: usize) !EpollConnTable {
         // Slots are mmap'd (kernel-zeroed, demand-paged) rather than allocated +
         // memset, so untouched slots cost no physical memory and the array does
         // not fault in all MAX_FD slots per worker. See multiplexers/slab.
         const slots = try slab.mapZeroedSlots(EpollConn, MAX_FD);
+        errdefer slab.unmapSlots(slots);
+
+        // Page-align the slot stride so a closed slot's MADV_DONTNEED reclaims
+        // whole pages, never a page half-shared with a live neighbor slot.
+        const stride = std.mem.alignForward(usize, buf_size, std.heap.page_size_min);
 
         // Slab not memset: physical pages committed only on first recv per slot.
-        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * stride);
+        errdefer std.heap.smp_allocator.free(recv_slab);
 
-        return .{ .slots = slots, .slab = recv_slab, .buf_size = buf_size };
+        const free_slots = try std.heap.smp_allocator.alloc(u32, MAX_FD);
+
+        return .{
+            .slots = slots,
+            .slab = recv_slab,
+            .buf_size = buf_size,
+            .stride = stride,
+            .free_slots = free_slots,
+            .free_count = 0,
+            .slot_top = 0,
+        };
     }
 
     pub fn deinit(self: *EpollConnTable) void {
+        std.heap.smp_allocator.free(self.free_slots);
         std.heap.smp_allocator.free(self.slab);
         slab.unmapSlots(self.slots);
     }
@@ -275,12 +312,30 @@ pub const EpollConnTable = struct {
         return if (conn.buf.len > 0) conn else null;
     }
 
+    /// Draw a compact slab slot: reuse a closed slot when one is free, else take
+    /// the next never-used slot. Null when the slab is exhausted (all MAX_FD slots live).
+    fn acquireSlot(self: *EpollConnTable) ?u32 {
+        if (self.free_count > 0) {
+            self.free_count -= 1;
+
+            return self.free_slots[self.free_count];
+        }
+
+        if (self.slot_top >= MAX_FD) return null;
+
+        const slot: u32 = @intCast(self.slot_top);
+        self.slot_top += 1;
+
+        return slot;
+    }
+
     pub fn alloc(self: *EpollConnTable, fd: std.posix.fd_t) ?*EpollConn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const buf = self.slab[idx * self.buf_size ..][0..self.buf_size];
-        self.slots[idx] = .{ .fd = fd, .buf = buf, .filled = 0 };
+        const slot = self.acquireSlot() orelse return null;
+        const buf = self.slab[slot * self.stride ..][0..self.buf_size];
+        self.slots[idx] = .{ .fd = fd, .buf = buf, .slot = slot, .filled = 0 };
 
         return &self.slots[idx];
     }
@@ -293,7 +348,14 @@ pub const EpollConnTable = struct {
         if (conn.buf.len == 0) return;
 
         if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
-        slab.releaseSlabPages(conn.buf);
+
+        // Return the slot pages to the OS and the slot index to the free-list, so the next accept
+        // reuses a low slot and the resident slab stays packed to the live set.
+        const slot = conn.slot;
+        slab.releaseSlabPages(self.slab[slot * self.stride ..][0..self.stride]);
+        self.free_slots[self.free_count] = slot;
+        self.free_count += 1;
+
         conn.* = std.mem.zeroes(EpollConn);
     }
 };
