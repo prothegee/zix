@@ -57,7 +57,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, writeSimple ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query |
+| `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query |
 | `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (POOL / EPOLL), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
 | `tcp/http1/websocket.zig` | `refAllDecls` + perilaku: acceptKey vektor RFC 6455, round-trip buildFrame/parseFrame, SIMD unmask cocok dengan scalar (dan tail bytes), prefix buildHeader, pump echo lewat socketpair, pumpRing stage lalu melaporkan close, broadcast fan-out (+ skip fd mati, list kosong) |
 | `tcp/http1/router.zig` | `refAllDecls` + perilaku: matchParam, router comptime |
@@ -112,7 +112,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/frame.zig` | `refAllDecls` + perilaku: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, round-trip `writeFrameHeader`/`readFrameHeader` melalui pipe, PREFACE dimulai dengan `PRI`, `sendSettings` menulis frame SETTINGS 9-byte valid melalui pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + perilaku: round-trip encode/decode Huffman, `HpackEncoder.writeHeader` menghasilkan entri terindeks dari static table, `HpackDecoder.decode` mendekode `:method GET` terindeks, eviksi dynamic table menghormati max_size, indeks `HPACK_STATIC` ke-8 adalah `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
-| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, max_streams=16 dan max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, max_streams=128 dan max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
 
 ### zix.Grpc
@@ -523,7 +523,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `Http2ServerConfig` dispatch_model wajib (tidak ada default) | pemanggil harus menyetelnya eksplisit |
-| `Http2ServerConfig` max_streams default ke 16 | invarian `max_streams == 16` |
+| `Http2ServerConfig` max_streams default ke 128 | invarian `max_streams == 128` |
 | `Http2ServerConfig` max_frame_size default ke 16384 | invarian `max_frame_size == 16384` |
 | `Http2` HandlerFn dapat ditugaskan ke variabel lokal | penugasan tipe `zix.Http2.HandlerFn` berhasil dikompilasi |
 | Panjang `Http2` PREFACE adalah 24 | `zix.Http2.PREFACE.len == 24` |
@@ -536,7 +536,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Default `GrpcServerConfig` | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=16, max_frame_size=16384, max_body=65536 |
+| Default `GrpcServerConfig` | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=128, max_frame_size=16384, max_body=16384 |
 | Field dasar `GrpcClientConfig` | field ip dan port tersimpan |
 | Nilai enum `GrpcStatus` | OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
 | `GrpcContext.recvMessage` body kosong | menghasilkan null segera |

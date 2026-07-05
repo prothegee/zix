@@ -57,7 +57,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, writeSimple into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query |
+| `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query |
 | `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (POOL / EPOLL), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
 | `tcp/http1/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, buildFrame/parseFrame round-trip, SIMD unmask matches scalar (and tail bytes), buildHeader prefix, pump echoes over a socketpair, pumpRing stages then reports close, broadcast fan-out (+ dead-fd skip, empty list) |
 | `tcp/http1/router.zig` | `refAllDecls` + behavioral: matchParam, comptime router |
@@ -112,7 +112,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/frame.zig` | `refAllDecls` + behavioral: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, `writeFrameHeader`/`readFrameHeader` roundtrip via pipe, PREFACE starts with `PRI`, `sendSettings` writes a valid 9-byte SETTINGS frame via pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
-| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers/pool_size default to 0, max_streams=16 and max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers/pool_size default to 0, max_streams=128 and max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
 
 ### zix.Grpc
@@ -529,7 +529,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Test | What it verifies |
 | :- | :- |
 | `Http2ServerConfig` dispatch_model is required (no default) | caller must set it explicitly |
-| `Http2ServerConfig` max_streams defaults to 16 | `max_streams == 16` invariant |
+| `Http2ServerConfig` max_streams defaults to 128 | `max_streams == 128` invariant |
 | `Http2ServerConfig` max_frame_size defaults to 16384 | `max_frame_size == 16384` invariant |
 | `Http2` HandlerFn can be assigned to a local variable | `zix.Http2.HandlerFn` type assignment compiles |
 | `Http2` PREFACE length is 24 | `zix.Http2.PREFACE.len == 24` |
@@ -542,7 +542,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `GrpcServerConfig` defaults | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=16, max_frame_size=16384, max_body=65536 |
+| `GrpcServerConfig` defaults | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=128, max_frame_size=16384, max_body=16384 |
 | `GrpcClientConfig` basic fields | ip and port fields preserved |
 | `GrpcStatus` enum values | OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
 | `GrpcContext.recvMessage` empty body | returns null immediately |
