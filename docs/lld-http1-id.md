@@ -28,7 +28,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
 
-`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.writeNegotiated`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: ia no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
+`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.sendNegotiateFD`. Helper lama `core.sendGzipFD` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: ia no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
 
 ---
 
@@ -38,7 +38,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 
 ```
 BUF_SIZE      = 16 * 1024   // receive buffer (stack serveConn, scratch worker EPOLL)
-GZIP_OUT_SIZE = 256 * 1024  // buffer output writeGzip
+GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
 ```
 
 ### parseHead()
@@ -100,22 +100,22 @@ RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
-Selama terpasang, `fdWriteAll(fd, ...)` untuk fd yang cocok menambahkan ke `buf` alih-alih menyentuh socket:
+Selama terpasang, `writeAllFD(fd, ...)` untuk fd yang cocok menambahkan ke `buf` alih-alih menyentuh socket:
 
 ```
 append(bytes):
   bytes.len > buf.len        -> tumbuhkan agar muat bila growable, selain itu flush + tulis langsung
   len + bytes.len > buf.len  -> tumbuhkan agar muat bila growable, selain itu flush dulu
   selain itu                 -> memcpy ke buf
-flush(): satu fdWriteAllDirect(buf[0..len]), len = 0, failed lengket saat error
+flush(): satu writeAllDirectFD(buf[0..len]), len = 0, failed lengket saat error
 grow(need): realloc buf (power-of-two) hingga grow_cap, tidak pernah menyusut, false bila tak-growable
 ```
 
-Loop request EPOLL (`serveEpollConn`) memasang sink tanpa `grow_allocator`, jadi burst pipelined N response berbiaya satu `write()` dan response oversized mem-flush batch lalu menulis langsung. Loop URING memasang sink di atas `send_buf` per-koneksi dengan `grow_allocator` diset dan `grow_cap = URING_SEND_BUF_MAX` (1 MiB): response yang lebih besar dari buffer ter-stage menumbuhkannya di tempat (realloc power-of-two) sehingga seluruh balasan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir (`fdWriteAllDirect`). Buffer yang ditumbuhkan tidak pernah menyusut, jadi koneksi yang didaur ulang memakainya ulang untuk request berikutnya. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
+Loop request EPOLL (`serveEpollConn`) memasang sink tanpa `grow_allocator`, jadi burst pipelined N response berbiaya satu `write()` dan response oversized mem-flush batch lalu menulis langsung. Loop URING memasang sink di atas `send_buf` per-koneksi dengan `grow_allocator` diset dan `grow_cap = URING_SEND_BUF_MAX` (1 MiB): response yang lebih besar dari buffer ter-stage menumbuhkannya di tempat (realloc power-of-two) sehingga seluruh balasan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir (`writeAllDirectFD`). Buffer yang ditumbuhkan tidak pernah menyusut, jadi koneksi yang didaur ulang memakainya ulang untuk request berikutnya. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
 
-### fdWriteAll() / fdWriteAllDirect()
+### writeAllFD() / writeAllDirectFD()
 
-`fdWriteAll` melewati sink yang terpasang saat fd cocok, selain itu memanggil jalur langsung. Loop jalur langsung:
+`writeAllFD` melewati sink yang terpasang saat fd cocok, selain itu memanggil jalur langsung. Loop jalur langsung:
 
 ```
 write(fd, rem)
@@ -155,13 +155,13 @@ cachedDate():
 
 String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan syscall clock-nya sendiri diamortisasi atas 256 response. `formatHttpDate` memakai dekomposisi `std.time.epoch`, hari-dalam-minggu dari `(epoch_day % 7 + 4) % 7`.
 
-### writeSimple()
+### sendSimpleFD()
 
 ```
 1. buildSimpleHeader ke buffer stack 256 byte
 2. body.len <= 3840:
       memcpy header + body ke satu buffer stack 4096 byte
-      satu fdWriteAll                          // satu syscall untuk mayoritas response
+      satu writeAllFD                          // satu syscall untuk mayoritas response
 3. body lebih besar: loop writev dengan 2 iovec (sisa header, body)
       melacak sent antar partial write, INTR mengulang, AGAIN melakukan poll POLLOUT
 ```
@@ -170,14 +170,14 @@ String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan
 
 | Helper | Perilaku di kabel |
 | :- | :- |
-| `writeSimpleNoBody` | `buildSimpleHeader` saja, Content-Length diisi ukuran body seandainya ada (HEAD) |
-| `writeJson` | `writeSimple` dengan `application/json` |
-| `write100Continue` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `writeGzip` | alokasi heap 256 KB out + flate window + compressor (keamanan stack), kompresi `std.compress.flate` `.gzip`, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
-| `writeChunkedStart` | status line + `Transfer-Encoding: chunked`, tanpa Content-Length |
-| `writeChunk` | `{x}\r\n` + data + `\r\n`, data kosong adalah no-op (akan mengakhiri body) |
-| `writeChunkedEnd` | `0\r\n\r\n` |
-| `writeRange` | `parseRange` terhadap `full_body.len`: valid menghasilkan `206` + `Content-Range` + slice, tidak valid menghasilkan `416` dengan `Content-Range: bytes */{total}` |
+| `sendSimpleNoBodyFD` | `buildSimpleHeader` saja, Content-Length diisi ukuran body seandainya ada (HEAD) |
+| `sendJsonFD` | `sendSimpleFD` dengan `application/json` |
+| `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
+| `sendGzipFD` | alokasi heap 256 KB out + flate window + compressor (keamanan stack), kompresi `std.compress.flate` `.gzip`, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
+| `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, tanpa Content-Length |
+| `sendChunkFD` | `{x}\r\n` + data + `\r\n`, data kosong adalah no-op (akan mengakhiri body) |
+| `sendChunkedEndFD` | `0\r\n\r\n` |
+| `sendRangeFD` | `parseRange` terhadap `full_body.len`: valid menghasilkan `206` + `Content-Range` + slice, tidak valid menghasilkan `416` dengan `Content-Range: bytes */{total}` |
 
 ### serveConn(): loop keep-alive blocking
 
@@ -189,7 +189,7 @@ loop:
   1. recvHead(fd, recv_buf, leftover)
         HeaderTooLarge -> tulis 431, return
   2. parseHead -> gagal: tulis 400, return
-  3. expect_continue dan ada body -> write100Continue
+  3. expect_continue dan ada body -> send100ContinueFD
   4. body:
         chunked        -> readChunkedBody(peeked, body_buf)
         content_length -> salin byte peeked, baca sampai min(content_length, 8192)
@@ -230,7 +230,7 @@ Tipe yang dikembalikan punya satu decl, `dispatch`, dengan signature `HandlerFn`
 3. inline for param_routes: matchParam -> panggil handler, return  (cocok pertama menang)
 4. inline for prefix_routes: startsWith + cek batas (karakter berikutnya '/' atau akhir)
        lacak kecocokan terpanjang      -> panggil handler terbaik
-5. tidak ada yang cocok                -> writeSimple 404 text/plain
+5. tidak ada yang cocok                -> sendSimpleFD 404 text/plain
 ```
 
 ### matchParam() dan penyimpanan param
@@ -467,7 +467,7 @@ Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap m
 
 ### acceptKey() / upgrade()
 
-`acceptKey` menyambung key client dengan GUID RFC 6455, SHA-1, base64 ke `[64]u8` milik pemanggil (`error.KeyTooLong` melewati 128 byte input). `upgrade` menulis blok `101 Switching Protocols` penuh melalui `core.fdWriteAll` (sadar sink, sehingga pada EPOLL ditahapkan bersama response lain).
+`acceptKey` menyambung key client dengan GUID RFC 6455, SHA-1, base64 ke `[64]u8` milik pemanggil (`error.KeyTooLong` melewati 128 byte input). `upgrade` menulis blok `101 Switching Protocols` penuh melalui `core.writeAllFD` (sadar sink, sehingga pada EPOLL ditahapkan bersama response lain).
 
 ### send() dan SendSink
 
@@ -476,7 +476,7 @@ Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap m
 ```
 send(fd, opcode, payload):
   sink aktif -> tahapkan header lalu payload       (error.BrokenPipe bila sink gagal)
-  payload + header <= 4096 -> bangun satu buffer, satu fdWriteAll
+  payload + header <= 4096 -> bangun satu buffer, satu writeAllFD
   lebih besar -> tulis header lalu payload terpisah (menghindari salinan stack besar)
 ```
 
