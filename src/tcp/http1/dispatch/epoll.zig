@@ -29,36 +29,70 @@ const EPOLL_MAX_EVENTS: usize = 4096;
 /// room for a full pipelined burst without mid-burst flushes.
 const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
-/// Max write-pending staging buffers kept on the per-worker pool. Past this a released buffer is
-/// freed instead of pooled, so a pathological backpressure storm cannot grow the pool without bound.
+/// Max write-pending staging buffers kept per size class on the per-worker pool. Past this a released
+/// buffer is freed instead of pooled, so a pathological backpressure storm cannot grow the pool without bound.
 const WRITE_POOL_CAP: usize = 64;
+
+/// Size classes for write-pending staging buffers, smallest first. A stalled write stages only its
+/// unflushed remainder, which for small responses is far below the 64 KiB sink. Bucketing the staging
+/// buffer to the smallest class that fits the remainder stops a high-connection backpressure burst
+/// (thousands of simultaneous stalls) from each pinning a full 64 KiB, the dominant term in the EPOLL
+/// resident set at high concurrency. The largest class equals the sink, so a full-burst remainder
+/// still fits, since the staged remainder never exceeds the sink buffer.
+const WRITE_STAGE_CLASSES = [_]usize{ 8 * 1024, 32 * 1024, EPOLL_OUT_BUF_SIZE };
 
 /// Per-worker pool of write-pending staging buffers (A3). When a response does not fully flush on
 /// EAGAIN (a slow client), the remainder is staged in a buffer until EPOLLOUT drains it. Rather than
-/// allocate and free one per stall, the worker recycles a small free-list of EPOLL_OUT_BUF_SIZE
-/// buffers (the max a single flush can stage, since the staged remainder never exceeds the sink
-/// buffer), so a backpressure burst reuses allocations instead of churning the allocator. One worker
-/// thread owns it (threadlocal), so no synchronization is needed.
+/// allocate and free one per stall, the worker recycles a free-list per size class, so a backpressure
+/// burst reuses allocations instead of churning the allocator. One worker thread owns it (threadlocal),
+/// so no synchronization is needed.
 const WritePendingPool = struct {
-    bufs: [WRITE_POOL_CAP][]u8 = undefined,
-    count: usize = 0,
+    /// One free-list per size class in WRITE_STAGE_CLASSES, each capped at WRITE_POOL_CAP entries.
+    free: [WRITE_STAGE_CLASSES.len][WRITE_POOL_CAP][]u8 = undefined,
+    counts: [WRITE_STAGE_CLASSES.len]usize = std.mem.zeroes([WRITE_STAGE_CLASSES.len]usize),
 
-    /// Take a staging buffer: pop one from the free-list, else allocate. Null only on alloc failure.
-    fn acquire(self: *WritePendingPool) ?[]u8 {
-        if (self.count > 0) {
-            self.count -= 1;
-
-            return self.bufs[self.count];
+    /// Index of the smallest size class that holds need bytes, or null when need exceeds the largest
+    /// class (never happens here: the staged remainder never exceeds the sink, which is the largest class).
+    fn classOf(need: usize) ?usize {
+        for (WRITE_STAGE_CLASSES, 0..) |size, idx| {
+            if (need <= size) return idx;
         }
 
-        return std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch null;
+        return null;
     }
 
-    /// Return a drained buffer to the free-list, or free it when the pool is already full.
+    /// Take a staging buffer sized to the smallest class that holds need bytes: pop one from that
+    /// class free-list, else allocate one. Null only on a need past the largest class or alloc failure.
+    fn acquire(self: *WritePendingPool, need: usize) ?[]u8 {
+        const class = classOf(need) orelse return null;
+
+        if (self.counts[class] > 0) {
+            self.counts[class] -= 1;
+
+            return self.free[class][self.counts[class]];
+        }
+
+        return std.heap.smp_allocator.alloc(u8, WRITE_STAGE_CLASSES[class]) catch null;
+    }
+
+    /// Return a drained buffer to its size-class free-list, or free it when that class is already full.
+    /// The buffer length identifies its class, a length matching no class exactly is freed outright.
     fn release(self: *WritePendingPool, buf: []u8) void {
-        if (self.count < WRITE_POOL_CAP) {
-            self.bufs[self.count] = buf;
-            self.count += 1;
+        const class = classOf(buf.len) orelse {
+            std.heap.smp_allocator.free(buf);
+
+            return;
+        };
+
+        if (WRITE_STAGE_CLASSES[class] != buf.len) {
+            std.heap.smp_allocator.free(buf);
+
+            return;
+        }
+
+        if (self.counts[class] < WRITE_POOL_CAP) {
+            self.free[class][self.counts[class]] = buf;
+            self.counts[class] += 1;
 
             return;
         }
@@ -67,8 +101,11 @@ const WritePendingPool = struct {
     }
 
     fn deinit(self: *WritePendingPool) void {
-        for (self.bufs[0..self.count]) |buf| std.heap.smp_allocator.free(buf);
-        self.count = 0;
+        for (0..WRITE_STAGE_CLASSES.len) |class| {
+            for (self.free[class][0..self.counts[class]]) |buf| std.heap.smp_allocator.free(buf);
+
+            self.counts[class] = 0;
+        }
     }
 };
 
@@ -98,6 +135,9 @@ threadlocal var tl_write_pool: WritePendingPool = .{};
 const Conn = struct {
     fd: std.posix.fd_t,
     buf: []u8,
+    /// Compact slab slot backing buf, returned to the free-list on close so the
+    /// resident recv slab packs to the live connection count, not the fd range.
+    slot: u32 = 0,
     filled: usize,
     ws: ?core.WsFrameFn = null,
     drain: usize = 0,
@@ -110,15 +150,30 @@ const Conn = struct {
 
 /// Private per-worker fd to Conn map. Not shared between workers: a connection
 /// fd is accepted and served by a single worker, and freed before its fd can
-/// be reused, so a stale slot is always zeroed by the time it is reused.
-/// Conn structs are stored inline in slots (no pointer indirection). recv
-/// buffers are pre-allocated as a contiguous slab (MAX_FD * buf_size virtual
-/// bytes, Linux demand-paged). On accept, alloc() assigns conn.buf from the
-/// slab with no heap call. Empty slots are identified by buf.len == 0.
+/// be reused, so a stale slot is always zeroed by the time it is reused. Conn
+/// structs are stored inline in slots (no pointer indirection).
+///
+/// Recv buffers live in a per-worker slab carved into fixed-size slots. A
+/// connection draws a compact slot index from a free-list on accept (reusing a
+/// closed connection's slot first), not its fd, so the resident slab tracks the
+/// live connection count rather than the fd range. Indexing by fd instead spread
+/// the touched pages across the whole fd space (fds climb under load and churn),
+/// which held far more resident than the live set. Slots are page-aligned so a
+/// closed slot's pages reclaim cleanly. Empty fd slots are identified by buf.len == 0.
 const ConnTable = struct {
     slots: []Conn,
     slab: []u8,
+    /// Usable recv bytes per connection (config.max_recv_buf or ws_recv_buf).
     buf_size: usize,
+    /// Slab bytes per slot: buf_size rounded up to a page so a released slot's
+    /// pages reclaim without touching a live neighbor slot.
+    stride: usize,
+    /// Stack of closed slot indices available for reuse, newest on top.
+    free_slots: []u32,
+    free_count: usize,
+    /// Next never-used slot index. Slots are handed out compactly from 0, so the
+    /// touched slab prefix bounds the resident recv memory.
+    slot_top: usize,
 
     fn init(buf_size: usize) !ConnTable {
         // Slots are mmap'd (kernel-zeroed, demand-paged) rather than allocated +
@@ -126,12 +181,28 @@ const ConnTable = struct {
         // and costs no physical memory, and a memset would fault in all MAX_FD
         // slots per worker (which scales with core count). See multiplexers/slab.
         const conn_slots = try slab.mapZeroedSlots(Conn, MAX_FD);
+        errdefer slab.unmapSlots(conn_slots);
+
+        // Page-align the slot stride so a closed slot's MADV_DONTNEED reclaims
+        // whole pages, never a page half-shared with a live neighbor slot.
+        const stride = std.mem.alignForward(usize, buf_size, std.heap.page_size_min);
 
         // Slab is intentionally not memset: Linux demand-paging means physical
         // pages are only committed when a connection first recvs into its slot.
-        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * buf_size);
+        const recv_slab = try std.heap.smp_allocator.alloc(u8, MAX_FD * stride);
+        errdefer std.heap.smp_allocator.free(recv_slab);
 
-        return .{ .slots = conn_slots, .slab = recv_slab, .buf_size = buf_size };
+        const free_slots = try std.heap.smp_allocator.alloc(u32, MAX_FD);
+
+        return .{
+            .slots = conn_slots,
+            .slab = recv_slab,
+            .buf_size = buf_size,
+            .stride = stride,
+            .free_slots = free_slots,
+            .free_count = 0,
+            .slot_top = 0,
+        };
     }
 
     fn deinit(self: *ConnTable) void {
@@ -140,6 +211,7 @@ const ConnTable = struct {
             if (conn.write_pending.len > 0) std.heap.smp_allocator.free(conn.write_pending);
         }
 
+        std.heap.smp_allocator.free(self.free_slots);
         std.heap.smp_allocator.free(self.slab);
         slab.unmapSlots(self.slots);
     }
@@ -153,12 +225,30 @@ const ConnTable = struct {
         return if (conn.buf.len > 0) conn else null;
     }
 
+    /// Draw a compact slab slot: reuse a closed slot when one is free, else take
+    /// the next never-used slot. Null when the slab is exhausted (all MAX_FD slots live).
+    fn acquireSlot(self: *ConnTable) ?u32 {
+        if (self.free_count > 0) {
+            self.free_count -= 1;
+
+            return self.free_slots[self.free_count];
+        }
+
+        if (self.slot_top >= MAX_FD) return null;
+
+        const slot: u32 = @intCast(self.slot_top);
+        self.slot_top += 1;
+
+        return slot;
+    }
+
     fn alloc(self: *ConnTable, fd: std.posix.fd_t) ?*Conn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const buf = self.slab[idx * self.buf_size ..][0..self.buf_size];
-        self.slots[idx] = .{ .fd = fd, .buf = buf, .filled = 0 };
+        const slot = self.acquireSlot() orelse return null;
+        const buf = self.slab[slot * self.stride ..][0..self.buf_size];
+        self.slots[idx] = .{ .fd = fd, .buf = buf, .filled = 0, .slot = slot };
 
         return &self.slots[idx];
     }
@@ -173,7 +263,14 @@ const ConnTable = struct {
         // Recycle a still-staged write buffer to the per-worker pool (A3) rather than freeing it, so a
         // connection that closes mid-stall hands its buffer to the next stall instead of the allocator.
         if (conn.write_pending.len > 0) tl_write_pool.release(conn.write_pending);
-        slab.releaseSlabPages(conn.buf);
+
+        // Return the slot pages to the OS and the slot index to the free-list, so the next accept
+        // reuses a low slot and the resident slab stays packed to the live set.
+        const slot = conn.slot;
+        slab.releaseSlabPages(self.slab[slot * self.stride ..][0..self.stride]);
+        self.free_slots[self.free_count] = slot;
+        self.free_count += 1;
+
         conn.* = std.mem.zeroes(Conn);
     }
 };
@@ -232,7 +329,7 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, 
 
         if (written < sink.len) {
             const remaining = sink.buf[written..sink.len];
-            const staged = tl_write_pool.acquire() orelse return .close;
+            const staged = tl_write_pool.acquire(remaining.len) orelse return .close;
             @memcpy(staged[0..remaining.len], remaining);
             conn.write_pending = staged;
             conn.write_pending_len = remaining.len;
@@ -762,6 +859,25 @@ test "zix http1: ConnTable buf_size takes ws_recv_buf when larger" {
     try std.testing.expectEqual(@as(usize, 512), conn.buf.len);
 }
 
+test "zix http1: ConnTable packs recv buffers into compact slots, not the fd range" {
+    var table = try ConnTable.init(4096);
+    defer table.deinit();
+
+    // Two connections on far-apart fds still draw adjacent low slab slots, so the
+    // resident recv slab tracks the live count, not the fd values.
+    const first = table.alloc(5000).?;
+    const second = table.alloc(60000).?;
+
+    const base = @intFromPtr(table.slab.ptr);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(first.buf.ptr) - base);
+    try std.testing.expectEqual(table.stride, @intFromPtr(second.buf.ptr) - base);
+
+    // A closed slot returns to the free-list and is reused before a never-used one.
+    table.free(5000);
+    const reused = table.alloc(123).?;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(reused.buf.ptr) - base);
+}
+
 test "zix http1: serveEpollWs drains pipelined frames to EAGAIN in one call" {
     var fds: [2]i32 = undefined;
     const linux = std.os.linux;
@@ -806,34 +922,54 @@ test "zix http1: EPOLL WritePendingPool recycles a released buffer instead of re
 
     // First acquire allocates, release returns it to the free-list, the next acquire hands back the
     // very same buffer with no new allocation. That reuse is the whole point on a backpressure burst.
-    const first = pool.acquire().?;
+    const first = pool.acquire(EPOLL_OUT_BUF_SIZE).?;
     try std.testing.expectEqual(@as(usize, EPOLL_OUT_BUF_SIZE), first.len);
 
     pool.release(first);
-    try std.testing.expectEqual(@as(usize, 1), pool.count);
+    try std.testing.expectEqual(@as(usize, 1), pool.counts[WRITE_STAGE_CLASSES.len - 1]);
 
-    const second = pool.acquire().?;
+    const second = pool.acquire(EPOLL_OUT_BUF_SIZE).?;
     try std.testing.expectEqual(first.ptr, second.ptr);
-    try std.testing.expectEqual(@as(usize, 0), pool.count);
+    try std.testing.expectEqual(@as(usize, 0), pool.counts[WRITE_STAGE_CLASSES.len - 1]);
 
     pool.release(second);
+}
+
+test "zix http1: EPOLL WritePendingPool sizes a staging buffer to the smallest fitting class" {
+    var pool = WritePendingPool{};
+    defer pool.deinit();
+
+    // A tiny remainder (the common small-response stall) draws the smallest class, not the 64 KiB
+    // sink. That is what keeps a high-connection backpressure burst from pinning a full sink each.
+    const small = pool.acquire(200).?;
+    try std.testing.expectEqual(WRITE_STAGE_CLASSES[0], small.len);
+
+    // A remainder between classes rounds up to the next class that holds it.
+    const mid = pool.acquire(WRITE_STAGE_CLASSES[0] + 1).?;
+    try std.testing.expectEqual(WRITE_STAGE_CLASSES[1], mid.len);
+
+    // Release routes each buffer back to its own class free-list by length.
+    pool.release(small);
+    pool.release(mid);
+    try std.testing.expectEqual(@as(usize, 1), pool.counts[0]);
+    try std.testing.expectEqual(@as(usize, 1), pool.counts[1]);
 }
 
 test "zix http1: EPOLL WritePendingPool frees beyond the cap instead of growing unbounded" {
     var pool = WritePendingPool{};
     defer pool.deinit();
 
-    // Fill the free-list to the cap.
+    // Fill the largest class free-list to the cap.
     var i: usize = 0;
     while (i < WRITE_POOL_CAP) : (i += 1) {
         const buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch unreachable;
         pool.release(buf);
     }
-    try std.testing.expectEqual(WRITE_POOL_CAP, pool.count);
+    try std.testing.expectEqual(WRITE_POOL_CAP, pool.counts[WRITE_STAGE_CLASSES.len - 1]);
 
     // One more release is freed directly (release owns it past the cap), so the pool never grows past
     // the cap and the buffer is not leaked.
     const extra = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch unreachable;
     pool.release(extra);
-    try std.testing.expectEqual(WRITE_POOL_CAP, pool.count);
+    try std.testing.expectEqual(WRITE_POOL_CAP, pool.counts[WRITE_STAGE_CLASSES.len - 1]);
 }
