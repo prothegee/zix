@@ -244,14 +244,19 @@ pub const ServeOpts = struct {
 
 const StreamState = enum { IDLE, OPEN, HALF_CLOSED_REMOTE, CLOSED };
 
+/// Per-stream request body buffer size (bytes a single stream can accumulate).
+const STREAM_BODY_BUF_SIZE: usize = 64 * 1024;
+/// Per-stream scratch buffer for building the HPACK-decoded header block.
+const STREAM_HEADER_SCRATCH_SIZE: usize = 4096;
+
 const Stream = struct {
     id: u31,
     state: StreamState,
     headers: [frame.MAX_HEADERS]hpack.Header,
     header_count: usize,
-    body: [65536]u8,
+    body: [STREAM_BODY_BUF_SIZE]u8,
     body_len: usize,
-    header_scratch: [4096]u8,
+    header_scratch: [STREAM_HEADER_SCRATCH_SIZE]u8,
     end_headers: bool,
     end_stream: bool,
 };
