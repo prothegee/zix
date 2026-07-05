@@ -4,7 +4,7 @@
 //! - This is the policy layer over the codecs: it decides WHICH content coding to use
 //!   (Accept-Encoding negotiation, RFC 9110 section 12.5.3), WHETHER a body is worth
 //!   compressing (size floor plus already-compressed media types), and dispatches to
-//!   the matching codec. The codecs themselves (flate.zig, later brotli.zig) are
+//!   the matching codec. The codecs themselves (flate.zig, brotli.zig) are
 //!   transport-agnostic and know nothing about HTTP.
 //! - gRPC does NOT use this facade. It runs its own grpc-encoding per-message
 //!   negotiation, a different protocol layer, and only reuses the flate codec.
