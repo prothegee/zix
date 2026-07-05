@@ -177,7 +177,7 @@ Codec frame, pengirim control-frame, dan konstanta (`FRAME_TYPE_*`, `FLAG_*`, `E
 
 `FrameHeader` adalah `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` tidak melakukan I/O (untuk write ter-buffer atau ter-stage), `writeFrameHeader` dan `readFrameHeader` menambahkan I/O fd.
 
-`fdWriteAll` memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `fdWriteAllRaw`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `fdWriteAllRaw` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook.
+`writeAllFD` memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `writeAllRawFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `writeAllRawFD` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook.
 
 `sendSettings` / `sendSettingsAck` / `sendPingAck` / `sendGoaway` / `sendRstStream` / `sendWindowUpdate` masing-masing mengenkode satu control frame. `sendResponse` -> `sendResponseEncoded` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStream` sebagai gantinya.
 
