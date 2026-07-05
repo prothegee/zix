@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/utils/compression/brotli_dictionary.gen.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = optimize,
         }),
     });
     const brotli_dict_run = b.addRunArtifact(brotli_dict_gen);
