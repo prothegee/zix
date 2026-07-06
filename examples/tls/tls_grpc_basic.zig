@@ -43,7 +43,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = try zix.Grpc.Server.init(&Routes, .{
+    var server = zix.Grpc.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

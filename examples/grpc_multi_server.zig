@@ -102,7 +102,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer logger.deinit();
 
-    var server = try zix.Grpc.Server.init(
+    var server = zix.Grpc.Server.init(
         &Routes,
         .{
             .io = process.io,

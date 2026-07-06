@@ -26,7 +26,7 @@ const Routes = [_]zix.Http2.Route{
 };
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(&Routes, .{
         .io = process.io,
         .ip = SERVER_IP,
         .port = SERVER_PORT,

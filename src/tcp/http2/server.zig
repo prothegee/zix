@@ -26,13 +26,11 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 
         config: Http2ServerConfig,
 
-        /// Initialize the HTTP/2 server with the given config.
+        /// Initialize the HTTP/2 server with the given config. Validation happens in run.
         ///
         /// Return:
-        /// - !Self (error.PortNotConfigured if config.port is 0)
-        pub fn init(config: Http2ServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
-
+        /// - Self
+        pub fn init(config: Http2ServerConfig) Self {
             return .{ .config = config };
         }
 
@@ -45,7 +43,10 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
         ///
         /// Return:
         /// - !void
+        /// - error.PortNotConfigured if config.port is 0
         pub fn run(self: *Self) !void {
+            if (self.config.port == 0) return error.PortNotConfigured;
+
             const cfg = self.config;
 
             if (cfg.tls != null) {
@@ -87,7 +88,7 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
 ///
 /// Usage:
 /// ```zig
-/// var server = try zix.Http2.Server.init(
+/// var server = zix.Http2.Server.init(
 ///     &[_]zix.Http2.Route{
 ///         .{ .path = "/",     .handler = homeHandler },
 ///         .{ .path = "/echo", .handler = echoHandler },
@@ -101,7 +102,7 @@ pub const Http2Server = struct {
     pub fn init(
         comptime routes: []const Route,
         config: Http2ServerConfig,
-    ) !Http2ServerImpl(routes) {
+    ) Http2ServerImpl(routes) {
         return Http2ServerImpl(routes).init(config);
     }
 };
@@ -109,15 +110,15 @@ pub const Http2Server = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Http2Server.init, port zero returns PortNotConfigured" {
+test "zix test: Http2Server.run, port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try std.testing.expectError(
-        error.PortNotConfigured,
-        Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
-    );
+    var server = Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    try std.testing.expectError(error.PortNotConfigured, server.run());
 }
 
 test "zix test: Http2Server.init, valid config succeeds and deinit is safe" {
@@ -125,6 +126,6 @@ test "zix test: Http2Server.init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
+    var server = Http2Server.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
     server.deinit();
 }

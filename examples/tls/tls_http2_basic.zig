@@ -32,7 +32,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = try zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
