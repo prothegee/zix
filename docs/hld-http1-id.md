@@ -157,18 +157,18 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.queryParam` | fn | Pemindaian linear satu query parameter berdasarkan nama persis |
 | `zix.Http1.percentDecode` | fn | Percent-decode buffer secara in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` menjadi `Range` |
-| `zix.Http1.fdWriteAll` | fn | Menulis semua byte ke fd (sadar sink, menangani EINTR/EAGAIN) |
+| `zix.Http1.writeAllFD` | fn | Menulis semua byte ke fd (sadar sink, menangani EINTR/EAGAIN) |
 | `zix.Http1.flushPending` | fn | Flush byte response yang masih tertahan sebelum raw fd write (urutan pipelining) |
 | `zix.Http1.beginStream` | fn | Memulai response streaming (SSE), melepas sink jadi write flush per event (cleartext + TLS) |
-| `zix.Http1.writeSimple` | fn | Response lengkap dengan body Content-Length |
-| `zix.Http1.writeSimpleNoBody` | fn | Response headers saja (method HEAD) |
-| `zix.Http1.writeJson` | fn | Singkatan `writeSimple` dengan `application/json` |
-| `zix.Http1.writeGzip` | fn | Response terkompresi gzip via `std.compress.flate` |
-| `zix.Http1.writeChunkedStart` | fn | Memulai response `Transfer-Encoding: chunked` |
-| `zix.Http1.writeChunk` | fn | Menulis satu chunk |
-| `zix.Http1.writeChunkedEnd` | fn | Mengakhiri body chunked |
-| `zix.Http1.writeRange` | fn | 206 Partial Content atau 416 berdasarkan nilai header Range |
-| `zix.Http1.write100Continue` | fn | Mengirim `100 Continue` sebelum membaca body besar |
+| `zix.Http1.sendSimpleFD` | fn | Response lengkap dengan body Content-Length |
+| `zix.Http1.sendSimpleNoBodyFD` | fn | Response headers saja (method HEAD) |
+| `zix.Http1.sendJsonFD` | fn | Singkatan `sendSimpleFD` dengan `application/json` |
+| `zix.Http1.sendGzipFD` | fn | Response terkompresi gzip via `std.compress.flate` |
+| `zix.Http1.sendChunkedStartFD` | fn | Memulai response `Transfer-Encoding: chunked` |
+| `zix.Http1.sendChunkFD` | fn | Menulis satu chunk |
+| `zix.Http1.sendChunkedEndFD` | fn | Mengakhiri body chunked |
+| `zix.Http1.sendRangeFD` | fn | 206 Partial Content atau 416 berdasarkan nilai header Range |
+| `zix.Http1.send100ContinueFD` | fn | Mengirim `100 Continue` sebelum membaca body besar |
 
 ---
 
@@ -181,10 +181,10 @@ pub const Http1ServerConfig = struct {
     port:               u16,                   // harus non-zero
     dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
-    max_recv_buf:       usize = 16 * 1024,     // buffer per-connection (.EPOLL saja, lihat catatan)
-    large_body_rcvbuf:  usize = 256 * 1024,    // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
+    max_recv_buf:       usize = 6 * 1024,      // buffer per-connection (.EPOLL / .URING, lihat catatan)
+    large_body_rcvbuf:  usize = 0,             // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
     ws_recv_buf:        usize = 0,             // buffer WebSocket (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compression:          bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via core.writeNegotiated (.EPOLL/.URING)
+    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via core.sendNegotiateFD (.EPOLL/.URING)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
     compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
     max_headers:        u8    = 16,            // no-op, dipertahankan untuk kompatibilitas sumber
@@ -197,7 +197,7 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection hanya pada `.EPOLL`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.writeNegotiated` alih-alih `writeSimple`. Helper lama `core.writeGzip` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` adalah no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
+Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.sendNegotiateFD` alih-alih `sendSimpleFD`. Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` adalah no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
 
@@ -231,7 +231,7 @@ fn home(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t)
         _ = name; // slice ke receive buffer, hanya valid selama pemanggilan ini
     }
 
-    zix.Http1.writeSimple(fd, 200, "text/plain", "hello") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello") catch {};
 }
 
 var server = zix.Http1.Server.init(home, .{
@@ -345,12 +345,12 @@ fn slow(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t)
 
     doStep1();
     if (zix.Http1.isExpired()) {
-        zix.Http1.writeJson(fd, 408, "{\"error\":\"timeout\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\"}") catch {};
         return;
     }
 
     doStep2();
-    zix.Http1.writeJson(fd, 200, "{\"result\":\"ok\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\"}") catch {};
 }
 ```
 
@@ -416,7 +416,7 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | Buffer receive + body (.ASYNC/.POOL/.MIXED) | stack thread/task yang melayani (16 KB + 8 KB) | Koneksi |
 | Buffer per-connection (.EPOLL) | `smp_allocator`, `max_recv_buf` byte | Koneksi |
 | Staging body + output (.EPOLL) | `smp_allocator`, masing-masing 16 KB, per worker | Worker thread |
-| Scratch gzip (`writeGzip`) | `smp_allocator` (256 KB out + flate window + compressor) | Satu pemanggilan |
+| Scratch gzip (`sendGzipFD`) | `smp_allocator` (256 KB out + flate window + compressor) | Satu pemanggilan |
 | Alokasi handler | tidak disediakan (bawa allocator sendiri bila perlu) | n/a |
 
 ---

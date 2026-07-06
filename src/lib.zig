@@ -60,6 +60,12 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http/client.zig"));
     std.testing.refAllDecls(@import("tcp/http/h2_client.zig"));
     std.testing.refAllDecls(@import("tcp/http/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/async.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/pool.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/mixed.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/epoll.zig"));
+    std.testing.refAllDecls(@import("tcp/http/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http/tls_serve.zig"));
     std.testing.refAllDecls(@import("tcp/http/sse_client.zig"));
     std.testing.refAllDecls(@import("tcp/http/ws_client.zig"));

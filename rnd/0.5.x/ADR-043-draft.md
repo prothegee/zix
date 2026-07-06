@@ -80,16 +80,12 @@ full copies of the monolithic `server.zig`, so the split would orphan them. They
 differ only in the `.URING` idle-pool code, which after the split lives entirely
 in `dispatch/uring.zig`. Preserve them as follows:
 
-- Reduce each to its `.URING` form and relocate to `rnd/0.5.x/a2-variants/`
-  (`uring.1.pre_A2.zig` ... `uring.4.cold_tail.zig`), out of `src/` since they are
-  inert research snapshots, not built code. `dispatch/uring.zig` stays the
-  canonical cold_tail.
-- A cross-reference manifest in `rnd/0.5.x/` indexes the four, names the single
-  differing function set, and links the existing records: issue comments 6 and 7,
-  `a2-uring-4way-results-0.4.x.md`, `smaps-anon-breakdown-0.4.x.md`,
-  `bench-cell-scaling-analysis-0.4.x.md`, and the `project_a2_uring_idle_pool`
-  memory (which already holds all four code shapes). The manifest is the durable
-  record, the files are attachments it points at.
+- Reduce each to its `.URING` form and relocate to a variants folder, out of `src/`
+  since they are inert research snapshots, not built code. `dispatch/uring.zig` stays
+  the canonical cold_tail.
+- A cross-reference manifest indexes the four, names the single differing function
+  set, and links the existing research records. The manifest is the durable record,
+  the snapshots are attachments it points at.
 
 ## Alternatives rejected
 | Alternative | Why rejected |
@@ -120,7 +116,7 @@ aliases the shared helpers (`const setNoDelay = common.setNoDelay;`), and only t
 `run()` switch was rewritten. `zig build`, `test-all`, and `test-runner-all` (all
 56 protocols) pass, with the 25 http1 tests preserved (4 server, 7 common, 6
 epoll, 8 uring). The four A2 variant snapshots were relocated to
-`rnd/0.5.x/a2-variants/` with a README cross-reference manifest.
+a variants folder with a README cross-reference manifest.
 
 The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`,
 `zix.Fix`) were then split the same way, each an independent equivalent move, all
@@ -170,7 +166,7 @@ preserved): `server.zig` shrank from 2,624 lines to 154, the models live under
 `dispatch/`, and moved bodies are byte-identical (shared helpers reached via
 `const X = common.X;` aliases, only the `run()` switch rewritten). The four A2
 idle-pool variants are preserved as full-server snapshots in
-`rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a
+a variants folder (they differ only in the `.URING` pool code) with a
 cross-reference manifest. The connection-oriented engines (`zix.Http`,
 `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, all green on
 Zig 0.16.x and 0.17.x. `zix.Udp` is excluded by design: it is connectionless, so

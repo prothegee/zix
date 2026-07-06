@@ -250,14 +250,14 @@ Diakses melalui `const zix = @import("zix");`
 
 ```zig
 pub const HttpServerConfig = struct {
-    io:                   ?std.Io           = null,      // caller-provided io backend. null = internal Threaded
+    io:                   std.Io,                         // backend io dari pemanggil, wajib, harus outlive server
     ip:                   []const u8,
     port:                 u16,
     dispatch_model:       DispatchModel,    // required: ASYNC, POOL, MIXED, EPOLL, or URING (EPOLL/URING Linux-only)
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
-    large_body_rcvbuf:    usize             = 256 * 1024, // SO_RCVBUF pada jalur large-body/upload, 0 = default kernel
-    compression:          bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (.EPOLL/.URING)
+    large_body_rcvbuf:    usize             = 0,          // SO_RCVBUF pada jalur large-body/upload, 0 = default kernel
+    compress:             bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (.EPOLL/.URING)
     compression_min_size: usize             = 256,        // lewati body di bawah floor ini
     compression_max_out:  usize             = 256 * 1024, // cap output terkompresi codec-agnostic
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size

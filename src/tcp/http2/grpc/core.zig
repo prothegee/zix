@@ -353,7 +353,7 @@ pub const GrpcContext = struct {
 
 // --------------------------------------------------------- //
 
-/// Per-worker response cache installed by the EPOLL mux worker. Null on workers
+/// Per-worker response cache installed by the EPOLL / URING mux worker. Null on workers
 /// without a cache, so the GrpcContext cache API degrades to a plain send.
 pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
 
@@ -473,7 +473,7 @@ pub const GrpcServeOpts = struct {
     /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress.
     compress: bool = false,
     /// Enable the per-worker unary response cache (ADR-036). Passed from
-    /// GrpcServerConfig.response_cache. Active under .EPOLL in this release.
+    /// GrpcServerConfig.response_cache. Active under .EPOLL and .URING.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two.
     cache_max_entries: u32 = 256,
@@ -643,6 +643,11 @@ const ConnMutex = struct {
     }
 };
 
+/// Per-task scratch buffer for building the HPACK-decoded header block.
+const TASK_HEADER_SCRATCH_SIZE: usize = 4096;
+/// Per-task request body buffer size (bytes a single call can accumulate).
+const TASK_BODY_BUF_SIZE: usize = 64 * 1024;
+
 /// Heap-allocated per-stream dispatch task. Owns a deep copy of the stream's headers
 /// and body so the read loop can immediately reuse the stream slot after spawning.
 fn DispatchTask(comptime routes: []const Route) type {
@@ -653,9 +658,9 @@ fn DispatchTask(comptime routes: []const Route) type {
         stream_id: u31,
         header_count: usize,
         headers: [h2.MAX_HEADERS]h2.Header,
-        header_scratch: [4096]u8,
+        header_scratch: [TASK_HEADER_SCRATCH_SIZE]u8,
         body_len: usize,
-        body: [65536]u8,
+        body: [TASK_BODY_BUF_SIZE]u8,
         opts: GrpcServeOpts,
         conn_mutex: *ConnMutex,
 
@@ -736,7 +741,7 @@ fn spawnGrpcStream(
     task.headers = stream.headers;
 
     // stream.header_scratch is a slice into the connection backing buffer. Copy its used range
-    // into the task'stream owned array so header name/value pointers can be rebased below.
+    // into the task's own array so header name/value pointers can be rebased below.
     // Requires opts.max_header_scratch <= task.header_scratch.len (4096).
     const scratch_n = @min(task.header_scratch.len, stream.header_scratch.len);
     @memcpy(task.header_scratch[0..scratch_n], stream.header_scratch[0..scratch_n]);
@@ -1332,7 +1337,7 @@ pub const GrpcConnOutcome = enum { keep_alive, close };
 
 const MuxPhase = enum { await_preface, await_upgrade, await_preface2, h2 };
 
-/// Per-connection h2/gRPC state for the multiplexed EPOLL model. Heap-owned, one per fd.
+/// Per-connection h2/gRPC state for the multiplexed .EPOLL / .URING models. Heap-owned, one per fd.
 /// rbuf is the read accumulator: it persists across readable events and holds any partial
 /// frame until the rest arrives. The stream table, hpack decoder and reply cork are all
 /// private to the owning worker thread.

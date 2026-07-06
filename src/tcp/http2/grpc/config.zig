@@ -73,7 +73,7 @@ pub const GrpcServerConfig = struct {
     compress: bool = false,
     /// Enable the per-worker unary response cache (ADR-036). Default false. When off,
     /// the handler cache API (ctx.serveCached / ctx.sendCached) degrades to a plain
-    /// send. Active under the .EPOLL dispatch model in this release.
+    /// send. Active under the .EPOLL and .URING dispatch models.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker memory
     /// is cache_max_entries * cache_max_value_bytes, times the worker count.

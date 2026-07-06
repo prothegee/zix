@@ -292,7 +292,7 @@ Content-Type dan Date ditulis dengan `@memcpy` prefix literal plus value (bukan 
 7. return SseWriter{ .fd = fd }
 ```
 
-`SseWriter` menyimpan fd koneksi. Setiap metode penulisan memanggil `fdWriteAll` agar event sampai ke client tanpa buffering. Melalui TLS (ADR-054) stream sink per-koneksi terpasang: langkah 1 melepas buffered capture sink alih-alih mem-flush-nya (byte-nya digantikan oleh stream), dan `fdWriteAll` merutekan tiap header dan event lewat stream sink, mengenkripsi satu TLS record per write. Di cleartext write langsung ke socket.
+`SseWriter` menyimpan fd koneksi. Setiap metode penulisan memanggil `writeAllFD` agar event sampai ke client tanpa buffering. Melalui TLS (ADR-054) stream sink per-koneksi terpasang: langkah 1 melepas buffered capture sink alih-alih mem-flush-nya (byte-nya digantikan oleh stream), dan `writeAllFD` merutekan tiap header dan event lewat stream sink, mengenkripsi satu TLS record per write. Di cleartext write langsung ke socket.
 
 ```
 writeEvent(data):      writeAll("data: ") + writeAll(data) + writeAll("\n\n") + flush

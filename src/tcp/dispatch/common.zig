@@ -44,6 +44,9 @@ pub const FrameFn = *const fn (payload: []const u8, fd: std.posix.fd_t) void;
 pub const FRAME_LEN_PREFIX: usize = 4;
 pub const FRAME_MAX_PAYLOAD: usize = 1 << 20;
 
+/// Scratch buffer size backing the stream reader on the framed-connection path.
+const FRAME_READ_BUF_SIZE: usize = 4096;
+
 // --------------------------------------------------------- //
 // Framed-engine response sink + helpers. While a sink is installed
 // (tl_resp_sink, the .URING ring path), writes stage into it and coalesce into
@@ -196,7 +199,7 @@ pub fn frameAdapter(comptime frame_fn: FrameFn) HandlerFn {
             const payload_buf = std.heap.smp_allocator.alloc(u8, FRAME_MAX_PAYLOAD) catch return;
             defer std.heap.smp_allocator.free(payload_buf);
 
-            var read_buf: [4096]u8 = undefined;
+            var read_buf: [FRAME_READ_BUF_SIZE]u8 = undefined;
             var reader = stream.reader(io, &read_buf);
 
             while (true) {

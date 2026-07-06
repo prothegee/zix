@@ -40,8 +40,8 @@ http1
 
 ### A2 Variant Preservation
 The 4 A2 snapshots are full copies of the monolith, differing only in `.URING` pool code.
-1. Moved as full-server snapshots (`server.1.pre_A2.zig` ... `server.4.cold_tail.zig`) to `rnd/0.5.x/a2-variants/`. Kept full rather than reduced to `.URING`-only, so each stays a complete, self-consistent snapshot that diffs cleanly to the idle-pool delta.
-2. Added a README cross-reference manifest in `rnd/0.5.x/a2-variants/` linking the existing research records. `dispatch/uring.zig` remains the canonical `cold_tail`.
+1. Moved as full-server snapshots to a variants folder. Kept full rather than reduced to `.URING`-only, so each stays a complete, self-consistent snapshot that diffs cleanly to the idle-pool delta.
+2. Added a README cross-reference manifest in the variants folder linking the existing research records. `dispatch/uring.zig` remains the canonical `cold_tail`.
 
 ## Acceptance Criteria / Checklist
 
@@ -49,7 +49,7 @@ The 4 A2 snapshots are full copies of the monolith, differing only in `.URING` p
 - [x] Create `dispatch/` folder and split `server.zig` according to the partition map. (`server.zig` 2,624 to 154 lines)
 - [x] Add `std.testing.refAllDecls` (one per new file) in `src/lib.zig` so tests actually run.
 - [x] Move model-specific tests into their respective `dispatch/*.zig` files. Move shared helper tests to `common.zig`. (25 tests: 4 server, 7 common, 6 epoll, 8 uring)
-- [x] Relocate A2 variants to `rnd/0.5.x/a2-variants/` and create the cross-reference manifest. (moved as full-server snapshots, not reduced to `.URING`-only)
+- [x] Relocate A2 variants to a variants folder and create the cross-reference manifest. (moved as full-server snapshots, not reduced to `.URING`-only)
 - [x] Verify **zero behavior/API change**: `zig build`, `test-all`, and the live `test-runner-*` pass with identical numbers. (all 56 protocols green, 25 http1 tests preserved)
 
 **Rollout**

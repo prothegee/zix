@@ -4,7 +4,9 @@
 //! - `pemToDer` strips the -----BEGIN/END----- armor and base64-decodes the body. The
 //!   certificate DER feeds the Certificate message as-is. `ecdsaScalarFromSec1` extracts the
 //!   raw 32-byte private scalar from a SEC1 ECPrivateKey (RFC 5915, the form `openssl ecparam
-//!   -genkey` emits). Full X.509 / PKCS8 parsing is a separate concern.
+//!   -genkey` emits), and `ed25519SeedFromPkcs8` extracts the 32-byte seed from a PKCS#8
+//!   PrivateKeyInfo (RFC 8410, the form `openssl genpkey -algorithm ed25519` emits). Full X.509
+//!   parsing is a separate concern.
 
 const std = @import("std");
 

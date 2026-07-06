@@ -157,18 +157,18 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.queryParam` | fn | Linear scan for one query parameter by exact name |
 | `zix.Http1.percentDecode` | fn | Percent-decode a buffer in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` into a `Range` |
-| `zix.Http1.fdWriteAll` | fn | Write all bytes to fd (sink-aware, handles EINTR/EAGAIN) |
+| `zix.Http1.writeAllFD` | fn | Write all bytes to fd (sink-aware, handles EINTR/EAGAIN) |
 | `zix.Http1.flushPending` | fn | Flush staged response bytes before raw fd writes (pipelining order) |
 | `zix.Http1.beginStream` | fn | Begin a streaming response (SSE), detaches the sink so writes flush per event (cleartext + TLS) |
-| `zix.Http1.writeSimple` | fn | Full response with Content-Length body |
-| `zix.Http1.writeSimpleNoBody` | fn | Headers-only response (HEAD method) |
-| `zix.Http1.writeJson` | fn | `writeSimple` shorthand with `application/json` |
-| `zix.Http1.writeGzip` | fn | gzip-compressed response via `std.compress.flate` |
-| `zix.Http1.writeChunkedStart` | fn | Start a `Transfer-Encoding: chunked` response |
-| `zix.Http1.writeChunk` | fn | Write one chunk |
-| `zix.Http1.writeChunkedEnd` | fn | Terminate the chunked body |
-| `zix.Http1.writeRange` | fn | 206 Partial Content or 416 based on a Range header value |
-| `zix.Http1.write100Continue` | fn | Send `100 Continue` before reading a large body |
+| `zix.Http1.sendSimpleFD` | fn | Full response with Content-Length body |
+| `zix.Http1.sendSimpleNoBodyFD` | fn | Headers-only response (HEAD method) |
+| `zix.Http1.sendJsonFD` | fn | `sendSimpleFD` shorthand with `application/json` |
+| `zix.Http1.sendGzipFD` | fn | gzip-compressed response via `std.compress.flate` |
+| `zix.Http1.sendChunkedStartFD` | fn | Start a `Transfer-Encoding: chunked` response |
+| `zix.Http1.sendChunkFD` | fn | Write one chunk |
+| `zix.Http1.sendChunkedEndFD` | fn | Terminate the chunked body |
+| `zix.Http1.sendRangeFD` | fn | 206 Partial Content or 416 based on a Range header value |
+| `zix.Http1.send100ContinueFD` | fn | Send `100 Continue` before reading a large body |
 
 ---
 
@@ -181,10 +181,10 @@ pub const Http1ServerConfig = struct {
     port:               u16,                   // must be non-zero
     dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
-    max_recv_buf:       usize = 16 * 1024,     // per-connection buffer (.EPOLL only, see note)
-    large_body_rcvbuf:  usize = 256 * 1024,    // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
+    max_recv_buf:       usize = 6 * 1024,      // per-connection buffer (.EPOLL / .URING, see note)
+    large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compression:          bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via core.writeNegotiated (.EPOLL/.URING)
+    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via core.sendNegotiateFD (.EPOLL/.URING)
     compression_min_size: usize = 256,           // skip bodies under this floor
     compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
     max_headers:        u8    = 16,            // no-op, kept for source compatibility
@@ -197,7 +197,7 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` only. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compression`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.writeNegotiated` instead of `writeSimple`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` is a no-op kept for source compatibility (the lazy engine has no header-count cap).
+Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.sendNegotiateFD` instead of `sendSimpleFD`. The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` is a no-op kept for source compatibility (the lazy engine has no header-count cap).
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -231,7 +231,7 @@ fn home(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t)
         _ = name; // slices into the receive buffer, valid only for this call
     }
 
-    zix.Http1.writeSimple(fd, 200, "text/plain", "hello") catch {};
+    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello") catch {};
 }
 
 var server = zix.Http1.Server.init(home, .{
@@ -345,12 +345,12 @@ fn slow(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t)
 
     doStep1();
     if (zix.Http1.isExpired()) {
-        zix.Http1.writeJson(fd, 408, "{\"error\":\"timeout\"}") catch {};
+        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\"}") catch {};
         return;
     }
 
     doStep2();
-    zix.Http1.writeJson(fd, 200, "{\"result\":\"ok\"}") catch {};
+    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\"}") catch {};
 }
 ```
 
@@ -416,7 +416,7 @@ Per-request access logging is the handler's responsibility: the Http1 handler wr
 | Receive + body buffers (.ASYNC/.POOL/.MIXED) | stack of the serving thread/task (16 KB + 8 KB) | Connection |
 | Per-connection buffer (.EPOLL) | `smp_allocator`, `max_recv_buf` bytes | Connection |
 | Body + output staging (.EPOLL) | `smp_allocator`, 16 KB each, per worker | Worker thread |
-| gzip scratch (`writeGzip`) | `smp_allocator` (256 KB out + flate window + compressor) | One call |
+| gzip scratch (`sendGzipFD`) | `smp_allocator` (256 KB out + flate window + compressor) | One call |
 | Handler allocations | none provided (bring your own allocator if needed) | n/a |
 
 ---

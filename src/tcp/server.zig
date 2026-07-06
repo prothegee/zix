@@ -194,15 +194,19 @@ pub const Server = struct {
 
 // --------------------------------------------------------- //
 
+/// Max payload the built-in echo handler buffers. A frame whose payload exceeds
+/// this closes the connection. The read and write buffers add the 4-byte length prefix.
+const ECHO_PAYLOAD_SIZE: usize = 4096;
+
 /// Built-in echo handler. Reads length-prefixed frames and echoes each back unchanged.
 /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
-/// Payloads larger than 4096 bytes close the connection.
+/// Payloads larger than ECHO_PAYLOAD_SIZE close the connection.
 pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
     defer stream.close(io);
 
-    var read_buf: [4096 + 4]u8 = undefined;
-    var write_buf: [4096 + 4]u8 = undefined;
-    var payload_buf: [4096]u8 = undefined;
+    var read_buf: [ECHO_PAYLOAD_SIZE + 4]u8 = undefined;
+    var write_buf: [ECHO_PAYLOAD_SIZE + 4]u8 = undefined;
+    var payload_buf: [ECHO_PAYLOAD_SIZE]u8 = undefined;
 
     var reader = stream.reader(io, &read_buf);
     var writer = stream.writer(io, &write_buf);

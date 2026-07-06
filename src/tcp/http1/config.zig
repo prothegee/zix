@@ -44,7 +44,7 @@ pub const Http1ServerConfig = struct {
     /// number of closed connections kept warm (buffers resident) per worker when otherwise
     /// idle, so a trickle of new connections skips the allocator. No effect under the other
     /// dispatch models.
-    uring_idle_pool_floor: usize = 64,
+    uring_idle_pool_floor: usize = 8,
     /// Warm idle-connection pool ceiling for the .URING dispatch model (A2): the absolute
     /// upper bound on warm connections per worker, regardless of live concurrency. The warm
     /// cap is clamp(live_count, floor, ceiling). At high concurrency the ceiling holds the
@@ -131,7 +131,7 @@ test "zix http1: Http1ServerConfig URING knob defaults" {
 
     const cfg = Http1ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9200, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
-    try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+    try std.testing.expectEqual(@as(usize, 8), cfg.uring_idle_pool_floor);
     try std.testing.expectEqual(@as(usize, 256), cfg.uring_idle_pool_ceiling);
 }
 

@@ -18,7 +18,7 @@ pub const DispatchModel = enum(u8) {
 
 Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/config.zig` (untuk `zix.Http`) dan diimpor oleh `src/tcp/http2/grpc/config.zig` (untuk `zix.Grpc`). Kelima nilai tersedia di setiap konfigurasi.
 
-`.EPOLL = 3` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. `zix.Http2` dan build non-Linux akan fallback ke `.POOL` secara otomatis. `.URING = 4` juga hanya tersedia di Linux dan native di `zix.Http1`, `zix.Http`, `zix.Grpc`, dan `zix.Fix`. `zix.Http2` melipat ke `.POOL` dan handler per-connection `zix.Tcp` melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring secara native). Lihat tabel Perbandingan Model Dispatch di bawah.
+`.EPOLL = 3` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. Build non-Linux akan fallback ke `.POOL` secara otomatis. `.URING = 4` juga hanya tersedia di Linux dan native di `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, dan `zix.Fix`. Handler per-connection `zix.Tcp` melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring secara native). Lihat tabel Perbandingan Model Dispatch di bawah.
 
 ---
 
@@ -245,7 +245,7 @@ try server.run();
 | Item | Detail |
 | :- | :- |
 | Platform | Hanya Linux (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux fallback ke `.POOL` secara otomatis (dengan debug print) |
-| Ketersediaan | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` diimplementasikan secara native di Linux. `zix.Http2` fallback ke `.POOL` |
+| Ketersediaan | `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` diimplementasikan secara native di Linux |
 | Model accept (`zix.Http`) | Setiap worker memiliki `SO_REUSEPORT` listener tersendiri. Kernel mendistribusikan koneksi ke worker: tanpa antrian accept bersama |
 | Perbedaan gRPC | `zix.Grpc` menggunakan model multiplexed shared-nothing: satu worker mendrive banyak koneksi h2 non-blocking via resumable state machine. `pool_size` sebagai jumlah worker. Lihat ADR-031 |
 | Perbedaan FIX dan TCP | `zix.Fix` dan `zix.Tcp` EPOLL menggunakan desain terpusat: satu accept loop mendorong fd ke antrian bersama, pool worker pop dan menahan setiap koneksi sepanjang hidupnya. `pool_size` sebagai jumlah worker |
@@ -265,7 +265,7 @@ try server.run();
 
 `.URING` adalah saudara completion-based dari `.EPOLL`: topologi thread-per-core, shared-nothing yang sama (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama, tanpa perpindahan fd antar thread), tetapi accept, read, dan write disubmit sebagai SQE io_uring dan dipanen sebagai CQE alih-alih menunggu readiness `epoll_wait`. Sebagian besar transisi syscall di-batch ke dalam ring (ADR-037 Fase 4).
 
-- Engine native: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` dan handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.POOL` / `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Build non-Linux fallback ke `.POOL`.
+- Engine native: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Build non-Linux fallback ke `.POOL`.
 - `workers` (Http/Http1) atau `pool_size` (gRPC/FIX/TCP) menentukan jumlah worker, persis seperti `.EPOLL`.
 - Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Di mesin many-core, ring close (`prep_close`, ADR-041) membuat worker terus memanen completion lintas connection churn alih-alih memblokir di `close` sinkron, jadi `.URING` mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
 - "Kapan tidak digunakan" sama dengan `.EPOLL`: SSE / WebSocket di `zix.Http`, jumlah koneksi rendah, target non-Linux.
@@ -316,7 +316,7 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 | Field `workers` digunakan | ya | tidak (diabaikan) | ya | ya (Http/Http1 only) |
 | Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (Http: diabaikan). Ya (gRPC/FIX/TCP) |
 | Terbaik untuk | throughput, jumlah koneksi tinggi | SSE, WebSocket, latensi rendah | balanced, multi-accept async | HTTP/1 atau gRPC throughput tinggi di Linux |
-| Tersedia di | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 fallback ke .POOL) |
+| Tersedia di | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Fix, Tcp (Linux-only) |
 
 ---
 
@@ -327,7 +327,7 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 | HTTP | ya | ya (default) | ya | ya, Linux-only |
 | SSE | tidak direkomendasikan (menghabiskan pool thread) | ya, direkomendasikan | ya | n/a |
 | WebSocket | tidak direkomendasikan (koneksi berumur panjang) | ya, direkomendasikan | ya | n/a |
-| HTTP/2 (h2c) | ya | ya (default) | ya | n/a |
+| HTTP/2 (h2c) | ya | ya (default) | ya | ya, Linux-only |
 | HTTP/3 (QUIC) | ya | ya (single worker) | ya | ya, Linux-only |
 | gRPC (h2c) | ya | ya (default) | ya | ya, Linux-only |
 | TCP (raw stream) | ya | ya (default) | ya | ya, Linux-only |

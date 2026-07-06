@@ -28,7 +28,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |
 
-`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.writeNegotiated`. The legacy `core.writeGzip` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: it is a no-op kept for source compatibility (the lazy engine has no header-count cap).
+`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.sendNegotiateFD`. The legacy `core.sendGzipFD` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: it is a no-op kept for source compatibility (the lazy engine has no header-count cap).
 
 ---
 
@@ -38,7 +38,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 
 ```
 BUF_SIZE      = 16 * 1024   // receive buffer (serveConn stack, EPOLL worker scratch)
-GZIP_OUT_SIZE = 256 * 1024  // writeGzip output buffer
+GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
 ```
 
 ### parseHead()
@@ -100,22 +100,22 @@ RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
-While installed, `fdWriteAll(fd, ...)` for the matching fd appends to `buf` instead of hitting the socket:
+While installed, `writeAllFD(fd, ...)` for the matching fd appends to `buf` instead of hitting the socket:
 
 ```
 append(bytes):
   bytes.len > buf.len        -> grow to fit when growable, else flush + write through directly
   len + bytes.len > buf.len  -> grow to fit when growable, else flush first
   else                       -> memcpy into buf
-flush(): one fdWriteAllDirect(buf[0..len]), len = 0, failed sticky on error
+flush(): one writeAllDirectFD(buf[0..len]), len = 0, failed sticky on error
 grow(need): realloc buf (power-of-two) up to grow_cap, never shrinks, false when ungrowable
 ```
 
-The EPOLL request loop (`serveEpollConn`) installs the sink with no `grow_allocator`, so a pipelined burst of N responses costs one `write()` and an oversized response flushes the batch then writes straight through. The URING loop installs the sink over the per-connection `send_buf` with `grow_allocator` set and `grow_cap = URING_SEND_BUF_MAX` (1 MiB): a response larger than the staged buffer grows it in place (power-of-two realloc) so the whole reply still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write (`fdWriteAllDirect`). The grown buffer never shrinks, so the recycled connection reuses it for later requests. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
+The EPOLL request loop (`serveEpollConn`) installs the sink with no `grow_allocator`, so a pipelined burst of N responses costs one `write()` and an oversized response flushes the batch then writes straight through. The URING loop installs the sink over the per-connection `send_buf` with `grow_allocator` set and `grow_cap = URING_SEND_BUF_MAX` (1 MiB): a response larger than the staged buffer grows it in place (power-of-two realloc) so the whole reply still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write (`writeAllDirectFD`). The grown buffer never shrinks, so the recycled connection reuses it for later requests. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
 
-### fdWriteAll() / fdWriteAllDirect()
+### writeAllFD() / writeAllDirectFD()
 
-`fdWriteAll` routes through the installed sink when the fd matches, otherwise calls the direct path. Direct path loop:
+`writeAllFD` routes through the installed sink when the fd matches, otherwise calls the direct path. Direct path loop:
 
 ```
 write(fd, rem)
@@ -155,13 +155,13 @@ cachedDate():
 
 The IMF-fixdate string is reformatted at most once per second per thread, and the clock syscall itself is amortized across 256 responses. `formatHttpDate` uses `std.time.epoch` decomposition, day-of-week from `(epoch_day % 7 + 4) % 7`.
 
-### writeSimple()
+### sendSimpleFD()
 
 ```
 1. buildSimpleHeader into 256-byte stack buffer
 2. body.len <= 3840:
       memcpy header + body into one 4096-byte stack buffer
-      single fdWriteAll                       // one syscall for most responses
+      single writeAllFD                       // one syscall for most responses
 3. larger body: writev loop with 2 iovecs (header remainder, body)
       tracks sent across partial writes, INTR retries, AGAIN polls POLLOUT
 ```
@@ -170,14 +170,14 @@ The IMF-fixdate string is reformatted at most once per second per thread, and th
 
 | Helper | Wire behaviour |
 | :- | :- |
-| `writeSimpleNoBody` | `buildSimpleHeader` only, Content-Length set to the would-be body size (HEAD) |
-| `writeJson` | `writeSimple` with `application/json` |
-| `write100Continue` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `writeGzip` | heap-allocates 256 KB out + flate window + compressor (stack safety), compresses with `std.compress.flate` `.gzip`, then header (`Content-Encoding: gzip`) + compressed bytes |
-| `writeChunkedStart` | status line + `Transfer-Encoding: chunked`, no Content-Length |
-| `writeChunk` | `{x}\r\n` + data + `\r\n`, zero-length data is a no-op (would terminate the body) |
-| `writeChunkedEnd` | `0\r\n\r\n` |
-| `writeRange` | `parseRange` against `full_body.len`: valid gives `206` + `Content-Range` + slice, invalid gives `416` with `Content-Range: bytes */{total}` |
+| `sendSimpleNoBodyFD` | `buildSimpleHeader` only, Content-Length set to the would-be body size (HEAD) |
+| `sendJsonFD` | `sendSimpleFD` with `application/json` |
+| `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
+| `sendGzipFD` | heap-allocates 256 KB out + flate window + compressor (stack safety), compresses with `std.compress.flate` `.gzip`, then header (`Content-Encoding: gzip`) + compressed bytes |
+| `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, no Content-Length |
+| `sendChunkFD` | `{x}\r\n` + data + `\r\n`, zero-length data is a no-op (would terminate the body) |
+| `sendChunkedEndFD` | `0\r\n\r\n` |
+| `sendRangeFD` | `parseRange` against `full_body.len`: valid gives `206` + `Content-Range` + slice, invalid gives `416` with `Content-Range: bytes */{total}` |
 
 ### serveConn(): blocking keep-alive loop
 
@@ -189,7 +189,7 @@ loop:
   1. recvHead(fd, recv_buf, leftover)
         HeaderTooLarge -> write 431, return
   2. parseHead -> failure: write 400, return
-  3. expect_continue and body present -> write100Continue
+  3. expect_continue and body present -> send100ContinueFD
   4. body:
         chunked        -> readChunkedBody(peeked, body_buf)
         content_length -> copy peeked bytes, read until min(content_length, 8192)
@@ -230,7 +230,7 @@ The returned type has a single decl, `dispatch`, with the exact `HandlerFn` sign
 3. inline for param_routes: matchParam -> call handler, return  (first match wins)
 4. inline for prefix_routes: startsWith + boundary check (next char '/' or end)
        track longest match             -> call best handler
-5. nothing matched                     -> writeSimple 404 text/plain
+5. nothing matched                     -> sendSimpleFD 404 text/plain
 ```
 
 ### matchParam() and the param store
@@ -468,7 +468,7 @@ The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte 
 
 ### acceptKey() / upgrade()
 
-`acceptKey` concatenates the client key with the RFC 6455 GUID, SHA-1, base64 into a caller `[64]u8` (`error.KeyTooLong` past 128 input bytes). `upgrade` writes the full `101 Switching Protocols` block through `core.fdWriteAll` (sink-aware, so under EPOLL it stages with the other responses).
+`acceptKey` concatenates the client key with the RFC 6455 GUID, SHA-1, base64 into a caller `[64]u8` (`error.KeyTooLong` past 128 input bytes). `upgrade` writes the full `101 Switching Protocols` block through `core.writeAllFD` (sink-aware, so under EPOLL it stages with the other responses).
 
 ### send() and SendSink
 
@@ -477,7 +477,7 @@ The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte 
 ```
 send(fd, opcode, payload):
   sink active -> stage header then payload         (error.BrokenPipe if sink failed)
-  payload + header <= 4096 -> build one buffer, one fdWriteAll
+  payload + header <= 4096 -> build one buffer, one writeAllFD
   larger -> write header then payload separately   (avoids a big stack copy)
 ```
 

@@ -8,6 +8,11 @@ const common = @import("common.zig");
 const logSystem = common.logSystem;
 const dispatchConn = common.dispatchConn;
 
+/// Stack size for the accept worker threads. These only run the accept loop and
+/// hand connections to the pool, so they need far less stack than the pool
+/// workers (which use cfg.worker_stack_size_bytes for the handler frames).
+const ACCEPT_WORKER_STACK_BYTES: usize = 256 * 1024;
+
 // --------------------------------------------------------- //
 
 const ConnQueue = struct {
@@ -130,7 +135,7 @@ pub fn runPool(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     defer std.heap.smp_allocator.free(acc_threads);
     for (acc_threads) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 256 * 1024 },
+            .{ .stack_size = ACCEPT_WORKER_STACK_BYTES },
             workerEntry,
             .{WorkerCtx{
                 .queue = &queue,

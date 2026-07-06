@@ -100,6 +100,7 @@
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
 | [`docs/lld-http2-id.md`](docs/lld-http2-id.md) | HTTP/2: mux state machine, pool slot stream per worker, cache HPACK, frame loop, flow control, dispatch |
+| [`docs/lld-grpc-id.md`](docs/lld-grpc-id.md) | gRPC: helper build/send frame, mux dispatch, pool slot stream per worker, coalescing server-streaming, TLS serve paths |
 | [`docs/lld-tcp-id.md`](docs/lld-tcp-id.md) | TCP: struktur data internal dan algoritma |
 | [`docs/lld-udp-id.md`](docs/lld-udp-id.md) | UDP: struktur data internal dan algoritma |
 | [`docs/lld-uds-id.md`](docs/lld-uds-id.md) | UDS: struktur server/client internal dan penanganan frame |
@@ -109,6 +110,7 @@
 | [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
 | [`docs/lld-http3-id.md`](docs/lld-http3-id.md) | HTTP/3 (QUIC): internal per-layer (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/zix-deploy-id.md`](docs/zix-deploy-id.md) | Deployment: bangun Docker image (zig fetch atau vendor) dan konfigurasi TLS context untuk Ed25519 / ECDSA P-256 / RSA |
+| [`docs/zix-config-id.md`](docs/zix-config-id.md) | Referensi config: tiap field config dengan default, efek, dan trade-off tuning-nya (engine server plus TLS context) |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: POOL, ASYNC, MIXED, EPOLL. Jumlah thread, kecocokan protokol. |
 | [`docs/design-considerations-id.md`](docs/design-considerations-id.md) | Pertimbangan desain, design pattern, dan konvensi penamaan |
 | [`docs/coding-guideline-id.md`](docs/coding-guideline-id.md) | Coding style: layout source, naming, anatomi file, doc comment, config, test, aturan prosa |
@@ -231,6 +233,18 @@ __*6. Manajemen Memori yang Dapat Diprediksi dan Transparan.*__
 
 ## Fitur Utama
 
+__*0. Zero dependencies:*__
+
+Hanya Zig standard library. Tanpa paket pihak ketiga (dependency set `build.zig.zon` kosong),
+tanpa C library, dan tanpa linking libc: TLS 1.3 / 1.2 berjalan pure-Zig di atas `std.crypto`
+(tanpa OpenSSL), gzip / deflate di `std.compress.flate`, dan brotli, QUIC, HPACK, serta QPACK
+ditulis in-tree dari RFC masing-masing (`std` tidak menyediakan satu pun).
+
+> Satu `zig build` mengompilasi seluruh stack dari source tanpa ada yang perlu di-vendor,
+di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus repository ini.
+
+<br>
+
 __*1. Stack protokol lengkap dalam satu tempat:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (varian
@@ -282,7 +296,7 @@ menelusuri default yang diwariskan.
 
 __*6. HTTP/1 zix.Http1 yang dioptimasi pada hot-path:*__
 
-- Menghapus HeadParser, header Date yang di-cache secara thread-local, writeSimple yang dikonsolidasi, serveConn(fd, handler, opts), kapasitas response-header yang dapat dikonfigurasi.
+- Menghapus HeadParser, header Date yang di-cache secara thread-local, sendSimpleFD yang dikonsolidasi, serveConn(fd, handler, opts), kapasitas response-header yang dapat dikonfigurasi.
 
 > Memangkas jalur request umum tanpa mengorbankan API yang eksplisit.
 
@@ -348,7 +362,63 @@ Response cache opt-in per-worker (ADR-036) yang dibagikan oleh `zix.Http1`, `zix
 
 <br>
 
-__*14. Dokumentasi multi-bahasa:*__
+__*14. TLS pure-Zig (https, h2, wss):*__
+
+TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan additive: `zix.Http1` dan `zix.Http` menyajikan https/1.1, `zix.Http2` dan `zix.Grpc` menyajikan h2 di atas TLS (ALPN h2), dan SSE serta WebSocket berjalan di atas TLS (wss) pada jalur thread-per-koneksi. Sertifikat server bisa ECDSA P-256, Ed25519, atau RSA, dikonfigurasi oleh `Tls.Context` milik pemanggil (curve / cipher tervalidasi, HSTS). Client native yang memverifikasi (`zix.Tls.Client`) memeriksa chain dan hostname.
+
+> Transport terenkripsi adalah gate config di depan engine cleartext yang tak berubah, bukan server terpisah, jadi handler yang sama menyajikan http dan https.
+
+<br>
+
+__*15. HTTP/3 di atas QUIC, pure-Zig:*__
+
+`zix.Http3` menyajikan HTTP/3 (RFC 9114) di atas QUIC (RFC 9000 / 9001 / 9002), dibangun dari RFC di atas `std.crypto`: packet protection, handshake TLS 1.3 di atas CRYPTO stream, loss recovery, QPACK, dan dispatch per-core di atas substrat `zix.Udp`. `Router` comptime dan `Tls.Context` yang sama dengan engine TCP.
+
+> Transport HTTP terbaru hadir in-tree tanpa C QUIC library, berbagi router dan config TLS yang sudah dipakai untuk HTTP/1 dan HTTP/2.
+
+<br>
+
+__*16. Kompresi respons (gzip / deflate / brotli):*__
+
+Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di atas `std.compress.flate`, plus brotli dari encoder / decoder in-tree yang ditulis dari RFC 7932 (`std` tidak punya brotli). Opt-in per server, dengan size floor, skip media-type yang sudah ter-compressed, dan `Vary: Accept-Encoding`. HTTP/3 menyajikan body statis pre-compressed dengan `content-encoding`.
+
+> Respons lebih kecil di jaringan nyata tanpa dependensi kompresi, mati secara default jadi hot path cleartext tak tersentuh sampai di-opt-in.
+
+<br>
+
+__*17. Routing comptime, tanpa alokasi:*__
+
+Satu `Router` comptime yang dibagikan oleh `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, dan `zix.Http3`: route table adalah argumen comptime, jadi matching (`.EXACT` via `StaticStringMap`, `.PARAM`, `.PREFIX` longest-prefix, query di-strip lebih dulu) tidak melakukan alokasi runtime.
+
+> Biaya routing dibayar saat compile-time, jadi jalur request tidak menambah traffic heap dan setiap engine mencocokkan path dengan cara yang sama.
+
+<br>
+
+__*18. Memori terbatas, proporsional terhadap kerja:*__
+
+Alokasi eksplisit dan ter-cap: satu arena per koneksi atau request, pool slot-stream per-worker pada engine h2 / gRPC multipleks (memori stream residen mengikuti stream konkuren, bukan connections * max_streams, memangkas footprint 4096-koneksi 6 sampai 12x), dan response cache lock-free. Tanpa pertumbuhan heap per-request yang tersembunyi.
+
+> Memori mengikuti kerja in-flight, bukan jumlah koneksi, jadi footprint tetap terprediksi dari idle sampai saturasi.
+
+<br>
+
+__*19. Harness test conformance yang hermetik:*__
+
+Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client native buatan sendiri (raw socket, client QUIC native, TLS native), plus unit test vektor-RFC untuk codec wire (TLS key schedule, HPACK / QPACK, packet QUIC), ditemukan lewat `std.testing.refAllDecls`.
+
+> Kebenaran diperiksa terhadap RFC secara in-tree tanpa curl / openssl / websocat, jadi suite-nya reproducible di mana pun toolchain bisa build.
+
+<br>
+
+__*20. Static file serving dengan dukungan range:*__
+
+`public_dir` pada `zix.Http` dan `zix.Http1` menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan HTTP range request (RFC 7233, 206 / 416), pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`).
+
+> Aset statis dan upload disajikan oleh engine pada port yang sama dengan API, tanpa file server terpisah.
+
+<br>
+
+__*21. Dokumentasi multi-bahasa:*__
 
 Setiap dokumen punya variannya sendiri.
 
@@ -1316,7 +1386,7 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 
 - Opt-in saja. Mati secara default, dan handler harus memanggil `res.serveCached` lalu `res.sendCached` (HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `writeWithCache` milik `zix.Http1`.
 - Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
-- Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`writeNegotiated` / `writeGzipCached`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
+- Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`sendNegotiateFD` / `sendGzipCachedFD`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
 - Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.

@@ -37,59 +37,15 @@ const URING_IDLE_POOL_FLOOR: usize = 64;
 // --------------------------------------------------------- //
 // URING dispatch (Linux): shared-nothing io_uring ring per worker.
 
-/// One io_uring worker: a private SO_REUSEPORT listener and completion
-/// loop. Each readable batch recvs into the connection buffer, runs one
-/// request through processRequest with the response staged into a
-/// RespSink, and submits one coalesced send. Half-duplex per connection,
-/// one request per buffer (matches the EPOLL path, ADR-037 Phase 4 step 4).
-fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
-    const ServerPtr = @TypeOf(server);
-    const cfg = server.config;
-
-    pinToCpu(worker_id);
-
-    const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch return;
-    var net_server = addr.listen(io, .{
-        .mode = .stream,
-        .kernel_backlog = @intCast(cfg.kernel_backlog),
-        .reuse_address = true,
-    }) catch return;
-    defer net_server.deinit(io);
-    const listener_fd = net_server.socket.handle;
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
-    _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
-    _ = arena.reset(.retain_capacity);
-
-    // Per-worker response cache: lock-free by ownership, never shared.
-    var response_cache: rcache.ResponseCache = undefined;
-    var cache_on = false;
-    if (cfg.response_cache) {
-        if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
-            .max_entries = effectiveCacheEntries(cfg),
-            .max_value_bytes = cfg.cache_max_value_bytes,
-        })) |built| {
-            response_cache = built;
-            cache_on = true;
-            setCache(&response_cache, cfg.cache_ttl_ms);
-        } else |_| {
-            cache_on = false;
-        }
-    }
-    defer if (cache_on) {
-        setCache(null, 0);
-        response_cache.deinit();
-    };
-
-    // Response compression, stateless per worker. Active under .EPOLL and .URING,
-    // like the cache.
-    if (cfg.compress) setCompression(cfg.compress, cfg.compression_min_size, cfg.compression_max_out);
-    defer setCompression(false, 0, 0);
-
-    const slots = slab.mapZeroedSlots(?*UringHttpConn, MAX_FD) catch return;
-
-    const Worker = struct {
+/// Per-worker io_uring completion loop, parameterized by the concrete server
+/// pointer type (the router is comptime-baked into the server, ADR-043). Hoisting
+/// this to module scope (instead of a struct local to uringWorker) lets the idle
+/// pool and prewarm be unit-tested directly, mirroring the zix.Http1 URING worker.
+///
+/// Param:
+/// ServerPtr - type (pointer to the HttpServerImpl instance)
+fn UringWorker(comptime ServerPtr: type) type {
+    return struct {
         ring: IoUring,
         slots: []?*UringHttpConn,
         listener_fd: std.posix.fd_t,
@@ -191,6 +147,51 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
             conn.send_buf = send_buf;
 
             return conn;
+        }
+
+        /// Seed the warm idle pool with idle_floor connections before the accept
+        /// loop starts, so the first burst of accepts reuses resident buffers
+        /// instead of allocating and first-touch faulting them under load. Without
+        /// it the first run after startup pays every connection's allocation and
+        /// page fault while a later run (pool already warm from the prior run) does
+        /// not, which reads as a cold-first-run gap in back-to-back measurements.
+        ///
+        /// Note:
+        /// - The seed count is idle_floor, the reserve the pool settles to when
+        ///   idle (see idleCap). Seeding to it keeps the resident set identical to
+        ///   steady state, so the cost is paid once at startup, not carried as
+        ///   extra memory.
+        /// - Each connection's recv and send buffers are touched page by page so
+        ///   the pages are resident up front, not faulted on the first recv.
+        /// - A partial allocation failure stops the seed early and leaves whatever
+        ///   was already warmed. Startup never fails on a warm-pool short-fall: the
+        ///   accept path still allocates on demand when the pool is empty.
+        fn prewarmPool(worker: *W) void {
+            var seeded: usize = 0;
+            while (seeded < worker.idle_floor) : (seeded += 1) {
+                const conn = allocator.create(UringHttpConn) catch break;
+                const buf = allocator.alloc(u8, worker.recv_buf_size) catch {
+                    allocator.destroy(conn);
+                    break;
+                };
+                const send_buf = allocator.alloc(u8, worker.send_buf_size) catch {
+                    allocator.free(buf);
+                    allocator.destroy(conn);
+                    break;
+                };
+
+                @memset(buf, 0);
+                @memset(send_buf, 0);
+
+                conn.buf = buf;
+                conn.send_buf = send_buf;
+                conn.prev = null;
+                conn.next = worker.warm_head;
+                if (worker.warm_head) |head| head.prev = conn;
+                worker.warm_head = conn;
+                if (worker.warm_tail == null) worker.warm_tail = conn;
+                worker.warm_count += 1;
+            }
         }
 
         /// Warm idle-pool cap, derived from this worker's live concurrency so the pool keeps up to one
@@ -460,6 +461,61 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
             }
         }
     };
+}
+
+/// One io_uring worker: a private SO_REUSEPORT listener and completion
+/// loop. Each readable batch recvs into the connection buffer, runs one
+/// request through processRequest with the response staged into a
+/// RespSink, and submits one coalesced send. Half-duplex per connection,
+/// one request per buffer (matches the EPOLL path, ADR-037 Phase 4 step 4).
+fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
+    const ServerPtr = @TypeOf(server);
+    const cfg = server.config;
+
+    pinToCpu(worker_id);
+
+    const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch return;
+    var net_server = addr.listen(io, .{
+        .mode = .stream,
+        .kernel_backlog = @intCast(cfg.kernel_backlog),
+        .reuse_address = true,
+    }) catch return;
+    defer net_server.deinit(io);
+    const listener_fd = net_server.socket.handle;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    _ = arena.allocator().alloc(u8, cfg.max_allocator_size) catch {};
+    _ = arena.reset(.retain_capacity);
+
+    // Per-worker response cache: lock-free by ownership, never shared.
+    var response_cache: rcache.ResponseCache = undefined;
+    var cache_on = false;
+    if (cfg.response_cache) {
+        if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+            .max_entries = effectiveCacheEntries(cfg),
+            .max_value_bytes = cfg.cache_max_value_bytes,
+        })) |built| {
+            response_cache = built;
+            cache_on = true;
+            setCache(&response_cache, cfg.cache_ttl_ms);
+        } else |_| {
+            cache_on = false;
+        }
+    }
+    defer if (cache_on) {
+        setCache(null, 0);
+        response_cache.deinit();
+    };
+
+    // Response compression, stateless per worker. Active under .EPOLL and .URING,
+    // like the cache.
+    if (cfg.compress) setCompression(cfg.compress, cfg.compression_min_size, cfg.compression_max_out);
+    defer setCompression(false, 0, 0);
+
+    const slots = slab.mapZeroedSlots(?*UringHttpConn, MAX_FD) catch return;
+
+    const Worker = UringWorker(ServerPtr);
 
     var worker = Worker{
         .ring = undefined,
@@ -476,6 +532,10 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
     };
     worker.ring = initUringRing() catch return;
     defer worker.deinit();
+
+    // Seed the warm idle pool before the accept loop so the first burst reuses
+    // resident buffers instead of faulting them in under load.
+    worker.prewarmPool();
 
     worker.run();
 }
@@ -518,4 +578,71 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     }
 
     for (threads) |t| t.join();
+}
+
+// --------------------------------------------------------- //
+
+test "zix http: URING prewarmPool seeds the warm pool to idle_floor with sized buffers" {
+    const gpa = std.heap.smp_allocator;
+
+    const Worker = UringWorker(*u8);
+    const recv_size: usize = 6 * 1024;
+    const send_size: usize = 8 * 1024;
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringHttpConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .server = undefined,
+        .io = undefined,
+        .arena = undefined,
+        .recv_buf_size = recv_size,
+        .send_buf_size = send_size,
+        .idle_floor = 4,
+    };
+
+    worker.prewarmPool();
+
+    try std.testing.expectEqual(@as(usize, 4), worker.warm_count);
+    try std.testing.expect(worker.warm_head != null);
+    try std.testing.expect(worker.warm_tail != null);
+
+    // Every seeded connection carries buffers at the configured sizes, resident
+    // and reusable: an accept pops them from the warm pool with no allocator call.
+    var idx: usize = 0;
+    while (idx < 4) : (idx += 1) {
+        const conn = worker.acquireConn().?;
+        try std.testing.expectEqual(recv_size, conn.buf.len);
+        try std.testing.expectEqual(send_size, conn.send_buf.len);
+
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringHttpConn, null), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringHttpConn, null), worker.warm_tail);
+}
+
+test "zix http: URING prewarmPool with a zero floor seeds nothing" {
+    const Worker = UringWorker(*u8);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringHttpConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .server = undefined,
+        .io = undefined,
+        .arena = undefined,
+        .recv_buf_size = 4096,
+        .send_buf_size = 4096,
+        .idle_floor = 0,
+    };
+
+    worker.prewarmPool();
+
+    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringHttpConn, null), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringHttpConn, null), worker.warm_tail);
 }

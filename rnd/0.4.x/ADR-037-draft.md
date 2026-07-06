@@ -1,11 +1,10 @@
 # ADR-037 (accepted record)
 
 Records the foundation decision for the `.URING` dispatch model before any `src/`
-ring code is written (Phase 1 of `rnd/0.4.x/Proposal-IO_uring_Dispatch_Model.md`).
+ring code is written (Phase 1 of the io_uring dispatch-model proposal).
 To be folded into `docs/adr-en.md` (before the `###### end of adr` footer) and
 mirrored into `docs/adr-id.md` once the wording is settled. Kept here as the rnd
-record alongside the PoC (`rnd/0.4.x/server_hello_uring.zig`,
-`server_hello_epoll.zig`, `client_hello.zig`). No external engine or benchmark
+record alongside the PoC. No external engine or benchmark
 framework is named, per project rule.
 
 ---

@@ -75,7 +75,7 @@ const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 /// so a trickle of new connections after a quiet spell still skips the allocator.
 /// The effective warm cap is clamped between this floor and URING_IDLE_POOL_CEILING,
 /// see UringWorker.idleCap.
-const URING_IDLE_POOL_FLOOR: usize = 64;
+const URING_IDLE_POOL_FLOOR: usize = 8;
 
 /// Idle-pool warm ceiling (A2). The absolute upper bound on the warm pool per
 /// worker, regardless of live concurrency. The earlier cap tracked live_count, so
@@ -321,6 +321,51 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             conn.send_buf = send_buf;
 
             return conn;
+        }
+
+        /// Seed the warm idle pool with idle_floor connections before the accept
+        /// loop starts, so the first burst of accepts reuses resident buffers
+        /// instead of allocating and first-touch faulting them under load. Without
+        /// it the first run after startup pays every connection's allocation and
+        /// page fault while a later run (pool already warm from the prior run) does
+        /// not, which reads as a cold-first-run gap in back-to-back measurements.
+        ///
+        /// Note:
+        /// - The seed count is idle_floor, the reserve the pool settles to when
+        ///   idle (see idleCap). Seeding to it keeps the resident set identical to
+        ///   steady state, so the cost is paid once at startup, not carried as
+        ///   extra memory.
+        /// - Each connection's recv and send buffers are touched page by page so
+        ///   the pages are resident up front, not faulted on the first recv.
+        /// - A partial allocation failure stops the seed early and leaves whatever
+        ///   was already warmed. Startup never fails on a warm-pool short-fall: the
+        ///   accept path still allocates on demand when the pool is empty.
+        fn prewarmPool(self: *Self) void {
+            var seeded: usize = 0;
+            while (seeded < self.idle_floor) : (seeded += 1) {
+                const conn = allocator.create(UringConn) catch break;
+                const buf = allocator.alloc(u8, self.recv_buf_size) catch {
+                    allocator.destroy(conn);
+                    break;
+                };
+                const send_buf = allocator.alloc(u8, self.send_buf_size) catch {
+                    allocator.free(buf);
+                    allocator.destroy(conn);
+                    break;
+                };
+
+                @memset(buf, 0);
+                @memset(send_buf, 0);
+
+                conn.buf = buf;
+                conn.send_buf = send_buf;
+                conn.prev = null;
+                conn.next = self.warm_head;
+                if (self.warm_head) |head| head.prev = conn;
+                self.warm_head = conn;
+                if (self.warm_tail == null) self.warm_tail = conn;
+                self.warm_count += 1;
+            }
         }
 
         /// Warm idle-pool cap. The pool tracks live concurrency so steady churn
@@ -1001,6 +1046,10 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             if (config.compress) core.setCompression(config.compress, config.compression_min_size, config.compression_max_out);
             defer core.setCompression(false, 0, 0);
 
+            // Seed the warm idle pool so the first accept burst reuses resident
+            // buffers instead of allocating and faulting them under load.
+            worker.prewarmPool();
+
             worker.run();
         }
     }.run;
@@ -1516,4 +1565,71 @@ test "zix http1: URING releaseConn past the cap returns buffer pages to the OS" 
     // Reuse drains the warm head first, then the cold stack, both allocation-free.
     try std.testing.expectEqual(@as(?*UringConn, mru), worker.acquireConn());
     try std.testing.expectEqual(@as(?*UringConn, lru), worker.acquireConn());
+}
+
+test "zix http1: URING prewarmPool seeds the warm pool to idle_floor with sized buffers" {
+    const gpa = std.heap.smp_allocator;
+
+    const Worker = UringWorker(testOkHandler, null);
+    const recv_size: usize = 6 * 1024;
+    const send_size: usize = 8 * 1024;
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = recv_size,
+        .send_buf_size = send_size,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 4,
+    };
+
+    worker.prewarmPool();
+
+    try std.testing.expectEqual(@as(usize, 4), worker.warm_count);
+    try std.testing.expect(worker.warm_head != null);
+    try std.testing.expect(worker.warm_tail != null);
+
+    // Every seeded connection carries buffers at the configured sizes, resident
+    // and reusable: an accept pops them from the warm pool with no allocator call.
+    var idx: usize = 0;
+    while (idx < 4) : (idx += 1) {
+        const conn = worker.acquireConn().?;
+        try std.testing.expectEqual(recv_size, conn.buf.len);
+        try std.testing.expectEqual(send_size, conn.send_buf.len);
+
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_tail);
+}
+
+test "zix http1: URING prewarmPool with a zero floor seeds nothing" {
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .send_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .idle_floor = 0,
+    };
+
+    worker.prewarmPool();
+
+    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_head);
+    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_tail);
 }

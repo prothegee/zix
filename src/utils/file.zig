@@ -2,6 +2,11 @@
 
 const std = @import("std");
 
+/// Largest "dir/filename" path save() can assemble on the stack. Longer paths return error.PathTooLong.
+const MAX_PATH_LEN: usize = 512;
+/// Scratch buffer size backing the file writer in save().
+const WRITE_BUF_SIZE: usize = 8192;
+
 // --------------------------------------------------------- //
 
 /// Get file extension from file path
@@ -37,7 +42,7 @@ pub fn extension(file_path: []const u8) []const u8 {
 pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename: []const u8, data: []const u8) ![]const u8 {
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [MAX_PATH_LEN]u8 = undefined;
     if (dir.len + 1 + filename.len > path_buf.len) return error.PathTooLong;
     @memcpy(path_buf[0..dir.len], dir);
     path_buf[dir.len] = '/';
@@ -47,7 +52,7 @@ pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename:
     const f = try std.Io.Dir.cwd().createFile(io, full_path, .{});
     defer f.close(io);
 
-    var write_buf: [8192]u8 = undefined;
+    var write_buf: [WRITE_BUF_SIZE]u8 = undefined;
     var writer = f.writer(io, &write_buf);
     try writer.interface.writeAll(data);
     try writer.interface.flush();

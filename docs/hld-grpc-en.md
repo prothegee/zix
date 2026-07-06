@@ -294,7 +294,7 @@ sequenceDiagram
 +------------------------------------------+
 ```
 
-Compress flag is always 0 (compression not implemented).
+The compress flag is 1 when the message payload is gzip-compressed, otherwise 0. Compression is opt-in through the server `compress` config and applies only when the client advertises `grpc-accept-encoding: gzip`, in which case the server also emits `grpc-encoding: gzip` in the initial HEADERS frame.
 
 ### Error path (trailers-only)
 

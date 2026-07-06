@@ -25,8 +25,8 @@ deployment that must serve a pre-issued RSA-2048 certificate can be served by zi
 - No ECDSA-cert workaround was taken: the shared cert is fixed, so RSA had to be done properly.
 
 ## Phasing
-Primitive-first PoCs under `rnd/0.5.x` gated by `verify-rsa.sh` (openssl oracle), then folded into
-`src/tls`. See `rsa-plan.md` (R1 v1.5 -> R6 Tls.Context). R1-R6 landed.
+Primitive-first PoCs gated by an openssl oracle, then folded into
+`src/tls` (R1 v1.5 -> R6 Tls.Context). R1-R6 landed.
 
 ## Gate
 - `verify-rsa.sh`: v1.5 byte-exact vs openssl, PSS openssl-verified, key-parse modulus round-trip.

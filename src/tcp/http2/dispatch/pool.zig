@@ -10,6 +10,11 @@ const ConnQueue = common.ConnQueue;
 const WorkerCtx = common.WorkerCtx;
 const workerEntry = common.workerEntry;
 
+/// Stack size for the accept worker threads. These only run the accept loop and
+/// hand connections to the pool, so they need far less stack than the pool
+/// workers (which use cfg.worker_stack_size_bytes for the handler frames).
+const ACCEPT_WORKER_STACK_BYTES: usize = 256 * 1024;
+
 // --------------------------------------------------------- //
 // POOL model
 
@@ -39,7 +44,7 @@ pub fn runPool(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     defer std.heap.smp_allocator.free(acc_threads);
     for (acc_threads) |*t|
         t.* = try std.Thread.spawn(
-            .{ .stack_size = 256 * 1024 },
+            .{ .stack_size = ACCEPT_WORKER_STACK_BYTES },
             workerEntry,
             .{WorkerCtx{
                 .queue = &queue,

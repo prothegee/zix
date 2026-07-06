@@ -109,7 +109,7 @@ pub const HttpServerConfig = struct {
     worker_stack_compress_bytes: usize = 2 * 1024 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off,
     /// the handler cache API (res.serveCached / res.sendCached) degrades to a
-    /// plain send. Active under the .EPOLL dispatch model in this release.
+    /// plain send. Active under the .EPOLL and .URING dispatch models.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.

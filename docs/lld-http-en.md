@@ -292,7 +292,7 @@ Content-Type and Date are written with `@memcpy` of the literal prefix plus the 
 7. return SseWriter{ .fd = fd }
 ```
 
-`SseWriter` holds the connection fd. Each write method calls `fdWriteAll` so events reach the client without buffering. Over TLS (ADR-054) the per-connection stream sink is armed: step 1 detaches the buffered capture sink instead of flushing it (its bytes are replaced by the stream), and `fdWriteAll` routes each header and event through the stream sink, encrypting one TLS record per write. In cleartext the writes go straight to the socket.
+`SseWriter` holds the connection fd. Each write method calls `writeAllFD` so events reach the client without buffering. Over TLS (ADR-054) the per-connection stream sink is armed: step 1 detaches the buffered capture sink instead of flushing it (its bytes are replaced by the stream), and `writeAllFD` routes each header and event through the stream sink, encrypting one TLS record per write. In cleartext the writes go straight to the socket.
 
 ```
 writeEvent(data):      writeAll("data: ") + writeAll(data) + writeAll("\n\n") + flush

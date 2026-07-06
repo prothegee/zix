@@ -100,6 +100,7 @@
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
 | [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
 | [`docs/lld-http2-en.md`](docs/lld-http2-en.md) | HTTP/2: mux state machine, per-worker stream-slot pool, HPACK cache, frame loop, flow control, dispatch |
+| [`docs/lld-grpc-en.md`](docs/lld-grpc-en.md) | gRPC: frame build/send helpers, mux dispatch, per-worker stream-slot pool, server-streaming coalescing, TLS serve paths |
 | [`docs/lld-tcp-en.md`](docs/lld-tcp-en.md) | TCP: internal data structures and algorithms |
 | [`docs/lld-udp-en.md`](docs/lld-udp-en.md) | UDP: internal data structures and algorithms |
 | [`docs/lld-uds-en.md`](docs/lld-uds-en.md) | UDS: internal server/client structure and frame handling |
@@ -109,6 +110,7 @@
 | [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
 | [`docs/lld-http3-en.md`](docs/lld-http3-en.md) | HTTP/3 (QUIC): per-layer internals (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/zix-deploy-en.md`](docs/zix-deploy-en.md) | Deployment: build a Docker image (zig fetch or vendor) and configure the TLS context for Ed25519 / ECDSA P-256 / RSA |
+| [`docs/zix-config-en.md`](docs/zix-config-en.md) | Config reference: every config field with its default, effect, and tuning trade-offs (server engines plus the TLS context) |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: POOL, ASYNC, MIXED, EPOLL. Thread counts, protocol applicability. |
 | [`docs/design-considerations-en.md`](docs/design-considerations-en.md) | Design considerations, design patterns, and naming conventions |
 | [`docs/coding-guideline-en.md`](docs/coding-guideline-en.md) | Coding style: source layout, naming, file anatomy, doc comments, config, tests, prose rules |
@@ -231,6 +233,18 @@ __*6. Predictable, Transparent Memory Management.*__
 
 ## Key Features
 
+__*0. Zero dependencies:*__
+
+Only the Zig standard library. No third-party packages (an empty `build.zig.zon` dependency
+set), no C libraries, and no libc linking: TLS 1.3 / 1.2 runs pure-Zig on `std.crypto` (no
+OpenSSL), gzip / deflate on `std.compress.flate`, and brotli, QUIC, HPACK, and QPACK are
+authored in-tree from their RFCs (`std` ships none of them).
+
+> One `zig build` compiles the whole stack from source with nothing to vendor, pin, or keep
+patched, so the supply chain is the Zig toolchain plus this repository.
+
+<br>
+
 __*1. Full protocol stack under one roof:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (hot-path-optimized
@@ -282,7 +296,7 @@ chasing inherited defaults. Do not buried (1 or 3+ levels deep) config fields at
 
 __*6. Hot-path-optimized HTTP/1 zix.Http1:*__
 
-- Removed HeadParser, thread-local cached Date header, consolidated writeSimple, serveConn(fd, handler, opts), configurable response-header capacity.
+- Removed HeadParser, thread-local cached Date header, consolidated sendSimpleFD, serveConn(fd, handler, opts), configurable response-header capacity.
 
 > Squeeze the common request path without sacrificing the explicit API.
 
@@ -348,7 +362,63 @@ Opt-in, per-worker response cache (ADR-036) shared by `zix.Http1`, `zix.Http`, a
 
 <br>
 
-__*14. Bilingual multi-documentation:*__
+__*14. Pure-Zig TLS (https, h2, wss):*__
+
+TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: `zix.Http1` and `zix.Http` serve https/1.1, `zix.Http2` and `zix.Grpc` serve h2 over TLS (ALPN h2), and SSE and WebSocket run over TLS (wss) on the thread-per-connection path. Server certificates are ECDSA P-256, Ed25519, or RSA, configured by a user-owned `Tls.Context` (validated curves / ciphers, HSTS). A verifying native client (`zix.Tls.Client`) checks the chain and hostname.
+
+> Encrypted transport is a config gate in front of the unchanged cleartext engines, not a separate server, so the same handler serves http and https.
+
+<br>
+
+__*15. HTTP/3 over QUIC, pure-Zig:*__
+
+`zix.Http3` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), built from the RFCs on `std.crypto`: packet protection, the TLS 1.3 handshake over CRYPTO streams, loss recovery, QPACK, and per-core dispatch on the `zix.Udp` substrate. Same comptime `Router` and `Tls.Context` as the TCP engines.
+
+> The newest HTTP transport ships in-tree with no C QUIC library, sharing the router and TLS config already used for HTTP/1 and HTTP/2.
+
+<br>
+
+__*16. Response compression (gzip / deflate / brotli):*__
+
+`Accept-Encoding` negotiation on `zix.Http1` and `zix.Http`: gzip and deflate on `std.compress.flate`, plus brotli from an in-tree encoder / decoder authored from RFC 7932 (`std` has no brotli). Opt-in per server, with a size floor, already-compressed media-type skip, and `Vary: Accept-Encoding`. HTTP/3 serves pre-compressed static bodies with `content-encoding`.
+
+> Smaller responses over real networks with no compression dependency, off by default so the cleartext hot path is untouched until opted in.
+
+<br>
+
+__*17. Comptime routing, zero allocation:*__
+
+One comptime `Router` shared by `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, and `zix.Http3`: the route table is a comptime argument, so matching (`.EXACT` via a `StaticStringMap`, `.PARAM`, longest-prefix `.PREFIX`, query stripped first) does no runtime allocation.
+
+> Routing cost is paid at compile time, so the request path adds no heap traffic and every engine matches paths the same way.
+
+<br>
+
+__*18. Bounded, work-proportional memory:*__
+
+Explicit, capped allocation: an arena per connection or request, per-worker stream-slot pools on the multiplexed h2 / gRPC engines (resident stream memory tracks concurrent streams, not connections * max_streams, cutting 4096-connection footprint 6 to 12x), and a lock-free response cache. No hidden per-request heap growth.
+
+> Memory tracks the work in flight, not the connection count, so footprint stays predictable from idle to saturation.
+
+<br>
+
+__*19. Hermetic conformance test harness:*__
+
+Tests run with no external tools: a 69-protocol runner driving hand-rolled native clients (raw sockets, a native QUIC client, native TLS), plus RFC-vector unit tests for the wire codecs (TLS key schedule, HPACK / QPACK, QUIC packets), discovered through `std.testing.refAllDecls`.
+
+> Correctness is checked against the RFCs in-tree with no curl / openssl / websocat in the loop, so the suite is reproducible anywhere the toolchain builds.
+
+<br>
+
+__*20. Static file serving with range support:*__
+
+`public_dir` on `zix.Http` and `zix.Http1` serves unmatched routes as files before the 404 fallback, with HTTP range requests (RFC 7233, 206 / 416), a traversal-safe path check, and a multipart upload companion (`public_dir_upload`).
+
+> Static assets and uploads are served by the engine on the same port as the API, no separate file server.
+
+<br>
+
+__*21. Bilingual multi-documentation:*__
 
 Every doc has it own variants.
 
@@ -1316,7 +1386,7 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 
 - Opt-in only. Off by default, and the handler must call `res.serveCached` then `res.sendCached` (HTTP), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the `zix.Http1` `cacheLookup` / `writeWithCache`.
 - `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
-- For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`writeNegotiated` / `writeGzipCached`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
+- For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`sendNegotiateFD` / `sendGzipCachedFD`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
 - Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
 - Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.

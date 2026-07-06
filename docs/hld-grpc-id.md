@@ -294,7 +294,7 @@ sequenceDiagram
 +------------------------------------------+
 ```
 
-Flag compress selalu 0 (kompresi belum diimplementasikan).
+Flag compress bernilai 1 saat payload pesan dikompresi gzip, selain itu 0. Kompresi bersifat opt-in lewat config server `compress` dan hanya berlaku saat client mengiklankan `grpc-accept-encoding: gzip`, di mana server juga mengeluarkan `grpc-encoding: gzip` pada HEADERS frame awal.
 
 ### Jalur error (trailers-only)
 

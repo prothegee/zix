@@ -33,7 +33,7 @@ const ReplyStage = struct {
     len: usize,
 
     fn append(self, bytes) void   // flush first if it would overflow; pass a >buf payload straight through
-    fn flush(self) void           // one fdWriteAll of buf[0..len]; len = 0
+    fn flush(self) void           // one writeAllFD of buf[0..len]; len = 0
 };
 ```
 
@@ -176,7 +176,7 @@ Unchanged for `.ASYNC`, `.POOL`, `.MIXED`. `serveGrpcConn` sets `TCP_NODELAY` an
 
 ### build* / send*
 
-`build*` functions encode a frame into a caller buffer and return the byte count, `send*` wrap them with `fdWriteAll`.
+`build*` functions encode a frame into a caller buffer and return the byte count, `send*` wrap them with `writeAllFD`.
 
 ```zig
 pub fn buildGrpcHeaders(out, stream_id, content_type) usize     // initial HEADERS, no END_STREAM

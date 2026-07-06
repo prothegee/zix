@@ -531,7 +531,7 @@ pub const Response = struct {
 
 // --------------------------------------------------------- //
 
-/// Per-worker response cache installed by the EPOLL worker. Null on workers
+/// Per-worker response cache installed by the EPOLL / URING worker. Null on workers
 /// without a cache, so the Response cache API degrades to a plain send.
 pub threadlocal var tl_cache: ?*rc.ResponseCache = null;
 

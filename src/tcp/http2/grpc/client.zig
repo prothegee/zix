@@ -34,6 +34,12 @@ pub const GrpcClientResponse = union(enum) {
 
 // --------------------------------------------------------- //
 
+/// Scratch buffer for HPACK-decoding a response header block.
+const HDEC_SCRATCH_SIZE: usize = 4096;
+/// DATA-frame payload staging buffer: one 64 KiB body plus a small margin for the
+/// gRPC length-prefix and framing overhead.
+const PAYLOAD_SCRATCH_SIZE: usize = 64 * 1024 + 256;
+
 /// gRPC h2c client. One TCP connection, sequential calls.
 ///
 /// Usage:
@@ -48,10 +54,10 @@ pub const GrpcClient = struct {
     fd: std.posix.fd_t,
     next_sid: u31,
     hdec: h2.HpackDecoder,
-    hdec_scratch: [4096]u8,
+    hdec_scratch: [HDEC_SCRATCH_SIZE]u8,
     resp_hdrs: [h2.MAX_HEADERS]h2.Header,
     resp_hdr_count: usize,
-    payload_scratch: [65536 + 256]u8,
+    payload_scratch: [PAYLOAD_SCRATCH_SIZE]u8,
 
     /// Unconsumed tail of the current DATA frame's payload (points into `payload_scratch`). A server may
     /// pack several length-prefixed gRPC messages into one DATA frame, so `recvResponse` drains them one

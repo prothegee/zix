@@ -19,7 +19,7 @@ fields on each HTTP config.
 
 ## rnd-only rationale (kept OUT of the public ADR)
 - The intermediate-config posture this mirrors (the common reverse-proxy TLS reference) is the
-  modern-secure baseline. zix verifies that posture on-box (see `rnd/0.5.x/verify-tls-posture.sh`)
+  modern-secure baseline. zix verifies that posture on-box
   with the ECDHE-only set, so the dhparam knob those proxies expose is intentionally dropped: it
   only parameterizes finite-field DHE, which zix does not negotiate, and the key-exchange strength
   comes from the EC curve, not a DH group file.

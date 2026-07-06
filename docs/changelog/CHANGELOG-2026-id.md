@@ -47,7 +47,7 @@ __*Fix:*__
 ## 0.5.0 (TBD)
 
 __*Update:*__
-- Zig 0.17 (eksperimental) support.
+- Zig 0.17 (eksperimental) support: satu source tree build di Zig 0.16.x dan 0.17.x, sedikit divergensi API `std.Io` di-gate di balik cek comptime `ZIG_SEMVER` (ADR-044).
 
 - Breaking: `dispatch_model` kini field config wajib tanpa default. Setiap config server (`Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, `GrpcServerConfig`, `FixServerConfig`, `TcpServerConfig`, `UdpServerConfig`, `Http3ServerConfig`) melepas default `.ASYNC`, jadi pemanggil harus menyetel `dispatch_model` secara eksplisit.
 
@@ -78,13 +78,13 @@ __*Update:*__
 
     ---
 
-- Optimasi memori dan throughput `zix.Http2`:
+- Optimasi memori dan throughput `zix.Http2` (pool slot-stream per-worker, ADR-058):
     - Pool slot stream per worker (`src/tcp/http2/mux.zig`): mux `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, jadi memori stream residen mengikuti stream konkuren, bukan `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjaman). Pada 4096 koneksi ini memangkas memori baseline-h2c sekitar 6x sambil menaikkan throughput 8 sampai 20 persen, karena slot hot yang di-pool punya cache working set lebih rapat dibanding tabel per-koneksi lama yang sparse.
     - Cache prefix header respons HPACK (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): blok `[:status, content-type, content-encoding]` untuk triple yang hot di-encode sekali dan dipakai ulang byte-identik lintas koneksi (encoder stateless, tidak pernah dynamic table), hanya `content-length` yang di-encode per balasan. Menaikkan cell body-kecil 18 sampai 26 persen pada CPU lebih rendah.
     - Seal-in-place pada jalur record TLS 1.3 (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): gather-encrypt yang menyegel dua slice plaintext ke satu record tanpa copy staging.
     - Default config: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
 
-- Optimasi memori dan throughput `zix.Grpc`:
+- Optimasi memori dan throughput `zix.Grpc` (pool slot-stream per-worker, ADR-058):
     - Pool slot-stream per-worker (`src/tcp/http2/grpc/core.zig`): mux gRPC `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, sehingga memori stream residen mengikuti stream konkuren alih-alih `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjam). Pada 1024 koneksi ini memangkas memori unary-grpc sekitar 12x (916 ke 77 MiB) sambil menaikkan throughput 8 sampai 11 persen, hasil dua-sumbu yang sama seperti pool Http2. Path blocking `.ASYNC` / `.POOL` / `.MIXED` mempertahankan array per-koneksinya sendiri, tak berubah.
     - Default config: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
 
@@ -122,14 +122,15 @@ __*Update:*__
 - Mode datagram UDP raw-bytes `zix.Udp.Raw` (ADR-049):
     - `zix.Udp.Raw(handler)` melayani datagram variable-length (hingga `max_recv_buf`) berdampingan dengan typed `zix.Udp.Server(Packet)`. Handler menerima byte datagram, peer, dan `Sink` untuk membalas. Di Linux ia mem-batch receive / send via `recvmmsg` / `sendmmsg`, balasan digabung jadi satu `sendmmsg` per batch yang diterima, dengan worker `SO_REUSEPORT` per-core di bawah `.EPOLL` / `.URING` (satu worker di bawah `.ASYNC` / `.POOL` / `.MIXED`).
     - Dispatch dipartisi sesuai ADR-043: `src/udp/dispatch/` (satu file per model plus `common.zig`) dengan `run()` switch tipis, plus `src/udp/datagram.zig` (socket raw-fd + primitive `recvmmsg` / `sendmmsg`) dan `src/udp/core.zig` (`HandlerFn`, `Sink`). Typed `Server(Packet)` tidak berubah, `dispatch_model` non-ASYNC padanya di-fold dengan notice yang dicatat. Non-Linux jatuh ke satu loop `std.Io.net`.
-    - Example baru `examples/udp_server_raw.zig` (port 9064) dengan runner step `test-runner-udp-raw`, dilipat ke `test-runner-all`. GSO / GRO / ECN dan jalur submission io_uring khusus di balik `.URING` ditunda (`.URING` di-fold ke loop per-core recvmmsg).
+    - Example baru `examples/udp_server_raw.zig` (port 9064) dengan runner step `test-runner-udp-raw`, dilipat ke `test-runner-all`. GSO dan jalur submission io_uring khusus di balik `.URING` menyusul di ADR-056 (di bawah), GRO / ECN tetap ditunda.
 
     ---
 
-- Engine HTTP/3 melalui QUIC `zix.Http3`, pure-Zig di atas `std.crypto`, di substrate `zix.Udp`:
+- Engine HTTP/3 melalui QUIC `zix.Http3`, pure-Zig di atas `std.crypto`, di substrate `zix.Udp` (ADR-051):
     - `zix.Http3.Http3(handler)` melayani HTTP/3 (RFC 9114) melalui QUIC (RFC 9000 / 9001 / 9002), dengan comptime `zix.Http3.Router` yang mengikuti `zix.Http1` / `zix.Http2` (EXACT / PARAM / PREFIX, query di-strip sebelum matching). TLS 1.3 wajib, dikonfigurasi oleh `Tls.Context` user-owned yang sama dengan engine TCP.
     - Layer QUIC / TLS / QPACK yang deterministik adalah pure-Zig dari RFC: packet protection (header protection plus AEAD), key schedule (Initial / Handshake / 1-RTT), handshake TLS 1.3 di atas CRYPTO-stream (ServerHello plus flight EE / Certificate / CertificateVerify / Finished), QPACK static-table field line, dan decoder Huffman RFC 7541 untuk request path.
     - Dispatch model (Linux-only): `.ASYNC` menjalankan satu recv loop single-worker dengan demux connection-id internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 phase 3, ADR-050).
+    - Loss recovery dan congestion control di hot-path (ADR-056, menggantikan penundaan ADR-051): deteksi loss berbasis ACK (RFC 9002), estimator RTT, Probe Timeout dengan backoff, dan congestion window gaya NewReno kini berjalan di jalur serve, jadi path yang lossy pulih alih-alih satu packet tail yang hilang memacetkan seluruh response. Sebuah maintenance sweep berbasis timer (tiap 5 ms) me-re-pump range in-flight yang timed-out. Hanya loss yang terdeteksi ACK yang memotong congestion window, sebuah PTO me-retransmit tanpa mengurangi cwnd (RFC 9002 6.2). Model `.EPOLL` dan `.URING` kini menjalankan worker `SO_REUSEPORT` per-core yang sebenarnya (tiap worker memiliki tabel connection-id-nya sendiri, `.URING` adalah ring io_uring nyata dengan fallback ke loop `.EPOLL`) alih-alih fold ke worker single v1. Sebuah slot koneksi direklamasi hanya saat close atau idle melewati `max_idle_ms`, tidak pernah karena loss, jadi peer yang hidup-tapi-lossy tetap tersambung. Pada potongan yang sama `zix.Udp` raw memperoleh ADR-049 phase dua-nya (ring recv io_uring nyata di balik `.URING` plus UDP GSO). Steering connection-id lintas-core untuk migrasi di tengah koneksi tetap ditunda.
     - `zix.Http3` mengekspor primitive low-level-nya (`crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`), cara yang sama `zix.Http2` mengekspor primitive frame / HPACK-nya, sehingga sebuah peer bisa membangun sisi lain dari wire.
     - Example baru `examples/tls/http3_basic.zig` (port 9063). Runner menggerakkan client QUIC native yang hermetic, hand-rolled dari primitive itu (tanpa tool eksternal), dengan runner step `test-runner-http3` dilipat ke `test-runner-all`.
     - Docs: `docs/hld-http3-id.md` / `docs/lld-http3-id.md` (dan -en).
@@ -142,10 +143,11 @@ __*Update:*__
     ---
 
 - Server config (knob) ditambahkan:
-    - `compression` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
+    - `compress` (bool), `compression_min_size` (usize), dan `compression_max_out` (usize) pada `zix.Http1` dan `zix.Http`. Field gzip-spesifik `max_gzip_out` di-rename menjadi `compression_max_out` yang codec-agnostic.
     - `tls` (`?*Tls.Context`) pada `zix.Http1`, `zix.Http2`, dan `zix.Grpc`, gate opt-in https. Menggantikan field flat `tls_cert_path` / `tls_key_path` / `tls_alpn` / `hsts_max_age_s` Http1 (ADR-047).
     - `dispatch_model`, `workers`, `reuse_address`, `recv_batch`, `send_batch`, `max_recv_buf` pada `zix.Udp` (`UdpServerConfig`), dipakai jalur raw (`zix.Udp.Raw`, ADR-049). Additive, typed `Server(Packet)` tidak berubah.
     - `public_dir` dan `public_dir_upload` pada `zix.Http1` (`Http1ServerConfig`), static file serving untuk route yang tidak match, meniru `zix.Http`. `public_dir` yang non-empty divalidasi saat `run()` dan menghasilkan `error.PublicDirNotFound` jika tidak ada.
+    - `uring_send_buf_size` (default 16 KiB), `uring_idle_pool_floor` (default 8), dan `uring_idle_pool_ceiling` (default 256) pada `zix.Http1` (`Http1ServerConfig`), menyetel send buffer per-koneksi `.URING` dan batas warm reconnect-pool (lihat entri optimasi memori Http1 / Http).
 
     ---
 
@@ -159,11 +161,31 @@ __*Update:*__
     - Static table QPACK diperluas dari indeks 0..28 ke 0..43 (RFC 9204 Appendix A), mencakup `accept-encoding` (31) dan `content-encoding` br / gzip (42 / 43). Decoder request menelusuri melewati pseudo-header untuk menangkap `accept-encoding`, dan `buildRequestStreamContent` / `buildStreamPrefix` memancarkan line `content-encoding` (`SendStream` menyimpan coding-nya agar body multi-packet yang di-resume tetap membawa header-nya). Perubahan ini ada di `dispatch/common.zig` bersama, jadi setiap dispatch model mewarisinya.
     - `zix.Http3.ContentEncoding` diekspor. `examples/tls/http3_basic.zig` mendapat route `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br. Docs `hld-http3`, `lld-http3` (en dan -id) diperbarui.
 
+    ---
+
+- Taksonomi penamaan send / write / FD untuk response-API (ADR-059):
+    - Permukaan penulisan response di-rename pada dua sumbu independen agar call site terbaca tanpa ambiguitas: fungsi yang mengirim response, atau komunikasi keluar apa pun, adalah `send*`, sebuah write murni tanpa send adalah `write*`, dan signature yang menerima parameter `fd` mentah diakhiri `FD` (sebuah fd yang ditahan di dalam struct, dijangkau lewat `self`, tidak dihitung, jadi method objek tetap bersih).
+    - Breaking untuk kode yang memanggil helper response secara langsung. Helper fd-level di core di-rename lintas setiap engine: `fdWriteAll` -> `writeAllFD`, `fdWriteAllRaw` -> `writeAllRawFD`, `writeSimple` -> `sendSimpleFD`, `writeSimpleNoBody` -> `sendSimpleNoBodyFD`, `writeJson` -> `sendJsonFD`, `writeGzip` -> `sendGzipFD`, `writeGzipCached` -> `sendGzipCachedFD`, `writeBrotli` -> `sendBrotliFD`, `writeNegotiated` -> `sendNegotiateFD`, `writeChunkedStart` / `writeChunk` / `writeChunkedEnd` -> `sendChunkedStartFD` / `sendChunkFD` / `sendChunkedEndFD`, `writeRange` -> `sendRangeFD`, `write100Continue` -> `send100ContinueFD`. Body dan parameter fungsi tak berubah, hanya nama dan teks doc / comment yang merujuknya.
+    - Engine yang mampu compression mengekspos enam yang sama: `sendGzipFD`, `sendGzipCachedFD`, `sendBrotliFD`, `sendBrotliCachedFD`, `sendNegotiateFD`, `sendNegotiateCachedFD`. Negotiate merutekan secara internal lewat jalur gzip / brotli bersama, jadi kebijakan compression ada di satu tempat, dan primitif precompressed / caller-encoded (`sendResponseEncodedFD`) tetap menjadi lapisan yang dibangun keenam fungsi itu di atasnya.
+    - Digulirkan engine demi engine (`zix.Http1`, WebSocket-nya, `zix.Http2`, `zix.Grpc`, `zix.Http3`, lalu full server plus tls / dispatch bersama), tiap langkah di-gate oleh suite test penuh. Entri HttpArena dan example bawaan pindah ke nama baru (call site saja, tanpa perubahan behavior). Docs `hld-http1`, `lld-http1`, `lld-http`, `lld-http2`, `lld-grpc`, `lld-tls` (en dan -id) diperbarui. Lihat ADR-059.
+
+    ---
+
+- Optimasi memori `zix.Http1` dan `zix.Http` (kompaksi recv-slab EPOLL, batas idle-pool URING):
+    - Kompaksi recv-slab EPOLL (`src/tcp/http1/dispatch/epoll.zig`, di-port ke `dispatch/common.zig` milik `zix.Http`): slab receive per-worker diindeks oleh fd global (`slab[fd * buf_size]`), jadi page yang tersentuh tersebar di seluruh ruang 64K-fd dan menahan residen jauh lebih banyak dari yang dibutuhkan set koneksi hidup. Sebuah free-list slot kompak per-worker (tiap `Conn` membawa `slot`, `acquireSlot` memakai ulang slot yang sudah ditutup sebelum menaikkan high-water mark, `free` mengembalikan stride page-aligned via `MADV_DONTNEED`) memampatkan memori residen ke jumlah koneksi hidup terlepas dari nilai fd. Pada jumlah koneksi tinggi ini memangkas memori Http1 puncak sekitar 2.5x (kira-kira 704 ke 281 MiB), membawa `.EPOLL` ke paritas `.URING`, dengan throughput tertahan dalam noise loopback.
+    - Batas idle-pool URING (`src/tcp/http1/dispatch/uring.zig`): warm reconnect pool kini meng-evict tail yang paling lama tidak dipakai (`evictColdTail`, list warm MRU plus stack cold) melewati sebuah batas, mengecilkan `send_buf` per-koneksi yang tumbuh kembali ke ukuran dasar saat dilepas, dan mem-prewarm floor residen kecil saat startup untuk menghindari badai page-fault cold-start. Mereklamasi cold tail (bukan hot head yang diambil reconnect berikutnya) menjaga reklamasi keluar dari hot path churn, jadi memori turun tanpa biaya throughput. Dibatasi oleh knob config `uring_send_buf_size` / `uring_idle_pool_floor` / `uring_idle_pool_ceiling` di atas.
+
 <br>
 
 __*Fix:*__
 
-- n/a
+- Drain body besar `zix.Http1` di bawah model thread:
+    - Di bawah `.ASYNC` / `.POOL` / `.MIXED`, body request yang lebih besar dari receive buffer dipotong di batas buffer dan byte yang belum terbaca merusak request keep-alive berikutnya di koneksi itu. Jalur thread kini menguras sisanya sebelum melayani request berikutnya, cocok dengan perilaku `.EPOLL` / `.URING`.
+
+    ---
+
+- Truncation body request `zix.Http` di bawah `.EPOLL` / `.URING`:
+    - Body request multi-segment (upload besar atau chunked yang terpecah lintas read) dipotong ketika `body()` / `readChunkedBody()` kena `EAGAIN` di tengah body. Reader kini mem-poll fd dan mencoba ulang hingga `body_read_timeout_ms` (default 30s), jadi upload terbaca penuh. Jalur GET hot kembali lebih awal dan tidak membayar apa pun.
 
 <br>
 

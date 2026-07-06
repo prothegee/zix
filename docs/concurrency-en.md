@@ -18,7 +18,7 @@ pub const DispatchModel = enum(u8) {
 
 Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (for `zix.Http`) and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All five values are present in every config.
 
-`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `zix.Http2` and non-Linux builds fall back to `.POOL` automatically. `.URING = 4` is also Linux-only and native in `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Fix`. `zix.Http2` folds to `.POOL` and the `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
+`.EPOLL = 3` is Linux-only. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. Non-Linux builds fall back to `.POOL` automatically. `.URING = 4` is also Linux-only and native in `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, and `zix.Fix`. The `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
 
 ---
 
@@ -250,7 +250,7 @@ try server.run();
 | Item | Detail |
 | :- | :- |
 | Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux falls back to `.POOL` automatically (with a debug print) |
-| Availability | `zix.Http` (HTTP/1), `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux. `zix.Http2` falls back to `.POOL` |
+| Availability | `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux |
 | Accept model (`zix.Http`) | Each worker binds its own `SO_REUSEPORT` listener. The kernel distributes connections across workers: no shared accept queue |
 | gRPC difference | `zix.Grpc` uses a multiplexed shared-nothing model: one worker drives many non-blocking h2 connections via a resumable state machine. `pool_size` is the worker count. See ADR-031 |
 | FIX and TCP difference | `zix.Fix` and `zix.Tcp` EPOLL use a centralized design: one accept loop pushes fds to a shared queue, pool workers pop and hold each connection for its full lifetime. `pool_size` is the worker count |
@@ -270,7 +270,7 @@ try server.run();
 
 `.URING` is the completion-based sibling of `.EPOLL`: the same shared-nothing, thread-per-core topology (one `SO_REUSEPORT` listener and one ring per worker, no shared queue, no cross-thread fd handoff), but accepts, reads, and writes are submitted as io_uring SQEs and reaped as CQEs instead of waiting on `epoll_wait` readiness. Most syscall transitions are batched into the ring (ADR-037 Phase 4).
 
-- Native engines: `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`. `zix.Http2` and the `zix.Tcp` per-connection handler have no native ring and fold to `.POOL` / `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Non-Linux builds fall back to `.POOL`.
+- Native engines: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Non-Linux builds fall back to `.POOL`.
 - `workers` (Http/Http1) or `pool_size` (gRPC/FIX/TCP) sizes the worker count, exactly as `.EPOLL`.
 - On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. On a many-core box the ring close (`prep_close`, ADR-041) keeps the worker reaping completions through connection churn instead of blocking in a synchronous `close`, so `.URING` reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 - Same "when NOT to use" as `.EPOLL`: SSE / WebSocket on `zix.Http`, low connection counts, non-Linux targets.
@@ -321,9 +321,9 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 | `workers` field used | yes | no (ignored) | yes | yes (Http/Http1 only) |
 | `pool_size` field used | yes | no (ignored) | no (ignored) | no (Http: ignored). Yes (gRPC/FIX/TCP) |
 | Best for | throughput, high connection counts | SSE, WebSocket, low latency | balanced, multi-accept async | high-throughput HTTP/1 or gRPC on Linux |
-| Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Grpc, Fix, Tcp (Linux-only: Http2 falls back to .POOL) |
+| Available in | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Fix, Tcp (Linux-only) |
 
-`.URING` (Linux-only) mirrors the `.EPOLL` column: a shared-nothing per-worker ring, completion-based, native in Http1, Http, Grpc, and Fix. Http2 folds to `.POOL`, and the Tcp per-connection handler folds to `.EPOLL` (the Tcp framed callback runs the ring).
+`.URING` (Linux-only) mirrors the `.EPOLL` column: a shared-nothing per-worker ring, completion-based, native in Http1, Http, Http2, Grpc, and Fix. The Tcp per-connection handler folds to `.EPOLL` (the Tcp framed callback runs the ring).
 
 ---
 
@@ -334,7 +334,7 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 | HTTP | yes | yes (default) | yes | yes, Linux-only |
 | SSE | not recommended (exhausts pool threads) | yes, preferred | yes | n/a |
 | WebSocket | not recommended (long-lived connections) | yes, preferred | yes | n/a |
-| HTTP/2 (h2c) | yes | yes (default) | yes | n/a |
+| HTTP/2 (h2c) | yes | yes (default) | yes | yes, Linux-only |
 | HTTP/3 (QUIC) | yes | yes (single worker) | yes | yes, Linux-only |
 | gRPC (h2c) | yes | yes (default) | yes | yes, Linux-only |
 | TCP (raw stream) | yes | yes (default) | yes | yes, Linux-only |
@@ -342,7 +342,7 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 | UDP | n/a | n/a | n/a | n/a |
 | UDS (stream) | n/a | yes (io.concurrent() per connection) | n/a | n/a |
 
-`.URING` (Linux-only) matches the `.EPOLL` column per protocol: native for HTTP, gRPC, TCP, and FIX, n/a for SSE / WebSocket / UDP / UDS, Http2 falls back to `.POOL`, and Http3 runs real per-core workers (cross-core CID steering for mid-connection migration is v2, ADR-049 phase 3).
+`.URING` (Linux-only) matches the `.EPOLL` column per protocol: native for HTTP, HTTP/2, gRPC, TCP, and FIX, n/a for SSE / WebSocket / UDP / UDS, and Http3 runs real per-core workers (cross-core CID steering for mid-connection migration is v2, ADR-049 phase 3).
 
 ---
 
