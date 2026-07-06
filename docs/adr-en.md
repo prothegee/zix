@@ -183,7 +183,7 @@ fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     }.handle;
 }
 
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(4096, &[_]zix.Http.Route{
     .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
@@ -257,19 +257,20 @@ var server = try MyServer.init(.{
 
 ---
 
-## ADR-014: `Server.init(comptime stack_threshold, config)`, explicit stack buffer threshold
+## ADR-014: `Server.init(comptime routes, config)`, internal stack buffer cap
 
 **Status:** Accepted
 
-**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. The stack threshold controls whether per-connection I/O buffers (`read_buf`, `write_buf`) live on the stack or heap: if `max_recv_buf` and `max_client_response` both fit within `stack_threshold`, the buffers are stack-allocated, otherwise they fall back to `smp_allocator`.
+**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. A first revision moved the threshold into the constructor (`init(comptime stack_threshold, comptime routes, config)`), but every call site passed the same 4096, the runtime knob deciding the buffer size was already `max_recv_buf`, and the write-side field it once paired with (`max_client_response`) lost its consumer and was removed from the config. A comptime parameter carrying one value across the whole codebase is dead flexibility.
 
-**Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime stack_threshold: usize, comptime routes: []const Route, config: Config) !HttpServerImpl(stack_threshold, routes)`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(4096, &[_]zix.Http.Route{...}, .{...})`: `Server` reads as a type, `init` reads as a constructor.
+**Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. The stack cutoff is the internal constant `stack_read_buf_max = 4096` (dispatch/common.zig): a connection whose `max_recv_buf` fits within it reads on the connection thread stack, a larger `max_recv_buf` heap-allocates from `smp_allocator`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(&[_]zix.Http.Route{...}, .{...})`: `Server` reads as a type, `init` reads as a constructor.
 
 **Consequences:**
-- Call sites are one level simpler: `Server.init(N, routes, config)` instead of `Server(N).init(config)`.
-- Both `stack_threshold` and `routes` must remain `comptime`: Zig requires comptime-known sizes for stack arrays, and the route table is zero-size at runtime when comptime.
-- `HttpServerImpl(stack_threshold, routes)` is the concrete type returned, callers use `var server = try ...` without naming the generic type.
-- Breaking change: all existing call sites updated.
+- Call sites match the rest of the engine family: `Server.init(routes, config)`, like `zix.Http1` / `zix.Http2` / `zix.Grpc` / `zix.Http3` (`Server.init(routes-or-handler, config)`).
+- `routes` must remain `comptime`: the route table is baked into the server type. The stack array is sized by the internal comptime constant, so no comptime size parameter is needed at the call site.
+- `max_recv_buf` (config) is the single tuning knob: it sets the read buffer size and thereby its stack vs heap placement.
+- `init` stores the config and cannot fail, validation happens in `run()`.
+- Breaking change: all existing call sites updated (the leading size parameter removed).
 
 ---
 

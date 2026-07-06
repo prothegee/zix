@@ -183,7 +183,7 @@ fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     }.handle;
 }
 
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(4096, &[_]zix.Http.Route{
     .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
@@ -257,19 +257,20 @@ var server = try MyServer.init(.{
 
 ---
 
-## ADR-014: `Server.init(comptime stack_threshold, config)`, ambang buffer stack eksplisit
+## ADR-014: `Server.init(comptime routes, config)`, cap buffer stack internal
 
 **Status:** Diterima
 
-**Konteks:** API awal memakai fungsi generik comptime sebagai entry point: `zix.Http.Server(4096).init(config)`. Ini memaksa pemanggil memperlakukan `HttpServer` sebagai fungsi pabrik alih-alih struct, yang tidak intuitif dan tidak konsisten dengan sisa API. Ambang stack mengendalikan apakah buffer I/O per koneksi (`read_buf`, `write_buf`) tinggal di stack atau heap: jika `max_recv_buf` dan `max_client_response` keduanya muat dalam `stack_threshold`, buffer dialokasikan di stack, jika tidak ia jatuh kembali ke `smp_allocator`.
+**Konteks:** API awal memakai fungsi generik comptime sebagai entry point: `zix.Http.Server(4096).init(config)`. Ini memaksa pemanggil memperlakukan `HttpServer` sebagai fungsi pabrik alih-alih struct, yang tidak intuitif dan tidak konsisten dengan sisa API. Revisi pertama memindahkan ambang ke konstruktor (`init(comptime stack_threshold, comptime routes, config)`), tetapi semua call site memakai 4096 yang sama, knob runtime yang menentukan ukuran buffer sudah ada di `max_recv_buf`, dan field sisi tulis pasangannya dulu (`max_client_response`) kehilangan konsumennya dan dihapus dari config. Parameter comptime yang membawa satu nilai di seluruh codebase adalah fleksibilitas mati.
 
-**Keputusan:** Ekspos struct `pub const Server` dengan satu `pub fn init(comptime stack_threshold: usize, comptime routes: []const Route, config: Config) !HttpServerImpl(stack_threshold, routes)`. Generik `HttpServerImpl` tetap privat. Call site menjadi `zix.Http.Server.init(4096, &[_]zix.Http.Route{...}, .{...})`: `Server` terbaca sebagai tipe, `init` terbaca sebagai konstruktor.
+**Keputusan:** Ekspos struct `pub const Server` dengan satu `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. Cutoff stack menjadi konstanta internal `stack_read_buf_max = 4096` (dispatch/common.zig): koneksi yang `max_recv_buf`-nya muat di dalamnya membaca pada stack thread koneksi, `max_recv_buf` yang lebih besar alokasi heap dari `smp_allocator`. Generik `HttpServerImpl` tetap privat. Call site menjadi `zix.Http.Server.init(&[_]zix.Http.Route{...}, .{...})`: `Server` terbaca sebagai tipe, `init` terbaca sebagai konstruktor.
 
 **Konsekuensi:**
-- Call site satu tingkat lebih sederhana: `Server.init(N, routes, config)` alih-alih `Server(N).init(config)`.
-- Baik `stack_threshold` maupun `routes` harus tetap `comptime`: Zig menuntut ukuran yang diketahui comptime untuk array stack, dan tabel route berukuran nol saat runtime ketika comptime.
-- `HttpServerImpl(stack_threshold, routes)` adalah tipe konkret yang dikembalikan, pemanggil memakai `var server = try ...` tanpa menamai tipe generik.
-- Perubahan breaking: semua call site yang ada diperbarui.
+- Call site mengikuti sisa keluarga engine: `Server.init(routes, config)`, seperti `zix.Http1` / `zix.Http2` / `zix.Grpc` / `zix.Http3` (`Server.init(routes-atau-handler, config)`).
+- `routes` harus tetap `comptime`: tabel route dibaked ke tipe server. Array stack diukur oleh konstanta comptime internal, jadi tidak perlu parameter ukuran comptime di call site.
+- `max_recv_buf` (config) adalah satu-satunya knob tuning: ia menentukan ukuran buffer baca sekaligus penempatannya di stack atau heap.
+- `init` menyimpan config dan tidak bisa gagal, validasi terjadi di `run()`.
+- Perubahan breaking: semua call site yang ada diperbarui (parameter ukuran di depan dihapus).
 
 ---
 
