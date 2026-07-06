@@ -53,20 +53,20 @@
 </div>
 <br>
 <div align="center">
-    <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44">
-    </a>
-    &nbsp;&nbsp;
+    <!-- <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer"> -->
+    <!--     <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44"> -->
+    <!-- </a> -->
+    <!-- &nbsp;&nbsp; -->
     <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
     </a>
 </div>
-<br>
-<div align="center">
-    <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
-    </a>
-</div>
+<!-- <br> -->
+<!-- <div align="center"> -->
+<!--     <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer"> -->
+<!--         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44"> -->
+<!--     </a> -->
+<!-- </div> -->
 
 <br>
 
