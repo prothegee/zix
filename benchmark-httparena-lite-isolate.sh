@@ -22,12 +22,16 @@
 #   --no-quiesce    Skip quiesce/pin (measure noisy baseline).
 #   --out-dir DIR   Result directory (default: logs/benchmark).
 #
-# Passthrough args: <framework> (required), [httparena-dir], --load-threads N,
-# --source MODE, --zix-dir DIR. If --load-threads is omitted, defaults to half
-# the logical CPUs (matching loadgen half).
+# Passthrough args: <framework> (required), [profile], [httparena-dir],
+# --load-threads N, --source MODE, --zix-dir DIR. When --load-threads is
+# omitted, nothing is injected: benchmark-lite.sh applies its own default
+# (nproc/2). A positional that is not an HttpArena folder is the profile
+# (bench only that one), and the result/mem/smaps filenames gain it as a
+# suffix (e.g. isolate-zix-baseline-<stamp>.txt).
 #
 # Usage (re-execs under sudo if needed):
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena
+#   ./benchmark-httparena-lite-isolate zix baseline ../HttpArena
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --probe --sample-mem
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --source local --load-threads 12
 #   ./benchmark-httparena-lite-isolate zix ../HttpArena --no-quiesce
@@ -93,8 +97,13 @@ if [ "${#PASSTHROUGH[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# Extract <framework> from passthrough args (skip known flag values).
+# Extract <framework> and [profile] from passthrough args (skip known flag
+# values). The first non-flag positional is the framework. A later positional
+# that is an HttpArena folder is the httparena-dir, anything else the profile.
+# --load-threads is NOT defaulted here: when omitted, benchmark-lite.sh applies
+# its own default (nproc/2).
 FRAMEWORK=""
+PROFILE=""
 skip_next=0
 for arg in "${PASSTHROUGH[@]}"; do
     if [ "$skip_next" -eq 1 ]; then
@@ -104,25 +113,15 @@ for arg in "${PASSTHROUGH[@]}"; do
     case "$arg" in
         --load-threads|--source|--zix-dir) skip_next=1; continue ;;
         --*) continue ;;
-        *) FRAMEWORK="$arg"; break ;;
     esac
+    if [ -z "$FRAMEWORK" ]; then
+        FRAMEWORK="$arg"
+    elif [ -f "$arg/scripts/benchmark-lite.sh" ]; then
+        continue
+    elif [ -z "$PROFILE" ]; then
+        PROFILE="$arg"
+    fi
 done
-
-# Default --load-threads to half logical CPUs if not provided.
-has_load_threads=0
-for arg in "${PASSTHROUGH[@]}"; do
-    case "$arg" in
-        --load-threads|--load-threads=*) has_load_threads=1; break ;;
-    esac
-done
-if [ "$has_load_threads" -eq 0 ]; then
-    avail_cpus=$(nproc)
-    default_load_threads=$(( avail_cpus / 2 ))
-    [ "$default_load_threads" -ge 1 ] || default_load_threads=1
-
-    PASSTHROUGH+=(--load-threads "$default_load_threads")
-    echo "[isolate] --load-threads not set, defaulting to $default_load_threads (half of $avail_cpus logical CPUs)" >&2
-fi
 
 # SMT-aware half-split: keeps SMT pairs together on server or loadgen side.
 derive_split() {
@@ -412,8 +411,8 @@ start_mem_sampler() {
     command -v docker >/dev/null 2>&1 || return 0
 
     local name="httparena-bench-$FRAMEWORK"
-    MEM_LOG="$RESULT_DIR/isolate-mem-${FRAMEWORK}-${RUN_STAMP}.txt"
-    SMAPS_FILE="$RESULT_DIR/isolate-smaps-${FRAMEWORK}-${RUN_STAMP}.txt"
+    MEM_LOG="$RESULT_DIR/isolate-mem-${RUN_TAG}-${RUN_STAMP}.txt"
+    SMAPS_FILE="$RESULT_DIR/isolate-smaps-${RUN_TAG}-${RUN_STAMP}.txt"
     echo "[isolate] memory samples -> $MEM_LOG" >&2
     (
         local tick=0 peak_cur=0
@@ -471,10 +470,11 @@ start_mem_sampler() {
     SAMPLER_PID=$!
 }
 
-# Lifecycle.
+# Lifecycle. A single-profile run carries the profile in every result filename.
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 START="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
-RESULT_TXT="$RESULT_DIR/isolate-${FRAMEWORK}-${RUN_STAMP}.txt"
+RUN_TAG="${FRAMEWORK}${PROFILE:+-$PROFILE}"
+RESULT_TXT="$RESULT_DIR/isolate-${RUN_TAG}-${RUN_STAMP}.txt"
 
 # Start banner for terminal and result file.
 START_BANNER="Isolate: $FRAMEWORK bench start $START"
@@ -512,7 +512,8 @@ export GCANNON_CPUS="$LOADGEN_CPUS"
     echo "# command:     $INVOCATION"
     echo "# stamp:        $RUN_STAMP"
     echo "# framework:    $FRAMEWORK"
-    echo "# args:         ${PASSTHROUGH[*]} (effective, --load-threads injected if absent)"
+    echo "# profile:      ${PROFILE:-(all)}"
+    echo "# args:         ${PASSTHROUGH[*]}"
     echo "# server_cpus:  $SERVER_CPUS"
     echo "# loadgen_cpus: $LOADGEN_CPUS"
     echo "# quiesce:      $DO_QUIESCE (governor/boost/freq/cstate/thp/irqbalance/lo-mtu/paranoid)"
