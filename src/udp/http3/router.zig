@@ -59,7 +59,7 @@ pub fn pathParam(name: []const u8) ?[]const u8 {
 ///     .{ .path = "/users/:id", .handler = userHandler, .kind = .PARAM },
 /// });
 ///
-/// const Server = zix.Http3.Http3(R.dispatch);
+/// var server = zix.Http3.Server.init(R.dispatch, config);
 /// ```
 ///
 /// Return:
