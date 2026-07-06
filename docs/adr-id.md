@@ -183,7 +183,7 @@ fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     }.handle;
 }
 
-var server = zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
@@ -261,7 +261,7 @@ var server = try MyServer.init(.{
 
 **Status:** Diterima
 
-**Konteks:** API awal memakai fungsi generik comptime sebagai entry point: `zix.Http.Server(4096).init(config)`. Ini memaksa pemanggil memperlakukan `HttpServer` sebagai fungsi pabrik alih-alih struct, yang tidak intuitif dan tidak konsisten dengan sisa API. Revisi pertama memindahkan ambang ke konstruktor (`init(comptime stack_threshold, comptime routes, config)`), tetapi semua call site memakai 4096 yang sama, knob runtime yang menentukan ukuran buffer sudah ada di `max_recv_buf`, dan field sisi tulis pasangannya dulu (`max_client_response`) kehilangan konsumennya dan dihapus dari config. Parameter comptime yang membawa satu nilai di seluruh codebase adalah fleksibilitas mati.
+**Konteks:** API awal memakai fungsi generik comptime sebagai entry point: `zix.Http.Server(4096).init(config)`. Ini memaksa pemanggil memperlakukan `HttpServer` sebagai fungsi pabrik alih-alih struct, yang tidak intuitif dan tidak konsisten dengan sisa API. Parameter comptime `stack_threshold` pada konstruktor juga fleksibilitas mati: semua call site memakai 4096 yang sama, knob runtime yang menentukan ukuran buffer sudah ada di `max_recv_buf`, dan field sisi tulis pasangannya dulu (`max_client_response`) tidak punya konsumen.
 
 **Keputusan:** Ekspos struct `pub const Server` dengan satu `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. Cutoff stack menjadi konstanta internal `stack_read_buf_max = 4096` (dispatch/common.zig): koneksi yang `max_recv_buf`-nya muat di dalamnya membaca pada stack thread koneksi, `max_recv_buf` yang lebih besar alokasi heap dari `smp_allocator`. Generik `HttpServerImpl` tetap privat. Call site menjadi `zix.Http.Server.init(&[_]zix.Http.Route{...}, .{...})`: `Server` terbaca sebagai tipe, `init` terbaca sebagai konstruktor.
 
@@ -955,7 +955,7 @@ Ditolak di tengah jalan, disimpan untuk catatan. Ring `sendFile` untuk static di
 - Tiap file baru perlu baris `std.testing.refAllDecls`-nya sendiri di `src/lib.zig` (refAllDecls tidak rekursif), jika tidak test-nya diam-diam tidak pernah jalan. Test pindah ke file model yang diujinya.
 - Pilot `zix.Http1` mendarat hijau: `server.zig` menyusut dari 2.624 baris ke 154, kelima model berada di bawah `dispatch/` (dengan `common.zig` untuk helper bersama), dan `zig build`, `test-all`, serta `test-runner-all` (semua 56 protokol) lulus dengan 25 test http1 terjaga.
 - Keempat varian idle-pool A2 disimpan sebagai snapshot server-penuh di `rnd/0.5.x/a2-variants/` (hanya berbeda di kode pool `.URING`) dengan manifest cross-reference.
-- Engine connection-oriented (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) mendarat dengan pemisahan yang sama, masing-masing pemindahan independen yang setara, semua hijau di Zig 0.16.x dan 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` dan `zix.Grpc` menyalurkan route lewat generic `common.Dispatch(...)`, dan `zix.Http` membakukannya ke factory `HttpServerImpl(stack_threshold, routes)` (fungsi dispatch-nya menerima `server: anytype`), agar body yang dipindah tetap byte-identical, engine route-runtime (`zix.Tcp`, `zix.Fix`) menyalurkan handler saat runtime.
+- Engine connection-oriented (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) mendarat dengan pemisahan yang sama, masing-masing pemindahan independen yang setara, semua hijau di Zig 0.16.x dan 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` dan `zix.Grpc` menyalurkan route lewat generic `common.Dispatch(...)`, dan `zix.Http` membakukannya ke factory `HttpServerImpl(routes)` (fungsi dispatch-nya menerima `server: anytype`), agar body yang dipindah tetap byte-identical, engine route-runtime (`zix.Tcp`, `zix.Fix`) menyalurkan handler saat runtime.
 - `zix.Udp` dikecualikan secara desain. Dispatch model mengabstraksi connection lifecycle (accept, lalu multiplex per-fd, lalu close). UDP itu connectionless: satu datagram socket yang di-bind, tanpa per-connection fd, client dilacak sebagai record alamat di level aplikasi, dan concurrency-nya per-datagram (`io.concurrent`) bukan per-connection. Tidak ada model untuk dipartisi. Pemisahan `dispatch/` baru ditinjau ulang jika strategi serve datagram kedua ditambahkan (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
 
 ---

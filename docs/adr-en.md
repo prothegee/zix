@@ -183,7 +183,7 @@ fn withAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
     }.handle;
 }
 
-var server = zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/private", .handler = withAuth(withLogging(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
@@ -261,7 +261,7 @@ var server = try MyServer.init(.{
 
 **Status:** Accepted
 
-**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. A first revision moved the threshold into the constructor (`init(comptime stack_threshold, comptime routes, config)`), but every call site passed the same 4096, the runtime knob deciding the buffer size was already `max_recv_buf`, and the write-side field it once paired with (`max_client_response`) lost its consumer and was removed from the config. A comptime parameter carrying one value across the whole codebase is dead flexibility.
+**Context:** The original API used a comptime generic function as the entry point: `zix.Http.Server(4096).init(config)`. This forced callers to treat `HttpServer` as a factory function rather than a struct, which was unintuitive and inconsistent with the rest of the API. A comptime `stack_threshold` parameter on the constructor is also dead flexibility: every call site passes the same 4096, the runtime knob deciding the buffer size is already `max_recv_buf`, and the write-side field it once paired with (`max_client_response`) has no consumer.
 
 **Decision:** Expose a `pub const Server` struct with a single `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. The stack cutoff is the internal constant `stack_read_buf_max = 4096` (dispatch/common.zig): a connection whose `max_recv_buf` fits within it reads on the connection thread stack, a larger `max_recv_buf` heap-allocates from `smp_allocator`. The `HttpServerImpl` generic remains private. Call sites become `zix.Http.Server.init(&[_]zix.Http.Route{...}, .{...})`: `Server` reads as a type, `init` reads as a constructor.
 
@@ -955,7 +955,7 @@ Rejected on the way, kept for the record. Ring `sendFile` for static was deprior
 - Each new file needs its own `std.testing.refAllDecls` line in `src/lib.zig` (refAllDecls is not recursive), else its tests silently never run. Tests move into the file of the model they cover.
 - The `zix.Http1` pilot landed green: `server.zig` shrank from 2,624 lines to 154, the five models live under `dispatch/` (with `common.zig` for the shared helpers), and `zig build`, `test-all`, and `test-runner-all` (all 56 protocols) pass with the 25 http1 tests preserved.
 - The four A2 idle-pool variants are preserved as full-server snapshots in `rnd/0.5.x/a2-variants/` (they differ only in the `.URING` pool code) with a cross-reference manifest.
-- The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, each an independent equivalent move, all green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` and `zix.Grpc` thread routes through a `common.Dispatch(...)` generic, and `zix.Http` bakes them into a `HttpServerImpl(stack_threshold, routes)` factory (its dispatch functions take `server: anytype`), so the moved bodies stay byte-identical, the runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
+- The connection-oriented engines (`zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`) landed the same split, each an independent equivalent move, all green on Zig 0.16.x and 0.17.x (`test-all`, `examples`, `test-runner-all`). `zix.Http2` and `zix.Grpc` thread routes through a `common.Dispatch(...)` generic, and `zix.Http` bakes them into a `HttpServerImpl(routes)` factory (its dispatch functions take `server: anytype`), so the moved bodies stay byte-identical, the runtime-route engines (`zix.Tcp`, `zix.Fix`) pass the handler at runtime.
 - `zix.Udp` is excluded by design. The dispatch models abstract connection lifecycle (accept, then per-fd multiplex, then close). UDP is connectionless: one bound datagram socket, no per-connection fds, clients tracked as application-level address records, and concurrency is per-datagram (`io.concurrent`) not per-connection. There are no models to partition. A `dispatch/` split would be revisited only if a second datagram serve strategy is added (reuseport plus `recvmmsg` / `sendmmsg` / io_uring multishot).
 
 ---

@@ -8,9 +8,9 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 ### Public API
 
-`Server` is a namespace struct with a single `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` is the private generic. Callers use `var server = try zix.Http.Server.init(4096, .{...})` without naming the generic type.
+`Server` is a namespace struct with a single `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. `HttpServerImpl` is the private generic. Callers use `var server = zix.Http.Server.init(&routes, .{...})` without naming the generic type.
 
-`HttpServerImpl.init(config)` stores the config and allocates the `Router` from `config.allocator`. Does not open any socket: socket is opened in `run()`.
+`HttpServerImpl.init(config)` stores the config, nothing else: the `Router` is comptime-baked into the type (zero-size at runtime) and no socket is opened. The socket is opened in `run()`.
 
 ### ConnQueue
 
@@ -117,11 +117,9 @@ loop:
 2. Layer D: if conn_timeout_ms > 0:
       register ConnEntry{ stream, deadline = now + conn_timeout_ms } with self.registry
       defer deregister on return (marks done=true, removes from registry)
-3. stack_read / stack_write [stack_threshold]u8 on stack
-   read_buf  = if max_recv_buf  <= stack_threshold: stack slice
+3. stack_read [stack_read_buf_max]u8 on stack (stack_read_buf_max = 4096, dispatch/common)
+   read_buf  = if max_recv_buf <= stack_read_buf_max: stack slice
                else smp_allocator.alloc(u8, max_recv_buf)
-   write_buf = if max_client_response <= stack_threshold: stack slice
-               else smp_allocator.alloc(u8, max_client_response)
 4. defer: heap-free if heap-allocated stream.close()
 5. std.http.Server.init(&reader.interface, &writer.interface)
 6. ArenaAllocator.init(smp_allocator), pre-warm with max_allocator_size, reset(.retain_capacity)

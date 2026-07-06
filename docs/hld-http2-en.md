@@ -123,7 +123,7 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http2.Server` | struct | `init(comptime routes, config)!Self`, then `run()` / `deinit()` |
+| `zix.Http2.Server` | struct | `init(comptime routes, config)`, then `run()` / `deinit()` |
 | `zix.Http2.ServerConfig` | struct | Server configuration (see Http2ServerConfig section) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
 | `zix.Http2.HandlerFn` | type | `*const fn(method: []const u8, headers: []const Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void` |
@@ -197,7 +197,7 @@ fn home(
     zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello") catch {};
 }
 
-var server = try zix.Http2.Server.init(
+var server = zix.Http2.Server.init(
     &[_]zix.Http2.Route{
         .{ .path = "/", .handler = home },
     },

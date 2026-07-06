@@ -205,7 +205,7 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http.Server` | struct | Lifecycle: `init(comptime stack_threshold, comptime routes, config)` / `deinit()` / `run()` |
+| `zix.Http.Server` | struct | Lifecycle: `init(comptime routes, config)` / `deinit()` / `run()` |
 | `zix.Http.ServerConfig` | struct | Server configuration (see HttpServerConfig section) |
 | `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
 | `zix.Http.ClientConfig` | struct | Client configuration (see HttpClientConfig section) |
@@ -261,7 +261,6 @@ pub const HttpServerConfig = struct {
     compression_min_size: usize             = 256,        // skip bodies under this floor
     compression_max_out:  usize             = 256 * 1024, // codec-agnostic compressed-output cap
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
-    max_client_response:  usize             = 1024 * 4,  // write buffer per connection
     max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap, requests exceeding -> 431
     max_response_headers: HeaderSize        = .MINIMAL,  // custom response header cap, arena-allocated per request
     public_dir:           []const u8        = "",         // static file root, "" disables static serving
@@ -402,7 +401,7 @@ Routes are passed at compile time as the second argument to `Server.init`. Each 
 | `.PARAM` | `"/users/:id"` | `:name` segments captured, literals must match exactly |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
@@ -603,7 +602,7 @@ For the network-level connection guard (Layer D, `conn_timeout_ms`) see ADR-018.
 ### Handler pattern
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
 
@@ -722,7 +721,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Compose left-to-right: the outermost wrapper runs first. Routes are registered at compile time via `Server.init`:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });

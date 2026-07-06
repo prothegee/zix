@@ -61,7 +61,7 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 **Example** (`examples/http_basic.zig` with explicit POOL):
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io             = process.io,
@@ -75,7 +75,7 @@ pub fn main(process: std.process.Init) !void {
 
 **Explicit thread counts:**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io        = process.io,
@@ -112,7 +112,7 @@ Handler tasks (one per active connection):
 
 **Example** (`examples/http_sse.zig`, `examples/http_websocket.zig`):
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }, .{
     .io             = process.io,
@@ -127,7 +127,7 @@ var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
 });
 defer threaded.deinit();
 
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = threaded.io(),
@@ -161,7 +161,7 @@ Accept threads (worker_count, default cpu_count):
 
 **Example:**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -221,7 +221,7 @@ occupy only one entry in the per-worker epoll set.
 
 **Example (`zix.Http`):**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -233,7 +233,7 @@ try server.run();
 
 **Example (`zix.Grpc`):**
 ```zig
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHello },
     },

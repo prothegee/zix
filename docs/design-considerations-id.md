@@ -3,7 +3,7 @@
 Catatan layout dan struktur: pilihan yang sudah diambil, plus arah yang perlu ditinjau ulang. Bukan tugas aktif.
 
 **CT (Compile Time):**<br>
-Zix mendorong pekerjaan ke `comptime` setiap kali input-nya tetap saat build time. Route table dipartisi dan dispatch dispesialisasi per set route (`Router(comptime routes)`, `HttpServerImpl(comptime stack_threshold, comptime routes)`), dan perbedaan versi di-gate keluar dengan `ZIG_SEMVER` (`comptime ZIG_SEMVER.MINOR == 16`) sehingga hanya branch yang aktif yang dikompilasi. Trade-off-nya: pekerjaan build-time dan ukuran binary ditukar dengan nol branching runtime di hot path.
+Zix mendorong pekerjaan ke `comptime` setiap kali input-nya tetap saat build time. Route table dipartisi dan dispatch dispesialisasi per set route (`Router(comptime routes)`, `HttpServerImpl(comptime routes)`), dan perbedaan versi di-gate keluar dengan `ZIG_SEMVER` (`comptime ZIG_SEMVER.MINOR == 16`) sehingga hanya branch yang aktif yang dikompilasi. Trade-off-nya: pekerjaan build-time dan ukuran binary ditukar dengan nol branching runtime di hot path.
 
 > Gunakan ketika sebuah input diketahui saat build time: pilih parameter atau branch comptime alih-alih field atau pengecekan runtime.
 

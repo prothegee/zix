@@ -634,7 +634,7 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 }
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io   = process.io,
@@ -655,7 +655,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io             = threaded.io(),
@@ -696,7 +696,7 @@ pub fn main() !void {
 Routes are registered at compile time via the route table passed to `Server.init`. Each `Route` entry has a `path`, a `handler`, and an optional `kind` (`.EXACT` by default):
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     // exact (default): matches only /about
 
@@ -721,7 +721,7 @@ exact  >  param  >  prefix (longer prefix beats shorter)
 Exact and prefix priority is independent of registration order. **Param routes are the exception**: when two patterns have the same segment count and both match, the first entry in the route table wins. Register more-literal patterns before all-param patterns of the same depth:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     // Correct order: /path/user/:id wins for /path/user/alice
     .{ .path = "/path/user/:id",        .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/path/:tenant/:branch", .handler = tenantHandler, .kind = .PARAM },
@@ -785,7 +785,7 @@ N accept threads push connections to a shared `ConnQueue`. M pool threads pop an
 
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
@@ -800,7 +800,7 @@ pub fn main(process: std.process.Init) !void {
 One accept thread dispatches each connection via `io.async()`. `workers` and `pool_size` are ignored. Preferred for SSE and WebSocket (long-lived connections do not hold pool threads). Also suitable for explicit `concurrent_limit`.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -813,7 +813,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 N accept threads each dispatch connections via `io.async()` directly, no `ConnQueue`. Balanced throughput and latency. `pool_size` is ignored.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -826,7 +826,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 Each worker owns a private `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers. No shared queue, no mutex, no fd handoff between threads. Level-triggered `EPOLLIN` keeps connections registered after each request without explicit re-arm. Idle keep-alive connections hold no thread. Best for high-throughput short-lived requests on Linux. Non-Linux builds fall back to `.POOL` automatically.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -840,7 +840,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, ADR-041, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, and `zix.Http2`. The `zix.Tcp` per-connection handler has no native ring and folds to `.POOL` / `.EPOLL`. Non-Linux builds fall back to `.POOL`.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -882,7 +882,7 @@ Two independent timeout layers, both disabled by default (`0`):
 **`handler_timeout_ms`**: per-handler execution budget (Layer B). Sets `ctx.deadline` before each dispatch. Handlers opt in by calling `ctx.isExpired()` between expensive steps.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/slow", .handler = slowHandler },
 }, .{
     .io                 = process.io,
@@ -964,7 +964,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Compose left-to-right, the outermost wrapper runs first:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     // origin check only
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     // origin check -> basic auth -> handler
@@ -1026,7 +1026,7 @@ pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
     }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9008 });
     defer server.deinit();
@@ -1050,7 +1050,7 @@ wscat    -c "ws://localhost:9008/ws/lobby"
 **Combining HTTP, static, and WebSocket in one server**: register all handler types together, routing handles dispatch. Unmatched routes fall through to static serving:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/",          .handler = homeHandler },
     .{ .path = "/api",       .handler = apiHandler,  .kind = .PREFIX },
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
@@ -1103,7 +1103,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 **Dispatch model:** use `.ASYNC`. SSE connections are long-lived: they would exhaust a blocking pool (`.POOL`) one thread per open stream. `.ASYNC` dispatches each connection via `io.async()`, keeping pool threads free.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }, .{
     .io             = process.io,
@@ -1207,7 +1207,7 @@ fn createInitDirs(io: std.Io) void {
 pub fn main(process: std.process.Init) !void {
     createInitDirs(process.io); // idempotent, safe on every start
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/upload", .handler = uploadHandler },
     }, .{
         .io                = process.io,
@@ -1269,7 +1269,7 @@ curl -X POST "http://localhost:9005/upload" \
 | `.{ .CUSTOM = N }` | N | Explicit cap, arena-allocated to exactly N slots per request |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .max_response_headers = .LARGE,                // 64 headers
@@ -1303,7 +1303,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 | `.{ .CUSTOM = N }` | N (capped at 64) | Explicit cap values above 64 silently capped at the parser limit |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .max_request_headers = .COMMON,                // 32 headers
@@ -1331,7 +1331,7 @@ What the key and the cached value are depends on the engine:
 It is off by default. Enable it on the `.EPOLL` or `.URING` dispatch model:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/report", .handler = reportHandler },
 }, .{
     .ip = "0.0.0.0",
@@ -1453,7 +1453,7 @@ fn sayHelloHandler(
 }
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Grpc.Server.init(
+    var server = zix.Grpc.Server.init(
         &[_]zix.Grpc.Route{
             .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
         },
@@ -1516,7 +1516,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 **Context timeout:** Three inputs, tightest wins:
 
 ```zig
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // per-route 3s cap, tightens the 5s global cap
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
@@ -2005,8 +2005,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    const Server = zix.Http3.Http3(Routes.dispatch);
-    var server = try Server.init(.{
+    var server = zix.Http3.Server.init(Routes.dispatch, .{
         .io             = process.io,
         .allocator      = std.heap.smp_allocator,
         .ip             = "127.0.0.1",
@@ -2029,7 +2028,7 @@ curl --http3-only -k https://127.0.0.1:9063/
 
 - `req.method` and `req.path` are populated from the wire. The response body handed to `res.send` is copied after the handler returns, so it may point at static or handler-owned memory.
 - `req.accept_encoding` carries the client's Accept-Encoding (empty when absent). A handler negotiates a pre-compressed body against it and calls `res.setContentEncoding(.br)` (or `.gzip`), which emits the `content-encoding` response header. The engine never compresses on the send path: `res.body` must already be encoded (serve a pre-built `.br` / `.gz` file), so there is no per-request codec cost.
-- `init` requires a non-zero port and a TLS context: it returns `error.PortNotConfigured` or `error.TlsRequired` otherwise.
+- `run()` requires a non-zero port and a TLS context: it returns `error.PortNotConfigured` or `error.TlsRequired` otherwise (`init` only stores the config).
 
 **Dispatch models** (Linux-only): `.ASYNC` runs one single-worker recv loop with internal connection-id demux (migration-safe). `.POOL` / `.MIXED` run one SO_REUSEPORT recvmmsg worker per core, and `.EPOLL` / `.URING` add epoll readiness / io_uring completion on that per-core shape (`.URING` folds to the epoll worker loop when io_uring is unavailable). Per-core connection-id steering is deferred (ADR-049 phase 3).
 
@@ -2072,7 +2071,7 @@ pub fn main(process: std.process.Init) !void {
     logger.system(.ERROR, "db",      "connect failed: {}", .{error.ConnectionRefused});
 
     // Wire into HTTP server for automatic per-request access logging
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io     = process.io,
@@ -2137,25 +2136,33 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 <div align="left">
     <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
     </a>
-</div>
-<br>
-<div align="left">
+    &nbsp;&nbsp;
     <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
     </a>
 </div>
 <br>
 <div align="left">
+    <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44">
+    </a>
+    &nbsp;&nbsp;
     <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
+    </a>
+</div>
+<br>
+<div align="left">
+    <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
     </a>
 </div>
 <br>
 
 > When performance measurement is not narrowed, our workload assumption can't be measure,
-> behaviour of 8-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
+> behaviour of 6-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
 
 > Historical benchmark stored inside `docs/benchmark` directory.
 

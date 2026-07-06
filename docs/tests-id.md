@@ -143,7 +143,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `udp/http3/request.zig` / `response.zig` | `refAllDecls` + perilaku: `parseRequest` memulihkan `:method` / `:path` melewati ACK di depan, `buildResponse` membawa control SETTINGS plus balasan HEADERS / DATA |
 | `udp/http3/connection.zig` | `refAllDecls` + perilaku: `init` menurunkan Initial key dari connection id (RFC 9001 A.1), cap anti-amplification 3x |
 | `udp/http3/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, query di-strip sebelum matching, tidak ada match mengembalikan 404 |
-| `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat init |
+| `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat run |
 
 ### zix.Logger
 
@@ -408,7 +408,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Default ukuran buffer | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` semuanya 4096 |
+| Default ukuran buffer | `kernel_backlog`, `max_recv_buf`, `max_allocator_size` semuanya 4096 |
 | Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` wajib (tidak ada default) | pemanggil harus menyetelnya di `HttpServerConfig` |

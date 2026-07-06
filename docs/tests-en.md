@@ -143,7 +143,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `udp/http3/request.zig` / `response.zig` | `refAllDecls` + behavioral: `parseRequest` recovers `:method` / `:path` past a leading ACK, `buildResponse` carries the control SETTINGS plus a HEADERS / DATA reply |
 | `udp/http3/connection.zig` | `refAllDecls` + behavioral: `init` derives the Initial keys from the connection id (RFC 9001 A.1), the anti-amplification 3x cap |
 | `udp/http3/router.zig` | `refAllDecls` + behavioral: dispatch calls the matching handler, the query is stripped before matching, no match returns 404 |
-| `udp/http3/config.zig` / `server.zig` | `refAllDecls` + behavioral: required config fields and defaults, a null `Tls.Context` is rejected at init |
+| `udp/http3/config.zig` / `server.zig` | `refAllDecls` + behavioral: required config fields and defaults, a null `Tls.Context` is rejected at run |
 
 ### zix.Logger
 
@@ -414,7 +414,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| Buffer size defaults | `kernel_backlog`, `max_recv_buf`, `max_allocator_size`, `max_client_response` all 4096 |
+| Buffer size defaults | `kernel_backlog`, `max_recv_buf`, `max_allocator_size` all 4096 |
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` is required (no default) | caller must set it in `HttpServerConfig` |

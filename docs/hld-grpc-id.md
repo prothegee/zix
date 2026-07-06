@@ -43,7 +43,7 @@ graph LR
 
 | Simbol | Catatan |
 | :- | :- |
-| `zix.Grpc.Server` | `init(comptime routes, config)!Self`, `deinit()`, `run()!void` |
+| `zix.Grpc.Server` | `init(comptime routes, config)`, `deinit()`, `run()!void` |
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
@@ -104,7 +104,7 @@ fn echoHandler(
     ctx.finish(zix.Grpc.Status.OK, "");
 }
 
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         .{ .path = "/pkg.Svc/Echo", .handler = echoHandler, .is_server_streaming = true },
     },
@@ -167,7 +167,7 @@ Risiko saat menimpa:
 Contoh timeout per route:
 
 ```zig
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/FastOp", .handler = fastHandler, .timeout_ms = 500    },
         .{ .path = "/svc.Svc/SlowOp", .handler = slowHandler, .timeout_ms = 30_000 },

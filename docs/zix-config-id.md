@@ -39,7 +39,7 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | io | wajib | backend std.Io, harus hidup lebih lama dari server | | | | | harus diisi |
 | ip | wajib | alamat bind | | | | | |
-| port | wajib | port bind, harus non-zero | | | | | nilai nol ditolak saat init |
+| port | wajib | port bind, harus non-zero | | | | | nol tidak divalidasi: bind ke port ephemeral pilihan kernel |
 | dispatch_model | wajib | model concurrency (lihat tabel di atas) | menentukan keseluruhan strategi | `.EPOLL`/`.URING` untuk jumlah koneksi tinggi di Linux | | | model salah membatasi throughput, di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog sebelum accept() | kedalaman antrian accept kernel | naikkan saat lonjakan koneksi | koneksi baru dibuang saat lonjakan | lebih banyak memori kernel untuk antrian | terlalu kecil membuang koneksi saat spike |
 | busy_poll_us | 50 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL) | hot, kernel busy-spin sebelum menidurkan worker | naikkan untuk memangkas tail latency saat beban, 0 untuk hemat CPU idle | spin lebih pendek, lebih banyak wakeup idle-sleep, tail latency lebih tinggi | core spin 100% saat idle | no-op tanpa dukungan SO_BUSY_POLL kernel |
@@ -137,7 +137,7 @@ Jalur library standar. Set field compression dan cache yang sama dengan HTTP/1, 
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | io | wajib | backend std.Io | | | | | |
 | ip | wajib | alamat bind | | | | | |
-| port | wajib | port bind, non-zero | | | | | nilai nol ditolak |
+| port | wajib | port bind, non-zero | | | | | nol tidak divalidasi: bind ke port ephemeral pilihan kernel |
 | dispatch_model | wajib | model concurrency | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala | | | di luar Linux melipat ke `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | antrian accept kernel | naikkan saat lonjakan | koneksi dibuang | lebih banyak memori kernel | terlalu kecil membuang koneksi |
 | busy_poll_us | 50 | spin window SO_BUSY_POLL dalam mikrodetik untuk koneksi yang diterima (.EPOLL) | hot, kernel busy-spin sebelum menidurkan worker | naikkan untuk memangkas tail latency saat beban, 0 untuk hemat CPU idle | spin lebih pendek, lebih banyak wakeup idle-sleep, tail latency lebih tinggi | core spin 100% saat idle | no-op tanpa dukungan SO_BUSY_POLL kernel |
@@ -150,7 +150,6 @@ Jalur library standar. Set field compression dan cache yang sama dengan HTTP/1, 
 | compression_min_size | 256 | ukuran body minimum sebelum kompresi | pemeriksaan per respons | naikkan agar melewati body kecil | body kecil dikompres | body lebih besar melewati kompresi | terlalu kecil memboroskan CPU |
 | compression_max_out | 262144 | byte output terkompresi maksimum | batas per respons | naikkan untuk body lebih besar | body lebih besar tanpa kompresi | lebih banyak CPU sebelum menyerah | di atas ini dikirim tanpa kompresi |
 | max_allocator_size | 4096 | kapasitas arena awal per koneksi, tumbuh bila terlampaui | memori per koneksi, realokasi | naikkan untuk menghindari pertumbuhan arena dini | lebih banyak event pertumbuhan arena | lebih banyak memori idle per koneksi | tetap tumbuh otomatis | 
-| max_client_response | 4096 | buffer write per respons | memori per respons | naikkan untuk respons lebih besar | respons single-write lebih kecil | lebih banyak memori per respons | membatasi satu write respons |
 | max_request_headers | `.LARGE` | header request maksimum, di atas tier ditolak 431 | penyimpanan parse | naikkan tier untuk klien dengan banyak header | request padat header ditolak | lebih banyak penyimpanan parse | nilai custom di atas 64 dibatasi ke 64 |
 | max_response_headers | `.MINIMAL` (16) | header respons custom maksimum, dialokasikan arena seukuran ini | memori per respons | naikkan tier untuk banyak header custom | header ekstra tidak bisa diset | lebih banyak memori per respons | dialokasikan persis per request |
 | public_dir | "" | direktori root untuk serve file statis, kosong menonaktifkan | I/O disk saat hit statis | atur untuk melayani file statis | | | kosong menonaktifkan serve statis |
@@ -313,7 +312,7 @@ Bangun satu Logger dengan config ini dan lampirkan lewat pointer ke field `logge
 
 ## Catatan
 
-- Field wajib (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) tidak punya default dan harus diisi. Port nol ditolak saat init.
+- Field wajib (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) tidak punya default dan harus diisi. Port nol ditolak saat init oleh `zix.Tcp` / `zix.Udp` / `zix.Fix` (dan client-nya), dan saat `run()` oleh `zix.Http2` / `zix.Grpc` / `zix.Http3`. `zix.Http1` dan `zix.Http` tidak memvalidasinya (port 0 bind ke port ephemeral pilihan kernel).
 - `io`, `logger`, dan `tls` dimiliki pemanggil: dilewatkan lewat handle atau pointer dan harus hidup lebih lama dari server.
 - `.EPOLL` dan `.URING` khusus Linux. Di luar Linux keduanya melipat ke `.POOL` (HTTP/2 juga melipat ke `.POOL` di Linux untuk jalur TLS).
 - Fitur compression dan response-cache aktif hanya pada `.EPOLL` dan `.URING` (shared-nothing, satu pemilik per worker).

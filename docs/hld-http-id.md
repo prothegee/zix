@@ -205,7 +205,7 @@ Diakses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http.Server` | struct | Siklus hidup: `init(comptime stack_threshold, comptime routes, config)` / `deinit()` / `run()` |
+| `zix.Http.Server` | struct | Siklus hidup: `init(comptime routes, config)` / `deinit()` / `run()` |
 | `zix.Http.ServerConfig` | struct | Konfigurasi server (lihat bagian HttpServerConfig) |
 | `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
 | `zix.Http.ClientConfig` | struct | Konfigurasi client (lihat bagian HttpClientConfig) |
@@ -261,7 +261,6 @@ pub const HttpServerConfig = struct {
     compression_min_size: usize             = 256,        // lewati body di bawah floor ini
     compression_max_out:  usize             = 256 * 1024, // cap output terkompresi codec-agnostic
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
-    max_client_response:  usize             = 1024 * 4,  // write buffer per connection
     max_request_headers:  RequestHeaderSize = .LARGE,    // request header cap, requests exceeding -> 431
     max_response_headers: HeaderSize        = .MINIMAL,  // custom response header cap, arena-allocated per request
     public_dir:           []const u8        = "",         // static file root, "" disables static serving
@@ -402,7 +401,7 @@ Route dioper saat kompilasi sebagai argumen kedua ke `Server.init`. Setiap `Rout
 | `.PARAM` | `"/users/:id"` | Segmen `:name` ditangkap, literal harus cocok persis |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
@@ -603,7 +602,7 @@ Untuk connection guard level jaringan (Layer D, `conn_timeout_ms`) lihat ADR-018
 ### Pola handler
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
 
@@ -722,7 +721,7 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Susun dari kiri ke kanan: wrapper paling luar berjalan pertama. Route didaftarkan saat kompilasi melalui `Server.init`:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
 }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });

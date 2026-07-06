@@ -58,7 +58,7 @@ Doc comment menandai tiap file dengan layer-nya: C (dasar kripto), Q (transport 
 graph TD
     zix["src/lib.zig"] --> H3["udp/http3/Http3.zig\nzix.Http3"]
 
-    H3 --> server["server.zig\nHttp3(handler) facade\nrun() switch"]
+    H3 --> server["server.zig\nServer.init(handler, config)\nrun() switch"]
     H3 --> config["config.zig\nHttp3ServerConfig, DispatchModel"]
     H3 --> router["router.zig\nRouter, Route, pathParam"]
     H3 --> core["core.zig\nHandlerFn, Request, Response"]
@@ -84,7 +84,7 @@ Akses via `const zix = @import("zix");`
 
 | Symbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http3.Http3(handler)` | generic fn | Mengembalikan tipe server HTTP/3, handler dibaked saat comptime |
+| `zix.Http3.Server` | struct | `Server.init(handler, config)` mengembalikan server, handler dibaked saat comptime |
 | `zix.Http3.HandlerFn` | fn type | `fn(req: *const Request, res: *Response) void` |
 | `zix.Http3.Request` | struct | Request terdekode: `method`, `path`, `authority`, `body` |
 | `zix.Http3.Response` | struct | Response yang diisi handler: `status`, `body`, `content_type` |
@@ -96,12 +96,12 @@ Akses via `const zix = @import("zix");`
 
 Primitive level rendah, diekspos agar sebuah peer dapat membangun sisi lain dari wire: `crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`.
 
-### Method Http3(handler)
+### Method Server
 
 | Method | Deskripsi |
 | :- | :- |
-| `init(config)` | Menolak port nol (`error.PortNotConfigured`) dan TLS context null (`error.TlsRequired`). Validasi terjadi di `init`, bukan `run`. |
-| `run()` | Bind dan serve pada model di `config.dispatch_model`. Blok sampai error. Linux-only. |
+| `init(handler, config)` | Menyimpan config, tanpa validasi dan tanpa error. Mengikuti `zix.Http1.Server.init`. |
+| `run()` | Validasi dulu (`error.PortNotConfigured` pada port nol, `error.TlsRequired` pada TLS context null), lalu bind dan serve pada model di `config.dispatch_model`. Blok sampai error. Linux-only. |
 | `deinit()` | Melepas resource (no-op saat ini, disimpan untuk simetri API). |
 
 ---
@@ -127,7 +127,7 @@ pub const Http3ServerConfig = struct {
     socket_sndbuf:           usize = 4 * 1024 * 1024, // SO_SNDBUF yang diminta (kernel clamp)
     gso_enabled:             bool  = true,       // UDP GSO saat kirim, diprobe saat worker mulai
 
-    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), wajib, null ditolak di init
+    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), wajib, null ditolak saat run
 
     cid_len:              u8    = 8,     // panjang connection-id terbitan server (RFC 9000 5.1)
     max_idle_ms:          u32   = 30000, // idle timeout (RFC 9000 10.1)
@@ -156,7 +156,7 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
     .{ .path = "/static",    .handler = files, .kind = .PREFIX },
 });
 
-const Server = zix.Http3.Http3(Routes.dispatch);
+var server = zix.Http3.Server.init(Routes.dispatch, config);
 ```
 
 | Kind | Match | Lookup |
@@ -165,7 +165,7 @@ const Server = zix.Http3.Http3(Routes.dispatch);
 | `PARAM` | Segmen `:name` menangkap, segmen lain harus cocok persis | match pertama terdaftar menang, dibaca dengan `pathParam("name")` |
 | `PREFIX` | Prefix terdaftar terpanjang pada batas `/` | match terpanjang menang |
 
-Query string di-strip sebelum matching (matching melihat path sampai `?`), handler tetap menerima path penuh. Path yang tidak cocok mengembalikan `404 Not Found`. `Routes.dispatch` sendiri adalah `HandlerFn`, jadi langsung terpasang ke `Http3(handler)`. Satu handler tunggal juga bekerja (tanpa router).
+Query string di-strip sebelum matching (matching melihat path sampai `?`), handler tetap menerima path penuh. Path yang tidak cocok mengembalikan `404 Not Found`. `Routes.dispatch` sendiri adalah `HandlerFn`, jadi langsung terpasang ke `Server.init`. Satu handler tunggal juga bekerja (tanpa router).
 
 ---
 

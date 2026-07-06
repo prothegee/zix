@@ -59,7 +59,7 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 **Contoh** (`examples/http_basic.zig` dengan POOL eksplisit):
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io             = process.io,
@@ -73,7 +73,7 @@ pub fn main(process: std.process.Init) !void {
 
 **Jumlah thread eksplisit:**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io        = process.io,
@@ -108,7 +108,7 @@ Handler tasks (one per active connection):
 
 **Contoh** (`examples/http_sse.zig`, `examples/http_websocket.zig`):
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }, .{
     .io             = process.io,
@@ -123,7 +123,7 @@ var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
 });
 defer threaded.deinit();
 
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = threaded.io(),
@@ -155,7 +155,7 @@ Accept threads (worker_count, default cpu_count):
 
 **Contoh:**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -216,7 +216,7 @@ dan hanya menempati satu entri di epoll set per-worker.
 
 **Contoh (`zix.Http`):**
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -228,7 +228,7 @@ try server.run();
 
 **Contoh (`zix.Grpc`):**
 ```zig
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHello },
     },
