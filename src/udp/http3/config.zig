@@ -67,7 +67,7 @@ pub const Http3ServerConfig = struct {
     // QUIC / HTTP-3 knobs.
 
     /// TLS 1.3 context: cert / key / ALPN. QUIC requires TLS 1.3. Caller owns, must outlive the
-    /// server. Null is rejected at init (QUIC has no cleartext mode).
+    /// server. Null is rejected at run (QUIC has no cleartext mode).
     tls: ?*Tls.Context = null,
     /// The server-issued connection ID length in bytes (RFC 9000 5.1). A fixed length enables the
     /// future per-core CID steering (ADR-049 phase 3).

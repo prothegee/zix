@@ -216,7 +216,7 @@ The v1 engine's `.ASYNC` model runs one worker that owns the whole table, so a c
 
 ## server.zig and dispatch/
 
-`Http3(handler)` (server.zig) is a thin facade: `init` validates (`error.PortNotConfigured` on a zero port, `error.TlsRequired` on a null TLS context), `run` switches on `config.dispatch_model` into the per-model `dispatch/` entry point. All models are Linux-only.
+`Server.init(handler, config)` (server.zig) is a thin facade: `init` stores the config, `run` validates (`error.PortNotConfigured` on a zero port, `error.TlsRequired` on a null TLS context) then switches on `config.dispatch_model` into the per-model `dispatch/` entry point. All models are Linux-only.
 
 - `dispatch/common.zig`: the shared machinery. `workerLoop` (recvmmsg in, `serveDatagram` per datagram, sendmmsg out), `runSingle` (one worker on the calling thread, ASYNC), `runMulti` (one SO_REUSEPORT thread per CPU, pinned, POOL / MIXED). `processDatagram` demuxes by DCID and decrypts (`openInitial` / `openHandshake` / `openShort`). `serveDatagram` drives the matching step: `sendServerHello` on a complete ClientHello, or `sendResponse` on a 1-RTT request. `sendResponse` applies ACKs (feeding `onAckFrame`), parses requests, replenishes bidi stream credit, coalesces the ACK + HANDSHAKE_DONE + SETTINGS + MAX_STREAMS + small responses into one sealed packet (a `COALESCE_PAYLOAD_MAX` budget), registers oversized bodies as `SendStream`s, and `pumpStream`s each active stream within the congestion window. `sweepMaintenance` runs `onMaintenance` per connection at a bounded interval, retransmitting PTO-expired flights and evicting idle / closed connections.
 - `dispatch/async.zig`, `pool.zig`, `mixed.zig`: thin wrappers into `runSingle` / `runMulti`.

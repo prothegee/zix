@@ -123,7 +123,7 @@ Diakses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http2.Server` | struct | `init(comptime routes, config)!Self`, lalu `run()` / `deinit()` |
+| `zix.Http2.Server` | struct | `init(comptime routes, config)`, lalu `run()` / `deinit()` |
 | `zix.Http2.ServerConfig` | struct | Konfigurasi server (lihat bagian Http2ServerConfig) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
 | `zix.Http2.HandlerFn` | type | `*const fn(method: []const u8, headers: []const Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void` |
@@ -197,7 +197,7 @@ fn home(
     zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello") catch {};
 }
 
-var server = try zix.Http2.Server.init(
+var server = zix.Http2.Server.init(
     &[_]zix.Http2.Route{
         .{ .path = "/", .handler = home },
     },

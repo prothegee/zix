@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 64;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
 const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
 
@@ -233,7 +232,7 @@ const Routes = [_]zix.Http.Route{
 pub fn main(process: std.process.Init) !void {
     createInitDirs(process.io);
 
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
@@ -241,7 +240,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .public_dir = PUBLIC_DIR,
         .public_dir_upload = UPLOAD_SUBDIR,
         .workers = WORKERS,

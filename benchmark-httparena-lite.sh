@@ -8,10 +8,15 @@
 # - Add h2c cells (baseline-h2c, json-h2c) at the actual HttpArena sweeps.
 # The patched copy runs and is removed on exit; paths resolve correctly.
 #
-# Args (flags can appear anywhere, positionals are <framework> [httparena-dir]):
+# Args (flags can appear anywhere, positionals are <framework> [profile] [httparena-dir]):
 #   <framework>       Required. Framework to benchmark (e.g., zix, zix-grpc).
+#   [profile]         Optional. Bench only this profile (e.g., baseline). Any
+#                     positional that is not an HttpArena folder is the profile,
+#                     so order does not matter. Validated before any build.
 #   [httparena-dir]   Optional. HttpArena folder (default: script's directory).
-#   --load-threads N  Optional. Load-gen threads (default: 4).
+#   --load-threads N  Optional. Load-gen threads. When omitted, nothing is
+#                     injected: benchmark-lite.sh applies its own default
+#                     (nproc/2, env THREADS also honored).
 #   --source MODE     Optional. "remote" (default, fetches branch) or "local".
 #   --zix-dir DIR     Optional. Local zix checkout for --source local (default: script's dir).
 #
@@ -23,16 +28,19 @@
 # for the HttpArena build hook.
 #
 # Usage:
-#   ./benchmark-httparena-lite.sh zix                              # this folder, 4 threads
+#   ./benchmark-httparena-lite.sh zix                              # this folder, all profiles
+#   ./benchmark-httparena-lite.sh zix baseline                     # only the baseline profile
 #   ./benchmark-httparena-lite.sh zix-grpc                         # gRPC suite
 #   ./benchmark-httparena-lite.sh zix --load-threads 6             # override threads
 #   ./benchmark-httparena-lite.sh zix-ws /path/HttpArena           # ws, other folder
+#   ./benchmark-httparena-lite.sh zix baseline /path/HttpArena     # one profile, other folder
 #   ./benchmark-httparena-lite.sh zix /path/HttpArena --source local --zix-dir /path/zix
 
 set -euo pipefail
 
-# Parse arguments: flags anywhere, positionals are <framework> [httparena-dir].
-LOAD_THREADS=4
+# Parse arguments: flags anywhere, positionals are <framework> [profile] [httparena-dir].
+# LOAD_THREADS empty = not given: benchmark-lite.sh applies its own default (nproc/2).
+LOAD_THREADS=
 SOURCE=remote
 ZIX_DIR=
 POSITIONAL=()
@@ -66,14 +74,45 @@ fi
 # <framework> is required.
 FRAMEWORK="${1:-}"
 if [ -z "$FRAMEWORK" ]; then
-    echo "usage: $(basename "$0") <framework> [httparena-dir] [--load-threads N]" >&2
+    echo "usage: $(basename "$0") <framework> [profile] [httparena-dir] [--load-threads N]" >&2
     echo "       <framework> is required (e.g. zix, zix-grpc, zix-ws)" >&2
     exit 1
 fi
+shift
 
-# [httparena-dir] defaults to this script's directory.
+# Classify the remaining positionals: an HttpArena folder (has scripts/benchmark-lite.sh)
+# is [httparena-dir], anything else is [profile]. Order does not matter.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${2:-$SELF_DIR}"
+REPO_DIR=
+PROFILE=
+for extra in "$@"; do
+    if [ -f "$extra/scripts/benchmark-lite.sh" ]; then
+        if [ -n "$REPO_DIR" ]; then
+            echo "error: httparena-dir given twice ('$REPO_DIR', '$extra')" >&2
+            exit 1
+        fi
+        REPO_DIR="$extra"
+    else
+        if [ -n "$PROFILE" ]; then
+            echo "error: profile given twice ('$PROFILE', '$extra')" >&2
+            exit 1
+        fi
+        PROFILE="$extra"
+    fi
+done
+REPO_DIR="${REPO_DIR:-$SELF_DIR}"
+
+# Validate [profile] against the patched profile set before any build starts.
+KNOWN_PROFILES="baseline pipelined limited-conn json json-comp json-tls upload static async-db baseline-h2 static-h2 baseline-h2c json-h2c baseline-h3 static-h3 unary-grpc unary-grpc-tls stream-grpc stream-grpc-tls echo-ws echo-ws-pipeline"
+if [ -n "$PROFILE" ]; then
+    case " $KNOWN_PROFILES " in
+        *" $PROFILE "*) ;;
+        *)
+            echo "error: unknown profile '$PROFILE'" >&2
+            echo "known profiles: $KNOWN_PROFILES" >&2
+            exit 1 ;;
+    esac
+fi
 
 # --zix-dir defaults to this script's directory.
 ZIX_DIR="${ZIX_DIR:-$SELF_DIR}"
@@ -211,8 +250,15 @@ if [ "${TUNE:-false}" != "true" ]; then
 fi
 chmod +x "$PATCHED"
 
+# Forward only what was given: --load-threads when the user typed it, [profile]
+# when set. Otherwise benchmark-lite.sh applies its own defaults.
+RUN_ARGS=()
+[ -n "$LOAD_THREADS" ] && RUN_ARGS+=(--load-threads "$LOAD_THREADS")
+RUN_ARGS+=("$FRAMEWORK")
+[ -n "$PROFILE" ] && RUN_ARGS+=("$PROFILE")
+
 if [ "${TUNE:-false}" = "true" ]; then
-    sudo -E "$PATCHED" --load-threads "$LOAD_THREADS" "$FRAMEWORK"
+    sudo -E "$PATCHED" "${RUN_ARGS[@]}"
 else
-    "$PATCHED" --load-threads "$LOAD_THREADS" "$FRAMEWORK"
+    "$PATCHED" "${RUN_ARGS[@]}"
 fi

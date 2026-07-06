@@ -607,11 +607,17 @@ fn handleOneRequest(
     return processRequest(server, stream, fd, io, buf_read[0..filled], arena);
 }
 
+/// Stack read-buffer cap for the thread models (POOL / MIXED / ASYNC): a connection whose
+/// max_recv_buf fits within this reads on the connection thread stack, a larger max_recv_buf
+/// heap-allocates from smp_allocator. max_recv_buf (config) is the tuning knob, this cap only
+/// bounds the comptime-sized stack array.
+pub const stack_read_buf_max: usize = 4096;
+
 /// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
 ///
 /// Note:
 /// - Sets TCP_NODELAY immediately on accepted connection
-/// - Stack-allocates the read buffer when max_recv_buf <= stack_threshold,
+/// - Stack-allocates the read buffer when max_recv_buf <= stack_read_buf_max,
 ///   heap-allocates from smp_allocator otherwise
 /// - Per-connection arena is pre-warmed with max_allocator_size then reset
 ///   with retain_capacity before the loop, first request pays no heap cost
@@ -620,12 +626,11 @@ fn handleOneRequest(
 /// Param:
 /// stream - std.Io.net.Stream
 /// io - std.Io
-/// server - anytype (pointer to the HttpServerImpl instance, carries stack_buf_threshold)
+/// server - anytype (pointer to the HttpServerImpl instance)
 pub fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: anytype) void {
     defer stream.close(io);
     setNoDelay(stream.socket.handle);
 
-    const stack_threshold = @TypeOf(server.*).stack_buf_threshold;
     const cfg = server.config;
     const fd = stream.socket.handle;
 
@@ -643,13 +648,13 @@ pub fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: anytype) 
     }
     defer if (maybe_conn_entry != null) server.registry.deregister(&maybe_conn_entry.?, io);
 
-    // Read buffer: stack when max_recv_buf <= stack_threshold, heap otherwise.
-    var stack_read: [stack_threshold]u8 = undefined;
-    const buf_read = if (cfg.max_recv_buf <= stack_threshold)
+    // Read buffer: stack when max_recv_buf <= stack_read_buf_max, heap otherwise.
+    var stack_read: [stack_read_buf_max]u8 = undefined;
+    const buf_read = if (cfg.max_recv_buf <= stack_read_buf_max)
         stack_read[0..cfg.max_recv_buf]
     else
         std.heap.smp_allocator.alloc(u8, cfg.max_recv_buf) catch return;
-    defer if (cfg.max_recv_buf > stack_threshold) std.heap.smp_allocator.free(buf_read);
+    defer if (cfg.max_recv_buf > stack_read_buf_max) std.heap.smp_allocator.free(buf_read);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();

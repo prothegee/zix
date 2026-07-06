@@ -26,7 +26,7 @@ test "zix integration: dispatch, exact match routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/about", .handler = handlerA },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
@@ -44,7 +44,7 @@ test "zix integration: dispatch, param populates path_params" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
@@ -64,7 +64,7 @@ test "zix integration: dispatch, two path params both populated" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/orgs/:org/repos/:repo", .handler = handlerA, .kind = .PARAM },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
@@ -83,7 +83,7 @@ test "zix integration: dispatch, prefix routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/static", .handler = handlerA, .kind = .PREFIX },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();

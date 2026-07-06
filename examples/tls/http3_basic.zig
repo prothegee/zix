@@ -113,8 +113,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    const Server = zix.Http3.Http3(Routes.dispatch);
-    var server = try Server.init(.{
+    var server = zix.Http3.Server.init(Routes.dispatch, .{
         .io = process.io,
         .allocator = std.heap.smp_allocator,
         .ip = IP,

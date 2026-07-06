@@ -216,7 +216,7 @@ Model `.ASYNC` engine v1 menjalankan satu worker yang memiliki seluruh table, ja
 
 ## server.zig dan dispatch/
 
-`Http3(handler)` (server.zig) adalah facade tipis: `init` memvalidasi (`error.PortNotConfigured` pada port nol, `error.TlsRequired` pada TLS context null), `run` switch pada `config.dispatch_model` ke entry point per-model `dispatch/`. Semua model Linux-only.
+`Server.init(handler, config)` (server.zig) adalah facade tipis: `init` menyimpan config, `run` memvalidasi (`error.PortNotConfigured` pada port nol, `error.TlsRequired` pada TLS context null) lalu switch pada `config.dispatch_model` ke entry point per-model `dispatch/`. Semua model Linux-only.
 
 - `dispatch/common.zig`: machinery bersama. `workerLoop` (recvmmsg masuk, `serveDatagram` per datagram, sendmmsg keluar), `runSingle` (satu worker di thread pemanggil, ASYNC), `runMulti` (satu thread SO_REUSEPORT per CPU, dipin, POOL / MIXED). `processDatagram` men-demux berdasarkan DCID dan mendekripsi (`openInitial` / `openHandshake` / `openShort`). `serveDatagram` menggerakkan langkah yang cocok: `sendServerHello` pada ClientHello lengkap, atau `sendResponse` pada request 1-RTT. `sendResponse` menerapkan ACK (memberi makan `onAckFrame`), mem-parse request, mengisi-ulang bidi stream credit, menggabung ACK + HANDSHAKE_DONE + SETTINGS + MAX_STREAMS + response kecil ke satu packet ter-seal (budget `COALESCE_PAYLOAD_MAX`), mendaftar body besar sebagai `SendStream`, dan `pumpStream` tiap stream aktif dalam congestion window. `sweepMaintenance` menjalankan `onMaintenance` per connection pada interval terbatas, meretransmit flight yang PTO-expired dan mengevict connection idle / closed.
 - `dispatch/async.zig`, `pool.zig`, `mixed.zig`: wrapper tipis ke `runSingle` / `runMulti`.

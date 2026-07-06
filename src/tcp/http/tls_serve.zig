@@ -590,7 +590,7 @@ test "zix test: http tls_serve, processRequestToBuffer captures the router respo
         .{ .path = "/", .handler = tlsTestHandler },
         .{ .path = "/sse", .handler = tlsStreamHandler },
     };
-    var server = try HttpServerImpl.init(4096, &routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    var server = HttpServerImpl.init(&routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -631,7 +631,7 @@ test "zix test: http tls_serve, processRequestToBuffer streams over TLS when the
     const routes = [_]Route{
         .{ .path = "/sse", .handler = tlsStreamHandler },
     };
-    var server = try HttpServerImpl.init(4096, &routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    var server = HttpServerImpl.init(&routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

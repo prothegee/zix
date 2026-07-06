@@ -23,13 +23,11 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
         config: GrpcServerConfig,
 
-        /// Initialize the gRPC server with the given config.
+        /// Initialize the gRPC server with the given config. Validation happens in run.
         ///
         /// Return:
-        /// - !Self (error.PortNotConfigured if config.port is 0)
-        pub fn init(config: GrpcServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
-
+        /// - Self
+        pub fn init(config: GrpcServerConfig) Self {
             return .{ .config = config };
         }
 
@@ -42,7 +40,10 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         ///
         /// Return:
         /// - !void
+        /// - error.PortNotConfigured if config.port is 0
         pub fn run(self: *Self) !void {
+            if (self.config.port == 0) return error.PortNotConfigured;
+
             const cfg = self.config;
 
             if (cfg.tls != null) {
@@ -86,7 +87,7 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 ///
 /// Usage:
 /// ```zig
-/// var server = try zix.Grpc.Server.init(
+/// var server = zix.Grpc.Server.init(
 ///     &[_]zix.Grpc.Route{
 ///         .{ .path = "/pkg.Svc/Method", .handler = myHandler },
 ///     },
@@ -99,7 +100,7 @@ pub const GrpcServer = struct {
     pub fn init(
         comptime routes: []const Route,
         config: GrpcServerConfig,
-    ) !GrpcServerImpl(routes) {
+    ) GrpcServerImpl(routes) {
         return GrpcServerImpl(routes).init(config);
     }
 };
@@ -107,15 +108,15 @@ pub const GrpcServer = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix grpc: GrpcServer.init port zero returns PortNotConfigured" {
+test "zix grpc: GrpcServer.run port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try std.testing.expectError(
-        error.PortNotConfigured,
-        GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
-    );
+    var server = GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    try std.testing.expectError(error.PortNotConfigured, server.run());
 }
 
 test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {
@@ -123,7 +124,7 @@ test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
+    var server = GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
     server.deinit();
 }
 

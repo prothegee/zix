@@ -634,7 +634,7 @@ pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 }
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io   = process.io,
@@ -655,7 +655,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io             = threaded.io(),
@@ -696,7 +696,7 @@ pub fn main() !void {
 Rute didaftarkan pada waktu kompilasi via tabel rute yang diteruskan ke `Server.init`. Setiap entri `Route` memiliki `path`, `handler`, dan `kind` opsional (`.EXACT` secara default):
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     // exact (default): hanya cocok dengan /about
 
@@ -721,7 +721,7 @@ exact  >  param  >  prefix (prefix lebih panjang mengalahkan yang lebih pendek)
 Prioritas exact dan prefix tidak bergantung pada urutan pendaftaran. **Rute param adalah pengecualian**: ketika dua pola memiliki jumlah segmen yang sama dan keduanya cocok, entri pertama dalam tabel rute yang menang. Daftarkan pola yang lebih literal sebelum pola all-param dengan kedalaman yang sama:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     // Urutan yang benar: /path/user/:id menang untuk /path/user/alice
     .{ .path = "/path/user/:id",        .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/path/:tenant/:branch", .handler = tenantHandler, .kind = .PARAM },
@@ -785,7 +785,7 @@ N accept thread mendorong koneksi ke `ConnQueue` bersama. M pool thread mengambi
 
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io = process.io,
@@ -800,7 +800,7 @@ pub fn main(process: std.process.Init) !void {
 Satu accept thread mendispatch setiap koneksi via `io.async()`. `workers` dan `pool_size` diabaikan. Diutamakan untuk SSE dan WebSocket (koneksi long-lived tidak menahan pool thread). Cocok juga untuk `concurrent_limit` eksplisit.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -813,7 +813,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 N accept thread masing-masing mendispatch koneksi via `io.async()` secara langsung, tanpa `ConnQueue`. Throughput dan latensi seimbang. `pool_size` diabaikan.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -826,7 +826,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 Setiap worker memiliki `SO_REUSEPORT` listener dan satu `epoll` instance tersendiri. Kernel mendistribusikan koneksi baru ke worker. Tidak ada antrian bersama, tidak ada mutex, tidak ada handoff fd antar thread. Level-triggered `EPOLLIN` menjaga koneksi tetap terdaftar setelah setiap request tanpa re-arm eksplisit. Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk request berumur pendek throughput tinggi di Linux. Build non-Linux otomatis fallback ke `.POOL`.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -840,7 +840,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, ADR-041, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.POOL` / `.EPOLL`. Build non-Linux fallback ke `.POOL`.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .io             = process.io,
@@ -882,7 +882,7 @@ Dua lapisan timeout independen, keduanya dinonaktifkan secara default (`0`):
 **`handler_timeout_ms`**: anggaran eksekusi per-handler (Layer B). Mengatur `ctx.deadline` sebelum setiap dispatch. Handler ikut serta dengan memanggil `ctx.isExpired()` di antara langkah-langkah yang mahal.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/slow", .handler = slowHandler },
 }, .{
     .io                 = process.io,
@@ -964,7 +964,7 @@ fn withBasicAuth(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Susun dari kiri ke kanan, wrapper paling luar dijalankan pertama:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     // hanya pengecekan origin
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     // pengecekan origin -> basic auth -> handler
@@ -1026,7 +1026,7 @@ pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
     }, .{ .io = process.io, .ip = "127.0.0.1", .port = 9008 });
     defer server.deinit();
@@ -1050,7 +1050,7 @@ wscat    -c "ws://localhost:9008/ws/lobby"
 **Menggabungkan HTTP, static, dan WebSocket dalam satu server**: daftarkan semua tipe handler bersamaan, routing menangani dispatch. Rute yang tidak cocok diteruskan ke static serving:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/",          .handler = homeHandler },
     .{ .path = "/api",       .handler = apiHandler,  .kind = .PREFIX },
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
@@ -1103,7 +1103,7 @@ pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 **Model dispatch:** gunakan `.ASYNC`. Koneksi SSE bersifat long-lived: mereka akan menghabiskan blocking pool (`.POOL`) satu thread per stream yang terbuka. `.ASYNC` mendispatch setiap koneksi via `io.async()`, menjaga pool thread tetap bebas.
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }, .{
     .io             = process.io,
@@ -1207,7 +1207,7 @@ fn createInitDirs(io: std.Io) void {
 pub fn main(process: std.process.Init) !void {
     createInitDirs(process.io); // idempoten, aman dipanggil setiap start
 
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/upload", .handler = uploadHandler },
     }, .{
         .io                = process.io,
@@ -1269,7 +1269,7 @@ curl -X POST "http://localhost:9005/upload" \
 | `.{ .CUSTOM = N }` | N | Cap eksplisit, dialokasikan arena tepat N slot per permintaan |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .max_response_headers = .LARGE,                // 64 header
@@ -1303,7 +1303,7 @@ var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
 | `.{ .CUSTOM = N }` | N (dibatasi 64) | Cap eksplisit nilai di atas 64 secara diam-diam dibatasi ke batas parser |
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
 }, .{
     .max_request_headers = .COMMON,                // 32 header
@@ -1331,7 +1331,7 @@ Apa yang menjadi key dan nilai yang di-cache bergantung pada engine:
 Secara default fitur ini mati. Aktifkan pada dispatch model `.EPOLL` atau `.URING`:
 
 ```zig
-var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+var server = zix.Http.Server.init(&[_]zix.Http.Route{
     .{ .path = "/report", .handler = reportHandler },
 }, .{
     .ip = "0.0.0.0",
@@ -1453,7 +1453,7 @@ fn sayHelloHandler(
 }
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Grpc.Server.init(
+    var server = zix.Grpc.Server.init(
         &[_]zix.Grpc.Route{
             .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler },
         },
@@ -1516,7 +1516,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 **Timeout context:** Tiga input, yang paling ketat menang:
 
 ```zig
-var server = try zix.Grpc.Server.init(
+var server = zix.Grpc.Server.init(
     &[_]zix.Grpc.Route{
         // cap per-rute 3 detik, memperketat cap global 5 detik
         .{ .path = "/helloworld.Greeter/SayHello", .handler = sayHelloHandler, .timeout_ms = 3_000 },
@@ -2005,8 +2005,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    const Server = zix.Http3.Http3(Routes.dispatch);
-    var server = try Server.init(.{
+    var server = zix.Http3.Server.init(Routes.dispatch, .{
         .io             = process.io,
         .allocator      = std.heap.smp_allocator,
         .ip             = "127.0.0.1",
@@ -2029,7 +2028,7 @@ curl --http3-only -k https://127.0.0.1:9063/
 
 - `req.method` dan `req.path` diisi dari wire. Body response yang diserahkan ke `res.send` disalin setelah handler kembali, jadi boleh menunjuk ke memori static atau milik handler.
 - `req.accept_encoding` membawa Accept-Encoding klien (kosong jika tidak ada). Handler menegosiasi body pre-compressed terhadapnya lalu memanggil `res.setContentEncoding(.br)` (atau `.gzip`), yang memancarkan header response `content-encoding`. Engine tidak pernah mengompresi di jalur kirim: `res.body` harus sudah ter-encode (menyajikan file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request.
-- `init` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak.
+- `run()` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak (`init` hanya menyimpan config).
 
 **Dispatch model** (Linux-only): `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 fase 3).
 
@@ -2072,7 +2071,7 @@ pub fn main(process: std.process.Init) !void {
     logger.system(.ERROR, "db",      "connect failed: {}", .{error.ConnectionRefused});
 
     // Pasangkan ke server HTTP untuk logging akses per-permintaan otomatis
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
     }, .{
         .io     = process.io,
@@ -2137,25 +2136,33 @@ Project repo: https://github.com/MDA2AV/HttpArena <br>
 
 <div align="left">
     <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
     </a>
-</div>
-<br>
-<div align="left">
+    &nbsp;&nbsp;
     <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
     </a>
 </div>
 <br>
 <div align="left">
+    <!-- <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0" target="_blank" rel="noopener noreferrer"> -->
+    <!--     <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44"> -->
+    <!-- </a> -->
+    <!-- &nbsp;&nbsp; -->
     <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" width="235">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
     </a>
 </div>
+<!-- <br> -->
+<!-- <div align="left"> -->
+<!--     <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0" target="_blank" rel="noopener noreferrer"> -->
+<!--         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44"> -->
+<!--     </a> -->
+<!-- </div> -->
 <br>
 
 > Ketika pengukuran performa tidak dipersempit, asumsi beban kerja kita tidak bisa diukur,
-> perilaku CPU 8-12 core berbeda dengan 32-64 core. Berkat proyek HttpArena, zix bisa diukur pada beban kerja besar.
+> perilaku CPU 6-12 core berbeda dengan 32-64 core. Berkat proyek HttpArena, zix bisa diukur pada beban kerja besar.
 
 > Benchmark historis disimpan di dalam direktori `docs/benchmark`.
 

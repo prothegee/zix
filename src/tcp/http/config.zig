@@ -66,8 +66,6 @@ pub const HttpServerConfig = struct {
     compression_max_out: usize = 256 * 1024,
     /// Initial arena capacity in bytes per connection. Grows automatically if exceeded.
     max_allocator_size: usize = 1024 * 4,
-    /// Write buffer size in bytes per response.
-    max_client_response: usize = 1024 * 4,
     /// Maximum request headers accepted per request. Requests exceeding this are rejected with 431.
     /// CUSTOM values above 64 are silently capped at the parser storage limit (64).
     /// See RequestHeaderSize for tier guidance.

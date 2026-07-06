@@ -26,7 +26,6 @@ const SOCK_PATH: []const u8 = "/tmp/zix.sock";
 const KERNEL_BACKLOG: usize = 1024;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 8;
 
 // --------------------------------------------------------- //
 
@@ -170,14 +169,13 @@ pub fn main(process: std.process.Init) !void {
         std.debug.print("uds_http: fetcher spawn error: {}\n", .{err});
     }
 
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = io,
         .ip = IP,
         .port = PORT,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .dispatch_model = .ASYNC, // .ASYNC preferred for SSE: long-lived connections do not hold pool threads
     });
     defer server.deinit();

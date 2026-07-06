@@ -8,9 +8,9 @@ Detail implementasi internal untuk lapisan HTTP. Untuk dasar pertimbangan desain
 
 ### API Publik
 
-`Server` adalah namespace struct dengan satu `pub fn init(comptime stack_threshold: usize, config: Config) !HttpServerImpl(stack_threshold)`. `HttpServerImpl` adalah generik privat. Pemanggil menggunakan `var server = try zix.Http.Server.init(4096, .{...})` tanpa menyebutkan tipe generiknya.
+`Server` adalah namespace struct dengan satu `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. `HttpServerImpl` adalah generik privat. Pemanggil menggunakan `var server = zix.Http.Server.init(&routes, .{...})` tanpa menyebutkan tipe generiknya.
 
-`HttpServerImpl.init(config)` menyimpan config dan mengalokasi `Router` dari `config.allocator`. Tidak membuka socket apa pun: socket dibuka di `run()`.
+`HttpServerImpl.init(config)` menyimpan config, tidak ada yang lain: `Router` dibaked comptime ke dalam tipe (berukuran nol saat runtime) dan tidak ada socket yang dibuka. Socket dibuka di `run()`.
 
 ### ConnQueue
 
@@ -117,11 +117,9 @@ loop:
 2. Layer D: if conn_timeout_ms > 0:
       daftarkan ConnEntry{ stream, deadline = now + conn_timeout_ms } ke self.registry
       defer deregister saat return (tandai done=true, hapus dari registry)
-3. stack_read / stack_write [stack_threshold]u8 pada stack
-   read_buf  = if max_recv_buf  <= stack_threshold: slice stack
+3. stack_read [stack_read_buf_max]u8 pada stack (stack_read_buf_max = 4096, dispatch/common)
+   read_buf  = if max_recv_buf <= stack_read_buf_max: slice stack
                else smp_allocator.alloc(u8, max_recv_buf)
-   write_buf = if max_client_response <= stack_threshold: slice stack
-               else smp_allocator.alloc(u8, max_client_response)
 4. defer: bebaskan heap jika dialokasi di heap, stream.close()
 5. std.http.Server.init(&reader.interface, &writer.interface)
 6. ArenaAllocator.init(smp_allocator), pre-warm dengan max_allocator_size, reset(.retain_capacity)

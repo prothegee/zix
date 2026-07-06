@@ -6,7 +6,6 @@ const PORT: u16 = 9014;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 
 // 0 means unlimited concurrent tasks (auto from CPU count).
 // Any other value pins the max concurrent task limit.
@@ -47,14 +46,14 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // Comparison:
 // Auto (default in other examples):
 // pub fn main(process: std.process.Init) !void {
-//     var server = try zix.Http.Server.init(4096, &Routes, .{ .io = process.io, ... });
+//     var server = zix.Http.Server.init(&Routes, .{ .io = process.io, ... });
 //     // ...
 // }
 //
 // Manual (this example):
 // pub fn main() !void {
 //     var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//     var server = try zix.Http.Server.init(4096, &Routes, .{ .io = threaded.io(), ... });
+//     var server = zix.Http.Server.init(&Routes, .{ .io = threaded.io(), ... });
 //     // ...
 // }
 
@@ -74,7 +73,7 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = threaded.io(),
         .ip = IP,
         .port = PORT,
@@ -82,7 +81,6 @@ pub fn main() !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
     });
     defer server.deinit();

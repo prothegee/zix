@@ -58,7 +58,7 @@ Doc comments tag each file by layer: C (crypto bottom), Q (QUIC transport), T (T
 graph TD
     zix["src/lib.zig"] --> H3["udp/http3/Http3.zig\nzix.Http3"]
 
-    H3 --> server["server.zig\nHttp3(handler) facade\nrun() switch"]
+    H3 --> server["server.zig\nServer.init(handler, config)\nrun() switch"]
     H3 --> config["config.zig\nHttp3ServerConfig, DispatchModel"]
     H3 --> router["router.zig\nRouter, Route, pathParam"]
     H3 --> core["core.zig\nHandlerFn, Request, Response"]
@@ -84,7 +84,7 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http3.Http3(handler)` | generic fn | Returns the HTTP/3 server type, the handler baked in at comptime |
+| `zix.Http3.Server` | struct | `Server.init(handler, config)` returns the server, the handler baked in at comptime |
 | `zix.Http3.HandlerFn` | fn type | `fn(req: *const Request, res: *Response) void` |
 | `zix.Http3.Request` | struct | Decoded request: `method`, `path`, `authority`, `body` |
 | `zix.Http3.Response` | struct | Handler-filled response: `status`, `body`, `content_type` |
@@ -96,12 +96,12 @@ Access via `const zix = @import("zix");`
 
 Low-level primitives, exposed so a peer can build the other side of the wire: `crypto`, `protection`, `keyschedule`, `qpack`, `huffman`, `packet`, `varint`, `frame`, plus `tls_key_schedule`.
 
-### Http3(handler) methods
+### Server methods
 
 | Method | Description |
 | :- | :- |
-| `init(config)` | Rejects a zero port (`error.PortNotConfigured`) and a null TLS context (`error.TlsRequired`). Validation happens at `init`, not `run`. |
-| `run()` | Bind and serve on the model in `config.dispatch_model`. Blocks until an error. Linux-only. |
+| `init(handler, config)` | Stores the config, no validation and no error. Mirrors `zix.Http1.Server.init`. |
+| `run()` | Validates first (`error.PortNotConfigured` on a zero port, `error.TlsRequired` on a null TLS context), then binds and serves on the model in `config.dispatch_model`. Blocks until an error. Linux-only. |
 | `deinit()` | Release resources (no-op today, kept for API symmetry). |
 
 ---
@@ -127,7 +127,7 @@ pub const Http3ServerConfig = struct {
     socket_sndbuf:           usize = 4 * 1024 * 1024, // requested SO_SNDBUF (kernel clamps)
     gso_enabled:             bool  = true,       // UDP GSO on send, probed at worker start
 
-    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), required, null rejected at init
+    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), required, null rejected at run
 
     cid_len:              u8    = 8,     // server-issued connection-id length (RFC 9000 5.1)
     max_idle_ms:          u32   = 30000, // idle timeout (RFC 9000 10.1)
@@ -156,7 +156,7 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
     .{ .path = "/static",    .handler = files, .kind = .PREFIX },
 });
 
-const Server = zix.Http3.Http3(Routes.dispatch);
+var server = zix.Http3.Server.init(Routes.dispatch, config);
 ```
 
 | Kind | Match | Lookup |
@@ -165,7 +165,7 @@ const Server = zix.Http3.Http3(Routes.dispatch);
 | `PARAM` | `:name` segments capture, other segments must match | first registered match wins, read with `pathParam("name")` |
 | `PREFIX` | Longest registered prefix on a `/` boundary | longest match wins |
 
-The query string is stripped before matching (matching sees the path up to `?`), the handler still receives the full path. An unmatched path returns `404 Not Found`. `Routes.dispatch` is itself a `HandlerFn`, so it plugs straight into `Http3(handler)`. A single bare handler works too (no router).
+The query string is stripped before matching (matching sees the path up to `?`), the handler still receives the full path. An unmatched path returns `404 Not Found`. `Routes.dispatch` is itself a `HandlerFn`, so it plugs straight into `Server.init`. A single bare handler works too (no router).
 
 ---
 

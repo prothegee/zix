@@ -172,19 +172,19 @@ test "zix integration: Http2Server.init and deinit do not error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
+    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
-test "zix integration: Http2Server.init port zero returns PortNotConfigured" {
+test "zix integration: Http2Server.run port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try std.testing.expectError(
-        error.PortNotConfigured,
-        zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
-    );
+    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    try std.testing.expectError(error.PortNotConfigured, server.run());
 }
 
 test "zix integration: Http2 HandlerFn type is a function pointer" {

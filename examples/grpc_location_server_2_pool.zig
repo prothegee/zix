@@ -74,7 +74,7 @@ const Routes = [_]zix.Grpc.Route{
 };
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Grpc.Server.init(
+    var server = zix.Grpc.Server.init(
         &Routes,
         .{
             .io = process.io,

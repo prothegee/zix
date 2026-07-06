@@ -3,7 +3,7 @@
 Layout and structure notes: the choices already made, plus directions to revisit. Not active tasks.
 
 **CT (Compile Time):**<br>
-Zix pushes work to `comptime` whenever the input is fixed at build time. Route tables are partitioned and dispatch is specialized per route set (`Router(comptime routes)`, `HttpServerImpl(comptime stack_threshold, comptime routes)`), and version differences are gated out with `ZIG_SEMVER` (`comptime ZIG_SEMVER.MINOR == 16`) so only the active branch is compiled. The trade is build-time work and binary size for zero runtime branching on the hot path.
+Zix pushes work to `comptime` whenever the input is fixed at build time. Route tables are partitioned and dispatch is specialized per route set (`Router(comptime routes)`, `HttpServerImpl(comptime routes)`), and version differences are gated out with `ZIG_SEMVER` (`comptime ZIG_SEMVER.MINOR == 16`) so only the active branch is compiled. The trade is build-time work and binary size for zero runtime branching on the hot path.
 
 > Use it when an input is known at build time: prefer a comptime parameter or branch over a runtime field or check.
 

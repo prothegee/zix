@@ -27,7 +27,7 @@ test "zix behaviour: dispatch, exact beats param regardless of registration orde
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerB, .kind = .PARAM },
         .{ .path = "/users/alice", .handler = handlerA },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
@@ -46,7 +46,7 @@ test "zix behaviour: dispatch, param beats prefix regardless of registration ord
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/:resource", .handler = handlerA, .kind = .PARAM },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
@@ -65,7 +65,7 @@ test "zix behaviour: dispatch, prefix: longest match wins" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/users", .handler = handlerA, .kind = .PREFIX },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
@@ -84,7 +84,7 @@ test "zix behaviour: dispatch, prefix matches its own path exactly" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerA, .kind = .PREFIX },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
@@ -102,7 +102,7 @@ test "zix behaviour: dispatch, query string transparent to path matching (param)
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();
@@ -119,7 +119,7 @@ test "zix behaviour: dispatch, query string transparent to path matching (exact)
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const al = arena.allocator();
-    var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+    var server = zix.Http.Server.init(&[_]zix.Http.Route{
         .{ .path = "/about", .handler = handlerA },
     }, .{ .io = undefined, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
     defer server.deinit();

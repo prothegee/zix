@@ -39,7 +39,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | io | required | std.Io backend, must outlive the server | | | | | must be provided |
 | ip | required | bind address | | | | | |
-| port | required | bind port, must be non-zero | | | | | zero is rejected at init |
+| port | required | bind port, must be non-zero | | | | | zero is not validated: binds a kernel-chosen ephemeral port |
 | dispatch_model | required | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, non-Linux folds to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog before accept() | kernel accept queue depth | raise under bursty connection storms | new connections dropped during a burst | more kernel memory for the queue | too low drops connections during spikes |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
@@ -137,7 +137,7 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
-| port | required | bind port, non-zero | | | | | zero is rejected |
+| port | required | bind port, non-zero | | | | | zero is not validated: binds a kernel-chosen ephemeral port |
 | dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
 | kernel_backlog | 4096 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
@@ -150,7 +150,6 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | compression_min_size | 256 | min body size before compression | per-response check | raise to skip small bodies | small bodies compressed | larger bodies skip compression | too low wastes CPU |
 | compression_max_out | 262144 | max compressed output bytes | per-response cap | raise for larger bodies | larger bodies uncompressed | more CPU before bailing | over this is sent uncompressed |
 | max_allocator_size | 4096 | initial arena capacity per connection, grows if exceeded | per-conn memory, reallocation | raise to avoid early arena growth | more arena growth events | more idle memory per connection | grows automatically anyway |
-| max_client_response | 4096 | write buffer per response | per-response memory | raise for larger responses | smaller single-write responses | more memory per response | caps a single response write |
 | max_request_headers | `.LARGE` | max request headers, over-tier rejected with 431 | parse storage | raise the tier for header-heavy clients | header-heavy requests rejected | more parse storage | custom values above 64 are capped at 64 |
 | max_response_headers | `.MINIMAL` (16) | max custom response headers, arena-allocated to this size | per-response memory | raise the tier for many custom headers | extra headers cannot be set | more per-response memory | sized exactly per request |
 | public_dir | "" | root directory for static file serving, empty disables it | disk I/O on static hits | set to serve static files | | | empty disables static serving |
@@ -313,7 +312,7 @@ Build one Logger with this config and attach it by pointer to any engine's `logg
 
 ## Notes
 
-- Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) have no default and must be set. A zero `port` is rejected at init.
+- Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) have no default and must be set. A zero `port` is rejected at init by `zix.Tcp` / `zix.Udp` / `zix.Fix` (and their clients), and at `run()` by `zix.Http2` / `zix.Grpc` / `zix.Http3`. `zix.Http1` and `zix.Http` do not validate it (port 0 binds a kernel-chosen ephemeral port).
 - `io`, `logger`, and `tls` are caller-owned: they are passed by handle or pointer and must outlive the server.
 - `.EPOLL` and `.URING` are Linux-only. Off Linux they fold to `.POOL` (HTTP/2 also folds to `.POOL` on Linux for the TLS path).
 - The compression and response-cache features are active only under `.EPOLL` and `.URING` (shared-nothing, one owner per worker).

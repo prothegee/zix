@@ -110,13 +110,15 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
     try std.testing.expect(ctx.err == null);
 }
 
-test "zix edge: Http2Server.init rejects port zero" {
+test "zix edge: Http2Server.run rejects port zero" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const result = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
-    try std.testing.expectError(error.PortNotConfigured, result);
+    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    try std.testing.expectError(error.PortNotConfigured, server.run());
 }
 
 test "zix edge: HpackDecoder decode of empty block returns zero headers" {
