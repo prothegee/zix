@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Tcp.DispatchModel = .MIXED;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
 const POOL_SIZE: usize = 0; // ignored by .MIXED
 
@@ -85,7 +84,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
@@ -93,7 +92,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
         // .logger = &logger, // uncomment to wire logger (automatic HTTP access logging)

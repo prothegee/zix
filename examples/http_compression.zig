@@ -9,7 +9,6 @@ const DISPATCH_MODEL: zix.Http.DispatchModel = .EPOLL;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const COMPRESSION_MIN_SIZE: usize = 256;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const WORKERS: usize = 0; // 0 = cpu_count epoll workers
@@ -113,7 +112,7 @@ const Routes = [_]zix.Http.Route{
 };
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
@@ -121,7 +120,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .compress = true,
         .compression_min_size = COMPRESSION_MIN_SIZE,
         .compression_max_out = COMPRESSION_MAX_OUT,

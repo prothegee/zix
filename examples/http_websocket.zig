@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 8; // 8 KB read buffer per connection
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const MAX_CLIENT_RESPONSE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .ASYNC
 const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
@@ -169,7 +168,7 @@ pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var server = try zix.Http.Server.init(4096, &Routes, .{
+    var server = zix.Http.Server.init(&Routes, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
@@ -177,7 +176,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .max_client_response = MAX_CLIENT_RESPONSE,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });

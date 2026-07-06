@@ -25,18 +25,14 @@ const tls_mux = @import("tls_mux.zig");
 
 // --------------------------------------------------------- //
 
-// Internal generic implementation: use `Server.init(stack_threshold, routes, config)` publicly.
-fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Route) type {
+// Internal generic implementation: use `Server.init(routes, config)` publicly.
+fn HttpServerImpl(comptime routes: []const Route) type {
     return struct {
         config: Config,
         router: Router(routes) = .{},
         registry: common.ConnRegistry = .{},
 
         const Self = @This();
-
-        /// Stack buffer cutoff, read by dispatch/common.handleConnection to size
-        /// the per-connection read buffer when it fits on the thread stack.
-        pub const stack_buf_threshold = stack_threshold;
 
         // --------------------------------------------------------- //
 
@@ -64,8 +60,8 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
         /// config - HttpServerConfig
         ///
         /// Return:
-        /// - !Self
-        pub fn init(config: Config) !Self {
+        /// - Self
+        pub fn init(config: Config) Self {
             return .{ .config = config };
         }
 
@@ -136,22 +132,21 @@ fn HttpServerImpl(comptime stack_threshold: usize, comptime routes: []const Rout
 
 // --------------------------------------------------------- //
 
-/// HTTP server: initialize with a comptime stack buffer threshold and comptime route table
+/// HTTP server: initialize with a comptime route table
 ///
 /// Note:
-/// - stack_threshold sets the cutoff for stack vs heap I/O buffers per connection:
-///   if max_recv_buf fits within stack_threshold the buffer lives on the
-///   connection thread stack, otherwise heap-allocated
-/// - stack_threshold must be comptime so Zig can size the stack arrays at compile time
 /// - routes must be comptime: the router is baked into the server type at compile time
 ///   (no heap allocation, no dynamic registration after init)
+/// - The per-connection read buffer lives on the connection thread stack when
+///   max_recv_buf <= dispatch/common.stack_read_buf_max (4096), otherwise it
+///   heap-allocates. max_recv_buf (config) is the tuning knob.
 /// - workers in config controls accept thread count:
 ///   0 (default) = cpu_count accept threads, max(10, cpu_count * 2) pool threads.
 ///   N           = exactly N accept threads, same pool sizing formula.
 ///
 /// Usage:
 /// ```zig
-/// var server = try zix.Http.Server.init(4096, &[_]zix.Http.Route{
+/// var server = zix.Http.Server.init(&[_]zix.Http.Route{
 ///     .{ .path = "/",      .handler = homeHandler },
 ///     .{ .path = "/api",   .handler = apiHandler,  .kind = .PREFIX },
 ///     .{ .path = "/u/:id", .handler = userHandler, .kind = .PARAM },
@@ -161,18 +156,16 @@ pub const Server = struct {
     /// Initialize the HTTP server
     ///
     /// Param:
-    /// stack_threshold - comptime usize (stack buffer size cutoff, e.g. 4096)
     /// routes - comptime []const Route (route table baked into server type)
     /// config - HttpServerConfig
     ///
     /// Return:
-    /// - !HttpServerImpl(stack_threshold, routes)
+    /// - HttpServerImpl(routes)
     pub fn init(
-        comptime stack_threshold: usize,
         comptime routes: []const Route,
         config: Config,
-    ) !HttpServerImpl(stack_threshold, routes) {
-        return HttpServerImpl(stack_threshold, routes).init(config);
+    ) HttpServerImpl(routes) {
+        return HttpServerImpl(routes).init(config);
     }
 };
 
@@ -274,8 +267,8 @@ test "zix http: EPOLL processRequest serves a cache miss then a hit" {
     defer setCache(null, 0);
 
     const routes = [_]Route{.{ .path = "/cached", .handler = cacheRouteHandler }};
-    const ServerImpl = HttpServerImpl(4096, &routes);
-    var server = try ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .response_cache = true });
+    const ServerImpl = HttpServerImpl(&routes);
+    var server = ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .response_cache = true });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
