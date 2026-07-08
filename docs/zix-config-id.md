@@ -67,6 +67,7 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | cache_ttl_ms | 1000 | kesegaran cache default (ms) | hit rate cache vs kebasian | naikkan untuk hit rate lebih tinggi, turunkan untuk data lebih segar | entri kedaluwarsa lebih cepat, lebih banyak miss | respons lebih basi disajikan | terlalu tinggi menyajikan data basi |
 | cache_max_total_bytes | 0 | batas opsional memori cache per worker, 0 = tanpa batas | membatasi total memori cache | atur untuk membatasi RAM cache | jumlah entri efektif dikurangi agar muat | memakai penuh entries * value_bytes | 0 menonaktifkan batas |
 | tls | null | TLS context untuk https (opt-in), null = cleartext | mengaktifkan TLS, band performa tersendiri | pasang context untuk melayani https | | | null melayani cleartext |
+| tls_port | 0 | port bind https pendamping untuk dual listener (ADR-060) | satu worker fleet melayani cleartext + TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging server | | | access logging per request adalah tugas handler |
 
 ## HTTP/2 (`Http2ServerConfig`)
@@ -96,6 +97,7 @@ h2c cleartext secara default, h2-over-TLS saat `tls` diisi.
 | cache_ttl_ms | 1000 | kesegaran cache default (ms) | hit rate vs kebasian | naikkan untuk hit rate, turunkan untuk kesegaran | kedaluwarsa lebih cepat, lebih banyak miss | data lebih basi | terlalu tinggi menyajikan data basi |
 | cache_max_total_bytes | 0 | batas memori cache per worker, 0 = tanpa batas | membatasi memori cache | atur untuk membatasi RAM cache | jumlah entri dikurangi agar muat | penuh entries * value_bytes | 0 menonaktifkan batas |
 | tls | null | TLS context untuk h2-over-TLS (ALPN h2), null = h2c | mengaktifkan TLS | pasang context dengan ALPN h2 | | | browser butuh ALPN h2 untuk HTTP/2 over TLS |
+| tls_port | 0 | port bind h2-over-TLS pendamping untuk dual listener (ADR-060) | satu worker fleet melayani h2c + h2-over-TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging | | | logging per request adalah tugas handler |
 
 ## gRPC (`GrpcServerConfig`)
@@ -120,6 +122,7 @@ gRPC di atas HTTP/2. h2c cleartext secara default, h2-over-TLS saat `tls` diisi.
 | max_recv_buf | 65536 | floor buffer read per koneksi (.EPOLL / .URING) | buffer read per koneksi, hot | naikkan untuk memangkas read() dan compaction untuk frame besar | lebih banyak read dan compaction untuk frame besar | lebih banyak memori per koneksi | reader = max(ini, satu frame maksimum) |
 | tls_write_buf_initial_bytes | 16384 | kapasitas awal buffer TLS pending-write per koneksi (tumbuh sesuai kebutuhan) | per koneksi, jalur TLS | naikkan untuk menghindari realokasi dini pada balasan besar | lebih banyak realokasi pada balasan besar | lebih banyak memori idle per koneksi TLS | minor, hanya amortisasi |
 | tls | null | TLS context untuk gRPC over TLS (ALPN h2), null = h2c | mengaktifkan TLS | pasang context dengan ALPN h2 | | | gRPC jalan di HTTP/2, butuh ALPN h2 over TLS |
+| tls_port | 0 | port bind gRPC-over-TLS pendamping untuk dual listener (ADR-060) | satu worker fleet melayani h2c + TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
 | logger | null | logger opsional, lifecycle plus per-rpc | | pasang untuk logging | | | |
 | handler_timeout_ms | 0 | batas timeout handler global (ms), 0 = nonaktif | deadline kooperatif | atur untuk membatasi handler lambat | handler diputus lebih cepat | handler lambat berjalan lebih lama | Route.timeout_ms dan header grpc-timeout memperketatnya |
 | compress | false | kompresi gzip frame DATA untuk klien yang mengiklankan grpc-accept-encoding: gzip | CPU vs ukuran pesan | aktifkan lewat jaringan | | | murni biaya CPU pada loopback |
@@ -166,6 +169,8 @@ Jalur library standar. Set field compression dan cache yang sama dengan HTTP/1, 
 | cache_ttl_ms | 1000 | kesegaran cache default (ms) | hit rate vs kebasian | naikkan untuk hit rate, turunkan untuk kesegaran | kedaluwarsa lebih cepat, lebih banyak miss | data lebih basi | terlalu tinggi menyajikan data basi |
 | cache_max_total_bytes | 0 | batas memori cache per worker, 0 = tanpa batas | membatasi memori cache | atur untuk membatasi RAM cache | jumlah entri dikurangi agar muat | penuh entries * value_bytes | 0 menonaktifkan batas |
 | logger | null | logger opsional, memanggil logger.access() per respons | | pasang untuk access logging | | | menyuntikkan ctx.logger untuk handler |
+| tls | null | TLS context untuk https (opt-in, ADR-053), null = cleartext | mengaktifkan TLS, band performa tersendiri | pasang context untuk melayani https | | | null melayani cleartext |
+| tls_port | 0 | port bind https pendamping untuk dual listener (ADR-060) | satu worker fleet melayani cleartext + TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
 
 ## TCP (`TcpServerConfig`)
 

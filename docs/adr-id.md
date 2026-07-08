@@ -1297,4 +1297,37 @@ Engine yang mampu compression mengekspos enam yang sama: `sendGzipFD`, `sendGzip
 
 ---
 
+## ADR-060: TLS dual listener (tls_port) dan transport tls_conn bersama
+
+**Status:** Accepted
+
+**Context:** TLS bersifat all-or-nothing per server: `config.tls` non-null mengalihkan seluruh server ke jalur TLS-only, jadi melayani cleartext dan https dari satu proses butuh peluncuran `Server` kedua. Peluncuran kedua menduplikasi runtime penuh: worker fleet, tabel fd MAX_FD, instance epoll, cache response / static. Empat file `tls_mux.zig` masing-masing membawa salinan transport TLS per-koneksi yang nyaris identik (total sekitar 2k baris), di bawah `.URING` sisi TLS masih menjalankan fleet epoll paralel, dan WebSocket / SSE over TLS terkurung di jalur thread-per-connection (ADR-054 / ADR-055).
+
+**Decision:** TLS menjadi properti koneksi lewat satu field config flat, `tls_port: u16 = 0`, pada `Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, dan `GrpcServerConfig`:
+
+| tls | tls_port | perilaku |
+| :- | :- | :- |
+| null | apapun | cleartext saja di port (tidak berubah, tls_port diabaikan) |
+| diisi | 0 | TLS-only di port (tidak berubah) |
+| diisi | non-zero | SATU server: cleartext di port + TLS di tls_port, worker yang sama |
+
+`tls_port == port` ditolak di run() (`error.TlsPortConflict`). Keputusan pendukung:
+
+- Modul transport bersama `src/multiplexers/tls_conn.zig`: transport byte TLS per-koneksi (resumable session, buffer backpressure ciphertext keluar, tabel slot fd -> koneksi) diangkat dari empat salinan tls_mux. Loop engine tetap per-engine (ADR-050) dan memakai modul ini.
+- `.EPOLL`: listen fd TLS bergabung ke instance epoll yang sama. Event TLS membawa bit tag di data word epoll (`tls_event_tag | fd`), dan koneksi TLS hidup di tabel pointer yang hanya di-map saat tls_port aktif, jadi worker cleartext-only tidak mengalami perubahan layout sama sekali.
+- `.URING`: TLS berjalan di ring untuk pertama kalinya (op `tls_accept` / `tls_recv` / `tls_send` di codec user_data bersama), tanpa fleet epoll tersembunyi. Flush bersifat half-duplex: ciphertext yang tertahan dikirim on-ring sebelum recv berikutnya, jadi buffer staging tidak pernah bergeser saat kernel membacanya.
+- Thread model (`.ASYNC` / `.POOL` / `.MIXED`): satu accept thread tambahan (`serveTlsThread`) melayani sisi TLS lewat jalur tls_serve yang ada (termasuk WebSocket + SSE).
+- Loop mux `zix.Http1` kini menampung WebSocket (handoff `WebSocket.serve` plus frame pump) dan SSE (`beginStream`) over TLS, encrypt-on-write lewat stream sink per-koneksi, menghapus batasan thread-path ADR-054 / ADR-055 di sana. `zix.Http` menampung `res.stream()` dengan cara yang sama. WebSocket-nya tetap di jalur thread (paritas dengan loop mux cleartext-nya, yang juga tidak menampung WS).
+- Pembatasan ALPN untuk Context bersama tetap di sisi engine: engine h2 menolak sesi yang tidak menegosiasikan h2 (`alpnIsH2`), `Http1` / `zix.Http` menerima sisanya. Satu Context yang memuat semua protokol yang dilayani bisa dipakai semua engine dalam satu proses, tanpa field override ALPN per-engine.
+- `zix.Http3` dikecualikan: QUIC selalu terenkripsi (satu listener UDP, `tls` wajib), ia berpartisipasi dengan berbagi satu `Tls.Context`.
+
+**Rationale:** Peluncuran kedua adalah duplikasi murni. Satu-satunya biaya per-koneksi yang khusus TLS adalah state sesi (kunci, buffer staging), yang memang tidak bisa dibagi, jadi melipat listener TLS ke satu loop mempertahankan tepat biaya itu dan menghapus sisanya: satu fleet, satu layout slot fd, satu set cache melayani kedua transport.
+
+**Consequences:**
+- Pelayanan dual turun dari 2 worker fleet / 2 tabel fd / 2 set cache menjadi 1, plus satu slab pointer TLS demand-paged yang hanya di-map saat tls_port aktif.
+- Hot path cleartext tidak berubah: registrasi koneksi beralih ke bentuk data u64 epoll (byte yang sama untuk sebuah fd) dan routing TLS menambah satu branch per event yang mudah diprediksi. Gate: isolate bench, penurunan RPS lebih dari 1% berarti revert.
+- Unit test bersama (tls_conn), integration test dual-listener per-engine (.EPOLL / .URING / .POOL, plus SSE di atas mux), contoh `examples/tls/tls_http1_dual.zig` (9076 cleartext / 9077 TLS) dengan check runner `tls-http1-dual`.
+
+---
+
 ###### end of adr

@@ -67,6 +67,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | cache_ttl_ms | 1000 | default cache freshness in ms | cache hit rate vs staleness | raise for higher hit rate, lower for fresher data | entries expire sooner, more misses | staler responses served | too high serves stale data |
 | cache_max_total_bytes | 0 | optional ceiling on per-worker cache memory, 0 = no ceiling | caps total cache memory | set to bound cache RAM | effective entry count reduced to fit | uses the full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for https (opt-in), null = cleartext | enables TLS, a separate perf band | attach a context to serve https | | | null serves cleartext |
+| tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger for lifecycle lines | | attach for server logging | | | per-request access logging is the handler's job |
 
 ## HTTP/2 (`Http2ServerConfig`)
@@ -96,6 +97,7 @@ h2c cleartext by default, h2-over-TLS when `tls` is set.
 | cache_ttl_ms | 1000 | default cache freshness in ms | hit rate vs staleness | raise for hit rate, lower for freshness | sooner expiry, more misses | staler data | too high serves stale data |
 | cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for h2-over-TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | browsers require ALPN h2 for HTTP/2 over TLS |
+| tls_port | 0 | companion h2-over-TLS bind port for the dual listener (ADR-060) | one worker fleet serves h2c + h2-over-TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | per-request logging is the handler's job |
 
 ## gRPC (`GrpcServerConfig`)
@@ -120,6 +122,7 @@ gRPC over HTTP/2. h2c cleartext by default, h2-over-TLS when `tls` is set.
 | max_recv_buf | 65536 | per-connection read buffer floor (.EPOLL / .URING) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
 | tls_write_buf_initial_bytes | 16384 | initial capacity of the per-connection TLS pending-write buffer (grows on demand) | per-conn, TLS path | raise to avoid early reallocation under big replies | more reallocations under large replies | more idle memory per TLS conn | minor, amortization only |
 | tls | null | TLS context for gRPC over TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | gRPC runs on HTTP/2, needs ALPN h2 over TLS |
+| tls_port | 0 | companion gRPC-over-TLS bind port for the dual listener (ADR-060) | one worker fleet serves h2c + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger, lifecycle plus per-rpc | | attach for logging | | | |
 | handler_timeout_ms | 0 | global handler timeout cap in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut sooner | slow handlers run longer | Route.timeout_ms and the grpc-timeout header tighten it further |
 | compress | false | gzip DATA-frame compression for clients advertising grpc-accept-encoding: gzip | CPU vs message size | enable over a network | | | pure CPU cost on loopback |
@@ -166,6 +169,8 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | cache_ttl_ms | 1000 | default cache freshness in ms | hit rate vs staleness | raise for hit rate, lower for freshness | sooner expiry, more misses | staler data | too high serves stale data |
 | cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | logger | null | optional logger, calls logger.access() per response | | attach for access logging | | | injects ctx.logger for handlers |
+| tls | null | TLS context for https (opt-in, ADR-053), null = cleartext | enables TLS, a separate perf band | attach a context to serve https | | | null serves cleartext |
+| tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 
 ## TCP (`TcpServerConfig`)
 

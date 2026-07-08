@@ -127,6 +127,8 @@ TLS adalah jalur serve blocking ber-gate per engine, dipilih oleh `config.tls`, 
   - `.EPOLL` / `.URING`: satu worker epoll `SO_REUSEPORT` per core (`tls_mux.zig`, `grpc/tls_mux.zig`) menterminasi TLS di tempat lewat session TLS 1.3 resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker. Tanpa socketpair, tanpa thread per koneksi. Ini jalur konkurensi-tinggi.
   - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` menjalankan accept loop thread-per-koneksi di atas terminator bersama `tcp/tls/h2_terminator.zig`, yang menjalankan driver inline-mux langsung di atas record terdekripsi (frame disegel kembali ke record TLS lewat write hook thread-local). Tanpa socketpair, tanpa thread kedua. Jalur ini juga melayani fallback TLS 1.2.
 
+- Dual listener (ADR-060): dengan `tls_port` diisi bersama `tls` (Http1, Http, Http2, Grpc), SATU server melayani cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama. Mesin transport per-koneksi yang dipakai bersama jalur mux hidup di `src/multiplexers/tls_conn.zig`, dan di bawah `.URING` sisi TLS berjalan di ring (tanpa fleet epoll terpisah).
+
 Karena engine dipakai ulang tanpa perubahan, https tidak bisa meregresi hot path cleartext. Pipe blocking (Http1) dapat diterima di band https, yang bukan gate perf 1 persen.
 
 ## Misdirected Request (RFC 9110 7.4)

@@ -1297,4 +1297,37 @@ Compression-capable engines expose the same six: `sendGzipFD`, `sendGzipCachedFD
 
 ---
 
+## ADR-060: TLS dual listener (tls_port) and the shared tls_conn transport
+
+**Status:** Accepted
+
+**Context:** TLS was all-or-nothing per server: a non-null `config.tls` flipped the whole server to a TLS-only path, so serving cleartext and https from one process required a second `Server` launch. The second launch duplicated a full runtime: worker fleet, MAX_FD fd tables, epoll instances, response / static caches. The four `tls_mux.zig` files each carried a near-identical copy of the per-connection TLS transport (about 2k lines total), under `.URING` the TLS side still ran a parallel epoll fleet, and WebSocket / SSE over TLS were confined to the thread-per-connection path (ADR-054 / ADR-055).
+
+**Decision:** TLS becomes a connection property behind one flat config field, `tls_port: u16 = 0`, on `Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, and `GrpcServerConfig`:
+
+| tls | tls_port | behavior |
+| :- | :- | :- |
+| null | any | cleartext only on port (unchanged, tls_port ignored) |
+| set | 0 | TLS-only on port (unchanged) |
+| set | non-zero | ONE server: cleartext on port + TLS on tls_port, same workers |
+
+`tls_port == port` is rejected at run() (`error.TlsPortConflict`). Supporting decisions:
+
+- Shared transport module `src/multiplexers/tls_conn.zig`: the per-connection TLS byte transport (resumable session, outbound-ciphertext backpressure buffer, fd -> connection slot table) lifted out of the four tls_mux copies. Engine loops stay per-engine (ADR-050) and feed the module.
+- `.EPOLL`: the TLS listen fd joins the same epoll instance. TLS events carry a tag bit in the epoll data word (`tls_event_tag | fd`), and TLS connections live in a pointer table mapped only when tls_port is active, so a cleartext-only worker sees zero layout change.
+- `.URING`: TLS rides the ring for the first time (`tls_accept` / `tls_recv` / `tls_send` ops in the shared user_data codec), no hidden epoll fleet. Flushes are half-duplex: staged ciphertext is sent on-ring before the next recv is armed, so the staging buffer never moves while the kernel reads it.
+- Thread models (`.ASYNC` / `.POOL` / `.MIXED`): one extra accept thread (`serveTlsThread`) serves the TLS side through the existing tls_serve path (WebSocket + SSE included).
+- The `zix.Http1` mux loop now hosts WebSocket (the `WebSocket.serve` handoff plus the frame pump) and SSE (`beginStream`) over TLS, encrypt-on-write through a per-connection stream sink, dissolving the ADR-054 / ADR-055 thread-path restriction there. `zix.Http` hosts `res.stream()` the same way. Its WebSocket stays on the thread path (parity with its cleartext mux loop, which does not host WS either).
+- ALPN scoping for a shared Context stays engine-side: the h2 engines reject a session that did not negotiate h2 (`alpnIsH2`), `Http1` / `zix.Http` accept the rest. One Context listing every served protocol can back all engines in a process, no per-engine ALPN override field.
+- `zix.Http3` is exempt: QUIC is always encrypted (one UDP listener, `tls` required), it participates by sharing the one `Tls.Context`.
+
+**Rationale:** The second launch was pure duplication. The only TLS-specific per-connection cost is the session state (keys, staging buffers), which cannot be shared anyway, so folding the TLS listener into the one loop keeps exactly that cost and deletes everything else: one fleet, one fd-slot layout, one cache set serving both transports.
+
+**Consequences:**
+- Dual serving drops from 2 worker fleets / 2 fd tables / 2 cache sets to 1, plus a demand-paged TLS pointer slab mapped only when tls_port is active.
+- Cleartext hot path unchanged: connection registration switched to the u64 epoll-data form (same bytes for an fd) and TLS routing adds one predictable branch per event. Gate: isolate bench, more than 1% RPS drop reverts.
+- Shared unit tests (tls_conn), per-engine dual-listener integration tests (.EPOLL / .URING / .POOL, plus SSE over the mux), example `examples/tls/tls_http1_dual.zig` (9076 cleartext / 9077 TLS) with the `tls-http1-dual` runner check.
+
+---
+
 ###### end of adr
