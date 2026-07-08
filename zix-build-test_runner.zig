@@ -328,6 +328,9 @@ pub fn addSteps(
 
             // https/1.1 over TLS on the arena engine: appended last so existing argv order is stable
             .{ "tr-all-server-tls-http", "examples/tls/tls_http_basic.zig" },
+
+            // dual listener (config.tls_port, ADR-060): appended last, argv order stays stable
+            .{ "tr-all-server-tls-http1-dual", "examples/tls/tls_http1_dual.zig" },
         };
 
         const all_runner_mod = b.createModule(.{

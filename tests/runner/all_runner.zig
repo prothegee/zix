@@ -446,6 +446,14 @@ const checks = [_]Check{
             return checks_tls.runTls(io, paths[0], 9071);
         }
     }.f },
+
+    // Dual listener (config.tls_port, ADR-060): appended last so the argv order of the existing
+    // checks stays stable. One server answers cleartext AND https from the same worker fleet.
+    .{ .label = "tls-http1-dual", .heavy = true, .run = &struct {
+        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_tls.runTlsHttp1Dual(io, paths[0], 9076, 9077);
+        }
+    }.f },
 };
 
 /// Total argv server paths the checks table consumes (sum of every row's arity).

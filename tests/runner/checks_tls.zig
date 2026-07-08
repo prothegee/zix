@@ -46,6 +46,44 @@ pub fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
     if (resp.header("Strict-Transport-Security") == null) return error.MissingHsts;
 }
 
+/// Dual listener (config.tls_port, ADR-060): spawn ONE server, then assert the same route answers
+/// cleartext on `port` AND https on `tls_port`. No curl, both via the native zix.Http.Client.
+pub fn runTlsHttp1Dual(io: std.Io, server_path: []const u8, port: u16, tls_port: u16) !void {
+    var server_child = try common.spawnServer(io, server_path);
+    defer server_child.kill(io);
+
+    try common.waitForTcpPort(io, &server_child, port, common.START_TIMEOUT_MS);
+    try common.waitForTcpPort(io, &server_child, tls_port, common.START_TIMEOUT_MS);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    var client = zix.Http.Client.init(.{
+        .allocator = arena.allocator(),
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .max_response_body = 4096,
+        .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+    });
+    defer client.deinit();
+
+    var clear_url_buf: [64]u8 = undefined;
+    const clear_url = try std.fmt.bufPrint(&clear_url_buf, "http://localhost:{d}/", .{port});
+
+    var clear_resp = try client.get(clear_url, .{});
+    defer clear_resp.deinit();
+    if (clear_resp.status() != 200) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, clear_resp.body(), "dual listener") == null) return error.UnexpectedBody;
+
+    var tls_url_buf: [64]u8 = undefined;
+    const tls_url = try std.fmt.bufPrint(&tls_url_buf, "https://localhost:{d}/", .{tls_port});
+
+    var tls_resp = try client.get(tls_url, .{});
+    defer tls_resp.deinit();
+    if (tls_resp.status() != 200) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, tls_resp.body(), "dual listener") == null) return error.UnexpectedBody;
+}
+
 /// h2 over TLS 1.3: spawn the server, connect with the native zix.Tls client (ALPN h2), speak h2
 /// over the encrypted ClientConnection (preface + SETTINGS + HEADERS GET /), assert :status 200.
 pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
