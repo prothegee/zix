@@ -140,8 +140,8 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `udp/http3/qpack.zig` | `refAllDecls` + perilaku: encode / decode prefixed-integer, indexed field line, literal-with-name-reference, entri static table |
 | `udp/http3/huffman.zig` | `refAllDecls` + perilaku: decode vector `www.example.com` RFC 7541 Appendix C.4 dan sebuah request path dengan digit dan simbol |
 | `udp/http3/varint.zig` / `packet.zig` / `frame.zig` | `refAllDecls` + perilaku: round-trip read / write varint, parse long / short header, parse frame CRYPTO dan STREAM |
-| `udp/http3/request.zig` / `response.zig` | `refAllDecls` + perilaku: `parseRequest` memulihkan `:method` / `:path` melewati ACK di depan, `buildResponse` membawa control SETTINGS plus balasan HEADERS / DATA |
-| `udp/http3/connection.zig` | `refAllDecls` + perilaku: `init` menurunkan Initial key dari connection id (RFC 9001 A.1), cap anti-amplification 3x |
+| `udp/http3/request.zig` / `response.zig` | `refAllDecls` + perilaku: `parseRequest` memulihkan `:method` / `:path` melewati ACK di depan, `streamBytes` menjumlah byte payload stream lintas stream dan melewati frame non-stream, `buildResponse` membawa control SETTINGS plus balasan HEADERS / DATA dan menumpangkan grant MAX_STREAMS / MAX_DATA yang jatuh tempo (encode `buildMaxStreams` / `buildMaxData`) |
+| `udp/http3/connection.zig` | `refAllDecls` + perilaku: `init` menurunkan Initial key dari connection id (RFC 9001 A.1), cap anti-amplification 3x, `sendDatagramSize` meng-clamp ke config / client / ceiling, `replenishBidiStreams` dan `replenishMaxData` menaikkan grant melewati allowance sekali-pakai, batas pool `reserveSendStream`, pelacakan lubang `AckTracker`, sampling RTT `onAckFrame` |
 | `udp/http3/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, query di-strip sebelum matching, tidak ada match mengembalikan 404 |
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat run |
 

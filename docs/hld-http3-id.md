@@ -44,7 +44,7 @@ flowchart TD
     F --> G["Router.dispatch(req, res)\nor bare handler"]
     G --> H["handler fills res.status / res.body"]
     H --> I{"body fits one packet?"}
-    I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + response\ninto one sealed 1-RTT packet"]
+    I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + MAX_DATA +\nresponse into one sealed 1-RTT packet"]
     I -->|no| K["register SendStream,\npump across many packets\n(congestion-window bounded)"]
 ```
 
@@ -241,7 +241,8 @@ QPACK dynamic table terimplementasi penuh dan teruji tetapi belum diwire ke jalu
 
 Jalur kirim 1-RTT menghormati limit yang diiklankan client dan sebuah congestion controller NewReno nyata.
 
-- Flow control: server membaca `initial_max_data` dan `initial_max_stream_data_bidi_local` client dari transport parameter-nya, dan menggulir bidirectional stream credit maju dengan MAX_STREAMS saat request stream pensiun, sehingga connection tidak stall setelah allowance awal habis.
+- Flow control, sisi kirim: server membaca `initial_max_data` dan `initial_max_stream_data_bidi_local` client dari transport parameter-nya dan tidak pernah mengirim byte response melewatinya.
+- Flow control, sisi terima: kedua budget handshake sekali-pakai yang diiklankan server digulir maju saat client memakainya, MAX_STREAMS untuk jumlah bidirectional stream dan MAX_DATA untuk byte request seluruh connection. Tiap grant menumpang sebuah reply begitu konsumsi melewati separuh window-nya, sehingga connection berumur panjang tidak pernah stall pada stream credit dan tidak pernah deadlock setelah byte budget (`initial_max_data`) habis.
 - Loss recovery (RFC 9002): RTT estimator, threshold packet-reordering dan waktu, Probe Timeout dengan backoff, dan congestion window NewReno. Body response besar dipump lintas banyak packet 1-RTT dibatasi congestion window.
 
 Detail ada di [`docs/lld-http3-id.md`](lld-http3-id.md).
