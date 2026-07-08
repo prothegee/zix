@@ -89,6 +89,30 @@ pub fn parseRequests(payload: []const u8, out: []StreamRequest) usize {
     return count;
 }
 
+/// Sum the STREAM-frame payload bytes in a decrypted 1-RTT payload, across every stream (bidi and
+/// uni: connection-level flow control counts them all, RFC 9000 4.1). Feeds replenishMaxData so the
+/// server keeps the client's MAX_DATA credit ahead of what it consumes.
+pub fn streamBytes(payload: []const u8) u64 {
+    var total: u64 = 0;
+    var pos: usize = 0;
+
+    while (pos < payload.len) {
+        const type_vi = varint.read(payload[pos..]) catch break;
+
+        if (isStreamFrameType(type_vi.value)) {
+            const stream = parseStreamFrame(payload[pos..]) orelse break;
+            total += stream.data.len;
+            pos += stream.consumed;
+            continue;
+        }
+
+        const skipped = skipFrame(payload[pos..]) orelse break;
+        pos += skipped;
+    }
+
+    return total;
+}
+
 /// Whether a frame type is a STREAM frame (RFC 9000 19.8): 0x08..0x0f, OFF / LEN / FIN in the low bits.
 pub fn isStreamFrameType(frame_type: u64) bool {
     return frame_type >= 0x08 and frame_type <= 0x0f;
@@ -295,6 +319,17 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
     return out;
+}
+
+test "zix test: streamBytes sums stream payloads across streams, skipping non-stream frames" {
+    // ACK (skipped, charges nothing), a 17-byte request STREAM on bidi stream 0, then a 3-byte
+    // STREAM on client uni stream 2: connection-level flow control counts both (RFC 9000 4.1).
+    const payload = h("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "0a0203" ++ "000400");
+    try std.testing.expectEqual(@as(u64, 20), streamBytes(&payload));
+
+    // A payload with no STREAM frame charges nothing.
+    const ack_only = h("0200000000");
+    try std.testing.expectEqual(@as(u64, 0), streamBytes(&ack_only));
 }
 
 test "zix test: parseRequest decodes method and path past a leading ACK" {

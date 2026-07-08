@@ -225,6 +225,14 @@ pub const Connection = struct {
     // stalls once the initial allowance is spent.
     bidi_streams_granted: u64 = 0,
     bidi_stream_high_water: u64 = 0,
+    // Client connection-wide byte credit, the twin of the stream-count credit above. The handshake
+    // advertises a ONE-TIME initial_max_data budget for the bytes the client sends across all its
+    // streams. data_granted is the cumulative limit advertised so far (0 until the first packet seeds
+    // it from the window), data_consumed is the running total of client stream bytes received.
+    // replenishMaxData keeps the grant ahead of consumption so the connection never deadlocks once
+    // the initial budget is spent (~1 MiB of requests, however much stream credit remains).
+    data_granted: u64 = 0,
+    data_consumed: u64 = 0,
     // Large responses still being sent across packets, resumed as the client extends flow control.
     send_streams: [max_send_streams]SendStream = @splat(.{}),
     // Loss detection and retransmission (RFC 9002). The power-of-two divisor the client used to
@@ -528,6 +536,32 @@ pub const Connection = struct {
 
         return self.bidi_streams_granted;
     }
+
+    /// Track the client's connection-wide byte consumption and extend its MAX_DATA credit when the
+    /// one-time handshake budget (initial_max_data) is running low (RFC 9000 4.1 / 19.9). Without
+    /// this a connection deadlocks once the client has sent `window` bytes of stream data (~1 MiB of
+    /// requests): the client blocks on flow control and its last in-flight requests are never
+    /// answered. Call once per received packet with the stream bytes it carried. Retransmitted
+    /// stream bytes may be counted twice, which only grants credit early, never late: a grant is a
+    /// limit, so overshooting by a packet is harmless while undershooting stalls the peer.
+    ///
+    /// Param:
+    /// bytes_received - u64 (stream-frame payload bytes carried by the packet, all streams)
+    /// window - u64 (bytes of credit to keep available ahead of the client, flight.initial_max_data)
+    ///
+    /// Return:
+    /// - ?u64 (the new cumulative MAX_DATA value to advertise, or null when the grant still has room)
+    pub fn replenishMaxData(self: *Connection, bytes_received: u64, window: u64) ?u64 {
+        self.data_consumed += bytes_received;
+
+        if (self.data_granted == 0) self.data_granted = window;
+
+        if (self.data_consumed + window / 2 < self.data_granted) return null;
+
+        self.data_granted = self.data_consumed + window;
+
+        return self.data_granted;
+    }
 };
 
 // --------------------------------------------------------------- //
@@ -594,6 +628,31 @@ test "zix test: replenishBidiStreams raises the grant past the one-time allowanc
     // A packet that opens no new stream (a lower id, a retransmit) does not lower the grant.
     try std.testing.expect(conn.replenishBidiStreams(0, window) == null);
     try std.testing.expectEqual(@as(u64, 384), conn.bidi_streams_granted);
+}
+
+test "zix test: replenishMaxData raises the byte grant past the one-time budget so a connection never deadlocks" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var conn = Connection.init(&dcid, 1200, 10);
+
+    const window: u64 = 1024;
+
+    // Early bytes stay inside the seeded budget (1024), so no MAX_DATA is due.
+    try std.testing.expect(conn.replenishMaxData(100, window) == null);
+    try std.testing.expectEqual(@as(u64, 1024), conn.data_granted);
+    try std.testing.expectEqual(@as(u64, 100), conn.data_consumed);
+
+    // Crossing half the window (consumed 100 + 500 = 600 >= 1024 - 512) raises the grant ahead of the
+    // client: 600 + 1024 = 1624, already past the one-time 1024 budget.
+    try std.testing.expectEqual(@as(u64, 1624), conn.replenishMaxData(500, window).?);
+
+    // Continuing past the old budget keeps replenishing, so the client can send well beyond the
+    // handshake allowance on the one connection (the ~1 MiB request deadlock this fixes).
+    try std.testing.expectEqual(@as(u64, 2624), conn.replenishMaxData(1000, window).?);
+    try std.testing.expect(conn.data_consumed > window);
+
+    // A packet with few stream bytes leaves the grant untouched while it still has half a window.
+    try std.testing.expect(conn.replenishMaxData(1, window) == null);
+    try std.testing.expectEqual(@as(u64, 2624), conn.data_granted);
 }
 
 test "zix test: reserveSendStream tracks max_send_streams concurrent large bodies, then reports full" {

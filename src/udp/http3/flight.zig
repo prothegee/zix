@@ -38,6 +38,11 @@ fn putBytesParam(buf: []u8, pos: *usize, id: u64, value: []const u8) void {
     pos.* += value.len;
 }
 
+/// The one-time connection-wide byte budget advertised in the handshake (initial_max_data, RFC 9000
+/// 18.2) and the rolling window replenishMaxData keeps ahead of the client's consumption. One value
+/// for both so a replenished grant always extends by exactly what the handshake promised.
+pub const initial_max_data: u64 = 1048576;
+
 /// Encode the QUIC transport parameters (RFC 9000 18.2). The connection-id params are validated by
 /// the peer, so they MUST carry the client's first DCID and our SCID exactly.
 fn encodeTransportParams(buf: []u8, original_dcid: []const u8, source_cid: []const u8, max_idle_ms: u64, max_streams: u64) usize {
@@ -46,7 +51,7 @@ fn encodeTransportParams(buf: []u8, original_dcid: []const u8, source_cid: []con
     putBytesParam(buf, &pos, 0x00, original_dcid); // original_destination_connection_id
     putBytesParam(buf, &pos, 0x0f, source_cid); // initial_source_connection_id
     putIntParam(buf, &pos, 0x01, max_idle_ms); // max_idle_timeout
-    putIntParam(buf, &pos, 0x04, 1048576); // initial_max_data
+    putIntParam(buf, &pos, 0x04, initial_max_data); // initial_max_data
     putIntParam(buf, &pos, 0x05, 262144); // initial_max_stream_data_bidi_local
     putIntParam(buf, &pos, 0x06, 262144); // initial_max_stream_data_bidi_remote
     putIntParam(buf, &pos, 0x07, 262144); // initial_max_stream_data_uni
