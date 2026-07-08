@@ -7,8 +7,8 @@ const Tls = @import("../../tls/Tls.zig");
 
 /// HTTP/1 server configuration.
 pub const Http1ServerConfig = struct {
-    /// std.Io handle from process.io.
-    io: @import("std").Io,
+    /// Io backend for the server. Caller-provided. Must outlive the server.
+    io: std.Io,
     /// Bind address.
     ip: []const u8,
     /// Bind port. Must be non-zero.
