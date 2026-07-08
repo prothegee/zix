@@ -34,6 +34,13 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
 
         pub fn deinit(_: *Self) void {}
 
+        /// Dual-listener TLS accept thread for the thread models: serves https on config.port
+        /// (already overridden to tls_port by the caller) while the cleartext model runs on the
+        /// original port.
+        fn serveTlsThread(config: Config) void {
+            tls_serve.runTls(handler, config) catch {};
+        }
+
         pub fn run(self: *const Self) !void {
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http.Server.run.
@@ -45,13 +52,34 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
             if (self.config.tls != null) {
                 const is_linux = comptime @import("builtin").target.os.tag == .linux;
 
-                // .EPOLL / .URING terminate TLS in an event-driven epoll-mux worker (keep-alive,
-                // thousands of connections per worker). The thread-per-connection blocking path
-                // (tls_serve) serves the remaining models.
-                if (is_linux and (self.config.dispatch_model == .EPOLL or self.config.dispatch_model == .URING))
-                    return tls_mux.runTlsMux(self.config, handler);
+                // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
+                // fleet, instead of a second server launch.
+                if (self.config.tls_port != 0) {
+                    if (self.config.tls_port == self.config.port) return error.TlsPortConflict;
 
-                return tls_serve.runTls(self.config, handler);
+                    if (is_linux and self.config.dispatch_model == .EPOLL)
+                        return epoll_model.runEpoll(self.config, handler, raw_fn);
+                    if (is_linux and self.config.dispatch_model == .URING)
+                        return uring_model.runUring(self.config, handler, raw_fn);
+
+                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
+                    // TLS on tls_port (thread-per-connection, WebSocket + SSE included), the
+                    // cleartext model runs below unchanged.
+                    var tls_cfg = self.config;
+                    tls_cfg.port = self.config.tls_port;
+                    tls_cfg.tls_port = 0;
+
+                    const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{tls_cfg});
+                    tls_thread.detach();
+                } else {
+                    // .EPOLL / .URING terminate TLS in an event-driven epoll-mux worker (keep-alive,
+                    // thousands of connections per worker). The thread-per-connection blocking path
+                    // (tls_serve) serves the remaining models.
+                    if (is_linux and (self.config.dispatch_model == .EPOLL or self.config.dispatch_model == .URING))
+                        return tls_mux.runTlsMux(handler, self.config);
+
+                    return tls_serve.runTls(handler, self.config);
+                }
             }
 
             return switch (self.config.dispatch_model) {

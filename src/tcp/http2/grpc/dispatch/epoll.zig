@@ -14,6 +14,9 @@ const setNoDelay = common.setNoDelay;
 const MAX_FD = common.MAX_FD;
 const rcache = @import("../../../../utils/response_cache.zig");
 const slab = @import("../../../../multiplexers/slab.zig");
+const tls_mux = @import("../tls_mux.zig");
+const tls_conn = @import("../../../../multiplexers/tls_conn.zig");
+const Tls = @import("../../../../tls/Tls.zig");
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
 /// ready-fd set in one syscall at high connection counts.
@@ -67,13 +70,6 @@ const GrpcConnTable = struct {
     }
 };
 
-fn setNonBlock(fd: std.posix.fd_t) void {
-    const linux = std.os.linux;
-    const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
-    const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
-}
-
 /// Accept every pending connection on listener_fd and register each in epfd. Level-triggered,
 /// so draining to EAGAIN guarantees no accept is missed.
 fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.GrpcServeOpts, busy_poll_us: u32) void {
@@ -96,9 +92,11 @@ fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix
             continue;
         }
 
+        // Registered via the u64 data form (same bytes for an fd) so the dual-listener loop can
+        // rely on the whole data word: TLS events carry a tag bit there, cleartext events must not.
         var ev = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-            .data = .{ .fd = conn_fd },
+            .data = .{ .u64 = @intCast(conn_fd) },
         };
         if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &ev)) != .SUCCESS) {
             table.free(conn_fd);
@@ -117,6 +115,9 @@ const MuxWorkerCtx = struct {
     opts: core.GrpcServeOpts,
     worker_id: usize,
     busy_poll_us: u32,
+    /// Dual-listener TLS side (config.tls + config.tls_port). Inactive when null / 0.
+    tls_ctx: ?*Tls.Context = null,
+    tls_port: u16 = 0,
 };
 
 /// Build a concrete epoll mux worker entry with the routes baked in at compile
@@ -124,6 +125,31 @@ const MuxWorkerCtx = struct {
 /// driving many non-blocking connections through the resumable h2 state machine.
 fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
     return struct {
+        /// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body
+        /// (flush staged ciphertext on EPOLLOUT, feed decrypted bytes on EPOLLIN, re-arm or reap).
+        fn serveTlsEvent(tls_conns: *tls_mux.ConnTable, epfd: std.posix.fd_t, ev: std.os.linux.epoll_event) void {
+            const linux = std.os.linux;
+            const fd: std.posix.fd_t = @intCast(ev.data.u64 & (tls_conn.tls_event_tag - 1));
+
+            const conn = tls_conns.get(fd) orelse return;
+            var keep = true;
+
+            if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
+                keep = false;
+            } else {
+                if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
+                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(routes, conn);
+                if (keep and conn.transport.want_out) tls_conn.armOut(epfd, fd, conn.transport.ep_data, true);
+                if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
+            }
+
+            if (!keep) {
+                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+                tls_conns.drop(fd);
+                _ = linux.close(fd);
+            }
+        }
+
         fn run(ctx: MuxWorkerCtx) void {
             const linux = std.os.linux;
 
@@ -138,7 +164,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
             defer srv.deinit(ctx.io);
             const listener_fd = srv.socket.handle;
 
-            setNonBlock(listener_fd);
+            common.setNonBlock(listener_fd);
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
             if (std.posix.errno(epfd_rc) != .SUCCESS) return;
@@ -147,12 +173,41 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 
             var listener_ev = linux.epoll_event{
                 .events = linux.EPOLL.IN,
-                .data = .{ .fd = listener_fd },
+                .data = .{ .u64 = @intCast(listener_fd) },
             };
             if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
 
             var table = GrpcConnTable.init() catch return;
             defer table.deinit();
+
+            // Dual-listener TLS side (config.tls + config.tls_port): a second listen fd whose
+            // connections terminate TLS in this same loop via the tls_mux connection machinery.
+            // Everything below is mapped only when active, so a cleartext-only worker sees zero
+            // layout change on its hot structures.
+            const tls_ctx: ?*Tls.Context = if (ctx.tls_port != 0) ctx.tls_ctx else null;
+            var tls_listener_fd: std.posix.fd_t = -1;
+            var tls_srv: std.Io.net.Server = undefined;
+            var tls_table: ?tls_mux.ConnTable = null;
+            defer if (tls_table) |*tls_conns| tls_conns.deinit();
+            defer if (tls_ctx != null and tls_listener_fd != -1) tls_srv.deinit(ctx.io);
+
+            if (tls_ctx != null) {
+                const tls_addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.tls_port) catch return;
+                tls_srv = tls_addr.listen(ctx.io, .{
+                    .reuse_address = true,
+                    .kernel_backlog = ctx.kernel_backlog,
+                }) catch return;
+                tls_listener_fd = tls_srv.socket.handle;
+                common.setNonBlock(tls_listener_fd);
+
+                var tls_lev = linux.epoll_event{
+                    .events = linux.EPOLL.IN,
+                    .data = .{ .u64 = @intCast(tls_listener_fd) },
+                };
+                if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, tls_listener_fd, &tls_lev)) != .SUCCESS) return;
+
+                tls_table = tls_mux.ConnTable.init() catch return;
+            }
 
             // Per-worker unary response cache: lock-free by ownership, never shared.
             var response_cache: rcache.ResponseCache = undefined;
@@ -196,6 +251,17 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
                         continue;
                     }
 
+                    if (tls_ctx) |tls_context| {
+                        if (ev.data.fd == tls_listener_fd) {
+                            tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, tls_context, ctx.opts, tls_conn.tls_event_tag);
+                            continue;
+                        }
+                        if (ev.data.u64 & tls_conn.tls_event_tag != 0) {
+                            serveTlsEvent(&tls_table.?, epfd, ev);
+                            continue;
+                        }
+                    }
+
                     const conn = table.get(ev.data.fd) orelse continue;
                     const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                         core.GrpcConnOutcome.close
@@ -233,6 +299,8 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     const opts = common.serveOptsWithCache(cfg);
 
     logSystem(cfg, "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
+    if (cfg.tls != null and cfg.tls_port != 0)
+        logSystem(cfg, "dual listener: grpc TLS on {s}:{d} (same workers)", .{ cfg.ip, cfg.tls_port });
 
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
@@ -250,6 +318,8 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
                 .opts = opts,
                 .worker_id = idx,
                 .busy_poll_us = cfg.busy_poll_us,
+                .tls_ctx = cfg.tls,
+                .tls_port = cfg.tls_port,
             }},
         );
 

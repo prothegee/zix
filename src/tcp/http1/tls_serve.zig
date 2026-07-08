@@ -87,7 +87,7 @@ fn peerAlert(body: []const u8) anyerror {
 /// - Each accepted connection is handed to its own thread so a slow handshake or a keep-alive client
 ///   never blocks the accept loop (serving inline would serialize every connection, the slow path
 ///   that wedged json-tls). The connection thread runs the full keep-alive request loop.
-pub fn runTls(config: Config, handler: HandlerFn) !void {
+pub fn runTls(handler: HandlerFn, config: Config) !void {
     const io = config.io;
     const ctx = config.tls.?;
 

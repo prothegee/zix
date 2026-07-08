@@ -39,6 +39,13 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
             _ = self;
         }
 
+        /// Dual-listener TLS accept thread for the thread models: serves h2-over-TLS on
+        /// config.port (already overridden to tls_port by the caller) while the cleartext model
+        /// runs on the original port.
+        fn serveTlsThread(config: Http2ServerConfig) void {
+            tls_serve.runTls(routes, config) catch {};
+        }
+
         /// Listen and serve. Routes are baked in at compile time via Server.init.
         ///
         /// Return:
@@ -50,14 +57,35 @@ fn Http2ServerImpl(comptime routes: []const Route) type {
             const cfg = self.config;
 
             if (cfg.tls != null) {
-                // Multiplexed TLS for the event-loop models (no thread-per-conn): one epoll worker per
-                // core terminates TLS in place and serves the resumable mux, so high concurrency does
-                // not spawn a thread per connection. ASYNC / POOL / MIXED keep the thread-per-conn
-                // terminator, which also serves TLS 1.2.
-                if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
-                    return tls_mux.runTlsMux(routes, cfg);
+                // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
+                // fleet, instead of a second server launch.
+                if (cfg.tls_port != 0) {
+                    if (cfg.tls_port == cfg.port) return error.TlsPortConflict;
 
-                return tls_serve.runTls(routes, cfg);
+                    if (is_linux and cfg.dispatch_model == .EPOLL)
+                        return epoll_model.runEpoll(routes, cfg);
+                    if (is_linux and cfg.dispatch_model == .URING)
+                        return uring_model.runUring(routes, cfg);
+
+                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
+                    // TLS on tls_port (thread-per-connection), the cleartext model runs below
+                    // unchanged.
+                    var tls_cfg = cfg;
+                    tls_cfg.port = cfg.tls_port;
+                    tls_cfg.tls_port = 0;
+
+                    const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{tls_cfg});
+                    tls_thread.detach();
+                } else {
+                    // Multiplexed TLS for the event-loop models (no thread-per-conn): one epoll worker per
+                    // core terminates TLS in place and serves the resumable mux, so high concurrency does
+                    // not spawn a thread per connection. ASYNC / POOL / MIXED keep the thread-per-conn
+                    // terminator, which also serves TLS 1.2.
+                    if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
+                        return tls_mux.runTlsMux(routes, cfg);
+
+                    return tls_serve.runTls(routes, cfg);
+                }
             }
 
             return switch (cfg.dispatch_model) {

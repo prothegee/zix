@@ -119,6 +119,11 @@ pub const Http1ServerConfig = struct {
     /// carries the cert / key / alpn / version / curve / cipher / HSTS policy (Tls.Context.Config).
     /// Caller owns the Context and must ensure it outlives the server.
     tls: ?*Tls.Context = null,
+    /// Companion https bind port for the dual-listener mode. 0 (default) keeps the single-listener
+    /// behavior: with tls set the server is TLS-only on port. Non-zero (requires tls set) serves
+    /// cleartext on port AND https on tls_port from the same worker fleet, one server instead of two
+    /// launches. Ignored when tls is null.
+    tls_port: u16 = 0,
     /// Optional logger for server lifecycle lines (listening, fallback notices). null = std.debug.print.
     /// The Http1 handler writes the fd and returns void, so per-request access logging is the handler's job:
     /// call logger.access() inside the handler where status and byte count are known. Caller owns, must outlive.

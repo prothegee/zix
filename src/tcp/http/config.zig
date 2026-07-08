@@ -133,6 +133,11 @@ pub const HttpServerConfig = struct {
     /// policy (Tls.Context.Config). Buffered responses only: SSE / streaming and WebSocket are not
     /// served over TLS yet (they bypass the buffered response sink).
     tls: ?*Tls.Context = null,
+    /// Companion https bind port for the dual-listener mode. 0 (default) keeps the
+    /// single-listener behavior: with tls set the server is TLS-only on port. Non-zero (requires
+    /// tls set) serves cleartext on port AND TLS on tls_port from the same worker fleet, one
+    /// server instead of two launches. Ignored when tls is null.
+    tls_port: u16 = 0,
 };
 
 test "zix http: HttpServerConfig uring_send_buf_size default" {

@@ -70,6 +70,13 @@ fn HttpServerImpl(comptime routes: []const Route) type {
             self.registry.deinit();
         }
 
+        /// Dual-listener TLS accept thread for the thread models: serves https on config.port
+        /// (already overridden to tls_port by the caller) while the cleartext model runs on the
+        /// original port.
+        fn serveTlsThread(server_copy: Self, tls_io: std.Io) void {
+            tls_serve.runTls(&server_copy, tls_io) catch {};
+        }
+
         /// Start listening and accepting connections
         ///
         /// Note:
@@ -83,6 +90,11 @@ fn HttpServerImpl(comptime routes: []const Route) type {
         /// - !void
         pub fn run(self: *Self) !void {
             const cfg = self.config;
+
+            // Reject an impossible dual-listener bind before the timer thread spawns, so an
+            // error return leaves no detached thread reading this server's registry.
+            if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
+
             const cpu = try std.Thread.getCpuCount();
 
             const thread_io: std.Io = cfg.io;
@@ -112,10 +124,27 @@ fn HttpServerImpl(comptime routes: []const Route) type {
             // epoll worker per core, many connections each), the thread models hand each connection to
             // its own worker thread.
             if (cfg.tls != null) {
-                if (effective_model == .EPOLL or effective_model == .URING) {
-                    return tls_mux.runTlsMux(self, thread_io);
+                // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
+                // fleet, instead of a second server launch.
+                if (cfg.tls_port != 0) {
+                    if (effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
+                    if (effective_model == .URING) return uring_model.runUring(self, thread_io);
+
+                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
+                    // TLS on tls_port (thread-per-connection, WebSocket + SSE included, ADR-054 /
+                    // ADR-055), the cleartext model runs below unchanged.
+                    var tls_server = self.*;
+                    tls_server.config.port = cfg.tls_port;
+                    tls_server.config.tls_port = 0;
+
+                    const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{ tls_server, thread_io });
+                    tls_thread.detach();
+                } else {
+                    if (effective_model == .EPOLL or effective_model == .URING) {
+                        return tls_mux.runTlsMux(self, thread_io);
+                    }
+                    return tls_serve.runTls(self, thread_io);
                 }
-                return tls_serve.runTls(self, thread_io);
             }
 
             switch (effective_model) {

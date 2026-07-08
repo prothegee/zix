@@ -78,6 +78,11 @@ pub const Http2ServerConfig = struct {
     /// Http2 engine alpn should include .H2 (browsers require ALPN h2 for HTTP/2 over TLS, RFC 7540
     /// 3.3). Caller owns the Context and must ensure it outlives the server.
     tls: ?*Tls.Context = null,
+    /// Companion h2-over-TLS bind port for the dual-listener mode. 0 (default) keeps the
+    /// single-listener behavior: with tls set the server is TLS-only on port. Non-zero (requires
+    /// tls set) serves cleartext on port AND TLS on tls_port from the same worker fleet, one
+    /// server instead of two launches. Ignored when tls is null.
+    tls_port: u16 = 0,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle
     /// events (listening, fallback notices) instead of std.debug.print. The h2c handler
     /// owns its frame I/O, so per-request access logging is the handler's responsibility.

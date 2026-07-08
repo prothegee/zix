@@ -2,16 +2,22 @@
 //!
 //! What:
 //! - One SO_REUSEPORT listener + epoll instance per worker, like the cleartext .EPOLL model, but each
-//!   connection terminates TLS in place via a resumable tls_session.Session (no thread per connection).
-//!   recv ciphertext -> session decrypts -> the plaintext feeds the http1 request loop -> the handler's
-//!   response is encrypted back into TLS records -> sent. A worker multiplexes thousands of TLS
-//!   connections, so high concurrency no longer spawns thousands of blocking threads (the thread-per-
-//!   connection TLS path in tls_serve.zig serializes connections and starves the rest).
+//!   connection terminates TLS in place via the shared transport (multiplexers/tls_conn.zig), no thread
+//!   per connection. recv ciphertext -> transport decrypts -> the plaintext feeds the http1 request
+//!   loop -> the handler's response is encrypted back into TLS records -> sent. A worker multiplexes
+//!   thousands of TLS connections, so high concurrency no longer spawns thousands of blocking threads
+//!   (the thread-per-connection TLS path in tls_serve.zig serializes connections and starves the rest).
 //! - Keep-alive (RFC 9112 9.3): a connection serves requests in a loop over the established session, so
 //!   the handshake is paid once per connection, not once per request. The loop ends on Connection:
 //!   close, a client close_notify, or a hangup.
 //! - Writes are non-blocking: on EAGAIN the unsent ciphertext is staged per connection and EPOLLOUT is
 //!   armed, so a slow client never parks the worker.
+//! - WebSocket and SSE are hosted in the loop: a WebSocket.serve handoff switches the connection to
+//!   the frame pump (echo frames encrypt per pass), and a beginStream handler streams each write as
+//!   TLS records through the per-connection stream sink. Both stage on backpressure like any response.
+//! - The connection machinery (TlsConn, ConnTable, onReadable, acceptAll) is pub: the dual-listener
+//!   .EPOLL loop (dispatch/epoll.zig, config.tls_port) hosts the same connections in the cleartext
+//!   worker instead of a second fleet.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -21,9 +27,9 @@ const core = @import("core.zig");
 const Config = @import("config.zig").Http1ServerConfig;
 const common = @import("dispatch/common.zig");
 const tls_serve = @import("tls_serve.zig");
-const session = @import("../tls/tls_session.zig");
+const ws = @import("websocket.zig");
 const Tls = @import("../../tls/Tls.zig");
-const slab = @import("../../multiplexers/slab.zig");
+const tls_conn = @import("../../multiplexers/tls_conn.zig");
 
 const HandlerFn = core.HandlerFn;
 const MAX_FD = common.MAX_FD;
@@ -31,7 +37,7 @@ const EPOLL_MAX_EVENTS: usize = 4096;
 const allocator = std.heap.smp_allocator;
 
 /// Inbound ciphertext read staging (may hold several records per read).
-const TLS_READ_STAGING_SIZE: usize = 32 * 1024;
+const TLS_READ_STAGING_SIZE: usize = tls_conn.read_staging_size;
 
 /// Decrypted plaintext staging for one read (matches the read staging so a full read fits).
 const TLS_PLAIN_STAGING_SIZE: usize = 32 * 1024;
@@ -43,180 +49,66 @@ const TLS_SEALED_OUT_SIZE: usize = 70 * 1024;
 const REQUEST_BUF_SIZE: usize = 17 * 1024;
 
 /// Handler response staging: the effective max response size over TLS (matches tls_serve).
-const RESPONSE_BUF_SIZE: usize = 64 * 1024;
+pub const RESPONSE_BUF_SIZE: usize = 64 * 1024;
 
-/// Initial size of the per-connection outbound-ciphertext backpressure buffer (grown on demand).
-const tls_write_buf_initial: usize = 16 * 1024;
-
-const content_type_application_data: u8 = 23;
-
-/// One TLS connection: the resumable TLS session, the request accumulator, and the outbound-ciphertext
-/// backpressure buffer. One worker owns a connection for its whole lifetime (shared-nothing).
-const TlsConn = struct {
-    fd: posix.fd_t,
-    tls: session.Session,
+/// One TLS connection: the shared byte transport (session + outbound backpressure buffer) plus the
+/// http1 payload (request accumulator, WebSocket mode). One worker owns a connection for its whole
+/// lifetime (shared-nothing).
+pub const TlsConn = struct {
+    transport: tls_conn.Transport,
     handler: HandlerFn,
     ctx: *const Tls.Context,
+
+    // Set once the handler hands the connection to the engine (WebSocket.serve): from then on the
+    // decrypted bytes are frames, pumped instead of parsed as HTTP.
+    ws: ?core.WsFrameFn = null,
 
     // Partial request bytes across reads (and pipelined requests): the live bytes are rbuf[0..rlen].
     rbuf: [REQUEST_BUF_SIZE]u8 = undefined,
     rlen: usize = 0,
-
-    // Outbound ciphertext staged on EAGAIN: a heap buffer flushed on the next EPOLLOUT. wbuf is the
-    // allocation (capacity), the live bytes are wbuf[woff..wlen]. Capacity and length are tracked
-    // separately so a grown buffer never transmits its uninitialized tail.
-    wbuf: []u8 = &.{},
-    woff: usize = 0,
-    wlen: usize = 0,
-    wclose: bool = false,
-    want_out: bool = false,
 };
 
 /// Per-worker fd -> TlsConn map (shared-nothing, one worker owns a connection for its lifetime).
-const ConnTable = struct {
-    slots: []?*TlsConn,
-
-    fn init() !ConnTable {
-        return .{ .slots = try slab.mapZeroedSlots(?*TlsConn, MAX_FD) };
-    }
-
-    fn deinit(self: *ConnTable) void {
-        for (self.slots) |maybe| {
-            if (maybe) |conn| freeConn(conn);
-        }
-        slab.unmapSlots(self.slots);
-    }
-
-    fn get(self: *ConnTable, fd: posix.fd_t) ?*TlsConn {
-        const idx: usize = @intCast(fd);
-        if (idx >= self.slots.len) return null;
-
-        return self.slots[idx];
-    }
-
-    fn put(self: *ConnTable, conn: *TlsConn) void {
-        self.slots[@intCast(conn.fd)] = conn;
-    }
-
-    fn drop(self: *ConnTable, fd: posix.fd_t) void {
-        const idx: usize = @intCast(fd);
-        if (idx >= self.slots.len) return;
-        if (self.slots[idx]) |conn| freeConn(conn);
-        self.slots[idx] = null;
-    }
-};
+pub const ConnTable = tls_conn.ConnTable(TlsConn, MAX_FD, freeConn);
 
 fn freeConn(conn: *TlsConn) void {
-    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
+    conn.transport.deinit();
     allocator.destroy(conn);
-}
-
-fn armOut(epfd: posix.fd_t, fd: posix.fd_t, on: bool) void {
-    var flags: u32 = linux.EPOLL.IN | linux.EPOLL.RDHUP;
-    if (on) flags |= linux.EPOLL.OUT;
-
-    var ev = linux.epoll_event{ .events = flags, .data = .{ .fd = fd } };
-    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &ev);
-}
-
-/// Try to send `bytes` now, staging whatever does not fit and marking the connection for EPOLLOUT.
-/// Returns false on a fatal write error (the caller closes).
-///
-/// Note:
-/// - TLS records must reach the peer in order (the AEAD nonce is the record sequence number). If
-///   ciphertext is already staged, this MUST append rather than write directly, or a later record
-///   would overtake the staged one on the wire and break decryption.
-fn sendRaw(conn: *TlsConn, bytes: []const u8) bool {
-    if (conn.wlen > conn.woff) {
-        stageWrite(conn, bytes);
-        return true;
-    }
-
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const rc = linux.write(conn.fd, bytes[off..].ptr, bytes.len - off);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return false;
-                off += @intCast(rc);
-            },
-            .INTR => continue,
-            .AGAIN => {
-                stageWrite(conn, bytes[off..]);
-                return true;
-            },
-            else => return false,
-        }
-    }
-
-    return true;
-}
-
-/// Append unsent ciphertext to the connection's pending buffer (grown as needed) for the next EPOLLOUT.
-/// The live bytes are wbuf[woff..wlen]. Capacity (wbuf.len) is never used as the data length, so a
-/// grown buffer never flushes its uninitialized tail.
-fn stageWrite(conn: *TlsConn, bytes: []const u8) void {
-    const pending = conn.wlen - conn.woff;
-
-    // Room already at the tail: append in place.
-    if (conn.wbuf.len - conn.wlen >= bytes.len) {
-        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-        conn.wlen += bytes.len;
-        conn.want_out = true;
-        return;
-    }
-
-    const need = pending + bytes.len;
-
-    // Compaction alone makes room: slide the live bytes to the front.
-    if (conn.wbuf.len >= need) {
-        std.mem.copyForwards(u8, conn.wbuf[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-        conn.woff = 0;
-        conn.wlen = pending;
-
-        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-        conn.wlen += bytes.len;
-        conn.want_out = true;
-        return;
-    }
-
-    // Grow: allocate a larger buffer and move the live bytes to its front.
-    var new_cap: usize = if (conn.wbuf.len == 0) tls_write_buf_initial else conn.wbuf.len * 2;
-    while (new_cap < need) new_cap *= 2;
-
-    const grown = allocator.alloc(u8, new_cap) catch {
-        conn.wclose = true;
-        return;
-    };
-    @memcpy(grown[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
-    conn.wbuf = grown;
-    conn.woff = 0;
-    conn.wlen = pending;
-
-    @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-    conn.wlen += bytes.len;
-    conn.want_out = true;
 }
 
 /// Encrypt response plaintext into TLS records and send (staging on backpressure).
 fn sendPlain(conn: *TlsConn, plaintext: []const u8) bool {
     var sealed: [TLS_SEALED_OUT_SIZE]u8 = undefined;
-    const ct = conn.tls.encrypt(plaintext, &sealed);
 
-    return sendRaw(conn, ct);
+    return conn.transport.sendPlain(plaintext, &sealed);
+}
+
+/// Stream-sink write (SSE events, WebSocket frames): seal the plaintext into records and send
+/// through the transport, staging on backpressure. Chunked, so one oversized write (a large frame
+/// written straight through the frame sink) never overflows the sealed staging buffer.
+fn streamWrite(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
+    const transport: *tls_conn.Transport = @ptrCast(@alignCast(ctx_ptr));
+
+    var rest = plaintext;
+    while (rest.len > 0) {
+        const n = @min(rest.len, RESPONSE_BUF_SIZE);
+        var sealed: [TLS_SEALED_OUT_SIZE]u8 = undefined;
+        if (!transport.sendPlain(rest[0..n], &sealed)) return false;
+        rest = rest[n..];
+    }
+
+    return true;
 }
 
 /// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
-/// plaintext to the http1 request loop and seal its replies. Returns false when the connection must
-/// close.
-fn onReadable(conn: *TlsConn) bool {
+/// plaintext to the http1 request loop (or the WebSocket frame pump) and seal the replies. Returns
+/// false when the connection must close. payload_buf / out_buf are per-worker scratch for the frame
+/// pump (frame payloads, coalesced echo frames).
+pub fn onReadable(conn: *TlsConn, payload_buf: []u8, out_buf: []u8) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
-    var to_send: [TLS_SEALED_OUT_SIZE]u8 = undefined;
-    var plain_in: [TLS_PLAIN_STAGING_SIZE]u8 = undefined;
 
     while (true) {
-        const rc = linux.read(conn.fd, &cipher, cipher.len);
+        const rc = linux.read(conn.transport.fd, &cipher, cipher.len);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false; // peer closed
@@ -226,35 +118,58 @@ fn onReadable(conn: *TlsConn) bool {
             else => return false,
         }
 
-        const got = cipher[0..@intCast(rc)];
-        const r = conn.tls.feed(got, &to_send, &plain_in);
+        if (!onCiphertext(conn, cipher[0..@intCast(rc)], payload_buf, out_buf)) return false;
+        if (conn.transport.wclose) return conn.transport.want_out; // flush, then close
+    }
+}
 
-        if (r.to_send.len > 0 and !sendRaw(conn, r.to_send)) return false;
+/// Feed one received ciphertext chunk through the session and the request loop (or the WebSocket
+/// frame pump). The recv-model-agnostic core of onReadable: the .EPOLL paths call it under their
+/// own read loop, the .URING path calls it per recv completion. Returns false when the connection
+/// must close now. transport.wclose set with staged bytes means flush, then close.
+pub fn onCiphertext(conn: *TlsConn, cipher: []const u8, payload_buf: []u8, out_buf: []u8) bool {
+    var to_send: [TLS_SEALED_OUT_SIZE]u8 = undefined;
+    var plain_in: [TLS_PLAIN_STAGING_SIZE]u8 = undefined;
 
-        if (r.outcome == .close) {
-            conn.wclose = true;
-            return conn.want_out; // keep the conn only to flush a final alert
-        }
+    const r = conn.transport.tls.feed(cipher, &to_send, &plain_in);
 
-        if (r.plaintext.len > 0) {
-            if (!feedRequests(conn, r.plaintext)) return false;
-            if (conn.wclose) return conn.want_out; // Connection: close handled, flush then close
+    if (r.to_send.len > 0 and !conn.transport.sendRaw(r.to_send)) return false;
+
+    if (r.outcome == .close) {
+        conn.transport.wclose = true; // keep the conn only to flush a final alert
+        return true;
+    }
+
+    if (r.plaintext.len > 0) {
+        if (conn.ws) |on_frame| {
+            if (!feedFrames(conn, on_frame, r.plaintext, payload_buf, out_buf)) return false;
+        } else {
+            if (!feedRequests(conn, r.plaintext, payload_buf, out_buf)) return false;
         }
     }
+
+    return true;
 }
 
 /// Accumulate decrypted plaintext and dispatch every complete request now buffered. Pipelined requests
 /// drain in one pass. Returns false when the connection must close (request too large, bad request, or
-/// a fatal write); sets conn.wclose when the client asked to close after the response.
-fn feedRequests(conn: *TlsConn, plaintext: []const u8) bool {
+/// a fatal write); sets transport.wclose when the client asked to close after the response.
+fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_buf: []u8) bool {
     // overflow guard: a single request larger than the buffer is rejected (matches tls_serve's cap).
     if (plaintext.len > conn.rbuf.len - conn.rlen) {
-        conn.wclose = true;
+        conn.transport.wclose = true;
         return true;
     }
 
     @memcpy(conn.rbuf[conn.rlen..][0..plaintext.len], plaintext);
     conn.rlen += plaintext.len;
+
+    // The per-connection stream sink (ADR-054): a handler that calls beginStream (SSE) or
+    // WebSocket.serveTls detaches the buffered capture, and every subsequent write seals records
+    // through the transport, staging on backpressure instead of parking the worker.
+    var stream_sink = core.TlsStreamSink{ .ctx = &conn.transport, .writeFn = streamWrite };
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = null;
 
     var response_buf: [RESPONSE_BUF_SIZE]u8 = undefined;
 
@@ -262,7 +177,7 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8) bool {
         const parsed = core.parseHead(conn.rbuf[0..conn.rlen]) catch |err| {
             if (err == error.IncompleteHeader) return true; // wait for the rest of the head
 
-            conn.wclose = true; // malformed request: close
+            conn.transport.wclose = true; // malformed request: close
             return true;
         };
         const total = parsed.body_offset + parsed.head.content_length;
@@ -278,30 +193,39 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8) bool {
             Tls.verifyCertIdentity(conn.ctx.cert_der, host) catch {
                 const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 _ = sendPlain(conn, misdirected);
-                conn.wclose = true;
+                conn.transport.wclose = true;
                 return true;
             };
         }
 
-        // the multiplexed path stays buffered (ADR-054): a streaming handler (beginStream) has no
-        // stream sink armed here, so runHandlerToBuffer rejects it and the connection closes cleanly.
         const result = tls_serve.runHandlerToBuffer(conn.handler, &head, body, &response_buf) catch {
-            _ = core.takeWebSocket(); // the multiplexed path does not host WS (ADR-055), drop any handoff
-            conn.wclose = true;
+            _ = core.takeWebSocket(); // failed upgrade or oversized response: drop any handoff
+            conn.transport.wclose = true;
             return true;
         };
-        if (!sendPlain(conn, result.bytes)) return false;
+
+        // A streamed response (beginStream / serveTls) already left through the stream sink.
+        if (stream_sink.failed) return false;
+        if (!result.streamed and !sendPlain(conn, result.bytes)) return false;
 
         // consume this request, sliding any pipelined bytes to the front.
         const remaining = conn.rlen - total;
         if (remaining > 0) std.mem.copyForwards(u8, conn.rbuf[0..remaining], conn.rbuf[total..conn.rlen]);
         conn.rlen = remaining;
 
+        // WebSocket handoff (serve or serveTls): from now on rbuf holds frames. The client may have
+        // pipelined its first frame with the handshake, so pump what is already buffered.
+        if (core.takeWebSocket()) |pending| {
+            conn.ws = pending.on_frame;
+
+            return pumpFrames(conn, pending.on_frame, payload_buf, out_buf);
+        }
+
         // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
         if (!head.keep_alive) {
             var close_buf: [64]u8 = undefined;
-            _ = sendRaw(conn, conn.tls.closeNotify(&close_buf));
-            conn.wclose = true;
+            _ = conn.transport.sendRaw(conn.transport.tls.closeNotify(&close_buf));
+            conn.transport.wclose = true;
             return true;
         }
     }
@@ -309,33 +233,53 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8) bool {
     return true;
 }
 
-/// Flush staged outbound ciphertext on an EPOLLOUT. Returns false when the connection must close.
-fn onWritable(epfd: posix.fd_t, conn: *TlsConn) bool {
-    while (conn.woff < conn.wlen) {
-        const rc = linux.write(conn.fd, conn.wbuf[conn.woff..].ptr, conn.wlen - conn.woff);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return false;
-                conn.woff += @intCast(rc);
-            },
-            .INTR => continue,
-            .AGAIN => return true,
-            else => return false,
-        }
-    }
+/// Append decrypted plaintext (frame bytes) to the accumulator and pump the frames.
+fn feedFrames(conn: *TlsConn, on_frame: core.WsFrameFn, plaintext: []const u8, payload_buf: []u8, out_buf: []u8) bool {
+    // A frame that cannot ever fit the accumulator can never complete: close.
+    if (plaintext.len > conn.rbuf.len - conn.rlen) return false;
 
-    // Drained. Keep the buffer for reuse instead of freeing: under sustained backpressure the
-    // stage/drain cycle repeats, and a free here plus a realloc on the next stageWrite churns the
-    // shared allocator on the hot path. freeConn releases it at close.
-    conn.woff = 0;
-    conn.wlen = 0;
-    conn.want_out = false;
-    armOut(epfd, conn.fd, false);
+    @memcpy(conn.rbuf[conn.rlen..][0..plaintext.len], plaintext);
+    conn.rlen += plaintext.len;
 
-    return !conn.wclose;
+    return pumpFrames(conn, on_frame, payload_buf, out_buf);
 }
 
-fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) void {
+/// Parse and dispatch every complete frame buffered on an engine-owned WebSocket over TLS. Echo /
+/// pong / close frames leave through the stream sink, sealed as records (coalesced per pass by the
+/// frame send sink). Mirrors serveEpollWs, with encrypt-on-write.
+fn pumpFrames(conn: *TlsConn, on_frame: core.WsFrameFn, payload_buf: []u8, out_buf: []u8) bool {
+    if (conn.rlen == 0) return true;
+
+    var stream_sink = core.TlsStreamSink{ .ctx = &conn.transport, .writeFn = streamWrite };
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = null;
+
+    const result = ws.pump(conn.transport.fd, conn.rbuf[0..conn.rlen], payload_buf, out_buf, on_frame);
+
+    if (result.consumed >= conn.rlen) {
+        conn.rlen = 0;
+    } else if (result.consumed > 0) {
+        std.mem.copyForwards(u8, conn.rbuf[0 .. conn.rlen - result.consumed], conn.rbuf[result.consumed..conn.rlen]);
+        conn.rlen -= result.consumed;
+    }
+
+    if (result.close or stream_sink.failed) {
+        var close_buf: [64]u8 = undefined;
+        _ = conn.transport.sendRaw(conn.transport.tls.closeNotify(&close_buf));
+        conn.transport.wclose = true;
+        return true;
+    }
+
+    // A frame wider than the whole buffer can never complete: close rather than spin.
+    if (conn.rlen >= conn.rbuf.len) return false;
+
+    return true;
+}
+
+/// Accept every pending TLS connection on listener_fd and register each in epfd with
+/// `ev_tag | fd` as the event data. The TLS-only worker passes 0 (plain fd), the dual-listener
+/// .EPOLL loop passes tls_conn.tls_event_tag so its one loop can route TLS events.
+pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, ev_tag: u64) void {
     while (true) {
         const rc = linux.accept4(listener_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
         switch (posix.errno(rc)) {
@@ -359,14 +303,14 @@ fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, handl
             continue;
         };
         conn.* = .{
-            .fd = fd,
-            .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn),
+            .transport = tls_conn.Transport.init(fd, ctx),
             .handler = handler,
             .ctx = ctx,
         };
-        table.put(conn);
+        conn.transport.ep_data = ev_tag | @as(u64, @intCast(fd));
+        table.put(fd, conn);
 
-        var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .fd = fd } };
+        var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .u64 = conn.transport.ep_data } };
         if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev)) != .SUCCESS) {
             table.drop(fd);
             _ = linux.close(fd);
@@ -404,11 +348,18 @@ fn workerRun(worker: WorkerCtx) void {
     const epfd: posix.fd_t = @intCast(epfd_rc);
     defer _ = linux.close(epfd);
 
-    var lev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = listener_fd } };
+    var lev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .u64 = @intCast(listener_fd) } };
     if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS) return;
 
     var table = ConnTable.init() catch return;
     defer table.deinit();
+
+    // Per-worker scratch for the WebSocket frame pump (payloads, coalesced echo frames).
+    const payload_buf = allocator.alloc(u8, core.BUF_SIZE) catch return;
+    defer allocator.free(payload_buf);
+
+    const out_buf = allocator.alloc(u8, RESPONSE_BUF_SIZE) catch return;
+    defer allocator.free(out_buf);
 
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
     while (true) {
@@ -421,7 +372,7 @@ fn workerRun(worker: WorkerCtx) void {
 
         for (events[0..@intCast(wait_rc)]) |ev| {
             if (ev.data.fd == listener_fd) {
-                acceptAll(&table, epfd, listener_fd, worker.handler, worker.ctx);
+                acceptAll(&table, epfd, listener_fd, worker.handler, worker.ctx, 0);
                 continue;
             }
 
@@ -431,10 +382,10 @@ fn workerRun(worker: WorkerCtx) void {
             if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
                 keep = false;
             } else {
-                if ((ev.events & linux.EPOLL.OUT) != 0) keep = onWritable(epfd, conn);
-                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(conn);
-                if (keep and conn.want_out) armOut(epfd, conn.fd, true);
-                if (keep and conn.wclose and !conn.want_out) keep = false;
+                if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
+                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(conn, payload_buf, out_buf);
+                if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
+                if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
             }
 
             if (!keep) {
@@ -448,7 +399,7 @@ fn workerRun(worker: WorkerCtx) void {
 
 /// Listen and serve https/1.1 over TLS, multiplexed across one epoll worker per core. The cert / key /
 /// policy are already loaded and validated in the context (config.tls).
-pub fn runTlsMux(config: Config, handler: HandlerFn) !void {
+pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
     const ctx = config.tls.?;
     // Cpuset-aware count (sched_getaffinity), NOT the host CPU count, so a cgroup-pinned server does
     // not spawn host-many workers onto a few cores. This matches the cleartext .EPOLL model.
@@ -488,6 +439,33 @@ fn epollTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd
     core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
 }
 
+/// Test handler: engine-owned WebSocket upgrade (the cleartext WebSocket.serve API, honored on the
+/// TLS mux loop).
+fn wsUpgradeTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
+    _ = body;
+
+    const key = core.getHeader(head, "sec-websocket-key") orelse {
+        core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        return;
+    };
+    ws.serve(fd, key, wsEchoTestFrame) catch {};
+}
+
+fn wsEchoTestFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
+    ws.sendFD(fd, @enumFromInt(opcode), payload) catch {};
+}
+
+/// Test handler: SSE-style streaming response (beginStream detaches the capture sink, every write
+/// seals records through the connection's stream sink).
+fn sseTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
+    _ = head;
+    _ = body;
+
+    core.beginStream();
+    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.writeAllFD(fd, "data: one\n\n") catch return;
+}
+
 /// Read exactly one TLS record (5-byte header + body) from a blocking fd into buf, returning its full
 /// bytes. Used by the test client to read the server flight and the encrypted responses.
 fn readRecordFd(fd: posix.fd_t, buf: []u8) ![]const u8 {
@@ -511,49 +489,62 @@ fn readRecordFd(fd: posix.fd_t, buf: []u8) ![]const u8 {
     return buf[0..total];
 }
 
-test "zix test: tls_mux, event-driven keep-alive serves many requests then Connection: close" {
+/// Test fixture: a served TlsConn with an established client session over a socketpair. Drives the
+/// full handshake through onReadable so every test starts from an application-data session.
+const TestSession = struct {
+    conn: TlsConn,
+    client_fd: posix.fd_t,
+    server_fd: posix.fd_t,
+    finished: @import("../../tls/client.zig").FinishResult,
+    payload_buf: [core.BUF_SIZE]u8 = undefined,
+    out_buf: [RESPONSE_BUF_SIZE]u8 = undefined,
+
+    fn deinit(self: *TestSession) void {
+        self.conn.transport.deinit();
+        _ = linux.close(self.client_fd);
+        _ = linux.close(self.server_fd);
+    }
+
+    fn readable(self: *TestSession) bool {
+        return onReadable(&self.conn, &self.payload_buf, &self.out_buf);
+    }
+
+    /// Encrypt request bytes as client application data and hand them to the server side.
+    fn send(self: *TestSession, plaintext: []const u8) !void {
+        var enc: [4096]u8 = undefined;
+        try writeAllFD(self.client_fd, self.finished.connection.writeAppData(plaintext, &enc));
+    }
+
+    /// Read one encrypted record from the server and return its decrypted plaintext.
+    fn recv(self: *TestSession, plain: []u8) ![]const u8 {
+        var rec_buf: [4096]u8 = undefined;
+        const rec = try readRecordFd(self.client_fd, &rec_buf);
+
+        return self.finished.connection.readAppData(rec, plain);
+    }
+};
+
+fn startTestSession(handler: HandlerFn, ctx: *Tls.Context) !TestSession {
     const client = @import("../../tls/client.zig");
-    const context = @import("../../tls/context.zig");
-    const tls_serve_mod = @import("tls_serve.zig");
-    const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
-
-    // server identity from the shared fixture.
-    var skey: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&skey, tls_serve_mod.fixture_key_hex);
-    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
-    var cert_buf: [512]u8 = undefined;
-    const cert_der = try std.fmt.hexToBytes(&cert_buf, tls_serve_mod.fixture_cert_hex);
-
-    var ctx = Tls.Context{
-        .allocator = std.testing.allocator,
-        .cert_der = cert_der,
-        .signing_key = .{ .ecdsa_p256 = server_key },
-        .alpn = &.{},
-        .curves = context.default_curves,
-        .ciphers = context.default_ciphers,
-        .min_version = .TLS_1_2,
-        .max_version = .TLS_1_3,
-        .prefer_server_ciphers = true,
-        .hsts_max_age_s = 0,
-    };
 
     var pair: [2]posix.fd_t = undefined;
     try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
     const client_fd = pair[0];
     const server_fd = pair[1];
-    defer _ = linux.close(client_fd);
-    defer _ = linux.close(server_fd);
 
     // the worker drives the server side via onReadable, which needs a non-blocking fd to detect drain.
     common.setNonBlock(server_fd);
 
-    var conn = TlsConn{
-        .fd = server_fd,
-        .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn),
-        .handler = epollTestHandler,
-        .ctx = &ctx,
+    var self = TestSession{
+        .conn = .{
+            .transport = tls_conn.Transport.init(server_fd, ctx),
+            .handler = handler,
+            .ctx = ctx,
+        },
+        .client_fd = client_fd,
+        .server_fd = server_fd,
+        .finished = undefined,
     };
-    defer if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
 
     // client ClientHello wrapped in a plaintext handshake record. The worker reads + answers it.
     var ch_buf: [512]u8 = undefined;
@@ -567,7 +558,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
     try writeAllFD(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
 
-    try std.testing.expect(onReadable(&conn)); // process ClientHello, emit the server flight
+    try std.testing.expect(onReadable(&self.conn, &self.payload_buf, &self.out_buf)); // ClientHello -> server flight
 
     var flight_buf: [4096]u8 = undefined;
     var flen: usize = 0;
@@ -577,8 +568,42 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     }
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
-    try writeAllFD(client_fd, finished.client_finished);
+    self.finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
+    try writeAllFD(client_fd, self.finished.client_finished);
+
+    return self;
+}
+
+fn testContext(cert_buf: *[512]u8) !Tls.Context {
+    const context = @import("../../tls/context.zig");
+    const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    // server identity from the shared fixture.
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, tls_serve.fixture_key_hex);
+    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    const cert_der = try std.fmt.hexToBytes(cert_buf, tls_serve.fixture_cert_hex);
+
+    return .{
+        .allocator = std.testing.allocator,
+        .cert_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = server_key },
+        .alpn = &.{},
+        .curves = context.default_curves,
+        .ciphers = context.default_ciphers,
+        .min_version = .TLS_1_2,
+        .max_version = .TLS_1_3,
+        .prefer_server_ciphers = true,
+        .hsts_max_age_s = 0,
+    };
+}
+
+test "zix test: tls_mux, event-driven keep-alive serves many requests then Connection: close" {
+    var cert_buf: [512]u8 = undefined;
+    var ctx = try testContext(&cert_buf);
+
+    var tst = try startTestSession(epollTestHandler, &ctx);
+    defer tst.deinit();
 
     // two keep-alive requests on the one connection: both get a 200 over the SAME session driven by
     // onReadable (no re-handshake), and onReadable keeps the connection alive (returns true).
@@ -587,32 +612,81 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
         "GET /b HTTP/1.1\r\nHost: localhost\r\n\r\n",
     };
     for (keepalive_reqs) |req| {
-        var enc: [512]u8 = undefined;
-        try writeAllFD(client_fd, finished.connection.writeAppData(req, &enc));
+        try tst.send(req);
 
-        try std.testing.expect(onReadable(&conn));
-        try std.testing.expect(!conn.wclose);
+        try std.testing.expect(tst.readable());
+        try std.testing.expect(!tst.conn.transport.wclose);
 
-        var resp_rec: [1024]u8 = undefined;
-        const rec = try readRecordFd(client_fd, &resp_rec);
         var plain: [1024]u8 = undefined;
-        const resp = try finished.connection.readAppData(rec, &plain);
+        const resp = try tst.recv(&plain);
         try std.testing.expect(std.mem.indexOf(u8, resp, "200 OK") != null);
     }
 
     // the Connection: close request still gets its 200, but onReadable signals close (returns false)
     // and the loop ends. The response is sent before the close path.
-    var enc: [512]u8 = undefined;
-    try writeAllFD(client_fd, finished.connection.writeAppData("GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", &enc));
+    try tst.send("GET /c HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
 
-    try std.testing.expect(!onReadable(&conn));
-    try std.testing.expect(conn.wclose);
+    try std.testing.expect(!tst.readable());
+    try std.testing.expect(tst.conn.transport.wclose);
 
-    var resp_rec: [1024]u8 = undefined;
-    const rec = try readRecordFd(client_fd, &resp_rec);
     var plain: [1024]u8 = undefined;
-    const resp = try finished.connection.readAppData(rec, &plain);
+    const resp = try tst.recv(&plain);
     try std.testing.expect(std.mem.indexOf(u8, resp, "200 OK") != null);
+}
+
+test "zix test: tls_mux, WebSocket.serve handoff pumps frames with encrypt-on-write" {
+    var cert_buf: [512]u8 = undefined;
+    var ctx = try testContext(&cert_buf);
+
+    var tst = try startTestSession(wsUpgradeTestHandler, &ctx);
+    defer tst.deinit();
+
+    // Upgrade request: the 101 is captured by the response sink and arrives as one sealed record.
+    try tst.send("GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+
+    try std.testing.expect(tst.readable());
+    try std.testing.expect(tst.conn.ws != null);
+
+    var plain: [1024]u8 = undefined;
+    const upgrade_resp = try tst.recv(&plain);
+    try std.testing.expect(std.mem.indexOf(u8, upgrade_resp, "101 Switching Protocols") != null);
+
+    // One masked client text frame "hi": the echo comes back as an encrypted record holding an
+    // unmasked server frame with the same payload.
+    const frame = [_]u8{ 0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02 };
+    try tst.send(&frame);
+
+    try std.testing.expect(tst.readable());
+    try std.testing.expect(!tst.conn.transport.wclose);
+
+    var echo_plain: [1024]u8 = undefined;
+    const echo = try tst.recv(&echo_plain);
+    var scratch: [128]u8 = undefined;
+    const parsed = ws.parseFrame(echo, &scratch).?;
+    try std.testing.expectEqualStrings("hi", parsed.frame.payload);
+}
+
+test "zix test: tls_mux, beginStream handler streams SSE records and keeps the connection" {
+    var cert_buf: [512]u8 = undefined;
+    var ctx = try testContext(&cert_buf);
+
+    var tst = try startTestSession(sseTestHandler, &ctx);
+    defer tst.deinit();
+
+    try tst.send("GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    // The handler streamed two writes (headers, one event): each write is its own sealed record,
+    // and the connection stays open for more events.
+    try std.testing.expect(tst.readable());
+    try std.testing.expect(!tst.conn.transport.wclose);
+
+    var plain_a: [1024]u8 = undefined;
+    const headers = try tst.recv(&plain_a);
+    try std.testing.expect(std.mem.indexOf(u8, headers, "text/event-stream") != null);
+
+    var plain_b: [1024]u8 = undefined;
+    const event = try tst.recv(&plain_b);
+    try std.testing.expectEqualStrings("data: one\n\n", event);
 }
 
 const content_type_handshake_test: u8 = 22;

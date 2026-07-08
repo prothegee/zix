@@ -60,6 +60,11 @@ pub const GrpcServerConfig = struct {
     /// key / alpn / version policy (Tls.Context.Config); alpn should include .H2 (gRPC runs on
     /// HTTP/2, RFC 7540 3.3). Caller owns the Context and must ensure it outlives the server.
     tls: ?*Tls.Context = null,
+    /// Companion gRPC-over-TLS bind port for the dual-listener mode. 0 (default) keeps the
+    /// single-listener behavior: with tls set the server is TLS-only on port. Non-zero (requires
+    /// tls set) serves cleartext on port AND TLS on tls_port from the same worker fleet, one
+    /// server instead of two launches. Ignored when tls is null.
+    tls_port: u16 = 0,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.rpc() for each gRPC stream dispatched. Caller owns. Must outlive the server.
     logger: ?*Logger = null,

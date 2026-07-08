@@ -8,6 +8,9 @@ const cache = @import("../../../utils/response_cache.zig");
 const ws = @import("../websocket.zig");
 const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const tls_mux = @import("../tls_mux.zig");
+const tls_conn = @import("../../../multiplexers/tls_conn.zig");
+const Tls = @import("../../../tls/Tls.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
 const common = @import("common.zig");
@@ -164,6 +167,24 @@ const UringConn = struct {
     prev: ?*UringConn = null,
 };
 
+/// Ring-hosted TLS connection (dual listener, config.tls_port): the shared TLS connection
+/// (tls_mux) plus ring bookkeeping. The ciphertext recv buffer is per connection because the
+/// kernel fills it asynchronously (the .EPOLL paths read into per-event stack staging instead).
+const UringTlsConn = struct {
+    conn: tls_mux.TlsConn,
+    gen: u24,
+    cipher_buf: []u8,
+};
+
+fn freeUringTlsConn(ring_conn: *UringTlsConn) void {
+    ring_conn.conn.transport.deinit();
+    std.heap.smp_allocator.free(ring_conn.cipher_buf);
+    std.heap.smp_allocator.destroy(ring_conn);
+}
+
+/// Per-worker fd -> UringTlsConn map for the dual-listener TLS side.
+const TlsConnTable = tls_conn.ConnTable(UringTlsConn, MAX_FD, freeUringTlsConn);
+
 /// Build a concrete io_uring worker with the handler and optional raw
 /// interceptor baked in at compile time, mirroring epollWorkerFn.
 fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) type {
@@ -226,6 +247,14 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// the constant directly) so tests can drive the cap with a small pool and
         /// the entry can tune it for the host concurrency.
         idle_ceiling: usize = URING_IDLE_POOL_CEILING,
+        /// Dual-listener TLS side (config.tls + config.tls_port). Inactive by default (-1 / null),
+        /// so a cleartext-only worker sees zero layout change on its hot structures.
+        tls_listener_fd: std.posix.fd_t = -1,
+        tls_ctx: ?*Tls.Context = null,
+        tls_conns: ?TlsConnTable = null,
+        tls_gen_counter: u24 = 0,
+        /// Per-worker scratch for the TLS WebSocket frame pump (coalesced echo frames).
+        tls_out_buf: []u8 = &.{},
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -261,6 +290,8 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             allocator.free(self.ws_payload_buf);
             allocator.free(self.body_buf);
             if (self.ws_bufs) |*bg| bg.deinit(allocator);
+            if (self.tls_conns) |*tls_table| tls_table.deinit();
+            if (self.tls_out_buf.len > 0) allocator.free(self.tls_out_buf);
             self.ring.deinit();
         }
 
@@ -919,9 +950,177 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         // ----------------------------------------------------- //
+        // Dual-listener TLS side (config.tls_port): ciphertext recv and the staged-ciphertext
+        // flush ride the ring (tls_recv / tls_send ops), the TLS connection logic is tls_mux's
+        // (shared with the .EPOLL paths). Half-duplex per connection: while a flush send is in
+        // flight no recv is armed, so the transport's staging buffer is never compacted while
+        // the kernel reads it.
+
+        fn lookupTls(self: *Self, decoded: uring.Decoded) ?*UringTlsConn {
+            const table = if (self.tls_conns) |*tls_table| tls_table else return null;
+
+            const ring_conn = table.get(decoded.fd) orelse return null;
+            if (ring_conn.gen != decoded.gen) return null;
+
+            return ring_conn;
+        }
+
+        fn armTlsAccept(self: *Self) void {
+            const sqe = self.getSqe() orelse return;
+            sqe.prep_multishot_accept(self.tls_listener_fd, null, null, 0);
+            sqe.user_data = uring.packUserData(.tls_accept, 0, self.tls_listener_fd);
+        }
+
+        fn handleTlsAccept(self: *Self, cqe: linux.io_uring_cqe) void {
+            const rearm = (cqe.flags & linux.IORING_CQE_F_MORE) == 0;
+            defer if (rearm) self.armTlsAccept();
+
+            if (cqe.res < 0) return;
+
+            const conn_fd: std.posix.fd_t = cqe.res;
+            const table = if (self.tls_conns) |*tls_table| tls_table else {
+                _ = linux.close(conn_fd);
+                return;
+            };
+            const idx: usize = @intCast(conn_fd);
+            if (idx >= table.slots.len) {
+                _ = linux.close(conn_fd);
+                return;
+            }
+
+            setNoDelay(conn_fd);
+            // The transport writes records directly (staging on EAGAIN), so the fd must be
+            // non-blocking.
+            common.setNonBlock(conn_fd);
+
+            const ring_conn = allocator.create(UringTlsConn) catch {
+                _ = linux.close(conn_fd);
+                return;
+            };
+            const cipher_buf = allocator.alloc(u8, tls_conn.read_staging_size) catch {
+                allocator.destroy(ring_conn);
+                _ = linux.close(conn_fd);
+                return;
+            };
+
+            self.tls_gen_counter +%= 1;
+            ring_conn.* = .{
+                .conn = .{
+                    .transport = tls_conn.Transport.init(conn_fd, self.tls_ctx.?),
+                    .handler = handler_fn,
+                    .ctx = self.tls_ctx.?,
+                },
+                .gen = self.tls_gen_counter,
+                .cipher_buf = cipher_buf,
+            };
+            table.put(conn_fd, ring_conn);
+
+            self.armTlsRecv(ring_conn);
+        }
+
+        /// Tear a TLS connection down: drop it from the table (frees the conn object) and hand
+        /// the fd close to the ring, mirroring finishClose.
+        fn closeTls(self: *Self, ring_conn: *UringTlsConn) void {
+            const fd = ring_conn.conn.transport.fd;
+            if (self.tls_conns) |*tls_table| tls_table.drop(fd);
+
+            const sqe = self.getSqe() orelse {
+                _ = linux.close(fd);
+                return;
+            };
+            sqe.prep_close(fd);
+            sqe.user_data = uring.packUserData(.close, 0, fd);
+        }
+
+        fn armTlsRecv(self: *Self, ring_conn: *UringTlsConn) void {
+            const sqe = self.getSqe() orelse {
+                self.closeTls(ring_conn);
+                return;
+            };
+            sqe.prep_recv(ring_conn.conn.transport.fd, ring_conn.cipher_buf, 0);
+            sqe.user_data = uring.packUserData(.tls_recv, ring_conn.gen, ring_conn.conn.transport.fd);
+        }
+
+        /// Flush the transport's staged ciphertext (wbuf[woff..wlen]) with an on-ring send.
+        fn submitTlsSend(self: *Self, ring_conn: *UringTlsConn) void {
+            const transport = &ring_conn.conn.transport;
+
+            const sqe = self.getSqe() orelse {
+                self.closeTls(ring_conn);
+                return;
+            };
+            sqe.prep_send(transport.fd, transport.wbuf[transport.woff..transport.wlen], linux.MSG.NOSIGNAL);
+            sqe.user_data = uring.packUserData(.tls_send, ring_conn.gen, transport.fd);
+        }
+
+        fn handleTlsRecv(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
+            const ring_conn = self.lookupTls(decoded) orelse return;
+
+            if (cqe.res <= 0) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
+            const keep = tls_mux.onCiphertext(
+                &ring_conn.conn,
+                ring_conn.cipher_buf[0..@intCast(cqe.res)],
+                self.ws_payload_buf,
+                self.tls_out_buf,
+            );
+            const transport = &ring_conn.conn.transport;
+
+            if (!keep) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
+            // Backpressure-staged ciphertext: flush it on the ring before the next recv.
+            if (transport.wlen > transport.woff) {
+                self.submitTlsSend(ring_conn);
+                return;
+            }
+
+            if (transport.wclose) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
+            self.armTlsRecv(ring_conn);
+        }
+
+        fn handleTlsSend(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
+            const ring_conn = self.lookupTls(decoded) orelse return;
+            const transport = &ring_conn.conn.transport;
+
+            if (cqe.res <= 0) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
+            transport.woff += @intCast(cqe.res);
+            if (transport.woff < transport.wlen) {
+                self.submitTlsSend(ring_conn);
+                return;
+            }
+
+            // Drained. Keep the buffer for reuse (freed at close), mirroring the EPOLL flush.
+            transport.woff = 0;
+            transport.wlen = 0;
+            transport.want_out = false;
+
+            if (transport.wclose) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
+            self.armTlsRecv(ring_conn);
+        }
+
+        // ----------------------------------------------------- //
 
         fn run(self: *Self) void {
             self.armAccept();
+            if (self.tls_listener_fd != -1) self.armTlsAccept();
 
             var cqes: [URING_CQE_BATCH]linux.io_uring_cqe = undefined;
             while (true) {
@@ -939,6 +1138,9 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         .send => self.handleSend(cqe, decoded),
                         .timeout => {},
                         .close => {},
+                        .tls_accept => self.handleTlsAccept(cqe),
+                        .tls_recv => self.handleTlsRecv(cqe, decoded),
+                        .tls_send => self.handleTlsSend(cqe, decoded),
                     }
                 }
             }
@@ -970,6 +1172,22 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             }) catch return;
             defer srv.deinit(io);
             const listener_fd = srv.socket.handle;
+
+            // Dual-listener TLS side: a second listener on tls_port whose connections terminate
+            // TLS in this same ring loop (no separate epoll fleet).
+            const tls_active = config.tls != null and config.tls_port != 0;
+            var tls_srv: std.Io.net.Server = undefined;
+            var tls_listener_fd: std.posix.fd_t = -1;
+            if (tls_active) {
+                const tls_addr = std.Io.net.IpAddress.resolve(io, config.ip, config.tls_port) catch return;
+                tls_srv = tls_addr.listen(io, .{
+                    .mode = .stream,
+                    .kernel_backlog = config.kernel_backlog,
+                    .reuse_address = true,
+                }) catch return;
+                tls_listener_fd = tls_srv.socket.handle;
+            }
+            defer if (tls_active) tls_srv.deinit(io);
 
             const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
 
@@ -1009,8 +1227,14 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 .ws_payload_buf = ws_payload_buf,
                 .body_buf = body_buf,
                 .ws_bufs = null,
+                .tls_listener_fd = tls_listener_fd,
+                .tls_ctx = if (tls_active) config.tls else null,
             };
             worker.ring = initUringRing() catch return;
+            if (tls_active) {
+                worker.tls_conns = TlsConnTable.init() catch return;
+                worker.tls_out_buf = std.heap.smp_allocator.alloc(u8, tls_mux.RESPONSE_BUF_SIZE) catch return;
+            }
             // Provided-buffer ring for WebSocket recvs (Phase 4b). Optional: a
             // kernel without buffer-ring support leaves it null, and WebSocket
             // uses the plain recv path.
@@ -1071,6 +1295,8 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
     logSystem(config, "listening on {s}:{d} (io_uring, {d} workers, shared-nothing)", .{ config.ip, config.port, worker_count });
+    if (config.tls != null and config.tls_port != 0)
+        logSystem(config, "dual listener: https/1.1 TLS on {s}:{d} (same workers, on-ring)", .{ config.ip, config.tls_port });
 
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
