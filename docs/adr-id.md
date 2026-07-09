@@ -1330,4 +1330,27 @@ Engine yang mampu compression mengekspos enam yang sama: `sendGzipFD`, `sendGzip
 
 ---
 
+## ADR-061: Steering CPU REUSEPORT (reuseport_cbpf), pelengkapan pin worker, dan counter beban per-worker
+
+**Status:** Accepted
+
+**Context:** Engine multiplexed mem-pin satu worker SO_REUSEPORT per core, tapi kernel menempatkan koneksi lewat hash 4-tuple, buta terhadap CPU mana yang menerima paketnya: sebuah koneksi bisa mendarat di worker A sementara paketnya soft-irq di CPU B, membayar wakeup lintas-CPU dan cache dingin pada tiap request. `zix.Tcp` dan `zix.Fix` juga mendahului konvensi pinning (worker-nya jalan tanpa pin), urutan pin mengikuti affinity mask mentah (SMT sibling terselip di antara physical core), dan keseimbangan beban antar worker tidak terobservasi (tanpa counter per-worker).
+
+**Decision:** Tiga langkah penempatan di balik satu field config flat baru:
+
+- `reuseport_cbpf: bool = false` di semua server config kecuali `zix.Uds`: memasang SO_ATTACH_REUSEPORT_CBPF pada grup REUSEPORT per-worker (`src/multiplexers/reuseport.zig`), menempatkan koneksi baru (TCP) atau tiap datagram (UDP) pada listener index = CPU penerima mod workers alih-alih hash 4-tuple. Listener bind di dalam thread worker yang berpacu, jadi bind-order gate khusus startup (`BindOrderGate` / `BindTurn`) menserialkan join: group index i = worker i = slot pin i. Release turn idempoten dan ditopang defer, jadi bind yang gagal tidak pernah mengunci worker saudaranya. Dual listener TLS membentuk grup REUSEPORT kedua dengan attach-nya sendiri.
+- Pinning melengkapi keluarga: worker `.EPOLL` / `.URING` `zix.Tcp` dan `zix.Fix` kini pin per-core dengan jumlah worker sadar-cpuset, dan urutan pin semua engine mengisi physical core lebih dulu, SMT sibling setelahnya (kunci package/core sysfs, two-pass stabil, urutan mask dipertahankan bila sysfs absen).
+- Counter beban per-worker melapor saat worker keluar melalui system logger (request, frame, koneksi diterima, atau message, per engine), sehingga kemiringan REUSEPORT antar worker terobservasi. Dua engine h2-mux (`zix.Http2`, `zix.Grpc`) tidak membawa counter: increment threadlocal di dispatch mux-nya terukur sekitar 1 persen throughput pada jutaan req/s dan dihapus.
+- QUIC: `reuseport_cbpf` tetap tersedia di `zix.Http3` tapi diperingatkan di doc comment field dan referensi config, bukan ditolak. Steering CPU per paket merusak flow affinity QUIC (paket satu flow mendarat di worker tanpa state koneksinya), terukur sebagai penurunan throughput berat dengan nol request gagal. Tidak ada yang hard-fail, jadi guard-nya adalah dokumentasi, menjaga kontrak opt-in identik di semua engine.
+
+**Rationale:** Default false mempertahankan hash kernel, yang sudah seimbang pada box loopback (terukur netral throughput di semua engine TCP). Kasus nilainya adalah host multi-CPU tempat NIC RSS menyebarkan soft-irq: steering membuat penempatan koneksi mengikuti core penerima, yang kemudian dilayani pin per-core tanpa handoff lintas-CPU. Field opt-in dengan peringatan QUIC terdokumentasi menjaga satu kosakata config flat di semua engine alih-alih pengecualian per-engine atau hard error pada field yang valid di engine lain.
+
+**Consequences:**
+- Nol biaya hot-path: program CBPF berjalan di kernel saat penempatan (per SYN di TCP, per paket di UDP), dan bind-order gate hanya hidup selama bind startup.
+- Counter berbiaya satu increment lokal-worker per unit yang dilayani di enam engine, dan nol di engine mux (biayanya terukur di sana, jadi dihapus di sana).
+- A/B isolate (before / steering off / steering on, lima subjek, tiga run penuh masing-masing): steering off netral throughput dengan CPU-at-best lebih rendah di beberapa cell, steering on netral di subjek TCP lewat loopback dan meruntuhkan `zix.Http3`, yang direkam sebagai peringatan di comment field dan `docs/zix-config-en.md` / `-id.md`.
+- Silent no-op pada kernel sebelum 4.5 (tanpa SO_ATTACH_REUSEPORT_CBPF), sejalan dengan postur busy-poll.
+
+---
+
 ###### end of adr
