@@ -8,33 +8,22 @@ const Logger = @import("../logger/logger.zig").Logger;
 /// Connection dispatch model. Controls how accepted connections are handed off to handlers.
 /// Zero-value (.ASYNC = 0) is the default for zero-init structs.
 pub const DispatchModel = enum(u8) {
-    /// Single accept thread dispatches each connection via io.async().
-    /// workers and pool_size are ignored.
-    /// Best for low latency at moderate connection counts.
+    /// Single accept thread dispatches each connection via io.async(). workers and pool_size are
+    /// ignored. Best for low latency at moderate connection counts.
     ASYNC = 0,
-    /// N accept threads push connections to a shared ConnQueue.
-    /// M pool threads handle each connection synchronously.
-    /// Best for throughput under high connection counts.
+    /// N accept threads push connections to a shared ConnQueue, M pool threads handle each
+    /// connection synchronously. Best for throughput under high connection counts.
     POOL = 1,
-    /// N accept threads each dispatch via io.async() directly, no ConnQueue.
-    /// pool_size is ignored.
+    /// N accept threads each dispatch via io.async() directly, no ConnQueue. pool_size is ignored.
     /// Balanced throughput and latency.
     MIXED = 2,
-    /// Shared-nothing epoll: each worker owns one SO_REUSEPORT listener and
-    /// one epoll instance. The kernel load-balances accepted connections across
-    /// workers with no shared queue. Each connection is dispatched via io.async.
-    /// Best for very high connection counts. Linux-only.
-    /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
-    /// Http1, Http, Http2, Grpc, Fix, and Tcp implement natively on Linux.
+    /// Shared-nothing epoll: each worker owns one SO_REUSEPORT listener and one epoll instance, the
+    /// kernel load-balances connections with no shared queue. Linux-only, best at very high connection
+    /// counts. workers sets the count (0 = cpu_count), pool_size is ignored. All engines native.
     EPOLL = 3,
-    /// Shared-nothing io_uring: each worker owns one SO_REUSEPORT listener and
-    /// one completion ring (ADR-037). Same thread-per-core topology as .EPOLL,
-    /// but completion-based instead of readiness-based, so most syscall
-    /// transitions are batched away. Linux-only.
-    /// workers sets the worker count (0 = cpu_count). pool_size is ignored.
-    /// zix.Http1, zix.Http, zix.Http2, zix.Grpc, and zix.Fix implement natively on
-    /// Linux, as do the WebSocket pump and the zix.Tcp framed path. Each falls back
-    /// to .EPOLL when io_uring is unavailable, as does the zix.Tcp per-connection handler.
+    /// Shared-nothing io_uring (ADR-037): same thread-per-core topology as .EPOLL but completion-based,
+    /// so most syscall transitions are batched away. Linux-only. All engines (plus the WebSocket pump
+    /// and the zix.Tcp framed path) run natively and fall back to .EPOLL when io_uring is unavailable.
     URING = 4,
 }; // for all Tcp
 
@@ -53,12 +42,6 @@ pub const TcpServerConfig = struct {
     dispatch_model: DispatchModel,
     /// TCP listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 4096,
-    /// Maximum payload bytes per frame. Frames exceeding this close the connection.
-    max_recv_buf: usize = 4096,
-    /// Per-connection send buffer size in bytes for the .URING framed model. The send half
-    /// of the per-connection footprint (max_recv_buf covers recv). No effect under the other
-    /// dispatch models.
-    uring_send_buf_size: usize = 64 * 1024,
     /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC.
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL.
@@ -66,6 +49,16 @@ pub const TcpServerConfig = struct {
     /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
+    /// Attach SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener
+    /// index = receiving CPU mod workers instead of the 4-tuple hash, so it is served start-to-finish
+    /// on the core that received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
+    reuseport_cbpf: bool = false,
+    /// Maximum payload bytes per frame. Frames exceeding this close the connection.
+    max_recv_buf: usize = 4096,
+    /// Per-connection send buffer size in bytes for the .URING framed model. The send half
+    /// of the per-connection footprint (max_recv_buf covers recv). No effect under the other
+    /// dispatch models.
+    uring_send_buf_size: usize = 64 * 1024,
     /// Max concurrent connections one .URING worker tracks (the per-worker fd-indexed slab size).
     /// The slab is demand-paged, so a larger value costs little until used. Connections past it are refused.
     uring_max_conns_per_worker: usize = 1 << 16,
@@ -106,6 +99,7 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 4096), cfg.kernel_backlog);
+    try std.testing.expect(!cfg.reuseport_cbpf);
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
