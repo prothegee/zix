@@ -112,7 +112,7 @@ const SentRange = struct {
 /// Http3ServerConfig.max_inflight_packets, clamped to this, so an in-flight range is never overwritten
 /// while still awaiting acknowledgment. Sized at 128: at max_datagram_size 1200 that is 153.6 KiB in
 /// flight, so a large static response (up to ~150 KiB) streams in one congestion-window round instead
-/// of several, which is the lever that moves static-h3 throughput (the window, not per-request compute).
+/// of several, which is what moves static-h3 throughput (the window, not per-request compute).
 /// A deployment tunes the runtime window down with max_inflight_packets. Raising it past 128 needs this
 /// bumped and a rebuild. Full-body delivery under concurrency is checked by the local h3 gate (rnd note).
 pub const max_sent_ranges = 128;

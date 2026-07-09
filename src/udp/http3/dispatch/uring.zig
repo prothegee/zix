@@ -1,5 +1,5 @@
 //! zix HTTP/3 URING dispatch: one SO_REUSEPORT worker per core, the kernel load-balancing connections by
-//! 4-tuple (RC3 multicore). Each worker drives a real io_uring completion loop: a pool of recvmsg
+//! 4-tuple (multicore). Each worker drives a real io_uring completion loop: a pool of recvmsg
 //! submissions stays in flight and the kernel hands back datagrams (with peer address) as CQEs. A worker
 //! whose host lacks io_uring (old kernel, seccomp, RLIMIT_MEMLOCK) falls back to the epoll loop, so
 //! selecting .URING never strands a core. The recv / demux / respond code it drives lives in the common
@@ -15,6 +15,7 @@ const core = @import("../core.zig");
 const datagram = @import("../../datagram.zig");
 const recovery = @import("../recovery.zig");
 const common = @import("common.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const epoll = @import("epoll.zig");
 
 /// io_uring submission-queue depth for an HTTP/3 .URING worker. The ring carries only recvmsg SQEs
@@ -33,8 +34,8 @@ const uring_cqe_batch: usize = 256;
 /// One dual-stack sockaddr_in6 length, for a recvmsg msghdr name field.
 const sockaddr_in6_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in6);
 
-/// L2 multishot recv. A provided buffer ring lets one multishot recvmsg SQE deliver a CQE per datagram
-/// without re-arming per datagram (the one-shot re-arm churn, RC-B): the kernel selects a buffer from the
+/// Multishot recv. A provided buffer ring lets one multishot recvmsg SQE deliver a CQE per datagram
+/// without re-arming per datagram (the one-shot re-arm churn): the kernel selects a buffer from the
 /// ring for each completion and writes an io_uring_recvmsg_out header, the peer address, then the payload
 /// into it. When the kernel ends the multishot (buffer exhaustion or error, no IORING_CQE_F_MORE), the
 /// worker re-arms. Buffer-ring entries must be a power of two.
@@ -215,26 +216,38 @@ fn parseMultishotBuf(buf: []const u8, name_reserve: usize, controllen: usize, ma
 }
 
 /// One HTTP/3 io_uring worker: bind a per-core SO_REUSEPORT UDP socket, own a CID table + SendBatch, and
-/// drive an io_uring completion loop. Prefers L2 multishot recvmsg on a provided buffer ring, falling
+/// drive an io_uring completion loop. Prefers multishot recvmsg on a provided buffer ring, falling
 /// back to the one-shot recvmsg slot pool (still io_uring) when the buffer ring cannot be set up. If
 /// io_uring is unavailable entirely (old kernel, seccomp, RLIMIT_MEMLOCK), the worker folds to the epoll
 /// loop so .URING never strands a core (a capability fold, not model-mixing). Shared-nothing: its own
 /// ring, socket, CID table, and batches, no lock on the hot path.
-fn workerLoopUring(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize) void {
+fn workerLoopUring(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
     common.pinToCpu(worker_id);
 
     var ring = initUringRing() catch |err| {
         common.logSystem(config, "io_uring unavailable ({s}): worker {d} folds to epoll", .{ @errorName(err), worker_id });
 
-        return epoll.workerLoopEpoll(handler, config, worker_id);
+        return epoll.workerLoopEpoll(handler, config, worker_id, steering);
     };
     defer ring.deinit();
+
+    // Skew report at worker exit: requests this worker served (common.tl_requests_served).
+    // Placed after the ring probe so the epoll fold reports through its own line only.
+    defer common.logSystem(config, "uring worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
+    defer bind_turn.release();
 
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
         common.logSystem(config, "bind error: {}", .{err});
         return;
     };
     defer datagram.close(fd);
+
+    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    bind_turn.release();
 
     common.setBusyPoll(fd, config.busy_poll_us);
     datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
@@ -468,13 +481,17 @@ pub fn runUring(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, steering }) catch break;
         spawned += 1;
     }
 
-    for (threads[0..spawned]) |t| t.join();
+    for (threads[0..spawned]) |thread| thread.join();
 }
 
 // --------------------------------------------------------------- //
