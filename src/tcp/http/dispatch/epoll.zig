@@ -16,6 +16,7 @@ const EPOLL_MAX_EVENTS = common.EPOLL_MAX_EVENTS;
 const EPOLL_OUT_BUF_SIZE = common.EPOLL_OUT_BUF_SIZE;
 const parser = @import("../parser.zig");
 const rcache = @import("../../../utils/response_cache.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const resp_mod = @import("../response.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
@@ -70,11 +71,22 @@ fn serveTlsEvent(comptime TlsWorker: type, tls_conns: *TlsWorker.ConnTable, epfd
     }
 }
 
-fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
+fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering) void {
     const linux = std.os.linux;
     const cfg = server.config;
 
     pinToCpu(worker_id);
+
+    // Requests served by this worker (cleartext dispatch). Single-owner plain
+    // increment (no contention), reported through the system logger at worker
+    // exit so REUSEPORT skew across workers is measurable.
+    var requests_served: u64 = 0;
+    defer logSystem(cfg, "epoll worker {d}: {d} requests served", .{ worker_id, requests_served });
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
+    defer bind_turn.release();
 
     const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
         logSystem(cfg, "epoll worker resolve error: {}", .{err});
@@ -90,6 +102,8 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
     };
     defer net_server.deinit(io);
     const listener_fd = net_server.socket.handle;
+
+    if (steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
     // Non-blocking listener so epollAcceptAll drains to EAGAIN without blocking.
     const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
@@ -129,6 +143,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
             .reuse_address = true,
         }) catch return;
         tls_listener_fd = tls_srv.socket.handle;
+        if (steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
 
         const tls_cur_flags = linux.fcntl(tls_listener_fd, std.posix.F.GETFL, 0);
         _ = linux.fcntl(tls_listener_fd, std.posix.F.SETFL, tls_cur_flags | @as(usize, nonblock_bit));
@@ -141,6 +156,9 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
 
         tls_table = TlsWorker.ConnTable.init() catch return;
     }
+
+    // Both groups joined: release the bind turn to the next worker.
+    bind_turn.release();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -304,6 +322,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize) void {
             resp_mod.tl_resp_sink = &sink;
             const outcome = processRequest(server, stream, conn_fd, io, conn.buf[0..conn.filled], &arena);
             resp_mod.tl_resp_sink = null;
+            requests_served += 1;
 
             var close_conn = (outcome != .keep_alive) or sink.failed;
 
@@ -386,9 +405,13 @@ pub fn runEpoll(server: anytype, io: std.Io) !void {
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (cfg.compress) @max(cfg.worker_stack_size_bytes, cfg.worker_stack_compress_bytes) else cfg.worker_stack_size_bytes;
 
-    for (threads, 0..) |*t, idx| {
-        t.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, epollWorker, .{ server, io, idx });
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
+    for (threads, 0..) |*thread, idx| {
+        thread.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, epollWorker, .{ server, io, idx, steering });
     }
 
-    for (threads) |t| t.join();
+    for (threads) |thread| thread.join();
 }
