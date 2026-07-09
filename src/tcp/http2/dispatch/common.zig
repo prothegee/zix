@@ -69,6 +69,14 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
     }
 }
 
+/// Put a socket in non-blocking mode (listener and accepted fds in the event-driven paths).
+pub fn setNonBlock(fd: std.posix.fd_t) void {
+    const linux = std.os.linux;
+    const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
+    const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
+}
+
 /// Spin up to `us` microseconds before the worker sleeps on a connection socket (SO_BUSY_POLL),
 /// trading CPU for lower wake-up latency on saturated loopback benchmarks. us = 0 leaves it unset
 /// (no syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.

@@ -37,17 +37,17 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 
 | field | default | controls | perf impact | how to tweak | if lower | if higher | knob consequence |
 | :- | :- | :- | :- | :- | :- | :- | :- |
-| io | required | std.Io backend, must outlive the server | | | | | must be provided |
+| io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, must be non-zero | | | | | zero is not validated: binds a kernel-chosen ephemeral port |
 | dispatch_model | required | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, non-Linux folds to `.POOL` |
 | kernel_backlog | 1024 | TCP listen backlog before accept() | kernel accept queue depth | raise under bursty connection storms | new connections dropped during a burst | more kernel memory for the queue | too low drops connections during spikes |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
-| max_recv_buf | 16384 | bytes buffered per request header block and per EPOLL connection | per-conn memory and max request size | raise for large request headers | large requests rejected | more memory per connection | too low rejects valid large requests |
+| max_recv_buf | 6144 | bytes buffered per request header block and per EPOLL connection | per-conn memory and max request size | raise for large request headers | large requests rejected | more memory per connection | too low rejects valid large requests |
 | large_body_rcvbuf | 0 | SO_RCVBUF applied only on the large-body path (a body bigger than the read buffer, ie uploads), 0 leaves the kernel default | upload ingest speed and per-conn memory while a large body is in flight | raise for faster upload ingestion | uploads ingest slower (narrow kernel-default window) | more memory during a large body (256 KiB targets about 256 MiB resident at 256c) | only the upload path touches it, small-request cells are unaffected |
 | ws_recv_buf | 0 | per-connection receive buffer for WebSocket connections, 0 falls back to max_recv_buf | per-WS-conn memory and WS pipelined-burst depth | raise above max_recv_buf to hold a deeper pipelined burst | more compact-and-reread churn for WS | more memory per WS connection | .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer and unmask scratch, 0 reuses max_recv_buf |
 | uring_send_buf_size | 16384 | per-connection send buffer for the .URING dispatch model (the send half, max_recv_buf covers recv) | per-conn memory under .URING | raise for larger single responses, lower to shrink per-conn memory | more buffer growth on big responses | more memory per connection | no effect under other dispatch models |
-| uring_idle_pool_floor | 64 | warm idle-connection pool floor per worker under .URING (A2) | warm-pool memory vs allocator hits on new connections | raise to keep more connections warm for bursty churn, lower to shrink idle memory | more allocator hits after a quiet spell | more idle connections kept resident | warm cap is clamp(live_count, floor, ceiling), no effect under other models |
+| uring_idle_pool_floor | 8 | warm idle-connection pool floor per worker under .URING (A2) | warm-pool memory vs allocator hits on new connections | raise to keep more connections warm for bursty churn, lower to shrink idle memory | more allocator hits after a quiet spell | more idle connections kept resident | warm cap is clamp(live_count, floor, ceiling), no effect under other models |
 | uring_idle_pool_ceiling | 256 | absolute warm idle-pool ceiling per worker under .URING (A2), holds the warm set below live_count at high concurrency | resident memory at high connection counts | raise to keep more warm for reconnect, lower to shrink the resident set under churn | more allocator hits on reconnect at high concurrency | more closed connections kept resident (cache and TLB pressure) | the fix for the high-connection regression where the warm set tracked live_count, no effect under other models |
 | compress | false | enable gzip/deflate/brotli response compression with Accept-Encoding negotiation | CPU vs body size, only pays off over a real network | enable when serving over a network, leave off for loopback benchmarks | | | on a loopback benchmark it is pure CPU cost |
 | compression_min_size | 256 | minimum body size in bytes before compression is attempted | per-response check | raise to skip compressing small bodies | tiny bodies compressed for little gain | larger bodies sent uncompressed | too low wastes CPU on small bodies |
@@ -67,6 +67,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | cache_ttl_ms | 1000 | default cache freshness in ms | cache hit rate vs staleness | raise for higher hit rate, lower for fresher data | entries expire sooner, more misses | staler responses served | too high serves stale data |
 | cache_max_total_bytes | 0 | optional ceiling on per-worker cache memory, 0 = no ceiling | caps total cache memory | set to bound cache RAM | effective entry count reduced to fit | uses the full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for https (opt-in), null = cleartext | enables TLS, a separate perf band | attach a context to serve https | | | null serves cleartext |
+| tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger for lifecycle lines | | attach for server logging | | | per-request access logging is the handler's job |
 
 ## HTTP/2 (`Http2ServerConfig`)
@@ -96,6 +97,7 @@ h2c cleartext by default, h2-over-TLS when `tls` is set.
 | cache_ttl_ms | 1000 | default cache freshness in ms | hit rate vs staleness | raise for hit rate, lower for freshness | sooner expiry, more misses | staler data | too high serves stale data |
 | cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for h2-over-TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | browsers require ALPN h2 for HTTP/2 over TLS |
+| tls_port | 0 | companion h2-over-TLS bind port for the dual listener (ADR-060) | one worker fleet serves h2c + h2-over-TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | per-request logging is the handler's job |
 
 ## gRPC (`GrpcServerConfig`)
@@ -120,6 +122,7 @@ gRPC over HTTP/2. h2c cleartext by default, h2-over-TLS when `tls` is set.
 | max_recv_buf | 65536 | per-connection read buffer floor (.EPOLL / .URING) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
 | tls_write_buf_initial_bytes | 16384 | initial capacity of the per-connection TLS pending-write buffer (grows on demand) | per-conn, TLS path | raise to avoid early reallocation under big replies | more reallocations under large replies | more idle memory per TLS conn | minor, amortization only |
 | tls | null | TLS context for gRPC over TLS (ALPN h2), null = h2c | enables TLS | attach a context with ALPN h2 | | | gRPC runs on HTTP/2, needs ALPN h2 over TLS |
+| tls_port | 0 | companion gRPC-over-TLS bind port for the dual listener (ADR-060) | one worker fleet serves h2c + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger, lifecycle plus per-rpc | | attach for logging | | | |
 | handler_timeout_ms | 0 | global handler timeout cap in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut sooner | slow handlers run longer | Route.timeout_ms and the grpc-timeout header tighten it further |
 | compress | false | gzip DATA-frame compression for clients advertising grpc-accept-encoding: gzip | CPU vs message size | enable over a network | | | pure CPU cost on loopback |
@@ -166,6 +169,8 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | cache_ttl_ms | 1000 | default cache freshness in ms | hit rate vs staleness | raise for hit rate, lower for freshness | sooner expiry, more misses | staler data | too high serves stale data |
 | cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | logger | null | optional logger, calls logger.access() per response | | attach for access logging | | | injects ctx.logger for handlers |
+| tls | null | TLS context for https (opt-in, ADR-053), null = cleartext | enables TLS, a separate perf band | attach a context to serve https | | | null serves cleartext |
+| tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 
 ## TCP (`TcpServerConfig`)
 

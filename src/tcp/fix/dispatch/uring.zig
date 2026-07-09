@@ -359,6 +359,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
                         .send => worker.handleSend(cqe, decoded),
                         .timeout => worker.handleTimeout(cqe),
                         .close => {},
+                        .tls_accept, .tls_recv, .tls_send => {},
                     }
                 }
             }

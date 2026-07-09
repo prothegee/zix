@@ -801,6 +801,14 @@ fn maxStreamsTake(max_streams_pending: *?u64) ?u64 {
     return value;
 }
 
+/// Take the pending MAX_DATA credit (consume it so only one packet of a call carries it).
+fn maxDataTake(max_data_pending: *?u64) ?u64 {
+    const value = max_data_pending.*;
+    max_data_pending.* = null;
+
+    return value;
+}
+
 /// Apply the acknowledgment content of a decrypted 1-RTT payload: an ACK frame (0x02 / 0x03) drives RTT
 /// sampling, range retirement, loss detection and retransmission, congestion control, and send-stream
 /// retirement (RFC 9002, Connection.onAckFrame). Every other frame is walked past. Run BEFORE request
@@ -919,7 +927,7 @@ fn pumpLimit(fc_limit: usize, sent: usize, congestion_window: u64, bytes_in_flig
 /// sent offset. The connection's first response packet carries HANDSHAKE_DONE + the server control
 /// SETTINGS, and the first packet sent this call carries the pending ACK. A completed stream frees its
 /// slot. Returns true when at least one packet was sent.
-fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, max_streams_pending: *?u64, config: Http3ServerConfig, stats: ?*WorkerStats) bool {
+fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, ack_pending: *?u64, max_streams_pending: *?u64, max_data_pending: *?u64, config: Http3ServerConfig, stats: ?*WorkerStats) bool {
     var prefix_buf: [32]u8 = undefined;
     const prefix_len = response.buildStreamPrefix(&prefix_buf, stream.status, stream.content_encoding, stream.body.len) orelse {
         stream.active = false;
@@ -995,6 +1003,8 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
         if (ackTake(ack_pending)) |largest| pos += response.buildAck(payload[pos..], largest);
 
         if (maxStreamsTake(max_streams_pending)) |granted| pos += response.buildMaxStreams(payload[pos..], granted);
+
+        if (maxDataTake(max_data_pending)) |granted| pos += response.buildMaxData(payload[pos..], granted);
 
         // STREAM frame on the request stream: type OFF | LEN (| FIN), id, offset, length, then data.
         payload[pos] = 0x0e | @as(u8, if (is_last) 0x01 else 0x00);
@@ -1087,6 +1097,13 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
     }
     var max_streams_pending: ?u64 = if (highest_bidi_id) |hid| conn.replenishBidiStreams(hid, config.max_streams) else null;
 
+    // Extend the client's connection-wide byte credit the same way (RFC 9000 4.1): charge the stream
+    // bytes this packet carried and decide whether a MAX_DATA must ride a reply. Without it the
+    // connection deadlocks at the one-time initial_max_data budget (~1 MiB of requests) with the
+    // client's last in-flight requests never answered, whatever MAX_STREAMS still allows.
+    const stream_bytes = request.streamBytes(payload_view);
+    var max_data_pending: ?u64 = if (stream_bytes != 0) conn.replenishMaxData(stream_bytes, flight.initial_max_data) else null;
+
     // Apply the client's ACKs first: retire acknowledged ranges, grow the window, rewind any lost stream
     // for retransmit, and free the slot of any stream this ACK fully retires. Done before the
     // registration loop so a request riding the same datagram as the finishing ACK finds the freed slot
@@ -1111,6 +1128,7 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
         conn.first_response_sent = true;
     }
     if (maxStreamsTake(&max_streams_pending)) |granted| plen += response.buildMaxStreams(pbuf[plen..], granted);
+    if (maxDataTake(&max_data_pending)) |granted| plen += response.buildMaxData(pbuf[plen..], granted);
 
     for (reqs[0..count]) |stream_req| {
         // A retransmit of a request already being streamed: leave its progress, the pump continues it.
@@ -1159,11 +1177,12 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
     // client sees the ACK and HANDSHAKE_DONE first.
     if (plen > 0) sealAndQueue(conn, tx, fd, peer, pbuf[0..plen], null);
 
-    // Pump every active large stream. The ACK and MAX_STREAMS were consumed into the coalesced packet,
-    // so ack_pending / max_streams_pending are null here, the pump carries only stream data. The worker
-    // loop flushes the SendBatch once per recv batch, so this call leaves replies queued, not flushed.
+    // Pump every active large stream. The ACK, MAX_STREAMS, and MAX_DATA were consumed into the
+    // coalesced packet, so the pending slots are null here, the pump carries only stream data. The
+    // worker loop flushes the SendBatch once per recv batch, so this call leaves replies queued, not
+    // flushed.
     for (&conn.send_streams) |*stream| {
-        if (stream.active) _ = pumpStream(conn, stream, tx, fd, peer, &ack_pending, &max_streams_pending, config, stats);
+        if (stream.active) _ = pumpStream(conn, stream, tx, fd, peer, &ack_pending, &max_streams_pending, &max_data_pending, config, stats);
     }
 }
 
@@ -1189,15 +1208,16 @@ fn packStreamFrame(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.soc
 pub const maintenance_interval_us: u64 = 5_000;
 
 /// Resume every active send stream on `conn` after a Probe Timeout rewound them, queuing the packets into
-/// `tx` for the caller to flush. A pure retransmit carries only stream data, so it takes no pending ACK
-/// or MAX_STREAMS (those ride a fresh request's reply). The peer address comes from the connection
-/// (conn.peer_addr): a timer-driven resend has no incoming datagram to carry it.
+/// `tx` for the caller to flush. A pure retransmit carries only stream data, so it takes no pending ACK,
+/// MAX_STREAMS, or MAX_DATA (those ride a fresh request's reply). The peer address comes from the
+/// connection (conn.peer_addr): a timer-driven resend has no incoming datagram to carry it.
 fn resumeStreams(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket_t, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     var ack_pending: ?u64 = null;
     var max_streams_pending: ?u64 = null;
+    var max_data_pending: ?u64 = null;
 
     for (&conn.send_streams) |*stream| {
-        if (stream.active) _ = pumpStream(conn, stream, tx, fd, conn.peer_addr, &ack_pending, &max_streams_pending, config, stats);
+        if (stream.active) _ = pumpStream(conn, stream, tx, fd, conn.peer_addr, &ack_pending, &max_streams_pending, &max_data_pending, config, stats);
     }
 }
 

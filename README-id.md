@@ -1567,7 +1567,20 @@ var tls = try zix.Tls.Context.init(allocator, io, .{
 });
 defer tls.deinit();
 
-var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
+var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls, .dispatch_model = .EPOLL });
+```
+
+Dengan `tls` diisi, server menjadi TLS-only di `port`. Tambahkan `tls_port` untuk melayani KEDUANYA dari satu server (dual listener, ADR-060): cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama, alih-alih meluncurkan server kedua yang menduplikasi worker, tabel fd, dan cache. Tersedia di Http1, Http, Http2, dan Grpc, semua dispatch model (di bawah `.URING` sisi TLS berjalan di ring).
+
+```zig
+var server = zix.Http1.Server.init(handler, .{
+    .io = io,
+    .ip = "127.0.0.1",
+    .port = 9076, // cleartext
+    .tls = &tls,
+    .tls_port = 9077, // https, worker yang sama
+    .dispatch_model = .EPOLL,
+});
 ```
 
 Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `Tls.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup. Cert bisa ECDSA P-256, Ed25519, atau RSA: `Tls.Context.init` mendeteksi tipe key dari cert (cert RSA membutuhkan TLS 1.3 dan menandatangani CertificateVerify dengan `rsa_pss_rsae_sha256`). Untuk deployment baru utamakan Ed25519 (signature handshake termurah), lalu ECDSA P-256, lalu RSA (pakai RSA untuk menyajikan cert RSA yang sudah diterbitkan). Lihat [docs/zix-deploy-id.md](docs/zix-deploy-id.md) untuk snippet config per tipe dan deployment Docker image.
@@ -1575,6 +1588,7 @@ Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutama
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
 - [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - server cert Ed25519
+- [examples/tls/tls_http1_dual.zig](examples/tls/tls_http1_dual.zig) - dual listener (cleartext + https, satu server)
 
 <br>
 

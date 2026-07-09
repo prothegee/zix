@@ -2,15 +2,21 @@
 //!
 //! What:
 //! - One SO_REUSEPORT listener + epoll instance per worker, like the cleartext .EPOLL model, but each
-//!   connection terminates TLS in place via a resumable tls_session.Session (no thread per connection).
-//!   recv ciphertext -> session decrypts -> plaintext feeds the request loop -> the router response is
-//!   captured (the existing response sink, reused via tls_serve.processRequestToBuffer) -> encrypted
-//!   back into TLS records -> sent. A worker multiplexes thousands of TLS connections.
+//!   connection terminates TLS in place via the shared transport (multiplexers/tls_conn.zig), no
+//!   thread per connection. recv ciphertext -> transport decrypts -> plaintext feeds the request loop
+//!   -> the router response is captured (the existing response sink, reused via
+//!   tls_serve.processRequestToBuffer) -> encrypted back into TLS records -> sent. A worker
+//!   multiplexes thousands of TLS connections.
 //! - Keep-alive: a connection serves requests in a loop over the established session. Writes are
 //!   non-blocking: on EAGAIN the unsent ciphertext is staged per connection and EPOLLOUT is armed.
 //! - Cpuset-aware worker count + per-core pin (common.getAvailableCpuCount / common.pinToCpu), so a
 //!   cgroup-pinned cpuset does not oversubscribe a core under a handshake storm (matches http1).
-//! - Buffered responses only (SSE / streaming + WebSocket are out of scope, the same as tls_serve).
+//! - Streaming (res.stream, SSE) is hosted via the per-connection stream sink: each write seals
+//!   records through the transport, staging on backpressure. WebSocket stays on the
+//!   thread-per-connection path (the cleartext mux loop does not host WS either).
+//! - The Worker machinery (TlsConn, ConnTable, onReadable, acceptAll) is pub: the dual-listener
+//!   loops (dispatch/epoll.zig, dispatch/uring.zig, config.tls_port) host the same connections in
+//!   the cleartext worker instead of a second fleet.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -20,21 +26,20 @@ const Config = @import("config.zig").HttpServerConfig;
 const common = @import("dispatch/common.zig");
 const parser = @import("parser.zig");
 const ws = @import("websocket.zig");
+const resp = @import("response.zig");
 const tls_serve = @import("tls_serve.zig");
-const session = @import("../tls/tls_session.zig");
 const Tls = @import("../../tls/Tls.zig");
-const slab = @import("../../multiplexers/slab.zig");
+const tls_conn = @import("../../multiplexers/tls_conn.zig");
 
 const MAX_FD = common.MAX_FD;
 const EPOLL_MAX_EVENTS: usize = 4096;
 const allocator = std.heap.smp_allocator;
 
-const TLS_READ_STAGING_SIZE: usize = 32 * 1024;
+const TLS_READ_STAGING_SIZE: usize = tls_conn.read_staging_size;
 const TLS_SEALED_OUT_SIZE: usize = 70 * 1024;
 const TLS_PLAIN_STAGING_SIZE: usize = 32 * 1024;
 const REQUEST_BUF_SIZE: usize = 17 * 1024;
 const RESPONSE_BUF_SIZE: usize = 64 * 1024;
-const tls_write_buf_initial: usize = 16 * 1024;
 
 /// Listen and serve https/1.1 over TLS, multiplexed across one epoll worker per core. Generic over the
 /// server type (the comptime-baked router), so the worker machinery is instantiated per server.
@@ -42,161 +47,57 @@ pub fn runTlsMux(server: anytype, io: std.Io) !void {
     return Worker(@TypeOf(server)).run(server, io);
 }
 
-fn Worker(comptime Server: type) type {
+pub fn Worker(comptime Server: type) type {
     return struct {
-        /// One TLS connection: the resumable session, the request accumulator, the server pointer (for
-        /// the router), and the outbound-ciphertext backpressure buffer.
-        const TlsConn = struct {
-            fd: posix.fd_t,
-            tls: session.Session,
+        /// One TLS connection: the shared byte transport (session + outbound backpressure buffer),
+        /// the request accumulator, and the server pointer (for the router).
+        pub const TlsConn = struct {
+            transport: tls_conn.Transport,
             server: Server,
             ctx: *const Tls.Context,
 
             rbuf: [REQUEST_BUF_SIZE]u8 = undefined,
             rlen: usize = 0,
-
-            wbuf: []u8 = &.{},
-            woff: usize = 0,
-            wlen: usize = 0,
-            wclose: bool = false,
-            want_out: bool = false,
         };
 
-        const ConnTable = struct {
-            slots: []?*TlsConn,
-
-            fn init() !ConnTable {
-                return .{ .slots = try slab.mapZeroedSlots(?*TlsConn, MAX_FD) };
-            }
-
-            fn deinit(self: *ConnTable) void {
-                for (self.slots) |maybe| {
-                    if (maybe) |conn| freeConn(conn);
-                }
-                slab.unmapSlots(self.slots);
-            }
-
-            fn get(self: *ConnTable, fd: posix.fd_t) ?*TlsConn {
-                const idx: usize = @intCast(fd);
-                if (idx >= self.slots.len) return null;
-
-                return self.slots[idx];
-            }
-
-            fn put(self: *ConnTable, conn: *TlsConn) void {
-                self.slots[@intCast(conn.fd)] = conn;
-            }
-
-            fn drop(self: *ConnTable, fd: posix.fd_t) void {
-                const idx: usize = @intCast(fd);
-                if (idx >= self.slots.len) return;
-                if (self.slots[idx]) |conn| freeConn(conn);
-                self.slots[idx] = null;
-            }
-        };
+        pub const ConnTable = tls_conn.ConnTable(TlsConn, MAX_FD, freeConn);
 
         fn freeConn(conn: *TlsConn) void {
-            if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
+            conn.transport.deinit();
             allocator.destroy(conn);
-        }
-
-        fn armOut(epfd: posix.fd_t, fd: posix.fd_t, on: bool) void {
-            var flags: u32 = linux.EPOLL.IN | linux.EPOLL.RDHUP;
-            if (on) flags |= linux.EPOLL.OUT;
-
-            var ev = linux.epoll_event{ .events = flags, .data = .{ .fd = fd } };
-            _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &ev);
-        }
-
-        /// Try to send `bytes` now, staging whatever does not fit. TLS records must reach the peer in
-        /// order (the AEAD nonce is the record sequence), so if ciphertext is already staged this MUST
-        /// append rather than write directly.
-        fn sendRaw(conn: *TlsConn, bytes: []const u8) bool {
-            if (conn.wlen > conn.woff) {
-                stageWrite(conn, bytes);
-                return true;
-            }
-
-            var off: usize = 0;
-            while (off < bytes.len) {
-                const rc = linux.write(conn.fd, bytes[off..].ptr, bytes.len - off);
-                switch (posix.errno(rc)) {
-                    .SUCCESS => {
-                        if (rc == 0) return false;
-                        off += @intCast(rc);
-                    },
-                    .INTR => continue,
-                    .AGAIN => {
-                        stageWrite(conn, bytes[off..]);
-                        return true;
-                    },
-                    else => return false,
-                }
-            }
-
-            return true;
-        }
-
-        /// Append unsent ciphertext to the connection's pending buffer (grown as needed) for the next
-        /// EPOLLOUT. The live bytes are wbuf[woff..wlen]. Capacity is never used as the data length.
-        fn stageWrite(conn: *TlsConn, bytes: []const u8) void {
-            const pending = conn.wlen - conn.woff;
-
-            if (conn.wbuf.len - conn.wlen >= bytes.len) {
-                @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-                conn.wlen += bytes.len;
-                conn.want_out = true;
-                return;
-            }
-
-            const need = pending + bytes.len;
-
-            if (conn.wbuf.len >= need) {
-                std.mem.copyForwards(u8, conn.wbuf[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-                conn.woff = 0;
-                conn.wlen = pending;
-
-                @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-                conn.wlen += bytes.len;
-                conn.want_out = true;
-                return;
-            }
-
-            var new_cap: usize = if (conn.wbuf.len == 0) tls_write_buf_initial else conn.wbuf.len * 2;
-            while (new_cap < need) new_cap *= 2;
-
-            const grown = allocator.alloc(u8, new_cap) catch {
-                conn.wclose = true;
-                return;
-            };
-            @memcpy(grown[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-            if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
-            conn.wbuf = grown;
-            conn.woff = 0;
-            conn.wlen = pending;
-
-            @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-            conn.wlen += bytes.len;
-            conn.want_out = true;
         }
 
         /// Encrypt response plaintext into TLS records and send (staging on backpressure).
         fn sendPlain(conn: *TlsConn, plaintext: []const u8) bool {
             var sealed: [TLS_SEALED_OUT_SIZE]u8 = undefined;
-            const ct = conn.tls.encrypt(plaintext, &sealed);
 
-            return sendRaw(conn, ct);
+            return conn.transport.sendPlain(plaintext, &sealed);
+        }
+
+        /// Stream-sink write (res.stream, SSE): seal the plaintext into records and send through
+        /// the transport, staging on backpressure. Chunked, so one oversized write never
+        /// overflows the sealed staging buffer.
+        fn streamWrite(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
+            const transport: *tls_conn.Transport = @ptrCast(@alignCast(ctx_ptr));
+
+            var rest = plaintext;
+            while (rest.len > 0) {
+                const n = @min(rest.len, RESPONSE_BUF_SIZE);
+                var sealed: [TLS_SEALED_OUT_SIZE]u8 = undefined;
+                if (!transport.sendPlain(rest[0..n], &sealed)) return false;
+                rest = rest[n..];
+            }
+
+            return true;
         }
 
         /// Handle a readable TLS connection: decrypt records, drive the handshake, feed plaintext to the
         /// request loop, seal replies. Returns false when the connection must close.
-        fn onReadable(conn: *TlsConn, io: std.Io, arena: *std.heap.ArenaAllocator) bool {
+        pub fn onReadable(conn: *TlsConn, io: std.Io, arena: *std.heap.ArenaAllocator) bool {
             var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
-            var to_send: [TLS_SEALED_OUT_SIZE]u8 = undefined;
-            var plain_in: [TLS_PLAIN_STAGING_SIZE]u8 = undefined;
 
             while (true) {
-                const rc = linux.read(conn.fd, &cipher, cipher.len);
+                const rc = linux.read(conn.transport.fd, &cipher, cipher.len);
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         if (rc == 0) return false;
@@ -206,46 +107,65 @@ fn Worker(comptime Server: type) type {
                     else => return false,
                 }
 
-                const got = cipher[0..@intCast(rc)];
-                const r = conn.tls.feed(got, &to_send, &plain_in);
-
-                if (r.to_send.len > 0 and !sendRaw(conn, r.to_send)) return false;
-
-                if (r.outcome == .close) {
-                    conn.wclose = true;
-                    return conn.want_out;
-                }
-
-                if (r.plaintext.len > 0) {
-                    if (!feedRequests(conn, r.plaintext, io, arena)) return false;
-                    if (conn.wclose) return conn.want_out;
-                }
+                if (!onCiphertext(conn, cipher[0..@intCast(rc)], io, arena)) return false;
+                if (conn.transport.wclose) return conn.transport.want_out; // flush, then close
             }
         }
 
+        /// Feed one received ciphertext chunk through the session and the request loop. The
+        /// recv-model-agnostic core of onReadable: the .EPOLL paths call it under their own read
+        /// loop, the .URING path calls it per recv completion. Returns false when the connection
+        /// must close now. transport.wclose set with staged bytes means flush, then close.
+        pub fn onCiphertext(conn: *TlsConn, cipher: []const u8, io: std.Io, arena: *std.heap.ArenaAllocator) bool {
+            var to_send: [TLS_SEALED_OUT_SIZE]u8 = undefined;
+            var plain_in: [TLS_PLAIN_STAGING_SIZE]u8 = undefined;
+
+            const r = conn.transport.tls.feed(cipher, &to_send, &plain_in);
+
+            if (r.to_send.len > 0 and !conn.transport.sendRaw(r.to_send)) return false;
+
+            if (r.outcome == .close) {
+                conn.transport.wclose = true; // keep the conn only to flush a final alert
+                return true;
+            }
+
+            if (r.plaintext.len > 0) {
+                if (!feedRequests(conn, r.plaintext, io, arena)) return false;
+            }
+
+            return true;
+        }
+
         /// Accumulate decrypted plaintext and dispatch every complete request now buffered (pipelined
-        /// requests drain in one pass). Returns false on a fatal write, sets conn.wclose otherwise.
+        /// requests drain in one pass). Returns false on a fatal write, sets transport.wclose otherwise.
         fn feedRequests(conn: *TlsConn, plaintext: []const u8, io: std.Io, arena: *std.heap.ArenaAllocator) bool {
             const cfg = conn.server.config;
 
             if (plaintext.len > conn.rbuf.len - conn.rlen) {
-                conn.wclose = true;
+                conn.transport.wclose = true;
                 return true;
             }
 
             @memcpy(conn.rbuf[conn.rlen..][0..plaintext.len], plaintext);
             conn.rlen += plaintext.len;
 
+            // The per-connection stream sink (ADR-054): a handler that calls res.stream (SSE)
+            // detaches the buffered capture, and every subsequent write seals records through the
+            // transport, staging on backpressure instead of parking the worker.
+            var stream_sink = resp.TlsStreamSink{ .ctx = &conn.transport, .writeFn = streamWrite };
+            resp.tl_tls_stream = &stream_sink;
+            defer resp.tl_tls_stream = null;
+
             var response_buf: [RESPONSE_BUF_SIZE]u8 = undefined;
 
             while (conn.rlen > 0) {
                 const maybe_head = parser.parse(conn.rbuf[0..conn.rlen], cfg.max_request_headers.value()) catch {
-                    conn.wclose = true;
+                    conn.transport.wclose = true;
                     return true;
                 };
                 const head = maybe_head orelse return true; // incomplete head: wait for more
                 if (head.chunked) {
-                    conn.wclose = true; // chunked bodies are out of scope for the TLS cut
+                    conn.transport.wclose = true; // chunked bodies are out of scope for the TLS cut
                     return true;
                 }
                 const total = head.body_offset + head.content_length;
@@ -257,17 +177,21 @@ fn Worker(comptime Server: type) type {
                     Tls.verifyCertIdentity(conn.ctx.cert_der, host) catch {
                         const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         _ = sendPlain(conn, misdirected);
-                        conn.wclose = true;
+                        conn.transport.wclose = true;
                         return true;
                     };
                 }
 
                 const cap = tls_serve.processRequestToBuffer(conn.server, io, conn.rbuf[0..total], &response_buf, arena) catch {
                     _ = ws.takeWebSocket(); // the multiplexed path does not host WS (ADR-055), drop any handoff
-                    conn.wclose = true; // ResponseTooLarge / StreamingNotSupported: close
+                    conn.transport.wclose = true; // ResponseTooLarge: close
                     return true;
                 };
-                if (!sendPlain(conn, cap.bytes)) return false;
+                _ = ws.takeWebSocket(); // WS stays on the thread path: drop any handoff
+
+                // A streamed response (res.stream) already left through the stream sink.
+                if (stream_sink.failed) return false;
+                if (!cap.streamed and !sendPlain(conn, cap.bytes)) return false;
 
                 const remaining = conn.rlen - total;
                 if (remaining > 0) std.mem.copyForwards(u8, conn.rbuf[0..remaining], conn.rbuf[total..conn.rlen]);
@@ -275,8 +199,8 @@ fn Worker(comptime Server: type) type {
 
                 if (cap.outcome == .close) {
                     var close_buf: [64]u8 = undefined;
-                    _ = sendRaw(conn, conn.tls.closeNotify(&close_buf));
-                    conn.wclose = true;
+                    _ = conn.transport.sendRaw(conn.transport.tls.closeNotify(&close_buf));
+                    conn.transport.wclose = true;
                     return true;
                 }
             }
@@ -284,29 +208,11 @@ fn Worker(comptime Server: type) type {
             return true;
         }
 
-        fn onWritable(epfd: posix.fd_t, conn: *TlsConn) bool {
-            while (conn.woff < conn.wlen) {
-                const rc = linux.write(conn.fd, conn.wbuf[conn.woff..].ptr, conn.wlen - conn.woff);
-                switch (posix.errno(rc)) {
-                    .SUCCESS => {
-                        if (rc == 0) return false;
-                        conn.woff += @intCast(rc);
-                    },
-                    .INTR => continue,
-                    .AGAIN => return true,
-                    else => return false,
-                }
-            }
-
-            conn.woff = 0;
-            conn.wlen = 0;
-            conn.want_out = false;
-            armOut(epfd, conn.fd, false);
-
-            return !conn.wclose;
-        }
-
-        fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, server: Server, ctx: *const Tls.Context) void {
+        /// Accept every pending TLS connection on listener_fd and register each in epfd with
+        /// `ev_tag | fd` as the event data. The TLS-only worker passes 0 (plain fd), the
+        /// dual-listener .EPOLL loop passes tls_conn.tls_event_tag so its one loop can route
+        /// TLS events.
+        pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, server: Server, ctx: *const Tls.Context, ev_tag: u64) void {
             while (true) {
                 const rc = linux.accept4(listener_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
                 switch (posix.errno(rc)) {
@@ -330,14 +236,14 @@ fn Worker(comptime Server: type) type {
                     continue;
                 };
                 conn.* = .{
-                    .fd = fd,
-                    .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn),
+                    .transport = tls_conn.Transport.init(fd, ctx),
                     .server = server,
                     .ctx = ctx,
                 };
-                table.put(conn);
+                conn.transport.ep_data = ev_tag | @as(u64, @intCast(fd));
+                table.put(fd, conn);
 
-                var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .fd = fd } };
+                var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .u64 = conn.transport.ep_data } };
                 if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev)) != .SUCCESS) {
                     table.drop(fd);
                     _ = linux.close(fd);
@@ -394,7 +300,7 @@ fn Worker(comptime Server: type) type {
 
                 for (events[0..@intCast(wait_rc)]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, worker.server, worker.ctx);
+                        acceptAll(&table, epfd, listener_fd, worker.server, worker.ctx, 0);
                         continue;
                     }
 
@@ -404,10 +310,10 @@ fn Worker(comptime Server: type) type {
                     if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
                         keep = false;
                     } else {
-                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = onWritable(epfd, conn);
+                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
                         if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(conn, worker.io, &arena);
-                        if (keep and conn.want_out) armOut(epfd, conn.fd, true);
-                        if (keep and conn.wclose and !conn.want_out) keep = false;
+                        if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
+                        if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
                     }
 
                     if (!keep) {

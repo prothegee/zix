@@ -114,6 +114,7 @@ test "zix tests: unit test" {
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
+    std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
 
     // # zix.Http2
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));

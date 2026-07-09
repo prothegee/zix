@@ -15,8 +15,10 @@ const linux = std.os.linux;
 /// engines that do not arm a timer treat it as a no-op. close is a ring close
 /// (prep_close) submitted in place of a synchronous linux.close at teardown: its
 /// CQE carries no connection (the slot is already cleared), so every engine
-/// treats it as a no-op.
-pub const OpKind = enum(u8) { accept, recv, send, timeout, close };
+/// treats it as a no-op. The tls_* ops route the dual-listener TLS side
+/// (config.tls_port): accept on the TLS listener, ciphertext recv, and the
+/// staged-ciphertext flush send. Engines without a TLS side treat them as no-ops.
+pub const OpKind = enum(u8) { accept, recv, send, timeout, close, tls_accept, tls_recv, tls_send };
 
 /// Decoded user_data fields.
 pub const Decoded = struct { op: OpKind, gen: u24, fd: linux.fd_t };

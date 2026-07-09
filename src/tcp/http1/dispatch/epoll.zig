@@ -7,6 +7,9 @@ const core = @import("../core.zig");
 const cache = @import("../../../utils/response_cache.zig");
 const ws = @import("../websocket.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const tls_mux = @import("../tls_mux.zig");
+const tls_conn = @import("../../../multiplexers/tls_conn.zig");
+const Tls = @import("../../../tls/Tls.zig");
 const HandlerFn = core.HandlerFn;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
@@ -297,9 +300,11 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
             continue;
         }
 
+        // Registered via the u64 data form (same bytes for an fd) so the dual-listener loop can
+        // rely on the whole data word: TLS events carry a tag bit there, cleartext events must not.
         var ev = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-            .data = .{ .fd = conn_fd },
+            .data = .{ .u64 = @intCast(conn_fd) },
         };
         if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &ev)) != .SUCCESS) {
             table.free(conn_fd);
@@ -338,7 +343,7 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, 
 
             var arm_ev = linux.epoll_event{
                 .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP,
-                .data = .{ .fd = conn.fd },
+                .data = .{ .u64 = @intCast(conn.fd) },
             };
             _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn.fd, &arm_ev);
 
@@ -379,7 +384,7 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
 
     var disarm_ev = linux.epoll_event{
         .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-        .data = .{ .fd = conn.fd },
+        .data = .{ .u64 = @intCast(conn.fd) },
     };
     _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, conn.fd, &disarm_ev);
 
@@ -577,6 +582,31 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     return if (conn.drain_close) .close else .keep_alive;
 }
 
+/// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body (flush staged
+/// ciphertext on EPOLLOUT, feed decrypted bytes on EPOLLIN, re-arm or reap).
+fn serveTlsEvent(tls_conns: *tls_mux.ConnTable, epfd: std.posix.fd_t, ev: std.os.linux.epoll_event, payload_buf: []u8, out_buf: []u8) void {
+    const linux = std.os.linux;
+    const fd: std.posix.fd_t = @intCast(ev.data.u64 & (tls_conn.tls_event_tag - 1));
+
+    const conn = tls_conns.get(fd) orelse return;
+    var keep = true;
+
+    if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
+        keep = false;
+    } else {
+        if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
+        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(conn, payload_buf, out_buf);
+        if (keep and conn.transport.want_out) tls_conn.armOut(epfd, fd, conn.transport.ep_data, true);
+        if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
+    }
+
+    if (!keep) {
+        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+        tls_conns.drop(fd);
+        _ = linux.close(fd);
+    }
+}
+
 const EpollWorkerCtx = struct { config: Config, worker_id: usize };
 
 /// Return a concrete epoll worker function with handler_fn baked in at compile
@@ -613,13 +643,43 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
 
             var listener_ev = linux.epoll_event{
                 .events = linux.EPOLL.IN,
-                .data = .{ .fd = listener_fd },
+                .data = .{ .u64 = @intCast(listener_fd) },
             };
             if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
 
             const ws_buf_size = if (config.ws_recv_buf > config.max_recv_buf) config.ws_recv_buf else config.max_recv_buf;
             var table = ConnTable.init(ws_buf_size) catch return;
             defer table.deinit();
+
+            // Dual-listener TLS side (config.tls + config.tls_port): a second listen fd whose
+            // connections terminate TLS in this same loop via the tls_mux connection machinery.
+            // Everything below is mapped only when active, so a cleartext-only worker sees zero
+            // layout change on its hot structures.
+            const tls_ctx: ?*Tls.Context = if (config.tls_port != 0) config.tls else null;
+            var tls_listener_fd: std.posix.fd_t = -1;
+            var tls_srv: std.Io.net.Server = undefined;
+            var tls_table: ?tls_mux.ConnTable = null;
+            defer if (tls_table) |*tls_conns| tls_conns.deinit();
+            defer if (tls_ctx != null and tls_listener_fd != -1) tls_srv.deinit(io);
+
+            if (tls_ctx != null) {
+                const tls_addr = std.Io.net.IpAddress.resolve(io, config.ip, config.tls_port) catch return;
+                tls_srv = tls_addr.listen(io, .{
+                    .mode = .stream,
+                    .kernel_backlog = config.kernel_backlog,
+                    .reuse_address = true,
+                }) catch return;
+                tls_listener_fd = tls_srv.socket.handle;
+                setNonBlock(tls_listener_fd);
+
+                var tls_lev = linux.epoll_event{
+                    .events = linux.EPOLL.IN,
+                    .data = .{ .u64 = @intCast(tls_listener_fd) },
+                };
+                if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, tls_listener_fd, &tls_lev)) != .SUCCESS) return;
+
+                tls_table = tls_mux.ConnTable.init() catch return;
+            }
 
             // Free the per-worker write-pending staging pool (A3) when the worker exits. table.deinit
             // frees buffers still attached to live connections, this frees the recycled free-list, two
@@ -680,6 +740,17 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                         continue;
                     }
 
+                    if (tls_ctx) |tls_context| {
+                        if (ev.data.fd == tls_listener_fd) {
+                            tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, handler_fn, tls_context, tls_conn.tls_event_tag);
+                            continue;
+                        }
+                        if (ev.data.u64 & tls_conn.tls_event_tag != 0) {
+                            serveTlsEvent(&tls_table.?, epfd, ev, body_buf, out_buf);
+                            continue;
+                        }
+                    }
+
                     const conn = table.get(ev.data.fd) orelse continue;
                     const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                         core.ConnOutcome.close
@@ -710,6 +781,8 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
     logSystem(config, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{ config.ip, config.port, worker_count });
+    if (config.tls != null and config.tls_port != 0)
+        logSystem(config, "dual listener: https/1.1 TLS on {s}:{d} (same workers)", .{ config.ip, config.tls_port });
 
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);

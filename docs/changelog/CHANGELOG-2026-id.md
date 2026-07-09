@@ -65,15 +65,24 @@ __*Update:*__
 
 - SSE / streaming melalui TLS (ADR-054):
     - `zix.Http` dan `zix.Http1` melayani Server-Sent Events melalui TLS di jalur thread-per-koneksi (`.ASYNC` / `.POOL` / `.MIXED`). Stream sink per-koneksi (`TlsStreamSink`, type-erased atas koneksi TLS 1.3 / 1.2 hidup) mengenkripsi satu TLS record per write dan mengirimnya seketika, menggantikan buffered capture hanya ketika handler memilih streaming. `fdWriteAll` memeriksa buffered sink dulu, lalu stream sink, jadi response normal menjaga jalur cepat ter-buffer tetap utuh.
-    - `zix.Http` memakai ulang `res.stream()` (tanpa simbol publik baru, kini menjaga stream sink aktif melalui TLS). `zix.Http1` memperoleh `beginStream()`, no-op di cleartext, jadi satu fd-handler melayani cleartext dan TLS. Jalur `tls_mux` multipleks (`.EPOLL` / `.URING`) tetap request / response saja.
+    - `zix.Http` memakai ulang `res.stream()` (tanpa simbol publik baru, kini menjaga stream sink aktif melalui TLS). `zix.Http1` memperoleh `beginStream()`, no-op di cleartext, jadi satu fd-handler melayani cleartext dan TLS. Jalur `tls_mux` multipleks (`.EPOLL` / `.URING`) tetap request / response saja (kemudian dibuka oleh ADR-060 di bawah).
     - Example baru `examples/tls/tls_http_sse.zig` (port 9072) dan `examples/tls/tls_http1_sse.zig` (port 9073), dengan runner step `test-runner-tls-http-sse` / `test-runner-tls-http1-sse` (client `zix.Tls` native, tanpa curl), dilipat ke `test-runner-all`. `examples/http1_sse.zig` kini memanggil `beginStream()`.
 
     ---
 
 - WebSocket melalui TLS (ADR-055):
     - `zix.Http` dan `zix.Http1` melayani WebSocket melalui TLS (wss) di jalur thread-per-koneksi (`.ASYNC` / `.POOL` / `.MIXED`). Handler memanggil `WebSocket.serveTls(fd, key, on_frame)`: ia mengirim `101` terenkripsi lewat ADR-054 stream sink dan mendaftarkan handoff, lalu loop serve https menjalankan inline frame loop atas TLS session (dekripsi record, parse frame, `on_frame` untuk text / binary, ping di-auto-pong, close di-auto-echo). Frame keluar memakai ulang ADR-054 stream sink, jadi tiap pump pass mengenkripsi frame ter-coalesce sebagai satu record.
-    - `zix.Http1` memakai ulang frame codec-nya (`parseFrame` / `pump` / `send`) dan handoff `requestWebSocket` / `takeWebSocket`. `zix.Http` memperoleh bagian engine-driven yang cocok (`WsFrameFn`, `send`, `pump`, handoff, `upgradeFd`), jadi `on_frame(fd, opcode, payload)` dan `serveTls` yang sama jalan di kedua engine. Rooms / broadcast tidak dilayani melalui TLS (enkripsi per-session), jadi wss bersifat per-koneksi / echo. Jalur `tls_mux` multipleks tetap request / response saja.
+    - `zix.Http1` memakai ulang frame codec-nya (`parseFrame` / `pump` / `send`) dan handoff `requestWebSocket` / `takeWebSocket`. `zix.Http` memperoleh bagian engine-driven yang cocok (`WsFrameFn`, `send`, `pump`, handoff, `upgradeFd`), jadi `on_frame(fd, opcode, payload)` dan `serveTls` yang sama jalan di kedua engine. Rooms / broadcast tidak dilayani melalui TLS (enkripsi per-session), jadi wss bersifat per-koneksi / echo. Jalur `tls_mux` multipleks tetap request / response saja (kemudian dibuka untuk `zix.Http1` oleh ADR-060 di bawah).
     - Example baru `examples/tls/tls_http1_ws.zig` (port 9074) dan `examples/tls/tls_http_ws.zig` (port 9075), dengan runner step `test-runner-tls-http1-ws` / `test-runner-tls-http-ws` (client `zix.Tls` native, tanpa websocat), dilipat ke `test-runner-all`.
+
+    ---
+
+- TLS dual listener (ADR-060):
+    - Field config flat baru `tls_port: u16 = 0` pada `Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, dan `GrpcServerConfig`: dengan `tls` diisi dan `tls_port` non-zero, SATU server melayani cleartext di `port` DAN TLS di `tls_port` dari worker fleet yang sama, menggantikan setup dua-peluncuran yang menduplikasi worker, tabel fd, dan cache. `tls_port == port` ditolak di `run()` (`error.TlsPortConflict`). Default tidak berubah: `tls` null tetap cleartext-only, `tls` diisi dengan `tls_port` 0 tetap TLS-only.
+    - Transport TLS per-koneksi dibagi di `src/multiplexers/tls_conn.zig` (session + staging backpressure + tabel slot fd), menggantikan empat salinan nyaris identik di file `tls_mux.zig`. Loop engine tetap per-engine (ADR-050).
+    - Di bawah `.URING` sisi TLS berjalan di ring (op user_data `tls_accept` / `tls_recv` / `tls_send`), tanpa fleet epoll tersembunyi. Di bawah `.EPOLL` listener TLS bergabung ke epoll yang sama, ditandai di data word event. Thread model melayani sisi TLS dengan satu accept thread tambahan.
+    - Loop mux `zix.Http1` kini menampung WebSocket dan SSE melalui TLS (encrypt-on-write lewat stream sink per-koneksi), dan loop mux `zix.Http` menampung `res.stream()` melalui TLS, membuka batasan thread-path ADR-054 / ADR-055 di sana.
+    - Contoh baru `examples/tls/tls_http1_dual.zig` (port 9076 cleartext / 9077 TLS), check runner `tls-http1-dual`, dan integration test dual-listener per-engine.
 
     ---
 
@@ -166,6 +175,13 @@ __*Update:*__
     - `zix.Http3` mendapat content-negotiation pada response. `req.accept_encoding` mengekspos Accept-Encoding klien (didekode dari QPACK static entry 31 atau literal, Huffman diperluas), dan handler memanggil `res.setContentEncoding(.br)` / `.gzip`, yang memancarkan header response `content-encoding` sebagai satu QPACK indexed line (indeks static 42 br / 43 gzip). Engine tidak pernah mengompresi di jalur kirim: handler menyajikan body yang sudah ter-compressed (file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request dan aturan perf / memory tetap terpenuhi. Menyajikan varian pre-compressed yang lebih kecil berarti lebih sedikit packet per response, lever untuk static-serving.
     - Static table QPACK diperluas dari indeks 0..28 ke 0..43 (RFC 9204 Appendix A), mencakup `accept-encoding` (31) dan `content-encoding` br / gzip (42 / 43). Decoder request menelusuri melewati pseudo-header untuk menangkap `accept-encoding`, dan `buildRequestStreamContent` / `buildStreamPrefix` memancarkan line `content-encoding` (`SendStream` menyimpan coding-nya agar body multi-packet yang di-resume tetap membawa header-nya). Perubahan ini ada di `dispatch/common.zig` bersama, jadi setiap dispatch model mewarisinya.
     - `zix.Http3.ContentEncoding` diekspor. `examples/tls/http3_basic.zig` mendapat route `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br. Docs `hld-http3`, `lld-http3` (en dan -id) diperbarui.
+
+    ---
+
+- Rolling flow-control credit HTTP/3 (MAX_STREAMS + MAX_DATA):
+    - Handshake QUIC mengiklankan dua budget sekali-pakai ke client, `max_streams` request stream dan `initial_max_data` (1 MiB) byte request seluruh connection. Keduanya kini digulir maju saat client memakainya: grant MAX_STREAMS (frame 0x12, `replenishBidiStreams`) naik saat request stream pensiun, dan grant MAX_DATA (frame 0x10, `replenishMaxData`) naik saat byte request terpakai. Tiap grant dipancarkan begitu konsumsi melewati separuh window-nya dan menumpang prologue reply yang ter-coalesce, seperti ACK.
+    - Memperbaiki deadlock seumur connection: tanpa byte grant, connection membisu setelah kira-kira `initial_max_data` request, client terblokir pada connection flow control dan request in-flight terakhirnya tak pernah terjawab, sehingga throughput connection berumur panjang mentok di konstanta yang tidak bergantung hardware. Dengan kedua grant menggulir, connection melayani tanpa batas.
+    - Bagian baru: `flight.initial_max_data` (nilai yang diiklankan sekaligus window replenish, satu const), `Connection.replenishMaxData`, `request.streamBytes` (menjumlah byte payload STREAM sebuah packet lintas semua stream, karena flow control level connection menghitung semuanya), dan `response.buildMaxData` plus `Framing.max_data`. Wiring ada di `dispatch/common.zig` bersama, jadi semua dispatch model mewarisinya. Unit test mencakup matematika replenish, encoding frame, dan penghitungan byte.
 
     ---
 

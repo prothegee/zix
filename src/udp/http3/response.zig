@@ -221,6 +221,22 @@ pub fn buildMaxStreams(out: []u8, max_streams: u64) usize {
     return pos;
 }
 
+/// Build a MAX_DATA frame (RFC 9000 19.9, type 0x10): raise the cumulative connection-wide byte
+/// budget the peer may send across all its streams. The handshake advertises a one-time
+/// initial_max_data, so without periodic MAX_DATA the client stalls for good once it has sent that
+/// many request bytes, however many stream credits it still holds. Returns 0 when the frame does not
+/// fit in `out` (nothing is written).
+pub fn buildMaxData(out: []u8, max_data: u64) usize {
+    const frame_len = 1 + varint.encodedLen(max_data);
+    if (frame_len > out.len) return 0;
+
+    out[0] = 0x10; // MAX_DATA
+    var pos: usize = 1;
+    pos += varint.write(out[pos..], max_data);
+
+    return pos;
+}
+
 /// Which one-shot and terminal frames a response packet carries around the request-stream content.
 ///
 /// Note:
@@ -234,6 +250,9 @@ pub const Framing = struct {
     /// When set, a MAX_STREAMS (bidi) frame raising the client's request-stream credit to this
     /// cumulative value rides this packet (RFC 9000 19.11). Set only when replenishment is due.
     max_streams_bidi: ?u64 = null,
+    /// When set, a MAX_DATA frame raising the client's connection-wide byte budget to this
+    /// cumulative value rides this packet (RFC 9000 19.9). Set only when replenishment is due.
+    max_data: ?u64 = null,
 };
 
 /// Build the full 1-RTT payload (QUIC frames) for one HTTP/3 response on `stream_id`.
@@ -276,6 +295,16 @@ pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, a
     // when replenishment is due.
     if (framing.max_streams_bidi) |max_streams| {
         const written = buildMaxStreams(out[pos..], max_streams);
+        if (written == 0) return null;
+
+        pos += written;
+    }
+
+    // MAX_DATA (RFC 9000 19.9): extend the client's connection-wide byte budget so a long-lived
+    // connection does not stall once the one-time initial_max_data is spent. Rides this packet only
+    // when replenishment is due.
+    if (framing.max_data) |max_data| {
+        const written = buildMaxData(out[pos..], max_data);
         if (written == 0) return null;
 
         pos += written;
@@ -371,6 +400,26 @@ test "zix test: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse 
     var out2: [1024]u8 = undefined;
     const without = buildResponse(&out2, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
     try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x12}) == null);
+}
+
+test "zix test: buildMaxData encodes a MAX_DATA frame, buildResponse rides it" {
+    // The frame is type 0x10 then the cumulative byte limit as a varint (192 = 0x40c0 two-byte varint).
+    var frame: [8]u8 = undefined;
+    const len = buildMaxData(&frame, 192);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x40, 0xc0 }, frame[0..len]);
+
+    // A small destination that cannot hold the frame reports 0 and writes nothing.
+    var tiny: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), buildMaxData(&tiny, 192));
+
+    // A response with max_data set carries the 0x10 frame, a lean response without it does not.
+    var out: [1024]u8 = undefined;
+    const with = buildResponse(&out, 4, 200, "hi", null, .{ .handshake_done = false, .control = false, .max_data = 192 }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out[0..with], &[_]u8{ 0x10, 0x40, 0xc0 }) != null);
+
+    var out2: [1024]u8 = undefined;
+    const without = buildResponse(&out2, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
+    try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x10}) == null);
 }
 
 test "zix test: a body larger than the buffer returns null, never overflows" {

@@ -442,9 +442,11 @@ pub fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd:
             continue;
         }
 
+        // Registered via the u64 data form (same bytes for an fd) so the dual-listener loop can
+        // rely on the whole data word: TLS events carry a tag bit there, cleartext events must not.
         var ev = linux.epoll_event{
             .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-            .data = .{ .fd = conn_fd },
+            .data = .{ .u64 = @intCast(conn_fd) },
         };
         if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, conn_fd, &ev)) != .SUCCESS) {
             table.free(conn_fd);

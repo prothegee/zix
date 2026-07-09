@@ -2,11 +2,12 @@
 //!
 //! What:
 //! - The gRPC twin of ../tls_mux.zig: one SO_REUSEPORT listener + epoll instance per worker, each
-//!   connection terminating TLS in place via a resumable tls_session.Session (no socketpair, no thread
-//!   per connection). recv ciphertext -> session decrypts -> the resumable gRPC h2 mux
-//!   (grpcMuxProcessRing) consumes plaintext -> its staged reply is encrypted back into TLS records
-//!   through the frame write hook -> sent. A worker multiplexes thousands of TLS connections, so high
-//!   concurrency no longer spawns a thread per connection (the thread-per-conn TLS path thrashes).
+//!   connection terminating TLS in place via the shared transport (multiplexers/tls_conn.zig), no
+//!   socketpair, no thread per connection. recv ciphertext -> transport decrypts -> the resumable gRPC
+//!   h2 mux (grpcMuxProcessRing) consumes plaintext -> its staged reply is encrypted back into TLS
+//!   records through the frame write hook -> sent. A worker multiplexes thousands of TLS connections,
+//!   so high concurrency no longer spawns a thread per connection (the thread-per-conn TLS path
+//!   thrashes).
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -17,10 +18,9 @@ const Route = core.Route;
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const frame = @import("../frame.zig");
-const session = @import("../../tls/tls_session.zig");
 const Tls = @import("../../../tls/Tls.zig");
 const record = @import("../../../tls/record.zig");
-const slab = @import("../../../multiplexers/slab.zig");
+const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 
 const MAX_FD = common.MAX_FD;
 const EPOLL_MAX_EVENTS: usize = 4096;
@@ -29,164 +29,48 @@ const EPOLL_MAX_EVENTS: usize = 4096;
 const TLS_SEALED_RECORD_SIZE: usize = 18 * 1024;
 
 /// Inbound ciphertext read staging (may hold several records per read).
-const TLS_READ_STAGING_SIZE: usize = 32 * 1024;
+const TLS_READ_STAGING_SIZE: usize = tls_conn.read_staging_size;
 
 const allocator = std.heap.smp_allocator;
 
-const TlsConn = struct {
-    fd: posix.fd_t,
-    tls: session.Session,
+/// One multiplexed TLS connection: the shared byte transport (session + outbound backpressure
+/// buffer), the gRPC h2 mux (allocated once the handshake establishes), and the plaintext record
+/// accumulator.
+/// One multiplexed TLS connection. Pub with ConnTable / onCiphertext / acceptAll: the
+/// dual-listener loops (dispatch/epoll.zig, dispatch/uring.zig, config.tls_port) host the same
+/// connections in the cleartext worker instead of a second fleet.
+pub const TlsConn = struct {
+    transport: tls_conn.Transport,
     grpc: ?*core.GrpcMuxConn = null,
     opts: core.GrpcServeOpts,
 
-    // Outbound ciphertext staged on EAGAIN. wbuf is the allocation (capacity), the live bytes are
-    // wbuf[woff..wlen]. Length is tracked apart from capacity so a grown buffer never flushes its
-    // uninitialized tail.
-    wbuf: []u8 = &.{},
-    woff: usize = 0,
-    wlen: usize = 0,
-    wclose: bool = false,
-    want_out: bool = false,
-
+    // Plaintext the mux emitted this pass, accumulated then sealed in record-sized chunks.
     plain: [record.max_plaintext]u8 = undefined,
     plain_len: usize = 0,
 };
 
-const ConnTable = struct {
-    slots: []?*TlsConn,
-
-    fn init() !ConnTable {
-        return .{ .slots = try slab.mapZeroedSlots(?*TlsConn, MAX_FD) };
-    }
-
-    fn deinit(self: *ConnTable) void {
-        for (self.slots) |maybe| {
-            if (maybe) |conn| freeConn(conn);
-        }
-        slab.unmapSlots(self.slots);
-    }
-
-    fn get(self: *ConnTable, fd: posix.fd_t) ?*TlsConn {
-        const idx: usize = @intCast(fd);
-        if (idx >= self.slots.len) return null;
-
-        return self.slots[idx];
-    }
-
-    fn put(self: *ConnTable, conn: *TlsConn) void {
-        self.slots[@intCast(conn.fd)] = conn;
-    }
-
-    fn drop(self: *ConnTable, fd: posix.fd_t) void {
-        const idx: usize = @intCast(fd);
-        if (idx >= self.slots.len) return;
-        if (self.slots[idx]) |conn| freeConn(conn);
-        self.slots[idx] = null;
-    }
-};
+/// Per-worker fd -> TlsConn map (shared-nothing, one worker owns a connection for its lifetime).
+pub const ConnTable = tls_conn.ConnTable(TlsConn, MAX_FD, freeConn);
 
 fn freeConn(conn: *TlsConn) void {
     if (conn.grpc) |grpc_conn| grpc_conn.deinit();
-    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
+    conn.transport.deinit();
     allocator.destroy(conn);
 }
 
-fn setNonBlock(fd: posix.fd_t) void {
-    const cur = linux.fcntl(fd, posix.F.GETFL, 0);
-    const nb: u32 = @bitCast(posix.O{ .NONBLOCK = true });
-    _ = linux.fcntl(fd, posix.F.SETFL, cur | @as(usize, nb));
-}
-
-fn armOut(epfd: posix.fd_t, fd: posix.fd_t, on: bool) void {
-    var flags: u32 = linux.EPOLL.IN | linux.EPOLL.RDHUP;
-    if (on) flags |= linux.EPOLL.OUT;
-
-    var ev = linux.epoll_event{ .events = flags, .data = .{ .fd = fd } };
-    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &ev);
-}
-
-/// TLS records must reach the peer in order (the AEAD nonce is the record sequence number). If
-/// ciphertext is already staged, append rather than write directly, or a later record would overtake
-/// the staged one on the wire and break decryption.
-fn sendRaw(conn: *TlsConn, bytes: []const u8) bool {
-    if (conn.wlen > conn.woff) {
-        stageWrite(conn, bytes);
-        return true;
-    }
-
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const rc = linux.write(conn.fd, bytes[off..].ptr, bytes.len - off);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return false;
-                off += @intCast(rc);
-            },
-            .INTR => continue,
-            .AGAIN => {
-                stageWrite(conn, bytes[off..]);
-                return true;
-            },
-            else => return false,
-        }
-    }
-
-    return true;
-}
-
-fn stageWrite(conn: *TlsConn, bytes: []const u8) void {
-    const pending = conn.wlen - conn.woff;
-
-    // Room already at the tail: append in place.
-    if (conn.wbuf.len - conn.wlen >= bytes.len) {
-        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-        conn.wlen += bytes.len;
-        conn.want_out = true;
-        return;
-    }
-
-    const need = pending + bytes.len;
-
-    // Compaction alone makes room: slide the live bytes to the front.
-    if (conn.wbuf.len >= need) {
-        std.mem.copyForwards(u8, conn.wbuf[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-        conn.woff = 0;
-        conn.wlen = pending;
-
-        @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-        conn.wlen += bytes.len;
-        conn.want_out = true;
-        return;
-    }
-
-    // Grow: allocate a larger buffer and move the live bytes to its front.
-    var new_cap: usize = if (conn.wbuf.len == 0) conn.opts.tls_write_buf_initial else conn.wbuf.len * 2;
-    while (new_cap < need) new_cap *= 2;
-
-    const grown = allocator.alloc(u8, new_cap) catch {
-        conn.wclose = true;
-        return;
-    };
-    @memcpy(grown[0..pending], conn.wbuf[conn.woff..conn.wlen]);
-    if (conn.wbuf.len > 0) allocator.free(conn.wbuf);
-    conn.wbuf = grown;
-    conn.woff = 0;
-    conn.wlen = pending;
-
-    @memcpy(conn.wbuf[conn.wlen..][0..bytes.len], bytes);
-    conn.wlen += bytes.len;
-    conn.want_out = true;
-}
-
+/// Seal the connection's accumulated plaintext into TLS records and send (staging on backpressure).
 fn flushPlain(conn: *TlsConn) void {
     if (conn.plain_len == 0) return;
 
     var sealed: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
-    const ct = conn.tls.encrypt(conn.plain[0..conn.plain_len], &sealed);
+    const plain_len = conn.plain_len;
     conn.plain_len = 0;
-    if (!sendRaw(conn, ct)) conn.wclose = true;
+    if (!conn.transport.sendPlain(conn.plain[0..plain_len], &sealed)) conn.transport.wclose = true;
 }
 
+/// The frame write hook: the mux writes plaintext h2 frames here. The plaintext accumulates into
+/// `plain` and seals in record-sized chunks. `ctx` is the *TlsConn the worker set before driving
+/// the mux.
 fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
     const conn: *TlsConn = @ptrCast(@alignCast(ctx));
     var rest = bytes;
@@ -200,13 +84,13 @@ fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
     }
 }
 
-fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
+/// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
+/// plaintext to the gRPC h2 mux and seal its reply. Returns false when the connection must close.
+pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
-    var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
-    var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
 
     while (true) {
-        const rc = linux.read(conn.fd, &cipher, cipher.len);
+        const rc = linux.read(conn.transport.fd, &cipher, cipher.len);
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
@@ -216,28 +100,43 @@ fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
             else => return false,
         }
 
-        const got = cipher[0..@intCast(rc)];
-        const r = conn.tls.feed(got, &to_send, &plain_in);
-
-        if (r.to_send.len > 0 and !sendRaw(conn, r.to_send)) return false;
-
-        if (r.outcome == .established) {
-            if (!conn.tls.alpnIsH2()) return false;
-            conn.grpc = core.GrpcMuxConn.init(conn.fd, conn.opts) orelse return false;
-        }
-
-        if (r.outcome == .close) {
-            conn.wclose = true;
-            return conn.want_out;
-        }
-
-        if (r.plaintext.len > 0) {
-            const grpc_conn = conn.grpc orelse return false;
-            if (!feedMux(routes, conn, grpc_conn, r.plaintext)) return false;
-        }
+        if (!onCiphertext(routes, conn, cipher[0..@intCast(rc)])) return false;
+        if (conn.transport.wclose) return conn.transport.want_out; // flush, then close
     }
 }
 
+/// Feed one received ciphertext chunk through the session and the gRPC h2 mux. The
+/// recv-model-agnostic core of onReadable: the .EPOLL paths call it under their own read loop, the
+/// .URING path calls it per recv completion. Returns false when the connection must close now.
+/// transport.wclose set with staged bytes means flush, then close.
+pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []const u8) bool {
+    var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
+    var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
+
+    const r = conn.transport.tls.feed(cipher, &to_send, &plain_in);
+
+    if (r.to_send.len > 0 and !conn.transport.sendRaw(r.to_send)) return false;
+
+    if (r.outcome == .established) {
+        if (!conn.transport.tls.alpnIsH2()) return false;
+        conn.grpc = core.GrpcMuxConn.init(conn.transport.fd, conn.opts) orelse return false;
+    }
+
+    if (r.outcome == .close) {
+        conn.transport.wclose = true; // keep the conn only to flush a final alert
+        return true;
+    }
+
+    if (r.plaintext.len > 0) {
+        const grpc_conn = conn.grpc orelse return false;
+        if (!feedMux(routes, conn, grpc_conn, r.plaintext)) return false;
+    }
+
+    return true;
+}
+
+/// Append decrypted plaintext to the mux read accumulator and drive one processing pass, sealing the
+/// reply through the write hook. Returns false when the mux asks to close.
 fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.GrpcMuxConn, plaintext: []const u8) bool {
     if (grpc_conn.rstart == grpc_conn.rend) {
         grpc_conn.rstart = 0;
@@ -264,31 +163,10 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.Grpc
     return outcome != .close;
 }
 
-fn onWritable(epfd: posix.fd_t, conn: *TlsConn) bool {
-    while (conn.woff < conn.wlen) {
-        const rc = linux.write(conn.fd, conn.wbuf[conn.woff..].ptr, conn.wlen - conn.woff);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return false;
-                conn.woff += @intCast(rc);
-            },
-            .INTR => continue,
-            .AGAIN => return true,
-            else => return false,
-        }
-    }
-
-    // Drained. Keep the buffer for reuse (freeConn releases it at close) rather than free-here +
-    // realloc-next-stage, which churns the shared allocator on the hot path under backpressure.
-    conn.woff = 0;
-    conn.wlen = 0;
-    conn.want_out = false;
-    armOut(epfd, conn.fd, false);
-
-    return !conn.wclose;
-}
-
-fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.GrpcServeOpts) void {
+/// Accept every pending TLS connection on listener_fd and register each in epfd with
+/// `ev_tag | fd` as the event data. The TLS-only worker passes 0 (plain fd), the dual-listener
+/// .EPOLL loop passes tls_conn.tls_event_tag so its one loop can route TLS events.
+pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.GrpcServeOpts, ev_tag: u64) void {
     while (true) {
         const rc = linux.accept4(listener_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
         switch (posix.errno(rc)) {
@@ -311,10 +189,12 @@ fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: 
             _ = linux.close(fd);
             continue;
         };
-        conn.* = .{ .fd = fd, .tls = session.Session.init(ctx.cert_der, ctx.signing_key, ctx.alpn), .opts = opts };
-        table.put(conn);
+        conn.* = .{ .transport = tls_conn.Transport.init(fd, ctx), .opts = opts };
+        conn.transport.wbuf_initial = opts.tls_write_buf_initial;
+        conn.transport.ep_data = ev_tag | @as(u64, @intCast(fd));
+        table.put(fd, conn);
 
-        var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .fd = fd } };
+        var ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.RDHUP, .data = .{ .u64 = conn.transport.ep_data } };
         if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev)) != .SUCCESS) {
             table.drop(fd);
             _ = linux.close(fd);
@@ -343,7 +223,7 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
             var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
             defer srv.deinit(worker.io);
             const listener_fd = srv.socket.handle;
-            setNonBlock(listener_fd);
+            common.setNonBlock(listener_fd);
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
             if (posix.errno(epfd_rc) != .SUCCESS) return;
@@ -367,7 +247,7 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
 
                 for (events[0..@intCast(wait_rc)]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts);
+                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts, 0);
                         continue;
                     }
 
@@ -377,10 +257,10 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
                     if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
                         keep = false;
                     } else {
-                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = onWritable(epfd, conn);
+                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
                         if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(routes, conn);
-                        if (keep and conn.want_out) armOut(epfd, conn.fd, true);
-                        if (keep and conn.wclose and !conn.want_out) keep = false;
+                        if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
+                        if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
                     }
 
                     if (!keep) {

@@ -140,8 +140,8 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `udp/http3/qpack.zig` | `refAllDecls` + behavioral: prefixed-integer encode / decode, indexed field line, literal-with-name-reference, the static table entries |
 | `udp/http3/huffman.zig` | `refAllDecls` + behavioral: decode of the RFC 7541 Appendix C.4 `www.example.com` vector and a request path with digits and symbols |
 | `udp/http3/varint.zig` / `packet.zig` / `frame.zig` | `refAllDecls` + behavioral: varint read / write round-trip, long / short header parse, CRYPTO and STREAM frame parse |
-| `udp/http3/request.zig` / `response.zig` | `refAllDecls` + behavioral: `parseRequest` recovers `:method` / `:path` past a leading ACK, `buildResponse` carries the control SETTINGS plus a HEADERS / DATA reply |
-| `udp/http3/connection.zig` | `refAllDecls` + behavioral: `init` derives the Initial keys from the connection id (RFC 9001 A.1), the anti-amplification 3x cap |
+| `udp/http3/request.zig` / `response.zig` | `refAllDecls` + behavioral: `parseRequest` recovers `:method` / `:path` past a leading ACK, `streamBytes` sums stream payload bytes across streams and skips non-stream frames, `buildResponse` carries the control SETTINGS plus a HEADERS / DATA reply and rides a due MAX_STREAMS / MAX_DATA grant (`buildMaxStreams` / `buildMaxData` encode) |
+| `udp/http3/connection.zig` | `refAllDecls` + behavioral: `init` derives the Initial keys from the connection id (RFC 9001 A.1), the anti-amplification 3x cap, `sendDatagramSize` clamps to config / client / ceiling, `replenishBidiStreams` and `replenishMaxData` raise their grants past the one-time allowances, `reserveSendStream` pool bounds, `AckTracker` hole tracking, `onAckFrame` RTT sampling |
 | `udp/http3/router.zig` | `refAllDecls` + behavioral: dispatch calls the matching handler, the query is stripped before matching, no match returns 404 |
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + behavioral: required config fields and defaults, a null `Tls.Context` is rejected at run |
 

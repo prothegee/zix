@@ -28,17 +28,21 @@ pub fn addSteps(
         "tests/integration/http/client_test.zig",
         "tests/integration/http/ws_client_test.zig",
         "tests/integration/http/sse_client_test.zig",
+        "tests/integration/http/tls_dual_test.zig",
         // http1
         "tests/integration/http1/server_test.zig",
         "tests/integration/http1/router_test.zig",
+        "tests/integration/http1/tls_dual_test.zig",
         // http2
         "tests/integration/http2/server_test.zig",
+        "tests/integration/http2/tls_dual_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
         // fix
         "tests/integration/fix/server_test.zig",
         // grpc
         "tests/integration/grpc/server_test.zig",
+        "tests/integration/grpc/tls_dual_test.zig",
         // udp
         "tests/integration/udp/packet_test.zig",
         "tests/integration/udp/config_test.zig",

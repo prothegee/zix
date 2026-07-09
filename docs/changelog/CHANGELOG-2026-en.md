@@ -65,15 +65,24 @@ __*Update:*__
 
 - SSE / streaming over TLS (ADR-054):
     - `zix.Http` and `zix.Http1` serve Server-Sent Events over TLS on the thread-per-connection path (`.ASYNC` / `.POOL` / `.MIXED`). A per-connection stream sink (`TlsStreamSink`, type-erased over the live TLS 1.3 / 1.2 connection) encrypts one TLS record per write and sends it immediately, replacing the buffered capture only when a handler opts into streaming. `fdWriteAll` checks the buffered sink first, then the stream sink, so a normal response keeps the buffered fast path untouched.
-    - `zix.Http` reuses `res.stream()` (no new public symbol, it now keeps the stream sink active over TLS). `zix.Http1` gains `beginStream()`, a no-op in cleartext, so one fd-handler serves cleartext and TLS. The multiplexed `tls_mux` path (`.EPOLL` / `.URING`) stays request / response only.
+    - `zix.Http` reuses `res.stream()` (no new public symbol, it now keeps the stream sink active over TLS). `zix.Http1` gains `beginStream()`, a no-op in cleartext, so one fd-handler serves cleartext and TLS. The multiplexed `tls_mux` path (`.EPOLL` / `.URING`) stays request / response only (later lifted by ADR-060 below).
     - New examples `examples/tls/tls_http_sse.zig` (port 9072) and `examples/tls/tls_http1_sse.zig` (port 9073), with runner steps `test-runner-tls-http-sse` / `test-runner-tls-http1-sse` (native `zix.Tls` client, no curl), folded into `test-runner-all`. `examples/http1_sse.zig` now calls `beginStream()`.
 
     ---
 
 - WebSocket over TLS (ADR-055):
     - `zix.Http` and `zix.Http1` serve WebSocket over TLS (wss) on the thread-per-connection path (`.ASYNC` / `.POOL` / `.MIXED`). A handler calls `WebSocket.serveTls(fd, key, on_frame)`: it sends the `101` encrypted through the ADR-054 stream sink and registers a handoff, then the https serve loop runs an inline frame loop over the TLS session (decrypt records, parse frames, `on_frame` for text / binary, ping auto-ponged, close auto-echoed). Outbound frames re-use the ADR-054 stream sink, so each pump pass encrypts its coalesced frames as one record.
-    - `zix.Http1` re-uses its existing frame codec (`parseFrame` / `pump` / `send`) and the `requestWebSocket` / `takeWebSocket` handoff. `zix.Http` gains the matching engine-driven pieces (`WsFrameFn`, `send`, `pump`, the handoff, `upgradeFd`), so the same `on_frame(fd, opcode, payload)` and `serveTls` work on both engines. Rooms / broadcast are not served over TLS (per-session encryption), so wss is per-connection / echo. The multiplexed `tls_mux` path stays request / response only.
+    - `zix.Http1` re-uses its existing frame codec (`parseFrame` / `pump` / `send`) and the `requestWebSocket` / `takeWebSocket` handoff. `zix.Http` gains the matching engine-driven pieces (`WsFrameFn`, `send`, `pump`, the handoff, `upgradeFd`), so the same `on_frame(fd, opcode, payload)` and `serveTls` work on both engines. Rooms / broadcast are not served over TLS (per-session encryption), so wss is per-connection / echo. The multiplexed `tls_mux` path stays request / response only (later lifted for `zix.Http1` by ADR-060 below).
     - New examples `examples/tls/tls_http1_ws.zig` (port 9074) and `examples/tls/tls_http_ws.zig` (port 9075), with runner steps `test-runner-tls-http1-ws` / `test-runner-tls-http-ws` (native `zix.Tls` client, no websocat), folded into `test-runner-all`.
+
+    ---
+
+- TLS dual listener (ADR-060):
+    - New flat config field `tls_port: u16 = 0` on `Http1ServerConfig`, `HttpServerConfig`, `Http2ServerConfig`, and `GrpcServerConfig`: with `tls` set and `tls_port` non-zero, ONE server serves cleartext on `port` AND TLS on `tls_port` from the same worker fleet, replacing the two-launch setup that duplicated workers, fd tables, and caches. `tls_port == port` is rejected at `run()` (`error.TlsPortConflict`). Defaults unchanged: `tls` null stays cleartext-only, `tls` set with `tls_port` 0 stays TLS-only.
+    - The per-connection TLS transport is shared in `src/multiplexers/tls_conn.zig` (session + backpressure staging + fd slot table), replacing four near-identical copies in the `tls_mux.zig` files. Engine loops stay per-engine (ADR-050).
+    - Under `.URING` the TLS side rides the ring (`tls_accept` / `tls_recv` / `tls_send` user_data ops), no hidden epoll fleet. Under `.EPOLL` the TLS listener joins the same epoll, tagged in the event data word. The thread models serve the TLS side with one extra accept thread.
+    - The `zix.Http1` mux loop now hosts WebSocket and SSE over TLS (encrypt-on-write through the per-connection stream sink), and the `zix.Http` mux loop hosts `res.stream()` over TLS, lifting the ADR-054 / ADR-055 thread-path restriction there.
+    - New example `examples/tls/tls_http1_dual.zig` (ports 9076 cleartext / 9077 TLS), runner check `tls-http1-dual`, and per-engine dual-listener integration tests.
 
     ---
 
@@ -166,6 +175,13 @@ __*Update:*__
     - `zix.Http3` gains content-negotiation on the response. `req.accept_encoding` exposes the client's Accept-Encoding (decoded from the QPACK static entry 31 or a literal, Huffman expanded), and a handler calls `res.setContentEncoding(.br)` / `.gzip`, which emits the `content-encoding` response header as one QPACK indexed line (static index 42 br / 43 gzip). The engine never compresses on the send path: the handler serves an already-compressed body (a pre-built `.br` / `.gz` file), so there is no per-request codec cost and the perf / memory rule holds. Serving the smaller pre-compressed variant is fewer packets per response, the static-serving lever.
     - The QPACK static table extends from indices 0..28 to 0..43 (RFC 9204 Appendix A), covering `accept-encoding` (31) and `content-encoding` br / gzip (42 / 43). The request decoder scans past the pseudo-headers to capture `accept-encoding`, and `buildRequestStreamContent` / `buildStreamPrefix` emit the `content-encoding` line (`SendStream` stores the coding so a resumed multi-packet body keeps its header). The change lives in the shared `dispatch/common.zig`, so every dispatch model inherits it.
     - `zix.Http3.ContentEncoding` is exported. `examples/tls/http3_basic.zig` gains a `/negotiated` route that serves a brotli-precompressed body with `content-encoding: br` when the client accepts br. Docs `hld-http3`, `lld-http3` (en and -id) updated.
+
+    ---
+
+- HTTP/3 rolling flow-control credit (MAX_STREAMS + MAX_DATA):
+    - The QUIC handshake advertises two one-time budgets to the client, `max_streams` request streams and `initial_max_data` (1 MiB) of request bytes across the connection. Both are now rolled forward as the client spends them: the MAX_STREAMS grant (frame 0x12, `replenishBidiStreams`) rises as request streams retire, and the MAX_DATA grant (frame 0x10, `replenishMaxData`) rises as request bytes are consumed. Each grant is emitted once consumption crosses half its window and rides the coalesced reply prologue like the ACK.
+    - Fixes a connection-lifetime deadlock: without the byte grant, a connection went silent after about `initial_max_data` of requests, the client blocked on connection flow control and its last in-flight requests were never answered, so a long-lived connection's throughput capped at a hardware-independent constant. With both grants rolling, a connection serves indefinitely.
+    - New pieces: `flight.initial_max_data` (the advertised value and the replenish window, one const), `Connection.replenishMaxData`, `request.streamBytes` (sums a packet's STREAM payload bytes across all streams, since connection-level flow control counts them all), and `response.buildMaxData` plus `Framing.max_data`. The wiring lives in the shared `dispatch/common.zig`, so every dispatch model inherits it. Unit tests cover the replenish math, the frame encoding, and the byte counting.
 
     ---
 

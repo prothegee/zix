@@ -44,7 +44,7 @@ flowchart TD
     F --> G["Router.dispatch(req, res)\nor bare handler"]
     G --> H["handler fills res.status / res.body"]
     H --> I{"body fits one packet?"}
-    I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + response\ninto one sealed 1-RTT packet"]
+    I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + MAX_DATA +\nresponse into one sealed 1-RTT packet"]
     I -->|no| K["register SendStream,\npump across many packets\n(congestion-window bounded)"]
 ```
 
@@ -241,7 +241,8 @@ The QPACK dynamic table is fully implemented and tested but not wired into the s
 
 The 1-RTT send path respects the client's advertised limits and a real NewReno congestion controller.
 
-- Flow control: the server reads the client's `initial_max_data` and `initial_max_stream_data_bidi_local` from its transport parameters, and rolls bidirectional stream credit forward with MAX_STREAMS as request streams retire, so the connection does not stall once the initial allowance is spent.
+- Flow control, send side: the server reads the client's `initial_max_data` and `initial_max_stream_data_bidi_local` from its transport parameters and never sends response bytes past them.
+- Flow control, receive side: both one-time handshake budgets the server advertises are rolled forward as the client spends them, MAX_STREAMS for the bidirectional stream count and MAX_DATA for the connection-wide request bytes. Each grant rides a reply once consumption crosses half its window, so a long-lived connection never stalls on stream credit and never deadlocks once the byte budget (`initial_max_data`) is spent.
 - Loss recovery (RFC 9002): an RTT estimator, packet-reordering and time thresholds, a Probe Timeout with backoff, and a NewReno congestion window. A large response body is pumped across many 1-RTT packets bounded by the congestion window.
 
 Detail lives in [`docs/lld-http3-en.md`](lld-http3-en.md).

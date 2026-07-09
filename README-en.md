@@ -1567,7 +1567,20 @@ var tls = try zix.Tls.Context.init(allocator, io, .{
 });
 defer tls.deinit();
 
-var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls });
+var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls, .dispatch_model = .EPOLL });
+```
+
+With `tls` set the server is TLS-only on `port`. Add `tls_port` to serve BOTH from one server (the dual listener, ADR-060): cleartext on `port` and TLS on `tls_port` from the same worker fleet, instead of launching a second server that duplicates workers, fd tables, and caches. Available on Http1, Http, Http2, and Grpc, every dispatch model (under `.URING` the TLS side runs on the ring).
+
+```zig
+var server = zix.Http1.Server.init(handler, .{
+    .io = io,
+    .ip = "127.0.0.1",
+    .port = 9076, // cleartext
+    .tls = &tls,
+    .tls_port = 9077, // https, same workers
+    .dispatch_model = .EPOLL,
+});
 ```
 
 The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `Tls.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error. The cert can be ECDSA P-256, Ed25519, or RSA: `Tls.Context.init` detects the key type from the cert (an RSA cert requires TLS 1.3 and signs the CertificateVerify with `rsa_pss_rsae_sha256`). For a new deployment prefer Ed25519 (cheapest handshake signature), then ECDSA P-256, then RSA (use RSA to serve a pre-issued RSA cert). See [docs/zix-deploy-en.md](docs/zix-deploy-en.md) for per-type config snippets and Docker image deployment.
@@ -1575,6 +1588,7 @@ The two paths are required, the rest default to a secure posture (TLS 1.2 floor,
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
 - [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - Ed25519 server cert
+- [examples/tls/tls_http1_dual.zig](examples/tls/tls_http1_dual.zig) - dual listener (cleartext + https, one server)
 
 <br>
 

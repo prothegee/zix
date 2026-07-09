@@ -43,6 +43,7 @@ pub fn addSteps(
         .{ "example-tls_http1_sse", "examples/tls/tls_http1_sse.zig", "tls" },
         .{ "example-tls_http1_ws", "examples/tls/tls_http1_ws.zig", "tls" },
         .{ "example-tls_http1_ed25519", "examples/tls/tls_http1_ed25519.zig", "tls" },
+        .{ "example-tls_http1_dual", "examples/tls/tls_http1_dual.zig", "tls" },
         .{ "example-tls_http2_basic", "examples/tls/tls_http2_basic.zig", "tls" },
         .{ "example-tls_grpc_basic", "examples/tls/tls_grpc_basic.zig", "tls" },
         .{ "example-http_basic_1_async", "examples/http_basic_1_async.zig", "http" },
