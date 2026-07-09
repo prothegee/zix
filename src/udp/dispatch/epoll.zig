@@ -11,6 +11,7 @@ const UdpServerConfig = Config.UdpServerConfig;
 const core = @import("../core.zig");
 const datagram = @import("../datagram.zig");
 const common = @import("common.zig");
+const reuseport = @import("../../multiplexers/reuseport.zig");
 
 /// Max datagrams drained per epoll wake before returning to epoll_wait, bounding one drain-to-EAGAIN
 /// pass so a sustained flood still re-enters the wait. EAGAIN normally ends the drain first.
@@ -19,14 +20,28 @@ const max_drain_per_wake: usize = 4096;
 /// One raw-UDP EPOLL worker: bind a per-core SO_REUSEPORT socket, watch it with epoll, and drain the
 /// receive queue to EAGAIN on each readiness wake. Pub so the io_uring worker can fall back to it when
 /// io_uring is unavailable.
-pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig, worker_id: usize) void {
+pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
     common.pinToCpu(worker_id);
+
+    // Datagrams served by this worker (skew counter). Single-owner plain increment
+    // (no contention), reported through the system logger at worker exit so
+    // REUSEPORT skew across workers is measurable.
+    var datagrams_served: u64 = 0;
+    defer common.logSystem(config, "epoll worker {d}: {d} datagrams served", .{ worker_id, datagrams_served });
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
+    defer bind_turn.release();
 
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
         common.logSystem(config, "raw bind error: {}", .{err});
         return;
     };
     defer datagram.close(fd);
+
+    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    bind_turn.release();
 
     common.setBusyPoll(fd, config.busy_poll_us);
 
@@ -66,6 +81,7 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig
             if (count == 0) break;
 
             drained += count;
+            datagrams_served += count;
             for (0..count) |i| common.serveDatagram(handler, rx.get(i), &tx, fd);
 
             tx.flush(fd) catch tx.reset();
@@ -84,11 +100,15 @@ pub fn runEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig) !void
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i, steering }) catch break;
         spawned += 1;
     }
 
-    for (threads[0..spawned]) |t| t.join();
+    for (threads[0..spawned]) |thread| thread.join();
 }

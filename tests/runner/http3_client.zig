@@ -493,7 +493,7 @@ pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const 
 }
 
 /// Do TWO HTTP/3 GET round trips on ONE connection, on client bidi streams 0 then 4, returning both
-/// decrypted bodies. This exercises request multiplexing (RC2): a single QUIC connection serving more
+/// decrypted bodies. This exercises request multiplexing: a single QUIC connection serving more
 /// than one request. The two responses are read in send order.
 ///
 /// Return:

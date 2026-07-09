@@ -12,7 +12,7 @@
 //!   torn down after the response.
 //! - Trust anchor: the native client validates against ONE anchor (config.tls_ca_path), the same
 //!   one-link scope as cert_verify. Public-CA system roots (a multi-link chain against the system
-//!   bundle) are a later lever, so tls_verify with no tls_ca_path is rejected up front rather than
+//!   bundle) come later, so tls_verify with no tls_ca_path is rejected up front rather than
 //!   silently trusting nothing.
 //! - Response headers must fit in one HEADERS frame (END_HEADERS). CONTINUATION is not handled.
 

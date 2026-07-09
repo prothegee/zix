@@ -29,6 +29,7 @@ const RespSink = resp_mod.RespSink;
 const writeAllFD = resp_mod.writeAllFD;
 const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../tls/Tls.zig");
@@ -88,6 +89,10 @@ fn UringWorker(comptime ServerPtr: type) type {
         tls_ctx: ?*Tls.Context = null,
         tls_conns: ?TlsConnTable = null,
         tls_gen_counter: u24 = 0,
+        /// Requests served by this worker (cleartext dispatch). Single-owner plain
+        /// increment (no contention), reported through the system logger at worker
+        /// exit so REUSEPORT skew across workers is measurable.
+        requests_served: u64 = 0,
 
         const W = @This();
         const allocator = std.heap.smp_allocator;
@@ -460,6 +465,7 @@ fn UringWorker(comptime ServerPtr: type) type {
             const stream = std.Io.net.Stream{ .socket = .{ .handle = conn.fd, .address = undefined } };
             const outcome = processRequest(worker.server, stream, conn.fd, worker.io, conn.buf[0..conn.filled], worker.arena);
             resp_mod.tl_resp_sink = null;
+            worker.requests_served += 1;
 
             conn.staged = sink.len;
             conn.filled = 0;
@@ -667,11 +673,16 @@ fn UringWorker(comptime ServerPtr: type) type {
 /// request through processRequest with the response staged into a
 /// RespSink, and submits one coalesced send. Half-duplex per connection,
 /// one request per buffer (matches the EPOLL path, ADR-037 Phase 4 step 4).
-fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
+fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering) void {
     const ServerPtr = @TypeOf(server);
     const cfg = server.config;
 
     pinToCpu(worker_id);
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
+    defer bind_turn.release();
 
     const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch return;
     var net_server = addr.listen(io, .{
@@ -681,6 +692,8 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
     }) catch return;
     defer net_server.deinit(io);
     const listener_fd = net_server.socket.handle;
+
+    if (steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
     // Dual-listener TLS side: a second listener on tls_port whose connections terminate TLS in
     // this same ring loop (no separate epoll fleet).
@@ -695,8 +708,12 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
             .reuse_address = true,
         }) catch return;
         tls_listener_fd = tls_srv.socket.handle;
+        if (steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
     }
     defer if (tls_active) tls_srv.deinit(io);
+
+    // Both groups joined: release the bind turn to the next worker.
+    bind_turn.release();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -756,6 +773,8 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize) void {
     worker.prewarmPool();
 
     worker.run();
+
+    logSystem(cfg, "uring worker {d}: {d} requests served", .{ worker_id, worker.requests_served });
 }
 
 // --------------------------------------------------------- //
@@ -793,11 +812,15 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (cfg.compress) @max(cfg.worker_stack_size_bytes, cfg.worker_stack_compress_bytes) else cfg.worker_stack_size_bytes;
 
-    for (threads, 0..) |*t, idx| {
-        t.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx });
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
+    for (threads, 0..) |*thread, idx| {
+        thread.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx, steering });
     }
 
-    for (threads) |t| t.join();
+    for (threads) |thread| thread.join();
 }
 
 // --------------------------------------------------------- //

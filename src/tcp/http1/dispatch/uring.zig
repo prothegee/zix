@@ -10,6 +10,7 @@ const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const Tls = @import("../../../tls/Tls.zig");
 const HandlerFn = core.HandlerFn;
 const IoUring = std.os.linux.IoUring;
@@ -33,7 +34,7 @@ const MAX_FD = common.MAX_FD;
 // per connection (at most one recv or one send in flight), so a blocking sink
 // flush can never interleave with an in-flight send.
 //
-// Phase 3 (ADR-037) lever results (rnd/0.4.x/uring_phase3_results.txt):
+// Phase 3 (ADR-037) results (rnd/0.4.x/uring_phase3_results.txt):
 // 1. ring setup flags (SINGLE_ISSUER | DEFER_TASKRUN): measured null on the
 //    12-core loopback box, but the reference ring engines run with them at
 //    scale, so they are applied here behind a kernel-version probe with a
@@ -73,14 +74,14 @@ const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 /// worst-case per-connection memory.
 const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 
-/// Idle-pool warm floor (A2). The minimum number of closed connections kept warm
+/// Idle-pool warm floor. The minimum number of closed connections kept warm
 /// (buffers resident, allocation-free to reuse) when the worker is otherwise idle,
 /// so a trickle of new connections after a quiet spell still skips the allocator.
 /// The effective warm cap is clamped between this floor and URING_IDLE_POOL_CEILING,
 /// see UringWorker.idleCap.
 const URING_IDLE_POOL_FLOOR: usize = 8;
 
-/// Idle-pool warm ceiling (A2). The absolute upper bound on the warm pool per
+/// Idle-pool warm ceiling. The absolute upper bound on the warm pool per
 /// worker, regardless of live concurrency. The earlier cap tracked live_count, so
 /// at very high concurrency (thousands of live connections on one worker) the pool
 /// kept a full reconnect of the working set warm: that doubled the resident set
@@ -255,6 +256,10 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         tls_gen_counter: u24 = 0,
         /// Per-worker scratch for the TLS WebSocket frame pump (coalesced echo frames).
         tls_out_buf: []u8 = &.{},
+        /// Requests served by this worker (cleartext dispatch). Single-owner plain
+        /// increment (no contention), reported through the system logger at worker
+        /// exit so REUSEPORT skew across workers is measurable.
+        requests_served: u64 = 0,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -432,7 +437,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             self.cold_head = victim;
         }
 
-        /// Return a closed connection to the warm idle pool (A2), then trim the
+        /// Return a closed connection to the warm idle pool, then trim the
         /// cold tail if the pool now exceeds the cap. Both steps are off the parse
         /// and handler hot path.
         ///
@@ -826,6 +831,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 if (comptime raw_fn != null) {
                     if (raw_fn.?(rem, header_end, fd)) |end| {
                         consumed += end;
+                        self.requests_served += 1;
                         continue;
                     }
                 }
@@ -859,6 +865,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         // so the connection stays usable for keep-alive.
                         if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
                         handler_fn(&head, &.{}, fd);
+                        self.requests_served += 1;
 
                         // Widen the receive window for the upcoming large-body drain (uploads).
                         // Only this branch (body larger than the recv buffer) touches it.
@@ -879,6 +886,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 handler_fn(&head, body, fd);
 
                 consumed += request_len;
+                self.requests_served += 1;
 
                 // WebSocket upgrade: stop parsing HTTP and switch to the frame
                 // loop. The 101 is already staged in the sink. Bytes the client
@@ -1148,7 +1156,12 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
     };
 }
 
-const UringWorkerCtx = struct { config: Config, worker_id: usize };
+const UringWorkerCtx = struct {
+    config: Config,
+    worker_id: usize,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
+};
 
 /// Return a concrete io_uring worker entry with handler_fn baked in at compile
 /// time, mirroring epollWorkerFn so Thread.spawn gets a direct call.
@@ -1164,6 +1177,11 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
             core.setStatic(config.public_dir, io);
 
+            // Bind under the order gate: REUSEPORT group index i = worker i,
+            // so the cpu-mod-N steering lands on the worker pinned to that slot.
+            var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+            defer bind_turn.release();
+
             const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
             var srv = addr.listen(io, .{
                 .mode = .stream,
@@ -1172,6 +1190,8 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             }) catch return;
             defer srv.deinit(io);
             const listener_fd = srv.socket.handle;
+
+            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
             // Dual-listener TLS side: a second listener on tls_port whose connections terminate
             // TLS in this same ring loop (no separate epoll fleet).
@@ -1186,8 +1206,12 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                     .reuse_address = true,
                 }) catch return;
                 tls_listener_fd = tls_srv.socket.handle;
+                if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
             }
             defer if (tls_active) tls_srv.deinit(io);
+
+            // Both groups joined: release the bind turn to the next worker.
+            bind_turn.release();
 
             const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
 
@@ -1275,6 +1299,8 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             worker.prewarmPool();
 
             worker.run();
+
+            logSystem(config, "uring worker {d}: {d} requests served", .{ ctx.worker_id, worker.requests_served });
         }
     }.run;
 }
@@ -1307,16 +1333,20 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (config.compress) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
     const worker = uringWorkerFn(handler_fn, raw_fn);
-    for (threads, 0..) |*t, worker_id| {
-        t.* = try std.Thread.spawn(
+    for (threads, 0..) |*thread, worker_id| {
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = worker_stack },
             worker,
-            .{UringWorkerCtx{ .config = config, .worker_id = worker_id }},
+            .{UringWorkerCtx{ .config = config, .worker_id = worker_id, .steering = steering }},
         );
     }
 
-    for (threads) |t| t.join();
+    for (threads) |thread| thread.join();
 }
 
 // Echo the received body size: content_length when present (the large-body

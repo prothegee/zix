@@ -29,13 +29,9 @@ pub const Endianness = enum(u8) {
 pub const UdpServerConfig = struct {
     /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
-    /// Backing allocator. Typed path: the client list and broadcast peer snapshots. Raw path
-    /// (`zix.Udp.Raw`): the recv / send batches and the worker-thread array. Caller owns, must
-    /// outlive the server.
-    /// Note:
-    /// - must be a general-purpose allocator (e.g. std.heap.smp_allocator).
-    ///   ArenaAllocator is not suitable: broadcast peer snapshots are allocated and freed per
-    ///   packet, ArenaAllocator.free() is a no-op, so each snapshot leaks until the server stops.
+    /// Backing allocator: typed path client list and broadcast peer snapshots, raw path
+    /// (`zix.Udp.Raw`) recv / send batches and the worker array. Must be general-purpose (e.g.
+    /// std.heap.smp_allocator): snapshots are freed per packet, so an arena (free is a no-op) leaks.
     allocator: std.mem.Allocator,
     /// Bind address.
     ip: []const u8,
@@ -43,6 +39,45 @@ pub const UdpServerConfig = struct {
     port: u16,
     /// When true, init() applies `--ip` / `--port` CLI overrides from the args it is passed.
     allow_args: bool = false,
+
+    // Datagram-transport knobs (ADR-049), used by the raw-bytes path (`zix.Udp.Raw`). The typed
+    // messaging path runs a single async receive loop: it folds a non-ASYNC `dispatch_model` with a
+    // notice and does not use the batch / worker knobs.
+
+    /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.POOL` / `.MIXED` /
+    /// `.EPOLL` / `.URING` run one worker per CPU (ADR-050): `.EPOLL` / `.URING` are per-core
+    /// SO_REUSEPORT, `.POOL` / `.MIXED` the recvmmsg loop. Required: set explicitly (no default).
+    dispatch_model: DispatchModel,
+    /// Worker count for the per-core models. 0 means one per available CPU.
+    workers: usize = 0,
+    /// Worker thread stack size in bytes for the per-core raw workers (.EPOLL / .URING). Thread
+    /// stacks are demand-paged, so this costs little RSS until the depth is used.
+    worker_stack_size_bytes: usize = 512 * 1024,
+    /// SO_BUSY_POLL spin window in microseconds for the raw path's UDP socket (.EPOLL / .URING): the
+    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower recvmmsg wake-up
+    /// latency. Default 0 leaves it unset. No-op when the kernel lacks SO_BUSY_POLL.
+    busy_poll_us: u32 = 0,
+    /// Attach SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): socket index = receiving CPU mod
+    /// workers per packet instead of the 4-tuple hash, so a datagram is served on the core that
+    /// received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
+    reuseport_cbpf: bool = false,
+    /// Set SO_REUSEADDR + SO_REUSEPORT so multiple workers can bind the same port and the kernel
+    /// load-balances datagrams across them.
+    reuse_address: bool = false,
+    /// recvmmsg batch size: datagrams received per syscall on the raw path.
+    recv_batch: usize = 32,
+    /// sendmmsg batch size: replies coalesced per flush on the raw path.
+    send_batch: usize = 32,
+    /// Maximum datagram size for the raw path, the receive buffer per slot. The typed path uses
+    /// `@sizeOf(Packet)` instead. 1500 is the common Ethernet MTU.
+    max_recv_buf: usize = 1500,
+    /// Enable UDP GSO (UDP_SEGMENT) on the send path: consecutive same-destination replies in a
+    /// flush are coalesced into one sendmsg and segmented by the kernel. Default false (plain
+    /// sendmmsg). Probed at worker start, left off pre-4.18. Helps multi-packet same-peer bursts.
+    gso_enabled: bool = false,
+
+    // Typed messaging path knobs.
+
     /// Wire endianness. Currently unused server-side (the typed server relays raw bytes without
     /// decoding). Kept for symmetry with the client, which does apply it.
     endianness: Endianness = .LITTLE,
@@ -61,44 +96,6 @@ pub const UdpServerConfig = struct {
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
     /// and logger.packet() for each received datagram. Caller owns. Must outlive the server.
     logger: ?*Logger = null,
-
-    // Datagram-transport knobs (ADR-049), used by the raw-bytes path (`zix.Udp.Raw`). The typed
-    // messaging path runs a single async receive loop: it folds a non-ASYNC `dispatch_model` with a
-    // notice and does not use the batch / worker knobs.
-
-    /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.POOL` / `.MIXED` /
-    /// `.EPOLL` / `.URING` run one worker per CPU (ADR-050): `.EPOLL` / `.URING` are per-core
-    /// SO_REUSEPORT (epoll readiness / real io_uring completion), `.POOL` / `.MIXED` the recvmmsg
-    /// loop. Same enum as the TCP engines.
-    /// Required: the caller must set it explicitly (no default).
-    dispatch_model: DispatchModel,
-    /// Worker count for the per-core models. 0 means one per available CPU.
-    workers: usize = 0,
-    /// Set SO_REUSEADDR + SO_REUSEPORT so multiple workers can bind the same port and the kernel
-    /// load-balances datagrams across them.
-    reuse_address: bool = false,
-    /// recvmmsg batch size: datagrams received per syscall on the raw path.
-    recv_batch: usize = 32,
-    /// sendmmsg batch size: replies coalesced per flush on the raw path.
-    send_batch: usize = 32,
-    /// Maximum datagram size for the raw path, the receive buffer per slot. The typed path uses
-    /// `@sizeOf(Packet)` instead. 1500 is the common Ethernet MTU.
-    max_recv_buf: usize = 1500,
-    /// SO_BUSY_POLL spin window in microseconds for the raw path's UDP socket (.EPOLL / .URING
-    /// per-core workers). The kernel busy-spins this long before sleeping the worker, trading CPU for
-    /// lower recvmmsg wake-up latency on saturated benchmarks. Default 0 leaves it unset, so the
-    /// current CPU profile is unchanged. Same knob as zix.Http1's busy_poll_us (Http1 defaults to 50,
-    /// this to 0). No-op when the kernel lacks SO_BUSY_POLL.
-    busy_poll_us: u32 = 0,
-    /// Worker thread stack size in bytes for the per-core raw workers (.EPOLL / .URING). Thread
-    /// stacks are demand-paged, so this costs little RSS until the depth is used.
-    worker_stack_size_bytes: usize = 512 * 1024,
-    /// Enable UDP GSO (UDP_SEGMENT) on the send path: consecutive same-destination replies in a flush
-    /// are coalesced into one sendmsg per group, so the kernel segments them into wire datagrams from
-    /// one syscall. Default false, so the send path is the plain sendmmsg. Probed at worker start and
-    /// left off when the kernel (older than 4.18) lacks support. Helps multi-packet same-peer bursts;
-    /// a one-datagram-per-peer batch sees no benefit.
-    gso_enabled: bool = false,
 };
 
 // --------------------------------------------------------- //
@@ -208,6 +205,7 @@ test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
     try std.testing.expectEqual(@as(usize, 32), cfg.send_batch);
     try std.testing.expectEqual(@as(usize, 1500), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
+    try std.testing.expect(!cfg.reuseport_cbpf);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
 }
 

@@ -222,24 +222,111 @@ pub fn effectiveWorkers(config: Http3ServerConfig) usize {
     return getAvailableCpuCount();
 }
 
-/// Pin the calling thread to the CPU slot assigned to worker_id, respecting the
-/// cgroup-allowed CPU mask so we never select a CPU the container cannot use.
+/// Widest allowed-CPU list the pinning path tracks: one slot per affinity-mask bit.
+pub const PIN_MAX_CPUS: usize = 256;
+
+/// Path buffer for /sys/devices/system/cpu/cpu<N>/topology/<leaf> (fits the widest leaf).
+const TOPOLOGY_PATH_BUF_SIZE: usize = 80;
+
+/// Value buffer for one sysfs topology read: a decimal id plus a trailing newline.
+const TOPOLOGY_VALUE_BUF_SIZE: usize = 16;
+
+/// Read one decimal value from /sys/devices/system/cpu/cpu<N>/topology/<leaf>.
+///
+/// Return:
+/// - u32 parsed value
+/// - null when the file is missing or malformed (non-sysfs layouts)
+fn readTopologyValue(cpu: u32, comptime leaf: []const u8) ?u32 {
+    var path_buf: [TOPOLOGY_PATH_BUF_SIZE]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/sys/devices/system/cpu/cpu{d}/topology/" ++ leaf, .{cpu}) catch return null;
+
+    const fd = std.posix.openat(
+        @as(std.posix.fd_t, std.posix.AT.FDCWD),
+        path,
+        .{ .ACCMODE = .RDONLY },
+        0,
+    ) catch return null;
+    defer _ = std.os.linux.close(fd);
+
+    var value_buf: [TOPOLOGY_VALUE_BUF_SIZE]u8 = undefined;
+    const len = std.posix.read(fd, &value_buf) catch return null;
+
+    const trimmed = std.mem.trim(u8, value_buf[0..len], " \n\t");
+
+    return std.fmt.parseInt(u32, trimmed, 10) catch null;
+}
+
+/// Physical-core key for a CPU: package id in the high half, core id in the low
+/// half, so two SMT siblings share a key and two packages never collide.
+fn coreKey(cpu: u32) ?u64 {
+    const package = readTopologyValue(cpu, "physical_package_id") orelse return null;
+    const core_id = readTopologyValue(cpu, "core_id") orelse return null;
+
+    return (@as(u64, package) << 32) | core_id;
+}
+
+/// Reorder the allowed-CPU list so each distinct physical core appears once
+/// before any SMT sibling repeats one (stable inside both groups). Worker i
+/// pins to slot i, so N workers land on N distinct physical cores whenever
+/// N <= the core count, instead of stacking sibling pairs.
+///
+/// Param:
+/// cpu_list - []u32 (the allowed CPUs, reordered in place)
+/// keys - []const u64 (physical-core key per cpu_list entry, same length)
+pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
+    std.debug.assert(cpu_list.len == keys.len);
+    std.debug.assert(cpu_list.len <= PIN_MAX_CPUS);
+
+    var ordered: [PIN_MAX_CPUS]u32 = undefined;
+    var ordered_len: usize = 0;
+    for (keys, 0..) |key, idx| {
+        if (std.mem.indexOfScalar(u64, keys[0..idx], key) == null) {
+            ordered[ordered_len] = cpu_list[idx];
+            ordered_len += 1;
+        }
+    }
+
+    for (keys, 0..) |key, idx| {
+        if (std.mem.indexOfScalar(u64, keys[0..idx], key) != null) {
+            ordered[ordered_len] = cpu_list[idx];
+            ordered_len += 1;
+        }
+    }
+
+    @memcpy(cpu_list, ordered[0..cpu_list.len]);
+}
+
+/// Pin the calling thread to the CPU slot assigned to worker_id, respecting
+/// the cgroup-allowed CPU mask so we never select a CPU the container cannot
+/// use. Slots enumerate distinct physical cores first and SMT siblings after
+/// (sysfs topology), so small worker counts never stack two workers on one
+/// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
 
-    var cpu_list: [256]u32 = undefined;
+    var cpu_list: [PIN_MAX_CPUS]u32 = undefined;
     var n_cpus: usize = 0;
     for (cpu_set, 0..) |word, word_idx| {
-        var w = word;
-        while (w != 0) : (w &= w - 1) {
+        var bits = word;
+        while (bits != 0) : (bits &= bits - 1) {
             if (n_cpus < cpu_list.len) {
-                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(w));
+                cpu_list[n_cpus] = @intCast(word_idx * @bitSizeOf(usize) + @ctz(bits));
                 n_cpus += 1;
             }
         }
     }
     if (n_cpus == 0) return;
+
+    var core_keys: [PIN_MAX_CPUS]u64 = undefined;
+    var topology_known = true;
+    for (cpu_list[0..n_cpus], 0..) |cpu, idx| {
+        core_keys[idx] = coreKey(cpu) orelse {
+            topology_known = false;
+            break;
+        };
+    }
+    if (topology_known) orderPhysicalCoresFirst(cpu_list[0..n_cpus], core_keys[0..n_cpus]);
 
     const target = cpu_list[worker_id % n_cpus];
     var target_set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
@@ -1067,6 +1154,11 @@ fn sealAndQueue(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket
 /// a small response goes out in one packet, a large one is registered as a send stream and fragmented
 /// across packets within the client's flow control, resumed as MAX_STREAM_DATA / MAX_DATA arrive. A
 /// packet carrying no work is acknowledged so the client stops retransmitting.
+/// Requests served on this worker thread (skew counter). Owned by the worker
+/// (threadlocal, plain increment, no contention), read and reported through the
+/// system logger at worker exit so REUSEPORT skew across workers is measurable.
+pub threadlocal var tl_requests_served: u64 = 0;
+
 fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     if (data.len < 1 + cid_len) return;
 
@@ -1142,6 +1234,7 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
         };
         var res = core.Response{};
         handler(&req, &res);
+        tl_requests_served += 1;
 
         var content: [1024]u8 = undefined;
         const content_len = response.buildRequestStreamContent(&content, res.status, res.content_encoding, res.body) orelse {
@@ -1426,4 +1519,21 @@ test "zix test: registerWorkerStats stamps a start time and adds the worker to t
     try std.testing.expect(stats.start_us > 0);
     try std.testing.expectEqual(before + 1, g_diag_count.load(.acquire));
     try std.testing.expect(g_diag_stats[before].? == &stats);
+}
+test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
+    var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
+    const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
+
+    orderPhysicalCoresFirst(&cpus, &keys);
+
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 1, 3, 5 }, &cpus);
+}
+
+test "zix test: orderPhysicalCoresFirst keeps mask order on unique keys" {
+    var cpus = [_]u32{ 3, 7, 11 };
+    const keys = [_]u64{ 30, 10, 20 };
+
+    orderPhysicalCoresFirst(&cpus, &keys);
+
+    try std.testing.expectEqualSlices(u32, &.{ 3, 7, 11 }, &cpus);
 }

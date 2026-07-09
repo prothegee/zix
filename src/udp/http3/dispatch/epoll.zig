@@ -1,5 +1,5 @@
 //! zix HTTP/3 EPOLL dispatch: one SO_REUSEPORT worker per core, the kernel load-balancing connections
-//! by 4-tuple (RC3 multicore). Each worker waits in epoll_wait and drains the socket to EAGAIN on every
+//! by 4-tuple (multicore). Each worker waits in epoll_wait and drains the socket to EAGAIN on every
 //! readiness wake, so a datagram is never left queued for the next cycle (the per-request latency tax
 //! under load) and an idle worker stays off the CPU. Shared-nothing: its own socket, epoll fd, CID
 //! table, and batches, so the hot path takes no lock. The recv / demux / respond code it drives lives in
@@ -14,6 +14,7 @@ const core = @import("../core.zig");
 const datagram = @import("../../datagram.zig");
 const recovery = @import("../recovery.zig");
 const common = @import("common.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 
 /// Max datagrams drained from the socket per epoll wake before returning to epoll_wait (the cap on one
 /// drain-to-EAGAIN pass). A worker owns one UDP socket, so the only reason to leave a non-empty drain is
@@ -27,14 +28,25 @@ const max_drain_per_wake: usize = 4096;
 /// epoll_wait block keeps an idle worker off the CPU, so utilization tracks real load with no spin.
 /// Shared-nothing: its own socket, epoll fd, CID table, and batches, so the hot path takes no lock. Pub
 /// so the io_uring worker can fall back to it when io_uring is unavailable.
-pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize) void {
+pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
     common.pinToCpu(worker_id);
+
+    // Skew report at worker exit: requests this worker served (common.tl_requests_served).
+    defer common.logSystem(config, "epoll worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
+    defer bind_turn.release();
 
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
         common.logSystem(config, "bind error: {}", .{err});
         return;
     };
     defer datagram.close(fd);
+
+    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    bind_turn.release();
 
     common.setBusyPoll(fd, config.busy_poll_us);
     datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
@@ -135,11 +147,15 @@ pub fn runEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i, steering }) catch break;
         spawned += 1;
     }
 
-    for (threads[0..spawned]) |t| t.join();
+    for (threads[0..spawned]) |thread| thread.join();
 }

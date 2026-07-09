@@ -19,6 +19,7 @@ const rcache = @import("../../../utils/response_cache.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../tls/Tls.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 
 /// Max epoll events drained per epoll_wait call.
 const EPOLL_MAX_EVENTS: usize = 512;
@@ -118,6 +119,8 @@ const MuxWorkerCtx = struct {
     /// Dual-listener TLS side (config.tls + config.tls_port). Inactive when null / 0.
     tls_ctx: ?*Tls.Context = null,
     tls_port: u16 = 0,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
 };
 
 /// Build a concrete epoll mux worker entry with the routes baked in at compile time. One worker:
@@ -156,6 +159,11 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
             // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
             common.pinToCpu(ctx.worker_id);
 
+            // Bind under the order gate: REUSEPORT group index i = worker i,
+            // so the cpu-mod-N steering lands on the worker pinned to that slot.
+            var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+            defer bind_turn.release();
+
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var srv = addr.listen(ctx.io, .{
                 .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: the kernel balances accepts across workers
@@ -165,6 +173,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
             const listener_fd = srv.socket.handle;
 
             common.setNonBlock(listener_fd);
+            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
             if (std.posix.errno(epfd_rc) != .SUCCESS) return;
@@ -199,6 +208,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
                 }) catch return;
                 tls_listener_fd = tls_srv.socket.handle;
                 common.setNonBlock(tls_listener_fd);
+                if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
 
                 var tls_lev = linux.epoll_event{
                     .events = linux.EPOLL.IN,
@@ -208,6 +218,9 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 
                 tls_table = tls_mux.ConnTable.init() catch return;
             }
+
+            // Both groups joined: release the bind turn to the next worker.
+            bind_turn.release();
 
             // Per-worker response cache: lock-free by ownership, never shared.
             var response_cache: rcache.ResponseCache = undefined;
@@ -310,9 +323,13 @@ pub fn runEpoll(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
     const worker_fn = epollMuxWorkerFn(routes);
-    for (workers, 0..) |*t, idx|
-        t.* = try std.Thread.spawn(
+    for (workers, 0..) |*thread, idx|
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{MuxWorkerCtx{
@@ -325,8 +342,9 @@ pub fn runEpoll(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
                 .busy_poll_us = cfg.busy_poll_us,
                 .tls_ctx = cfg.tls,
                 .tls_port = cfg.tls_port,
+                .steering = steering,
             }},
         );
 
-    for (workers) |t| t.join();
+    for (workers) |thread| thread.join();
 }

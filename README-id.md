@@ -356,7 +356,7 @@ Tipe log per protokol: conn (TCP), packet (UDP), frame (UDS), session (FIX), rpc
 
 __*13. Kesadaran Cache Respons:*__
 
-Response cache opt-in per-worker (ADR-036) yang dibagikan oleh `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Handler membangun respons sekali, engine menyimpannya di bawah key yang diturunkan dari request, dan request cocok berikutnya memutar ulang byte tersimpan tanpa rebuild dan tanpa re-serialization. Data oriented (structure of arrays plus satu flat payload slab), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dengan TTL lazy on-access. Aktif di bawah model shared-nothing `.EPOLL` dan `.URING`.
+Response cache opt-in per-worker yang dibagikan oleh `zix.Http1`, `zix.Http`, dan `zix.Grpc`. Handler membangun respons sekali, engine menyimpannya di bawah key yang diturunkan dari request, dan request cocok berikutnya memutar ulang byte tersimpan tanpa rebuild dan tanpa re-serialization. Data oriented (structure of arrays plus satu flat payload slab), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dengan TTL lazy on-access. Aktif di bawah model shared-nothing `.EPOLL` dan `.URING`.
 
 > Alat yang kamu pakai secara sengaja, bukan layer tersembunyi. Menguntungkan di atas body ~4 KiB (JSON berat ~32 KiB terukur +34% throughput) dan zero-regression wash di bawahnya.
 
@@ -441,23 +441,25 @@ Setiap config server berbagi satu kosakata: konsep yang sama memakai nama field 
 | `pool_size` | `usize` | Jumlah pool thread untuk `.POOL`, `0` memilih formula |
 | `logger` | `?*Logger` | Logger opsional, milik pemanggil |
 
-Field buffer, timeout, dan cache memakai nama yang sama di mana pun protokol memiliki fitur tersebut:
+Field buffer, socket, timeout, dan cache memakai nama yang sama di mana pun protokol memiliki fitur tersebut:
 
 | Field | Tipe | Ada di |
 | :- | :- | :- |
-| `max_recv_buf` | `usize` | `zix.Tcp`, `zix.Http1`, `zix.Http`, `zix.Uds` |
+| `max_recv_buf` | `usize` | semua server engine (cap per-frame, read buffer, atau slot datagram per engine) |
 | `large_body_rcvbuf` | `usize` | `zix.Http1`, `zix.Http` |
-| `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix` |
+| `busy_poll_us` | `u32` | `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Udp` raw, `zix.Http3` |
+| `reuseport_cbpf` | `bool` | semua server engine kecuali `zix.Uds` (grup listener atau socket `.EPOLL` / `.URING`) |
+| `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix`, `zix.Udp` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` dan empat field `cache_*` | lihat [Kesadaran Cache Respons](#kesadaran-cache-respons-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
-| `compression`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
+| `compress`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
 
 Beberapa perbedaan disengaja, bukan drift:
 
 - `zix.Http1` tidak punya `conn_timeout_ms`: ia tidak menjalankan timer thread connection-registry (lihat catatan Timeout di docs LLD HTTP/1).
-- `zix.Grpc` mengukur data masuk dengan field spesifik protokol (`max_body`, `max_frame_size`, `max_header_scratch`) alih-alih `max_recv_buf`.
-- Kompresi response runtime (`compression*`, engine mengompresi secara langsung) ada di `zix.Http1` dan `zix.Http`, yang menegosiasi terhadap Accept-Encoding dan mengompresi body sendiri. `zix.Http3` juga menegosiasi tapi tidak membawa codec runtime: handler membaca `req.accept_encoding` dan menyetel `res.content_encoding` pada body yang sudah ter-compressed (menyajikan file `.br` / `.gz`), jadi tidak ada config `compression*` padanya. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
-- `zix.Udp` (datagram) membawa `ip` / `port` / `logger` untuk jalur typed, plus knob jalur raw `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (ADR-049, dipakai `zix.Udp.Raw`). `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya. Tiap engine hanya mengambil subset yang berlaku.
+- `zix.Http2` dan `zix.Grpc` memakai `max_recv_buf` sebagai floor read-buffer per koneksi dan mengukur data per-stream dengan field protokol (`max_body`, `max_frame_size`, `max_header_scratch`).
+- Kompresi response runtime (`compress` plus ukuran `compression_*`, engine mengompresi secara langsung) ada di `zix.Http1` dan `zix.Http`, yang menegosiasi terhadap Accept-Encoding dan mengompresi body sendiri. `zix.Http3` juga menegosiasi tapi tidak membawa codec runtime: handler membaca `req.accept_encoding` dan menyetel `res.content_encoding` pada body yang sudah ter-compressed (menyajikan file `.br` / `.gz`), jadi tidak ada config `compress` padanya. `zix.Grpc` memakai kompresi `grpc-encoding` per-message miliknya sendiri, dan raw transport (`zix.Tcp`, `zix.Udp`, `zix.Uds`, `zix.Fix`) tidak punya negosiasi konten HTTP.
+- `zix.Udp` (datagram) membawa `ip` / `port` / `logger` untuk jalur typed, plus knob jalur raw `dispatch_model` / `workers` / `reuse_address` / `recv_batch` / `send_batch` / `max_recv_buf` (dipakai `zix.Udp.Raw`). `zix.Uds` (local socket) membawa `kernel_backlog` / `max_recv_buf` / `logger` plus path socket-nya. Tiap engine hanya mengambil subset yang berlaku.
 
 Untuk referensi per-field lengkap (tiap field config dengan default-nya, apa yang dipengaruhi, kapan dinaikkan atau diturunkan, dan trade-off-nya), lihat [`docs/zix-config-id.md`](./docs/zix-config-id.md).
 
@@ -487,7 +489,7 @@ Rute dibuat dalam tipe server pada waktu kompilasi: tidak diperlukan allocator u
 
 `config.allocator` harus berupa general-purpose allocator (misalnya `std.heap.smp_allocator`). `ArenaAllocator` tidak cocok: snapshot peer broadcast dialokasikan dan dibebaskan per paket: `ArenaAllocator.free()` adalah no-op, sehingga snapshot menumpuk tanpa batas hingga server berhenti. Lihat [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk penjelasan lengkap dan PoC.
 
-Jalur raw (`zix.Udp.Raw`, ADR-049) mengalokasikan recv / send batch dan array worker-thread-nya dari `config.allocator` sekali saat startup, bukan per paket, jadi caveat arena tidak berlaku di sana.
+Jalur raw (`zix.Udp.Raw`,) mengalokasikan recv / send batch dan array worker-thread-nya dari `config.allocator` sekali saat startup, bukan per paket, jadi caveat arena tidak berlaku di sana.
 
 ### HTTP/2 dan gRPC
 
@@ -751,7 +753,7 @@ const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 - [examples/http_paths.zig](examples/http_paths.zig) - pola routing parameter path
 - [examples/http_json.zig](examples/http_json.zig) - penanganan respons JSON
 
-**Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik dan prioritas `exact > param > prefix` yang sama. Satu perbedaannya adalah penangkapan param: handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request`, jadi param yang ditangkap dibaca dengan fungsi bebas `zix.Http1.pathParam("id")` (sebuah thread-local per-handler, model yang sama dengan `zix.Http1.setTimeout`, lihat ADR-029) alih-alih `req.pathParam("id")`:
+**Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik dan prioritas `exact > param > prefix` yang sama. Satu perbedaannya adalah penangkapan param: handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request`, jadi param yang ditangkap dibaca dengan fungsi bebas `zix.Http1.pathParam("id")` (sebuah thread-local per-handler, model yang sama dengan `zix.Http1.setTimeout`) alih-alih `req.pathParam("id")`:
 
 ```zig
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
@@ -766,7 +768,7 @@ var server = zix.Http1.Server.init(Router.dispatch, .{ .ip = "0.0.0.0", .port = 
 const id = zix.Http1.pathParam("id") orelse return;
 ```
 
-Penangkapan param per-rute dibatasi 8 param per pencocokan. Lihat ADR-033.
+Penangkapan param per-rute dibatasi 8 param per pencocokan..
 
 **Contoh:**
 - [examples/http1_static.zig](examples/http1_static.zig) - rute prefix yang digunakan
@@ -837,7 +839,7 @@ var server = zix.Http.Server.init(&[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring worker, khusus Linux):**
 
-Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, ADR-041, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.POOL` / `.EPOLL`. Build non-Linux fallback ke `.POOL`.
+Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.POOL` / `.EPOLL`. Build non-Linux fallback ke `.POOL`.
 
 ```zig
 var server = zix.Http.Server.init(&[_]zix.Http.Route{
@@ -861,9 +863,9 @@ __*In the nutshell:*__
 > Namun dalam beberapa kasus, kinerjanya dapat bervariasi, lihat bagian benchmark untuk referensi.
 > Uring tidak diizinkan di beberapa lingkungan karena alasan tertentu (misalnya, dari sudut pandang keamanan). Tetapi Anda memiliki pilihan.
 
-**Kapan digunakan:** model dispatch adalah satu knob yang membentuk ulang seluruh server. Pakai `.ASYNC` saat latensi dan koneksi berumur panjang (SSE, WebSocket) penting, `.POOL` / `.MIXED` untuk throughput mentah di platform mana pun, dan `.EPOLL` / `.URING` di Linux untuk jumlah koneksi tertinggi dengan biaya per-request terendah. Di kotak dev loopback keduanya seri pada throughput dan `.URING` menang terutama pada cache locality. Di mesin many-core, ring close (ADR-041) membuat `.URING` menjaga core-nya tetap sibuk lewat connection churn, di mana ia mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
+**Kapan digunakan:** model dispatch adalah satu knob yang membentuk ulang seluruh server. Pakai `.ASYNC` saat latensi dan koneksi berumur panjang (SSE, WebSocket) penting, `.POOL` / `.MIXED` untuk throughput mentah di platform mana pun, dan `.EPOLL` / `.URING` di Linux untuk jumlah koneksi tertinggi dengan biaya per-request terendah. Di kotak dev loopback keduanya seri pada throughput dan `.URING` menang terutama pada cache locality. Di mesin many-core, ring close membuat `.URING` menjaga core-nya tetap sibuk lewat connection churn, di mana ia mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
 
-**Mengapa per-engine:** setiap engine mengimplementasikan model-model ini di `server.zig`-nya sendiri, bukan di belakang satu multiplexer bersama. Pemisahan ini disengaja dan justru merupakan optimasinya: ia membuat tiap engine menyetel hot path-nya sendiri. `zix.Http1` mengukir buffer koneksi dari slab contiguous demand-paged (tanpa heap call per-accept), sementara `zix.Grpc` dan `zix.Fix` memegang pointer heap per-koneksi karena koneksinya membawa state sesi h2 atau FIX. Hanya primitive byte-identical yang dibagikan (codec `user_data` `.URING` di `src/multiplexers/ring.zig`): bagikan primitive yang harus cocok, pertahankan dispatch loop per-engine. Lihat ADR-042.
+**Mengapa per-engine:** setiap engine mengimplementasikan model-model ini di `server.zig`-nya sendiri, bukan di belakang satu multiplexer bersama. Pemisahan ini disengaja dan justru merupakan optimasinya: ia membuat tiap engine menyetel hot path-nya sendiri. `zix.Http1` mengukir buffer koneksi dari slab contiguous demand-paged (tanpa heap call per-accept), sementara `zix.Grpc` dan `zix.Fix` memegang pointer heap per-koneksi karena koneksinya membawa state sesi h2 atau FIX. Hanya primitive byte-identical yang dibagikan (codec `user_data` `.URING` di `src/multiplexers/ring.zig`): bagikan primitive yang harus cocok, pertahankan dispatch loop per-engine..
 
 > Beban kerja kita tidak sama, apa yang cocok untuk Anda mungkin tidak cocok untuk orang lain.
 > Uji beban kerja Anda bila memungkinkan, mungkin dengan rasio 1:4 dari lingkungan produksi.
@@ -921,11 +923,11 @@ Untuk menimpa deadline di dalam handler (jendela lebih pendek atau lebih panjang
 ctx.setTimeout(2_000); // timpa ke 2 detik dari sekarang terlepas dari cap global
 ```
 
-`ctx.isExpired()` adalah no-op (selalu mengembalikan `false`) ketika `handler_timeout_ms == 0`. `ctx.timedOut()` adalah alias untuk `ctx.isExpired()`. `conn_timeout_ms` harus >= `handler_timeout_ms` agar koneksi tidak terputus sebelum handler dapat mengirim 408. Lihat `docs/adr-id.md` (ADR-018) untuk alasan desain.
+`ctx.isExpired()` adalah no-op (selalu mengembalikan `false`) ketika `handler_timeout_ms == 0`. `ctx.timedOut()` adalah alias untuk `ctx.isExpired()`. `conn_timeout_ms` harus >= `handler_timeout_ms` agar koneksi tidak terputus sebelum handler dapat mengirim 408. Lihat `docs/adr-id.md` untuk alasan desain.
 
 **Contoh:**
 - [examples/http_timeout_resp.zig](examples/http_timeout_resp.zig)
-- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1` mentah, memakai `zix.Http1.isExpired()` dan `zix.Http1.setTimeout()` (tanpa ctx, lihat ADR-029)
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1` mentah, memakai `zix.Http1.isExpired()` dan `zix.Http1.setTimeout()` (tanpa ctx)
 
 **Kapan digunakan:** setel `handler_timeout_ms` setiap kali handler bisa berjalan lama (panggilan eksternal, komputasi berat) dan kamu ingin ia keluar secara kooperatif dengan 408 alih-alih menahan thread. Tambahkan `conn_timeout_ms` di bawah `.POOL` untuk mengusir client yang stall sebelum menyelesaikan request. Biarkan keduanya 0 untuk trafik internal tepercaya dengan kerja terbatas.
 
@@ -1182,7 +1184,7 @@ defer fast.deinit();
 
 Redirect diikuti secara otomatis hingga `max_redirects` (default 3). Atur `follow_redirects = false` untuk menerima respons 3xx secara langsung.
 
-`zix.Http.Client` yang sama bekerja terhadap server `zix.Http1` mentah via `.version = .HTTP_1` (selector versi, dengan `HTTP_2` dan `HTTP_3` direservasi, lihat ADR-028).
+`zix.Http.Client` yang sama bekerja terhadap server `zix.Http1` mentah via `.version = .HTTP_1` (selector versi, dengan `HTTP_2` dan `HTTP_3` direservasi).
 
 **Contoh:**
 - [examples/http_client.zig](examples/http_client.zig)
@@ -1319,7 +1321,7 @@ Batas penyimpanan parser adalah 64: nilai `CUSTOM` di atas 64 secara diam-diam d
 
 ### Kesadaran Cache Respons (`response_cache`)
 
-`zix.Http1`, `zix.Http`, dan `zix.Grpc` berbagi response cache per-worker yang opt-in (ADR-036). Handler membangun responnya sekali, engine menyimpannya di bawah sebuah key yang diturunkan dari request, dan request berikutnya yang cocok memutar ulang byte tersimpan tanpa membangun ulang. Sebuah hit melewati pembangunan body handler sekaligus serialization. Cache ini data oriented (structure of arrays plus satu payload slab datar), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dan freshness memakai lazy on-access TTL.
+`zix.Http1`, `zix.Http`, dan `zix.Grpc` berbagi response cache per-worker yang opt-in. Handler membangun responnya sekali, engine menyimpannya di bawah sebuah key yang diturunkan dari request, dan request berikutnya yang cocok memutar ulang byte tersimpan tanpa membangun ulang. Sebuah hit melewati pembangunan body handler sekaligus serialization. Cache ini data oriented (structure of arrays plus satu payload slab datar), lock-free by ownership (satu instance per worker, tidak pernah dibagi), dan freshness memakai lazy on-access TTL.
 
 Apa yang menjadi key dan nilai yang di-cache bergantung pada engine:
 
@@ -1416,7 +1418,7 @@ flowchart TD
 
 **Kapan digunakan:** nyalakan cache untuk respons panas, berulang, komputasi-berat di atas ~4 KiB (laporan ter-render, agregat JSON besar) yang disajikan di bawah `.EPOLL` atau `.URING`. Biarkan mati untuk respons kecil yang kernel-bound, body unik per-request, atau apa pun yang bervariasi pada header atau cookie, di mana ia tidak menambah manfaat. Baca aturan di atas sebelum men-cache apa pun yang sensitif waktu.
 
-Lihat ADR-036 untuk rasional desain dan angka terukur.
+Lihat `docs/adr-id.md` untuk rasional desain dan angka terukur.
 
 <br>
 
@@ -1557,7 +1559,7 @@ Lihat [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) untuk dokumentasi lengkap ter
 
 ### TLS (https / h2)
 
-Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Untuk Http2 dan gRPC, model `.EPOLL` / `.URING` menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core (ADR-052), jadi https tidak men-spawn thread per koneksi.
+Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Untuk Http2 dan gRPC, model `.EPOLL` / `.URING` menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core, jadi https tidak men-spawn thread per koneksi.
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{
@@ -1570,7 +1572,7 @@ defer tls.deinit();
 var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls, .dispatch_model = .EPOLL });
 ```
 
-Dengan `tls` diisi, server menjadi TLS-only di `port`. Tambahkan `tls_port` untuk melayani KEDUANYA dari satu server (dual listener, ADR-060): cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama, alih-alih meluncurkan server kedua yang menduplikasi worker, tabel fd, dan cache. Tersedia di Http1, Http, Http2, dan Grpc, semua dispatch model (di bawah `.URING` sisi TLS berjalan di ring).
+Dengan `tls` diisi, server menjadi TLS-only di `port`. Tambahkan `tls_port` untuk melayani KEDUANYA dari satu server (dual listener,): cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama, alih-alih meluncurkan server kedua yang menduplikasi worker, tabel fd, dan cache. Tersedia di Http1, Http, Http2, dan Grpc, semua dispatch model (di bawah `.URING` sisi TLS berjalan di ring).
 
 ```zig
 var server = zix.Http1.Server.init(handler, .{
@@ -1594,7 +1596,7 @@ Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutama
 
 ### Raw TCP
 
-`zix.Tcp` adalah server dan client TCP stream mentah. Handler dibakukan ke dalam tipe server pada `init` dan `io` adalah field config, sehingga `run()` tidak menerima argumen (ADR-038, ADR-039). Handler per-connection memiliki stream dan berjalan di bawah `.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL`. Untuk ring `.URING` yang completion-based ada jalur callback per-frame terpisah, `initFramed`. Format frame default: length prefix big-endian 4 byte.
+`zix.Tcp` adalah server dan client TCP stream mentah. Handler dibakukan ke dalam tipe server pada `init` dan `io` adalah field config, sehingga `run()` tidak menerima argumen (). Handler per-connection memiliki stream dan berjalan di bawah `.ASYNC` / `.POOL` / `.MIXED` / `.EPOLL`. Untuk ring `.URING` yang completion-based ada jalur callback per-frame terpisah, `initFramed`. Format frame default: length prefix big-endian 4 byte.
 
 ```zig
 const std = @import("std");
@@ -1798,7 +1800,7 @@ IPC dalam host yang sama melalui Unix stream socket. Server menerima koneksi dan
 ```zig
 // Proses A: server UDS (penyedia data)
 pub fn main(process: std.process.Init) !void {
-    // handler dibakukan pada init; io ada di config; run() tidak menerima argumen (ADR-039)
+    // handler dibakukan pada init; io ada di config; run() tidak menerima argumen
     var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{
         .io        = process.io,
         .path      = "/tmp/app.sock",
@@ -1899,7 +1901,7 @@ Untuk detail desain lihat [`docs/hld-channel-id.md`](docs/hld-channel-id.md).
 
 ### UDP
 
-Dua mode. Typed `zix.Udp.Server(Packet)` adalah server messaging yang aman tipe: pengguna mendefinisikan `extern struct` paket mereka sendiri, dan zix menangani endianness, validasi ukuran, dan konkurensi. Raw `zix.Udp.Raw(handler)` (ADR-049) melayani datagram variable-length tanpa struct tetap, dengan batching `recvmmsg` / `sendmmsg` dan worker SO_REUSEPORT per-core.
+Dua mode. Typed `zix.Udp.Server(Packet)` adalah server messaging yang aman tipe: pengguna mendefinisikan `extern struct` paket mereka sendiri, dan zix menangani endianness, validasi ukuran, dan konkurensi. Raw `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa struct tetap, dengan batching `recvmmsg` / `sendmmsg` dan worker SO_REUSEPORT per-core.
 
 ```zig
 const std = @import("std");
@@ -2044,7 +2046,7 @@ curl --http3-only -k https://127.0.0.1:9063/
 - `req.accept_encoding` membawa Accept-Encoding klien (kosong jika tidak ada). Handler menegosiasi body pre-compressed terhadapnya lalu memanggil `res.setContentEncoding(.br)` (atau `.gzip`), yang memancarkan header response `content-encoding`. Engine tidak pernah mengompresi di jalur kirim: `res.body` harus sudah ter-encode (menyajikan file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request.
 - `run()` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak (`init` hanya menyimpan config).
 
-**Dispatch model** (Linux-only): `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (ADR-049 fase 3).
+**Dispatch model** (Linux-only): `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.POOL` / `.MIXED` menjalankan satu worker recvmmsg SO_REUSEPORT per core, dan `.EPOLL` / `.URING` menambah readiness epoll / completion io_uring pada bentuk per-core itu (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia). Connection-id steering per-core ditunda (fase 3).
 
 **Contoh:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) menyajikan `/`, query-sum `/baseline2`, `/big` 256 KiB yang menguji jalur kirim streamed multi-packet, dan `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br.
 

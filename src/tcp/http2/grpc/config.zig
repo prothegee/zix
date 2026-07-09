@@ -23,23 +23,28 @@ pub const GrpcServerConfig = struct {
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Accept thread count.
-    /// 0 (default) = cpu_count accept threads.
-    /// Ignored by .ASYNC (always 1 accept thread).
+    /// Accept thread count (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
     workers: usize = 0,
-    /// Pool thread count. Only used by .POOL.
-    /// 0 (default) = max(10, cpu_count * 2).
-    /// Ignored by .ASYNC and .MIXED.
+    /// Pool thread count (0 = max(10, cpu_count * 2)). Only used by .POOL,
+    /// ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
     /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
-    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING). The
-    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower wake-up latency
-    /// on saturated benchmarks. Default 0 leaves it unset, so the engine's current CPU profile is
-    /// unchanged. Mirrors zix.Http1's busy_poll_us: set to e.g. 50 to opt in. No-op when the kernel
-    /// lacks SO_BUSY_POLL.
+    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING): the
+    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower wake-up latency.
+    /// Default 0 leaves it unset (set e.g. 50 to opt in). No-op when the kernel lacks SO_BUSY_POLL.
     busy_poll_us: u32 = 0,
+    /// Attach SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener
+    /// index = receiving CPU mod workers instead of the 4-tuple hash, so it is served start-to-finish
+    /// on the core that received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
+    reuseport_cbpf: bool = false,
+    /// Per-connection receive buffer in bytes (.EPOLL / .URING). Used as a floor: the reader is
+    /// sized to the larger of this and one max frame, so a larger value cuts read() and compaction
+    /// for big frames.
+    max_recv_buf: usize = 64 * 1024,
+    /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
+    tls_write_buf_initial_bytes: usize = 16 * 1024,
     /// Maximum concurrent h2 streams per connection.
     max_streams: u32 = 128,
     /// MAX_FRAME_SIZE setting sent to clients (bytes).
@@ -48,37 +53,16 @@ pub const GrpcServerConfig = struct {
     max_header_scratch: usize = 4096,
     /// Maximum body buffer per stream (bytes).
     max_body: usize = 16384,
-    /// Per-connection receive buffer in bytes (.EPOLL / .URING). Used as a floor: the reader is
-    /// sized to the larger of this and one max frame, so a larger value cuts read() and compaction
-    /// for big frames.
-    max_recv_buf: usize = 64 * 1024,
-    /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
-    tls_write_buf_initial_bytes: usize = 16 * 1024,
-    /// https - opt-in. When non-null the server serves gRPC over TLS (zix.Tls, ALPN h2) instead of
-    /// h2c cleartext. The TLS path is a gated per-connection terminator in front of the existing h2c
-    /// gRPC engine, so the cleartext dispatch models are untouched. The context carries the cert /
-    /// key / alpn / version policy (Tls.Context.Config); alpn should include .H2 (gRPC runs on
-    /// HTTP/2, RFC 7540 3.3). Caller owns the Context and must ensure it outlives the server.
-    tls: ?*Tls.Context = null,
-    /// Companion gRPC-over-TLS bind port for the dual-listener mode. 0 (default) keeps the
-    /// single-listener behavior: with tls set the server is TLS-only on port. Non-zero (requires
-    /// tls set) serves cleartext on port AND TLS on tls_port from the same worker fleet, one
-    /// server instead of two launches. Ignored when tls is null.
-    tls_port: u16 = 0,
-    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
-    /// and logger.rpc() for each gRPC stream dispatched. Caller owns. Must outlive the server.
-    logger: ?*Logger = null,
-    /// Global handler timeout cap (milliseconds). 0 = disabled.
-    /// When non-zero, each gRPC stream dispatch sets GrpcContext.deadline_ns to
-    /// now + tighter_of(handler_timeout_ms, Route.timeout_ms, grpc-timeout header).
-    /// Handlers opt in by checking ctx.isExpired() between expensive steps.
+    /// Global handler timeout cap (milliseconds). 0 = disabled. When non-zero, each stream dispatch
+    /// sets GrpcContext.deadline_ns to now + tighter_of(handler_timeout_ms, Route.timeout_ms,
+    /// grpc-timeout header). Handlers opt in by checking ctx.isExpired() between expensive steps.
     handler_timeout_ms: u32 = 0,
     /// Enable gzip response compression. When true, the server compresses DATA frames
     /// for clients that advertise grpc-accept-encoding: gzip. Default: false.
     compress: bool = false,
-    /// Enable the per-worker unary response cache (ADR-036). Default false. When off,
-    /// the handler cache API (ctx.serveCached / ctx.sendCached) degrades to a plain
-    /// send. Active under the .EPOLL and .URING dispatch models.
+    /// Enable the per-worker unary response cache (ADR-036). Default false. When off, the handler
+    /// cache API (ctx.serveCached / ctx.sendCached) degrades to a plain send. Active under .EPOLL
+    /// and .URING.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker memory
     /// is cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -92,6 +76,17 @@ pub const GrpcServerConfig = struct {
     /// Optional ceiling on per-worker cache memory. 0 disables the ceiling. When
     /// set, the effective entry count is reduced so entries * value_bytes fits.
     cache_max_total_bytes: usize = 0,
+    /// https - opt-in. When non-null the server serves gRPC over TLS (zix.Tls, ALPN h2) instead of
+    /// h2c, a gated per-connection terminator in front of the h2c engine (cleartext models
+    /// untouched). alpn should include .H2 (RFC 7540 3.3). Caller owns the Context, must outlive.
+    tls: ?*Tls.Context = null,
+    /// Companion gRPC-over-TLS bind port for the dual-listener mode. 0 (default) keeps
+    /// single-listener behavior (with tls set the server is TLS-only on port). Non-zero (requires
+    /// tls) serves cleartext on port AND TLS on tls_port from one worker fleet. Ignored when tls null.
+    tls_port: u16 = 0,
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
+    /// and logger.rpc() for each gRPC stream dispatched. Caller owns. Must outlive the server.
+    logger: ?*Logger = null,
 };
 
 /// Configuration for a gRPC h2c client connection.
@@ -138,6 +133,7 @@ test "zix grpc: GrpcServerConfig worker and pool defaults to zero" {
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
+    try std.testing.expect(!cfg.reuseport_cbpf);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.tls_write_buf_initial_bytes);

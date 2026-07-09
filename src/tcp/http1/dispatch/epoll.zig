@@ -8,6 +8,7 @@ const cache = @import("../../../utils/response_cache.zig");
 const ws = @import("../websocket.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 const tls_mux = @import("../tls_mux.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../tls/Tls.zig");
 const HandlerFn = core.HandlerFn;
@@ -44,7 +45,7 @@ const WRITE_POOL_CAP: usize = 64;
 /// still fits, since the staged remainder never exceeds the sink buffer.
 const WRITE_STAGE_CLASSES = [_]usize{ 8 * 1024, 32 * 1024, EPOLL_OUT_BUF_SIZE };
 
-/// Per-worker pool of write-pending staging buffers (A3). When a response does not fully flush on
+/// Per-worker pool of write-pending staging buffers. When a response does not fully flush on
 /// EAGAIN (a slow client), the remainder is staged in a buffer until EPOLLOUT drains it. Rather than
 /// allocate and free one per stall, the worker recycles a free-list per size class, so a backpressure
 /// burst reuses allocations instead of churning the allocator. One worker thread owns it (threadlocal),
@@ -113,6 +114,11 @@ const WritePendingPool = struct {
 };
 
 threadlocal var tl_write_pool: WritePendingPool = .{};
+
+/// Requests served by this worker thread (cleartext dispatch). Single-owner
+/// plain increment (no contention), reported through the system logger at
+/// worker exit so REUSEPORT skew across workers is measurable.
+threadlocal var tl_requests_served: u64 = 0;
 
 // --------------------------------------------------------- //
 // EPOLL model (Linux only): shared-nothing, one listener + epoll per worker.
@@ -263,7 +269,7 @@ const ConnTable = struct {
         const conn = &self.slots[idx];
         if (conn.buf.len == 0) return;
 
-        // Recycle a still-staged write buffer to the per-worker pool (A3) rather than freeing it, so a
+        // Recycle a still-staged write buffer to the per-worker pool rather than freeing it, so a
         // connection that closes mid-stall hands its buffer to the next stall instead of the allocator.
         if (conn.write_pending.len > 0) tl_write_pool.release(conn.write_pending);
 
@@ -424,6 +430,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
         if (comptime raw_fn != null) {
             if (raw_fn.?(rem, header_end, fd)) |end| {
                 consumed += end;
+                tl_requests_served += 1;
                 continue;
             }
         }
@@ -455,6 +462,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
                 // events so the connection stays usable for keep-alive.
                 if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
                 handler_fn(&head, &.{}, fd);
+                tl_requests_served += 1;
 
                 // Widen the receive window for the upcoming large-body drain (uploads). Only this
                 // branch (body larger than the read buffer) touches it, so small-request cells keep
@@ -476,6 +484,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
         handler_fn(&head, body, fd);
 
         consumed += request_len;
+        tl_requests_served += 1;
 
         // The handler may have promoted this connection to WebSocket via
         // WebSocket.serve. From here buf bytes are frames, not requests, so
@@ -607,7 +616,12 @@ fn serveTlsEvent(tls_conns: *tls_mux.ConnTable, epfd: std.posix.fd_t, ev: std.os
     }
 }
 
-const EpollWorkerCtx = struct { config: Config, worker_id: usize };
+const EpollWorkerCtx = struct {
+    config: Config,
+    worker_id: usize,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
+};
 
 /// Return a concrete epoll worker function with handler_fn baked in at compile
 /// time. Thread.spawn receives the returned function, eliminating the indirect
@@ -616,6 +630,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
     return struct {
         fn run(ctx: EpollWorkerCtx) void {
             pinToCpu(ctx.worker_id);
+            defer logSystem(ctx.config, "epoll worker {d}: {d} requests served", .{ ctx.worker_id, tl_requests_served });
 
             const linux = std.os.linux;
             const config = ctx.config;
@@ -624,6 +639,11 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
             core.setStatic(config.public_dir, io);
+
+            // Bind under the order gate: REUSEPORT group index i = worker i,
+            // so the cpu-mod-N steering lands on the worker pinned to that slot.
+            var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+            defer bind_turn.release();
 
             const addr = std.Io.net.IpAddress.resolve(io, config.ip, config.port) catch return;
             var srv = addr.listen(io, .{
@@ -635,6 +655,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             const listener_fd = srv.socket.handle;
 
             setNonBlock(listener_fd);
+            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
             if (std.posix.errno(epfd_rc) != .SUCCESS) return;
@@ -671,6 +692,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 }) catch return;
                 tls_listener_fd = tls_srv.socket.handle;
                 setNonBlock(tls_listener_fd);
+                if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
 
                 var tls_lev = linux.epoll_event{
                     .events = linux.EPOLL.IN,
@@ -681,7 +703,10 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                 tls_table = tls_mux.ConnTable.init() catch return;
             }
 
-            // Free the per-worker write-pending staging pool (A3) when the worker exits. table.deinit
+            // Both groups joined: release the bind turn to the next worker.
+            bind_turn.release();
+
+            // Free the per-worker write-pending staging pool when the worker exits. table.deinit
             // frees buffers still attached to live connections, this frees the recycled free-list, two
             // disjoint sets, so the order of these defers does not matter.
             defer tl_write_pool.deinit();
@@ -793,16 +818,20 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     // almost no RSS, and the bump applies only when compression is enabled.
     const worker_stack: usize = if (config.compress) @max(config.worker_stack_size_bytes, config.worker_stack_compress_bytes) else config.worker_stack_size_bytes;
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
     const worker = epollWorkerFn(handler_fn, raw_fn);
-    for (threads, 0..) |*t, worker_id| {
-        t.* = try std.Thread.spawn(
+    for (threads, 0..) |*thread, worker_id| {
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = worker_stack },
             worker,
-            .{EpollWorkerCtx{ .config = config, .worker_id = worker_id }},
+            .{EpollWorkerCtx{ .config = config, .worker_id = worker_id, .steering = steering }},
         );
     }
 
-    for (threads) |t| t.join();
+    for (threads) |thread| thread.join();
 }
 
 fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {

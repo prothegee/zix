@@ -14,6 +14,8 @@ const Config = @import("../config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const uring = @import("../../multiplexers/ring.zig");
 const slab = @import("../../multiplexers/slab.zig");
+const Logger = @import("../../logger/logger.zig").Logger;
+const reuseport = @import("../../multiplexers/reuseport.zig");
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const FrameFn = common.FrameFn;
@@ -93,6 +95,11 @@ const UringFrameCtx = struct {
     recv_buf_size: usize,
     send_buf_size: usize,
     max_conns: usize,
+    worker_id: usize,
+    /// Config logger, for the per-worker skew report at exit.
+    logger: ?*Logger = null,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
 };
 
 /// Build a concrete framed io_uring worker entry with frame_fn baked in at
@@ -106,6 +113,10 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             gen_counter: u24,
             recv_buf_size: usize,
             send_buf_size: usize = URING_SEND_BUF_SIZE,
+            /// Frames served by this worker (skew counter). Single-owner plain
+            /// increment (no contention), reported through the system logger at
+            /// worker exit so REUSEPORT skew across workers is measurable.
+            frames_served: u64 = 0,
 
             const W = @This();
             const allocator = std.heap.smp_allocator;
@@ -306,7 +317,6 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             /// frame_fn for each (reply staged through the sink into send_buf),
             /// then compact the trailing partial frame to the front.
             fn dispatch(worker: *W, conn: *UringConn) FrameOutcome {
-                _ = worker;
                 const fd = conn.fd;
 
                 var sink = RespSink{ .fd = fd, .buf = conn.send_buf };
@@ -328,6 +338,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
 
                     frame_fn(rem[FRAME_LEN_PREFIX..need], fd);
                     consumed += need;
+                    worker.frames_served += 1;
                 }
 
                 if (consumed >= conn.filled) {
@@ -370,6 +381,13 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
         };
 
         fn run(ctx: UringFrameCtx) void {
+            common.pinToCpu(ctx.worker_id);
+
+            // Bind under the order gate: REUSEPORT group index i = worker i,
+            // so the cpu-mod-N steering lands on the worker pinned to that slot.
+            var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+            defer bind_turn.release();
+
             const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
             var net_server = addr.listen(ctx.io, .{
                 .mode = .stream,
@@ -379,6 +397,9 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             }) catch return;
             defer net_server.deinit(ctx.io);
             const listener_fd = net_server.socket.handle;
+
+            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+            bind_turn.release();
 
             const slots = slab.mapZeroedSlots(?*UringConn, ctx.max_conns) catch return;
 
@@ -394,6 +415,8 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             defer worker.deinit();
 
             worker.run();
+
+            if (ctx.logger) |lg| lg.system(.INFO, "tcp", "uring worker {d}: {d} frames served", .{ ctx.worker_id, worker.frames_served });
         }
     }.run;
 }
@@ -402,16 +425,20 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
 // URING framed model
 
 pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: FrameFn) !void {
-    const worker_count = if (cfg.workers == 0) (std.Thread.getCpuCount() catch 1) else cfg.workers;
+    const worker_count = if (cfg.workers == 0) common.getAvailableCpuCount() else cfg.workers;
 
     logSystem(cfg, "listening on {s}:{d} (io_uring framed/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
 
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
     const worker_fn = uringFrameWorkerFn(frame_fn);
-    for (threads) |*t|
-        t.* = try std.Thread.spawn(
+    for (threads, 0..) |*thread, worker_id|
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{UringFrameCtx{
@@ -422,8 +449,11 @@ pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: Frame
                 .recv_buf_size = cfg.max_recv_buf,
                 .send_buf_size = cfg.uring_send_buf_size,
                 .max_conns = cfg.uring_max_conns_per_worker,
+                .worker_id = worker_id,
+                .logger = cfg.logger,
+                .steering = steering,
             }},
         );
 
-    for (threads) |t| t.join();
+    for (threads) |thread| thread.join();
 }

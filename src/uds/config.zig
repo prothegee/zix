@@ -9,11 +9,11 @@ const Logger = @import("../logger/logger.zig").Logger;
 pub const UdsServerConfig = struct {
     /// Io backend for the server. Caller-provided. Must outlive the server.
     io: std.Io,
+    /// Backing allocator. Caller owns, must outlive the server.
+    allocator: std.mem.Allocator,
     /// Filesystem path for the socket file (max 107 bytes on Linux/macOS).
     /// Server unlinks this path before binding and again when run() exits.
     path: []const u8,
-    /// Backing allocator. Caller owns, must outlive the server.
-    allocator: std.mem.Allocator,
     /// Listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 128,
     /// Maximum payload bytes accepted per frame. Frames larger than this close the connection.

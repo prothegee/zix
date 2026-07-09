@@ -42,7 +42,7 @@ pub const default_ciphers = &[_]CipherSuite{ .AES_128_GCM_SHA256, .ECDHE_ECDSA_A
 /// resulting Context per connection. Omitting the optional fields yields the secure default
 /// (forward secrecy + AEAD, ECDHE-only).
 pub const Config = struct {
-    /// PEM path to the end-entity certificate (ECDSA P-256 or Ed25519). Required.
+    /// PEM path to the end-entity certificate (ECDSA P-256, Ed25519, or RSA). Required.
     cert_path: []const u8,
     /// PEM path to the private key matching cert_path. Required.
     key_path: []const u8,
@@ -92,7 +92,7 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     /// DER end-entity certificate, owned (freed by deinit).
     cert_der: []u8,
-    /// The signing identity matching the certificate's key type (ECDSA P-256 or Ed25519).
+    /// The signing identity matching the certificate's key type (ECDSA P-256, Ed25519, or RSA).
     signing_key: SigningKey,
     alpn: []const Alpn,
     curves: []const NamedGroup,
