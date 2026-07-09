@@ -16,42 +16,28 @@ pub const Http2ServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. .ASYNC, .POOL, .MIXED are the cleartext blocking models. .EPOLL
-    /// and .URING are the Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener
-    /// plus epoll or io_uring per worker), driving the resumable h2 state machine. .URING probes the
-    /// ring at startup and falls back to .EPOLL when io_uring is unavailable. Off Linux both fold to
-    /// .POOL. Ignored on the TLS path (the https terminator runs the blocking engine).
-    /// Required: the caller must set it explicitly (no default).
+    /// Connection dispatch model. .ASYNC / .POOL / .MIXED are the cleartext blocking models, .EPOLL /
+    /// .URING the Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener plus epoll or
+    /// io_uring per worker, .URING falls back to .EPOLL, off Linux both fold to .POOL). Required.
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Accept thread count.
-    /// 0 (default) = cpu_count accept threads.
-    /// Ignored by .ASYNC (always 1 accept thread).
+    /// Accept thread count (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
     workers: usize = 0,
-    /// Pool thread count. Only used by .POOL.
-    /// 0 (default) = max(10, cpu_count * 2).
-    /// Ignored by .ASYNC and .MIXED.
+    /// Pool thread count (0 = max(10, cpu_count * 2)). Only used by .POOL,
+    /// ignored by .ASYNC and .MIXED.
     pool_size: usize = 0,
     /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
-    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING). The
-    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower wake-up latency
-    /// on saturated benchmarks. Default 0 leaves it unset, so the engine's current CPU profile is
-    /// unchanged. Mirrors zix.Http1's busy_poll_us: set to e.g. 50 to opt in. No-op when the kernel
-    /// lacks SO_BUSY_POLL.
+    /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING): the
+    /// kernel busy-spins this long before sleeping the worker, trading CPU for lower wake-up latency.
+    /// Default 0 leaves it unset (set e.g. 50 to opt in). No-op when the kernel lacks SO_BUSY_POLL.
     busy_poll_us: u32 = 0,
-    /// Maximum concurrent streams per connection, advertised as SETTINGS_MAX_CONCURRENT_STREAMS. The
-    /// .EPOLL / .URING mux borrows each stream's slot from a per-worker pool, so this bounds concurrency
-    /// without reserving the full count per connection.
-    max_streams: u32 = 128,
-    /// MAX_FRAME_SIZE setting sent to clients (bytes).
-    max_frame_size: u32 = 16384,
-    /// HPACK scratch buffer size per connection.
-    max_header_scratch: usize = 4096,
-    /// Maximum request body buffered per stream (bytes). A larger request body is truncated to this.
-    max_body: usize = 16384,
+    /// Attach SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener
+    /// index = receiving CPU mod workers instead of the 4-tuple hash, so it is served start-to-finish
+    /// on the core that received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
+    reuseport_cbpf: bool = false,
     /// Per-connection receive buffer in bytes (.EPOLL / .URING mux). Used as a floor: the reader is
     /// sized to the larger of this and one max frame, so a larger value cuts read() and compaction
     /// for big frames.
@@ -59,6 +45,16 @@ pub const Http2ServerConfig = struct {
     /// Initial capacity in bytes of the per-connection TLS pending-write buffer (it grows on demand).
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial_bytes: usize = 16 * 1024,
+    /// Maximum concurrent streams per connection, advertised as SETTINGS_MAX_CONCURRENT_STREAMS. The
+    /// .EPOLL / .URING mux borrows each stream's slot from a per-worker pool, so this bounds
+    /// concurrency without reserving the full count per connection.
+    max_streams: u32 = 128,
+    /// MAX_FRAME_SIZE setting sent to clients (bytes).
+    max_frame_size: u32 = 16384,
+    /// HPACK scratch buffer size per connection.
+    max_header_scratch: usize = 4096,
+    /// Maximum request body buffered per stream (bytes). A larger request body is truncated to this.
+    max_body: usize = 16384,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache API
     /// (serveCached / sendCachedFD) degrades to a plain send. Active under .EPOLL and .URING.
     response_cache: bool = false,
@@ -72,21 +68,16 @@ pub const Http2ServerConfig = struct {
     /// Optional ceiling on per-worker cache memory in bytes. 0 disables the ceiling.
     cache_max_total_bytes: usize = 0,
     /// https - opt-in. When non-null the server serves HTTP/2 over TLS (zix.Tls, ALPN h2), otherwise
-    /// h2c cleartext, the default. The TLS path is a gated blocking terminator in front of the
-    /// existing h2c engine, so the cleartext dispatch models are untouched. The context carries the
-    /// cert / key / alpn / version / curve / cipher / HSTS policy (Tls.Context.Config). For the
-    /// Http2 engine alpn should include .H2 (browsers require ALPN h2 for HTTP/2 over TLS, RFC 7540
-    /// 3.3). Caller owns the Context and must ensure it outlives the server.
+    /// h2c (the default), the cleartext dispatch models untouched. alpn should include .H2 (browsers
+    /// require it, RFC 7540 3.3). Caller owns the Context (Tls.Context.Config policy), must outlive.
     tls: ?*Tls.Context = null,
-    /// Companion h2-over-TLS bind port for the dual-listener mode. 0 (default) keeps the
-    /// single-listener behavior: with tls set the server is TLS-only on port. Non-zero (requires
-    /// tls set) serves cleartext on port AND TLS on tls_port from the same worker fleet, one
-    /// server instead of two launches. Ignored when tls is null.
+    /// Companion h2-over-TLS bind port for the dual-listener mode. 0 (default) keeps single-listener
+    /// behavior (with tls set the server is TLS-only on port). Non-zero (requires tls) serves
+    /// cleartext on port AND TLS on tls_port from one worker fleet. Ignored when tls is null.
     tls_port: u16 = 0,
-    /// Optional logger. When non-null, the server calls logger.system() for lifecycle
-    /// events (listening, fallback notices) instead of std.debug.print. The h2c handler
-    /// owns its frame I/O, so per-request access logging is the handler's responsibility.
-    /// Caller owns the Logger and must ensure it outlives the server.
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
+    /// (listening, fallback notices) instead of std.debug.print. The h2c handler owns its frame I/O,
+    /// so per-request access logging is the handler's responsibility. Caller owns, must outlive.
     logger: ?*Logger = null,
 };
 
@@ -152,4 +143,5 @@ test "zix test: Http2ServerConfig worker_stack_size_bytes default" {
     try std.testing.expectEqual(@as(usize, 32 * 1024), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.tls_write_buf_initial_bytes);
     try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
+    try std.testing.expect(!cfg.reuseport_cbpf);
 }
