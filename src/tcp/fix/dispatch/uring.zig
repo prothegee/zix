@@ -9,6 +9,7 @@ const core = @import("../core.zig");
 const FixServerConfig = @import("../config.zig").FixServerConfig;
 const FixServeOpts = core.FixServeOpts;
 const common = @import("common.zig");
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
 const uring = @import("../../../multiplexers/ring.zig");
@@ -77,6 +78,9 @@ const UringFixCtx = struct {
     opts: FixServeOpts,
     send_buf_size: usize,
     max_conns: usize,
+    worker_id: usize,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
 };
 
 fn uringFixWorker(ctx: UringFixCtx) void {
@@ -366,6 +370,13 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         }
     };
 
+    common.pinToCpu(ctx.worker_id);
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+    defer bind_turn.release();
+
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
     var net_server = addr.listen(ctx.io, .{
         .mode = .stream,
@@ -374,6 +385,9 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     }) catch return;
     defer net_server.deinit(ctx.io);
     const listener_fd = net_server.socket.handle;
+
+    if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+    bind_turn.release();
 
     const slots = slab.mapZeroedSlots(?*UringFixConn, ctx.max_conns) catch return;
 
@@ -393,6 +407,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     defer worker.deinit();
 
     worker.run();
+
+    if (ctx.opts.logger) |lg| lg.system(.INFO, "fix", "uring worker {d}: {d} messages served", .{ ctx.worker_id, core.tl_messages_served });
 }
 
 // --------------------------------------------------------- //
@@ -410,7 +426,7 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     };
     probe.deinit();
 
-    const cpu = try std.Thread.getCpuCount();
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
     logSystem(cfg, "listening on {s}:{d} (io_uring/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
@@ -418,8 +434,12 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
 
-    for (workers) |*t|
-        t.* = try std.Thread.spawn(
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
+    for (workers, 0..) |*thread, worker_id|
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             uringFixWorker,
             .{UringFixCtx{
@@ -431,8 +451,10 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
                 .opts = conn_opts,
                 .send_buf_size = cfg.uring_send_buf_size,
                 .max_conns = cfg.uring_max_conns_per_worker,
+                .worker_id = worker_id,
+                .steering = steering,
             }},
         );
 
-    for (workers) |t| t.join();
+    for (workers) |thread| thread.join();
 }

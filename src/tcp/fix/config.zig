@@ -22,46 +22,45 @@ pub const FixServerConfig = struct {
     /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
-    /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
+    /// TCP listen backlog: pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
-    /// Per-connection send buffer size in bytes for the .URING dispatch model. The send half
-    /// of the per-connection footprint. No effect under the other dispatch models.
-    uring_send_buf_size: usize = 64 * 1024,
-    /// Number of accept/event-loop workers.
-    /// 0 (default) = cpu_count workers.
-    /// Ignored by .ASYNC (always 1 accept thread).
-    /// For .EPOLL: controls how many shared-nothing listener workers are spawned.
+    /// Number of accept / event-loop workers (0 = cpu_count). Ignored by .ASYNC (always 1 accept
+    /// thread). For .EPOLL / .URING this is the shared-nothing listener worker count.
     workers: usize = 0,
-    /// Number of pool threads. Only used by .POOL dispatch model.
-    /// 0 (default) = max(10, cpu_count * 2).
-    /// Ignored by .ASYNC, .MIXED, and .EPOLL.
+    /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL,
+    /// ignored by .ASYNC, .MIXED, and .EPOLL.
     pool_size: usize = 0,
     /// Worker thread stack size in bytes for the .EPOLL and .URING handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
-    /// Max concurrent connections one .URING worker tracks (the per-worker fd-indexed slab size).
-    /// The slab is demand-paged, so a larger value costs little until used. Connections past it are refused.
-    uring_max_conns_per_worker: usize = 1 << 16,
     /// Pool worker thread stack size in bytes for the .POOL dispatch model. Smaller than the
     /// .EPOLL / .URING worker because FIX handlers process small fixed-format messages.
     pool_stack_size_bytes: usize = 256 * 1024,
-    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
-    /// and logger.session() for each FIX message processed. Caller owns. Must outlive the server.
-    logger: ?*Logger = null,
+    /// Attach SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener
+    /// index = receiving CPU mod workers instead of the 4-tuple hash, so it is served start-to-finish
+    /// on the core that received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
+    reuseport_cbpf: bool = false,
+    /// Per-connection send buffer size in bytes for the .URING dispatch model. The send half
+    /// of the per-connection footprint. No effect under the other dispatch models.
+    uring_send_buf_size: usize = 64 * 1024,
+    /// Max concurrent connections one .URING worker tracks (the per-worker fd-indexed slab size).
+    /// The slab is demand-paged, so a larger value costs little until used. Connections past it are refused.
+    uring_max_conns_per_worker: usize = 1 << 16,
     /// Default HeartBtInt (seconds) echoed in the Logon response when the client omits tag 108.
     default_heartbeat_secs: u32 = 30,
-    /// Heartbeat timeout in milliseconds. 0 = disabled.
-    /// When non-zero: after this interval with no incoming message, the server sends TestRequest (35=1).
-    /// If no response arrives within another interval, the server sends Logout (35=5) and closes.
-    /// Only takes effect after Logon completes. Before Logon, timeout closes silently.
+    /// Heartbeat timeout in milliseconds. 0 = disabled. After this interval with no incoming message
+    /// the server sends TestRequest (35=1), after another silent interval Logout (35=5) and close.
+    /// Takes effect after Logon completes. Before Logon, timeout closes silently.
     heartbeat_timeout_ms: u32 = 0,
-    /// Idle connection timeout in milliseconds. 0 = disabled.
-    /// When non-zero and heartbeat_timeout_ms is 0: the connection is closed if no message arrives
-    /// within this interval (no TestRequest is sent before closing).
+    /// Idle connection timeout in milliseconds. 0 = disabled. When non-zero and heartbeat_timeout_ms
+    /// is 0: the connection is closed if no message arrives within this interval (no TestRequest).
     conn_timeout_ms: u32 = 0,
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Applied to each routed message dispatch. Per-route Route.timeout_ms overrides this.
     handler_timeout_ms: u32 = 0,
+    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
+    /// and logger.session() for each FIX message processed. Caller owns. Must outlive the server.
+    logger: ?*Logger = null,
 };
 
 /// Configuration for a FIX 4.x session client instance.
@@ -121,6 +120,7 @@ test "zix fix: FixServerConfig kernel_backlog default" {
     const io = threaded.io();
     const cfg = FixServerConfig{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+    try std.testing.expect(!cfg.reuseport_cbpf);
 }
 
 test "zix fix: FixServerConfig uring_send_buf_size default" {

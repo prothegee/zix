@@ -677,6 +677,11 @@ pub const FixRingResult = struct {
 ///
 /// Return:
 /// - FixRingResult (consumed bytes, close flag)
+/// Messages processed on this worker thread (skew counter). Owned by the worker
+/// (threadlocal, plain increment, no contention), read and reported through the
+/// system logger at worker exit so REUSEPORT skew across workers is measurable.
+pub threadlocal var tl_messages_served: u64 = 0;
+
 pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeOpts, recv: []const u8, fd: std.posix.fd_t) FixRingResult {
     var consumed: usize = 0;
 
@@ -685,6 +690,7 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
         const msg_end = findMessageEnd(rem) orelse break;
         const raw = rem[0..msg_end];
         consumed += msg_end;
+        tl_messages_served += 1;
 
         var fields: [MAX_FIELDS]Field = undefined;
         const field_count = parseFields(raw, &fields) catch return .{ .consumed = consumed, .close = true };
@@ -1035,4 +1041,14 @@ test "zix fix: fixHeartbeatTick is a no-op before Logon or when disabled" {
     // hb_ms == 0 (disabled): no-op even when logged in.
     state.peer_len = 6;
     try std.testing.expect(!fixHeartbeatTick(&state, "ZIX", -1, 99999, 0));
+}
+
+test "zix fix: processFixRing counts each complete message in tl_messages_served" {
+    var state = FixRingState{};
+    const msg = "8=FIX.4.2\x019=5\x0135=A\x0110=001\x01";
+
+    const before = tl_messages_served;
+    _ = processFixRing(&state, "ZIX", .{}, msg, -1);
+
+    try std.testing.expectEqual(before + 1, tl_messages_served);
 }

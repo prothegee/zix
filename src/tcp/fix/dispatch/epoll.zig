@@ -9,6 +9,7 @@ const logSystem = common.logSystem;
 const ConnTask = common.ConnTask;
 const dispatchConn = common.dispatchConn;
 const EPOLL_MAX_EVENTS = common.EPOLL_MAX_EVENTS;
+const reuseport = @import("../../../multiplexers/reuseport.zig");
 
 // --------------------------------------------------------- //
 
@@ -19,6 +20,9 @@ const EpollWorkerCtx = struct {
     kernel_backlog: u31,
     comp_id: []const u8,
     opts: FixServeOpts,
+    worker_id: usize,
+    /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
+    steering: ?reuseport.Steering = null,
 };
 
 /// EPOLL worker: owns one SO_REUSEPORT listener and one epoll instance.
@@ -28,6 +32,18 @@ const EpollWorkerCtx = struct {
 /// and is not parked on the session lifetime.
 fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
     const linux = std.os.linux;
+    common.pinToCpu(ctx.worker_id);
+
+    // Connections accepted by this worker (skew counter): the accept loop's unit
+    // of work (each session is then served by its own io.async task). Reported
+    // through the system logger at worker exit so REUSEPORT skew is measurable.
+    var conns_served: u64 = 0;
+    defer if (ctx.opts.logger) |lg| lg.system(.INFO, "fix", "epoll worker {d}: {d} conns accepted", .{ ctx.worker_id, conns_served });
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+    defer bind_turn.release();
 
     const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
         if (ctx.opts.logger) |lg| lg.system(.ERROR, "fix", "epoll worker resolve error: {}", .{err});
@@ -42,6 +58,9 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
     };
     defer srv.deinit(ctx.io);
     const listener_fd = srv.socket.handle;
+
+    if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+    bind_turn.release();
 
     const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
     const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
@@ -87,6 +106,7 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
                 }
 
                 const conn_fd: std.posix.fd_t = @intCast(accept_result);
+                conns_served += 1;
                 const stream: std.Io.net.Stream = .{ .socket = .{
                     .handle = conn_fd,
                     .address = .{ .ip4 = .unspecified(0) },
@@ -116,10 +136,11 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 ///   shared queue and no cross-thread fd handoff.
 /// - Each accepted connection is dispatched via io.async: the worker returns
 ///   to epoll_wait immediately and is not parked on the session lifetime.
-/// - workers = 0 (default): cpu_count workers.
+/// - workers = 0 (default): one worker per available CPU (cgroup-allowed mask),
+///   each pinned to its own CPU slot.
 /// - pool_size is ignored for EPOLL (no session-worker pool needed).
 pub fn runEpoll(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
-    const cpu = try std.Thread.getCpuCount();
+    const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
     logSystem(cfg, "listening on {s}:{d} (epoll/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
@@ -127,8 +148,12 @@ pub fn runEpoll(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
 
-    for (workers) |*t|
-        t.* = try std.Thread.spawn(
+    // CBPF steering: one shared bind-order gate, alive until join().
+    var bind_gate = reuseport.BindOrderGate{};
+    const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
+
+    for (workers, 0..) |*thread, worker_id|
+        thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             epollWorkerEntry,
             .{EpollWorkerCtx{
@@ -138,8 +163,10 @@ pub fn runEpoll(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
                 .kernel_backlog = cfg.kernel_backlog,
                 .comp_id = cfg.comp_id,
                 .opts = conn_opts,
+                .worker_id = worker_id,
+                .steering = steering,
             }},
         );
 
-    for (workers) |t| t.join();
+    for (workers) |thread| thread.join();
 }
