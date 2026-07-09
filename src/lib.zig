@@ -113,6 +113,7 @@ test "zix tests: unit test" {
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     std.testing.refAllDecls(@import("multiplexers/ring.zig"));
+    std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
     std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
 
@@ -136,6 +137,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/grpc/core.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/server.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/tls_serve.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/client.zig"));
 
@@ -203,11 +205,13 @@ test "zix tests: unit test" {
     // # zix.Tcp (raw)
     std.testing.refAllDecls(@import("tcp/config.zig"));
     std.testing.refAllDecls(@import("tcp/server.zig"));
+    std.testing.refAllDecls(@import("tcp/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/client.zig"));
 
     // # zix.Fix
     std.testing.refAllDecls(@import("tcp/fix/core.zig"));
     std.testing.refAllDecls(@import("tcp/fix/config.zig"));
+    std.testing.refAllDecls(@import("tcp/fix/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/fix/server.zig"));
     std.testing.refAllDecls(@import("tcp/fix/client.zig"));
     std.testing.refAllDecls(@import("tcp/fix/router.zig"));
