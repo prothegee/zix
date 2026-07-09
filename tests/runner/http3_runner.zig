@@ -31,7 +31,7 @@ fn run(io: std.Io, server_path: []const u8) !void {
 
     if (!std.mem.eql(u8, body, "42")) return error.UnexpectedBody;
 
-    // Multiplexing (RC2): two requests on ONE connection, on streams 0 and 4, must both be answered
+    // Multiplexing: two requests on ONE connection, on streams 0 and 4, must both be answered
     // with their own summed result (a=20&b=22 -> 42, a=1&b=2 -> 3).
     var body0_buf: [256]u8 = undefined;
     var body1_buf: [256]u8 = undefined;
