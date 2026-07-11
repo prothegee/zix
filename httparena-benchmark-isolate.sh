@@ -269,7 +269,7 @@ restore_state() {
 
     [ "${IS_ROOT:-0}" -ne 1 ] && return 0
 
-    echo "[isolate] restoring host state" >&2
+    echo "[isol] restoring host state" >&2
 
     if [ -n "$SAVED_GOVERNOR" ]; then
         cpupower frequency-set -g "$SAVED_GOVERNOR" >/dev/null 2>&1 || true
@@ -320,11 +320,11 @@ trap 'exit 130' INT TERM
 # top (a deviation from the arena, off by default). Rootless mode skips all of it.
 quiesce() {
     if [ "${IS_ROOT:-0}" -ne 1 ]; then
-        echo "[isolate] not root, skipping host quiesce (governor/sysctl/mtu/etc.), pinning still applied" >&2
+        echo "[isol] not root, skipping host quiesce (governor/sysctl/mtu/etc.), pinning still applied" >&2
         return 0
     fi
 
-    echo "[isolate] quiescing host (system_tune equivalent)" >&2
+    echo "[isol] quiescing host (system_tune equivalent)" >&2
 
     cpupower frequency-set -g performance >/dev/null 2>&1 || true
 
@@ -369,7 +369,7 @@ probe_gate() {
     probe_core=${probe_core%%-*}
 
     if ! command -v cc >/dev/null 2>&1; then
-        echo "[isolate] cc not found, skipping --probe noise-floor gate" >&2
+        echo "[isol] cc not found, skipping --probe noise-floor gate" >&2
         PROBE_RESULT="skipped (no cc)"
         return 0
     fi
@@ -388,7 +388,7 @@ int main(void) {
 }
 EOF
     if ! cc -O2 -o "$bin" "$src" 2>/dev/null; then
-        echo "[isolate] probe build failed, skipping --probe noise-floor gate" >&2
+        echo "[isol] probe build failed, skipping --probe noise-floor gate" >&2
         PROBE_RESULT="skipped (build failed)"
         rm -rf "$probe_tmp"
         return 0
@@ -422,16 +422,16 @@ EOF
 
     case "$rel" in
         ERR_*)
-            echo "[isolate] probe produced no usable timing ($rel), skipping gate" >&2
+            echo "[isol] probe produced no usable timing ($rel), skipping gate" >&2
             PROBE_RESULT="skipped (no usable timing)"
             return 0 ;;
     esac
 
-    echo "[isolate] noise-floor relative stddev: ${rel}%" >&2
+    echo "[isol] noise-floor relative stddev: ${rel}%" >&2
 
     if awk -v r="$rel" 'BEGIN { exit !(r > 1.0) }'; then
         PROBE_RESULT="${rel}% (ABORT, box not quiet >1%)"
-        echo "[isolate] box is not quiet (>1%), aborting before bench" >&2
+        echo "[isol] box is not quiet (>1%), aborting before bench" >&2
 
         {
             echo "$START_BANNER"
@@ -439,7 +439,7 @@ EOF
             echo "# zix isolate full bench (ABORTED at probe)"
             echo "# probe_rel:   $PROBE_RESULT"
         } > "$RESULT_TXT" 2>/dev/null || true
-        echo "[isolate] aborted-probe record -> $RESULT_TXT" >&2
+        echo "[isol] aborted-probe record -> $RESULT_TXT" >&2
 
         exit 1
     fi
@@ -451,7 +451,7 @@ EOF
 # and apply the server cpuset (idempotent when the profile already carries it).
 start_server_pinner() {
     [ -z "$SERVER_CPUS" ] && return 0
-    command -v docker >/dev/null 2>&1 || { echo "[isolate] docker absent, server not pinned" >&2; return 0; }
+    command -v docker >/dev/null 2>&1 || { echo "[isol] docker absent, server not pinned" >&2; return 0; }
 
     local name="httparena-bench-$FRAMEWORK"
     (
@@ -477,7 +477,7 @@ start_mem_sampler() {
     local name="httparena-bench-$FRAMEWORK"
     MEM_LOG="$RESULT_DIR/isolate-full-mem-${RUN_TAG}-${RUN_STAMP}.txt"
     SMAPS_FILE="$RESULT_DIR/isolate-full-smaps-${RUN_TAG}-${RUN_STAMP}.txt"
-    echo "[isolate] memory samples -> $MEM_LOG" >&2
+    echo "[isol] memory samples -> $MEM_LOG" >&2
     (
         local tick=0 peak_cur=0
         while true; do
@@ -532,15 +532,15 @@ start_mem_sampler() {
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 START="$(date '+%Y-%m-%d %H:%M:%S:%3N')"
 RUN_TAG="${FRAMEWORK}${PROFILE:+-$PROFILE}"
-RESULT_TXT="$RESULT_DIR/isolate-full-${RUN_TAG}-${RUN_STAMP}.txt"
+RESULT_TXT="$RESULT_DIR/isolate-full-results-${RUN_TAG}-${RUN_STAMP}.txt"
 
 START_BANNER="Isolate-full: $FRAMEWORK bench start $START"
-echo "[isolate] $START_BANNER" >&2
-echo "[isolate] command: $INVOCATION" >&2
+echo "[isol] $START_BANNER" >&2
+echo "[isol] command: $INVOCATION" >&2
 
 save_state
 derive_split
-echo "[isolate] server=$SERVER_CPUS loadgen=$LOADGEN_CPUS threads=${LOAD_THREADS:-$LOADGEN_THREAD_COUNT}" >&2
+echo "[isol] server=$SERVER_CPUS loadgen=$LOADGEN_CPUS threads=${LOAD_THREADS:-$LOADGEN_THREAD_COUNT}" >&2
 
 if [ "$DO_QUIESCE" -eq 1 ]; then
     quiesce
@@ -564,7 +564,7 @@ cd "$REPO_DIR"
 # rsync the checkout into gitignored vendor/zix, rewrite the Dockerfile vendor
 # fetch to COPY, and drop a build.sh for the harness build hook.
 if [ "$SOURCE" = "local" ]; then
-    echo "[isolate] staging local zix from $ZIX_DIR into $VENDOR_DIR" >&2
+    echo "[isol] staging local zix from $ZIX_DIR into $VENDOR_DIR" >&2
 
     rm -rf "$VENDOR_DIR"
     mkdir -p "$VENDOR_DIR"
@@ -661,12 +661,12 @@ export GCANNON_MODE="${GCANNON_MODE:-docker}"
 RUN_ARGS=("$FRAMEWORK")
 [ -n "$PROFILE" ] && RUN_ARGS+=("$PROFILE")
 
-echo "[isolate] running full bench, result -> $RESULT_TXT" >&2
+echo "[isol] running full bench, result -> $RESULT_TXT" >&2
 bench_rc=0
 "$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
-[ "$bench_rc" -eq 0 ] || echo "[isolate] note: bench exited $bench_rc, continuing to summary and restore" >&2
+[ "$bench_rc" -eq 0 ] || echo "[isol] note: bench exited $bench_rc, continuing to summary and restore" >&2
 
-echo "[isolate] settling ${SETTLE}s before restore" >&2
+echo "[isol] settling ${SETTLE}s before restore" >&2
 sleep "$SETTLE"
 
 # Summarize memory samples (peak + steady-state median) into the main log.
@@ -709,6 +709,6 @@ if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
     } >> "$RESULT_TXT"
 fi
 
-echo "[isolate] result saved: $RESULT_TXT" >&2
+echo "[isol] result saved: $RESULT_TXT" >&2
 
 # Restore runs via EXIT trap.

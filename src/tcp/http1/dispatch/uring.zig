@@ -34,7 +34,6 @@ const MAX_FD = common.MAX_FD;
 // per connection (at most one recv or one send in flight), so a blocking sink
 // flush can never interleave with an in-flight send.
 //
-// Phase 3 (ADR-037) results (rnd/0.4.x/uring_phase3_results.txt):
 // 1. ring setup flags (SINGLE_ISSUER | DEFER_TASKRUN): measured null on the
 //    12-core loopback box, but the reference ring engines run with them at
 //    scale, so they are applied here behind a kernel-version probe with a
