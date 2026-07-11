@@ -212,9 +212,9 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
         const reaped = ring.copy_cqes(&cqes, 0) catch continue;
         var rearm = false;
         for (cqes[0..reaped]) |cqe| {
-            if (cqe.flags and linux.IORING_CQE_F_BUFFER != 0) {
+            if (cqe.flags & linux.IORING_CQE_F_BUFFER != 0) {
                 const bid = cqe.buffer_id() catch {
-                    if (cqe.flags and linux.IORING_CQE_F_MORE == 0) rearm = true;
+                    if (cqe.flags & linux.IORING_CQE_F_MORE == 0) rearm = true;
                     continue;
                 };
                 const buf = backing[@as(usize, bid) * buf_size ..][0..buf_size];
@@ -234,7 +234,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
             }
 
             // The multishot ended (buffer exhaustion or error): re-arm so receives stay in flight.
-            if (cqe.flags and linux.IORING_CQE_F_MORE == 0) rearm = true;
+            if (cqe.flags & linux.IORING_CQE_F_MORE == 0) rearm = true;
         }
         if (rearm) armMultishotRecv(ring, &msg, fd);
 
