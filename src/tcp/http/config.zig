@@ -62,6 +62,11 @@ pub const HttpServerConfig = struct {
     /// pooled (recv and send buffers intact) so a later accept reuses the allocation. The pool cap
     /// scales with the worker's live concurrency, this is the idle floor. Mirrors zix.Http1.
     uring_idle_pool_floor: usize = 64,
+    /// Process queue capacity (entry count) for the .URING dispatch model: a recv or send that
+    /// finds the submission queue full is parked on a per-worker FIFO ring of this length
+    /// (references only, fd + generation) and retried next loop pass instead of closing the
+    /// connection. 0 (default) = off. Mirrors zix.Http1. No effect under the other models.
+    process_queue_len: usize = 0,
     /// Initial arena capacity in bytes per connection. Grows automatically if exceeded.
     max_allocator_size: usize = 1024 * 4,
     /// Maximum request headers accepted per request. Requests exceeding this are rejected with 431.
@@ -130,6 +135,7 @@ test "zix http: HttpServerConfig uring_send_buf_size default" {
     const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+    try std.testing.expectEqual(@as(usize, 0), cfg.process_queue_len);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);
     try std.testing.expect(!cfg.reuseport_cbpf);
