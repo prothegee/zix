@@ -622,7 +622,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                     frame.sendRstStreamFD(conn.fd, sid, frame.ERR_STREAM_CLOSED) catch {};
                     continue;
                 };
-                const s = conn.streams[slot];
+                const stream = conn.streams[slot];
 
                 var data = payload;
                 var pad_len: usize = 0;
@@ -636,17 +636,28 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                 }
                 data = data[0 .. data.len - pad_len];
 
+                // A body past max_body sheds the stream instead of truncating it: 413 with
+                // END_STREAM, slot released, so a corrupt body never dispatches. A follow-up
+                // DATA frame finds no slot and is answered with RST_STREAM above. Only the
+                // connection window is credited for the discarded bytes (the stream is done,
+                // the connection must stay usable for its other streams).
+                if (data.len > stream.body.len - stream.body_len) {
+                    if (data.len > 0) frame.sendWindowUpdateFD(conn.fd, 0, @intCast(data.len)) catch {};
+                    sendRespHeadersFD(conn.fd, sid, 413, "text/plain", "", 0, true);
+                    releaseSlot(conn, slot);
+                    continue;
+                }
+
                 if (data.len > 0) {
                     frame.sendWindowUpdateFD(conn.fd, 0, @intCast(data.len)) catch {};
                     frame.sendWindowUpdateFD(conn.fd, sid, @intCast(data.len)) catch {};
                 }
 
-                const to_copy = @min(data.len, s.body.len - s.body_len);
-                @memcpy(s.body[s.body_len..][0..to_copy], data[0..to_copy]);
-                s.body_len += to_copy;
+                @memcpy(stream.body[stream.body_len..][0..data.len], data);
+                stream.body_len += data.len;
 
-                s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
-                if (s.end_stream) {
+                stream.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
+                if (stream.end_stream) {
                     muxDispatch(routes, conn, slot);
                 }
             },
@@ -904,6 +915,222 @@ test "zix test: mux pooled stream is reused and reset clean on release" {
     try std.testing.expect(again.body.len >= 128);
 
     releaseStream(again);
+}
+
+test "zix test: mux DATA past max_body sheds the stream with 413 instead of truncating" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    // the write end is closed explicitly below to signal EOF, so it is not deferred.
+
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // request: HEADERS POST / on stream 1 (no END_STREAM), which opens the slot
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+
+    // fill the body to 8 bytes short of its buffer (a pooled stream's buffer may exceed
+    // max_body, the overflow boundary is the buffer itself), then send a 32-byte DATA
+    const open_slot = findSlot(1, conn.streams, conn.slots).?;
+    conn.streams[open_slot].body_len = conn.streams[open_slot].body.len - 8;
+
+    const oversized: [32]u8 = @splat(0xaa);
+    feedFrame(conn, frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &oversized);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+
+    // the stream is shed: slot freed, so a follow-up DATA frame finds no slot and is RST
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
+    feedFrame(conn, frame.FRAME_TYPE_DATA, 0, 1, oversized[0..8]);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+
+    _ = std.posix.system.close(fds[1]);
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(fds[0], buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    // wire: connection window credited for the discarded bytes (stream window not),
+    // a 413 HEADERS with END_HEADERS | END_STREAM, then RST_STREAM(STREAM_CLOSED)
+    var saw_conn_credit = false;
+    var saw_stream_credit = false;
+    var saw_413 = false;
+    var saw_rst_closed = false;
+    var dec = hpack.HpackDecoder.init();
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        const payload = buf[off..][0..fh.length];
+        off += fh.length;
+
+        switch (fh.frame_type) {
+            frame.FRAME_TYPE_WINDOW_UPDATE => {
+                if (fh.stream_id == 0) saw_conn_credit = true;
+                if (fh.stream_id == 1) saw_stream_credit = true;
+            },
+            frame.FRAME_TYPE_HEADERS => {
+                try std.testing.expect((fh.flags & frame.FLAG_END_STREAM) != 0);
+                try std.testing.expect((fh.flags & frame.FLAG_END_HEADERS) != 0);
+
+                var hdrs: [frame.MAX_HEADERS]hpack.Header = undefined;
+                var scratch: [256]u8 = undefined;
+                const count = try dec.decode(payload, &hdrs, &scratch);
+                for (hdrs[0..count]) |hdr| {
+                    if (std.mem.eql(u8, hdr.name, ":status") and std.mem.eql(u8, hdr.value, "413")) saw_413 = true;
+                }
+            },
+            frame.FRAME_TYPE_RST_STREAM => {
+                const code: u32 = (@as(u32, payload[0]) << 24) | (@as(u32, payload[1]) << 16) |
+                    (@as(u32, payload[2]) << 8) | payload[3];
+                if (fh.stream_id == 1 and code == frame.ERR_STREAM_CLOSED) saw_rst_closed = true;
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(saw_conn_credit);
+    try std.testing.expect(!saw_stream_credit);
+    try std.testing.expect(saw_413);
+    try std.testing.expect(saw_rst_closed);
+}
+
+var exact_body_seen: usize = 0;
+
+fn exactBodyHandler(_: []const u8, _: []const hpack.Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void {
+    exact_body_seen = body.len;
+    frame.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
+}
+
+const exact_body_routes = [_]Route{.{ .path = "/", .handler = exactBodyHandler }};
+
+test "zix test: mux DATA exactly filling max_body still dispatches the full body" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
+    _ = muxFrameLoop(&exact_body_routes, conn);
+
+    // fill the body to exactly 16 bytes short of its buffer, then a 16-byte DATA lands
+    // flush on the boundary: it must copy and dispatch, not shed
+    const open_slot = findSlot(1, conn.streams, conn.slots).?;
+    const full_len = conn.streams[open_slot].body.len;
+    conn.streams[open_slot].body_len = full_len - 16;
+
+    const exact: [16]u8 = @splat(0xbb);
+    feedFrame(conn, frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &exact);
+
+    exact_body_seen = 0;
+    _ = muxFrameLoop(&exact_body_routes, conn);
+
+    try std.testing.expectEqual(full_len, exact_body_seen);
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
+}
+
+test "zix test: mux HEADERS past max_streams is refused, the open stream keeps its slot" {
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    // the write end is closed explicitly below to signal EOF, so it is not deferred.
+
+    const opts = core.ServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // stream 1 opens and holds the single slot (no END_STREAM, body pending)
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
+
+    // stream 3 finds no free slot and must be refused, retry-safe for the client
+    var hblk2: [128]u8 = undefined;
+    var enc2 = hpack.HpackEncoder.init(&hblk2);
+    try enc2.writeHeader(":method", "POST");
+    try enc2.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 3, enc2.encoded());
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) != null);
+    try std.testing.expect(findSlot(3, conn.streams, conn.slots) == null);
+
+    _ = std.posix.system.close(fds[1]);
+    var buf: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(fds[0], buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var saw_refused = false;
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        const payload = buf[off..][0..fh.length];
+        off += fh.length;
+
+        if (fh.frame_type == frame.FRAME_TYPE_RST_STREAM and fh.stream_id == 3) {
+            const code: u32 = (@as(u32, payload[0]) << 24) | (@as(u32, payload[1]) << 16) |
+                (@as(u32, payload[2]) << 8) | payload[3];
+            if (code == frame.ERR_REFUSED_STREAM) saw_refused = true;
+        }
+    }
+
+    try std.testing.expect(saw_refused);
+}
+
+test "zix test: mux RST_STREAM reaps a slot parked on pending_body" {
+    @memset(&fc_test_body, 'r');
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+    conn.send_window = 100;
+    conn.peer_init_window = 100;
+
+    // dispatch parks 4900 of the 5000-byte response on the tiny window, holding the slot
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+    _ = muxFrameLoop(&fc_test_routes, conn);
+
+    const slot = findSlot(1, conn.streams, conn.slots).?;
+    try std.testing.expectEqual(@as(usize, 4900), conn.streams[slot].pending_body.len);
+
+    // the peer cancels: the parked slot is released, nothing left to resume
+    const cancel = [4]u8{ 0, 0, 0, 8 };
+    feedFrame(conn, frame.FRAME_TYPE_RST_STREAM, 0, 1, &cancel);
+    _ = muxFrameLoop(&fc_test_routes, conn);
+
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
 }
 
 test "zix test: mux stream slots are pooled across connections" {
