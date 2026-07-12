@@ -117,12 +117,22 @@ const UringTx = struct {
         return false;
     }
 
+    /// True when the active buffer still holds replies not yet on the ring (a submit capped by a
+    /// full SQ). The buffer must then stay active so the tail is resubmitted next wake: rotating
+    /// it out would reset() it on swap-back and silently discard the tail.
+    fn activeTailPending(self: *const UringTx) bool {
+        return self.bufs[self.cur].ring_sent < self.bufs[self.cur].count;
+    }
+
     /// Submit the active buffer's newly queued replies as sendmsg SQEs (not waited on here), then
     /// swap to the other buffer for the next wake if it currently has no sends in flight. If it
     /// does, keep queuing into the current buffer instead of swapping into one still being drained.
+    /// A submit capped by a full SQ also defers the swap, so the unsent tail is retried, not reset.
     fn submitAndSwap(self: *UringTx, ring: *IoUring, fd: std.posix.socket_t) usize {
         const submitted = self.bufs[self.cur].submitUring(ring, fd, tags[self.cur]);
         self.inflight[self.cur] += submitted;
+
+        if (self.activeTailPending()) return submitted;
 
         const other = 1 - self.cur;
         if (self.inflight[other] == 0) {
@@ -165,24 +175,38 @@ fn uringGetSqe(ring: *IoUring) ?*linux.io_uring_sqe {
 /// Arm (or re-arm) a recvmsg on `slot`: reset the msghdr name length (recvmsg shrinks it to the actual
 /// peer), queue a recvmsg SQE on the worker socket, and tag it with the slot index so the completion
 /// recovers which buffer and peer address it filled.
-fn armUringRecv(ring: *IoUring, msg: *linux.msghdr, slot: usize, fd: std.posix.socket_t) void {
+///
+/// Return:
+/// - true when the SQE was queued
+/// - false when the SQ is full even after a submit (the caller must retry later, or the slot's
+///   receive is lost for good)
+fn armUringRecv(ring: *IoUring, msg: *linux.msghdr, slot: usize, fd: std.posix.socket_t) bool {
     msg.namelen = sockaddr_in6_len;
 
-    const sqe = uringGetSqe(ring) orelse return;
+    const sqe = uringGetSqe(ring) orelse return false;
     sqe.prep_recvmsg(fd, msg, 0);
     sqe.user_data = @intCast(slot);
+
+    return true;
 }
 
 /// Arm (or re-arm) the multishot recvmsg on the provided buffer group: one SQE yields a CQE per datagram
 /// (each carrying a selected buffer id) until the kernel ends the multishot, when the caller re-arms. The
 /// msghdr only reserves the name / control space; the kernel writes the recvmsg_out header, the peer
 /// address, then the payload into each selected buffer.
-fn armMultishotRecv(ring: *IoUring, msg: *linux.msghdr, fd: std.posix.socket_t) void {
-    const sqe = uringGetSqe(ring) orelse return;
+///
+/// Return:
+/// - true when the SQE was queued
+/// - false when the SQ is full even after a submit. The caller must retry: with no multishot in
+///   flight no completion re-arms it, so giving up here leaves the worker deaf for good.
+fn armMultishotRecv(ring: *IoUring, msg: *linux.msghdr, fd: std.posix.socket_t) bool {
+    const sqe = uringGetSqe(ring) orelse return false;
     sqe.prep_recvmsg_multishot(fd, msg, 0);
     sqe.flags |= linux.IOSQE_BUFFER_SELECT;
     sqe.buf_index = uring_buf_group;
     sqe.user_data = uring_mshot_tag;
+
+    return true;
 }
 
 /// Parse a completed multishot recvmsg buffer: the io_uring_recvmsg_out header, then the reserved peer
@@ -288,7 +312,11 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     // the buffer). It must outlive the multishot, so it lives here for the worker's life.
     var msg = std.mem.zeroes(linux.msghdr);
     msg.namelen = @intCast(mshot_name_reserve);
-    armMultishotRecv(ring, &msg, fd);
+
+    // Sticky: true while the multishot needs (re-)arming and the arm has not landed. A full SQ fails
+    // the arm, and with no multishot in flight no CQE would ever request the re-arm again, so the
+    // flag carries it across passes and the loop retries once a submit frees SQ space.
+    var recv_unarmed = !armMultishotRecv(ring, &msg, fd);
 
     common.logSystem(config, "io_uring worker {d} up (multishot recvmsg, {d} buffers)", .{ worker_id, uring_ring_bufs });
 
@@ -300,6 +328,9 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     const maintenance_ts = linux.kernel_timespec{ .sec = 0, .nsec = @intCast(common.maintenance_interval_us * 1000) };
 
     while (true) {
+        // Retry a multishot arm lost to a full SQ, so the queued SQE rides this pass's submit.
+        if (recv_unarmed) recv_unarmed = !armMultishotRecv(ring, &msg, fd);
+
         // Arm one maintenance timeout while the worker owns connections, so submit_and_wait returns after
         // the interval even with no I/O and the sweep (loss recovery, idle eviction) still runs during a
         // lull. Only one is ever in flight; it is re-armed after it fires (its CQE below).
@@ -351,7 +382,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
             // The multishot ended (buffer exhaustion or error): re-arm so receives stay in flight.
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) rearm = true;
         }
-        if (rearm) armMultishotRecv(ring, &msg, fd);
+        if (rearm) recv_unarmed = !armMultishotRecv(ring, &msg, fd);
 
         // Time-driven maintenance before the send submit, so a retransmit it queues rides this wake's
         // sends. At most once per interval however often a completion wakes the worker.
@@ -385,6 +416,11 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
     const msgs = config.allocator.alloc(linux.msghdr, uring_recv_slots) catch return;
     defer config.allocator.free(msgs);
 
+    // Slots whose recvmsg re-arm was lost to a full SQ, retried at the top of the loop. Each slot
+    // appears at most once (a slot re-arms only after its own completion), so the array bounds it.
+    var pending_slots: [uring_recv_slots]usize = undefined;
+    var pending_count: usize = 0;
+
     for (0..uring_recv_slots) |slot| {
         iovs[slot] = .{ .base = bufs.ptr + slot * config.max_recv_buf, .len = config.max_recv_buf };
         msgs[slot] = .{
@@ -396,7 +432,11 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
             .controllen = 0,
             .flags = 0,
         };
-        armUringRecv(ring, &msgs[slot], slot, fd);
+
+        if (!armUringRecv(ring, &msgs[slot], slot, fd)) {
+            pending_slots[pending_count] = slot;
+            pending_count += 1;
+        }
     }
 
     common.logSystem(config, "io_uring worker {d} up ({d} recv slots, one-shot)", .{ worker_id, uring_recv_slots });
@@ -409,6 +449,14 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
     const maintenance_ts = linux.kernel_timespec{ .sec = 0, .nsec = @intCast(common.maintenance_interval_us * 1000) };
 
     while (true) {
+        // Retry receive slots whose re-arm was lost to a full SQ, so a slot is delayed, never leaked.
+        while (pending_count > 0) {
+            const slot = pending_slots[pending_count - 1];
+            if (!armUringRecv(ring, &msgs[slot], slot, fd)) break;
+
+            pending_count -= 1;
+        }
+
         // Arm one maintenance timeout while the worker owns connections, so the wait returns after the
         // interval even with no I/O and the sweep still runs during a lull. Re-armed after it fires.
         if (!timeout_armed and table.count > 0) {
@@ -444,7 +492,10 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
                 common.serveDatagram(handler, table, .{ .data = bufs[slot * config.max_recv_buf ..][0..len], .from = names[slot] }, tx.active(), fd, config, &stats);
             }
 
-            armUringRecv(ring, &msgs[slot], slot, fd);
+            if (!armUringRecv(ring, &msgs[slot], slot, fd)) {
+                pending_slots[pending_count] = slot;
+                pending_count += 1;
+            }
         }
 
         // Time-driven maintenance before the send submit, so a retransmit it queues rides this wake's
@@ -565,7 +616,7 @@ test "zix test: io_uring recvmsg delivers a datagram and its peer address by slo
         .controllen = 0,
         .flags = 0,
     };
-    armUringRecv(&ring, &msg, 7, r_fd);
+    try std.testing.expect(armUringRecv(&ring, &msg, 7, r_fd));
     _ = ring.submit() catch return;
 
     const s_fd = datagram.open("127.0.0.1", 19074, false) catch return;
@@ -585,6 +636,62 @@ test "zix test: io_uring recvmsg delivers a datagram and its peer address by slo
     try std.testing.expectEqual(@as(u64, 7), cqes[0].user_data);
     try std.testing.expect(cqes[0].res >= 4);
     try std.testing.expectEqualStrings("ping", buf[0..4]);
+}
+
+test "zix test: UringTx.activeTailPending gates the swap on a fully submitted buffer" {
+    var tx = UringTx.init(std.testing.allocator, 4, 64) catch return;
+    defer tx.deinit();
+
+    // An empty active buffer has no tail.
+    try std.testing.expect(!tx.activeTailPending());
+
+    // A queued reply not yet on the ring is a pending tail: submitAndSwap must not rotate the
+    // buffer out, or the swap-back reset() would discard the reply.
+    const dest = datagram.ipToSockaddr6(try std.Io.net.IpAddress.parse("127.0.0.1", 19080));
+    try std.testing.expect(tx.active().queue(dest, "tail"));
+    try std.testing.expect(tx.activeTailPending());
+
+    // Once the ring took it (as submitUring records via ring_sent), the buffer may rotate.
+    tx.bufs[tx.cur].ring_sent = tx.bufs[tx.cur].count;
+    try std.testing.expect(!tx.activeTailPending());
+}
+
+test "zix test: armUringRecv and armMultishotRecv report the arm result" {
+    if (comptime !datagram.is_linux) return;
+
+    var ring = initUringRing() catch return; // skip where io_uring is unavailable
+    defer ring.deinit();
+
+    const fd = datagram.open("127.0.0.1", 19081, false) catch return; // skip if the port is busy
+    defer datagram.close(fd);
+
+    var name: std.posix.sockaddr.in6 = undefined;
+    var buf: [64]u8 = undefined;
+    var iov = std.posix.iovec{ .base = &buf, .len = buf.len };
+    var msg = linux.msghdr{
+        .name = @ptrCast(&name),
+        .namelen = sockaddr_in6_len,
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = null,
+        .controllen = 0,
+        .flags = 0,
+    };
+
+    // Fill the whole SQ with no-ops, so the next arm exercises the submit-then-retry path in
+    // uringGetSqe and still lands (true), instead of silently dropping the receive.
+    for (0..uring_entries) |_| {
+        const sqe = ring.get_sqe() catch break;
+        sqe.prep_nop();
+        sqe.user_data = 0;
+    }
+    try std.testing.expect(armUringRecv(&ring, &msg, 3, fd));
+
+    // The multishot arm reports its result the same way (no buffer ring is registered here, so the
+    // SQE will complete with ENOBUFS later, but queuing it must succeed).
+    var mshot_msg = std.mem.zeroes(linux.msghdr);
+    mshot_msg.namelen = @intCast(mshot_name_reserve);
+    try std.testing.expect(armMultishotRecv(&ring, &mshot_msg, fd));
 }
 
 test "zix test: UringTx.reap matches only its own two tags" {
