@@ -116,6 +116,13 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             tls_ctx: ?*Tls.Context = null,
             tls_conns: ?TlsConnTable = null,
             tls_gen_counter: u24 = 0,
+            /// The multishot accept re-arm was lost to a full SQ. Retried at the
+            /// top of the next loop pass, mirroring the Http1 URING worker.
+            /// Without this a full SQ at re-arm time stopped the worker from
+            /// ever accepting again while the kernel backlog filled.
+            accept_pending: bool = false,
+            /// Same lost-re-arm guard for the dual-listener TLS accept.
+            tls_accept_pending: bool = false,
 
             const Self = @This();
             const allocator = std.heap.smp_allocator;
@@ -162,7 +169,11 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             }
 
             fn armAccept(self: *Self) void {
-                const sqe = self.getSqe() orelse return;
+                const sqe = self.getSqe() orelse {
+                    self.accept_pending = true;
+                    return;
+                };
+
                 sqe.prep_multishot_accept(self.listener_fd, null, null, 0);
                 sqe.user_data = uring.packUserData(.accept, 0, self.listener_fd);
             }
@@ -274,7 +285,11 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             }
 
             fn armTlsAccept(self: *Self) void {
-                const sqe = self.getSqe() orelse return;
+                const sqe = self.getSqe() orelse {
+                    self.tls_accept_pending = true;
+                    return;
+                };
+
                 sqe.prep_multishot_accept(self.tls_listener_fd, null, null, 0);
                 sqe.user_data = uring.packUserData(.tls_accept, 0, self.tls_listener_fd);
             }
@@ -431,6 +446,17 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                         error.SignalInterrupt => continue,
                         else => return,
                     };
+
+                    // The submit above freed SQ space: retry an accept re-arm
+                    // lost to a full SQ, so the worker never stops accepting.
+                    if (self.accept_pending) {
+                        self.accept_pending = false;
+                        self.armAccept();
+                    }
+                    if (self.tls_accept_pending) {
+                        self.tls_accept_pending = false;
+                        self.armTlsAccept();
+                    }
 
                     const count = self.ring.copy_cqes(&cqes, 0) catch return;
                     for (cqes[0..count]) |cqe| {
