@@ -1304,9 +1304,22 @@ fn serveGrpcLoop(
                     }
                 }
 
-                const to_copy = @min(data.len, stream.body.len - stream.body_len);
-                @memcpy(stream.body[stream.body_len..][0..to_copy], data[0..to_copy]);
-                stream.body_len += to_copy;
+                // Same shed as the mux path: a payload past the body cap ends
+                // the stream with RESOURCE_EXHAUSTED trailers instead of a
+                // silent truncate that would dispatch a corrupt message.
+                if (data.len > stream.body.len - stream.body_len) {
+                    {
+                        conn_mutex.lock();
+                        defer conn_mutex.unlock();
+                        frame.sendGrpcErrorFD(fd, stream_id, @intFromEnum(GrpcStatus.RESOURCE_EXHAUSTED), "request message exceeds max_body") catch {};
+                    }
+
+                    stream_slots[slot] = false;
+                    continue;
+                }
+
+                @memcpy(stream.body[stream.body_len..][0..data.len], data);
+                stream.body_len += data.len;
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
@@ -1894,9 +1907,21 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                     }
                 }
 
-                const to_copy = @min(data.len, stream.body.len - stream.body_len);
-                @memcpy(stream.body[stream.body_len..][0..to_copy], data[0..to_copy]);
-                stream.body_len += to_copy;
+                // A payload past the body cap can not be served truncated (the
+                // dispatched message would be corrupt). Shed the started stream
+                // with RESOURCE_EXHAUSTED trailers and free the slot. Any later
+                // DATA for it lands on the findSlot miss above and gets
+                // RST(STREAM_CLOSED), other streams on the connection continue.
+                if (data.len > stream.body.len - stream.body_len) {
+                    var err_buf: [frame.headers_frame_scratch]u8 = undefined;
+                    const err_len = frame.buildGrpcError(&err_buf, stream_id, @intFromEnum(GrpcStatus.RESOURCE_EXHAUSTED), "request message exceeds max_body");
+                    conn.stage.append(err_buf[0..err_len]);
+                    muxReleaseSlot(conn, slot);
+                    continue;
+                }
+
+                @memcpy(stream.body[stream.body_len..][0..data.len], data);
+                stream.body_len += data.len;
                 stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
@@ -2573,4 +2598,130 @@ test "zix grpc: stream slots are pooled across connections" {
     try std.testing.expectEqual(@as(u31, 3), conn_b.streams[slot_b].id);
 
     muxReleaseSlot(conn_b, slot_b);
+}
+
+test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED trailers" {
+    const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 256 };
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // HEADERS for stream 1 (END_HEADERS, no END_STREAM): claims a slot and waits for DATA.
+    var enc_scratch: [256]u8 = undefined;
+    var enc = h2.HpackEncoder.init(&enc_scratch);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/svc.Svc/Method");
+    const hblock = enc.encoded();
+
+    var off: usize = 0;
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = @intCast(hblock.len), .frame_type = h2.FRAME_TYPE_HEADERS, .flags = h2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(conn.rbuf[off + 9 ..][0..hblock.len], hblock);
+    off += 9 + hblock.len;
+
+    // DATA with twice the body cap: the stream must be shed, not truncated.
+    const big: [32]u8 = @splat(0xaa);
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = big.len, .frame_type = h2.FRAME_TYPE_DATA, .flags = 0, .stream_id = 1 });
+    @memcpy(conn.rbuf[off + 9 ..][0..big.len], &big);
+    off += 9 + big.len;
+
+    // A second DATA for the shed stream must land on the freed-slot path
+    // (RST STREAM_CLOSED), proving a stale stream reference after the shed
+    // never touches recycled slot memory.
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = 4, .frame_type = h2.FRAME_TYPE_DATA, .flags = 0, .stream_id = 1 });
+    @memcpy(conn.rbuf[off + 9 ..][0..4], big[0..4]);
+    off += 9 + 4;
+    conn.rend = off;
+
+    const outcome = muxFrameLoop(&[_]Route{}, conn);
+
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, outcome);
+    for (conn.slots) |in_use| try std.testing.expect(!in_use);
+
+    // First staged frame: trailers-only HEADERS carrying grpc-status 8 (RESOURCE_EXHAUSTED).
+    const staged = conn.stage.buf[0..conn.stage.len];
+    const fh_err = h2.parseFrameHeader(staged[0..9]);
+    try std.testing.expectEqual(h2.FRAME_TYPE_HEADERS, fh_err.frame_type);
+    try std.testing.expectEqual(h2.FLAG_END_HEADERS | h2.FLAG_END_STREAM, fh_err.flags);
+    try std.testing.expectEqual(@as(u31, 1), fh_err.stream_id);
+
+    var decoder = h2.HpackDecoder.init();
+    var headers: [8]h2.Header = undefined;
+    var scratch: [512]u8 = undefined;
+    const count = try decoder.decode(staged[9..][0..fh_err.length], &headers, &scratch);
+
+    var saw_status = false;
+    for (headers[0..count]) |hdr| {
+        if (std.mem.eql(u8, hdr.name, "grpc-status") and std.mem.eql(u8, hdr.value, "8")) saw_status = true;
+    }
+    try std.testing.expect(saw_status);
+
+    // Second staged frame: RST_STREAM(STREAM_CLOSED) answering the stale DATA.
+    const rst_off = 9 + @as(usize, fh_err.length);
+    const fh_rst = h2.parseFrameHeader(staged[rst_off..][0..9]);
+    try std.testing.expectEqual(h2.FRAME_TYPE_RST_STREAM, fh_rst.frame_type);
+    try std.testing.expectEqual(@as(u31, 1), fh_rst.stream_id);
+
+    const rst_code: u32 = (@as(u32, staged[rst_off + 9]) << 24) | (@as(u32, staged[rst_off + 10]) << 16) |
+        (@as(u32, staged[rst_off + 11]) << 8) | staged[rst_off + 12];
+    try std.testing.expectEqual(h2.ERR_STREAM_CLOSED, rst_code);
+}
+
+test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
+    const opts = GrpcServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 256 };
+
+    const fds = try std.Io.Threaded.pipe2(.{});
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    var enc_scratch: [256]u8 = undefined;
+    var enc = h2.HpackEncoder.init(&enc_scratch);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/svc.Svc/Method");
+    const hblock = enc.encoded();
+
+    // Stream 1 claims the only slot (no END_STREAM, so it stays open).
+    var off: usize = 0;
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = @intCast(hblock.len), .frame_type = h2.FRAME_TYPE_HEADERS, .flags = h2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(conn.rbuf[off + 9 ..][0..hblock.len], hblock);
+    off += 9 + hblock.len;
+
+    // Stream 3 finds no free slot and must be refused, not queued and not served.
+    var enc_scratch2: [256]u8 = undefined;
+    var enc2 = h2.HpackEncoder.init(&enc_scratch2);
+    try enc2.writeHeader(":method", "POST");
+    try enc2.writeHeader(":path", "/svc.Svc/Method");
+    const hblock2 = enc2.encoded();
+
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = @intCast(hblock2.len), .frame_type = h2.FRAME_TYPE_HEADERS, .flags = h2.FLAG_END_HEADERS, .stream_id = 3 });
+    @memcpy(conn.rbuf[off + 9 ..][0..hblock2.len], hblock2);
+    off += 9 + hblock2.len;
+    conn.rend = off;
+
+    const outcome = muxFrameLoop(&[_]Route{}, conn);
+
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, outcome);
+
+    // Stream 1 keeps its slot, the refusal never disturbs an accepted stream.
+    try std.testing.expect(conn.slots[0]);
+    try std.testing.expectEqual(@as(u31, 1), conn.streams[0].id);
+
+    // The staged reply is RST_STREAM(REFUSED_STREAM) for stream 3: guaranteed
+    // unprocessed, safe for the client to retry.
+    const staged = conn.stage.buf[0..conn.stage.len];
+    const fh_rst = h2.parseFrameHeader(staged[0..9]);
+    try std.testing.expectEqual(h2.FRAME_TYPE_RST_STREAM, fh_rst.frame_type);
+    try std.testing.expectEqual(@as(u31, 3), fh_rst.stream_id);
+
+    const rst_code: u32 = (@as(u32, staged[9]) << 24) | (@as(u32, staged[10]) << 16) |
+        (@as(u32, staged[11]) << 8) | staged[12];
+    try std.testing.expectEqual(h2.ERR_REFUSED_STREAM, rst_code);
 }
