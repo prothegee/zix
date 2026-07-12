@@ -302,7 +302,7 @@ const checks = [_]Check{
     }.f },
     .{ .label = "http1-websocket", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runWs(io, paths[0], 9028, "/ws");
+            return checks_http.runWs(io, paths[0], 9028, "/ws/lobby");
         }
     }.f },
     .{ .label = "http1-cache", .run = &struct {

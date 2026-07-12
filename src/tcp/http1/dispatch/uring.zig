@@ -167,6 +167,19 @@ const UringConn = struct {
     prev: ?*UringConn = null,
 };
 
+/// Which re-arm a parked process-queue entry retries.
+const ParkKind = enum(u8) { recv, drain_recv, send };
+
+/// Postponed re-arm reference for the process queue (config.process_queue_len).
+/// Holds no request bytes: the connection's own buffers keep the data, the
+/// entry only records which arm to retry once the submission queue has space.
+/// The generation guards against fd reuse, a stale entry is skipped.
+const ParkEntry = struct {
+    fd: std.posix.fd_t,
+    gen: u24,
+    kind: ParkKind,
+};
+
 /// Ring-hosted TLS connection (dual listener, config.tls_port): the shared TLS connection
 /// (tls_mux) plus ring bookkeeping. The ciphertext recv buffer is per connection because the
 /// kernel fills it asynchronously (the .EPOLL paths read into per-event stack staging instead).
@@ -259,6 +272,21 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// increment (no contention), reported through the system logger at worker
         /// exit so REUSEPORT skew across workers is measurable.
         requests_served: u64 = 0,
+        /// The multishot accept re-arm was lost to a full SQ. Retried at the top
+        /// of the next loop pass. Without this a full SQ at re-arm time stopped
+        /// the worker from ever accepting again while the kernel backlog filled.
+        accept_pending: bool = false,
+        /// Same lost-re-arm guard for the dual-listener TLS accept.
+        tls_accept_pending: bool = false,
+        /// Process queue (config.process_queue_len): FIFO ring of postponed
+        /// re-arm references, preallocated once at startup. Empty = feature off.
+        /// When full the newest entry is rejected (the connection falls back to
+        /// the close path), so parked work always drains in arrival order.
+        park_entries: []ParkEntry = &.{},
+        /// Ring read position of the oldest parked entry.
+        park_head: usize = 0,
+        /// Parked entries currently in the ring.
+        park_len: usize = 0,
 
         const Self = @This();
         const allocator = std.heap.smp_allocator;
@@ -291,6 +319,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
 
             slab.unmapSlots(self.slots);
+            if (self.park_entries.len > 0) allocator.free(self.park_entries);
             allocator.free(self.ws_payload_buf);
             allocator.free(self.body_buf);
             if (self.ws_bufs) |*bg| bg.deinit(allocator);
@@ -309,13 +338,83 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         fn lookup(self: *Self, decoded: uring.Decoded) ?*UringConn {
-            const idx: usize = @intCast(decoded.fd);
+            return self.lookupFd(decoded.fd, decoded.gen);
+        }
+
+        /// Slot lookup by fd + generation. A mismatched generation means the fd
+        /// was closed and reused, so the reference is stale and must be ignored.
+        fn lookupFd(self: *Self, fd: std.posix.fd_t, gen: u24) ?*UringConn {
+            const idx: usize = @intCast(fd);
             if (idx >= self.slots.len) return null;
 
             const conn = self.slots[idx] orelse return null;
-            if (conn.gen != decoded.gen) return null;
+            if (conn.gen != gen) return null;
 
             return conn;
+        }
+
+        /// Park a postponed re-arm on the process queue (FIFO ring).
+        ///
+        /// Return:
+        /// - true when parked
+        /// - false when the feature is off (empty ring) or the ring is full
+        ///   (reject-newest, the caller falls back to the close path)
+        fn parkPush(self: *Self, kind: ParkKind, fd: std.posix.fd_t, gen: u24) bool {
+            if (self.park_entries.len == 0) return false;
+            if (self.park_len == self.park_entries.len) return false;
+
+            const tail = (self.park_head + self.park_len) % self.park_entries.len;
+            self.park_entries[tail] = .{ .fd = fd, .gen = gen, .kind = kind };
+            self.park_len += 1;
+
+            return true;
+        }
+
+        /// Pop the oldest parked entry, or null when the ring is empty.
+        fn parkPop(self: *Self) ?ParkEntry {
+            if (self.park_len == 0) return null;
+
+            const entry = self.park_entries[self.park_head];
+            self.park_head = (self.park_head + 1) % self.park_entries.len;
+            self.park_len -= 1;
+
+            return entry;
+        }
+
+        /// Retry postponed work once the SQ has space again: the lost accept
+        /// re-arms first (a lost accept stalls the worker permanently), then the
+        /// parked entries in FIFO order. Runs at the top of each loop pass,
+        /// right after submit_and_wait pushed the staged SQEs to the kernel.
+        /// Stops as soon as a retry re-parks (the SQ filled up again), the
+        /// remaining entries wait for the next pass. Stale entries (gen
+        /// mismatch after a close and fd reuse) are dropped as no-ops.
+        fn drainParked(self: *Self) void {
+            if (self.accept_pending) {
+                self.accept_pending = false;
+                self.armAccept();
+                if (self.accept_pending) return;
+            }
+
+            if (self.tls_accept_pending) {
+                self.tls_accept_pending = false;
+                self.armTlsAccept();
+                if (self.tls_accept_pending) return;
+            }
+
+            var budget = self.park_len;
+            while (budget > 0) : (budget -= 1) {
+                const entry = self.parkPop() orelse return;
+                const before = self.park_len;
+
+                const conn = self.lookupFd(entry.fd, entry.gen) orelse continue;
+                switch (entry.kind) {
+                    .recv => self.armRecv(conn),
+                    .drain_recv => self.armDrainRecv(conn),
+                    .send => self.submitSend(conn),
+                }
+
+                if (self.park_len > before) return;
+            }
         }
 
         /// Take a connection object for a freshly accepted fd: pop one from the
@@ -514,7 +613,13 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         fn armAccept(self: *Self) void {
-            const sqe = self.getSqe() orelse return;
+            const sqe = self.getSqe() orelse {
+                // SQ full even after a submit: mark the re-arm pending so the
+                // loop retries next pass. Losing it stops accepting for good.
+                self.accept_pending = true;
+                return;
+            };
+
             sqe.prep_multishot_accept(self.listener_fd, null, null, 0);
             sqe.user_data = uring.packUserData(.accept, 0, self.listener_fd);
         }
@@ -535,9 +640,14 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
 
             const sqe = self.getSqe() orelse {
+                // SQ full: park the re-arm on the process queue when it is on
+                // (retried next pass), otherwise keep the close behavior.
+                if (self.parkPush(.recv, conn.fd, conn.gen)) return;
+
                 self.beginClose(conn);
                 return;
             };
+
             sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
             sqe.user_data = uring.packUserData(.recv, conn.gen, conn.fd);
         }
@@ -558,6 +668,9 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         fn armDrainRecv(self: *Self, conn: *UringConn) void {
             const want = @min(conn.drain, common.MAX_DRAIN_RECV);
             const sqe = self.getSqe() orelse {
+                // SQ full: park like armRecv, close only when parking is off or full.
+                if (self.parkPush(.drain_recv, conn.fd, conn.gen)) return;
+
                 self.beginClose(conn);
                 return;
             };
@@ -569,22 +682,34 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
 
         /// Arm a buffer-select recv for a WebSocket connection: the kernel picks
         /// a buffer from the shared ring only when a frame arrives. Submits and
-        /// retries once if the SQ is momentarily full.
+        /// retries once if the SQ is momentarily full. A second failure parks
+        /// on the process queue when it is on (the drain retries armRecv, which
+        /// routes back here for a WS connection), otherwise closes.
         fn armWsRecv(self: *Self, conn: *UringConn, bg: *IoUring.BufferGroup) void {
             const ud = uring.packUserData(.recv, conn.gen, conn.fd);
             if (bg.recv(ud, conn.fd, 0)) |_| {
                 return;
             } else |_| {
                 _ = self.ring.submit() catch {};
-                if (bg.recv(ud, conn.fd, 0)) |_| {} else |_| self.beginClose(conn);
+                if (bg.recv(ud, conn.fd, 0)) |_| {} else |_| {
+                    if (self.parkPush(.recv, conn.fd, conn.gen)) return;
+
+                    self.beginClose(conn);
+                }
             }
         }
 
         fn submitSend(self: *Self, conn: *UringConn) void {
             const sqe = self.getSqe() orelse {
+                // SQ full: park the send when the process queue is on. The
+                // staged bytes stay in conn.send_buf (inflight stays 0), the
+                // retry re-enters here with the SQ drained.
+                if (self.parkPush(.send, conn.fd, conn.gen)) return;
+
                 self.finishClose(conn);
                 return;
             };
+
             sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], linux.MSG.NOSIGNAL);
             sqe.user_data = uring.packUserData(.send, conn.gen, conn.fd);
 
@@ -973,7 +1098,12 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         }
 
         fn armTlsAccept(self: *Self) void {
-            const sqe = self.getSqe() orelse return;
+            const sqe = self.getSqe() orelse {
+                // Same lost-re-arm guard as armAccept, for the TLS listener.
+                self.tls_accept_pending = true;
+                return;
+            };
+
             sqe.prep_multishot_accept(self.tls_listener_fd, null, null, 0);
             sqe.user_data = uring.packUserData(.tls_accept, 0, self.tls_listener_fd);
         }
@@ -1136,6 +1266,11 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                     else => return,
                 };
 
+                // The submit above pushed the staged SQEs to the kernel, so the
+                // SQ has room again: retry the pending accept re-arm and the
+                // parked process-queue entries before reaping new completions.
+                self.drainParked();
+
                 const count = self.ring.copy_cqes(&cqes, 0) catch return;
                 for (cqes[0..count]) |cqe| {
                     const decoded = uring.unpackUserData(cqe.user_data);
@@ -1235,10 +1370,18 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             // bytes.
             const body_buf = std.heap.smp_allocator.alloc(u8, conn_buf_size) catch return;
 
+            // Process queue (config.process_queue_len): the FIFO ring of
+            // postponed re-arm references, preallocated once. Empty when 0 (off).
+            const park_entries: []ParkEntry = if (config.process_queue_len > 0)
+                std.heap.smp_allocator.alloc(ParkEntry, config.process_queue_len) catch return
+            else
+                &.{};
+
             const Worker = UringWorker(handler_fn, raw_fn);
             var worker = Worker{
                 .ring = undefined,
                 .slots = slots,
+                .park_entries = park_entries,
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .recv_buf_size = conn_buf_size,
@@ -1614,6 +1757,253 @@ test "zix http1: URING releaseConn pools warm under cap, acquireConn reuses LIFO
     const second = worker.acquireConn().?;
     try std.testing.expectEqual(@as(?*UringConn, conn_a), second);
     try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+}
+
+test "zix http1: URING process queue parks FIFO, rejects the newest at full, and wraps" {
+    const Worker = UringWorker(testOkHandler, null);
+    var entries: [2]ParkEntry = undefined;
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .park_entries = &entries,
+    };
+
+    try std.testing.expect(worker.parkPush(.recv, 10, 1));
+    try std.testing.expect(worker.parkPush(.send, 11, 2));
+
+    // Full: the newest entry is rejected, the parked ones stay untouched.
+    try std.testing.expect(!worker.parkPush(.recv, 12, 3));
+    try std.testing.expectEqual(@as(usize, 2), worker.park_len);
+
+    // FIFO: the oldest entry pops first.
+    const first = worker.parkPop().?;
+    try std.testing.expectEqual(@as(std.posix.fd_t, 10), first.fd);
+    try std.testing.expectEqual(ParkKind.recv, first.kind);
+
+    // Wrap: this push lands past the ring end and still pops in order.
+    try std.testing.expect(worker.parkPush(.drain_recv, 12, 3));
+
+    const second = worker.parkPop().?;
+    try std.testing.expectEqual(@as(std.posix.fd_t, 11), second.fd);
+    try std.testing.expectEqual(ParkKind.send, second.kind);
+
+    const third = worker.parkPop().?;
+    try std.testing.expectEqual(ParkKind.drain_recv, third.kind);
+    try std.testing.expectEqual(@as(?ParkEntry, null), worker.parkPop());
+}
+
+test "zix http1: URING process queue off (len 0) never parks" {
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+    };
+
+    try std.testing.expect(!worker.parkPush(.recv, 10, 1));
+    try std.testing.expectEqual(@as(usize, 0), worker.park_len);
+    try std.testing.expectEqual(@as(?ParkEntry, null), worker.parkPop());
+}
+
+test "zix http1: URING drainParked drops a stale gen entry without touching the connection" {
+    const gpa = std.testing.allocator;
+
+    const Worker = UringWorker(testOkHandler, null);
+    var slots: [16]?*UringConn = @splat(null);
+    var entries: [4]ParkEntry = undefined;
+    var worker = Worker{
+        .ring = undefined,
+        .slots = &slots,
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .park_entries = &entries,
+    };
+
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = 5, .gen = 2, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+    slots[5] = conn;
+
+    // Parked under gen 1, then the fd closed and was reused under gen 2: the
+    // entry is stale and must be a no-op, never an arm on the new connection.
+    try std.testing.expect(worker.parkPush(.recv, 5, 1));
+
+    worker.drainParked();
+
+    try std.testing.expectEqual(@as(usize, 0), worker.park_len);
+    try std.testing.expect(!conn.closing);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+}
+
+test "zix http1: URING pending accept re-arm is retried by drainParked" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const linux = std.os.linux;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+    }
+
+    const Worker = UringWorker(testOkHandler, null);
+    var worker = Worker{
+        .ring = initUringRing() catch return error.SkipZigTest,
+        .slots = &[_]?*UringConn{},
+        .listener_fd = fds[0],
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+    };
+    defer worker.ring.deinit();
+
+    // Simulate an accept re-arm lost to a full SQ: the flag is set and no SQE
+    // exists yet. drainParked must stage the accept and clear the flag.
+    worker.accept_pending = true;
+
+    worker.drainParked();
+
+    try std.testing.expect(!worker.accept_pending);
+    try std.testing.expectEqual(@as(u32, 1), worker.ring.sq_ready());
+}
+
+test "zix http1: URING drainParked re-arms a parked recv on the ring" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const linux = std.os.linux;
+    const gpa = std.testing.allocator;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+    }
+
+    const Worker = UringWorker(testOkHandler, null);
+    var entries: [4]ParkEntry = undefined;
+    var worker = Worker{
+        .ring = initUringRing() catch return error.SkipZigTest,
+        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .park_entries = &entries,
+    };
+    @memset(worker.slots, null);
+    defer {
+        worker.ring.deinit();
+        gpa.free(worker.slots);
+    }
+
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+    worker.slots[@intCast(fds[1])] = conn;
+
+    // A recv parked while the SQ was full is re-armed on the next drain pass:
+    // the entry leaves the ring and one recv SQE is staged for the connection.
+    try std.testing.expect(worker.parkPush(.recv, fds[1], 1));
+
+    worker.drainParked();
+
+    try std.testing.expectEqual(@as(usize, 0), worker.park_len);
+    try std.testing.expectEqual(@as(u32, 1), worker.ring.sq_ready());
+    try std.testing.expect(!conn.closing);
+}
+
+test "zix http1: URING drainParked re-arms a parked WS recv through the buffer ring" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const linux = std.os.linux;
+    const gpa = std.testing.allocator;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+    }
+
+    const Worker = UringWorker(testOkHandler, null);
+    var entries: [4]ParkEntry = undefined;
+    var worker = Worker{
+        .ring = initUringRing() catch return error.SkipZigTest,
+        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .listener_fd = -1,
+        .gen_counter = 0,
+        .recv_buf_size = 64,
+        .handler_timeout_ms = 0,
+        .ws_payload_buf = &[_]u8{},
+        .body_buf = &[_]u8{},
+        .ws_bufs = null,
+        .park_entries = &entries,
+    };
+    @memset(worker.slots, null);
+    defer {
+        worker.ring.deinit();
+        gpa.free(worker.slots);
+    }
+
+    // Shared provided-buffer ring, skip where the kernel lacks buffer rings
+    // (the engine then uses the plain recv path, covered by the test above).
+    worker.ws_bufs = IoUring.BufferGroup.init(&worker.ring, gpa, WS_RING_BGID, WS_RING_BUF_SIZE, 4) catch return error.SkipZigTest;
+    defer if (worker.ws_bufs) |*bg| bg.deinit(gpa);
+
+    const conn = try gpa.create(UringConn);
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false, .ws = testWsEcho };
+    defer {
+        gpa.free(conn.buf);
+        gpa.free(conn.send_buf);
+        gpa.destroy(conn);
+    }
+    worker.slots[@intCast(fds[1])] = conn;
+
+    // A parked upgraded connection re-arms through armRecv -> armWsRecv: the
+    // entry leaves the ring and one buffer-select recv SQE is staged, the
+    // connection is never closed. The frames themselves waited in the kernel
+    // socket buffer the whole time, so delay is the only possible symptom.
+    try std.testing.expect(worker.parkPush(.recv, fds[1], 1));
+
+    worker.drainParked();
+
+    try std.testing.expectEqual(@as(usize, 0), worker.park_len);
+    try std.testing.expectEqual(@as(u32, 1), worker.ring.sq_ready());
+    try std.testing.expect(!conn.closing);
 }
 
 test "zix http1: URING idleCap clamps between the floor and the ceiling as live concurrency moves" {

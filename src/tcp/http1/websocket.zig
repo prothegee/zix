@@ -679,6 +679,20 @@ test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
     try std.testing.expectEqualStrings("yo", second.frame.payload);
 }
 
+test "zix http1 ws: pumpRing overflow fallback on a dead fd reports close" {
+    // Masked client text frame "hi": its echo is a 4-byte server frame. An
+    // out_buf of 2 cannot stage it, forcing the direct-write fallback, and
+    // fd -1 makes that write fail. The pump must report close: a consumer
+    // that cannot take its echoes is shed, never buffered further.
+    const data = [_]u8{ 0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02 };
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [2]u8 = undefined;
+    const result = pumpRing(-1, &data, &payload_buf, &out_buf, testEcho);
+
+    try std.testing.expect(result.close);
+}
+
 test "zix http1 ws: pumpRing reports close and consumes the close frame" {
     // Masked client close frame (opcode 0x8) with an empty payload.
     const data = [_]u8{ 0x88, 0x80, 0x01, 0x02, 0x03, 0x04 };
