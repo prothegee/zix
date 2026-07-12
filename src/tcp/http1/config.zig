@@ -59,6 +59,11 @@ pub const Http1ServerConfig = struct {
     /// upper bound, warm cap = clamp(live_count, floor, ceiling). Holds the warm set below a large
     /// live working set, whose resident buffers otherwise double RSS and cost cache / TLB pressure.
     uring_idle_pool_ceiling: usize = 256,
+    /// Process queue capacity (entry count) for the .URING dispatch model: a recv or send that
+    /// finds the submission queue full is parked on a per-worker FIFO ring of this length
+    /// (references only, fd + generation) and retried next loop pass instead of closing the
+    /// connection. 0 (default) = off. No effect under the other models.
+    process_queue_len: usize = 0,
     /// No-op with the lazy engine. Kept for source compatibility.
     max_headers: u8 = 16,
     /// Per-handler execution budget in milliseconds. 0 = disabled. When non-zero, a thread-local
@@ -125,6 +130,7 @@ test "zix http1: Http1ServerConfig URING knob defaults" {
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
     try std.testing.expectEqual(@as(usize, 8), cfg.uring_idle_pool_floor);
     try std.testing.expectEqual(@as(usize, 256), cfg.uring_idle_pool_ceiling);
+    try std.testing.expectEqual(@as(usize, 0), cfg.process_queue_len);
 }
 
 test "zix http1: Http1ServerConfig worker stack defaults" {
