@@ -90,7 +90,7 @@ pub fn addSteps(
         // http1 sse runner
         .{ "test-runner-http1-sse", "tests/runner/sse_runner.zig", "tr-server-http1-sse", "examples/http1_sse.zig", "9027", "", "", "" },
         // http1 websocket runner
-        .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9028", "/ws", "", "" },
+        .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9028", "/ws/lobby", "", "" },
         // http1 websocket runner on the io_uring (.URING) dispatch model
         .{ "test-runner-http1-websocket-uring", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-uring", "examples/http1_websocket_uring.zig", "9029", "/ws", "", "" },
         // http1 response-cache runner (unique port; small body so the GET is bounded)
