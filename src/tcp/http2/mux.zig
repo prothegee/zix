@@ -88,6 +88,11 @@ pub const MuxConn = struct {
     send_window: i64 = 65535,
     peer_init_window: i64 = 65535,
 
+    /// The peer's SETTINGS_MAX_FRAME_SIZE (RFC 7540 6.5.2): the largest DATA frame it will accept.
+    /// Defaults to 16384 until the peer advertises a larger value. Outbound DATA is sized by this,
+    /// never by our own receive-side max_frame_size, which the peer may reject as FRAME_SIZE_ERROR.
+    peer_max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE,
+
     /// Allocate and initialize a connection. Returns null on allocation failure (caller closes fd).
     pub fn init(fd: std.posix.fd_t, opts: core.ServeOpts) ?*MuxConn {
         const a = std.heap.smp_allocator;
@@ -295,7 +300,7 @@ fn pumpBody(conn: *MuxConn, stream: *MuxStream, body: []const u8, end: bool) voi
         const room = @min(conn.send_window, stream.send_window);
         if (room <= 0) break;
 
-        const cap = @min(@as(i64, conn.opts.max_frame_size), room);
+        const cap = @min(@as(i64, conn.peer_max_frame_size), room);
         const chunk = @min(body.len - off, @as(usize, @intCast(cap)));
         const is_last = end and (off + chunk == body.len);
 
@@ -502,6 +507,12 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                         for (conn.slots, 0..) |in_use, slot| {
                             if (in_use) conn.streams[slot].send_window += delta;
                         }
+                    }
+                    if (id == frame.SETTINGS_MAX_FRAME_SIZE) {
+                        // RFC 7540 6.5.2: the peer's largest acceptable frame, valid range
+                        // 16384..16777215. Cap outbound DATA to it so we never emit a frame the peer
+                        // rejects with FRAME_SIZE_ERROR. An out-of-range value keeps the last good one.
+                        if (val >= frame.DEFAULT_MAX_FRAME_SIZE and val <= 16_777_215) conn.peer_max_frame_size = val;
                     }
                 }
                 frame.sendSettingsAckFD(conn.fd) catch {};
@@ -1160,4 +1171,232 @@ test "zix test: mux stream slots are pooled across connections" {
     try std.testing.expectEqual(@as(u31, 3), conn_b.streams[slot_b].id);
 
     releaseSlot(conn_b, slot_b);
+}
+
+// The static-h2 bench stalls when several large-body streams share one connection window: the first
+// stream drains the window, the rest park, and every parked stream must resume as connection-level
+// WINDOW_UPDATE credit arrives. The single-stream tests above never exercise more than one parked
+// body at a time, so they miss a resumeAll that fails to drain the full parked set.
+var multi_body: [4000]u8 = undefined;
+
+fn multiBodyHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
+    sendResponseStreamFD(fd, sid, 200, "text/plain", "", &multi_body);
+}
+
+const multi_body_routes = [_]Route{.{ .path = "/", .handler = multiBodyHandler }};
+
+/// Read every byte currently in the pipe (non-blocking), tallying DATA payload and END_STREAM flags per
+/// stream. Used by the flow-control drain tests to prove the whole body reached the wire.
+const DrainTally = struct {
+    data_bytes: usize = 0,
+    end_streams: usize = 0,
+};
+
+fn drainDataTally(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, buf: []u8) DrainTally {
+    // Half-close the writer so the drain read sees EOF once the buffered frames are consumed (the fd
+    // itself stays open for the test's deferred close).
+    _ = std.os.linux.shutdown(write_fd, std.os.linux.SHUT.WR);
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(read_fd, buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var tally = DrainTally{};
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        if (fh.frame_type == frame.FRAME_TYPE_DATA) {
+            tally.data_bytes += fh.length;
+            if ((fh.flags & frame.FLAG_END_STREAM) != 0) tally.end_streams += 1;
+        }
+        off += fh.length;
+    }
+
+    return tally;
+}
+
+test "zix test: mux resumes every parked stream sharing one connection window" {
+    @memset(&multi_body, 'm');
+
+    // A socketpair's default buffer holds the whole reply set without blocking the writer, so a single
+    // thread can drive the frame loop and read the wire back afterwards.
+    var pair: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+    defer _ = std.posix.system.close(pair[1]);
+
+    const opts = core.ServeOpts{ .max_streams = 8, .max_body = 256, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // Large per-stream windows so the shared connection window (small here) is the sole bottleneck, the
+    // same shape as a client that advertises a big stream window but grants the connection window in
+    // steps.
+    conn.send_window = 1000;
+    conn.peer_init_window = 1 << 20;
+
+    // four concurrent GETs (streams 1, 3, 5, 7), each dispatching the 4000-byte body
+    const sids = [_]u31{ 1, 3, 5, 7 };
+    for (sids) |sid| {
+        var hblk: [64]u8 = undefined;
+        var enc = hpack.HpackEncoder.init(&hblk);
+        try enc.writeHeader(":method", "GET");
+        try enc.writeHeader(":path", "/");
+        feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, sid, enc.encoded());
+    }
+    _ = muxFrameLoop(&multi_body_routes, conn);
+
+    // stream 1 sent the 1000-byte window, the other three could not start: four slots still parked
+    var parked: usize = 0;
+    for (sids) |sid| {
+        if (findSlot(sid, conn.streams, conn.slots)) |slot| {
+            if (conn.streams[slot].pending_body.len > 0) parked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), parked);
+    try std.testing.expectEqual(@as(i64, 0), conn.send_window);
+
+    // grant the connection window the full remaining credit (3000 + 3 * 4000), which must resume and
+    // fully drain every parked stream
+    const remaining: u32 = 3000 + 3 * 4000;
+    const inc = [4]u8{
+        @intCast((remaining >> 24) & 0x7f),
+        @intCast((remaining >> 16) & 0xff),
+        @intCast((remaining >> 8) & 0xff),
+        @intCast(remaining & 0xff),
+    };
+    feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 0, &inc);
+    _ = muxFrameLoop(&multi_body_routes, conn);
+
+    // every slot is freed and every body reached the wire, each ending with END_STREAM
+    for (sids) |sid| {
+        try std.testing.expect(findSlot(sid, conn.streams, conn.slots) == null);
+    }
+
+    var buf: [64 * 1024]u8 = undefined;
+    const tally = drainDataTally(pair[0], pair[1], &buf);
+    try std.testing.expectEqual(@as(usize, 4 * multi_body.len), tally.data_bytes);
+    try std.testing.expectEqual(@as(usize, 4), tally.end_streams);
+}
+
+test "zix test: mux parks on an exhausted stream window until a stream WINDOW_UPDATE arrives" {
+    @memset(&multi_body, 'm');
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+    defer _ = std.posix.system.close(pair[1]);
+
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
+    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // Roomy connection window, tiny per-stream window: the stream window is the limit, so only a
+    // stream-level WINDOW_UPDATE may resume the parked tail. A connection-level grant must not.
+    conn.send_window = 1 << 20;
+    conn.peer_init_window = 500;
+
+    var hblk: [64]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+    _ = muxFrameLoop(&multi_body_routes, conn);
+
+    const slot = findSlot(1, conn.streams, conn.slots).?;
+    try std.testing.expectEqual(@as(usize, multi_body.len - 500), conn.streams[slot].pending_body.len);
+
+    // a connection-level grant alone leaves the body parked (the stream window is still zero)
+    const conn_inc = [4]u8{ 0, 0, 0x27, 0x10 }; // +10000
+    feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 0, &conn_inc);
+    _ = muxFrameLoop(&multi_body_routes, conn);
+    try std.testing.expectEqual(@as(usize, multi_body.len - 500), conn.streams[slot].pending_body.len);
+
+    // the stream-level grant resumes and fully drains the tail, freeing the slot
+    const stream_inc = [4]u8{ 0, 0, 0x0f, 0xa0 }; // +4000
+    feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 1, &stream_inc);
+    _ = muxFrameLoop(&multi_body_routes, conn);
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
+
+    var buf: [8 * 1024]u8 = undefined;
+    const tally = drainDataTally(pair[0], pair[1], &buf);
+    try std.testing.expectEqual(@as(usize, multi_body.len), tally.data_bytes);
+    try std.testing.expectEqual(@as(usize, 1), tally.end_streams);
+}
+
+// A body streamed to a peer that never advertised SETTINGS_MAX_FRAME_SIZE must be framed in <= 16384
+// (the RFC 7540 default) DATA chunks, NOT the server's own larger max_frame_size: a peer rejects an
+// over-sized frame with FRAME_SIZE_ERROR and tears the connection down (the static-h2 regression, where
+// every file past 16 KiB failed while small files passed).
+var mfs_body: [40000]u8 = undefined;
+
+fn mfsHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
+    sendResponseStreamFD(fd, sid, 200, "application/octet-stream", "", &mfs_body);
+}
+
+const mfs_routes = [_]Route{.{ .path = "/", .handler = mfsHandler }};
+
+test "zix test: outbound DATA frames respect the peer default max frame size, not the server's" {
+    @memset(&mfs_body, 'f');
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+    defer _ = std.posix.system.close(pair[1]);
+
+    // Server configured with a 24 KiB max_frame_size (its own receive-side limit), larger than the
+    // 16384 the peer will accept by default: outbound DATA must still cap at 16384.
+    const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024, .max_frame_size = 24 * 1024 };
+    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // The peer never sent SETTINGS_MAX_FRAME_SIZE, so its limit is the RFC default.
+    try std.testing.expectEqual(@as(u32, frame.DEFAULT_MAX_FRAME_SIZE), conn.peer_max_frame_size);
+
+    var hblk: [64]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+    _ = muxFrameLoop(&mfs_routes, conn);
+
+    // Every DATA frame on the wire must be <= 16384, and together they must carry the whole body.
+    var body_buf: [64 * 1024]u8 = undefined;
+    _ = std.os.linux.shutdown(pair[1], std.os.linux.SHUT.WR);
+    var total: usize = 0;
+    while (total < body_buf.len) {
+        const got = std.posix.read(pair[0], body_buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var data_bytes: usize = 0;
+    var frames: usize = 0;
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(body_buf[off..][0..9]);
+        off += 9;
+        if (fh.frame_type == frame.FRAME_TYPE_DATA) {
+            try std.testing.expect(fh.length <= frame.DEFAULT_MAX_FRAME_SIZE);
+            data_bytes += fh.length;
+            frames += 1;
+        }
+        off += fh.length;
+    }
+
+    try std.testing.expectEqual(@as(usize, mfs_body.len), data_bytes);
+    try std.testing.expect(frames >= 3); // 40000 / 16384 -> at least three frames
+
+    // Once the peer advertises a larger max frame size, the mux records it for subsequent sends.
+    const settings_mfs = [_]u8{ 0x00, 0x05, 0x00, 0x00, 0x60, 0x00 }; // SETTINGS_MAX_FRAME_SIZE = 24576
+    feedFrame(conn, frame.FRAME_TYPE_SETTINGS, 0, 0, &settings_mfs);
+    _ = muxFrameLoop(&mfs_routes, conn);
+    try std.testing.expectEqual(@as(u32, 24 * 1024), conn.peer_max_frame_size);
 }
