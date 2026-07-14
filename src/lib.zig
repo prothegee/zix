@@ -32,6 +32,15 @@ pub const Logger = @import("logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
+pub const Driver = struct {
+    /// zix redis internal db driver
+    pub const rediz = @import("driver/rediz/src/lib.zig");
+    /// zix postgresql internal db driver
+    pub const postgrez = @import("driver/postgrez/src/lib.zig");
+};
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
