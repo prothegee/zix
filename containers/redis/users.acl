@@ -1,0 +1,2 @@
+user default on nopass ~* &* +@all
+user role_acl on >rediz_acl_pw ~* &* +@all
