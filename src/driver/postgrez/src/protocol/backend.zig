@@ -137,7 +137,7 @@ pub const ParameterStatus = struct {
 };
 
 /// ReadyForQuery ('Z') transaction status.
-pub const TxStatus = enum(u8) {
+pub const TransactionStatus = enum(u8) {
     IDLE = 'I',
     IN_TRANSACTION = 'T',
     IN_FAILED_TRANSACTION = 'E',
@@ -336,7 +336,7 @@ pub const BackendMessage = union(enum) {
     auth: Auth,
     backend_key_data: BackendKeyData,
     parameter_status: ParameterStatus,
-    ready_for_query: TxStatus,
+    ready_for_query: TransactionStatus,
     error_response: Fields,
     notice_response: Fields,
     row_description: RowDescription,
@@ -540,12 +540,12 @@ test "postgrez test: parameter_status decodes name and value" {
     try testing.expectEqualStrings("18.0", msg.parameter_status.value);
 }
 
-test "postgrez test: ready_for_query maps tx status" {
+test "postgrez test: ready_for_query maps transaction status" {
     const idle = try decode('Z', "I");
-    try testing.expectEqual(TxStatus.IDLE, idle.ready_for_query);
+    try testing.expectEqual(TransactionStatus.IDLE, idle.ready_for_query);
 
-    const in_tx = try decode('Z', "T");
-    try testing.expectEqual(TxStatus.IN_TRANSACTION, in_tx.ready_for_query);
+    const in_transaction = try decode('Z', "T");
+    try testing.expectEqual(TransactionStatus.IN_TRANSACTION, in_transaction.ready_for_query);
 
     try testing.expectError(error.BadMessage, decode('Z', "X"));
 }

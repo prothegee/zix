@@ -33,6 +33,7 @@ pub const sqlstate = @import("sqlstate.zig");
 pub const conn = @import("conn.zig");
 pub const pool = @import("pool.zig");
 pub const statement = @import("statement.zig");
+pub const executor = @import("executor.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const copy = @import("copy.zig");
 pub const notify = @import("notify.zig");
@@ -85,7 +86,7 @@ pub const Config = struct {
 
 /// Connection surface, re-exported: postgrez.Conn.connect(...).
 pub const Conn = conn.Conn;
-pub const Tx = conn.Tx;
+pub const Transaction = conn.Transaction;
 pub const Result = conn.Result;
 pub const RowView = conn.Row;
 pub const OwnedNotification = conn.OwnedNotification;
@@ -95,6 +96,7 @@ pub const Pool = pool.Pool;
 
 /// Driver features, re-exported.
 pub const Statement = statement.Statement;
+pub const Executor = executor.Executor;
 pub const Pipeline = pipeline.Pipeline;
 pub const PipelineResult = pipeline.PipelineResult;
 pub const PipelineStatus = pipeline.PipelineStatus;
@@ -130,6 +132,7 @@ test {
     _ = conn;
     _ = pool;
     _ = statement;
+    _ = executor;
     _ = pipeline;
     _ = copy;
     _ = notify;

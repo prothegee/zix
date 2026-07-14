@@ -117,7 +117,7 @@ pub const Result = struct {
                 },
                 .notice_response => {},
                 .ready_for_query => |status| {
-                    self.conn.tx_status = status;
+                    self.conn.transaction_status = status;
                     self.done = true;
                     if (self.failed) return error.ServerError;
 
@@ -166,7 +166,7 @@ pub const Conn = struct {
     tls_session: ?*tls_mod.TlsSession = null,
     /// The SASL mechanism the startup used, null for non-SASL auth.
     sasl_mechanism: ?scram_mod.Mechanism = null,
-    tx_status: backend.TxStatus = .IDLE,
+    transaction_status: backend.TransactionStatus = .IDLE,
     last_server_error: sqlstate.ServerError = .{},
     pending_notifications: std.ArrayList(OwnedNotification) = .empty,
     /// The notification handed out by nextNotification, freed on the next call.
@@ -332,7 +332,7 @@ pub const Conn = struct {
                     failed = true;
                 },
                 .ready_for_query => |status| {
-                    self.tx_status = status;
+                    self.transaction_status = status;
                     if (failed) return error.ServerError;
 
                     return affected;
@@ -430,26 +430,26 @@ pub const Conn = struct {
     ///
     /// Usage:
     /// ```zig
-    /// var tx = try conn.begin();
-    /// defer tx.rollback();
-    /// _ = try tx.exec("INSERT ...", .{});
-    /// try tx.commit();
+    /// var transaction = try conn.begin();
+    /// defer transaction.rollback();
+    /// _ = try transaction.exec("INSERT ...", .{});
+    /// try transaction.commit();
     /// ```
-    pub fn begin(self: *Self) !Tx {
+    pub fn begin(self: *Self) !Transaction {
         _ = try self.exec("BEGIN", .{});
 
         return .{ .conn = self };
     }
 
-    /// Callback transaction: BEGIN, run `func(&tx, args...)`, COMMIT.
+    /// Callback transaction: BEGIN, run `func(&transaction, args...)`, COMMIT.
     /// Any error rolls back.
     pub fn transaction(self: *Self, comptime func: anytype, args: anytype) !void {
-        var tx = try self.begin();
-        defer tx.rollback();
+        var active = try self.begin();
+        defer active.rollback();
 
-        try @call(.auto, func, .{&tx} ++ args);
+        try @call(.auto, func, .{&active} ++ args);
 
-        try tx.commit();
+        try active.commit();
     }
 
     // --------------------------------------------------------- //
@@ -591,7 +591,7 @@ pub const Conn = struct {
                 },
                 .notice_response => {},
                 .ready_for_query => |status| {
-                    self.tx_status = status;
+                    self.transaction_status = status;
 
                     return;
                 },
@@ -667,7 +667,7 @@ pub const Conn = struct {
 
             switch (msg) {
                 .ready_for_query => |status| {
-                    self.tx_status = status;
+                    self.transaction_status = status;
 
                     return;
                 },
@@ -730,32 +730,32 @@ pub const Conn = struct {
 // --------------------------------------------------------- //
 
 /// Explicit transaction handle. rollback() after commit() is a no-op.
-pub const Tx = struct {
+pub const Transaction = struct {
     conn: *Conn,
     done: bool = false,
 
-    pub fn exec(self: *Tx, sql: []const u8, args: anytype) !u64 {
+    pub fn exec(self: *Transaction, sql: []const u8, args: anytype) !u64 {
         return self.conn.exec(sql, args);
     }
 
-    pub fn query(self: *Tx, comptime T: type, sql: []const u8, args: anytype) ![]T {
+    pub fn query(self: *Transaction, comptime T: type, sql: []const u8, args: anytype) ![]T {
         return self.conn.query(T, sql, args);
     }
 
-    pub fn queryRow(self: *Tx, comptime T: type, sql: []const u8, args: anytype) !?T {
+    pub fn queryRow(self: *Transaction, comptime T: type, sql: []const u8, args: anytype) !?T {
         return self.conn.queryRow(T, sql, args);
     }
 
-    pub fn rows(self: *Tx, sql: []const u8, args: anytype) !Result {
+    pub fn rows(self: *Transaction, sql: []const u8, args: anytype) !Result {
         return self.conn.rows(sql, args);
     }
 
-    pub fn commit(self: *Tx) !void {
+    pub fn commit(self: *Transaction) !void {
         _ = try self.conn.exec("COMMIT", .{});
         self.done = true;
     }
 
-    pub fn rollback(self: *Tx) void {
+    pub fn rollback(self: *Transaction) void {
         if (self.done) return;
 
         _ = self.conn.exec("ROLLBACK", .{}) catch {};
@@ -902,7 +902,7 @@ test "postgrez test: conn mock startup reaches ready" {
     try testing.expectEqual(@as(u32, 18), conn.server_version_major);
     try testing.expectEqual(@as(i32, 9), conn.backend_pid);
     try testing.expectEqual(frontend.PROTOCOL_V3_2, conn.protocol_code);
-    try testing.expectEqual(backend.TxStatus.IDLE, conn.tx_status);
+    try testing.expectEqual(backend.TransactionStatus.IDLE, conn.transaction_status);
 }
 
 test "postgrez test: conn mock NegotiateProtocolVersion downgrades in place" {
@@ -1217,14 +1217,14 @@ test "postgrez test: conn mock transaction callback commits" {
     const conn = scripted.conn;
 
     const insertOne = struct {
-        fn run(tx: *Tx, amount: i64) !void {
-            const affected = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
+        fn run(transaction: *Transaction, amount: i64) !void {
+            const affected = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
             try testing.expectEqual(@as(u64, 1), affected);
         }
     }.run;
 
     try conn.transaction(insertOne, .{@as(i64, 100)});
-    try testing.expectEqual(backend.TxStatus.IDLE, conn.tx_status);
+    try testing.expectEqual(backend.TransactionStatus.IDLE, conn.transaction_status);
 }
 
 test "postgrez test: conn mock prepared statement lifecycle" {

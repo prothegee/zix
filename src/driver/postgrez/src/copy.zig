@@ -75,7 +75,7 @@ pub const CopyIn = struct {
                     failed = true;
                 },
                 .ready_for_query => |status| {
-                    conn.tx_status = status;
+                    conn.transaction_status = status;
                     if (failed) return error.ServerError;
 
                     return affected;
@@ -100,7 +100,7 @@ pub const CopyIn = struct {
                 .notice_response => {},
                 .error_response => |fields| conn.last_server_error.capture(fields),
                 .ready_for_query => |status| {
-                    conn.tx_status = status;
+                    conn.transaction_status = status;
 
                     return;
                 },
@@ -154,7 +154,7 @@ pub const CopyOut = struct {
                     self.failed = true;
                 },
                 .ready_for_query => |status| {
-                    self.conn.tx_status = status;
+                    self.conn.transaction_status = status;
                     self.done = true;
                     if (self.failed) return error.ServerError;
 
@@ -188,7 +188,7 @@ fn drainToReady(conn: *Conn) !void {
 
         switch (msg) {
             .ready_for_query => |status| {
-                conn.tx_status = status;
+                conn.transaction_status = status;
 
                 return;
             },

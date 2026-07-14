@@ -100,7 +100,7 @@ pub const Pipeline = struct {
                     }
                 },
                 .ready_for_query => |status| {
-                    conn.tx_status = status;
+                    conn.transaction_status = status;
 
                     return results;
                 },

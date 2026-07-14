@@ -76,7 +76,7 @@ pub const Statement = struct {
                     failed = true;
                 },
                 .ready_for_query => |status| {
-                    conn.tx_status = status;
+                    conn.transaction_status = status;
                     if (failed) return error.ServerError;
 
                     return self;

@@ -20,9 +20,9 @@ const Total = struct {
     total: i64,
 };
 
-fn transfer(tx: *postgrez.Tx, amount: i64) !void {
-    _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
-    _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{-amount});
+fn transfer(transaction: *postgrez.Transaction, amount: i64) !void {
+    _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
+    _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{-amount});
 }
 
 pub fn main(process: std.process.Init) !void {
@@ -43,20 +43,20 @@ pub fn main(process: std.process.Init) !void {
 
     // rolled back: invisible afterwards
     {
-        var tx = try conn.begin();
-        _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 999)});
-        tx.rollback();
+        var transaction = try conn.begin();
+        _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 999)});
+        transaction.rollback();
     }
     const after_rollback = try conn.queryRow(Total, "SELECT count(*)::int8 AS total FROM ledger", .{});
     std.debug.print("rows after rollback: {d}\n", .{after_rollback.?.total});
 
     // committed: visible
     {
-        var tx = try conn.begin();
-        defer tx.rollback();
-        _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
+        var transaction = try conn.begin();
+        defer transaction.rollback();
+        _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
 
-        try tx.commit();
+        try transaction.commit();
     }
 
     // callback sugar

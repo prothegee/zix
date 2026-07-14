@@ -281,26 +281,26 @@ test "postgrez integration: 09 transactions, explicit and callback" {
 
     // explicit: rolled back insert is invisible
     {
-        var tx = try conn.begin();
-        _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
-        tx.rollback();
+        var transaction = try conn.begin();
+        _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
+        transaction.rollback();
     }
     const after_rollback = try conn.queryRow(struct { count: i64 }, "SELECT count(*)::int8 AS count FROM ledger", .{});
     try testing.expectEqual(@as(i64, 0), after_rollback.?.count);
 
     // explicit: committed insert is visible
     {
-        var tx = try conn.begin();
-        defer tx.rollback();
-        _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
+        var transaction = try conn.begin();
+        defer transaction.rollback();
+        _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{@as(i64, 100)});
 
-        try tx.commit();
+        try transaction.commit();
     }
 
     // callback sugar
     const addFifty = struct {
-        fn run(tx: *postgrez.Tx, amount: i64) !void {
-            _ = try tx.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
+        fn run(transaction: *postgrez.Transaction, amount: i64) !void {
+            _ = try transaction.exec("INSERT INTO ledger (amount) VALUES ($1)", .{amount});
         }
     }.run;
     try conn.transaction(addFifty, .{@as(i64, 50)});
@@ -545,4 +545,148 @@ test "postgrez integration: 17 pool parks an acquire and hands the connection ov
     const one = try handed.queryRow(struct { one: i64 }, "SELECT 1::int8 AS one", .{});
     try testing.expectEqual(@as(i64, 1), one.?.one);
     pool.release(handed);
+}
+
+// --------------------------------------------------------- //
+
+// Executor probe: one echo statement (SELECT $1::int8) prepared per
+// connection, so a batch proves each job runs on its own arg and its result
+// comes back in order. Static because run_batch is a plain function pointer.
+const EchoJob = struct {
+    id: i64,
+    slot: usize,
+};
+
+const ExecutorProbe = struct {
+    const Kind = postgrez.Executor(EchoJob, 1);
+
+    var results: [16]i64 = @splat(@as(i64, -1));
+    var done: std.atomic.Value(u32) = .init(0);
+    var break_after: std.atomic.Value(bool) = .init(false);
+
+    fn reset() void {
+        results = @splat(@as(i64, -1));
+        done.store(0, .monotonic);
+        break_after.store(false, .monotonic);
+    }
+
+    fn markDone(count: usize) void {
+        _ = done.fetchAdd(@intCast(count), .monotonic);
+    }
+
+    fn runBatch(batch: *Kind.Batch, jobs: []const EchoJob) void {
+        const echo = batch.statement(0, "SELECT $1::int8") orelse {
+            markDone(jobs.len);
+
+            return;
+        };
+
+        for (jobs) |job| echo.sendRows(.{job.id}) catch return batch.markBroken();
+
+        for (jobs) |job| {
+            var result = echo.awaitRows() catch {
+                markDone(1);
+
+                continue;
+            };
+            defer result.deinit();
+
+            if (result.next() catch null) |row| results[job.slot] = row.get(i64, 0) catch -2;
+
+            markDone(1);
+        }
+
+        // deterministic discard path: the caller can force every batch to end
+        // broken, so the next batch must reconnect and still work
+        if (break_after.load(.monotonic)) batch.markBroken();
+    }
+
+    fn waitDone(target: u32) !void {
+        var spins: usize = 0;
+        while (done.load(.monotonic) < target) : (spins += 1) {
+            if (spins > 50_000_000) return error.ExecutorNeverFinished;
+            std.atomic.spinLoopHint();
+        }
+    }
+};
+
+test "postgrez integration: 18 executor pipelines a batch of prepared reads in order" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    ExecutorProbe.reset();
+
+    var executor = try ExecutorProbe.Kind.init(std.heap.smp_allocator, threaded.io(), SCRAM_CONFIG, .{
+        .run_batch = ExecutorProbe.runBatch,
+        .workers = 2,
+        .stats = true,
+    });
+    defer executor.deinit();
+
+    const count = 8;
+    for (0..count) |slot| {
+        try testing.expect(executor.submit(.{ .id = @intCast(100 + slot), .slot = slot }));
+    }
+
+    try ExecutorProbe.waitDone(count);
+
+    // every job saw its own arg echoed back into its own slot
+    for (0..count) |slot| try testing.expectEqual(@as(i64, @intCast(100 + slot)), ExecutorProbe.results[slot]);
+
+    // stats settle just after the consumer signals done (the driver records
+    // the batch once run_batch returns), so accumulate drained snapshots
+    var seen_jobs: u64 = 0;
+    var seen_batches: u64 = 0;
+    var spins: usize = 0;
+    while (seen_jobs < count) : (spins += 1) {
+        if (spins > 50_000_000) return error.StatsNeverSettled;
+
+        const stats = executor.snapshot();
+        seen_jobs += stats.jobs;
+        seen_batches += stats.batches;
+        std.atomic.spinLoopHint();
+    }
+
+    try testing.expectEqual(@as(u64, count), seen_jobs);
+    try testing.expect(seen_batches >= 1);
+}
+
+test "postgrez integration: 19 executor runInline runs on the caller thread" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    ExecutorProbe.reset();
+
+    var executor = try ExecutorProbe.Kind.init(std.heap.smp_allocator, threaded.io(), SCRAM_CONFIG, .{
+        .run_batch = ExecutorProbe.runBatch,
+        .workers = 2,
+    });
+    defer executor.deinit();
+
+    try testing.expect(executor.runInline(.{ .id = 4242, .slot = 0 }));
+
+    // runInline is synchronous: the result is ready without waiting on a worker
+    try testing.expectEqual(@as(i64, 4242), ExecutorProbe.results[0]);
+}
+
+test "postgrez integration: 20 executor discards a broken connection and reconnects" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    ExecutorProbe.reset();
+    ExecutorProbe.break_after.store(true, .monotonic);
+
+    var executor = try ExecutorProbe.Kind.init(std.heap.smp_allocator, threaded.io(), SCRAM_CONFIG, .{
+        .run_batch = ExecutorProbe.runBatch,
+        .workers = 1,
+    });
+    defer executor.deinit();
+
+    // each batch ends broken, so every job forces a discard then a reconnect
+    for (0..3) |slot| {
+        try testing.expect(executor.submit(.{ .id = @intCast(500 + slot), .slot = slot }));
+        try ExecutorProbe.waitDone(@intCast(slot + 1));
+    }
+
+    for (0..3) |slot| try testing.expectEqual(@as(i64, @intCast(500 + slot)), ExecutorProbe.results[slot]);
 }
