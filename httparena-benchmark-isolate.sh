@@ -196,7 +196,11 @@ fi
 
 # SMT-aware half-split: keeps SMT pairs together on server or loadgen side, and
 # counts the loadgen hardware threads for the derived THREADS value.
+# SERVER_PAIRS keeps the server half as one entry per physical core (the
+# core's full sibling set), so layouts that carve N physical cores out of the
+# half (redis pair, api-4, api-16) can be derived on any topology.
 LOADGEN_THREAD_COUNT=0
+SERVER_PAIRS=()
 derive_split() {
     local -A core_to_siblings
     local order=()
@@ -225,6 +229,7 @@ derive_split() {
         index=$((index + 1))
     done
 
+    SERVER_PAIRS=("${server[@]}")
     SERVER_CPUS=$(IFS=,; echo "${server[*]}")
     LOADGEN_CPUS=$(IFS=,; echo "${loadgen[*]}")
 
@@ -610,20 +615,62 @@ sed -E \
     -e 's/if "\$GHZ" "\$flag"/if ${GHZ_CMD:-$GHZ} "$flag"/' \
     "$FW_SRC" > "$FW_PATCHED"
 
-# Scale the profiles to this machine: the stock server cpuset (the arena's
-# 0-31,64-95 whole-core half) becomes the local SMT-aware half. Connection
-# counts, iteration counts, and endpoints stay stock: the test is identical,
-# only the CPU sizing differs.
-sed -e "s/0-31,64-95/$SERVER_CPUS/g" "$PROFILES_SRC" > "$PROFILES_PATCHED"
+# Every arena cpuset literal is a topology statement, so derive each one
+# from this machine's SMT pairs instead of assuming the arena's numbering.
+# On an arena-shaped box the derived sets equal the stock ones, so the run
+# stays exactly what the original script intends; on any other machine they
+# scale to the pairs that exist.
+#   redis pair       (arena 0,64)       = the first SMT pair
+#   crud server      (arena 1-31,65-95) = the server half minus the redis pair
+#   api-4 / api-16   (arena 0-1,64-65 / 0-7,64-71) = first 2 / first 8 pairs
 
-# Patch benchmark.sh: source the patched framework/profiles copies, and
+# First N SMT pairs of the server half, capped at what exists.
+server_pairs_head() {
+    local want=$1
+    local have=${#SERVER_PAIRS[@]}
+    [ "$want" -gt "$have" ] && want=$have
+
+    (IFS=,; echo "${SERVER_PAIRS[*]:0:$want}")
+}
+
+# Pre-set REDIS_CPUSET wins (redis.sh and the crud experiment honor it via
+# the benchmark patch below).
+export REDIS_CPUSET="${REDIS_CPUSET:-$(server_pairs_head 1)}"
+
+if [ "${#SERVER_PAIRS[@]}" -gt 1 ]; then
+    SERVER_CPUS_SANS_REDIS=$(IFS=,; echo "${SERVER_PAIRS[*]:1}")
+else
+    SERVER_CPUS_SANS_REDIS="$SERVER_CPUS"
+fi
+
+API4_CPUS="$(server_pairs_head 2)"
+API16_CPUS="$(server_pairs_head 8)"
+
+# Scale the profiles to this machine: the stock server cpuset (the arena's
+# 0-31,64-95 whole-core half) becomes the local SMT-aware half, the crud
+# profile's redis-carved variant (1-31,65-95) becomes the half minus the
+# redis pair, and the api profiles' fixed physical-core counts become the
+# same counts from the local pairs. Connection counts, iteration counts, and
+# endpoints stay stock: the test is identical, only the CPU sizing differs.
+sed -e "s/0-31,64-95/$SERVER_CPUS/g" \
+    -e "s/1-31,65-95/$SERVER_CPUS_SANS_REDIS/g" \
+    -e "s/0-1,64-65/$API4_CPUS/g" \
+    -e "s/0-7,64-71/$API16_CPUS/g" \
+    "$PROFILES_SRC" > "$PROFILES_PATCHED"
+
+# Patch benchmark.sh: source the patched framework/profiles copies,
 # neutralize system_tune/system_restore (quiesce above replicates them with
-# save/restore, and no docker daemon restart happens mid-run).
+# save/restore, and no docker daemon restart happens mid-run), and localize
+# the crud experiment's hard-coded 64c cpusets (redis pair, gcannon half,
+# server-minus-redis) so a crud-filtered run works on this machine too.
 sed -E \
     -e "s|^source \"\\\$SOURCE_DIR/framework\.sh\"|source \"$FW_PATCHED\"|" \
     -e "s|^source \"\\\$SOURCE_DIR/profiles\.sh\"|source \"$PROFILES_PATCHED\"|" \
     -e 's/^([[:space:]]*)system_tune[[:space:]]*$/\1true  # system_tune replaced by isolate quiesce/' \
     -e "s/trap 'cleanup_all; system_restore' EXIT/trap 'cleanup_all' EXIT/" \
+    -e 's/export REDIS_CPUSET="0,64"/export REDIS_CPUSET="${REDIS_CPUSET:-0,64}"/' \
+    -e 's/export GCANNON_CPUS="32-63,96-127"/export GCANNON_CPUS="${GCANNON_CPUS:-32-63,96-127}"/' \
+    -e "s/1-31,65-95/$SERVER_CPUS_SANS_REDIS/g" \
     "$BENCH_SRC" > "$BENCH_PATCHED"
 chmod +x "$BENCH_PATCHED"
 
