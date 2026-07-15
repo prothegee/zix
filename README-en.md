@@ -66,6 +66,9 @@
     - [Response Cache Awareness](./README-en.md#response-cache-awareness-response_cache)
         - [When it pays off](./README-en.md#when-it-pays-off)
         - [Rules and conditions](./README-en.md#rules-and-conditions)
+    - [Process Queue Awareness](./README-en.md#process-queue-awareness-process_queue_len)
+        - [When it engages](./README-en.md#when-it-engages)
+        - [Rules and sizing](./README-en.md#rules-and-sizing)
     - [HTTP/2](./README-en.md#http2)
         - [gRPC h2c](./README-en.md#grpc-h2c)
     - [TLS (https / h2)](./README-en.md#tls-https--h2)
@@ -238,7 +241,7 @@ __*0. Zero dependencies:*__
 Only the Zig standard library. No third-party packages (an empty `build.zig.zon` dependency
 set), no C libraries, and no libc linking: TLS 1.3 / 1.2 runs pure-Zig on `std.crypto` (no
 OpenSSL), gzip / deflate on `std.compress.flate`, and brotli, QUIC, HPACK, and QPACK are
-authored in-tree from their RFCs (`std` ships none of them).
+authored in-tree from their RFCs.
 
 > One `zig build` compiles the whole stack from source with nothing to vendor, pin, or keep
 patched, so the supply chain is the Zig toolchain plus this repository.
@@ -362,7 +365,15 @@ Opt-in, per-worker response cache shared by `zix.Http1`, `zix.Http`, and `zix.Gr
 
 <br>
 
-__*14. Pure-Zig TLS (https, h2, wss):*__
+__*14. Process Queue Awareness:*__
+
+Opt-in, per-worker submission-queue backpressure on `zix.Http1` and `zix.Http` under `.URING`. When a burst fills the io_uring submission queue, a recv or send re-arm that would otherwise drop the connection is parked on a per-worker FIFO ring (references only, fd plus generation, reject-newest) and retried on the next loop pass. `process_queue_len` sizes the ring, `0` (default) leaves it off. No effect under the other dispatch models.
+
+> A reliability valve, not a throughput knob. Under an accept storm or connection churn it keeps overflow work in flight instead of dropping connections, and it is a measured no-op when the submission queue is not saturated.
+
+<br>
+
+__*15. Pure-Zig TLS (https, h2, wss):*__
 
 TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: `zix.Http1` and `zix.Http` serve https/1.1, `zix.Http2` and `zix.Grpc` serve h2 over TLS (ALPN h2), and SSE and WebSocket run over TLS (wss) on the thread-per-connection path. Server certificates are ECDSA P-256, Ed25519, or RSA, configured by a user-owned `Tls.Context` (validated curves / ciphers, HSTS). A verifying native client (`zix.Tls.Client`) checks the chain and hostname.
 
@@ -370,7 +381,7 @@ TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: 
 
 <br>
 
-__*15. HTTP/3 over QUIC, pure-Zig:*__
+__*16. HTTP/3 over QUIC, pure-Zig:*__
 
 `zix.Http3` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), built from the RFCs on `std.crypto`: packet protection, the TLS 1.3 handshake over CRYPTO streams, loss recovery, QPACK, and per-core dispatch on the `zix.Udp` substrate. Same comptime `Router` and `Tls.Context` as the TCP engines.
 
@@ -378,7 +389,7 @@ __*15. HTTP/3 over QUIC, pure-Zig:*__
 
 <br>
 
-__*16. Response compression (gzip / deflate / brotli):*__
+__*17. Response compression (gzip / deflate / brotli):*__
 
 `Accept-Encoding` negotiation on `zix.Http1` and `zix.Http`: gzip and deflate on `std.compress.flate`, plus brotli from an in-tree encoder / decoder authored from RFC 7932 (`std` has no brotli). Opt-in per server, with a size floor, already-compressed media-type skip, and `Vary: Accept-Encoding`. HTTP/3 serves pre-compressed static bodies with `content-encoding`.
 
@@ -386,7 +397,7 @@ __*16. Response compression (gzip / deflate / brotli):*__
 
 <br>
 
-__*17. Comptime routing, zero allocation:*__
+__*18. Comptime routing, zero allocation:*__
 
 One comptime `Router` shared by `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, and `zix.Http3`: the route table is a comptime argument, so matching (`.EXACT` via a `StaticStringMap`, `.PARAM`, longest-prefix `.PREFIX`, query stripped first) does no runtime allocation.
 
@@ -394,7 +405,7 @@ One comptime `Router` shared by `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`
 
 <br>
 
-__*18. Bounded, work-proportional memory:*__
+__*19. Bounded, work-proportional memory:*__
 
 Explicit, capped allocation: an arena per connection or request, per-worker stream-slot pools on the multiplexed h2 / gRPC engines (resident stream memory tracks concurrent streams, not connections * max_streams, cutting 4096-connection footprint 6 to 12x), and a lock-free response cache. No hidden per-request heap growth.
 
@@ -402,7 +413,7 @@ Explicit, capped allocation: an arena per connection or request, per-worker stre
 
 <br>
 
-__*19. Hermetic conformance test harness:*__
+__*20. Hermetic conformance test harness:*__
 
 Tests run with no external tools: a 69-protocol runner driving hand-rolled native clients (raw sockets, a native QUIC client, native TLS), plus RFC-vector unit tests for the wire codecs (TLS key schedule, HPACK / QPACK, QUIC packets), discovered through `std.testing.refAllDecls`.
 
@@ -410,7 +421,7 @@ Tests run with no external tools: a 69-protocol runner driving hand-rolled nativ
 
 <br>
 
-__*20. Static file serving with range support:*__
+__*21. Static file serving with range support:*__
 
 `public_dir` on `zix.Http` and `zix.Http1` serves unmatched routes as files before the 404 fallback, with HTTP range requests (RFC 7233, 206 / 416), a traversal-safe path check, and a multipart upload companion (`public_dir_upload`).
 
@@ -418,7 +429,7 @@ __*20. Static file serving with range support:*__
 
 <br>
 
-__*21. Bilingual multi-documentation:*__
+__*22. Bilingual multi-documentation:*__
 
 Every doc has it own variants.
 
@@ -452,6 +463,7 @@ Buffer, socket, timeout, and cache fields keep the same names wherever a protoco
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix`, `zix.Udp` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` and the four `cache_*` fields | see [Response Cache Awareness](#response-cache-awareness-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+| `process_queue_len` | `usize` | `zix.Http1`, `zix.Http` (`.URING` submission-queue park ring, see [Process Queue Awareness](#process-queue-awareness-process_queue_len)) |
 | `compress`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
 
 A few differences are by design, not drift:
@@ -504,8 +516,8 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 - [Zig](https://ziglang.org/):
     - [x] 0.16.x:
         - 0.16.0
-    - [ ] 0.17.x (Experimental):
-        - 0.17.0-dev.986+f3544a707
+    - [x] 0.17.x (Experimental):
+        - 0.17.0-dev.1158+1d1193aa7
 
 <br>
 
@@ -1419,6 +1431,64 @@ flowchart TD
 **When to use:** turn the cache on for hot, repeatable, compute-heavy responses above ~4 KiB (rendered reports, large JSON aggregates) served under `.EPOLL` or `.URING`. Leave it off for small kernel-bound responses, per-request unique bodies, or anything that varies on a header or cookie, where it adds no benefit. Read the rules above before caching anything time-sensitive.
 
 See `docs/adr-en.md` for the design rationale and measured numbers.
+
+<br>
+
+### Process Queue Awareness (`process_queue_len`)
+
+`zix.Http1` and `zix.Http` share an opt-in, per-worker submission-queue backpressure ring under the `.URING` dispatch model. When a connection burst fills the io_uring submission queue, a recv or send re-arm that would otherwise close the connection is parked on a per-worker FIFO ring, holding only a reference (the fd plus a generation tag, never the request bytes), and retried on the next loop pass. Without it, a re-arm dropped on a full submission queue closes the connection, and a lost multishot-accept re-arm stops the worker from accepting at all while the kernel backlog fills.
+
+It is `.URING` only, on `zix.Http1` and `zix.Http`. The submission-queue pressure it guards against does not exist on the thread models or `.EPOLL`, so the field is inert there.
+
+Enable it by setting a ring length (`0`, off, by default):
+
+```zig
+var server = zix.Http1.Server.init(handler, .{
+    .ip = "0.0.0.0",
+    .port = 8080,
+    .dispatch_model = .URING,
+    .process_queue_len = 4096,   // per-worker park-ring capacity, 0 = off
+});
+```
+
+Size the ring to about the peak concurrent connections a single worker handles: one connection parks at most one entry at a time, so the ring never needs more slots than that worker's live connections. A value far above that only reserves a slab that faults resident over time for no gain.
+
+#### When it engages
+
+The ring is a no-op under normal load and does work only when the submission queue is actually saturated.
+
+| Workload | Effect |
+| :- | :- |
+| Steady low-connection keep-alive | No-op, the submission queue never fills |
+| Connection burst above the submission-queue depth (accept storm, churn) | Overflow re-arms parked and retried next pass instead of the connection being dropped |
+| Sustained overload past the ring capacity | Reject-newest: the newest entry falls back to the close path while the oldest parked work still drains in arrival order |
+
+#### Rules and sizing
+
+- Opt-in only. `process_queue_len = 0` (default) leaves the ring unallocated and the close-on-full behavior unchanged.
+- `.URING` only, and only on `zix.Http1` and `zix.Http`. The other dispatch models and `.EPOLL` never fill a submission queue, so the field is inert.
+- Streams never enter the ring. WebSocket, SSE, and gRPC streaming are governed by protocol flow control (HTTP/2 window and `max_streams`, QUIC MAX_DATA and MAX_STREAMS) and shed with the protocol's own signal, not parked.
+- Reject-newest. When the ring is full the newest re-arm is refused (the connection closes), so parked work always drains oldest-first and a flood cannot starve earlier connections.
+- Per-worker memory is `process_queue_len` times a few bytes per entry (a reference, not a request buffer), times the worker count.
+- Sizing: about the peak concurrent connections per worker. Above that the extra slots are unreachable, below it a burst can hit reject-newest sooner.
+
+A related but separate guard covers an oversize request body: on `zix.Http2` a DATA body past the stream buffer is shed with a `413` and END_STREAM (crediting only the connection window), and on `zix.Grpc` with `RESOURCE_EXHAUSTED` trailers, so a body too large to buffer never dispatches truncated.
+
+```mermaid
+flowchart TD
+    A[recv or send re-arm] --> B{submission queue has space?}
+    B -- yes --> S[arm the SQE now]
+    B -- no --> C{process_queue_len greater than 0?}
+    C -- no --> X[close the connection]
+    C -- yes --> D{park ring full?}
+    D -- yes --> X
+    D -- no --> P[park fd plus generation]
+    P --> R[drainParked re-arms in FIFO order next pass]
+```
+
+**When to use:** set `process_queue_len` when a `.URING` deployment faces connection bursts or accept storms that can outrun the submission queue (churny short-lived connections, reconnect floods), sized to the peak connections per worker. Leave it off for steady keep-alive load, where the submission queue never fills and the ring never engages.
+
+See `docs/zix-config-en.md` for the field reference.
 
 <br>
 
