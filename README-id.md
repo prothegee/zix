@@ -66,6 +66,9 @@
     - [Kesadaran Cache Respons](./README-id.md#kesadaran-cache-respons-response_cache)
         - [Kapan menguntungkan](./README-id.md#kapan-menguntungkan)
         - [Aturan dan kondisi](./README-id.md#aturan-dan-kondisi)
+    - [Kesadaran Process Queue](./README-id.md#kesadaran-process-queue-process_queue_len)
+        - [Kapan aktif](./README-id.md#kapan-aktif)
+        - [Aturan dan sizing](./README-id.md#aturan-dan-sizing)
     - [HTTP/2 h2c](./README-id.md#http2-h2c)
         - [gRPC h2c](./README-id.md#grpc-h2c)
     - [TLS (https / h2)](./README-id.md#tls-https--h2)
@@ -238,7 +241,7 @@ __*0. Zero dependencies:*__
 Hanya Zig standard library. Tanpa paket pihak ketiga (dependency set `build.zig.zon` kosong),
 tanpa C library, dan tanpa linking libc: TLS 1.3 / 1.2 berjalan pure-Zig di atas `std.crypto`
 (tanpa OpenSSL), gzip / deflate di `std.compress.flate`, dan brotli, QUIC, HPACK, serta QPACK
-ditulis in-tree dari RFC masing-masing (`std` tidak menyediakan satu pun).
+ditulis in-tree dari RFC masing-masing.
 
 > Satu `zig build` mengompilasi seluruh stack dari source tanpa ada yang perlu di-vendor,
 di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus repository ini.
@@ -362,7 +365,15 @@ Response cache opt-in per-worker yang dibagikan oleh `zix.Http1`, `zix.Http`, da
 
 <br>
 
-__*14. TLS pure-Zig (https, h2, wss):*__
+__*14. Kesadaran Process Queue:*__
+
+Backpressure submission-queue per-worker yang opt-in pada `zix.Http1` dan `zix.Http` di bawah `.URING`. Saat burst mengisi submission queue io_uring, re-arm recv atau send yang seharusnya menutup koneksi diparkir pada FIFO ring per-worker (hanya referensi, fd plus generation, reject-newest) dan dicoba ulang pada loop pass berikutnya. `process_queue_len` mengatur panjang ring, `0` (default) mematikannya. Tanpa efek pada dispatch model lain.
+
+> Katup keandalan, bukan knob throughput. Di bawah accept storm atau churn koneksi ia menjaga kerja overflow tetap berjalan alih-alih membuang koneksi, dan terukur no-op saat submission queue tidak jenuh.
+
+<br>
+
+__*15. TLS pure-Zig (https, h2, wss):*__
 
 TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan additive: `zix.Http1` dan `zix.Http` menyajikan https/1.1, `zix.Http2` dan `zix.Grpc` menyajikan h2 di atas TLS (ALPN h2), dan SSE serta WebSocket berjalan di atas TLS (wss) pada jalur thread-per-koneksi. Sertifikat server bisa ECDSA P-256, Ed25519, atau RSA, dikonfigurasi oleh `Tls.Context` milik pemanggil (curve / cipher tervalidasi, HSTS). Client native yang memverifikasi (`zix.Tls.Client`) memeriksa chain dan hostname.
 
@@ -370,7 +381,7 @@ TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan ad
 
 <br>
 
-__*15. HTTP/3 di atas QUIC, pure-Zig:*__
+__*16. HTTP/3 di atas QUIC, pure-Zig:*__
 
 `zix.Http3` menyajikan HTTP/3 (RFC 9114) di atas QUIC (RFC 9000 / 9001 / 9002), dibangun dari RFC di atas `std.crypto`: packet protection, handshake TLS 1.3 di atas CRYPTO stream, loss recovery, QPACK, dan dispatch per-core di atas substrat `zix.Udp`. `Router` comptime dan `Tls.Context` yang sama dengan engine TCP.
 
@@ -378,7 +389,7 @@ __*15. HTTP/3 di atas QUIC, pure-Zig:*__
 
 <br>
 
-__*16. Kompresi respons (gzip / deflate / brotli):*__
+__*17. Kompresi respons (gzip / deflate / brotli):*__
 
 Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di atas `std.compress.flate`, plus brotli dari encoder / decoder in-tree yang ditulis dari RFC 7932 (`std` tidak punya brotli). Opt-in per server, dengan size floor, skip media-type yang sudah ter-compressed, dan `Vary: Accept-Encoding`. HTTP/3 menyajikan body statis pre-compressed dengan `content-encoding`.
 
@@ -386,7 +397,7 @@ Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di
 
 <br>
 
-__*17. Routing comptime, tanpa alokasi:*__
+__*18. Routing comptime, tanpa alokasi:*__
 
 Satu `Router` comptime yang dibagikan oleh `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, dan `zix.Http3`: route table adalah argumen comptime, jadi matching (`.EXACT` via `StaticStringMap`, `.PARAM`, `.PREFIX` longest-prefix, query di-strip lebih dulu) tidak melakukan alokasi runtime.
 
@@ -394,7 +405,7 @@ Satu `Router` comptime yang dibagikan oleh `zix.Http`, `zix.Http1`, `zix.Http2`,
 
 <br>
 
-__*18. Memori terbatas, proporsional terhadap kerja:*__
+__*19. Memori terbatas, proporsional terhadap kerja:*__
 
 Alokasi eksplisit dan ter-cap: satu arena per koneksi atau request, pool slot-stream per-worker pada engine h2 / gRPC multipleks (memori stream residen mengikuti stream konkuren, bukan connections * max_streams, memangkas footprint 4096-koneksi 6 sampai 12x), dan response cache lock-free. Tanpa pertumbuhan heap per-request yang tersembunyi.
 
@@ -402,7 +413,7 @@ Alokasi eksplisit dan ter-cap: satu arena per koneksi atau request, pool slot-st
 
 <br>
 
-__*19. Harness test conformance yang hermetik:*__
+__*20. Harness test conformance yang hermetik:*__
 
 Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client native buatan sendiri (raw socket, client QUIC native, TLS native), plus unit test vektor-RFC untuk codec wire (TLS key schedule, HPACK / QPACK, packet QUIC), ditemukan lewat `std.testing.refAllDecls`.
 
@@ -410,7 +421,7 @@ Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client 
 
 <br>
 
-__*20. Static file serving dengan dukungan range:*__
+__*21. Static file serving dengan dukungan range:*__
 
 `public_dir` pada `zix.Http` dan `zix.Http1` menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan HTTP range request (RFC 7233, 206 / 416), pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`).
 
@@ -418,7 +429,7 @@ __*20. Static file serving dengan dukungan range:*__
 
 <br>
 
-__*21. Dokumentasi multi-bahasa:*__
+__*22. Dokumentasi multi-bahasa:*__
 
 Setiap dokumen punya variannya sendiri.
 
@@ -452,6 +463,7 @@ Field buffer, socket, timeout, dan cache memakai nama yang sama di mana pun prot
 | `conn_timeout_ms` | `u32` | `zix.Http`, `zix.Fix`, `zix.Udp` |
 | `handler_timeout_ms` | `u32` | `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix` |
 | `response_cache` dan empat field `cache_*` | lihat [Kesadaran Cache Respons](#kesadaran-cache-respons-response_cache) | `zix.Http1`, `zix.Http`, `zix.Grpc` |
+| `process_queue_len` | `usize` | `zix.Http1`, `zix.Http` (park ring submission-queue `.URING`, lihat [Kesadaran Process Queue](#kesadaran-process-queue-process_queue_len)) |
 | `compress`, `compression_min_size`, `compression_max_out` | `bool` / `usize` / `usize` | `zix.Http1`, `zix.Http` |
 
 Beberapa perbedaan disengaja, bukan drift:
@@ -504,8 +516,8 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 - [Zig](https://ziglang.org/):
     - [x] 0.16.x:
         - 0.16.0
-    - [ ] 0.17.x (Experimental):
-        - 0.17.0-dev.986+f3544a707
+    - [x] 0.17.x (Experimental):
+        - 0.17.0-dev.1158+1d1193aa7
 
 <br>
 
@@ -1419,6 +1431,64 @@ flowchart TD
 **Kapan digunakan:** nyalakan cache untuk respons panas, berulang, komputasi-berat di atas ~4 KiB (laporan ter-render, agregat JSON besar) yang disajikan di bawah `.EPOLL` atau `.URING`. Biarkan mati untuk respons kecil yang kernel-bound, body unik per-request, atau apa pun yang bervariasi pada header atau cookie, di mana ia tidak menambah manfaat. Baca aturan di atas sebelum men-cache apa pun yang sensitif waktu.
 
 Lihat `docs/adr-id.md` untuk rasional desain dan angka terukur.
+
+<br>
+
+### Kesadaran Process Queue (`process_queue_len`)
+
+`zix.Http1` dan `zix.Http` berbagi ring backpressure submission-queue per-worker yang opt-in di bawah dispatch model `.URING`. Saat burst koneksi mengisi submission queue io_uring, re-arm recv atau send yang seharusnya menutup koneksi diparkir pada FIFO ring per-worker, hanya menyimpan referensi (fd plus tag generation, tidak pernah byte request), dan dicoba ulang pada loop pass berikutnya. Tanpa ini, re-arm yang jatuh saat submission queue penuh menutup koneksi, dan re-arm multishot-accept yang hilang membuat worker berhenti menerima sama sekali sementara backlog kernel terisi.
+
+Hanya `.URING`, pada `zix.Http1` dan `zix.Http`. Tekanan submission-queue yang dijaganya tidak ada pada thread model atau `.EPOLL`, jadi field ini inert di sana.
+
+Aktifkan dengan menyetel panjang ring (`0`, mati, secara default):
+
+```zig
+var server = zix.Http1.Server.init(handler, .{
+    .ip = "0.0.0.0",
+    .port = 8080,
+    .dispatch_model = .URING,
+    .process_queue_len = 4096,   // kapasitas park-ring per-worker, 0 = mati
+});
+```
+
+Atur ring sekitar puncak koneksi bersamaan yang ditangani satu worker: satu koneksi memarkir paling banyak satu entry pada satu waktu, jadi ring tidak pernah butuh slot lebih dari koneksi hidup worker itu. Nilai jauh di atas itu hanya mencadangkan slab yang menjadi resident seiring waktu tanpa manfaat.
+
+#### Kapan aktif
+
+Ring ini no-op pada beban normal dan hanya bekerja saat submission queue benar-benar jenuh.
+
+| Workload | Efek |
+| :- | :- |
+| Keep-alive koneksi rendah yang stabil | No-op, submission queue tidak pernah penuh |
+| Burst koneksi di atas kedalaman submission-queue (accept storm, churn) | Re-arm overflow diparkir dan dicoba ulang pass berikutnya alih-alih koneksi dibuang |
+| Overload berkelanjutan melewati kapasitas ring | Reject-newest: entry terbaru jatuh ke jalur close sementara kerja terparkir tertua tetap terkuras dalam urutan kedatangan |
+
+#### Aturan dan sizing
+
+- Opt-in saja. `process_queue_len = 0` (default) membiarkan ring tidak dialokasikan dan perilaku close-on-full tidak berubah.
+- Hanya `.URING`, dan hanya pada `zix.Http1` dan `zix.Http`. Dispatch model lain dan `.EPOLL` tidak pernah mengisi submission queue, jadi field ini inert.
+- Stream tidak pernah masuk ring. WebSocket, SSE, dan gRPC streaming diatur oleh protocol flow control (window HTTP/2 dan `max_streams`, QUIC MAX_DATA dan MAX_STREAMS) dan di-shed dengan sinyal protokolnya sendiri, bukan diparkir.
+- Reject-newest. Saat ring penuh re-arm terbaru ditolak (koneksi ditutup), jadi kerja terparkir selalu terkuras tertua-dulu dan flood tidak bisa membuat koneksi lebih awal kelaparan.
+- Memori per-worker adalah `process_queue_len` kali beberapa byte per entry (sebuah referensi, bukan buffer request), kali jumlah worker.
+- Sizing: sekitar puncak koneksi bersamaan per worker. Di atas itu slot ekstra tidak terjangkau, di bawahnya burst bisa kena reject-newest lebih cepat.
+
+Guard terkait namun terpisah menutupi body request oversize: pada `zix.Http2` body DATA yang melewati buffer stream di-shed dengan `413` dan END_STREAM (hanya window koneksi yang dikredit), dan pada `zix.Grpc` dengan trailer `RESOURCE_EXHAUSTED`, jadi body yang terlalu besar untuk di-buffer tidak pernah men-dispatch terpotong.
+
+```mermaid
+flowchart TD
+    A[re-arm recv atau send] --> B{submission queue punya ruang?}
+    B -- ya --> S[arm SQE sekarang]
+    B -- tidak --> C{process_queue_len lebih dari 0?}
+    C -- tidak --> X[tutup koneksi]
+    C -- ya --> D{park ring penuh?}
+    D -- ya --> X
+    D -- tidak --> P[park fd plus generation]
+    P --> R[drainParked re-arm dalam urutan FIFO pass berikutnya]
+```
+
+**Kapan digunakan:** setel `process_queue_len` saat deployment `.URING` menghadapi burst koneksi atau accept storm yang bisa melampaui submission queue (koneksi churny berumur pendek, flood reconnect), diukur sekitar puncak koneksi per worker. Biarkan mati untuk beban keep-alive stabil, di mana submission queue tidak pernah penuh dan ring tidak pernah aktif.
+
+Lihat `docs/zix-config-id.md` untuk referensi field.
 
 <br>
 
