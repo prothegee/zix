@@ -44,7 +44,7 @@ __*Fix:*__
 
 <br>
 
-## 0.5.0 (TBD)
+## 0.5.0-rc1 (2026-07-15)
 
 __*Update:*__
 - Zig 0.17 (experimental) support: one source tree builds on Zig 0.16.x and 0.17.x, the few `std.Io` API divergences gated behind a comptime `ZIG_SEMVER` check (ADR-044).
@@ -97,11 +97,11 @@ __*Update:*__
     - Per-worker stream-slot pool (`src/tcp/http2/mux.zig`): the `.EPOLL` / `.URING` mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 4096 connections this cut baseline-h2c memory about 6x while lifting throughput 8 to 20 percent, because the pooled hot slots have a tighter cache working set than the old sparse per-connection table.
     - HPACK response-header prefix cache (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): the `[:status, content-type, content-encoding]` block for a hot triple is encoded once and reused byte-identical across connections (a stateless encoder, never the dynamic table), only `content-length` is encoded per reply. Lifted the small-body cells 18 to 26 percent at lower CPU.
     - Seal-in-place on the TLS 1.3 record path (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): a gather-encrypt that seals two plaintext slices into one record without a staging copy.
-    - Config defaults: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
+    - Config defaults: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body sheds the stream with 413). `max_header_scratch` stays 4 KiB.
 
 - `zix.Grpc` memory and throughput optimization (per-worker stream-slot pool, ADR-058):
     - Per-worker stream-slot pool (`src/tcp/http2/grpc/core.zig`): the `.EPOLL` / `.URING` gRPC mux borrows each stream's slot (header table plus body / scratch buffers) from a thread-local free-list on stream open and returns it on close, so resident stream memory tracks concurrent streams instead of `connections * max_streams`. Each connection keeps only a `max_streams`-wide pointer array, and the steady state does no per-stream allocation (buffers reused across borrows). At 1024 connections this cut unary-grpc memory about 12x (916 to 77 MiB) while lifting throughput 8 to 11 percent, the same both-axes result as the Http2 pool. The blocking `.ASYNC` / `.POOL` / `.MIXED` path keeps its own per-connection arrays, unchanged.
-    - Config defaults: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body is truncated to this). `max_header_scratch` stays 4 KiB.
+    - Config defaults: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 to 128 (advertised concurrency, cheap now the slot is pooled) and `max_body` 64 KiB to 16 KiB (buffered request body per stream, a larger body sheds the stream with RESOURCE_EXHAUSTED). `max_header_scratch` stays 4 KiB.
 
     ---
 
@@ -205,6 +205,14 @@ __*Update:*__
     - Per-worker load counters report at worker exit through the system logger (requests, frames, accepted connections, or messages, per engine), so a skewed distribution across workers is observable. The two h2-mux engines (`zix.Http2`, `zix.Grpc`) do not carry the counter: a threadlocal increment in their mux hot loop measured about 1 percent of throughput at multi-million req/s, so it stays off their hot path.
 
 - `zix.Udp` raw `.URING` multishot receive: the per-core ring arms a multishot `recvmsg` with a provided buffer ring (mirroring `zix.Http3`'s recv layer, 256 buffers), replacing per-completion re-arms, with the one-shot slot pool kept as the fallback.
+
+    ---
+
+- `.URING` submission-queue backpressure (process queue):
+    - New flat config field `process_queue_len: usize = 0` on `Http1ServerConfig` and `HttpServerConfig`: under `.URING`, a recv or send re-arm that finds the submission queue full is parked on a per-worker FIFO ring of this length (references only, fd plus generation, reject-newest) and retried on the next loop pass instead of closing the connection. 0 (default) keeps the feature off, and it has no effect under the other dispatch models. Size it to about the peak concurrent connections per worker.
+    - Lost-accept re-arm fix across the `zix.Http1`, `zix.Http`, `zix.Grpc`, and `zix.Http2` `.URING` dispatches: a multishot-accept re-arm dropped on a full SQ left the worker unable to accept again while the kernel backlog filled. The worker now records the miss (`accept_pending` / `tls_accept_pending`) and retries the arm right after the next submit, so a full SQ no longer wedges accept.
+    - `zix.Http3` `.URING` submission-queue losses fixed (`src/udp/http3/dispatch/uring.zig`): a multishot `recvmsg` re-arm lost to a full SQ left the worker permanently deaf (a sticky `recv_unarmed` retry now re-arms it), a one-shot slot re-arm lost to a full SQ leaked the slot (a bounded pending re-arm list now recovers it), and a send tail capped by a full SQ was discarded on the buffer swap (the swap now defers while a tail is still unsent).
+    - Oversize request body sheds instead of truncating: `zix.Http2` answers a DATA body past the stream buffer with `413` and END_STREAM (crediting only the connection window for the discarded bytes), and `zix.Grpc` ends the stream with `RESOURCE_EXHAUSTED` trailers. Previously the body was silently truncated to the cap, which could dispatch a corrupt message. A later DATA frame for a shed stream is answered with RST_STREAM, and the connection's other streams continue.
 
 <br>
 
