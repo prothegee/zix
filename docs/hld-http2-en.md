@@ -165,7 +165,7 @@ pub const Http2ServerConfig = struct {
     max_streams:    u32   = 128,   // advertised SETTINGS_MAX_CONCURRENT_STREAMS
     max_frame_size: u32   = 16384, // advertised SETTINGS_MAX_FRAME_SIZE
     max_header_scratch: usize = 4096,       // HPACK decode scratch per connection
-    max_body:       usize = 16384, // max request body buffered per stream (truncated over this)
+    max_body:       usize = 16384, // max request body buffered per stream (a body past this sheds the stream with 413)
     max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     response_cache: bool  = false, // per-worker response cache (ADR-036), .EPOLL/.URING
@@ -235,7 +235,7 @@ Inside the `.h2` phase the frame loop reads a 9-byte header, waits for the full 
 
 - SETTINGS: apply the peer's header-table size and initial window (adjusting every open stream's send window per RFC 7540 6.9.2), then ACK and grant a connection-level WINDOW_UPDATE.
 - HEADERS / CONTINUATION: claim a stream slot, HPACK-decode the block into the stream's headers, and dispatch when END_HEADERS plus END_STREAM are seen.
-- DATA: return WINDOW_UPDATE for the connection and stream, copy the payload into the stream body (capped by `max_body`), and dispatch on END_STREAM.
+- DATA: return WINDOW_UPDATE for the connection and stream, copy the payload into the stream body, and dispatch on END_STREAM. A body past `max_body` sheds the stream with a 413 and END_STREAM instead of truncating, crediting only the connection window for the discarded bytes.
 - WINDOW_UPDATE: grow the connection or stream send window and resume any parked response body.
 - RST_STREAM: release the stream slot. PING: reply with an ACK. GOAWAY: close the connection.
 
@@ -303,7 +303,7 @@ The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-lo
 
 | Limit | Behaviour |
 | :- | :- |
-| Request body per stream | Buffered up to `max_body` (16 KB default). A larger body is truncated to `max_body` (the handler sees the capped slice), while flow-control WINDOW_UPDATEs are still returned so the stream stays in spec |
+| Request body per stream | Buffered up to `max_body` (16 KB default). A body past the buffer cap sheds the stream with a 413 and END_STREAM, so the handler never sees a truncated slice and a corrupt body never dispatches. Only the connection window is credited for the discarded bytes, keeping the connection usable for its other streams |
 | Concurrent streams | Advertised as `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). A stream opened beyond it is answered with `REFUSED_STREAM`, so the advertised value must be at least the peer's concurrent-stream count |
 | h2c upgrade (.EPOLL/.URING) | Served minimally on the mux path: `101` then the connection preface, the request carried on stream 1 is not served. Prior-knowledge clients (the common h2c case) are unaffected. The blocking `.ASYNC` / `.POOL` / `.MIXED` models serve the upgraded stream-1 request |
 | Header block scratch | `max_header_scratch` per connection (4 KB default). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |

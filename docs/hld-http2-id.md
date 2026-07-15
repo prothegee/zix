@@ -165,7 +165,7 @@ pub const Http2ServerConfig = struct {
     max_streams:    u32   = 128,   // SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan
     max_frame_size: u32   = 16384, // SETTINGS_MAX_FRAME_SIZE yang diiklankan
     max_header_scratch: usize = 4096,       // scratch decode HPACK per koneksi
-    max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (dipotong di atas ini)
+    max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (body di atas ini di-shed dengan 413)
     max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     response_cache: bool  = false, // response cache per-worker (ADR-036), .EPOLL/.URING
@@ -235,7 +235,7 @@ Di dalam fase `.h2` frame loop membaca header 9-byte, menunggu payload penuh tib
 
 - SETTINGS: terapkan header-table size dan initial window milik peer (menyesuaikan send window setiap stream terbuka sesuai RFC 7540 6.9.2), lalu ACK dan berikan WINDOW_UPDATE level-koneksi.
 - HEADERS / CONTINUATION: klaim satu stream slot, HPACK-decode blok ke dalam header stream, dan dispatch saat END_HEADERS plus END_STREAM terlihat.
-- DATA: kembalikan WINDOW_UPDATE untuk koneksi dan stream, salin payload ke dalam body stream (dibatasi oleh `max_body`), dan dispatch saat END_STREAM.
+- DATA: kembalikan WINDOW_UPDATE untuk koneksi dan stream, salin payload ke dalam body stream, dan dispatch saat END_STREAM. Body yang melewati `max_body` di-shed dengan 413 dan END_STREAM alih-alih dipotong, hanya window koneksi yang dikredit untuk byte yang dibuang.
 - WINDOW_UPDATE: tumbuhkan send window koneksi atau stream dan resume response body yang terparkir.
 - RST_STREAM: lepaskan stream slot. PING: balas dengan ACK. GOAWAY: tutup koneksi.
 
@@ -303,7 +303,7 @@ Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-wor
 
 | Batas | Perilaku |
 | :- | :- |
-| Body request per stream | Di-buffer hingga `max_body` (default 16 KB). Body yang lebih besar dipotong ke `max_body` (handler melihat slice yang dibatasi), sementara WINDOW_UPDATE flow control tetap dikembalikan agar stream tetap sesuai spec |
+| Body request per stream | Di-buffer hingga `max_body` (default 16 KB). Body yang melewati kapasitas buffer di-shed dengan 413 dan END_STREAM, jadi handler tidak pernah melihat slice terpotong dan body korup tidak pernah di-dispatch. Hanya window koneksi yang dikredit untuk byte yang dibuang, menjaga koneksi tetap dapat dipakai untuk stream lainnya |
 | Stream konkuren | Diiklankan sebagai `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). Stream yang dibuka melebihi itu dijawab dengan `REFUSED_STREAM`, jadi nilai yang diiklankan minimal harus sebesar jumlah concurrent-stream peer |
 | Upgrade h2c (.EPOLL/.URING) | Disajikan minimal pada jalur mux: `101` lalu connection preface, request yang dibawa pada stream 1 tidak dilayani. Klien prior-knowledge (kasus h2c yang umum) tidak terpengaruh. Model blocking `.ASYNC` / `.POOL` / `.MIXED` melayani request stream-1 hasil upgrade |
 | Scratch blok header | `max_header_scratch` per koneksi (default 4 KB). Set header yang meluapkannya dijawab dengan `COMPRESSION_ERROR` dan RST_STREAM |

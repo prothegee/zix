@@ -113,7 +113,7 @@ loop:
                          on END_HEADERS + END_STREAM -> muxDispatch
         CONTINUATION  -> findSlot; append-decode; dispatch on END
         DATA          -> findSlot; strip padding; WINDOW_UPDATE(0) + WINDOW_UPDATE(sid) for
-                         the data length; copy into body (capped, truncates past max_body);
+                         the data length; copy into body, shed with 413 past max_body;
                          dispatch on END_STREAM
         RST_STREAM    -> findSlot -> releaseSlot
         PING          -> skip ACK; sendPingAck

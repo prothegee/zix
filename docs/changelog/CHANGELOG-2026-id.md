@@ -44,7 +44,7 @@ __*Fix:*__
 
 <br>
 
-## 0.5.0 (TBD)
+## 0.5.0-rc1 (2026-07-15)
 
 __*Update:*__
 - Zig 0.17 (eksperimental) support: satu source tree build di Zig 0.16.x dan 0.17.x, sedikit divergensi API `std.Io` di-gate di balik cek comptime `ZIG_SEMVER` (ADR-044).
@@ -58,7 +58,7 @@ __*Update:*__
     - Migrasi: `zix.Http.Server.init(4096, &routes, cfg)` menjadi `zix.Http.Server.init(&routes, cfg)`. `const S = zix.Http3.Http3(handler); var s = try S.init(cfg)` menjadi `var s = zix.Http3.Server.init(handler, cfg)`. Lepas `try` pada init `zix.Http2` / `zix.Grpc` / `zix.Http` (port tidak valid kini muncul dari `run()`). Hapus setiap `.max_client_response = N` dari `HttpServerConfig`.
 
 - Jalur serve https `zix.Http` (ADR-053):
-    - `zix.Http` (arena engine) memperoleh TLS opt-in (`config.tls`), engine HTTP ketiga yang melayani https/1.1. Setiap koneksi menjalankan handshake (TLS 1.3, dengan fallback 1.2 ECDSA) dan loop request keep-alive di worker thread-nya sendiri, response router ditangkap lewat response sink milik engine lalu dienkripsi, jadi handler menulis Response biasa dan jalur cleartext tidak menambah biaya hot-path. Response ter-buffer secara default (WebSocket adalah follow-up, SSE / streaming melalui TLS mendarat di ADR-054). Example baru `examples/tls/tls_http_basic.zig` (port 9071).
+    - `zix.Http` memperoleh TLS opt-in (`config.tls`), engine HTTP ketiga yang melayani https/1.1. Setiap koneksi menjalankan handshake (TLS 1.3, dengan fallback 1.2 ECDSA) dan loop request keep-alive di worker thread-nya sendiri, response router ditangkap lewat response sink milik engine lalu dienkripsi, jadi handler menulis Response biasa dan jalur cleartext tidak menambah biaya hot-path. Response ter-buffer secara default (WebSocket adalah follow-up, SSE / streaming melalui TLS mendarat di ADR-054). Example baru `examples/tls/tls_http_basic.zig` (port 9071).
     - Worker TLS Http2 dan gRPC yang multipleks kini pin per-core dan menghitung worker count dari cpuset yang tersedia (paritas ADR-052 dengan `tls_mux` Http1), jadi cpuset yang di-pin cgroup tidak lagi meng-oversubscribe satu core di bawah handshake storm.
 
     ---
@@ -97,11 +97,11 @@ __*Update:*__
     - Pool slot stream per worker (`src/tcp/http2/mux.zig`): mux `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, jadi memori stream residen mengikuti stream konkuren, bukan `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjaman). Pada 4096 koneksi ini memangkas memori baseline-h2c sekitar 6x sambil menaikkan throughput 8 sampai 20 persen, karena slot hot yang di-pool punya cache working set lebih rapat dibanding tabel per-koneksi lama yang sparse.
     - Cache prefix header respons HPACK (`src/tcp/http2/hpack.zig`, `respHeaderBlock`): blok `[:status, content-type, content-encoding]` untuk triple yang hot di-encode sekali dan dipakai ulang byte-identik lintas koneksi (encoder stateless, tidak pernah dynamic table), hanya `content-length` yang di-encode per balasan. Menaikkan cell body-kecil 18 sampai 26 persen pada CPU lebih rendah.
     - Seal-in-place pada jalur record TLS 1.3 (`src/tls/record.zig` `protect2`, `src/tls/connection.zig` `writeAppData2`, `src/tcp/tls/tls_session.zig` `encrypt2`): gather-encrypt yang menyegel dua slice plaintext ke satu record tanpa copy staging.
-    - Default config: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
+    - Default config: `Http2ServerConfig` / `ServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar di-shed dari stream dengan 413). `max_header_scratch` tetap 4 KiB.
 
 - Optimasi memori dan throughput `zix.Grpc` (pool slot-stream per-worker, ADR-058):
     - Pool slot-stream per-worker (`src/tcp/http2/grpc/core.zig`): mux gRPC `.EPOLL` / `.URING` meminjam slot tiap stream (tabel header plus buffer body / scratch) dari free-list thread-local saat stream dibuka dan mengembalikannya saat ditutup, sehingga memori stream residen mengikuti stream konkuren alih-alih `connections * max_streams`. Tiap koneksi hanya menyimpan array pointer selebar `max_streams`, dan steady state tidak melakukan alokasi per-stream (buffer dipakai ulang lintas pinjam). Pada 1024 koneksi ini memangkas memori unary-grpc sekitar 12x (916 ke 77 MiB) sambil menaikkan throughput 8 sampai 11 persen, hasil dua-sumbu yang sama seperti pool Http2. Path blocking `.ASYNC` / `.POOL` / `.MIXED` mempertahankan array per-koneksinya sendiri, tak berubah.
-    - Default config: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar dipotong ke ini). `max_header_scratch` tetap 4 KiB.
+    - Default config: `GrpcServerConfig` / `GrpcServeOpts` default `max_streams` 16 ke 128 (concurrency yang diiklankan, murah sekarang slot di-pool) dan `max_body` 64 KiB ke 16 KiB (body request yang di-buffer per stream, body lebih besar di-shed dari stream dengan RESOURCE_EXHAUSTED). `max_header_scratch` tetap 4 KiB.
 
     ---
 
@@ -205,6 +205,14 @@ __*Update:*__
     - Counter beban per-worker melapor saat worker keluar melalui system logger (request, frame, koneksi diterima, atau message, per engine), sehingga distribusi yang miring antar worker bisa diamati. Dua engine h2-mux (`zix.Http2`, `zix.Grpc`) tidak membawa counter ini: increment threadlocal di hot loop mux-nya terukur sekitar 1 persen throughput pada jutaan req/s, jadi dijauhkan dari hot path mereka.
 
 - Receive multishot `zix.Udp` raw `.URING`: ring per-core memasang `recvmsg` multishot dengan provided buffer ring (mencerminkan layer recv `zix.Http3`, 256 buffer), menggantikan re-arm per completion, dengan slot pool one-shot dipertahankan sebagai fallback.
+
+    ---
+
+- Backpressure submission-queue `.URING` (process queue):
+    - Field config flat baru `process_queue_len: usize = 0` pada `Http1ServerConfig` dan `HttpServerConfig`: pada `.URING`, re-arm recv atau send yang menemukan submission queue penuh diparkir pada FIFO ring per-worker sepanjang nilai ini (hanya referensi, fd plus generation, reject-newest) dan dicoba ulang pada loop pass berikutnya alih-alih menutup koneksi. 0 (default) mematikan fitur, dan tanpa efek pada dispatch model lain. Atur sekitar puncak koneksi bersamaan per worker.
+    - Perbaikan lost-accept re-arm lintas dispatch `.URING` `zix.Http1`, `zix.Http`, `zix.Grpc`, dan `zix.Http2`: re-arm multishot-accept yang jatuh saat SQ penuh membuat worker tidak bisa accept lagi sementara backlog kernel terisi. Worker kini mencatat miss (`accept_pending` / `tls_accept_pending`) dan mencoba ulang arm tepat setelah submit berikutnya, jadi SQ penuh tidak lagi mengunci accept.
+    - Kehilangan submission-queue `.URING` `zix.Http3` diperbaiki (`src/udp/http3/dispatch/uring.zig`): re-arm `recvmsg` multishot yang hilang saat SQ penuh membuat worker tuli permanen (retry `recv_unarmed` sticky kini me-re-arm-nya), re-arm slot one-shot yang hilang saat SQ penuh membocorkan slot (daftar pending re-arm terbatas kini memulihkannya), dan tail send yang dibatasi SQ penuh terbuang saat buffer swap (swap kini ditunda selama tail belum terkirim).
+    - Body request oversize di-shed alih-alih dipotong: `zix.Http2` menjawab body DATA yang melewati buffer stream dengan `413` dan END_STREAM (hanya window koneksi yang dikredit untuk byte yang dibuang), dan `zix.Grpc` mengakhiri stream dengan trailer `RESOURCE_EXHAUSTED`. Sebelumnya body dipotong diam-diam ke kapasitas, yang bisa men-dispatch message korup. Frame DATA berikutnya untuk stream yang di-shed dijawab dengan RST_STREAM, dan stream lain pada koneksi tetap berjalan.
 
 <br>
 

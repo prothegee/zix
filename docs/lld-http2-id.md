@@ -113,7 +113,7 @@ loop:
                          saat END_HEADERS + END_STREAM -> muxDispatch
         CONTINUATION  -> findSlot; append-decode; dispatch saat END
         DATA          -> findSlot; buang padding; WINDOW_UPDATE(0) + WINDOW_UPDATE(sid) untuk
-                         panjang data; salin ke body (dibatasi, terpotong melewati max_body);
+                         panjang data; salin ke body, shed dengan 413 melewati max_body;
                          dispatch saat END_STREAM
         RST_STREAM    -> findSlot -> releaseSlot
         PING          -> lewati ACK; sendPingAck
