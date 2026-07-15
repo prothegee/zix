@@ -84,7 +84,7 @@ graph LR
 | `max_streams` | 128 | max concurrent HTTP/2 streams per connection (advertised SETTINGS_MAX_CONCURRENT_STREAMS) |
 | `max_frame_size` | 16384 | advertised max HTTP/2 frame size |
 | `max_header_scratch` | 4096 | HPACK decode scratch buffer per stream (pooled per worker) |
-| `max_body` | 16384 | max total gRPC body buffered per stream (all DATA frames), larger is truncated |
+| `max_body` | 16384 | max total gRPC body buffered per stream (all DATA frames), a body past this sheds the stream with RESOURCE_EXHAUSTED |
 | `logger` | `null` | optional `*zix.Logger`, when set, logs each stream close via `rpc()` and startup/shutdown via `system()` |
 | `handler_timeout_ms` | 0 | global handler timeout cap (ms), 0 = disabled. Combined with `Route.timeout_ms` and `grpc-timeout` header at dispatch |
 
