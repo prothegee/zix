@@ -44,6 +44,23 @@ __*Fix:*__
 
 <br>
 
+## MAJOR.MINOR.x (TBA)
+
+__*Update:*__
+
+- Two internal database drivers, `postgrez` (PostgreSQL) and `rediz` (Redis), pure Zig std only, no C dependency:
+    - `postgrez`: wire protocol 3.2 with an in-place 3.0 fallback (PostgreSQL 15 minimum), binary-first value encoding with a text fallback per parameter, prepared statements, query pipelining, a batching `Executor`, a thread-safe `Pool`, SCRAM and SCRAM-PLUS (channel binding) plus cleartext auth, TLS 1.3, COPY streaming, LISTEN and NOTIFY.
+    - `rediz`: RESP3 via HELLO with an in-place RESP2 fallback (Redis 7 and 8), typed value helpers plus a raw command escape hatch, command pipelining and a deferred write-behind path, a thread-safe `Pool`, TLS 1.3.
+    - Both drivers share a `dispatch_model` config: `.ASYNC` (the pooled / executor path, the default) or `.EPOLL` / `.URING` (`Transport`, a single-thread multiplexed dispatch that pipelines many requests per connection, cleartext only).
+    - Docs: `docs/driver/postgrez` and `docs/driver/rediz` (README, HLD, LLD, config reference, English and Indonesian).
+
+<br>
+
+__*Fix:*__
+- TBA
+
+<br>
+
 ## 0.5.0-rc1 (2026-07-15)
 
 __*Update:*__

@@ -44,6 +44,23 @@ __*Fix:*__
 
 <br>
 
+## MAJOR.MINOR.x (TBA)
+
+__*Update:*__
+
+- Dua driver database internal, `postgrez` (PostgreSQL) dan `rediz` (Redis), murni Zig std saja, tanpa dependency C:
+    - `postgrez`: wire protocol 3.2 dengan fallback 3.0 di tempat (PostgreSQL 15 minimum), encoding nilai binary-first dengan fallback text per parameter, prepared statement, query pipelining, `Executor` batching, `Pool` thread-safe, auth SCRAM dan SCRAM-PLUS (channel binding) serta cleartext, TLS 1.3, streaming COPY, LISTEN dan NOTIFY.
+    - `rediz`: RESP3 lewat HELLO dengan fallback RESP2 di tempat (Redis 7 dan 8), helper nilai bertipe plus jalan pintas raw command, command pipelining dan jalur deferred write-behind, `Pool` thread-safe, TLS 1.3.
+    - Kedua driver berbagi config `dispatch_model`: `.ASYNC` (jalur pooled / executor, default) atau `.EPOLL` / `.URING` (`Transport`, dispatch termultipleks satu-thread yang mem-pipeline banyak request per koneksi, cleartext saja).
+    - Dokumentasi: `docs/driver/postgrez` dan `docs/driver/rediz` (README, HLD, LLD, referensi config, Inggris dan Indonesia).
+
+<br>
+
+__*Fix:*__
+- TBA
+
+<br>
+
 ## 0.5.0-rc1 (2026-07-15)
 
 __*Update:*__
