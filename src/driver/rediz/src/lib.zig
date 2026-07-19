@@ -25,6 +25,7 @@ pub const reply_error = @import("reply_error.zig");
 pub const url = @import("url.zig");
 pub const conn = @import("conn.zig");
 pub const pool = @import("pool.zig");
+pub const dispatch = @import("dispatch/dispatch.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const tls = @import("tls.zig");
 
@@ -50,6 +51,21 @@ pub const TlsMode = enum {
     REQUIRE,
 };
 
+/// How the driver multiplexes socket I/O across connections.
+///
+/// Note:
+/// - ASYNC: the Pool, blocking connections with one round trip in flight per
+///   held connection. The default.
+/// - EPOLL: one thread that owns non-blocking connections and pipelines many
+///   commands per connection (see dispatch.Transport).
+/// - URING: the same single-thread multiplex on io_uring.
+/// - EPOLL and URING are cleartext only, so they pair with tls = OFF.
+pub const DispatchModel = enum {
+    ASYNC,
+    EPOLL,
+    URING,
+};
+
 /// Flat connection config, shared by Conn and Pool (pool_size and the retry
 /// knobs only matter for Pool).
 pub const Config = struct {
@@ -68,6 +84,10 @@ pub const Config = struct {
     conn_timeout_ms: u32 = 10_000,
     protocol_version: RespVersion = .AUTO,
     tls: TlsMode = .OFF,
+    /// Transport that multiplexes socket I/O. ASYNC (the Pool) is the
+    /// default, EPOLL and URING select the single-thread multiplexed
+    /// dispatch.Transport (cleartext only, so keep tls = OFF for them).
+    dispatch_model: DispatchModel = .ASYNC,
     /// Bounds replies a connection may owe: commands queued by a Pipeline
     /// (sheds error.QueueFull at the bound, 0 = no bound) and outstanding
     /// deferred commands (drained at the bound, 0 acts as one at a time).
@@ -93,6 +113,9 @@ pub const KeyValue = conn.KeyValue;
 /// Shared connection pool, re-exported: rediz.Pool.init(...).
 pub const Pool = pool.Pool;
 
+/// Multiplexed dispatch transport, re-exported: rediz.Transport.open(...).
+pub const Transport = dispatch.Transport;
+
 /// Batched commands, re-exported: conn.pipeline().
 pub const Pipeline = pipeline.Pipeline;
 
@@ -116,6 +139,7 @@ test {
     _ = url;
     _ = conn;
     _ = pool;
+    _ = dispatch;
     _ = pipeline;
     _ = tls;
     _ = @import("tls/wire.zig");
