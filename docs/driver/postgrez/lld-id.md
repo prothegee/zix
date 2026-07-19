@@ -24,8 +24,10 @@ sequenceDiagram
         S-->>C: AuthenticationSASLContinue (server-first)
         C->>S: SASLResponse (client-final dengan proof)
         S-->>C: AuthenticationSASLFinal (server signature)
-    else cleartext atau md5
+    else cleartext
         C->>S: PasswordMessage
+    else md5
+        Note over C: tidak didukung, connect gagal dengan error.UnsupportedAuth
     end
     S-->>C: AuthenticationOk, ParameterStatus, BackendKeyData, ReadyForQuery
 ```
