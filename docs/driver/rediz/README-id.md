@@ -6,7 +6,7 @@ Driver database Redis yang ditulis murni dengan Zig, hanya memakai standard libr
 - Helper nilai bertipe plus jalan pintas raw command.
 - Command pipelining dan jalur deferred write-behind.
 - Pool koneksi yang thread-safe.
-- TLS 1.3 dan 1.2 (`rediss://`).
+- TLS 1.3 (`rediss://`).
 - Kompatibel dengan Zig 0.16 dan 0.17.
 
 Untuk arsitektur lihat `hld-id.md`, untuk detail wire-level lihat `lld-id.md`, untuk field config dan sizing lihat `config-id.md`.
@@ -76,6 +76,7 @@ Nilai yang dikembalikan hidup di arena per reply koneksi dan tetap valid hingga 
 | `conn_timeout_ms` | `10000` | batas fase connect plus handshake, 0 menonaktifkan |
 | `protocol_version` | `.AUTO` | `.AUTO`, `.RESP2`, `.RESP3` |
 | `tls` | `.OFF` | `.OFF`, `.REQUIRE` |
+| `dispatch_model` | `.ASYNC` | transport yang me-multiplex I/O socket: `.ASYNC` (Pool), `.EPOLL`, `.URING` |
 | `max_pending_replies` | `16` | batas pipeline dan batas deferred tertunggak, 0 = tanpa batas |
 | `process_queue_len` | `0` | pool saja: batas acquire yang parkir |
 | `pool_size` | `6` | pool saja: jumlah koneksi per pool |
@@ -93,6 +94,7 @@ Nilai yang dikembalikan hidup di arena per reply koneksi dan tetap valid hingga 
 | Server dan db | `ping`, `select`, `dbSize`, `flushDb` |
 | Raw | `command(args)` mengembalikan `Reply` yang sudah di-decode |
 | Pipelining | `pipeline()` lalu `add`, `sync` |
+| Transport | dispatch EPOLL/URING yang di-multiplex (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
 | Pool | `acquire`, `release`, `discard` |
 
 ### Deferred write-behind

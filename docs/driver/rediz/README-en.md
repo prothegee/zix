@@ -6,7 +6,7 @@ A Redis database driver written in pure Zig, standard library only.
 - Typed value helpers plus a raw command escape hatch.
 - Command pipelining and a deferred write-behind path.
 - A thread-safe connection pool.
-- TLS 1.3 and 1.2 (`rediss://`).
+- TLS 1.3 (`rediss://`).
 - Builds on Zig 0.16 and 0.17.
 
 For the architecture see `hld-en.md`, for the wire-level details see `lld-en.md`, for the config fields and sizing see `config-en.md`.
@@ -76,6 +76,7 @@ The returned value lives in the connection's per-reply arena and stays valid unt
 | `conn_timeout_ms` | `10000` | connect plus handshake bound, 0 disables |
 | `protocol_version` | `.AUTO` | `.AUTO`, `.RESP2`, `.RESP3` |
 | `tls` | `.OFF` | `.OFF`, `.REQUIRE` |
+| `dispatch_model` | `.ASYNC` | transport that multiplexes socket I/O: `.ASYNC` (Pool), `.EPOLL`, `.URING` |
 | `max_pending_replies` | `16` | pipeline bound and outstanding deferred bound, 0 = no bound |
 | `process_queue_len` | `0` | pool only: parked-acquire bound |
 | `pool_size` | `6` | pool only: connections per pool |
@@ -93,6 +94,7 @@ The returned value lives in the connection's per-reply arena and stays valid unt
 | Server and db | `ping`, `select`, `dbSize`, `flushDb` |
 | Raw | `command(args)` returns a decoded `Reply` |
 | Pipelining | `pipeline()` then `add`, `sync` |
+| Transport | multiplexed EPOLL/URING dispatch (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
 | Pool | `acquire`, `release`, `discard` |
 
 ### Deferred write-behind
