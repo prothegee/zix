@@ -18,7 +18,7 @@ flowchart TB
         resp[RESP encode / decode]
         replyerr[reply error]
     end
-    tls[TLS 1.3 and 1.2]
+    tls[TLS 1.3]
     net[std.Io socket]
 
     app --> api
@@ -40,6 +40,7 @@ flowchart TB
 | `conn.zig` | connect, HELLO handshake, the typed command helpers, the raw `command`, the deferred write-behind path |
 | `pool.zig` | a thread-safe pool of connections with a bounded FIFO waiter queue |
 | `pipeline.zig` | queue several commands behind one flush, one round trip |
+| `dispatch/` | the EPOLL and URING dispatch: one thread that multiplexes non-blocking connections and pipelines commands |
 | `protocol/resp.zig` | RESP2 and RESP3 encode and decode, the `Reply` union |
 | `reply_error.zig` | the error prefix enum and the captured server error |
 | `tls/` | the TLS client (shared design with the zix TLS stack) |
@@ -91,6 +92,41 @@ flowchart LR
     cn --> redis
 ```
 
+## Dispatch model
+
+`Config.dispatch_model` picks how the driver multiplexes socket I/O across connections. The wire protocol is the same in every model, only the socket pump changes.
+
+| model | shape | best when |
+| :- | :- | :- |
+| `.ASYNC` | the Pool: blocking connections, one round trip in flight per held connection | the default, threads that acquire and release a connection per unit of work |
+| `.EPOLL` | one thread that owns non-blocking connections and pipelines many commands per connection, on epoll | one owner driving many connections without a thread per in-flight command |
+| `.URING` | the same single-thread multiplex on io_uring | the same as EPOLL, with io_uring submission and completion queues in place of epoll |
+
+`.ASYNC` is the Pool above. `.EPOLL` and `.URING` are `dispatch.Transport`: it reuses `Conn` for the connect and the RESP handshake, then runs the pipelined loop on the raw connection fd. The caller stages a command (the `resp` encoder builds the bytes) under a routing tag, and `dispatch.Transport` calls back with the raw reply (the `resp` decoder reads it) in submit order per connection. So the protocol is shared with the blocking path, only the socket pump changes.
+
+```mermaid
+flowchart LR
+    caller[caller loop]
+    subgraph transport [dispatch.Transport]
+        reactor[epoll or io_uring]
+        c1[conn 1]
+        c2[conn 2]
+        cn[conn K]
+    end
+    redis[(Redis)]
+
+    caller -->|submit command, tag| transport
+    reactor --> c1
+    reactor --> c2
+    reactor --> cn
+    c1 --> redis
+    c2 --> redis
+    cn --> redis
+    transport -->|on_reply, tag| caller
+```
+
+This is the write-behind mirror in its ideal form: the transport pipelines many fire-and-forget commands per connection at a fraction of the CPU of one round trip per connection. `.EPOLL` and `.URING` are cleartext only: the raw-fd loop cannot drive a TLS session, so pair them with `tls = .OFF`. The blocking `Conn` and `Pool` path keeps TLS.
+
 ## Command and reply flow
 
 RESP is a strict request and reply protocol: replies arrive in command order. rediz uses this for two shapes.
@@ -125,7 +161,7 @@ The deferred path exists for the mirror pattern: a cache fill or invalidation th
 
 ## TLS
 
-The TLS client is the same design used across the zix stack: TLS 1.3 with a 1.2 fallback. A `rediss://` URL or `tls = .REQUIRE` runs the handshake from the first byte on the connection.
+The TLS client follows the same TLS 1.3 design used across the zix stack (RFC 8446, no 1.2 fallback). A `rediss://` URL or `tls = .REQUIRE` runs the handshake from the first byte on the connection.
 
 ## Design decisions
 

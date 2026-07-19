@@ -18,7 +18,7 @@ flowchart TB
         resp[RESP encode / decode]
         replyerr[reply error]
     end
-    tls[TLS 1.3 dan 1.2]
+    tls[TLS 1.3]
     net[std.Io socket]
 
     app --> api
@@ -40,6 +40,7 @@ flowchart TB
 | `conn.zig` | connect, handshake HELLO, helper command bertipe, `command` raw, jalur deferred write-behind |
 | `pool.zig` | pool koneksi thread-safe dengan antrean waiter FIFO yang terbatas |
 | `pipeline.zig` | antre beberapa command di belakang satu flush, satu round trip |
+| `dispatch/` | dispatch EPOLL dan URING: satu thread yang me-multiplex koneksi non-blocking dan mem-pipeline command |
 | `protocol/resp.zig` | encode dan decode RESP2 dan RESP3, union `Reply` |
 | `reply_error.zig` | enum prefix error dan error server yang ditangkap |
 | `tls/` | klien TLS (desain bersama dengan stack TLS zix) |
@@ -91,6 +92,41 @@ flowchart LR
     cn --> redis
 ```
 
+## Dispatch model
+
+`Config.dispatch_model` memilih cara driver me-multiplex I/O socket lintas koneksi. Wire protocol sama di setiap model, hanya socket pump yang berubah.
+
+| model | bentuk | terbaik saat |
+| :- | :- | :- |
+| `.ASYNC` | Pool: koneksi blocking, satu round trip in flight per koneksi yang dipegang | default, thread yang acquire dan release satu koneksi per unit kerja |
+| `.EPOLL` | satu thread yang memiliki koneksi non-blocking dan mem-pipeline banyak command per koneksi, di atas epoll | satu owner yang menggerakkan banyak koneksi tanpa satu thread per command in flight |
+| `.URING` | multiplex satu thread yang sama di atas io_uring | sama seperti EPOLL, dengan submission dan completion queue io_uring menggantikan epoll |
+
+`.ASYNC` adalah Pool di atas. `.EPOLL` dan `.URING` adalah `dispatch.Transport`: ia memakai ulang `Conn` untuk connect dan handshake RESP, lalu menjalankan loop pipelined di atas fd koneksi mentah. Pemanggil men-stage sebuah command (encoder `resp` membangun byte-nya) di bawah routing tag, dan `dispatch.Transport` callback dengan reply mentah (decoder `resp` membacanya) dalam urutan submit per koneksi. Jadi protocol dibagi dengan jalur blocking, hanya socket pump yang berubah.
+
+```mermaid
+flowchart LR
+    caller[loop pemanggil]
+    subgraph transport [dispatch.Transport]
+        reactor[epoll atau io_uring]
+        c1[conn 1]
+        c2[conn 2]
+        cn[conn K]
+    end
+    redis[(Redis)]
+
+    caller -->|submit command, tag| transport
+    reactor --> c1
+    reactor --> c2
+    reactor --> cn
+    c1 --> redis
+    c2 --> redis
+    cn --> redis
+    transport -->|on_reply, tag| caller
+```
+
+Ini adalah write-behind mirror dalam bentuk idealnya: transport mem-pipeline banyak command fire-and-forget per koneksi dengan CPU jauh lebih kecil dari satu round trip per koneksi. `.EPOLL` dan `.URING` cleartext saja: loop raw-fd tidak bisa menggerakkan sesi TLS, jadi pasangkan dengan `tls = .OFF`. Jalur `Conn` dan `Pool` blocking tetap memakai TLS.
+
 ## Alur command dan reply
 
 RESP adalah protocol request dan reply yang ketat: reply datang sesuai urutan command. rediz memakai ini untuk dua bentuk.
@@ -125,7 +161,7 @@ Jalur deferred ada untuk pola mirror: pengisian cache atau invalidasi yang harus
 
 ## TLS
 
-Klien TLS memakai desain yang sama dengan seluruh stack zix: TLS 1.3 dengan fallback 1.2. URL `rediss://` atau `tls = .REQUIRE` menjalankan handshake dari byte pertama pada koneksi.
+Klien TLS memakai desain TLS 1.3 yang sama dengan seluruh stack zix (RFC 8446, tanpa fallback 1.2). URL `rediss://` atau `tls = .REQUIRE` menjalankan handshake dari byte pertama pada koneksi.
 
 ## Keputusan desain
 
