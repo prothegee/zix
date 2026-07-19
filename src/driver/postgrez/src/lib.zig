@@ -34,6 +34,7 @@ pub const conn = @import("conn.zig");
 pub const pool = @import("pool.zig");
 pub const statement = @import("statement.zig");
 pub const executor = @import("executor.zig");
+pub const dispatch = @import("dispatch/dispatch.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const copy = @import("copy.zig");
 pub const notify = @import("notify.zig");
@@ -53,6 +54,21 @@ pub const TlsMode = enum {
     REQUIRE,
 };
 
+/// How the driver multiplexes socket I/O across connections.
+///
+/// Note:
+/// - ASYNC: the Executor, a thread pool of blocking connections with one
+///   round trip in flight per worker. The default.
+/// - EPOLL: one thread that owns non-blocking connections and pipelines many
+///   requests per connection (see dispatch.Transport).
+/// - URING: the same single-thread multiplex on io_uring.
+/// - EPOLL and URING are cleartext only, so they pair with tls = OFF.
+pub const DispatchModel = enum {
+    ASYNC,
+    EPOLL,
+    URING,
+};
+
 /// Flat connection config, shared by Conn and Pool (pool_size and the retry
 /// knobs only matter for Pool).
 pub const Config = struct {
@@ -67,6 +83,10 @@ pub const Config = struct {
     conn_timeout_ms: u32 = 10_000,
     protocol_version: ProtocolVersion = .AUTO,
     tls: TlsMode = .OFF,
+    /// Transport that multiplexes socket I/O. ASYNC (the Executor) is the
+    /// default, EPOLL and URING select the single-thread multiplexed
+    /// dispatch.Transport (cleartext only, so keep tls = OFF for them).
+    dispatch_model: DispatchModel = .ASYNC,
     /// Bounds replies a connection may owe: statements queued by a
     /// Pipeline or by Statement.sendRows. At the bound the queuing call
     /// sheds with error.QueueFull, 0 = no bound.
@@ -97,6 +117,7 @@ pub const Pool = pool.Pool;
 /// Driver features, re-exported.
 pub const Statement = statement.Statement;
 pub const Executor = executor.Executor;
+pub const Transport = dispatch.Transport;
 pub const Pipeline = pipeline.Pipeline;
 pub const PipelineResult = pipeline.PipelineResult;
 pub const PipelineStatus = pipeline.PipelineStatus;
@@ -133,6 +154,7 @@ test {
     _ = pool;
     _ = statement;
     _ = executor;
+    _ = dispatch;
     _ = pipeline;
     _ = copy;
     _ = notify;
