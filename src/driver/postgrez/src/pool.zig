@@ -14,8 +14,8 @@
 //! - Slots connect lazily on first acquire and reconnect (with the config
 //!   retry knobs) after a discard, so a killed connection heals on the next
 //!   acquire. The connect itself runs outside the lock.
-//! - acquire/release are explicit (A14): release returns the connection,
-//!   discard destroys a broken one and frees its slot for reconnect.
+//! - acquire/release are explicit: release returns the connection, discard
+//!   destroys a broken one and frees its slot for reconnect.
 
 const std = @import("std");
 const lib = @import("lib.zig");
