@@ -24,7 +24,7 @@ flowchart TB
         types[binary / text / row]
         sqlstate[sqlstate]
     end
-    tls[TLS 1.3 dan 1.2]
+    tls[TLS 1.3]
     net[std.Io socket]
 
     app --> api
@@ -47,7 +47,8 @@ flowchart TB
 | `pool.zig` | pool koneksi thread-safe dengan antrean waiter FIFO yang terbatas |
 | `statement.zig` | prepared statement plus API batch `sendRows` dan `awaitRows` |
 | `pipeline.zig` | antre beberapa statement di belakang satu Sync, satu round trip |
-| `executor.zig` | fleet batching: intake queue, worker thread, pool, cache statement per koneksi |
+| `executor.zig` | fleet batching: intake queue, worker thread, pool, cache statement per koneksi (dispatch model ASYNC) |
+| `dispatch/` | dispatch EPOLL dan URING: satu thread yang me-multiplex koneksi non-blocking dan mem-pipeline request |
 | `copy.zig` | streaming COPY IN dan COPY OUT |
 | `protocol/` | framing message frontend dan backend, startup |
 | `auth/` | SCRAM, channel binding SCRAM-PLUS, cleartext |
@@ -121,13 +122,48 @@ flowchart LR
 
 Executor menjawab pertanyaan yang dihadapi server sinkron thread-per-core: bagaimana banyak request database yang bersamaan berbagi koneksi dan round trip tanpa satu thread yang memblokir per request. Satu worker menguras hingga satu batch job per wakeup lalu mem-pipeline-nya di satu koneksi, jadi throughput naik mengikuti pool, bukan mengikuti jumlah thread pemanggil.
 
+## Dispatch model
+
+`Config.dispatch_model` memilih cara driver me-multiplex I/O socket lintas koneksi. Wire protocol sama di setiap model, hanya socket pump yang berubah.
+
+| model | bentuk | terbaik saat |
+| :- | :- | :- |
+| `.ASYNC` | Executor: thread pool koneksi blocking, satu round trip in flight per worker | default, pemanggil yang mau job queue plus caching prepared statement per koneksi |
+| `.EPOLL` | satu thread yang memiliki koneksi non-blocking dan mem-pipeline banyak request per koneksi, di atas epoll | satu owner yang menggerakkan banyak koneksi tanpa satu thread per request in flight |
+| `.URING` | multiplex satu thread yang sama di atas io_uring | sama seperti EPOLL, dengan submission dan completion queue io_uring menggantikan epoll |
+
+`.ASYNC` adalah Executor di atas. `.EPOLL` dan `.URING` adalah `dispatch.Transport`: ia memakai ulang `Conn` untuk connect dan handshake SCRAM, lalu menjalankan loop pipelined di atas fd koneksi mentah. Pemanggil men-stage sebuah request (helper `frontend` membangun byte-nya) di bawah routing tag, dan `dispatch.Transport` callback dengan reply mentah (decoder `backend` membacanya) dalam urutan submit per koneksi. Jadi protocol dibagi dengan jalur blocking, hanya socket pump yang berubah.
+
+```mermaid
+flowchart LR
+    caller[loop pemanggil]
+    subgraph transport [dispatch.Transport]
+        reactor[epoll atau io_uring]
+        c1[conn 1]
+        c2[conn 2]
+        cn[conn K]
+    end
+    pg[(PostgreSQL)]
+
+    caller -->|submit request, tag| transport
+    reactor --> c1
+    reactor --> c2
+    reactor --> cn
+    c1 --> pg
+    c2 --> pg
+    cn --> pg
+    transport -->|on_reply, tag| caller
+```
+
+`.EPOLL` dan `.URING` cleartext saja: loop raw-fd tidak bisa menggerakkan sesi TLS, jadi pasangkan dengan `tls = .OFF`. Jalur `Conn`, `Pool`, dan `Executor` blocking tetap memakai TLS.
+
 ## Cache prepared statement di executor
 
 Prepared statement milik koneksi yang mem-parse-nya. Executor menyimpan tabel samping berkunci koneksi, jadi sebuah statement di-prepare sekali dan dipakai ulang antar batch pada koneksi itu. Ketika koneksi di-discard setelah kegagalan transport, statement yang di-cache ikut ditutup bersamanya dan acquire berikutnya connect ulang dari bersih.
 
 ## TLS
 
-Klien TLS memakai desain yang sama dengan seluruh stack zix: TLS 1.3 dengan fallback 1.2, handshake berjalan sebelum startup PostgreSQL. Channel binding SCRAM-PLUS meng-hash sertifikat server, jadi hanya berlaku untuk sertifikat bertanda tangan SHA-256.
+Klien TLS memakai desain TLS 1.3 yang sama dengan seluruh stack zix (RFC 8446, tanpa fallback 1.2), handshake berjalan sebelum startup PostgreSQL. Channel binding SCRAM-PLUS meng-hash sertifikat server, jadi hanya berlaku untuk sertifikat bertanda tangan SHA-256.
 
 ## Keputusan desain
 

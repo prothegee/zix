@@ -24,7 +24,7 @@ flowchart TB
         types[binary / text / row]
         sqlstate[sqlstate]
     end
-    tls[TLS 1.3 and 1.2]
+    tls[TLS 1.3]
     net[std.Io socket]
 
     app --> api
@@ -47,7 +47,8 @@ flowchart TB
 | `pool.zig` | a thread-safe pool of connections with a bounded FIFO waiter queue |
 | `statement.zig` | prepared statements plus the `sendRows` and `awaitRows` batch API |
 | `pipeline.zig` | queue several statements behind one Sync, one round trip |
-| `executor.zig` | a batching fleet: intake queue, worker threads, pool, per-connection statement cache |
+| `executor.zig` | a batching fleet: intake queue, worker threads, pool, per-connection statement cache (the ASYNC dispatch model) |
+| `dispatch/` | the EPOLL and URING dispatch: one thread that multiplexes non-blocking connections and pipelines requests |
 | `copy.zig` | COPY IN and COPY OUT streaming |
 | `protocol/` | frontend and backend message framing, startup |
 | `auth/` | SCRAM, SCRAM-PLUS channel binding, cleartext |
@@ -121,13 +122,48 @@ flowchart LR
 
 The executor answers the question a synchronous, thread-per-core server asks: how do many concurrent database requests share connections and round trips without one blocking thread per request. A worker drains up to a batch of jobs per wakeup and pipelines them on one connection, so throughput scales with the pool, not with the caller thread count.
 
+## Dispatch model
+
+`Config.dispatch_model` picks how the driver multiplexes socket I/O across connections. The wire protocol is the same in every model, only the socket pump changes.
+
+| model | shape | best when |
+| :- | :- | :- |
+| `.ASYNC` | the Executor: a thread pool of blocking connections, one round trip in flight per worker | the default, a caller that wants a job queue plus per-connection prepared-statement caching |
+| `.EPOLL` | one thread that owns non-blocking connections and pipelines many requests per connection, on epoll | one owner driving many connections without a thread per in-flight request |
+| `.URING` | the same single-thread multiplex on io_uring | the same as EPOLL, with io_uring submission and completion queues in place of epoll |
+
+`.ASYNC` is the Executor above. `.EPOLL` and `.URING` are `dispatch.Transport`: it reuses `Conn` for the connect and the SCRAM handshake, then runs the pipelined loop on the raw connection fd. The caller stages a request (the `frontend` helpers build the bytes) under a routing tag, and `dispatch.Transport` calls back with the raw reply (the `backend` decoder reads it) in submit order per connection. So the protocol is shared with the blocking path, only the socket pump changes.
+
+```mermaid
+flowchart LR
+    caller[caller loop]
+    subgraph transport [dispatch.Transport]
+        reactor[epoll or io_uring]
+        c1[conn 1]
+        c2[conn 2]
+        cn[conn K]
+    end
+    pg[(PostgreSQL)]
+
+    caller -->|submit request, tag| transport
+    reactor --> c1
+    reactor --> c2
+    reactor --> cn
+    c1 --> pg
+    c2 --> pg
+    cn --> pg
+    transport -->|on_reply, tag| caller
+```
+
+`.EPOLL` and `.URING` are cleartext only: the raw-fd loop cannot drive a TLS session, so pair them with `tls = .OFF`. The blocking `Conn`, `Pool`, and `Executor` path keeps TLS.
+
 ## Prepared-statement caching in the executor
 
 Prepared statements belong to the connection that parsed them. The executor keeps a side table keyed by connection, so a statement is prepared once and reused across batches on that connection. When a connection is discarded after a transport failure, its cached statements are closed with it and the next acquire reconnects clean.
 
 ## TLS
 
-The TLS client is the same design used across the zix stack: TLS 1.3 with a 1.2 fallback, the handshake runs before the PostgreSQL startup. SCRAM-PLUS channel binding hashes the server certificate, so it applies only to SHA-256 signed certificates.
+The TLS client follows the same TLS 1.3 design used across the zix stack (RFC 8446, no 1.2 fallback), the handshake runs before the PostgreSQL startup. SCRAM-PLUS channel binding hashes the server certificate, so it applies only to SHA-256 signed certificates.
 
 ## Design decisions
 
