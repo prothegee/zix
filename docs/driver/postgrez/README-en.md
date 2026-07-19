@@ -5,7 +5,7 @@ A PostgreSQL database driver written in pure Zig, standard library only.
 - Wire protocol 3.2 with an in-place 3.0 fallback, minimum server is PostgreSQL 15.
 - Binary-first value encoding with an automatic text fallback per parameter.
 - Prepared statements, query pipelining, a batching executor, a thread-safe pool.
-- SCRAM and SCRAM-PLUS (channel binding) plus cleartext auth, TLS 1.3 and 1.2.
+- SCRAM and SCRAM-PLUS (channel binding) plus cleartext auth, TLS 1.3.
 - COPY streaming, LISTEN and NOTIFY.
 - Builds on Zig 0.16 and 0.17.
 
@@ -76,7 +76,9 @@ The connection allocator is the caller's: an arena means mapped rows need no per
 | `database` | null | database name, null uses the user name |
 | `application_name` | `postgrez` | reported to the server |
 | `conn_timeout_ms` | `10000` | connect plus startup bound, 0 disables |
+| `protocol_version` | `.AUTO` | startup protocol selector, negotiates 3.2 with a 3.0 fallback |
 | `tls` | `.OFF` | `.OFF`, `.PREFER`, `.REQUIRE` |
+| `dispatch_model` | `.ASYNC` | transport that multiplexes socket I/O: `.ASYNC` (Executor), `.EPOLL`, `.URING` |
 | `max_pending_replies` | `16` | replies a connection may owe (pipeline and batch bound), 0 = no bound |
 | `process_queue_len` | `0` | pool only: parked-acquire bound, 0 sheds instead of parking |
 | `pool_size` | `6` | pool only: connections per pool |
@@ -92,6 +94,7 @@ The connection allocator is the caller's: an arena means mapped rows need no per
 | `Statement` | prepared statement: `exec`, `rows`, `query`, `queryRow`, `sendRows`, `awaitRows` |
 | `Pipeline` | batch commands in one round trip: `begin`, `add`, `sync` |
 | `Executor` | batching fleet over a pool for high-throughput parameterized queries |
+| `Transport` | multiplexed EPOLL/URING dispatch (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
 | `Pool` | thread-safe connection pool: `acquire`, `release`, `discard` |
 | `CopyIn` / `CopyOut` | COPY streaming |
 

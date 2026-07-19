@@ -5,7 +5,7 @@ Driver database PostgreSQL yang ditulis murni dengan Zig, hanya memakai standard
 - Wire protocol 3.2 dengan fallback 3.0 di tempat, server minimum adalah PostgreSQL 15.
 - Encoding nilai binary-first dengan fallback text otomatis per parameter.
 - Prepared statement, query pipelining, executor batching, pool yang thread-safe.
-- Auth SCRAM dan SCRAM-PLUS (channel binding) serta cleartext, TLS 1.3 dan 1.2.
+- Auth SCRAM dan SCRAM-PLUS (channel binding) serta cleartext, TLS 1.3.
 - Streaming COPY, LISTEN dan NOTIFY.
 - Kompatibel dengan Zig 0.16 dan 0.17.
 
@@ -76,7 +76,9 @@ Allocator koneksi dipegang oleh pemanggil: memakai arena berarti row hasil map t
 | `database` | null | nama database, null memakai nama user |
 | `application_name` | `postgrez` | dilaporkan ke server |
 | `conn_timeout_ms` | `10000` | batas fase connect plus startup, 0 menonaktifkan |
+| `protocol_version` | `.AUTO` | selector protocol startup, menegosiasi 3.2 dengan fallback 3.0 |
 | `tls` | `.OFF` | `.OFF`, `.PREFER`, `.REQUIRE` |
+| `dispatch_model` | `.ASYNC` | transport yang me-multiplex I/O socket: `.ASYNC` (Executor), `.EPOLL`, `.URING` |
 | `max_pending_replies` | `16` | reply yang boleh tertunggak satu koneksi (batas pipeline dan batch), 0 = tanpa batas |
 | `process_queue_len` | `0` | pool saja: batas acquire yang parkir, 0 shed alih-alih parkir |
 | `pool_size` | `6` | pool saja: jumlah koneksi per pool |
@@ -92,6 +94,7 @@ Allocator koneksi dipegang oleh pemanggil: memakai arena berarti row hasil map t
 | `Statement` | prepared statement: `exec`, `rows`, `query`, `queryRow`, `sendRows`, `awaitRows` |
 | `Pipeline` | batch beberapa command dalam satu round trip: `begin`, `add`, `sync` |
 | `Executor` | fleet batching di atas pool untuk query berparameter throughput tinggi |
+| `Transport` | dispatch EPOLL/URING yang di-multiplex (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
 | `Pool` | pool koneksi thread-safe: `acquire`, `release`, `discard` |
 | `CopyIn` / `CopyOut` | streaming COPY |
 
