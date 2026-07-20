@@ -37,7 +37,11 @@ const IoUring = std.os.linux.IoUring;
 
 /// Default minimum warm idle-connection pool floor. Overridden per worker from
 /// config.uring_idle_pool_floor. Mirrors the zix.Http1 URING idle pool.
-const URING_IDLE_POOL_FLOOR: usize = 64;
+const URING_IDLE_POOL_FLOOR: usize = 8;
+
+/// Default absolute warm idle-connection pool ceiling. Overridden per worker
+/// from config.uring_idle_pool_ceiling. Mirrors the zix.Http1 URING idle pool.
+const URING_IDLE_POOL_CEILING: usize = 256;
 
 /// Which re-arm a parked process-queue entry retries. Mirrors the zix.Http1
 /// URING park queue (this engine has no drain path, so recv and send only).
@@ -97,6 +101,8 @@ fn UringWorker(comptime ServerPtr: type) type {
         live_count: usize = 0,
         /// Minimum warm pool floor, set from config.uring_idle_pool_floor.
         idle_floor: usize = URING_IDLE_POOL_FLOOR,
+        /// Absolute warm pool ceiling, set from config.uring_idle_pool_ceiling.
+        idle_ceiling: usize = URING_IDLE_POOL_CEILING,
         /// Dual-listener TLS side (config.tls + config.tls_port). Inactive by default (-1 / null),
         /// so a cleartext-only worker sees zero layout change on its hot structures.
         tls_listener_fd: std.posix.fd_t = -1,
@@ -264,7 +270,7 @@ fn UringWorker(comptime ServerPtr: type) type {
         /// Warm idle-pool cap, derived from this worker's live concurrency so the pool keeps up to one
         /// full reconnect of the live working set warm. The floor keeps a small warm reserve when idle.
         fn idleCap(worker: *const W) usize {
-            return @max(worker.live_count, worker.idle_floor);
+            return @min(worker.idle_ceiling, @max(worker.live_count, worker.idle_floor));
         }
 
         /// Evict the least-recently-used warm connection (the tail) to the cold stack: return its
@@ -896,6 +902,7 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
         .send_buf_size = cfg.uring_send_buf_size,
         .busy_poll_us = cfg.busy_poll_us,
         .idle_floor = cfg.uring_idle_pool_floor,
+        .idle_ceiling = cfg.uring_idle_pool_ceiling,
         .tls_listener_fd = tls_listener_fd,
         .tls_ctx = if (tls_active) cfg.tls else null,
     };

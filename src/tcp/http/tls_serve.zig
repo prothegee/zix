@@ -122,7 +122,7 @@ pub fn processRequestToBuffer(server: anytype, io: std.Io, request: []u8, out: [
     const outcome = common.processRequest(server, stream, sink_fd, io, request, arena);
 
     if (resp.tl_resp_sink != &sink) {
-        // the handler detached the capture sink via res.stream(). With the stream sink armed it
+        // the handler detached the capture sink via res.sendStream(). With the stream sink armed it
         // already streamed the response over TLS (ADR-054). Without it, streaming has no TLS path.
         if (resp.tl_tls_stream != null) return .{ .bytes = &.{}, .outcome = .close, .streamed = true };
 
@@ -580,7 +580,7 @@ fn tlsStreamHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void 
     _ = req;
     _ = ctx;
 
-    _ = res.stream() catch {};
+    _ = res.sendStream() catch {};
 }
 
 test "zix test: http tls_serve, processRequestToBuffer captures the router response" {
@@ -645,7 +645,7 @@ test "zix test: http tls_serve, processRequestToBuffer streams over TLS when the
     resp.tl_tls_stream = &stream_sink;
     defer resp.tl_tls_stream = prev;
 
-    // res.stream() detaches the capture sink and writes the SSE headers through the stream sink.
+    // res.sendStream() detaches the capture sink and writes the SSE headers through the stream sink.
     var req_sse = "GET /sse HTTP/1.1\r\nHost: x\r\n\r\n".*;
     const cap = try processRequestToBuffer(&server, undefined, req_sse[0..], &out, &arena);
     try std.testing.expect(cap.streamed);

@@ -55,7 +55,7 @@ pub const HeaderSize = union(enum) {
     }
 };
 
-/// Writer handle returned by Response.stream() for SSE (Server-Sent Events).
+/// Writer handle returned by Response.sendStream() for SSE (Server-Sent Events).
 /// Writes directly to the raw socket fd, no buffering, no flush needed.
 pub const SseWriter = struct {
     fd: std.posix.fd_t,
@@ -98,10 +98,13 @@ pub const Response = struct {
     extra_len: usize = 0,
     max_headers: usize,
     date_cache: ?[]const u8 = null,
-    /// Set to true by stream() so handleConnection breaks the keep-alive loop after the handler exits.
+    /// Set to true by sendStream() so handleConnection breaks the keep-alive loop after the handler exits.
     streaming: bool = false,
     /// Body bytes set by send(). Read by the server to populate the access log.
     bytes_written: usize = 0,
+    /// Set once any send lands, so the engine writes a 500 only when a failed
+    /// handler produced no response at all.
+    sent: bool = false,
 
     pub fn init(fd: std.posix.fd_t, req_keep_alive: bool, io: std.Io, allocator: std.mem.Allocator, max_headers: usize) Response {
         return .{
@@ -149,6 +152,7 @@ pub const Response = struct {
     /// Slow path (extra headers or large body): fixed headers + extra headers + body.
     pub fn send(self: *Response, body_data: []const u8) !void {
         self.bytes_written = body_data.len;
+        self.sent = true;
 
         // Sink path: when a coalescing sink is installed (.EPOLL/.URING), serialize
         // the response directly into the sink's free space. This is byte-identical to
@@ -280,11 +284,33 @@ pub const Response = struct {
         return self.send(body_data);
     }
 
+    /// Send body as text/plain.
+    pub fn sendText(self: *Response, body_data: []const u8) !void {
+        self.content_type = .TEXT_PLAIN;
+        return self.send(body_data);
+    }
+
+    /// Write caller-owned bytes verbatim, a full response the handler built
+    /// itself. Routes through the coalescing sink and the TLS stream sink like
+    /// every other write.
+    ///
+    /// Param:
+    /// bytes - []const u8 (the exact wire bytes to send)
+    ///
+    /// Return:
+    /// - !void (propagates the writer error, e.g. error.BrokenPipe)
+    pub fn sendRaw(self: *Response, bytes: []const u8) !void {
+        self.bytes_written = bytes.len;
+        self.sent = true;
+
+        return writeAllFD(self.fd, bytes);
+    }
+
     /// Begin an SSE (Server-Sent Events) stream and return an SseWriter.
     /// Sends HTTP 200 with Content-Type: text/event-stream (no Content-Length).
     /// Sets res.streaming = true so handleConnection closes after the handler exits.
     /// Requires workers = 1 (Model 1). Long-lived SSE connections exhaust a blocking pool (Model 2).
-    pub fn stream(self: *Response) !SseWriter {
+    pub fn sendStream(self: *Response) !SseWriter {
         // SSE draining is handler-side: a blocking write parks the handler itself,
         // so detach any coalescing sink. Each event must flush to the fd directly
         // rather than buffer into the .EPOLL/.URING response sink (which only
@@ -325,10 +351,12 @@ pub const Response = struct {
         writeAllFD(fd, "\r\n") catch return error.BrokenPipe;
 
         self.streaming = true;
+        self.sent = true;
         return SseWriter{ .fd = fd };
     }
 
-    pub fn noContent(self: *Response) !void {
+    /// Send a 204 No Content response with an empty body.
+    pub fn sendNoContent(self: *Response) !void {
         self.status = .NO_CONTENT;
         return self.send("");
     }
@@ -429,25 +457,26 @@ pub const Response = struct {
     ///
     /// Usage:
     /// ```zig
-    /// if (res.serveCached(&req)) return;
+    /// if (res.sendFromCache(&req)) return;
     /// const body = buildExpensiveBody(...);
     /// try res.sendCached(&req, body, 0);
     /// ```
     ///
     /// Return:
     /// - bool (true when served from cache, the handler should return)
-    pub fn serveCached(self: *Response, req: *const Request) bool {
+    pub fn sendFromCache(self: *Response, req: *const Request) bool {
         const cache = tl_cache orelse return false;
         const bytes = cache.lookup(requestKey(req), rc.nowMillis()) orelse return false;
 
         self.bytes_written = bytes.len;
+        self.sent = true;
         writeAllFD(self.fd, bytes) catch return true;
 
         return true;
     }
 
     /// Serialize the response once, write it, and store it under the request key
-    /// for later serveCached hits. ttl_ms of 0 uses the worker default (cacheTtl).
+    /// for later sendFromCache hits. ttl_ms of 0 uses the worker default (cacheTtl).
     /// Falls back to a plain send when no cache is installed or the serialized
     /// response exceeds the per-slot cap.
     ///
@@ -471,6 +500,7 @@ pub const Response = struct {
 
         const len = self.buildResponse(body_data, buf) orelse return self.send(body_data);
         self.bytes_written = body_data.len;
+        self.sent = true;
 
         const ttl = if (ttl_ms == 0) tl_cache_ttl_ms else ttl_ms;
         _ = cache.store(requestKey(req), buf[0..len], ttl, rc.nowMillis());
@@ -587,7 +617,7 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     }
 
     // Streaming https path (ADR-054): no buffered capture is installed, so each write encrypts one
-    // TLS record and sends it. Reached only after res.stream() detaches the capture sink over TLS.
+    // TLS record and sends it. Reached only after res.sendStream() detaches the capture sink over TLS.
     if (tl_tls_stream) |strm| {
         return if (strm.write(data)) {} else error.BrokenPipe;
     }
@@ -838,7 +868,7 @@ test "zix test: formatHttpDate known timestamps" {
     try std.testing.expectEqualStrings("Mon, 28 Feb 2000 12:30:45 GMT", formatHttpDate(951_741_045, &buf));
 }
 
-test "zix http response cache: serveCached is a no-op when no cache is installed" {
+test "zix http response cache: sendFromCache is a no-op when no cache is installed" {
     setCache(null, 0);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -847,10 +877,10 @@ test "zix http response cache: serveCached is a no-op when no cache is installed
     var req = try Request.fromRaw("GET /x HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
     var res = Response.init(0, true, undefined, arena.allocator(), 16);
 
-    try std.testing.expect(!res.serveCached(&req));
+    try std.testing.expect(!res.sendFromCache(&req));
 }
 
-test "zix http response cache: sendCached stores then serveCached writes identical bytes" {
+test "zix http response cache: sendCached stores then sendFromCache writes identical bytes" {
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
     defer cache.deinit();
 
@@ -868,7 +898,7 @@ test "zix http response cache: sendCached stores then serveCached writes identic
 
     // first request: miss, then build + store + write
     var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
-    try std.testing.expect(!res.serveCached(&req));
+    try std.testing.expect(!res.sendFromCache(&req));
     try res.sendCached(&req, "hello", 0);
 
     var first: [256]u8 = undefined;
@@ -877,7 +907,7 @@ test "zix http response cache: sendCached stores then serveCached writes identic
 
     // second request: hit returns the identical cached bytes
     var res2 = Response.init(fds[1], true, undefined, arena.allocator(), 16);
-    try std.testing.expect(res2.serveCached(&req));
+    try std.testing.expect(res2.sendFromCache(&req));
 
     var second: [256]u8 = undefined;
     const n2 = try std.posix.read(fds[0], &second);
@@ -1054,12 +1084,12 @@ test "zix http response cache: distinct paths and queries are separate keys" {
     // a different path and a different query are both misses
     var res_b = Response.init(fds[1], true, undefined, allocator, 16);
     var res_q = Response.init(fds[1], true, undefined, allocator, 16);
-    try std.testing.expect(!res_b.serveCached(&req_b));
-    try std.testing.expect(!res_q.serveCached(&req_q));
+    try std.testing.expect(!res_b.sendFromCache(&req_b));
+    try std.testing.expect(!res_q.sendFromCache(&req_q));
 
     // the original path and query hits
     var res_a2 = Response.init(fds[1], true, undefined, allocator, 16);
-    try std.testing.expect(res_a2.serveCached(&req_a));
+    try std.testing.expect(res_a2.sendFromCache(&req_a));
 }
 
 test "zix http: writeNonBlockFD stages a partial write then resumes after drain" {
@@ -1118,7 +1148,7 @@ test "zix http: Response.stream detaches the coalescing sink for direct SSE writ
     defer tl_resp_sink = null;
 
     var res = Response.init(fds[1], true, undefined, arena.allocator(), 8);
-    const writer = try res.stream();
+    const writer = try res.sendStream();
 
     // stream() must detach the sink so SSE events write straight to the fd.
     try std.testing.expect(tl_resp_sink == null);
@@ -1184,4 +1214,45 @@ test "zix http: buildResponse emits Content-Type and Date without bufPrint, byte
     bare.status = .OK;
     const m = bare.buildResponse("hi", &out).?;
     try std.testing.expectEqualStrings("HTTP/1.1 200 Ok\r\nContent-Length: 2\r\n\r\nhi", out[0..m]);
+}
+
+test "zix http response: sendText sends text/plain and marks sent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(!res.sent);
+    try res.sendText("plain words");
+
+    var buf: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    const wire = buf[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Content-Type: text/plain\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, wire, "\r\n\r\nplain words"));
+    try std.testing.expect(res.sent);
+    try std.testing.expect(res.content_type.? == .TEXT_PLAIN);
+}
+
+test "zix http response: sendRaw writes caller bytes verbatim and marks sent" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var res = Response.init(fds[1], true, undefined, std.testing.allocator, 16);
+    const wire = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+    try res.sendRaw(wire);
+
+    var buf: [128]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+
+    try std.testing.expectEqualStrings(wire, buf[0..n]);
+    try std.testing.expectEqual(wire.len, res.bytes_written);
+    try std.testing.expect(res.sent);
 }

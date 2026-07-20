@@ -13,8 +13,8 @@ test "zix behaviour: ServerConfig, buffer size defaults" {
         .port = 9000,
         .dispatch_model = .ASYNC,
     };
-    try std.testing.expectEqual(@as(u31, 1024 * 4), cfg.kernel_backlog);
-    try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_recv_buf);
+    try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+    try std.testing.expectEqual(@as(usize, 6 * 1024), cfg.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 1024 * 4), cfg.max_allocator_size);
 }
 

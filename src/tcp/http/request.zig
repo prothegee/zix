@@ -168,6 +168,11 @@ pub const Request = struct {
         return self.body_cache.?;
     }
 
+    /// Whether the connection is keep-alive.
+    pub fn keepAlive(self: Request) bool {
+        return self.head.keep_alive;
+    }
+
     /// Get a single named query parameter value.
     pub fn queryParam(self: Request, key: []const u8) ?[]const u8 {
         const q = self.query();
@@ -401,4 +406,15 @@ test "zix test: http request chunked body must not truncate when chunks arrive i
     const body = try req.body();
 
     try std.testing.expectEqualStrings("abcdefghij", body);
+}
+
+test "zix test: http request keepAlive reflects the parsed head" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var req = try Request.fromRaw("GET / HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+    try std.testing.expect(req.keepAlive());
+
+    var req_close = try Request.fromRaw("GET / HTTP/1.1\r\nConnection: close\r\n\r\n", arena.allocator());
+    try std.testing.expect(!req_close.keepAlive());
 }

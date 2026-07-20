@@ -283,7 +283,7 @@ test "zix http: effectiveCacheEntries honors the memory ceiling" {
 }
 
 fn cacheRouteHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
-    if (res.serveCached(req)) return;
+    if (res.sendFromCache(req)) return;
 
     try res.sendCached(req, "cached-body", 0);
 }
