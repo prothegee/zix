@@ -157,6 +157,7 @@ pub const UdpServerConfig = struct {
     send_batch:            usize         = 32,     // ukuran batch sendmmsg
     max_recv_buf:          usize         = 1500,   // buffer datagram raw (typed pakai @sizeOf(Packet))
     busy_poll_us:          u32           = 0,      // jendela spin SO_BUSY_POLL (0 = tidak diset)
+    reuseport_cbpf:        bool          = false,  // steer datagram ke worker pada CPU penerima (ADR-061)
     worker_stack_size_bytes: usize       = 512 * 1024, // stack thread worker per-core
     gso_enabled:           bool          = false,  // UDP GSO di jalur kirim
 };
