@@ -66,6 +66,45 @@ pub fn releaseSlabPages(buf: []u8) void {
     std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
 }
 
+/// Best-effort MADV_NOHUGEPAGE over the pages fully covered by buf, so a slab
+/// keeps plain 4 KiB demand paging even on a host whose THP policy is
+/// "always". A contiguous slab is a perfect THP target there: any touch
+/// materializes a whole 2 MiB extent (dozens of neighbor slots) and khugepaged
+/// re-collapse undoes MADV_DONTNEED reclaim, so resident memory tracks the
+/// touched extent high-water instead of the live set. Opting out keeps
+/// resident memory equal to the pages actually written, on every host, every
+/// run. A kernel without THP ignores the advise.
+///
+/// Param:
+/// buf - []u8 (the slab, page-aligned when it comes from mapZeroedSlots)
+///
+/// Return:
+/// - void
+pub fn adviseNoHugePages(buf: []u8) void {
+    const page = std.heap.page_size_min;
+    const base = @intFromPtr(buf.ptr);
+    const start = std.mem.alignForward(usize, base, page);
+    const end = std.mem.alignBackward(usize, base + buf.len, page);
+    if (end <= start) return;
+
+    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+    std.posix.madvise(ptr, end - start, std.posix.MADV.NOHUGEPAGE) catch {};
+}
+
+/// Fault buf's pages in now (one byte written per page), so a slab's residency
+/// is a startup property instead of a first-recv fault during the load ramp.
+/// Writes zero, so a fresh anonymous mapping keeps its content.
+///
+/// Param:
+/// buf - []u8 (the slab prefix to make resident)
+///
+/// Return:
+/// - void
+pub fn pretouch(buf: []u8) void {
+    var pos: usize = 0;
+    while (pos < buf.len) : (pos += std.heap.page_size_min) buf[pos] = 0;
+}
+
 test "slab: mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
@@ -84,4 +123,38 @@ test "slab: mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
 
     try std.testing.expectEqual(@as(u8, 0), mem[0]);
     try std.testing.expectEqual(@as(u8, 0), mem[page]);
+}
+
+test "slab: pretouch keeps a fresh mapping zeroed and leaves data intact" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const page = std.heap.page_size_min;
+    const buf = try mapZeroedSlots(u8, page * 3);
+    defer unmapSlots(buf);
+
+    // Fresh mapping: pretouch faults the pages, content stays zero.
+    pretouch(buf);
+    try std.testing.expectEqual(@as(u8, 0), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0), buf[page * 2]);
+
+    // Already-written pages keep their bytes past the touched first byte.
+    buf[1] = 0xBB;
+    pretouch(buf[0..page]);
+    try std.testing.expectEqual(@as(u8, 0xBB), buf[1]);
+}
+
+test "slab: adviseNoHugePages is a safe no-op on any page-aligned slab" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const page = std.heap.page_size_min;
+    const buf = try mapZeroedSlots(u8, page * 2);
+    defer unmapSlots(buf);
+
+    // Best-effort advise: never faults, never alters content.
+    buf[0] = 0x11;
+    adviseNoHugePages(buf);
+    try std.testing.expectEqual(@as(u8, 0x11), buf[0]);
+
+    // A sub-page slice covers no full page and must be skipped without error.
+    adviseNoHugePages(buf[1 .. page - 1]);
 }
