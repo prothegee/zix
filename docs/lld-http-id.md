@@ -225,7 +225,7 @@ Ditulis oleh `Router.matchParam()` saat dispatch. `pathParam(name)` melakukan sc
 
 ### Field
 
-`Response` menyimpan `io: std.Io` (dipertahankan untuk kemungkinan penggunaan di masa depan, header `Date` sekarang bersumber dari atomic date cache global melalui `date_cache: ?[]const u8`, bukan dari pemanggilan clock per request). `streaming: bool` diatur ke `true` oleh `stream()` agar `handleConnection` memutus keep-alive loop setelah handler keluar. `bytes_written: usize` diatur ke `body_data.len` di awal `send()` agar `handleConnection` dapat membaca ukuran body respons untuk access logging tanpa harus menginspeksi write buffer.
+`Response` menyimpan `io: std.Io` (dipertahankan untuk kemungkinan penggunaan di masa depan, header `Date` sekarang bersumber dari atomic date cache global melalui `date_cache: ?[]const u8`, bukan dari pemanggilan clock per request). `streaming: bool` diatur ke `true` oleh `sendStream()` agar `handleConnection` memutus keep-alive loop setelah handler keluar. `bytes_written: usize` diatur ke `body_data.len` di awal `send()` agar `handleConnection` dapat membaca ukuran body respons untuk access logging tanpa harus menginspeksi write buffer.
 
 ### extra_buf (slice arena yang tumbuh secara lazy)
 
@@ -235,11 +235,11 @@ Ditulis oleh `Router.matchParam()` saat dispatch. `pathParam(name)` melakukan sc
 addHeader(name, value):
   1. CR/LF guard: scan name dan value untuk \r atau \n (return error jika ditemukan)
   2. if extra_buf == null:
-       initial = min(4, max_headers); if 0 -> return error.TooManyHeaders
+       initial = min(4, max_response_headers); if 0 -> return error.TooManyHeaders
        extra_buf = allocator.alloc(HttpHeader, initial)
   3. else if extra_len >= extra_buf.len:
-       if extra_buf.len >= max_headers -> return error.TooManyHeaders
-       new_cap = min(extra_buf.len * 2, max_headers)
+       if extra_buf.len >= max_response_headers -> return error.TooManyHeaders
+       new_cap = min(extra_buf.len * 2, max_response_headers)
        new_buf = allocator.alloc(HttpHeader, new_cap)
        @memcpy(new_buf[0..extra_len], extra_buf[0..extra_len])
        extra_buf = new_buf
@@ -247,7 +247,7 @@ addHeader(name, value):
   5. extra_len += 1
 ```
 
-Dimulai dari 4 slot, berlipat ganda setiap overflow, dibatasi pada `max_headers` (dari `HeaderSize.value()`). `TooManyHeaders` hanya dikembalikan saat batas maksimum tercapai.
+Dimulai dari 4 slot, berlipat ganda setiap overflow, dibatasi pada `max_response_headers` (dari `HeaderSize.value()`, ADR-062). `TooManyHeaders` hanya dikembalikan saat batas maksimum tercapai.
 
 ### send(): format penulisan header
 
@@ -273,7 +273,7 @@ Dimulai dari 4 slot, berlipat ganda setiap overflow, dibatasi pada `max_headers`
 
 Content-Type dan Date ditulis dengan `@memcpy` prefix literal plus value (bukan `bufPrint`), sehingga `send()` per-response tidak lagi memasuki jalur formatting `std.Io.Writer`. `buildResponse` (serializer zero-copy yang dipakai sink `.EPOLL` / `.URING`) menghasilkan output byte-identik dengan cara yang sama.
 
-### stream(): format penulisan header SSE
+### sendStream(): format penulisan header SSE
 
 ```
 1. Stage ke buffer stack 256 byte:

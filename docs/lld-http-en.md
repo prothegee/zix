@@ -225,7 +225,7 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 
 ### Fields
 
-`Response` carries `io: std.Io` (retained for potential future use, the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `stream()` so `handleConnection` breaks the keep-alive loop after the handler exits. `bytes_written: usize` is set to `body_data.len` at the start of `send()` so `handleConnection` can read the response body size for access logging without introspecting the write buffer.
+`Response` carries `io: std.Io` (retained for potential future use, the `Date` header is now sourced from the global atomic date cache via `date_cache: ?[]const u8`, not from a clock call per request). `streaming: bool` is set to `true` by `sendStream()` so `handleConnection` breaks the keep-alive loop after the handler exits. `bytes_written: usize` is set to `body_data.len` at the start of `send()` so `handleConnection` can read the response body size for access logging without introspecting the write buffer.
 
 ### extra_buf (lazily-grown arena slice)
 
@@ -235,11 +235,11 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 addHeader(name, value):
   1. CR/LF guard: scan name and value for \r or \n (return error if found)
   2. if extra_buf == null:
-       initial = min(4, max_headers); if 0 -> return error.TooManyHeaders
+       initial = min(4, max_response_headers); if 0 -> return error.TooManyHeaders
        extra_buf = allocator.alloc(HttpHeader, initial)
   3. else if extra_len >= extra_buf.len:
-       if extra_buf.len >= max_headers -> return error.TooManyHeaders
-       new_cap = min(extra_buf.len * 2, max_headers)
+       if extra_buf.len >= max_response_headers -> return error.TooManyHeaders
+       new_cap = min(extra_buf.len * 2, max_response_headers)
        new_buf = allocator.alloc(HttpHeader, new_cap)
        @memcpy(new_buf[0..extra_len], extra_buf[0..extra_len])
        extra_buf = new_buf
@@ -247,7 +247,7 @@ addHeader(name, value):
   5. extra_len += 1
 ```
 
-Starts at 4 slots, doubles on each overflow, capped at `max_headers` (from `HeaderSize.value()`). `TooManyHeaders` is only returned when the cap is reached.
+Starts at 4 slots, doubles on each overflow, capped at `max_response_headers` (from `HeaderSize.value()`, ADR-062). `TooManyHeaders` is only returned when the cap is reached.
 
 ### send(): header write format
 
@@ -273,7 +273,7 @@ Starts at 4 slots, doubles on each overflow, capped at `max_headers` (from `Head
 
 Content-Type and Date are written with `@memcpy` of the literal prefix plus the value (not `bufPrint`), so a per-response `send()` no longer enters the `std.Io.Writer` formatting path. `buildResponse` (the zero-copy serializer the `.EPOLL` / `.URING` sink uses) produces byte-identical output the same way.
 
-### stream(): SSE header write format
+### sendStream(): SSE header write format
 
 ```
 1. Stage into a 256-byte stack buffer:
