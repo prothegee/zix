@@ -19,17 +19,17 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
 // curl http://localhost:9076/
 // curl -k https://localhost:9077/
-fn handler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
+fn handler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     const body = "hello from the dual listener\n";
 
     var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    w.print(
+    var writer = std.Io.Writer.fixed(&buf);
+    writer.print(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n\r\n{s}",
         .{ body.len, body },
     ) catch return;
 
-    zix.Http1.writeAllFD(fd, w.buffered()) catch {};
+    try res.sendRaw(writer.buffered());
 }
 
 pub fn main(process: std.process.Init) !void {
