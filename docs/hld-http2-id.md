@@ -22,10 +22,10 @@ Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama dan tabel ro
 | Aspek | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
 | Protokol | HTTP/1.1 | HTTP/2 h2c | gRPC di atas HTTP/2 h2c |
-| Signature handler | `fn(head, body, fd)` | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
+| Signature handler | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
 | Konkurensi per koneksi | satu request pada satu waktu (pipelined) | banyak stream konkuren | banyak stream konkuren |
 | Codec header | parse teks mentah | HPACK | HPACK |
-| Allocator / context per-request | tidak ada | tidak ada | `GrpcContext` (recv / send / finish) |
+| Allocator / context per-request | arena per-request via `Context` | tidak ada | `GrpcContext` (recv / send / finish) |
 | Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStream`) | `ctx.sendMessage` |
 | Relasi layer | standalone | standalone | dibangun di atas `zix.Http2` |
 
@@ -136,7 +136,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http2.sendResponse` | fn | `sendResponse(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM pada frame terakhir (langsung, tanpa metering) |
 | `zix.Http2.sendResponseEncoded` | fn | `sendResponse` plus header `content-encoding` (menyajikan body pra-kompres) |
 | `zix.Http2.sendResponseStream` | fn | Pengiriman dengan flow control untuk body besar milik pemanggil (dipacu oleh WINDOW_UPDATE, body harus hidup lebih lama dari stream) |
-| `zix.Http2.serveCached` / `sendCached` / `cacheTtl` | fn | Response cache per-worker (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
+| `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Response cache per-worker (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | Tipe codec HPACK |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | Codec Huffman HPACK |
 | `zix.Http2.respHeaderBlock` | fn | Meng-encode blok `[:status, content-type, content-encoding, content-length]` yang di-cache |

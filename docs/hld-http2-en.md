@@ -22,10 +22,10 @@ All three are raw-fd engines with the same five dispatch models and a comptime r
 | Aspect | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
 | Protocol | HTTP/1.1 | HTTP/2 h2c | gRPC over HTTP/2 h2c |
-| Handler signature | `fn(head, body, fd)` | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
+| Handler signature | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
 | Concurrency per connection | one request at a time (pipelined) | many concurrent streams | many concurrent streams |
 | Header codec | raw text parse | HPACK | HPACK |
-| Per-request allocator / context | none | none | `GrpcContext` (recv / send / finish) |
+| Per-request allocator / context | per-request arena via `Context` | none | `GrpcContext` (recv / send / finish) |
 | Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStream`) | `ctx.sendMessage` |
 | Layer relationship | standalone | standalone | builds on `zix.Http2` |
 
@@ -136,7 +136,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http2.sendResponse` | fn | `sendResponse(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM on the last frame (immediate, unmetered) |
 | `zix.Http2.sendResponseEncoded` | fn | `sendResponse` plus a `content-encoding` header (serve a precompressed body) |
 | `zix.Http2.sendResponseStream` | fn | Flow-controlled send for a large, caller-owned body (paces by WINDOW_UPDATE, body must outlive the stream) |
-| `zix.Http2.serveCached` / `sendCached` / `cacheTtl` | fn | Per-worker response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
+| `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Per-worker response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | HPACK codec types |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | HPACK Huffman codec |
 | `zix.Http2.respHeaderBlock` | fn | Encode a cached `[:status, content-type, content-encoding, content-length]` block |
