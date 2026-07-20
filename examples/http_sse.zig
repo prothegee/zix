@@ -35,7 +35,7 @@ const POOL_SIZE: usize = 0; // ignored by .ASYNC
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
-    const sse = try res.stream();
+    const sse = try res.sendStream();
 
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
