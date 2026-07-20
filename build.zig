@@ -166,4 +166,18 @@ pub fn build(b: *std.Build) void {
         const rediz_runner_step = b.step("rediz-test-runner", "Run every rediz example against the Redis 8 container (owns the lifecycle)");
         rediz_runner_step.dependOn(&rediz_runner.step);
     }
+
+    // --------------------------------------------------------- //
+
+    // prometheuz is a standalone package (src/driver/prometheuz, own build.zig):
+    // this step delegates into it with the same compiler. Only test-unit
+    // exists so far; test-integration/test-runner join once the registry,
+    // remote_write, and examples pieces of the build land.
+    if (dirExists(b, "src/driver/prometheuz")) {
+        const prometheuz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit" });
+        prometheuz_unit.setCwd(b.path("src/driver/prometheuz"));
+
+        const prometheuz_unit_step = b.step("prometheuz-test-unit", "Run the prometheuz driver unit tests (no server needed)");
+        prometheuz_unit_step.dependOn(&prometheuz_unit.step);
+    }
 }

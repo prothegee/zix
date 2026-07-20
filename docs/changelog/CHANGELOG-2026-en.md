@@ -62,6 +62,13 @@ __*Update:*__
     - Both drivers share a `dispatch_model` config: `.ASYNC` (the pooled / executor path, the default) or `.EPOLL` / `.URING` (`Transport`, a single-thread multiplexed dispatch that pipelines many requests per connection, cleartext only).
     - Docs: `docs/driver/postgrez` and `docs/driver/rediz` (README, HLD, LLD, config reference, English and Indonesian).
 
+    ---
+
+- `prometheuz`, a third internal driver (Prometheus and node-exporter), pure Zig std only, no C dependency:
+    - Prometheus text exposition format 0.0.4 parser (scrape), a background `Scraper` poller, `remote_write` push (protobuf plus snappy), PromQL instant and ranged query, and an app-authored metric registry (`Counter`, `Gauge`) for values that never come from a scrape.
+    - Own minimal HTTP/1.1 client, cleartext only: unlike `postgrez`/`rediz` there is no pooled or multiplexed transport, GET/POST over `Content-Length` or chunked response bodies is the only transport this driver needs.
+    - Docs: `docs/driver/prometheuz` (README, HLD, LLD, config reference, English and Indonesian).
+
 <br>
 
 __*Fix:*__

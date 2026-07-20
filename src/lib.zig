@@ -37,6 +37,8 @@ pub const Driver = struct {
     pub const rediz = @import("driver/rediz/src/lib.zig");
     /// zix postgresql internal db driver
     pub const postgrez = @import("driver/postgrez/src/lib.zig");
+    /// zix prometheus/node-exporter internal driver
+    pub const prometheuz = @import("driver/prometheuz/src/lib.zig");
 };
 
 // --------------------------------------------------------- //

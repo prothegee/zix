@@ -62,6 +62,13 @@ __*Update:*__
     - Kedua driver berbagi config `dispatch_model`: `.ASYNC` (jalur pooled / executor, default) atau `.EPOLL` / `.URING` (`Transport`, dispatch termultipleks satu-thread yang mem-pipeline banyak request per koneksi, cleartext saja).
     - Dokumentasi: `docs/driver/postgrez` dan `docs/driver/rediz` (README, HLD, LLD, referensi config, Inggris dan Indonesia).
 
+    ---
+
+- `prometheuz`, driver internal ketiga (Prometheus dan node-exporter), murni Zig std saja, tanpa dependency C:
+    - Parser Prometheus text exposition format 0.0.4 (scrape), `Scraper` poller latar belakang, push `remote_write` (protobuf plus snappy), query PromQL instant dan ranged, dan registry metrik yang ditulis aplikasi (`Counter`, `Gauge`) untuk nilai yang tidak pernah berasal dari scrape.
+    - Client HTTP/1.1 minimal milik sendiri, cleartext saja: berbeda dengan `postgrez`/`rediz` tidak ada transport pooled atau multipleks, GET/POST dengan body response `Content-Length` atau chunked adalah satu-satunya transport yang dibutuhkan driver ini.
+    - Dokumentasi: `docs/driver/prometheuz` (README, HLD, LLD, referensi config, Inggris dan Indonesia).
+
 <br>
 
 __*Fix:*__
