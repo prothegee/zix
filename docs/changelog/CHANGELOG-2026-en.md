@@ -48,6 +48,14 @@ __*Fix:*__
 
 __*Update:*__
 
+- Breaking: `zix.Http1` hot path handler becomes the Request/Response/Context trio (ADR-062):
+    - `HandlerFn` is now `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void`, replacing the raw `fn(head: *const ParsedHead, body: []const u8, fd: fd_t) void`, matching `zix.Http`'s shape. `Request` is a zero-copy view, `Response` delegates to the existing byte-identical fd writers, `Context` carries `io`, a per-request arena, the fd, and deadline hooks. `core.invokeHandler` builds the trio per request and writes exactly one 500 on a handler error that has not already sent a response, on every dispatch model including the TLS buffer path.
+    - Canonical `send*` naming on both engines: `zix.Http1` renames `json` / `text` / `raw` to `sendJson` / `sendText` / `sendRaw` and gains `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, `setKeepAlive`, `addHeader`. `zix.Http` renames `noContent` / `serveCached` / `stream` to `sendNoContent` / `sendFromCache` / `sendStream` and gains `sendText`, `sendRaw`. `Request.param` becomes `pathParam` on `zix.Http1`, both engines gain `queryParams`, `pathSegments`, `body()`, `fromRaw`, `keepAlive`. Typed trio surface on both: `setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` returns `Method.Code`.
+    - `zix.Http1`'s `initRaw` and the `RawFn` hook are removed, `Server.init(handler, config)` is the single entry. `middleware.zig` is deleted from `zix.Http` (comptime wrapper composition, `examples/http_middleware.zig` / `examples/http1_middleware.zig`, is the middleware idiom on both engines now).
+    - Migration: rename `json` / `text` / `raw` / `noContent` / `serveCached` / `stream` / `param` call sites per the mapping above, replace a raw `fn(head, body, fd) void` handler with the trio signature, and drop any `initRaw` usage. All in-src handlers, every `examples/http1_*.zig` and `examples/tls/tls_http1_*.zig`, and the http1 integration tests were migrated as part of this change.
+
+    ---
+
 - Two internal database drivers, `postgrez` (PostgreSQL) and `rediz` (Redis), pure Zig std only, no C dependency:
     - `postgrez`: wire protocol 3.2 with an in-place 3.0 fallback (PostgreSQL 15 minimum), binary-first value encoding with a text fallback per parameter, prepared statements, query pipelining, a batching `Executor`, a thread-safe `Pool`, SCRAM and SCRAM-PLUS (channel binding) plus cleartext auth, TLS 1.3, COPY streaming, LISTEN and NOTIFY.
     - `rediz`: RESP3 via HELLO with an in-place RESP2 fallback (Redis 7 and 8), typed value helpers plus a raw command escape hatch, command pipelining and a deferred write-behind path, a thread-safe `Pool`, TLS 1.3.
@@ -57,7 +65,18 @@ __*Update:*__
 <br>
 
 __*Fix:*__
-- TBA
+
+- Client `send_timeout_ms` wiring (`zix.Uds`, `zix.Tcp`, `zix.Fix`):
+    - The client-side `send_timeout_ms` config field was accepted but never enforced (a leftover helper that set `SO_SNDTIMEO` existed but was never called). `UdsClient.sendMsg`, `TcpClient.sendMsg`, and `FixClient.sendMessage` now poll the socket for writability before sending and return `error.SendTimeout` on expiry, the same approach already used for `recv_timeout_ms` (`SO_RCVTIMEO` is not used: `std.Io.Threaded` panics on `EAGAIN`). `FixClient` also gained the `send_timeout_ms` field itself, previously dropped from its config entirely.
+
+    ---
+
+- Documentation corrections across `docs/` and the README:
+    - `zix.Http`: docs claimed no TLS support ("proxy-terminated by design"), TLS has been available since ADR-053.
+    - `zix.Grpc`: docs had no mention of the response cache (ADR-036) or the TLS dual listener (ADR-060), both already implemented.
+    - `zix.Uds`: docs (and the `zix.Tcp` docs' own comparison, and ADR-022) claimed UDS frames use little-endian, they use big-endian, matching TCP, and always have (ADR-010).
+    - `zix.Fix`: docs and a worked example used the field name `connection_timeout_ms`, the real field is `conn_timeout_ms`.
+    - `zix.Tcp`: docs used `max_msg_len`, the real field is `max_recv_buf`. `docs/lld-tcp-en/id.md` was also missing the `.EPOLL` / `.URING` dispatch models entirely.
 
 <br>
 

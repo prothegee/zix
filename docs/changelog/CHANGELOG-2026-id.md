@@ -48,6 +48,14 @@ __*Fix:*__
 
 __*Update:*__
 
+- Breaking: handler hot path `zix.Http1` menjadi trio Request/Response/Context (ADR-062):
+    - `HandlerFn` kini `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void`, menggantikan raw `fn(head: *const ParsedHead, body: []const u8, fd: fd_t) void`, menyamai bentuk `zix.Http`. `Request` adalah view zero-copy, `Response` mendelegasikan ke fd writer yang sudah ada dan byte-identical, `Context` membawa `io`, arena per-request, fd, dan hook deadline. `core.invokeHandler` membangun trio per request dan menulis tepat satu 500 saat handler error tanpa sudah mengirim response, di semua dispatch model termasuk jalur buffer TLS.
+    - Penamaan `send*` kanonis di kedua engine: `zix.Http1` mengganti nama `json` / `text` / `raw` menjadi `sendJson` / `sendText` / `sendRaw` dan memperoleh `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, `setKeepAlive`, `addHeader`. `zix.Http` mengganti nama `noContent` / `serveCached` / `stream` menjadi `sendNoContent` / `sendFromCache` / `sendStream` dan memperoleh `sendText`, `sendRaw`. `Request.param` menjadi `pathParam` pada `zix.Http1`, kedua engine memperoleh `queryParams`, `pathSegments`, `body()`, `fromRaw`, `keepAlive`. Permukaan trio bertipe di kedua engine: `setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`.
+    - `initRaw` milik `zix.Http1` dan hook `RawFn` dihapus, `Server.init(handler, config)` adalah satu-satunya pintu. `middleware.zig` dihapus dari `zix.Http` (komposisi wrapper comptime, `examples/http_middleware.zig` / `examples/http1_middleware.zig`, adalah idiom middleware di kedua engine sekarang).
+    - Migrasi: ganti nama call site `json` / `text` / `raw` / `noContent` / `serveCached` / `stream` / `param` sesuai pemetaan di atas, ganti handler raw `fn(head, body, fd) void` dengan signature trio, dan hapus pemakaian `initRaw` apa pun. Semua handler in-src, tiap `examples/http1_*.zig` dan `examples/tls/tls_http1_*.zig`, serta test integrasi http1 sudah dimigrasikan sebagai bagian dari perubahan ini.
+
+    ---
+
 - Dua driver database internal, `postgrez` (PostgreSQL) dan `rediz` (Redis), murni Zig std saja, tanpa dependency C:
     - `postgrez`: wire protocol 3.2 dengan fallback 3.0 di tempat (PostgreSQL 15 minimum), encoding nilai binary-first dengan fallback text per parameter, prepared statement, query pipelining, `Executor` batching, `Pool` thread-safe, auth SCRAM dan SCRAM-PLUS (channel binding) serta cleartext, TLS 1.3, streaming COPY, LISTEN dan NOTIFY.
     - `rediz`: RESP3 lewat HELLO dengan fallback RESP2 di tempat (Redis 7 dan 8), helper nilai bertipe plus jalan pintas raw command, command pipelining dan jalur deferred write-behind, `Pool` thread-safe, TLS 1.3.
@@ -57,7 +65,18 @@ __*Update:*__
 <br>
 
 __*Fix:*__
-- TBA
+
+- Penyambungan `send_timeout_ms` client (`zix.Uds`, `zix.Tcp`, `zix.Fix`):
+    - Field config `send_timeout_ms` sisi client diterima tetapi tidak pernah ditegakkan (helper peninggalan yang menyetel `SO_SNDTIMEO` ada tetapi tidak pernah dipanggil). `UdsClient.sendMsg`, `TcpClient.sendMsg`, dan `FixClient.sendMessage` kini melakukan poll pada socket untuk kesiapan tulis sebelum mengirim dan mengembalikan `error.SendTimeout` saat expired, pendekatan yang sama yang sudah dipakai untuk `recv_timeout_ms` (`SO_RCVTIMEO` tidak dipakai: `std.Io.Threaded` panic pada `EAGAIN`). `FixClient` juga memperoleh field `send_timeout_ms` itu sendiri, sebelumnya tidak dibawa sama sekali dari config-nya.
+
+    ---
+
+- Koreksi dokumentasi di `docs/` dan README:
+    - `zix.Http`: dokumentasi mengklaim tidak ada dukungan TLS ("proxy-terminated by design"), TLS sudah tersedia sejak ADR-053.
+    - `zix.Grpc`: dokumentasi tidak menyebutkan response cache (ADR-036) maupun dual listener TLS (ADR-060), keduanya sudah diimplementasikan.
+    - `zix.Uds`: dokumentasi (dan perbandingan pada dokumentasi `zix.Tcp` sendiri, serta ADR-022) mengklaim frame UDS memakai little-endian, padahal memakai big-endian, sama seperti TCP, dan selalu begitu (ADR-010).
+    - `zix.Fix`: dokumentasi dan sebuah contoh terpakai memakai nama field `connection_timeout_ms`, field sebenarnya adalah `conn_timeout_ms`.
+    - `zix.Tcp`: dokumentasi memakai `max_msg_len`, field sebenarnya adalah `max_recv_buf`. `docs/lld-tcp-en/id.md` juga sebelumnya tidak memuat model dispatch `.EPOLL` / `.URING` sama sekali.
 
 <br>
 
