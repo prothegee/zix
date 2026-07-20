@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
@@ -48,20 +47,23 @@ fn splitSegments(path: []const u8, out: [][]const u8) usize {
 // curl usage: curl -X GET "http://localhost:9023/path"
 // curl usage: curl -X GET "http://localhost:9023/path/hello"
 // curl usage: curl -X GET "http://localhost:9023/path/hello/world"
-fn pathsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+fn pathsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
     var segs: [MAX_PATH_SEGMENTS + 2][]const u8 = undefined;
-    const count = splitSegments(head.path, &segs);
+    const count = splitSegments(req.path(), &segs);
     // segs[0] == "path", subpath starts at segs[1]
     const sub_count = if (count > 0) count - 1 else 0;
 
     if (sub_count > MAX_PATH_SEGMENTS) {
-        zix.Http1.sendJsonFD(fd, 404, "{\"message\":\"Error: too many path segments\",\"max\":9}") catch {};
+        res.setStatus(.NOT_FOUND);
+
+        try res.sendJson("{\"message\":\"Error: too many path segments\",\"max\":9}");
         return;
     }
 
@@ -69,7 +71,7 @@ fn pathsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
     defer out.deinit(std.heap.smp_allocator);
 
     var hdr_buf: [256]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "{{\"path\":\"{s}\",\"segments\":[", .{head.path}) catch return;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "{{\"path\":\"{s}\",\"segments\":[", .{req.path()}) catch return;
     out.appendSlice(std.heap.smp_allocator, hdr) catch return;
 
     for (segs[1..count], 0..) |seg, i| {
@@ -83,30 +85,34 @@ fn pathsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
     const tail = std.fmt.bufPrint(&tail_buf, "],\"count\":{d}}}", .{sub_count}) catch return;
     out.appendSlice(std.heap.smp_allocator, tail) catch return;
 
-    zix.Http1.sendJsonFD(fd, 200, out.items) catch {};
+    try res.sendJson(out.items);
 }
 
 // GET /path/user/:id
 //
 // curl usage: curl -X GET "http://localhost:9023/path/user/alice"
 // curl usage: curl -X GET "http://localhost:9023/path/user/123"
-fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+fn userHandler(req: *zix.Http1.Request, res: *zix.Http1.Response) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
     const prefix = "/path/user/";
-    const id = if (std.mem.startsWith(u8, head.path, prefix)) head.path[prefix.len..] else "";
+    const id = if (std.mem.startsWith(u8, req.path(), prefix)) req.path()[prefix.len..] else "";
     if (id.len == 0) {
-        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing path param: id\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"missing path param: id\"}");
         return;
     }
 
     var buf: [256]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf, "{{\"path\":\"{s}\",\"id\":\"{s}\"}}", .{ head.path, id }) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+    const json = std.fmt.bufPrint(&buf, "{{\"path\":\"{s}\",\"id\":\"{s}\"}}", .{ req.path(), id }) catch return;
+
+    try res.sendJson(json);
 }
 
 // GET /path/:tenant-id/:tenant-branch
@@ -115,10 +121,11 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 // curl usage: curl -X GET "http://localhost:9023/path/acme/main"
 // curl usage: curl -X GET "http://localhost:9023/path/acme/dev"
 // curl usage: curl -X GET "http://localhost:9023/path/user/alice"  (-> userHandler)
-fn tenantHandler(head: *const zix.Http1.ParsedHead, body: []const u8, segs: []const []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+fn tenantHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, segs: []const []const u8) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
@@ -129,36 +136,37 @@ fn tenantHandler(head: *const zix.Http1.ParsedHead, body: []const u8, segs: []co
     const json = std.fmt.bufPrint(
         &buf,
         "{{\"path\":\"{s}\",\"tenant-id\":\"{s}\",\"tenant-branch\":\"{s}\"}}",
-        .{ head.path, tenant_id, tenant_branch },
+        .{ req.path(), tenant_id, tenant_branch },
     ) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // --------------------------------------------------------- //
 
-fn dispatch(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+fn dispatch(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) anyerror!void {
     var segs: [MAX_PATH_SEGMENTS + 2][]const u8 = undefined;
-    const count = splitSegments(head.path, &segs);
+    const count = splitSegments(req.path(), &segs);
 
     // /path/user/<id>: 3 segments, segs[1] == "user"
     if (count == 3 and std.mem.eql(u8, segs[1], "user")) {
-        userHandler(head, body, fd);
-        return;
+        return userHandler(req, res);
     }
 
     // /path/<tenant-id>/<tenant-branch>: 3 segments, segs[1] != "user"
     if (count == 3) {
-        tenantHandler(head, body, segs[0..count], fd);
-        return;
+        return tenantHandler(req, res, segs[0..count]);
     }
 
     // /path prefix (any other segment count)
     if (count >= 1 and std.mem.eql(u8, segs[0], "path")) {
-        pathsHandler(head, body, fd);
-        return;
+        return pathsHandler(req, res);
     }
 
-    zix.Http1.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
+    res.setStatus(.NOT_FOUND);
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("Not Found");
 }
 
 pub fn main(process: std.process.Init) !void {
@@ -170,7 +178,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
