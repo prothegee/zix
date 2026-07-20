@@ -30,15 +30,16 @@ Default echo bawaan adalah `zix.Uds.echoHandler` publik, dilewatkan secara ekspl
 ```
 1. unlink config.path (abaikan error, bersihkan socket yang kedaluwarsa)
 2. UnixAddress.init(config.path)
-3. ua.listen(io, .{ .kernel_backlog = config.backlog }) -> net_server
+3. ua.listen(io, .{ .kernel_backlog = config.kernel_backlog }) -> net_server
 4. defer: net_server.deinit(io) + unlink config.path
 5. loop accept:
-       stream = net_server.accept(io)   // blokir sampai ada koneksi
-       task = ConnTask{ stream, io, handler }
-       io.concurrent(dispatchConn, .{task}) catch dispatchConn(task)
+       stream = net_server.accept(io) catch |err| { log warn; continue }   // blokir sampai ada koneksi
+       applyConnTimeout(stream.socket.handle, config.recv_timeout_ms, config.send_timeout_ms)
+       task = ConnTask{ stream, io, logger: config.logger }
+       io.concurrent(dispatch, .{task}) catch dispatch(task)
 ```
 
-Accept berjalan single-threaded (pola mirip `.ASYNC`). Setiap koneksi di-dispatch melalui `io.concurrent()` agar loop accept tidak diblokir oleh handler yang lambat.
+Accept berjalan single-threaded (pola mirip `.ASYNC`). Tiap koneksi diberi `SO_RCVTIMEO` / `SO_SNDTIMEO` (`applyConnTimeout`, no-op saat keduanya 0), lalu di-dispatch melalui `io.concurrent()` agar loop accept tidak diblokir oleh handler yang lambat. `dispatch` adalah closure lokal yang mencatat "connection accepted" (saat logger diset) sebelum memanggil `handler` yang dibakukan comptime.
 
 ### ConnTask
 
@@ -48,7 +49,7 @@ Struct privat yang diteruskan by value ke `io.concurrent()`:
 const ConnTask = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
-    handler: HandlerFn,
+    logger: ?*Logger,
 };
 ```
 
@@ -58,7 +59,7 @@ const ConnTask = struct {
 defer stream.close(io)
 loop:
     baca header 4-byte (loop sampai 4 byte diterima)
-    len = readInt(u32, &hdr, .little)
+    len = readInt(u32, &hdr, .big)
     if len > payload_buf.len (4096): return  // terlalu besar, tutup koneksi
     baca len byte payload
     tulis hdr + payload kembali (echo)
@@ -88,7 +89,9 @@ pub const UdsClient = struct {
 ### sendMsg()
 
 ```
-tulis [u32 len, LE][payload]
+jika config.send_timeout_ms > 0:
+    poll(fd, POLLOUT, config.send_timeout_ms) -> error.SendTimeout saat 0 ready   // SO_SNDTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
+tulis [u32 len, BE][payload]
 flush
 ```
 
@@ -97,8 +100,10 @@ Stack write buffer (4096 byte). Blokir sampai frame terkirim.
 ### recvMsg()
 
 ```
+jika config.recv_timeout_ms > 0:
+    poll(fd, POLLIN, config.recv_timeout_ms) -> error.RecvTimeout saat 0 ready   // SO_RCVTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
 baca header 4-byte (loop sampai 4 byte)
-len = readInt(u32, &hdr, .little)
+len = readInt(u32, &hdr, .big)
 if len > buf.len: return error.MessageTooLarge
 baca len byte payload ke dalam buf[0..len]
 return buf[0..len]
@@ -112,18 +117,26 @@ Stack read buffer (4096 byte). Mengembalikan slice ke dalam `buf` milik pemanggi
 
 ```zig
 pub const UdsServerConfig = struct {
-    path:        []const u8,
-    allocator:   std.mem.Allocator,  // unused in current impl: reserved for future extensions
-    backlog:     u31  = 128,
-    max_msg_len: usize = 4096,
+    io:              std.Io,
+    allocator:       std.mem.Allocator,  // unused in current impl: reserved for future extensions
+    path:            []const u8,
+    kernel_backlog:  u31   = 128,
+    max_recv_buf:    usize = 4096,
+    recv_timeout_ms: u32   = 0,
+    send_timeout_ms: u32   = 0,
+    logger:          ?*Logger = null,
 };
 
 pub const UdsClientConfig = struct {
-    path: []const u8,
+    path:            []const u8,
+    recv_timeout_ms: u32 = 0,
+    send_timeout_ms: u32 = 0,
 };
 ```
 
 `allocator` ada di `UdsServerConfig` untuk konsistensi API dengan `UdpServerConfig` dan untuk mengakomodasi ekstensi di masa depan (misalnya connection pool, alokasi per-koneksi). Implementasi saat ini tidak melakukan alokasi heap: semua buffer bersifat stack-local di dalam handler.
+
+`recv_timeout_ms` / `send_timeout_ms` menyetel `SO_RCVTIMEO` / `SO_SNDTIMEO` pada server (`applyConnTimeout`, satu call per koneksi yang diterima). Pada client keduanya ditegakkan lewat `pollReady` (lihat [client.zig](#clientzig)), bukan `setsockopt`.
 
 ---
 
