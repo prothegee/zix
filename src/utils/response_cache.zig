@@ -400,13 +400,18 @@ test "zix response cache: an exhausted slab fails the store gracefully" {
 
     const key_a = hashKey("GET", "/a", "");
     const key_b = hashKey("GET", "/b", "");
-    try std.testing.expect(cache.store(key_a, "x" ** 40, 1000, 100));
-    try std.testing.expect(cache.store(key_b, "z" ** 90, 1000, 100));
+
+    const val_a: [40]u8 = @splat('x');
+    const val_b: [90]u8 = @splat('z');
+    const val_refresh: [90]u8 = @splat('y');
+
+    try std.testing.expect(cache.store(key_a, &val_a, 1000, 100));
+    try std.testing.expect(cache.store(key_b, &val_b, 1000, 100));
 
     // A larger refresh of key_a needs a fresh 128-byte region and the slab has
     // none left: the store fails, the existing entry stays intact and replayable.
-    try std.testing.expect(!cache.store(key_a, "y" ** 90, 1000, 200));
-    try std.testing.expectEqualStrings("x" ** 40, cache.lookup(key_a, 300).?);
+    try std.testing.expect(!cache.store(key_a, &val_refresh, 1000, 200));
+    try std.testing.expectEqualStrings(&val_a, cache.lookup(key_a, 300).?);
 }
 
 test "zix response cache: hitSlot resolves only the exact last-hit slice" {
