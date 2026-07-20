@@ -105,7 +105,7 @@ pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 pub fn streamHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
-    const sse = try res.stream();
+    const sse = try res.sendStream();
     while (true) {
         const count = g_channel.recv(ctx.io) catch break;
 
