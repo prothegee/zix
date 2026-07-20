@@ -67,6 +67,68 @@ Accept threads and pool threads share the same `io` handle (passed by value, `st
 
 Each accept thread listens on the same port (SO_REUSEPORT via `.reuse_address = true`) and dispatches via `io.async()`. No shared queue.
 
+### runEpoll (EPOLL path, dispatch/epoll.zig)
+
+```
+1. worker_count = cfg.workers (0 -> cpu_count)
+2. bind_gate = shared BindOrderGate; steering = cfg.reuseport_cbpf ? Steering{gate, worker_count} : null
+3. spawn worker_count threads: epollWorkerEntry(ctx)
+4. join threads
+```
+
+Per worker:
+
+```
+pinToCpu(worker_id)
+bind_turn = BindTurn.begin(steering, worker_id)   <- serializes binds: group index i = worker i
+listener = resolve(ip:port) + listen(reuse_address = true, kernel_backlog)
+if steering: attachCpuSteering(listener_fd, group_size)   <- SO_ATTACH_REUSEPORT_CBPF
+bind_turn.release()
+set listener non-blocking; epoll_create1; epoll_ctl ADD listener
+loop:
+    epoll_wait(events)
+    for each readable listener event:
+        loop: accept4() until EAGAIN
+            applyConnTimeout(conn_fd, recv_timeout_ms, send_timeout_ms)
+            io.async(dispatchConn, ConnTask{ stream, io, handler, logger })
+```
+
+One `SO_REUSEPORT` listener and one epoll instance per worker (shared-nothing): the kernel load-balances connections across workers with no shared queue and no cross-thread fd handoff. Each accepted connection still runs the blocking `HandlerFn` through `io.async`, so the epoll loop itself never blocks on a handler, it returns to `epoll_wait` immediately after dispatch. A per-worker accepted-connection counter reports through `logger.system()` at worker exit (REUSEPORT skew visibility, ADR-061).
+
+### runFramedUring (URING framed path, dispatch/uring.zig)
+
+Only `Server.initFramed`'s `FrameFn` runs natively on the ring: a blocking per-connection `HandlerFn` cannot, so its `.URING` folds to the `.EPOLL` path above. One ring plus one `SO_REUSEPORT` listener per worker (shared-nothing), a per-worker fd-indexed connection slab (`uring_max_conns_per_worker`, demand-paged via `slab.mapZeroedSlots`), and a coalescing response sink (`RespSink`, `tl_resp_sink`) that stages a frame handler's replies into one send per readable batch.
+
+```
+runFramedUring(cfg, io, frame_fn):
+    worker_count = cfg.workers (0 -> cpu_count)
+    steering = cfg.reuseport_cbpf ? Steering : null
+    spawn worker_count threads: uringFrameWorkerFn(frame_fn)(ctx)
+    join threads
+```
+
+Per worker:
+
+```
+pinToCpu(worker_id)
+bind under BindTurn (group index i = worker i); attachCpuSteering if steering
+slots = mapZeroedSlots(?*UringConn, max_conns)
+ring = initUringRing()   <- SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP, flagless fallback on init failure
+armAccept()   <- multishot accept SQE
+loop:
+    submit_and_wait(1)
+    for each cqe:
+        accept -> handleAccept: alloc UringConn{ buf: max_recv_buf, send_buf: uring_send_buf_size }, armRecv
+        recv   -> handleRecv: accumulate into conn.buf, dispatch() the complete frames, submitSend or armRecv
+        send   -> handleSend: partial-send retry (memmove the unsent tail), else armRecv or finishClose if closing
+```
+
+`dispatch()` parses every complete length-prefixed frame in the connection buffer (`FRAME_LEN_PREFIX` = 4-byte big-endian length, `FRAME_MAX_PAYLOAD` = 1 MiB), calls `frame_fn(payload, fd)` per frame with a `RespSink` installed as `tl_resp_sink` so `writeAllFD` / `frameRespond` coalesce into `conn.send_buf` instead of writing the fd directly, then compacts the trailing partial frame to the front of the buffer.
+
+Half-duplex per connection: `armRecv` fires again only once any staged reply's `send` completes (or immediately when a pass produced no reply), so a connection with a reply owed never races a second `recv` against the pending `send`. `beginClose` defers the actual close behind an in-flight or staged send (drains fully before `finishClose`), and each slot's `gen` counter guards a completion against a slot already recycled by a closed-then-reaccepted fd.
+
+Falls back to `.EPOLL` (the blocking `frameAdapter` wrapping `frame_fn` in a `HandlerFn`, see `common.zig`) when `uringUnavailableReason()` is non-null at startup (seccomp/sandbox, `RLIMIT_MEMLOCK` too low for the ring size, or a pre-io_uring kernel), decided once in `server.zig` before the worker fleet spawns.
+
 ### ConnQueue
 
 ```zig
@@ -185,7 +247,7 @@ stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp })
 ### sendMsg()
 
 ```
-if msg.len > config.max_msg_len: return error.MessageTooLarge
+if msg.len > config.max_recv_buf: return error.MessageTooLarge
 var wbuf [4096+4]u8 = undefined
 wtr = stream.writer(io, &wbuf)
 writeInt(u32, &hdr, msg.len, .big)
@@ -231,28 +293,42 @@ pub const DispatchModel = enum(u8) {
     ASYNC = 0,
     POOL  = 1,
     MIXED = 2,
+    EPOLL = 3,   // Linux-only, native
+    URING = 4,   // Linux-only, native for the framed path only (initFramed)
 };
 
 pub const TcpServerConfig = struct {
-    ip:             []const u8,
-    port:           u16,
-    dispatch_model: DispatchModel,
-    kernel_backlog: u31           = 4096,
-    max_msg_len:    usize         = 4096,
-    workers:        usize         = 0,
-    pool_size:      usize         = 0,
+    io:                         std.Io,
+    ip:                         []const u8,
+    port:                       u16,
+    dispatch_model:             DispatchModel,
+    kernel_backlog:             u31   = 4096,
+    workers:                    usize = 0,
+    pool_size:                  usize = 0,
+    worker_stack_size_bytes:    usize = 512 * 1024,
+    reuseport_cbpf:             bool  = false,
+    max_recv_buf:               usize = 4096,
+    uring_send_buf_size:        usize = 64 * 1024,
+    uring_max_conns_per_worker: usize = 1 << 16,
+    recv_timeout_ms:            u32   = 0,
+    send_timeout_ms:            u32   = 0,
+    logger:                     ?*Logger = null,
 };
 
 pub const TcpClientConfig = struct {
-    ip:          []const u8,
-    port:        u16,
-    max_msg_len: usize = 4096,
+    ip:              []const u8,
+    port:            u16,
+    max_recv_buf:    usize = 4096,
+    recv_timeout_ms: u32   = 0,
+    send_timeout_ms: u32   = 0,
 };
 ```
 
 `DispatchModel` is defined once in `src/tcp/config.zig` and re-exported as `zix.Tcp.DispatchModel`. HTTP and FIX configs import it from there. The backing type is `u8` per the project enum convention.
 
-`max_msg_len` in both configs is a runtime validation threshold, not a comptime buffer size. The I/O buffers in `echoHandler`, `sendMsg`, and `recvMsg` are stack-allocated to `4096 + 4` bytes regardless of the config value.
+`max_recv_buf` in both configs is a runtime validation threshold, not a comptime buffer size. The I/O buffers in `echoHandler`, `sendMsg`, and `recvMsg` are stack-allocated to `4096 + 4` bytes regardless of the config value.
+
+`reuseport_cbpf` (ADR-061) steers a new connection to the worker on the receiving CPU instead of the 4-tuple hash, `.EPOLL` / `.URING` only. `uring_send_buf_size` and `uring_max_conns_per_worker` size the `.URING` per-worker send buffer and connection slab respectively, no effect under the other dispatch models. `recv_timeout_ms` / `send_timeout_ms` set `SO_RCVTIMEO` / `SO_SNDTIMEO` per connection, 0 disables each.
 
 ---
 

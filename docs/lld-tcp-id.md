@@ -67,6 +67,68 @@ Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai 
 
 Setiap accept thread mendengarkan pada port yang sama (SO_REUSEPORT melalui `.reuse_address = true`) dan mendispatch melalui `io.async()`. Tidak ada antrian bersama.
 
+### runEpoll (jalur EPOLL, dispatch/epoll.zig)
+
+```
+1. worker_count = cfg.workers (0 -> cpu_count)
+2. bind_gate = BindOrderGate bersama; steering = cfg.reuseport_cbpf ? Steering{gate, worker_count} : null
+3. spawn worker_count thread: epollWorkerEntry(ctx)
+4. join thread
+```
+
+Per worker:
+
+```
+pinToCpu(worker_id)
+bind_turn = BindTurn.begin(steering, worker_id)   <- menyerialkan bind: group index i = worker i
+listener = resolve(ip:port) + listen(reuse_address = true, kernel_backlog)
+jika steering: attachCpuSteering(listener_fd, group_size)   <- SO_ATTACH_REUSEPORT_CBPF
+bind_turn.release()
+set listener non-blocking; epoll_create1; epoll_ctl ADD listener
+loop:
+    epoll_wait(events)
+    untuk tiap event listener yang readable:
+        loop: accept4() sampai EAGAIN
+            applyConnTimeout(conn_fd, recv_timeout_ms, send_timeout_ms)
+            io.async(dispatchConn, ConnTask{ stream, io, handler, logger })
+```
+
+Satu listener `SO_REUSEPORT` dan satu instance epoll per worker (shared-nothing): kernel melakukan load-balance koneksi lintas worker tanpa antrian bersama dan tanpa handoff fd lintas thread. Tiap koneksi yang diterima tetap menjalankan `HandlerFn` blocking lewat `io.async`, jadi loop epoll sendiri tidak pernah blocking pada handler, ia kembali ke `epoll_wait` segera setelah dispatch. Counter koneksi-diterima per-worker dilaporkan lewat `logger.system()` saat worker keluar (visibilitas skew REUSEPORT, ADR-061).
+
+### runFramedUring (jalur framed URING, dispatch/uring.zig)
+
+Hanya `FrameFn` milik `Server.initFramed` yang berjalan native di ring: `HandlerFn` per-koneksi yang blocking tidak bisa, jadi `.URING`-nya fold ke jalur `.EPOLL` di atas. Satu ring plus satu listener `SO_REUSEPORT` per worker (shared-nothing), satu slab koneksi fd-indexed per-worker (`uring_max_conns_per_worker`, demand-paged lewat `slab.mapZeroedSlots`), dan sebuah sink response coalescing (`RespSink`, `tl_resp_sink`) yang men-stage balasan frame handler jadi satu send per batch yang readable.
+
+```
+runFramedUring(cfg, io, frame_fn):
+    worker_count = cfg.workers (0 -> cpu_count)
+    steering = cfg.reuseport_cbpf ? Steering : null
+    spawn worker_count thread: uringFrameWorkerFn(frame_fn)(ctx)
+    join thread
+```
+
+Per worker:
+
+```
+pinToCpu(worker_id)
+bind di bawah BindTurn (group index i = worker i); attachCpuSteering jika steering
+slots = mapZeroedSlots(?*UringConn, max_conns)
+ring = initUringRing()   <- SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP, fallback flagless saat init gagal
+armAccept()   <- SQE multishot accept
+loop:
+    submit_and_wait(1)
+    untuk tiap cqe:
+        accept -> handleAccept: alokasi UringConn{ buf: max_recv_buf, send_buf: uring_send_buf_size }, armRecv
+        recv   -> handleRecv: akumulasi ke conn.buf, dispatch() frame yang lengkap, submitSend atau armRecv
+        send   -> handleSend: retry partial-send (memmove sisa yang belum terkirim), jika tidak armRecv atau finishClose jika closing
+```
+
+`dispatch()` mem-parse tiap frame length-prefixed yang lengkap di buffer koneksi (`FRAME_LEN_PREFIX` = panjang big-endian 4 byte, `FRAME_MAX_PAYLOAD` = 1 MiB), memanggil `frame_fn(payload, fd)` per frame dengan `RespSink` terpasang sebagai `tl_resp_sink` sehingga `writeAllFD` / `frameRespond` coalesce ke `conn.send_buf` alih-alih menulis fd langsung, lalu memampatkan frame parsial yang tersisa ke depan buffer.
+
+Half-duplex per koneksi: `armRecv` menyala lagi hanya setelah `send` dari balasan yang di-stage selesai (atau segera jika satu pass tidak menghasilkan balasan), jadi koneksi dengan balasan yang masih berutang tidak pernah membuat `recv` kedua balapan dengan `send` yang pending. `beginClose` menunda close sesungguhnya di belakang send yang in-flight atau ter-stage (mengalir habis dulu sebelum `finishClose`), dan counter `gen` tiap slot menjaga sebuah completion dari slot yang sudah didaur ulang oleh fd yang closed-lalu-diterima-ulang.
+
+Fallback ke `.EPOLL` (`frameAdapter` blocking yang membungkus `frame_fn` jadi `HandlerFn`, lihat `common.zig`) ketika `uringUnavailableReason()` non-null saat startup (seccomp/sandbox, `RLIMIT_MEMLOCK` terlalu rendah untuk ukuran ring, atau kernel pre-io_uring), diputuskan sekali di `server.zig` sebelum worker fleet di-spawn.
+
 ### ConnQueue
 
 ```zig
@@ -185,7 +247,7 @@ stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp })
 ### sendMsg()
 
 ```
-if msg.len > config.max_msg_len: return error.MessageTooLarge
+if msg.len > config.max_recv_buf: return error.MessageTooLarge
 var wbuf [4096+4]u8 = undefined
 wtr = stream.writer(io, &wbuf)
 writeInt(u32, &hdr, msg.len, .big)
@@ -231,28 +293,42 @@ pub const DispatchModel = enum(u8) {
     ASYNC = 0,
     POOL  = 1,
     MIXED = 2,
+    EPOLL = 3,   // Linux-only, native
+    URING = 4,   // Linux-only, native hanya untuk jalur framed (initFramed)
 };
 
 pub const TcpServerConfig = struct {
-    ip:             []const u8,
-    port:           u16,
-    dispatch_model: DispatchModel,
-    kernel_backlog: u31           = 4096,
-    max_msg_len:    usize         = 4096,
-    workers:        usize         = 0,
-    pool_size:      usize         = 0,
+    io:                         std.Io,
+    ip:                         []const u8,
+    port:                       u16,
+    dispatch_model:             DispatchModel,
+    kernel_backlog:             u31   = 4096,
+    workers:                    usize = 0,
+    pool_size:                  usize = 0,
+    worker_stack_size_bytes:    usize = 512 * 1024,
+    reuseport_cbpf:             bool  = false,
+    max_recv_buf:               usize = 4096,
+    uring_send_buf_size:        usize = 64 * 1024,
+    uring_max_conns_per_worker: usize = 1 << 16,
+    recv_timeout_ms:            u32   = 0,
+    send_timeout_ms:            u32   = 0,
+    logger:                     ?*Logger = null,
 };
 
 pub const TcpClientConfig = struct {
-    ip:          []const u8,
-    port:        u16,
-    max_msg_len: usize = 4096,
+    ip:              []const u8,
+    port:            u16,
+    max_recv_buf:    usize = 4096,
+    recv_timeout_ms: u32   = 0,
+    send_timeout_ms: u32   = 0,
 };
 ```
 
 `DispatchModel` didefinisikan sekali di `src/tcp/config.zig` dan di-re-export sebagai `zix.Tcp.DispatchModel`. Config HTTP dan FIX mengimpornya dari sana. Tipe backing adalah `u8` sesuai konvensi enum dalam proyek ini.
 
-`max_msg_len` pada kedua config merupakan ambang validasi runtime, bukan ukuran buffer comptime. Buffer I/O di `echoHandler`, `sendMsg`, dan `recvMsg` dialokasikan di stack dengan ukuran `4096 + 4` byte terlepas dari nilai config.
+`max_recv_buf` pada kedua config merupakan ambang validasi runtime, bukan ukuran buffer comptime. Buffer I/O di `echoHandler`, `sendMsg`, dan `recvMsg` dialokasikan di stack dengan ukuran `4096 + 4` byte terlepas dari nilai config.
+
+`reuseport_cbpf` (ADR-061) mengarahkan koneksi baru ke worker pada CPU penerima, bukan hash 4-tuple, hanya `.EPOLL` / `.URING`. `uring_send_buf_size` dan `uring_max_conns_per_worker` mengatur ukuran send buffer per-worker dan slab koneksi untuk `.URING`, tanpa efek pada dispatch model lain. `recv_timeout_ms` / `send_timeout_ms` mengatur `SO_RCVTIMEO` / `SO_SNDTIMEO` per koneksi, 0 menonaktifkan masing-masing.
 
 ---
 
