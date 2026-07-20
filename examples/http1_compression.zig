@@ -10,7 +10,6 @@ const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MIN_SIZE: usize = 256;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count epoll workers
 const POOL_SIZE: usize = 0; // ignored by .EPOLL
 
@@ -41,22 +40,23 @@ const BODY: []const u8 = PARAGRAPH ++ "\n\n" ++ PARAGRAPH ++ "\n\n" ++ PARAGRAPH
 // sendNegotiateCachedFD picks gzip, deflate, or brotli per the client (gzip leads at equal
 // quality, brotli when the client asks for it), or identity when none is accepted, and
 // sets Content-Encoding plus Vary: Accept-Encoding when it compresses.
-fn dataHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendSimpleFD(fd, 405, "text/plain", "method not allowed") catch {};
+fn dataHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+        res.setContentType(.TEXT_PLAIN);
+
+        try res.send("method not allowed");
         return;
     }
 
-    zix.Http1.sendNegotiateCachedFD(fd, head, 200, "text/plain", BODY) catch {};
+    zix.Http1.sendNegotiateCachedFD(req.fd, req.head, 200, "text/plain", BODY) catch {};
 }
 
 // curl usage: curl -H "Accept-Encoding: gzip" -v "http://localhost:9058/ping"
 // The body is under COMPRESSION_MIN_SIZE, so it is always sent uncompressed even
 // when gzip is accepted.
-fn pingHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    zix.Http1.sendNegotiateCachedFD(fd, head, 200, "text/plain", "pong") catch {};
+fn pingHandler(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    zix.Http1.sendNegotiateCachedFD(req.fd, req.head, 200, "text/plain", "pong") catch {};
 }
 
 // Produce one specific coding explicitly through the codec facade (zix.utils.compression.encode), the
@@ -85,24 +85,18 @@ fn serveCoding(fd: std.posix.fd_t, encoding: zix.utils.compression.Encoding) voi
 }
 
 // curl usage: curl -v "http://localhost:9058/gzip" | gunzip
-fn gzipHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    serveCoding(fd, .GZIP);
+fn gzipHandler(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    serveCoding(req.fd, .GZIP);
 }
 
 // curl usage: curl -v "http://localhost:9058/deflate"
-fn deflateHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    serveCoding(fd, .DEFLATE);
+fn deflateHandler(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    serveCoding(req.fd, .DEFLATE);
 }
 
 // curl usage: curl -v "http://localhost:9058/br" | brotli -d
-fn brHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    serveCoding(fd, .BR);
+fn brHandler(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    serveCoding(req.fd, .BR);
 }
 
 // --------------------------------------------------------- //
@@ -126,7 +120,6 @@ pub fn main(process: std.process.Init) !void {
         .compress = true,
         .compression_min_size = COMPRESSION_MIN_SIZE,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
