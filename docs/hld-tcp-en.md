@@ -45,7 +45,7 @@ pub const Tcp = @import("tcp/Tcp.zig");
 | :- | :- | :- |
 | `zix.Tcp.Server` | namespace | `init(handler, config)` / `initArgs(handler, config, args)` (per-connection), `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (per-frame ring), each returns a server with `run()` / `deinit()` |
 | `zix.Tcp.Client` | struct | `connect(config, io)` / `connectArgs(config, io, args)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `logger` (null) |
+| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
 | `zix.Tcp.ClientConfig` | struct | `ip`, `port`, `max_recv_buf` (4096) |
 | `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `POOL=1`, `MIXED=2`, `EPOLL=3`, `URING=4`. Per-connection handler: ASYNC/POOL/MIXED/EPOLL native, URING folds to EPOLL. Framed path: URING native. |
 | `zix.Tcp.HandlerFn` | type | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` (per-connection, owns the stream) |
@@ -81,9 +81,9 @@ Both the built-in `echoHandler` and `TcpClient.sendMsg`/`recvMsg` use a simple l
 [ payload bytes, payload_len bytes ]
 ```
 
-Big-endian is used because TCP is a network protocol: network byte order is the conventional choice and matches how most protocol libraries encode multi-byte integers over the wire. (Contrast with `zix.Uds`, which uses little-endian because UDS is local-only.)
+Big-endian is used because TCP is a network protocol: network byte order is the conventional choice and matches how most protocol libraries encode multi-byte integers over the wire. `zix.Uds` uses the same big-endian frame format (ADR-010), despite being local-only.
 
-Frames with `payload_len == 0` or `payload_len > max_msg_len` (default 4096) close the connection.
+Frames with `payload_len == 0` or `payload_len > max_recv_buf` (default 4096) close the connection.
 
 ---
 
