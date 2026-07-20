@@ -117,13 +117,13 @@ Signer RSA (ADR-048), sisi server saja. `PrivateKey.fromDer(der, is_pkcs8)` mem-
 2. version policy: jika `!ctx.allowsTls13()`, langsung ke jalur 1.2 (ECDSA saja, jika tidak `Tls12RequiresEcdsa`).
 3. ronde HelloRetryRequest jika `serverHelloRetry` mengembalikan satu, jika tidak `serverHandshake`. Saat `UnsupportedTlsVersion`: jika `!ctx.allowsTls12()` kirim alert `protocol_version`, jika tidak ambil jalur 1.2.
 4. baca (ChangeCipherSpec) + client Finished, lalu satu record aplikasi -> `readAppData` -> `core.parseHead`.
-5. Host vs identitas cert (`verifyCertIdentity`) -> 421 saat mismatch, jika tidak jalankan fd-handler lewat pipe dan `writeAppData` response, lalu `closeNotify`.
+5. Host vs identitas cert (`verifyCertIdentity`) -> 421 saat mismatch, jika tidak jalankan handler dengan capture sink in-memory (`runHandlerToBuffer`) dan `writeAppData` response, lalu `closeNotify`.
 
 `readRecord` / `readAll` / `writeAll` memakai `std.os.linux.read` / `write` dengan switch errno (tanpa wrapper std.posix demi portabilitas lintas 0.16 / 0.17).
 
 ### SSE / streaming melalui TLS (ADR-054)
 
-Jalur thread-per-koneksi juga melayani handler streaming (SSE) melalui TLS, di kedua `zix.Http1` (`core.zig`) dan `zix.Http` (`response.zig`). `serveRequests` memasang `TlsStreamSink` per-koneksi, writer type-erased (`StreamSinkFor(@TypeOf(conn))`) yang memegang koneksi hidup dan fd: tiap write mengenkripsi satu TLS record (`conn.writeAppData`) dan mengirimnya. `writeAllFD` memeriksa buffered capture sink dulu, lalu stream sink, jadi response normal menjaga jalur cepat ter-buffer. Handler memilih streaming dengan `res.stream()` (`zix.Http`, surface tak berubah) atau `beginStream()` (`zix.Http1`, no-op di cleartext), yang melepas capture sink jadi write berikutnya jatuh ke stream sink. `runHandlerToBuffer` / `processRequestToBuffer` melaporkan outcome streamed (capture sink dilepas) jadi loop close setelah stream selesai. Jalur `tls_mux` multipleks tetap request / response saja.
+Jalur thread-per-koneksi juga melayani handler streaming (SSE) melalui TLS, di kedua `zix.Http1` (`core.zig`) dan `zix.Http` (`response.zig`). `serveRequests` memasang `TlsStreamSink` per-koneksi, writer type-erased (`StreamSinkFor(@TypeOf(conn))`) yang memegang koneksi hidup dan fd: tiap write mengenkripsi satu TLS record (`conn.writeAppData`) dan mengirimnya. `writeAllFD` memeriksa buffered capture sink dulu, lalu stream sink, jadi response normal menjaga jalur cepat ter-buffer. Handler memilih streaming dengan `res.sendStream()` (`zix.Http`) atau `beginStream()` / `res.sendStream()` (`zix.Http1`, no-op di cleartext), yang melepas capture sink jadi write berikutnya jatuh ke stream sink. `runHandlerToBuffer` / `processRequestToBuffer` melaporkan outcome streamed (capture sink dilepas) jadi loop close setelah stream selesai. Jalur `tls_mux` multipleks tetap request / response saja.
 
 ### WebSocket melalui TLS (ADR-055)
 

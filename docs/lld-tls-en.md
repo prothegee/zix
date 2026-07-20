@@ -117,13 +117,13 @@ The RSA signer (ADR-048), server-side only. `PrivateKey.fromDer(der, is_pkcs8)` 
 2. version policy: if `!ctx.allowsTls13()`, go straight to the 1.2 path (ECDSA only, else `Tls12RequiresEcdsa`).
 3. HelloRetryRequest round if `serverHelloRetry` returns one, else `serverHandshake`. On `UnsupportedTlsVersion`: if `!ctx.allowsTls12()` send a `protocol_version` alert, else take the 1.2 path.
 4. read (ChangeCipherSpec) + client Finished, then one application record -> `readAppData` -> `core.parseHead`.
-5. Host vs cert identity (`verifyCertIdentity`) -> 421 on mismatch, else run the fd-handler over a pipe and `writeAppData` the response, then `closeNotify`.
+5. Host vs cert identity (`verifyCertIdentity`) -> 421 on mismatch, else run the handler with the in-memory capture sink (`runHandlerToBuffer`) and `writeAppData` the response, then `closeNotify`.
 
 `readRecord` / `readAll` / `writeAll` use `std.os.linux.read` / `write` with an errno switch (no std.posix wrapper for portability across 0.16 / 0.17).
 
 ### SSE / streaming over TLS (ADR-054)
 
-The thread-per-connection path also serves a streaming handler (SSE) over TLS, on both `zix.Http1` (`core.zig`) and `zix.Http` (`response.zig`). `serveRequests` arms a per-connection `TlsStreamSink`, a type-erased writer (`StreamSinkFor(@TypeOf(conn))`) holding the live connection and fd: each write encrypts one TLS record (`conn.writeAppData`) and sends it. `writeAllFD` checks the buffered capture sink first, then the stream sink, so a normal response keeps the buffered fast path. A handler opts into streaming with `res.stream()` (`zix.Http`, unchanged surface) or `beginStream()` (`zix.Http1`, a no-op in cleartext), which detaches the capture sink so the next writes fall through to the stream sink. `runHandlerToBuffer` / `processRequestToBuffer` report the streamed outcome (the capture sink was detached) so the loop closes after the stream ends. The multiplexed `tls_mux` path stays request / response only.
+The thread-per-connection path also serves a streaming handler (SSE) over TLS, on both `zix.Http1` (`core.zig`) and `zix.Http` (`response.zig`). `serveRequests` arms a per-connection `TlsStreamSink`, a type-erased writer (`StreamSinkFor(@TypeOf(conn))`) holding the live connection and fd: each write encrypts one TLS record (`conn.writeAppData`) and sends it. `writeAllFD` checks the buffered capture sink first, then the stream sink, so a normal response keeps the buffered fast path. A handler opts into streaming with `res.sendStream()` (`zix.Http`) or `beginStream()` / `res.sendStream()` (`zix.Http1`, a no-op in cleartext), which detaches the capture sink so the next writes fall through to the stream sink. `runHandlerToBuffer` / `processRequestToBuffer` report the streamed outcome (the capture sink was detached) so the loop closes after the stream ends. The multiplexed `tls_mux` path stays request / response only.
 
 ### WebSocket over TLS (ADR-055)
 
