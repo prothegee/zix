@@ -6,7 +6,7 @@
 //!
 //! Streaming over TLS rides the thread-per-connection path (.ASYNC / .POOL / .MIXED), so this
 //! example uses .ASYNC: each long-lived SSE connection owns its worker thread (ADR-054). The
-//! .EPOLL / .URING multiplexed TLS path stays request / response only. res.stream() is unchanged:
+//! .EPOLL / .URING multiplexed TLS path stays request / response only. res.sendStream() is unchanged:
 //! it detaches the buffered capture and each event encrypts one TLS record straight to the socket.
 //!
 //! curl usage:
@@ -38,7 +38,7 @@ const HSTS_MAX_AGE_S: u32 = 31536000;
 fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
-    const sse = try res.stream();
+    const sse = try res.sendStream();
 
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
