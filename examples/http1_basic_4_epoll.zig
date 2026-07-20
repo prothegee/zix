@@ -14,7 +14,6 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .throughput => 16 * 1024,
 };
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count epoll workers (shared-nothing, one listener + epoll each)
 const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POOL fallback)
 
@@ -33,10 +32,9 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POO
 // --------------------------------------------------------- //
 
 // Optional global logger for handler-side access logging.
-// The Http1 handler writes to the fd directly and returns void, so the server
-// cannot observe response status or bytes. Handlers log via this global, where
-// the final status and byte count are known. The server itself logs only
-// lifecycle lines (listening) when config.logger is set.
+// The engine does not emit a per-request access line, so a handler that wants
+// one logs via this global, where res holds the final status and byte count. The
+// server itself logs only lifecycle lines (listening) when config.logger is set.
 //
 // var g_logger: ?*zix.Logger = null;
 
@@ -51,33 +49,31 @@ const POOL_SIZE: usize = 0; // ignored by .EPOLL (used only on the non-Linux POO
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9018/"
-fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "Hello, World!") catch {};
+fn homeHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+    try res.send("Hello, World!");
 
     // Handler-side access logging (uncomment with g_logger above):
     // if (g_logger) |lg| {
-    //     const forwarded_for = zix.Http1.getHeader(head, "x-forwarded-for") orelse "";
-    //     const client_ip = if (forwarded_for.len > 0) forwarded_for else zix.Http1.getHeader(head, "x-real-ip") orelse "";
-    //     const user_agent = zix.Http1.getHeader(head, "user-agent") orelse "";
-    //     const origin = zix.Http1.getHeader(head, "origin") orelse "";
-    //     lg.access(head.method, head.path, 200, 0, client_ip, user_agent, origin);
+    //     const forwarded_for = req.header("x-forwarded-for") orelse "";
+    //     const client_ip = if (forwarded_for.len > 0) forwarded_for else req.header("x-real-ip") orelse "";
+    //     const user_agent = req.header("user-agent") orelse "";
+    //     const origin = req.header("origin") orelse "";
+    //     lg.access(req.method(), req.path(), res.status, res.bytes_written, client_ip, user_agent, origin);
     // }
+    _ = req;
 }
 
 // curl usage: curl -X GET "http://localhost:9018/echo"
-fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendJsonFD(fd, 200, "{\"status\":\"ok\"}") catch {};
+fn echoHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    try res.sendJson("{\"status\":\"ok\"}");
 }
 
 // curl usage: curl -X GET "http://localhost:9018/about"
-fn aboutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "zix http1 basic server example") catch {};
+fn aboutHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("zix http1 basic server example");
 }
 
 // --------------------------------------------------------- //
@@ -116,7 +112,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
         // .logger = &logger, // uncomment to wire logger (server lifecycle lines)
