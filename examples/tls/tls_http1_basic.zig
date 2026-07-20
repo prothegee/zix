@@ -19,17 +19,17 @@ const HSTS_MAX_AGE_S: u32 = 31536000;
 
 // --------------------------------------------------------- //
 
-fn handler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
+fn handler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     const body = "hello over tls 1.3\n";
 
     var buf: [512]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    w.print(
+    var writer = std.Io.Writer.fixed(&buf);
+    writer.print(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nStrict-Transport-Security: max-age={d}; includeSubDomains\r\n\r\n{s}",
         .{ body.len, HSTS_MAX_AGE_S, body },
     ) catch return;
 
-    zix.Http1.writeAllFD(fd, w.buffered()) catch {};
+    try res.sendRaw(writer.buffered());
 }
 
 pub fn main(process: std.process.Init) !void {
