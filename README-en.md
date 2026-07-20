@@ -128,9 +128,7 @@
 ## Important Notes
 
 Zix currently is linux-centric.
-
-As current state, zix will not:
-- Database driver implementation.
+Windows & MacOS currently not supported.
 
 <br>
 
@@ -307,7 +305,7 @@ __*6. Hot-path-optimized HTTP/1 zix.Http1:*__
 
 __*7. Composable HTTP request handling:*__
 
-A comptime router with path parameters (`matchParam`) shared by `zix.Http` and `zix.Http1`, an explicit middleware chain (`Middleware` / `NextFn`) on `zix.Http`, static file serving, multipart and file upload parsing (`multipart.Parser`), and HTTP range request parsing (`parseRange`) for partial content.
+A comptime router with path parameters (`matchParam`) shared by `zix.Http` and `zix.Http1`, comptime wrapper composition for middleware on both engines (a handler-in, handler-out function, see [Middleware](./README-en.md#middleware)), static file serving, multipart and file upload parsing (`multipart.Parser`), and HTTP range request parsing (`parseRange`) for partial content.
 
 > Each piece is an explicit, opt-in part of the engine, with route matching resolved at compile time. You compose only what a request needs instead of inheriting a fixed pipeline.
 
@@ -631,7 +629,7 @@ Zix has two models API for HTTP/1, `zix.Http` and `zix.Http1`.
 
 `zix.Http` relies on zig `std.http` and works as the convenient approach, while `zix.Http1` does not.
 
-**When to use:** pick `zix.Http` when you want the high-level request/response API (Request/Response/Context, an arena per request, middleware, static files). Pick `zix.Http1` when you want the lean hot-path engine with the lowest per-request overhead and are willing to work at the `fn(head, body, fd)` level. Both share the same comptime router and the same dispatch models.
+**When to use:** both engines share the same handler trio (`fn(*Request, *Response, *Context) anyerror!void`, caller-identical surface, ADR-062), the same comptime router, and the same dispatch models. Pick `zix.Http` when you want the full-featured layer (client stack, richer body handling). Pick `zix.Http1` when you want the lean hot-path engine with the lowest per-request overhead: its trio is stack views plus an arena reset, and the raw fd write helpers stay available as the escape hatch.
 
 <br>
 
@@ -765,7 +763,7 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 - [examples/http_paths.zig](examples/http_paths.zig) - path parameter routing patterns
 - [examples/http_json.zig](examples/http_json.zig) - JSON response handling
 
-**Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds and the same `exact > param > prefix` priority. The one difference is param capture: the Http1 handler is `fn(head: *const ParsedHead, body, fd) void` with no `Request`, so captured params are read with the free function `zix.Http1.pathParam("id")` (a per-handler thread-local, the same model as `zix.Http1.setTimeout`) rather than `req.pathParam("id")`:
+**Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds, the same `exact > param > prefix` priority, and the same trio handler, so param capture reads identically: `req.pathParam("id")` (the free function `zix.Http1.pathParam("id")` remains as the raw-layer equivalent):
 
 ```zig
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
@@ -777,7 +775,7 @@ const Router = zix.Http1.Router(&[_]zix.Http1.Route{
 var server = zix.Http1.Server.init(Router.dispatch, .{ .ip = "0.0.0.0", .port = 9100 });
 
 // inside userHandler:
-const id = zix.Http1.pathParam("id") orelse return;
+const id = req.pathParam("id") orelse return;
 ```
 
 Per-route param capture is capped at 8 params per match..
@@ -939,7 +937,7 @@ ctx.setTimeout(2_000); // override to 2s from now regardless of global cap
 
 **Examples:**
 - [examples/http_timeout_resp.zig](examples/http_timeout_resp.zig)
-- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - raw `zix.Http1`, uses `zix.Http1.isExpired()` and `zix.Http1.setTimeout()` (no ctx)
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - raw `zix.Http1`, uses `zix.Http1.isExpired()` plus the trio's `ctx.setTimeout()` / `ctx.timedOut()`
 
 **When to use:** set `handler_timeout_ms` whenever a handler can run long (external calls, heavy compute) and you want it to bail out cooperatively with a 408 instead of holding a thread. Add `conn_timeout_ms` under `.POOL` to evict clients that stall before completing a request. Leave both at 0 for trusted internal traffic with bounded work.
 
@@ -1096,7 +1094,7 @@ One-way server push over HTTP/1.1: no WebSocket handshake, browser-native `Event
 // GET /events: streams "tick N" once per second
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    const sse = try res.stream(); // sends SSE headers, returns SseWriter
+    const sse = try res.sendStream(); // sends SSE headers, returns SseWriter
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
         var buf: [32]u8 = undefined;
@@ -1363,7 +1361,7 @@ A miss builds and stores the response, a fresh hit is served verbatim:
 
 ```zig
 fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
-    if (res.serveCached(req)) return;            // fresh hit: cached bytes already written
+    if (res.sendFromCache(req)) return;          // fresh hit: cached bytes already written
 
     const body = try buildExpensiveReport(req);  // runs only on a miss
     res.setContentType(.APPLICATION_JSON);
@@ -1371,7 +1369,7 @@ fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.C
 }
 ```
 
-The raw `zix.Http1` engine exposes the same idea through `cacheLookup` and `writeWithCache`.
+The raw `zix.Http1` engine exposes the same idea through `cacheLookup` and `sendWithCacheFD` (or the trio's `res.sendFromCache` / `res.sendCached`).
 
 For gRPC unary handlers the opt-in lives on the call context. `ctx.serveCached` replays a stored reply message (re-framed for the current stream and finished with OK), and `ctx.sendCached` sends and stores the reply. Enable it with the same field names on `GrpcServerConfig` (`response_cache`, `cache_max_entries`, and so on) under `.EPOLL` or `.URING`:
 
@@ -1398,7 +1396,7 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 
 #### Rules and conditions
 
-- Opt-in only. Off by default, and the handler must call `res.serveCached` then `res.sendCached` (HTTP), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the `zix.Http1` `cacheLookup` / `writeWithCache`.
+- Opt-in only. Off by default, and the handler must call `res.sendFromCache` then `res.sendCached` (HTTP engines), `ctx.serveCached` then `ctx.sendCached` (gRPC), or the raw `zix.Http1` `cacheLookup` / `sendWithCacheFD`.
 - `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
 - For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`sendNegotiateFD` / `sendGzipCachedFD`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
@@ -1414,13 +1412,13 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 | `.POOL` | zix-owned pool threads | feasible and safe, but each thread would hold its own cache (lower hit rate, N times the memory), so it is deferred, not wired |
 | `.ASYNC`, `.MIXED` | `io.async()` tasks on the `std.Io` executor pool, not owned by zix | not installed: no per-thread install hook, and a task is not pinned to one thread, so a shared cache would need locks and break the lock-free design |
 
-Under any model the behavior is safe, just inert: with the cache uninstalled, `response_cache = true` and the `serveCached` / `sendCached` calls degrade to a plain send (no error, no caching).
+Under any model the behavior is safe, just inert: with the cache uninstalled, `response_cache = true` and the `sendFromCache` / `sendCached` calls degrade to a plain send (no error, no caching).
 
 ```mermaid
 flowchart TD
     A[Incoming request] --> B{response_cache and EPOLL/URING?}
     B -- no --> P[Plain send]
-    B -- yes --> C{serveCached hit and fresh?}
+    B -- yes --> C{sendFromCache hit and fresh?}
     C -- yes --> W[Write cached bytes, no rebuild]
     C -- no --> D[Build response]
     D --> E{body larger than cache_max_value_bytes?}
@@ -1803,7 +1801,7 @@ var server = try zix.Fix.Server.init(
         .comp_id        = "BROKER",
         .dispatch_model = .ASYNC,
         .handler_timeout_ms    = 200,
-        .connection_timeout_ms = 60_000,
+        .conn_timeout_ms       = 60_000,
     },
 );
 ```
@@ -1909,7 +1907,7 @@ defer server.deinit();
 try server.run();
 ```
 
-**Frame format:** `[u32 payload_len, native LE, 4 bytes][payload bytes]`. Frames with payload > `max_msg_len` (default 4096) close the connection.
+**Frame format:** `[u32 payload_len, big-endian, 4 bytes][payload bytes]`. Frames with payload > `max_recv_buf` (default 4096) close the connection.
 
 **When to use:** choose UDS for same-host IPC between cooperating processes (a sidecar, a local agent, a privileged helper) where you want stream semantics without a TCP port or the network stack. It is faster and more secure than loopback TCP (filesystem permissions guard the socket). Across hosts, use `zix.Tcp`.
 

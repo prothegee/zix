@@ -128,9 +128,7 @@
 ## Catatan Penting
 
 Saat ini Zix berfokus pada Linux.
-
-Dalam kondisi saat ini, zix tidak akan:
-- Implementasi database driver.
+Windows & MacOS belum di support.
 
 <br>
 
@@ -307,7 +305,7 @@ __*6. HTTP/1 zix.Http1 yang dioptimasi pada hot-path:*__
 
 __*7. Penanganan request HTTP yang composable:*__
 
-Router comptime dengan parameter path (`matchParam`) yang dibagikan oleh `zix.Http` dan `zix.Http1`, rantai middleware eksplisit (`Middleware` / `NextFn`) pada `zix.Http`, static file serving, parsing multipart dan file upload (`multipart.Parser`), dan parsing HTTP range request (`parseRange`) untuk partial content.
+Router comptime dengan parameter path (`matchParam`) yang dibagikan oleh `zix.Http` dan `zix.Http1`, komposisi wrapper comptime untuk middleware di kedua engine (fungsi handler-masuk, handler-keluar, lihat [Middleware](./README-id.md#middleware)), static file serving, parsing multipart dan file upload (`multipart.Parser`), dan parsing HTTP range request (`parseRange`) untuk partial content.
 
 > Setiap bagian adalah bagian engine yang eksplisit dan opt-in, dengan pencocokan route diselesaikan saat compile time. Kamu menyusun hanya apa yang dibutuhkan sebuah request alih-alih mewarisi pipeline tetap.
 
@@ -631,7 +629,7 @@ Zix memiliki dua model API untuk HTTP/1, `zix.Http` dan `zix.Http1`.
 
 `zix.Http` bergantung pada `std.http` Zig dan berfungsi sebagai pendekatan yang mudah, sedangkan `zix.Http1` tidak.
 
-**Kapan digunakan:** pilih `zix.Http` saat kamu ingin API request/response yang lengkap (Request/Response/Context, arena per request, middleware, file statis). Pilih `zix.Http1` saat kamu ingin engine hot-path yang ramping dengan overhead per-request terendah dan bersedia bekerja pada level `fn(head, body, fd)`. Keduanya berbagi router comptime dan model dispatch yang sama.
+**Kapan digunakan:** kedua engine berbagi handler trio yang sama (`fn(*Request, *Response, *Context) anyerror!void`, permukaan caller-identical, ADR-062), router comptime yang sama, dan model dispatch yang sama. Pilih `zix.Http` saat kamu ingin layer berfitur lengkap (client stack, penanganan body yang lebih kaya). Pilih `zix.Http1` saat kamu ingin engine hot-path yang ramping dengan overhead per-request terendah: trio-nya adalah stack view plus arena reset, dan helper tulis fd mentah tetap tersedia sebagai escape hatch.
 
 <br>
 
@@ -765,7 +763,7 @@ const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 - [examples/http_paths.zig](examples/http_paths.zig) - pola routing parameter path
 - [examples/http_json.zig](examples/http_json.zig) - penanganan respons JSON
 
-**Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik dan prioritas `exact > param > prefix` yang sama. Satu perbedaannya adalah penangkapan param: handler Http1 adalah `fn(head: *const ParsedHead, body, fd) void` tanpa `Request`, jadi param yang ditangkap dibaca dengan fungsi bebas `zix.Http1.pathParam("id")` (sebuah thread-local per-handler, model yang sama dengan `zix.Http1.setTimeout`) alih-alih `req.pathParam("id")`:
+**Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik, prioritas `exact > param > prefix` yang sama, dan handler trio yang sama, jadi penangkapan param terbaca identik: `req.pathParam("id")` (fungsi bebas `zix.Http1.pathParam("id")` tetap ada sebagai padanan raw-layer):
 
 ```zig
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
@@ -777,7 +775,7 @@ const Router = zix.Http1.Router(&[_]zix.Http1.Route{
 var server = zix.Http1.Server.init(Router.dispatch, .{ .ip = "0.0.0.0", .port = 9100 });
 
 // di dalam userHandler:
-const id = zix.Http1.pathParam("id") orelse return;
+const id = req.pathParam("id") orelse return;
 ```
 
 Penangkapan param per-rute dibatasi 8 param per pencocokan..
@@ -939,7 +937,7 @@ ctx.setTimeout(2_000); // timpa ke 2 detik dari sekarang terlepas dari cap globa
 
 **Contoh:**
 - [examples/http_timeout_resp.zig](examples/http_timeout_resp.zig)
-- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1` mentah, memakai `zix.Http1.isExpired()` dan `zix.Http1.setTimeout()` (tanpa ctx)
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1` mentah, memakai `zix.Http1.isExpired()` plus `ctx.setTimeout()` / `ctx.timedOut()` milik trio
 
 **Kapan digunakan:** setel `handler_timeout_ms` setiap kali handler bisa berjalan lama (panggilan eksternal, komputasi berat) dan kamu ingin ia keluar secara kooperatif dengan 408 alih-alih menahan thread. Tambahkan `conn_timeout_ms` di bawah `.POOL` untuk mengusir client yang stall sebelum menyelesaikan request. Biarkan keduanya 0 untuk trafik internal tepercaya dengan kerja terbatas.
 
@@ -1096,7 +1094,7 @@ Push satu arah dari server melalui HTTP/1.1: tanpa handshake WebSocket, reconnec
 // GET /events: streaming "tick N" sekali per detik
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    const sse = try res.stream(); // mengirim header SSE, mengembalikan SseWriter
+    const sse = try res.sendStream(); // mengirim header SSE, mengembalikan SseWriter
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
         var buf: [32]u8 = undefined;
@@ -1363,7 +1361,7 @@ Sebuah miss membangun dan menyimpan respons, sebuah hit yang fresh disajikan ver
 
 ```zig
 fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
-    if (res.serveCached(req)) return;            // hit fresh: byte cache sudah ditulis
+    if (res.sendFromCache(req)) return;          // hit fresh: byte cache sudah ditulis
 
     const body = try buildExpensiveReport(req);  // hanya berjalan saat miss
     res.setContentType(.APPLICATION_JSON);
@@ -1371,7 +1369,7 @@ fn reportHandler(req: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.C
 }
 ```
 
-Engine `zix.Http1` mentah mengekspos ide yang sama lewat `cacheLookup` dan `writeWithCache`.
+Engine `zix.Http1` mentah mengekspos ide yang sama lewat `cacheLookup` dan `sendWithCacheFD` (atau `res.sendFromCache` / `res.sendCached` milik trio).
 
 Untuk handler gRPC unary, opt-in berada di call context. `ctx.serveCached` memutar ulang pesan reply tersimpan (di-frame ulang untuk stream saat ini dan diselesaikan dengan OK), dan `ctx.sendCached` mengirim sekaligus menyimpan reply. Aktifkan dengan nama field yang sama pada `GrpcServerConfig` (`response_cache`, `cache_max_entries`, dan seterusnya) di bawah `.EPOLL` atau `.URING`:
 
@@ -1398,7 +1396,7 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 
 #### Aturan dan kondisi
 
-- Opt-in saja. Mati secara default, dan handler harus memanggil `res.serveCached` lalu `res.sendCached` (HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `writeWithCache` milik `zix.Http1`.
+- Opt-in saja. Mati secara default, dan handler harus memanggil `res.sendFromCache` lalu `res.sendCached` (engine HTTP), `ctx.serveCached` lalu `ctx.sendCached` (gRPC), atau `cacheLookup` / `sendWithCacheFD` milik `zix.Http1` mentah.
 - Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
 - Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`sendNegotiateFD` / `sendGzipCachedFD`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
@@ -1414,13 +1412,13 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 | `.POOL` | pool thread milik zix | layak dan aman, tetapi setiap thread akan memegang cache-nya sendiri (hit rate lebih rendah, N kali memori), sehingga ditunda, tidak dipasang |
 | `.ASYNC`, `.MIXED` | task `io.async()` di executor pool `std.Io`, bukan milik zix | tidak terpasang: tidak ada hook pasang per-thread, dan task tidak ditambatkan ke satu thread, sehingga cache bersama akan butuh lock dan merusak desain lock-free |
 
-Di model mana pun perilakunya aman, hanya tidak aktif: saat cache tidak terpasang, `response_cache = true` dan pemanggilan `serveCached` / `sendCached` menurun menjadi plain send (tanpa error, tanpa caching).
+Di model mana pun perilakunya aman, hanya tidak aktif: saat cache tidak terpasang, `response_cache = true` dan pemanggilan `sendFromCache` / `sendCached` menurun menjadi plain send (tanpa error, tanpa caching).
 
 ```mermaid
 flowchart TD
     A[Request masuk] --> B{response_cache dan EPOLL/URING?}
     B -- tidak --> P[Plain send]
-    B -- ya --> C{serveCached hit dan fresh?}
+    B -- ya --> C{sendFromCache hit dan fresh?}
     C -- ya --> W[Tulis byte cache, tanpa bangun ulang]
     C -- tidak --> D[Bangun respons]
     D --> E{body lebih besar dari cache_max_value_bytes?}
@@ -1803,7 +1801,7 @@ var server = try zix.Fix.Server.init(
         .comp_id               = "BROKER",
         .dispatch_model        = .ASYNC,
         .handler_timeout_ms    = 200,
-        .connection_timeout_ms = 60_000,
+        .conn_timeout_ms       = 60_000,
     },
 );
 ```
@@ -1909,7 +1907,7 @@ defer server.deinit();
 try server.run();
 ```
 
-**Format frame:** `[u32 payload_len, native LE, 4 bytes][payload bytes]`. Frame dengan payload > `max_msg_len` (default 4096) menutup koneksi.
+**Format frame:** `[u32 payload_len, big-endian, 4 bytes][payload bytes]`. Frame dengan payload > `max_recv_buf` (default 4096) menutup koneksi.
 
 **Kapan digunakan:** pilih UDS untuk IPC same-host antar proses yang bekerja sama (sidecar, agen lokal, helper berprivilese) saat kamu ingin semantik stream tanpa port TCP atau network stack. Lebih cepat dan lebih aman dari TCP loopback (izin filesystem menjaga socket). Antar host, pakai `zix.Tcp`.
 
