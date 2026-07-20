@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
@@ -21,60 +20,73 @@ const User = struct {
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9020/status"
-fn statusHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+fn statusHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"method not allowed\"}");
         return;
     }
 
-    zix.Http1.sendJsonFD(fd, 200, "{\"ok\":true,\"message\":\"\",\"data\":{\"server\":\"zix\"}}") catch {};
+    try res.sendJson("{\"ok\":true,\"message\":\"\",\"data\":{\"server\":\"zix\"}}");
 }
 
 // curl usage: curl -X GET "http://localhost:9020/echo?name=Alice"
-fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    const name = zix.Http1.queryParam(head, "name") orelse "world";
+fn echoHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    const name = req.queryParam("name") orelse "world";
 
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"\",\"data\":{{\"hello\":\"{s}\"}}}}", .{name}) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // curl usage: curl -X POST "http://localhost:9020/post" -d "hello"
-fn postHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+fn postHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .POST) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"method not allowed\"}");
         return;
     }
 
     var buf: [128]u8 = undefined;
+    const body = try req.body();
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"\",\"data\":{{\"received\":{d}}}}}", .{body.len}) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // curl usage: curl -X POST "http://localhost:9020/user" -H "Content-Type: application/json" -d '{"name":"Alice","age":30}'
-fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    if (!std.mem.eql(u8, head.method, "POST")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+fn userHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) !void {
+    if (req.method() != .POST) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"method not allowed\"}");
         return;
     }
 
+    const body = try req.body();
     if (body.len == 0) {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"empty body\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"empty body\"}");
         return;
     }
 
+    // ctx.allocator is the per-request arena: freed automatically at the next
+    // request, so a handler-scoped parse needs no manual teardown on the hot path.
     const parsed = std.json.parseFromSlice(
         User,
-        std.heap.smp_allocator,
+        ctx.allocator,
         body,
         .{ .ignore_unknown_fields = true },
     ) catch {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"invalid json\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"invalid json\"}");
         return;
     };
-    defer parsed.deinit();
 
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(
@@ -82,14 +94,16 @@ fn userHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
         "{{\"ok\":true,\"message\":\"\",\"data\":{{\"name\":\"{s}\",\"age\":{d}}}}}",
         .{ parsed.value.name, parsed.value.age },
     ) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // curl usage: curl -X GET "http://localhost:9020/users"
-fn usersHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"method not allowed\"}") catch {};
+fn usersHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"method not allowed\"}");
         return;
     }
 
@@ -99,7 +113,8 @@ fn usersHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
         "{\"name\":\"Bob\",\"age\":25}," ++
         "{\"name\":\"Carol\",\"age\":28}" ++
         "]}";
-    zix.Http1.sendJsonFD(fd, 200, payload) catch {};
+
+    try res.sendJson(payload);
 }
 
 // --------------------------------------------------------- //
@@ -121,7 +136,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
