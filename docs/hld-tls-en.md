@@ -122,14 +122,14 @@ sequenceDiagram
 
 TLS is a gated blocking serve path per engine, selected by `config.tls`, leaving every cleartext dispatch model untouched.
 
-- Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the existing fd-handler over a pipe (the handler writes plaintext unchanged), and encrypts the response.
+- Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the handler with an in-memory response sink capturing its plaintext (`runHandlerToBuffer`), and encrypts that.
 - Http2 and Grpc (ADR-052): two serve paths, selected by `dispatch_model`. ALPN selects h2 on both.
   - `.EPOLL` / `.URING`: one `SO_REUSEPORT` epoll worker per core (`tls_mux.zig`, `grpc/tls_mux.zig`) terminates TLS in place via a resumable TLS 1.3 session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker. No socketpair, no thread per connection. This is the high-concurrency path.
   - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` runs a thread-per-connection accept loop over the shared terminator `tcp/tls/h2_terminator.zig`, which runs an inline-mux driver directly over the decrypted records (frames sealed back into TLS records through a thread-local write hook). No socketpair, no second thread. This path also serves the TLS 1.2 fallback.
 
 - Dual listener (ADR-060): with `tls_port` set next to `tls` (Http1, Http, Http2, Grpc), ONE server serves cleartext on `port` and TLS on `tls_port` from the same worker fleet. The per-connection transport machinery the mux paths share lives in `src/multiplexers/tls_conn.zig`, and under `.URING` the TLS side runs on the ring (no separate epoll fleet).
 
-Because the engines are reused unchanged, https cannot regress the cleartext hot path. The blocking pipe (Http1) is acceptable on the https band, which is not the 1 percent perf gate.
+Because the engines are reused unchanged, https cannot regress the cleartext hot path. The per-request capture copy (Http1) is acceptable on the https band, which is not the 1 percent perf gate.
 
 ## Misdirected Request (RFC 9110 7.4)
 
