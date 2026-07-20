@@ -6,7 +6,6 @@ const PORT: u16 = 9030;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 
 // 0 means unlimited concurrent tasks (auto from CPU count).
 // Any other value pins the max concurrent task limit.
@@ -20,19 +19,18 @@ const WORKERS: usize = 0; // ignored by .ASYNC
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9030/"
-fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello from zix http1 (manual concurrent)") catch {};
+fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("hello from zix http1 (manual concurrent)");
 }
 
 // curl usage: curl -X GET "http://localhost:9030/info"
-fn infoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
+fn infoHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{{\"concurrent_limit\":{d}}}", .{CONCURRENT_LIMIT}) catch return;
-    zix.Http1.sendJsonFD(fd, 200, msg) catch {};
+
+    try res.sendJson(msg);
 }
 
 // --------------------------------------------------------- //
@@ -65,7 +63,6 @@ pub fn main() !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
     });
     defer server.deinit();
