@@ -22,23 +22,115 @@ pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
 // --------------------------------------------------------- //
 // Shared connection entry (ASYNC and MIXED)
 
+/// Arguments for connEntry, one set per accepted connection.
 pub const ConnArgs = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
     handler: HandlerFn,
     handler_timeout_ms: u32 = 0,
+    conn_timeout_ms: u32 = 0,
+    registry: ?*ConnRegistry = null,
     send_date_header: bool = true,
     large_body_rcvbuf: usize = 0,
     public_dir: []const u8 = "",
+    max_response_headers: usize = 16,
 };
 
+/// Thread entry for one accepted connection (.ASYNC / .MIXED): installs the
+/// per-worker switches, arms the guard when a registry is given, and runs the
+/// keep-alive serve loop until the connection ends.
 pub fn connEntry(args: ConnArgs) void {
     core.setDateHeader(args.send_date_header);
     core.setStatic(args.public_dir, args.io);
+    core.setMaxResponseHeaders(args.max_response_headers);
 
     defer args.stream.close(args.io);
     const fd = args.stream.socket.handle;
-    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf });
+
+    var guard: ?ConnEntry = null;
+    if (args.registry) |registry| {
+        guard = ConnEntry{ .fd = fd, .deadline = connDeadline(args.io, args.conn_timeout_ms) };
+        registry.register(&guard.?, args.io);
+    }
+    defer if (args.registry) |registry| registry.deregister(&guard.?, args.io);
+
+    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf }, args.io);
+}
+
+// --------------------------------------------------------- //
+// Connection guard (config.conn_timeout_ms): registry plus timer eviction on
+// the blocking models (.ASYNC, .POOL, .MIXED). The multiplexed models (.EPOLL,
+// .URING) do not use it, their event loops own connection lifetime.
+
+/// Sweep interval for the connection-guard timer thread.
+const conn_timer_interval_ms: u32 = 500;
+
+/// The wall-clock deadline for a connection accepted now.
+pub fn connDeadline(io: std.Io, timeout_ms: u32) std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.fromNow(
+        io,
+        std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(timeout_ms), .clock = .real },
+    );
+}
+
+/// One live connection tracked by the guard: its fd, eviction deadline, and done flag.
+pub const ConnEntry = struct {
+    fd: std.posix.fd_t,
+    deadline: std.Io.Clock.Timestamp,
+    done: std.atomic.Value(bool) = .init(false),
+};
+
+/// Live-connection registry the guard timer sweeps (evict).
+pub const ConnRegistry = struct {
+    mutex: std.Io.Mutex = .init,
+    entries: std.ArrayListUnmanaged(*ConnEntry) = .empty,
+
+    pub fn register(self: *ConnRegistry, entry: *ConnEntry, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        self.entries.append(std.heap.smp_allocator, entry) catch {};
+    }
+
+    pub fn deregister(self: *ConnRegistry, entry: *ConnEntry, io: std.Io) void {
+        entry.done.store(true, .release);
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        for (self.entries.items, 0..) |candidate, i| {
+            if (candidate == entry) {
+                _ = self.entries.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    /// Shut down every registered connection past its deadline. The blocked
+    /// serve loop then sees EOF and tears the connection down normally.
+    pub fn evict(self: *ConnRegistry, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const now = std.Io.Clock.Timestamp.now(io, .real);
+        for (self.entries.items) |entry| {
+            if (!entry.done.load(.acquire) and now.compare(.gte, entry.deadline))
+                _ = std.os.linux.shutdown(entry.fd, std.os.linux.SHUT.RDWR);
+        }
+    }
+
+    pub fn deinit(self: *ConnRegistry) void {
+        self.entries.deinit(std.heap.smp_allocator);
+    }
+};
+
+/// Timer thread body: sweep the registry every conn_timer_interval_ms.
+pub fn connTimerLoop(io: std.Io, registry: *ConnRegistry) void {
+    while (true) {
+        registry.evict(io);
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(conn_timer_interval_ms), .awake) catch break;
+    }
 }
 
 /// Highest fd a worker's table can index. Linux hands out the lowest free fd,
@@ -107,8 +199,9 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
     _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
 }
 
-/// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
-/// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
+/// Spin up to us microseconds before blocking (SO_BUSY_POLL, from config.busy_poll_us).
+/// Reduces wake-up latency on saturated loopback benchmarks. Silent no-op when the
+/// kernel lacks SO_BUSY_POLL support.
 pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
@@ -255,10 +348,12 @@ pub fn getAvailableCpuCount() usize {
 }
 
 /// Fast path for HTTP/1.1 GET requests: extract method and path with direct
-/// arithmetic, bypassing the full header scan loop in parseHeadAt. Only
-/// keep_alive defaults (HTTP/1.1 = true) and content_length=0 are assumed;
-/// raw_headers is still set so handlers can call getHeader() if needed.
-/// Returns null when the request is not a GET or the format is unexpected.
+/// arithmetic, bypassing the full request-line tokenization in parseHeadAt.
+/// One masked line walk (the same first-letter mask as parseHeadAt) handles
+/// Connection close/keep-alive natively, captures the Accept-Encoding span,
+/// and bails to the full parser only for a GET carrying framing headers
+/// (content-length, transfer-encoding, expect), which the fast head cannot
+/// represent. Returns null when the request is not a plain HTTP/1.1 GET.
 pub fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
     if (rem.len < 16) return null;
     if (std.mem.readInt(u32, rem[0..4], .little) != comptime std.mem.readInt(u32, "GET ", .little)) return null;
@@ -281,9 +376,37 @@ pub fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
     const raw_start = line_end + 2;
     const raw_headers: []const u8 = if (raw_start < header_end + 2) rem[raw_start .. header_end + 2] else &.{};
 
-    // Bail out to parseHeadAt when "close" appears in raw_headers so that
-    // Connection: close is handled correctly. This is the rare case.
-    if (std.mem.indexOf(u8, raw_headers, "close") != null) return null;
+    var keep_alive = true;
+    var accept_encoding: core.HeaderSpan = .{ .off = core.SPAN_ABSENT };
+
+    var pos: usize = 0;
+    while (pos < raw_headers.len) {
+        const line_start = pos;
+        const hdr_line_end = std.mem.indexOfPos(u8, raw_headers, pos, "\r\n") orelse raw_headers.len;
+        const line = raw_headers[line_start..hdr_line_end];
+        pos = hdr_line_end + 2;
+        if (line.len == 0) break;
+
+        const first_lower = line[0] | 0x20;
+        if (first_lower != 'c' and first_lower != 't' and first_lower != 'e' and first_lower != 'a') continue;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon];
+        var value_off: usize = colon + 1;
+        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
+        const value = line[value_off..];
+
+        if (std.ascii.eqlIgnoreCase(name, "connection")) {
+            if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
+        } else if (std.ascii.eqlIgnoreCase(name, "accept-encoding")) {
+            accept_encoding = .{ .off = @intCast(line_start + value_off), .len = @intCast(value.len) };
+        } else if (std.ascii.eqlIgnoreCase(name, "content-length") or
+            std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+            std.ascii.eqlIgnoreCase(name, "expect"))
+        {
+            return null;
+        }
+    }
 
     return .{
         .head = .{
@@ -292,10 +415,11 @@ pub fn parseGetFastPath(rem: []const u8, header_end: usize) ?core.ParseResult {
             .query = query,
             .raw_headers = raw_headers,
             .version_minor = 1,
-            .keep_alive = true,
+            .keep_alive = keep_alive,
             .content_length = 0,
             .chunked_request = false,
             .expect_continue = false,
+            .accept_encoding = accept_encoding,
         },
         .body_offset = header_end + 4,
     };
@@ -393,6 +517,50 @@ test "zix http1: parseGetFastPath raw_headers covers host line" {
     try std.testing.expect(host != null);
     try std.testing.expectEqualStrings("example.com", host.?);
 }
+
+test "zix http1: parseGetFastPath handles Connection close natively" {
+    const req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+
+    // Stays on the fast path (no bail to the full parser) with the same
+    // keep_alive outcome the full parser produces.
+    const result = parseGetFastPath(req, header_end).?;
+    try std.testing.expectEqual(false, result.head.keep_alive);
+
+    const keep = "GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n";
+    const keep_end = std.mem.indexOf(u8, keep, "\r\n\r\n").?;
+    try std.testing.expectEqual(true, parseGetFastPath(keep, keep_end).?.head.keep_alive);
+}
+
+test "zix http1: parseGetFastPath captures the Accept-Encoding span in the walk" {
+    const req = "GET /json HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, br\r\n\r\n";
+    const header_end = std.mem.indexOf(u8, req, "\r\n\r\n").?;
+    const result = parseGetFastPath(req, header_end).?;
+
+    // Definitive capture: the O(1) reader resolves without a fallback scan.
+    try std.testing.expect(result.head.accept_encoding.off != core.SPAN_UNSCANNED);
+    try std.testing.expectEqualStrings("gzip, br", core.acceptEncoding(&result.head).?);
+
+    // No header: a definitive absence, still no fallback scan.
+    const plain = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    const plain_end = std.mem.indexOf(u8, plain, "\r\n\r\n").?;
+    const plain_result = parseGetFastPath(plain, plain_end).?;
+    try std.testing.expectEqual(core.SPAN_ABSENT, plain_result.head.accept_encoding.off);
+    try std.testing.expect(core.acceptEncoding(&plain_result.head) == null);
+}
+
+test "zix http1: parseGetFastPath bails to the full parser on framing headers" {
+    // A GET carrying a body or an expectation cannot ride the fast head
+    // (content_length is assumed 0 there): each must fall back.
+    const with_length = "GET /odd HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(with_length, std.mem.indexOf(u8, with_length, "\r\n\r\n").?));
+
+    const chunked = "GET /odd HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(chunked, std.mem.indexOf(u8, chunked, "\r\n\r\n").?));
+
+    const expect_hdr = "GET /odd HTTP/1.1\r\nExpect: 100-continue\r\n\r\n";
+    try std.testing.expectEqual(@as(?core.ParseResult, null), parseGetFastPath(expect_hdr, std.mem.indexOf(u8, expect_hdr, "\r\n\r\n").?));
+}
 test "zix http1: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
     var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
@@ -409,4 +577,56 @@ test "zix http1: orderPhysicalCoresFirst keeps mask order on unique keys" {
     orderPhysicalCoresFirst(&cpus, &keys);
 
     try std.testing.expectEqualSlices(u32, &.{ 3, 7, 11 }, &cpus);
+}
+
+test "zix http1: ConnRegistry evicts a connection past its deadline" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var registry = ConnRegistry{};
+    defer registry.deinit();
+
+    var entry = ConnEntry{ .fd = fds[1], .deadline = std.Io.Clock.Timestamp.now(io, .real) };
+    registry.register(&entry, io);
+
+    registry.evict(io);
+
+    // the shut-down peer sees EOF, exactly what unblocks a stuck serve loop
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    try std.testing.expectEqual(@as(usize, 0), n);
+
+    registry.deregister(&entry, io);
+    try std.testing.expectEqual(@as(usize, 0), registry.entries.items.len);
+}
+
+test "zix http1: ConnRegistry leaves a connection before its deadline alone" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var registry = ConnRegistry{};
+    defer registry.deinit();
+
+    var entry = ConnEntry{ .fd = fds[1], .deadline = connDeadline(io, 60_000) };
+    registry.register(&entry, io);
+
+    registry.evict(io);
+
+    // still open: a write on the registered side goes through
+    const written = std.os.linux.write(fds[1], "x", 1);
+    try std.testing.expectEqual(@as(usize, 1), written);
+
+    registry.deregister(&entry, io);
 }

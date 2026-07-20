@@ -4,13 +4,20 @@
 const std = @import("std");
 const cache = @import("../../utils/response_cache.zig");
 const compression = @import("../../utils/compression/compression.zig");
+const slab_mem = @import("../../multiplexers/slab.zig");
+const parser = @import("parser.zig");
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
+pub const Request = @import("request.zig").Request;
+pub const Response = @import("response.zig").Response;
+pub const Context = @import("context.zig").Context;
 
+/// Shared per-connection scratch size: the blocking-loop receive buffer, the
+/// chunked-body reader, and the TLS payload buffers all use it.
 pub const BUF_SIZE: usize = 16 * 1024;
 const GZIP_OUT_SIZE: usize = 256 * 1024;
 
 /// Scratch buffer for building one HTTP status line plus its headers.
-const HEADER_BUF_SIZE: usize = 256;
+pub const HEADER_BUF_SIZE: usize = 256;
 
 /// Inline write fast-path buffer. A response whose status line, headers, and
 /// body all fit here is sent in one direct write, skipping the iovec scatter
@@ -20,47 +27,63 @@ const SMALL_BODY_INLINE_BUF: usize = 4096;
 /// Body read chunk for the ASYNC serve loop: bytes drained per recv after the head.
 const ASYNC_BODY_CHUNK: usize = 8 * 1024;
 
-pub const ParseResult = struct {
-    head: ParsedHead,
-    body_offset: usize,
-};
+// Head parsing lives in parser.zig, re-exported here so every dispatch loop
+// and call site keeps the same core.* names.
+pub const ParseResult = parser.ParseResult;
+pub const ParsedHead = parser.ParsedHead;
+pub const Range = parser.Range;
+pub const HeaderSpan = parser.HeaderSpan;
+pub const SPAN_UNSCANNED = parser.SPAN_UNSCANNED;
+pub const SPAN_ABSENT = parser.SPAN_ABSENT;
+pub const parseHeadAt = parser.parseHeadAt;
+pub const parseHead = parser.parseHead;
+pub const getHeader = parser.getHeader;
+pub const acceptEncoding = parser.acceptEncoding;
+pub const queryParam = parser.queryParam;
+pub const percentDecode = parser.percentDecode;
+pub const parseRange = parser.parseRange;
 
-pub const ParsedHead = struct {
-    method: []const u8,
-    path: []const u8,
-    query: []const u8,
-    /// Raw header block from the byte after the request line CRLF up to and
-    /// including the final header CRLF. Empty when the request has no headers.
-    /// Use getHeader to look up individual headers on demand.
-    raw_headers: []const u8,
-    version_minor: u8,
-    keep_alive: bool,
-    content_length: u64,
-    chunked_request: bool,
-    expect_continue: bool,
-};
-
-pub const Range = struct { start: u64, end: u64 };
-
-/// Handler signature. All slices are valid only for the duration of the call.
+/// Handler signature: the ergonomic request, response, context trio. All slices
+/// the request exposes are valid only for the duration of the call. A returned
+/// error is completed by the engine as a 500 when the handler wrote nothing.
 pub const HandlerFn = *const fn (
+    req: *Request,
+    res: *Response,
+    ctx: *Context,
+) anyerror!void;
+
+/// Build the request, response, and context trio over a parsed request and hand
+/// it to the handler. One place builds the trio, so every dispatch model invokes
+/// a handler the same way. On an error return the response is completed with a
+/// 500, but only when the handler wrote nothing, so a handler that already sent a
+/// response and then failed does not corrupt the stream.
+///
+/// Param:
+/// handler_fn - HandlerFn (the route or top-level handler)
+/// head - *const ParsedHead (borrows the receive buffer)
+/// body - []const u8 (already drained by the engine)
+/// fd - std.posix.fd_t (the connection)
+/// io - std.Io (the worker io, carried for ctx and an inline driver call)
+/// allocator - std.mem.Allocator (per-request scratch, reset by the engine)
+///
+/// Return:
+/// - void
+pub inline fn invokeHandler(
+    handler_fn: HandlerFn,
     head: *const ParsedHead,
     body: []const u8,
     fd: std.posix.fd_t,
-) void;
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) void {
+    var req = Request.init(head, body, fd);
+    var res = Response.init(fd, io, allocator);
+    var ctx = Context.init(io, allocator, fd);
 
-/// Optional raw-request interceptor for the EPOLL dispatch model.
-/// Called after the "\r\n\r\n" header boundary is found, before any parsing.
-/// rem is the full request slice (method line through end of headers + body).
-/// header_end is the byte offset of the "\r\n\r\n" sequence within rem.
-/// fd is the connection file descriptor for writing a response.
-///
-/// Return:
-/// - usize: consumed request length when the interceptor handled the request.
-///   The interceptor must write its response (via writeAllFD or tl_resp_sink)
-///   before returning. HTTP/1.1 keep-alive is assumed.
-/// - null: fall through to the normal parse-and-dispatch path.
-pub const RawFn = *const fn (rem: []const u8, header_end: usize, fd: std.posix.fd_t) ?usize;
+    handler_fn(&req, &res, &ctx) catch {
+        if (!res.sent) sendSimpleFD(fd, 500, "text/plain", "Internal Server Error") catch {};
+    };
+}
 
 /// Options for serveConn.
 pub const ServeOpts = struct {
@@ -137,8 +160,8 @@ pub fn isExpired() bool {
 /// auto-echoed by the engine, so the callback only ever sees data frames.
 ///
 /// Param:
-/// fd      - std.posix.fd_t (the connection, write replies with WebSocket.send)
-/// opcode  - u8 (RFC 6455 opcode, .text or .binary in practice)
+/// fd - std.posix.fd_t (the connection, write replies with WebSocket.send)
+/// opcode - u8 (RFC 6455 opcode, .text or .binary in practice)
 /// payload - []const u8 (unmasked frame payload, valid only for this call)
 pub const WsFrameFn = *const fn (fd: std.posix.fd_t, opcode: u8, payload: []const u8) void;
 
@@ -258,208 +281,20 @@ pub fn cacheStoreEncoded(head: *const ParsedHead, encoding: []const u8, bytes: [
 ///
 /// Usage:
 /// ```zig
-/// fn handler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-///     if (zix.Http1.cacheLookup(head)) |bytes| {
-///         zix.Http1.writeAllFD(fd, bytes) catch {};
+/// fn handler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) !void {
+///     if (zix.Http1.cacheLookup(req.head)) |bytes| {
+///         try res.sendRaw(bytes);
 ///         return;
 ///     }
 ///
-///     const resp = buildResponse(head, body);
-///     zix.Http1.sendWithCacheFD(fd, head, resp, zix.Http1.cacheTtl()) catch {};
+///     const resp = buildResponse(req.head, try req.body());
+///     zix.Http1.sendWithCacheFD(req.fd, req.head, resp, zix.Http1.cacheTtl()) catch {};
 /// }
 /// ```
 pub fn sendWithCacheFD(fd: std.posix.fd_t, head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
     cacheStore(head, bytes, ttl_ms);
 
     return writeAllFD(fd, bytes);
-}
-
-// --------------------------------------------------------- //
-
-/// Parse a complete HTTP/1.x request from buf where header_end (the index of
-/// \r\n\r\n in buf) is already known. Avoids the redundant indexOf scan when
-/// the caller has already located the terminator. buf may extend beyond
-/// header_end + 4 (body bytes are ignored).
-///
-/// Note:
-/// - Framing pass: a header line is tokenized only when its first letter is
-///   c, t, or e (the only letters that start a framing-relevant header:
-///   content-length, connection, transfer-encoding, expect). All other lines
-///   skip with one indexOfPos plus one masked compare.
-///
-/// Return:
-/// - !struct{ head: ParsedHead, body_offset: usize }
-/// - error.InvalidRequest on a malformed request line
-pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
-    const body_offset = header_end + 4;
-
-    const first_crlf = std.mem.indexOf(u8, buf[0..header_end], "\r\n") orelse header_end;
-    const req_line = buf[0..first_crlf];
-
-    const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
-    if (sp1 == 0) return error.InvalidRequest;
-    const method = req_line[0..sp1];
-
-    const rest = req_line[sp1 + 1 ..];
-    const sp2 = std.mem.lastIndexOfScalar(u8, rest, ' ') orelse return error.InvalidRequest;
-    const target = rest[0..sp2];
-    const version_str = rest[sp2 + 1 ..];
-
-    const version_minor: u8 = if (std.mem.eql(u8, version_str, "HTTP/1.1"))
-        1
-    else if (std.mem.eql(u8, version_str, "HTTP/1.0"))
-        0
-    else
-        return error.InvalidRequest;
-
-    var path = target;
-    var query: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, target, '?')) |question_mark| {
-        path = target[0..question_mark];
-        query = target[question_mark + 1 ..];
-    }
-
-    const raw_headers: []const u8 = if (first_crlf >= header_end)
-        buf[0..0]
-    else
-        buf[first_crlf + 2 .. header_end + 2];
-
-    var keep_alive = (version_minor == 1);
-    var content_length: u64 = 0;
-    var chunked_request = false;
-    var expect_continue = false;
-
-    var pos: usize = 0;
-    while (pos < raw_headers.len) {
-        const line_end = std.mem.indexOfPos(u8, raw_headers, pos, "\r\n") orelse raw_headers.len;
-        const line = raw_headers[pos..line_end];
-        pos = line_end + 2;
-        if (line.len == 0) break;
-
-        const first_lower = line[0] | 0x20;
-        if (first_lower != 'c' and first_lower != 't' and first_lower != 'e') continue;
-
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = line[0..colon];
-        var value_off: usize = colon + 1;
-        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
-        const value = line[value_off..];
-
-        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            content_length = std.fmt.parseInt(u64, value, 10) catch 0;
-        } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
-            if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
-            if (std.ascii.eqlIgnoreCase(value, "keep-alive")) keep_alive = true;
-        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            const chunked_pos = if (comptime ZIG_SEMVER.MINOR == 16)
-                std.ascii.indexOfIgnoreCase(value, "chunked")
-            else
-                std.ascii.findIgnoreCase(value, "chunked");
-
-            if (chunked_pos != null) chunked_request = true;
-        } else if (std.ascii.eqlIgnoreCase(name, "expect")) {
-            if (std.ascii.eqlIgnoreCase(value, "100-continue")) expect_continue = true;
-        }
-    }
-
-    return .{ .head = .{
-        .method = method,
-        .path = path,
-        .query = query,
-        .raw_headers = raw_headers,
-        .version_minor = version_minor,
-        .keep_alive = keep_alive,
-        .content_length = content_length,
-        .chunked_request = chunked_request,
-        .expect_continue = expect_continue,
-    }, .body_offset = body_offset };
-}
-
-/// Parse a complete HTTP/1.x request from buf.
-/// buf must contain the full header block ending with \r\n\r\n.
-/// All slices in ParsedHead point into buf (zero copy).
-///
-/// Return:
-/// - !struct{ head: ParsedHead, body_offset: usize }
-/// - error.IncompleteHeader when \r\n\r\n has not arrived yet
-/// - error.InvalidRequest on a malformed request line
-pub fn parseHead(buf: []const u8) !ParseResult {
-    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.IncompleteHeader;
-    return parseHeadAt(buf, header_end);
-}
-
-/// Case-insensitive header lookup, scanning raw_headers on demand.
-/// Cost is paid only by handlers that actually read a header.
-pub fn getHeader(head: *const ParsedHead, name: []const u8) ?[]const u8 {
-    var pos: usize = 0;
-    while (pos < head.raw_headers.len) {
-        const line_end = std.mem.indexOfPos(u8, head.raw_headers, pos, "\r\n") orelse head.raw_headers.len;
-        const line = head.raw_headers[pos..line_end];
-        pos = line_end + 2;
-        if (line.len == 0) break;
-
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
-
-        var value_off: usize = colon + 1;
-        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
-
-        return line[value_off..];
-    }
-
-    return null;
-}
-
-/// Linear scan for a single query parameter by exact name.
-/// Does not percent-decode keys or values.
-///
-/// Return:
-/// - ?[]const u8 (raw value slice, or null if not found)
-pub fn queryParam(head: *const ParsedHead, name: []const u8) ?[]const u8 {
-    if (head.query.len == 0) return null;
-
-    var it = std.mem.splitScalar(u8, head.query, '&');
-    while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-        if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
-    }
-
-    return null;
-}
-
-/// Percent-decode buf in place.
-///
-/// Return:
-/// - []u8 (decoded slice, shorter or equal length)
-pub fn percentDecode(buf: []u8) []u8 {
-    return std.Uri.percentDecodeInPlace(buf);
-}
-
-/// Parse "bytes=start-end" or "bytes=start-" (open-ended).
-///
-/// Return:
-/// - ?Range (null for invalid or unsatisfiable range)
-pub fn parseRange(val: []const u8, total: u64) ?Range {
-    if (!std.mem.startsWith(u8, val, "bytes=")) return null;
-    const spec = val[6..];
-    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse return null;
-    if (total == 0) return null;
-
-    const start_str = spec[0..dash];
-    const end_str = spec[dash + 1 ..];
-
-    const start = std.fmt.parseInt(u64, start_str, 10) catch return null;
-    if (start >= total) return null;
-
-    const end: u64 = if (end_str.len == 0)
-        total - 1
-    else blk: {
-        const e = std.fmt.parseInt(u64, end_str, 10) catch return null;
-        break :blk if (e >= total) total - 1 else e;
-    };
-
-    if (start > end) return null;
-    return .{ .start = start, .end = end };
 }
 
 // --------------------------------------------------------- //
@@ -558,8 +393,8 @@ pub fn setDateHeader(enabled: bool) void {
 }
 
 /// Configured static-serve root for the unmatched-route fallback. Empty disables it. The router
-/// reads these because the HandlerFn carries only (head, body, fd), never io, so the public_dir and
-/// io are threaded down per worker the same way the date / cache / compression switches are.
+/// reads these because the static fallback runs before any handler, so the public_dir and io are
+/// threaded down per worker the same way the date / cache / compression switches are.
 pub threadlocal var tl_static_dir: []const u8 = "";
 pub threadlocal var tl_static_io: ?std.Io = null;
 
@@ -568,6 +403,16 @@ pub threadlocal var tl_static_io: ?std.Io = null;
 pub fn setStatic(public_dir: []const u8, io: std.Io) void {
     tl_static_dir = public_dir;
     tl_static_io = io;
+}
+
+/// Response extra-header capacity (Response.addHeader) for this worker, from
+/// config.max_response_headers. The backing buffer is allocated lazily per
+/// request on the first addHeader call, so requests that add none pay nothing.
+pub threadlocal var tl_max_response_headers: usize = 16;
+
+/// Install the Response extra-header capacity for this worker thread. Called once per worker at startup.
+pub fn setMaxResponseHeaders(count: usize) void {
+    tl_max_response_headers = count;
 }
 
 fn cachedDate() []const u8 {
@@ -624,7 +469,9 @@ fn appendBytes(buf: []u8, pos: usize, str: []const u8) usize {
 
 /// Write a simple response header into buf starting at offset 0.
 /// buf must be at least 256 bytes. Returns the number of bytes written.
-fn buildSimpleHeaderInto(buf: []u8, status: u16, content_type: []const u8, body_len: usize) usize {
+/// The block ends with the final \r\n\r\n, so a caller inserting extra
+/// headers (Response.addHeader) splices them in before the last two bytes.
+pub fn buildSimpleHeaderInto(buf: []u8, status: u16, content_type: []const u8, body_len: usize) usize {
     var pos: usize = 0;
 
     const line = statusLine(status);
@@ -666,7 +513,8 @@ fn buildSimpleHeader(buf: *[HEADER_BUF_SIZE]u8, status: u16, content_type: []con
 /// Coalescing sink for pipelined responses. While installed (tl_resp_sink),
 /// writeAllFD appends to buf instead of hitting the socket, so a pipelined
 /// burst of N responses costs one write() instead of N. Same pattern as the
-/// WebSocket SendSink, owned by the EPOLL request loop in server.zig.
+/// WebSocket SendSink. Installed by the .EPOLL / .URING request loops
+/// (dispatch/) and the TLS capture path (tls_serve.runHandlerToBuffer).
 pub const RespSink = struct {
     fd: std.posix.fd_t,
     buf: []u8,
@@ -682,6 +530,33 @@ pub const RespSink = struct {
     /// Hard ceiling for grow_allocator growth. Past this an oversized response
     /// falls back to a single direct flush rather than unbounded buffering.
     grow_cap: usize = 0,
+    /// Whether buf is owned by grow_allocator (realloc-able). false when buf is
+    /// a slice of the per-connection slab, which cannot be realloc'd: the first
+    /// grow then switches to a fresh heap buffer (copying the staged bytes) and
+    /// flips this to true, so the connection's close path knows to free it.
+    buf_owned: bool = true,
+    /// Zero-copy cache replay (URING only): a whole-response cache hit written
+    /// while the sink is empty is borrowed into direct with its slot pinned,
+    /// instead of memcpy'd into buf. The ring then sends the slab bytes and
+    /// unpins on completion. Off (false) on every other path.
+    allow_direct: bool = false,
+    direct: []const u8 = &.{},
+    direct_slot: u32 = 0,
+
+    /// Fold a captured zero-copy replay back into the staged batch: a later
+    /// response in the same batch means the send must carry both in order, so
+    /// the borrowed bytes are copied after all and the pin drops. The copy
+    /// happens before unpin could matter: this worker owns the cache, so
+    /// nothing can overwrite the region between the unpin and the memcpy.
+    pub fn materializeDirect(self: *RespSink) void {
+        if (self.direct.len == 0) return;
+
+        const bytes = self.direct;
+        self.direct = &.{};
+        if (tl_cache) |c| c.unpin(self.direct_slot);
+
+        self.append(bytes);
+    }
 
     pub fn append(self: *RespSink, bytes: []const u8) void {
         // Single response larger than the whole buffer: grow to hold it when
@@ -735,6 +610,15 @@ pub const RespSink = struct {
         while (new_len < need) new_len *= 2;
         if (new_len > self.grow_cap) new_len = self.grow_cap;
 
+        if (!self.buf_owned) {
+            const grown = gpa.alloc(u8, new_len) catch return false;
+            @memcpy(grown[0..self.len], self.buf[0..self.len]);
+            self.buf = grown;
+            self.buf_owned = true;
+
+            return true;
+        }
+
         const grown = gpa.realloc(self.buf, new_len) catch return false;
         self.buf = grown;
 
@@ -742,6 +626,7 @@ pub const RespSink = struct {
     }
 };
 
+/// Coalescing sink for the current worker. null sends every write straight to the fd.
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
 
 /// Streaming sink for the thread-per-connection https path (ADR-054). While installed
@@ -771,7 +656,7 @@ pub const TlsStreamSink = struct {
 /// cleartext and the buffered https path, so writeAllFD never routes through it there.
 pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 
-/// Begin a streaming response (SSE) from an fd-handler, so one handler serves cleartext and TLS.
+/// Begin a streaming response (SSE) from a handler, so one handler serves cleartext and TLS.
 ///
 /// Detaches any buffered capture / coalescing sink, so each subsequent writeAllFD flushes
 /// immediately: over TLS it hands writes to the live-session stream sink (one record per write), in
@@ -780,14 +665,15 @@ pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
 ///
 /// Usage:
 /// ```zig
-/// fn eventsHandler(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+/// fn eventsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) !void {
 ///     zix.Http1.beginStream();
-///     zix.Http1.writeAllFD(fd, sse_headers) catch return;
-///     // ... emit events with writeAllFD(fd, ...) ...
+///     try res.sendRaw(sse_headers);
+///     // ... emit events with res.sendRaw(...) ...
 /// }
 /// ```
 pub fn beginStream() void {
     if (tl_resp_sink) |sink| {
+        sink.materializeDirect();
         sink.flush();
         tl_resp_sink = null;
     }
@@ -798,7 +684,10 @@ pub fn beginStream() void {
 /// matches the request order under pipelining. No-op when nothing is staged.
 pub fn flushPending(fd: std.posix.fd_t) void {
     if (tl_resp_sink) |sink| {
-        if (sink.fd == fd) sink.flush();
+        if (sink.fd == fd) {
+            sink.materializeDirect();
+            sink.flush();
+        }
     }
 }
 
@@ -823,9 +712,28 @@ pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
     return written;
 }
 
+/// Write response bytes to fd, the canonical write behind every send helper.
+/// Routes through the coalescing sink (tl_resp_sink) or the TLS stream sink
+/// when one is installed for this worker, otherwise writes directly.
 pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) {
+            // Zero-copy cache replay: a whole-response hit written while the
+            // batch is empty is borrowed (slot pinned) instead of copied. Only
+            // the exact slice the cache lookup returned qualifies.
+            if (sink.allow_direct and sink.len == 0 and sink.direct.len == 0) {
+                if (tl_cache) |c| {
+                    if (c.hitSlot(data)) |slot| {
+                        c.pin(slot);
+                        sink.direct = data;
+                        sink.direct_slot = slot;
+
+                        return;
+                    }
+                }
+            }
+
+            sink.materializeDirect();
             sink.append(data);
             if (sink.failed) return error.BrokenPipe;
 
@@ -873,6 +781,10 @@ pub fn sendSimpleFD(
 ) !void {
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) {
+            // A pending zero-copy replay must land in the batch before this
+            // response so the wire order matches the request order.
+            sink.materializeDirect();
+
             // Fast path: build header directly into sink.buf at sink.len, then
             // append body. Eliminates the hdr_buf[256] stack allocation and the
             // hdr_buf-to-sink memcpy on the pipelined hot path.
@@ -959,47 +871,73 @@ pub fn send100ContinueFD(fd: std.posix.fd_t) !void {
     try writeAllFD(fd, "HTTP/1.1 100 Continue\r\n\r\n");
 }
 
-/// Per-worker (threadlocal) gzip scratch, reused across requests so the response path never
-/// allocates. The Compress state is about 225 KB, the window 64 KB, the output 64 KB. A
-/// per-request heap alloc of these would overflow SmpAllocator's 32 KB size class and fall to
-/// mmap / munmap, whose process mmap_lock + TLB-shootdown serializes every worker (the json-comp
-/// low-CPU stall). Threadlocal storage is mapped once per worker thread and reused, so the hot
-/// path issues zero allocation syscalls. The compressor is held as an error-union slot and built
-/// in place (sret), never as a 225 KB stack temporary.
-threadlocal var tl_gzip_out: [GZIP_OUT_SIZE]u8 = undefined;
-threadlocal var tl_gzip_window: [std.compress.flate.max_window_len]u8 = undefined;
-threadlocal var tl_gzip_comp: std.Io.Writer.Error!std.compress.flate.Compress = undefined;
-/// Full gzip response (header + compressed body) assembled contiguously, so it writes in one call
-/// and can be stored in the response cache as a single replayable blob.
-threadlocal var tl_gzip_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
+/// Per-worker compression scratch, one lazily mapped block per worker thread instead of ~1 MiB of
+/// cold threadlocal (.tbss) buffers. The flate state is about 225 KB, its window 64 KB, plus the
+/// two response assembly buffers. A per-request heap alloc of these would overflow SmpAllocator's
+/// 32 KB size class and fall to mmap / munmap, whose process mmap_lock + TLB-shootdown serializes
+/// every worker (the json-comp low-CPU stall). One mapping per worker keeps the hot path free of
+/// allocation syscalls, keeps the hot threadlocals (sink, cache, date) packed instead of spread
+/// across cold TLS blobs, and gives the scratch its own mapping so a non-compressing worker pays
+/// nothing. The compressor is held as an error-union slot and built in place (sret), never as a
+/// 225 KB stack temporary.
+const EncodeScratch = struct {
+    /// flate history window.
+    window: [std.compress.flate.max_window_len]u8,
+    /// flate state, built in place per response.
+    comp: std.Io.Writer.Error!std.compress.flate.Compress,
+    /// Full gzip response: the body compresses straight into [HEADER_BUF_SIZE..]
+    /// and the header renders right-aligned before it (reserve-prefix assembly),
+    /// so header and body are contiguous with zero body copies.
+    resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8,
+    /// Same reserve-prefix assembly buffer for the negotiated
+    /// (gzip / deflate / brotli) response path.
+    neg_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8,
+};
+
+threadlocal var tl_encode_scratch: ?*EncodeScratch = null;
+
+/// The worker's compression scratch, mapped on the first compressed response.
+fn encodeScratch() !*EncodeScratch {
+    if (tl_encode_scratch == null) {
+        const raw = try slab_mem.mapZeroedSlots(u8, @sizeOf(EncodeScratch));
+        tl_encode_scratch = @ptrCast(@alignCast(raw.ptr));
+    }
+
+    return tl_encode_scratch.?;
+}
 
 /// Build a complete gzip HTTP response (header + compressed body) into the per-worker buffer and
-/// return the slice. Reuses the threadlocal compressor, so it allocates nothing. Shared by sendGzipFD
+/// return the slice. Reuses the per-worker compressor, so it allocates nothing. The body compresses
+/// directly into the response buffer past the header reserve, then the header renders right-aligned
+/// so it ends exactly where the body starts: no pass over the compressed bytes. Shared by sendGzipFD
 /// and sendGzipCachedFD.
 fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
-    var out_w: std.Io.Writer = .fixed(&tl_gzip_out);
-    tl_gzip_comp = std.compress.flate.Compress.init(
+    const scratch = try encodeScratch();
+
+    var out_w: std.Io.Writer = .fixed(scratch.resp[HEADER_BUF_SIZE..]);
+    scratch.comp = std.compress.flate.Compress.init(
         &out_w,
-        &tl_gzip_window,
+        &scratch.window,
         .gzip,
         std.compress.flate.Compress.Options.default,
     );
 
-    const comp: *std.compress.flate.Compress = if (tl_gzip_comp) |*payload| payload else |_| return error.CompressFailed;
+    const comp: *std.compress.flate.Compress = if (scratch.comp) |*payload| payload else |_| return error.CompressFailed;
     try comp.writer.writeAll(body);
     try comp.finish();
 
     const compressed = out_w.buffered();
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const header = try std.fmt.bufPrint(
-        &tl_gzip_resp,
+        &hdr_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n",
         .{ status, statusPhrase(status), content_type, compressed.len },
     );
-    const total = header.len + compressed.len;
+    const start = HEADER_BUF_SIZE - header.len;
 
-    @memcpy(tl_gzip_resp[header.len..total], compressed);
+    @memcpy(scratch.resp[start..HEADER_BUF_SIZE], header);
 
-    return tl_gzip_resp[0..total];
+    return scratch.resp[start .. HEADER_BUF_SIZE + compressed.len];
 }
 
 /// gzip-compressed response via std.compress.flate, reusing the per-worker compressor.
@@ -1021,26 +959,27 @@ pub fn sendGzipCachedFD(fd: std.posix.fd_t, head: *const ParsedHead, status: u16
 
 /// Build a complete brotli HTTP response (header + brotli body) into the per-worker negotiated buffer
 /// and return the slice. Brotli's encoder needs heap scratch (input-sized hash and Huffman tables),
-/// so it routes through the shared compression facade on the per-worker encode arena rather than a
-/// flate-style threadlocal compressor. Shared by sendBrotliFD and sendBrotliCachedFD.
+/// so it routes through the shared compression facade on the per-worker encode arena rather than the
+/// flate-style compressor. The encoded body lands past the header reserve and the header renders
+/// right-aligned before it (reserve-prefix assembly). Shared by sendBrotliFD and sendBrotliCachedFD.
 fn buildBrotliResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
+    const scratch = try encodeScratch();
     const arena = encodeArena();
     defer _ = arena.reset(.retain_capacity);
 
-    const encoded = try compression.encode(arena.allocator(), .BR, body, .DEFAULT);
+    const encoded_len = try compression.encodeInto(arena.allocator(), .BR, body, scratch.neg_resp[HEADER_BUF_SIZE..], .DEFAULT);
 
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const header = try std.fmt.bufPrint(
-        &tl_neg_resp,
+        &hdr_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: br\r\nContent-Length: {d}\r\n\r\n",
-        .{ status, statusPhrase(status), content_type, encoded.len },
+        .{ status, statusPhrase(status), content_type, encoded_len },
     );
-    const total = header.len + encoded.len;
+    const start = HEADER_BUF_SIZE - header.len;
 
-    if (total > tl_neg_resp.len) return error.ResponseTooLarge;
+    @memcpy(scratch.neg_resp[start..HEADER_BUF_SIZE], header);
 
-    @memcpy(tl_neg_resp[header.len..total], encoded);
-
-    return tl_neg_resp[0..total];
+    return scratch.neg_resp[start .. HEADER_BUF_SIZE + encoded_len];
 }
 
 /// brotli-compressed response via the shared compression facade on the per-worker encode arena. The
@@ -1074,11 +1013,6 @@ fn encodeArena() *std.heap.ArenaAllocator {
     return &tl_encode_arena.?;
 }
 
-/// Full negotiated response (header + encoded body) assembled contiguously so it writes in one call
-/// and stores in the per-(key, encoding) cache as a single replayable blob. Sized for the default
-/// compressed-output cap. A larger response streams in two parts and skips the cache.
-threadlocal var tl_neg_resp: [HEADER_BUF_SIZE + GZIP_OUT_SIZE]u8 = undefined;
-
 /// Response with Accept-Encoding negotiation: the body is compressed only when the
 /// worker has compression enabled, the client accepts a producible coding, the body
 /// clears the size floor and is not an already-compressed media type, and the
@@ -1110,7 +1044,7 @@ pub fn sendNegotiateCachedFD(
 ) !void {
     if (!tl_compression) return sendSimpleFD(fd, status, content_type, body);
 
-    const accept = getHeader(head, "accept-encoding");
+    const accept = acceptEncoding(head);
     const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
         return sendSimpleNoBodyFD(fd, 406, content_type, 0);
     };
@@ -1124,12 +1058,60 @@ pub fn sendNegotiateCachedFD(
     // Per-(key, encoding) cache hit: replay the full compressed response, no compression work.
     if (cacheLookupEncoded(head, token)) |cached| return writeAllFD(fd, cached);
 
+    const scratch = encodeScratch() catch {
+        return sendSimpleFD(fd, status, content_type, body);
+    };
+
     // Per-worker arena for the codec scratch. gzip / deflate / brotli each allocate transient
     // buffers (brotli especially: input-sized hash tables, Huffman tables, command lists). A
     // per-request smp_allocator would mmap the larger ones over the 32 KiB size class and serialize
     // workers in the kernel. The arena is retained across requests, so after warmup the codec path
     // issues no allocation syscalls. The reset(.retain_capacity) call reclaims every codec buffer
     // after the response is written.
+    const arena = encodeArena();
+    defer _ = arena.reset(.retain_capacity);
+
+    // Reserve-prefix assembly: the body encodes straight into the assembly buffer past the header
+    // reserve, so the response never repeats a pass over the encoded bytes. An encoded result too
+    // large for the buffer streams in two parts instead (the rare oversized path).
+    const encoded_len = compression.encodeInto(arena.allocator(), encoding, body, scratch.neg_resp[HEADER_BUF_SIZE..], .DEFAULT) catch |err| switch (err) {
+        error.BufferTooSmall => return sendNegotiateOversized(fd, head, encoding, token, status, content_type, body),
+        else => return sendSimpleFD(fd, status, content_type, body),
+    };
+
+    if (encoded_len > tl_compression_max_out or encoded_len >= body.len) {
+        return sendSimpleFD(fd, status, content_type, body);
+    }
+
+    // The header renders right-aligned so it ends exactly where the encoded body starts, then the
+    // contiguous response is cached and replayed on later requests with the same (key, encoding).
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &hdr_buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
+        .{ status, statusPhrase(status), content_type, token, encoded_len },
+    );
+    const start = HEADER_BUF_SIZE - header.len;
+
+    @memcpy(scratch.neg_resp[start..HEADER_BUF_SIZE], header);
+    const full = scratch.neg_resp[start .. HEADER_BUF_SIZE + encoded_len];
+    cacheStoreEncoded(head, token, full, cacheTtl());
+
+    return writeAllFD(fd, full);
+}
+
+/// Negotiated response for a body too large for the into-buffer bound check: compress through the
+/// arena, then assemble + cache when the result fits the per-worker buffer (the copy is paid only
+/// on this oversized-input branch), else stream in two parts and skip the cache. Off the hot path.
+fn sendNegotiateOversized(
+    fd: std.posix.fd_t,
+    head: *const ParsedHead,
+    encoding: compression.Encoding,
+    token: []const u8,
+    status: u16,
+    content_type: []const u8,
+    body: []const u8,
+) !void {
     const arena = encodeArena();
     defer _ = arena.reset(.retain_capacity);
 
@@ -1141,24 +1123,25 @@ pub fn sendNegotiateCachedFD(
         return sendSimpleFD(fd, status, content_type, body);
     }
 
-    // Assemble the full response (header + encoded body) contiguously so it can be cached and
-    // replayed on the next request with the same (key, encoding).
+    var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
     const header = try std.fmt.bufPrint(
-        &tl_neg_resp,
+        &hdr_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: {s}\r\nVary: Accept-Encoding\r\nContent-Length: {d}\r\n\r\n",
         .{ status, statusPhrase(status), content_type, token, encoded.len },
     );
-    const total = header.len + encoded.len;
 
-    if (total <= tl_neg_resp.len) {
-        @memcpy(tl_neg_resp[header.len..total], encoded);
-        const full = tl_neg_resp[0..total];
-        cacheStoreEncoded(head, token, full, cacheTtl());
+    if (encodeScratch()) |scratch| {
+        const total = header.len + encoded.len;
+        if (total <= scratch.neg_resp.len) {
+            @memcpy(scratch.neg_resp[0..header.len], header);
+            @memcpy(scratch.neg_resp[header.len..total], encoded);
+            const full = scratch.neg_resp[0..total];
+            cacheStoreEncoded(head, token, full, cacheTtl());
 
-        return writeAllFD(fd, full);
-    }
+            return writeAllFD(fd, full);
+        }
+    } else |_| {}
 
-    // Too large to assemble in the buffer: stream in two parts, skip the cache.
     try writeAllFD(fd, header);
     try writeAllFD(fd, encoded);
 }
@@ -1191,7 +1174,7 @@ pub fn sendNegotiateFD(
 ) !void {
     if (!tl_compression) return sendSimpleFD(fd, status, content_type, body);
 
-    const accept = getHeader(head, "accept-encoding");
+    const accept = acceptEncoding(head);
     const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
         return sendSimpleNoBodyFD(fd, 406, content_type, 0);
     };
@@ -1417,11 +1400,12 @@ pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize
     return out_pos;
 }
 
+/// Per-request verdict from a dispatch: keep the connection open or close it.
 pub const ConnOutcome = enum { keep_alive, close };
 
 /// Keep-alive connection loop. The caller owns closing the fd. Pass raw fd extracted
 /// from the accepted stream.
-pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
+pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: std.Io) void {
     if (opts.nodelay) {
         if (comptime @import("builtin").target.os.tag != .windows) {
             std.posix.setsockopt(
@@ -1432,6 +1416,11 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
             ) catch {};
         }
     }
+
+    // Per-connection scratch for the handler trio, reset before each request so a
+    // long keep-alive connection never grows without bound.
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
 
     var recv_buf: [BUF_SIZE]u8 = undefined;
     var body_buf: [ASYNC_BODY_CHUNK]u8 = undefined;
@@ -1494,7 +1483,8 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
         }
 
         setTimeout(opts.handler_timeout_ms);
-        handler(&head, body_buf[0..body_len], fd);
+        _ = arena.reset(.retain_capacity);
+        invokeHandler(handler, &head, body_buf[0..body_len], fd, io, arena.allocator());
 
         // Engine-owned WebSocket promotion is honored by the EPOLL loop only.
         // On this path clear the handoff and end the connection so it never leaks.
@@ -1521,71 +1511,6 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts) void {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
-
-test "zix http1: parseHead, GET request fields" {
-    const result = try parseHead("GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    try std.testing.expectEqualStrings("GET", result.head.method);
-    try std.testing.expectEqualStrings("/ping", result.head.path);
-    try std.testing.expectEqualStrings("", result.head.query);
-    try std.testing.expectEqual(@as(u8, 1), result.head.version_minor);
-    try std.testing.expect(result.head.keep_alive);
-}
-
-test "zix http1: parseHead, query string split from path" {
-    const result = try parseHead("GET /search?q=zig&page=2 HTTP/1.1\r\n\r\n");
-    try std.testing.expectEqualStrings("/search", result.head.path);
-    try std.testing.expectEqualStrings("q=zig&page=2", result.head.query);
-}
-
-test "zix http1: parseHead, POST with Content-Length" {
-    const result = try parseHead("POST /api HTTP/1.1\r\nContent-Length: 13\r\n\r\n");
-    try std.testing.expectEqualStrings("POST", result.head.method);
-    try std.testing.expectEqual(@as(u64, 13), result.head.content_length);
-}
-
-test "zix http1: parseHead, HTTP/1.0 defaults keep_alive to false" {
-    const result = try parseHead("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
-    try std.testing.expectEqual(@as(u8, 0), result.head.version_minor);
-    try std.testing.expect(!result.head.keep_alive);
-}
-
-test "zix http1: parseHead, Connection keep-alive overrides HTTP/1.0 default" {
-    const result = try parseHead("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
-    try std.testing.expect(result.head.keep_alive);
-}
-
-test "zix http1: parseHead, Expect: 100-continue sets flag" {
-    const result = try parseHead("POST /up HTTP/1.1\r\nContent-Length: 512\r\nExpect: 100-continue\r\n\r\n");
-    try std.testing.expect(result.head.expect_continue);
-}
-
-test "zix http1: getHeader, case-insensitive lookup" {
-    const result = try parseHead("GET / HTTP/1.1\r\nContent-Type: text/plain\r\n\r\n");
-    try std.testing.expectEqualStrings("text/plain", getHeader(&result.head, "content-type").?);
-    try std.testing.expectEqualStrings("text/plain", getHeader(&result.head, "CONTENT-TYPE").?);
-    try std.testing.expect(getHeader(&result.head, "x-missing") == null);
-}
-
-test "zix http1: queryParam, single and multiple params" {
-    const result = try parseHead("GET /p?name=alice&age=30 HTTP/1.1\r\n\r\n");
-    try std.testing.expectEqualStrings("alice", queryParam(&result.head, "name").?);
-    try std.testing.expectEqualStrings("30", queryParam(&result.head, "age").?);
-    try std.testing.expect(queryParam(&result.head, "missing") == null);
-}
-
-test "zix http1: parseRange, valid and boundary cases" {
-    try std.testing.expectEqual(Range{ .start = 0, .end = 99 }, parseRange("bytes=0-99", 200).?);
-    try std.testing.expectEqual(Range{ .start = 100, .end = 199 }, parseRange("bytes=100-", 200).?);
-    try std.testing.expectEqual(Range{ .start = 0, .end = 199 }, parseRange("bytes=0-999", 200).?);
-    try std.testing.expect(parseRange("bytes=200-", 200) == null);
-    try std.testing.expect(parseRange("notbytes=0-99", 200) == null);
-}
-
-test "zix http1: percentDecode, encoded chars decoded in place" {
-    var buf = [_]u8{ 'a', '%', '2', '0', 'b' };
-    const decoded = percentDecode(&buf);
-    try std.testing.expectEqualStrings("a b", decoded);
-}
 
 test "zix http1: buildSimpleHeaderInto writes status, content-type, content-length" {
     var buf: [HEADER_BUF_SIZE]u8 = undefined;
@@ -1924,6 +1849,62 @@ test "zix http1: RespSink grow refuses past grow_cap" {
     try std.testing.expect(sink.buf.len >= 20 and sink.buf.len <= 32);
 }
 
+test "zix http1: RespSink grow switches a slab-backed buf to a heap buffer" {
+    const gpa = std.testing.allocator;
+
+    // A borrowed (slab-slice) buffer must never be realloc'd: the first grow
+    // allocates fresh, copies the staged bytes, and marks the buffer owned.
+    var slab_slice: [8]u8 = undefined;
+    var sink = RespSink{ .fd = -1, .buf = &slab_slice, .grow_allocator = gpa, .grow_cap = 1024, .buf_owned = false };
+    defer if (sink.buf_owned) gpa.free(sink.buf);
+
+    sink.append("01234");
+    sink.append("56789ABCDEF");
+
+    try std.testing.expect(!sink.failed);
+    try std.testing.expect(sink.buf_owned);
+    try std.testing.expect(sink.buf.ptr != @as([*]u8, &slab_slice));
+    try std.testing.expectEqualStrings("0123456789ABCDEF", sink.buf[0..sink.len]);
+}
+
+test "zix http1: RespSink captures a cache-hit replay zero-copy and materializes it for a batch" {
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
+    defer rc.deinit();
+    setCache(&rc, 60_000);
+    defer setCache(null, 1000);
+
+    const key = cache.hashKey("GET", "/hit", "");
+    const stored = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    try std.testing.expect(rc.store(key, stored, 60_000, 100));
+    const cached = rc.lookup(key, 200).?;
+    const slot = rc.hitSlot(cached).?;
+
+    var stage: [256]u8 = undefined;
+    var sink = RespSink{ .fd = -1, .buf = &stage, .allow_direct = true };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    // First response of the batch is the exact cached slice: borrowed with the
+    // slot pinned, nothing copied into the stage buffer.
+    try writeAllFD(-1, cached);
+    try std.testing.expectEqual(@as(usize, 0), sink.len);
+    try std.testing.expectEqual(@intFromPtr(cached.ptr), @intFromPtr(sink.direct.ptr));
+    try std.testing.expectEqual(@as(u32, 1), rc.pins[slot]);
+
+    // A second response joins the batch: the borrowed bytes fold back into the
+    // stage in request order and the pin drops.
+    try writeAllFD(-1, "SECOND");
+    try std.testing.expectEqual(@as(usize, 0), sink.direct.len);
+    try std.testing.expectEqual(@as(u32, 0), rc.pins[slot]);
+    try std.testing.expectEqualStrings(stored ++ "SECOND", sink.buf[0..sink.len]);
+
+    // A plain (non-cache) first write on an empty batch never captures.
+    sink.len = 0;
+    try writeAllFD(-1, "plain");
+    try std.testing.expectEqual(@as(usize, 0), sink.direct.len);
+    try std.testing.expectEqualStrings("plain", sink.buf[0..sink.len]);
+}
+
 test "zix http1: RespSink without a grow allocator does not grow" {
     var stage: [8]u8 = undefined;
     var sink = RespSink{ .fd = -1, .buf = &stage };
@@ -1961,6 +1942,37 @@ test "zix http1: sendGzipFD reuses the threadlocal compressor across calls, vali
         const dlen = try flate.decompressGzip(gz, &out);
         try std.testing.expectEqualStrings(body, out[0..dlen]);
     }
+}
+
+test "zix http1: buildGzipResponse reserve-prefix bytes equal header plus the facade gzip stream" {
+    const linux = std.os.linux;
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const body = "{\"identity\":\"check check check check check check check\"}";
+
+    try sendGzipFD(pipe_fds[1], 200, "application/json", body);
+
+    var resp: [4096]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &resp);
+
+    // The reserve-prefix assembly (compress in place, header right-aligned)
+    // must be byte-identical to the plain header + gzip-stream concatenation.
+    const stream = try compression.encode(std.testing.allocator, .GZIP, body, .DEFAULT);
+    defer std.testing.allocator.free(stream);
+
+    var expect_buf: [4096]u8 = undefined;
+    const expect_hdr = try std.fmt.bufPrint(
+        &expect_buf,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n",
+        .{stream.len},
+    );
+    @memcpy(expect_buf[expect_hdr.len..][0..stream.len], stream);
+
+    try std.testing.expectEqualSlices(u8, expect_buf[0 .. expect_hdr.len + stream.len], resp[0..n]);
 }
 
 test "zix http1: sendGzipCachedFD stores per-(key,encoding) and replays the same bytes on a hit" {
@@ -2138,15 +2150,13 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     defer _ = linux.close(client_fd);
 
     const Handler = struct {
-        fn h(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-            _ = head;
-            _ = body;
-            writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+        fn h(_: *Request, res: *Response, _: *Context) anyerror!void {
+            try res.sendRaw("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         }
     };
     const Srv = struct {
         fn run(fd: std.posix.fd_t) void {
-            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20 });
+            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20 }, undefined);
 
             _ = linux.close(fd);
         }

@@ -148,6 +148,10 @@ const Conn = struct {
     /// resident recv slab packs to the live connection count, not the fd range.
     slot: u32 = 0,
     filled: usize,
+    /// Scan watermark for a split request head: bytes of buf already searched
+    /// for the header terminator by an earlier readable event, so the next
+    /// event resumes the scan instead of rescanning from zero.
+    scan_from: usize = 0,
     ws: ?core.WsFrameFn = null,
     drain: usize = 0,
     drain_close: bool = false,
@@ -325,12 +329,12 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 /// remaining bytes are staged in conn.write_pending and EPOLLOUT is armed so
 /// the worker is never parked waiting for a slow client. An upgraded connection
 /// is handed to the WebSocket pump only after the flush.
-fn serveEpollConn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t) core.ConnOutcome {
+fn serveEpollConn(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
     const linux = std.os.linux;
 
     var sink = core.RespSink{ .fd = conn.fd, .buf = out_buf };
     core.tl_resp_sink = &sink;
-    const outcome = serveEpollConnInner(handler_fn, raw_fn, conn, body_buf, handler_timeout_ms);
+    const outcome = serveEpollConnInner(handler_fn, conn, body_buf, handler_timeout_ms, io, arena);
     core.tl_resp_sink = null;
 
     if (sink.failed) return .close;
@@ -397,7 +401,7 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     return if (should_close) .close else .keep_alive;
 }
 
-fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn, conn: *Conn, body_buf: []u8, handler_timeout_ms: u32) core.ConnOutcome {
+fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, handler_timeout_ms: u32, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
 
@@ -417,23 +421,24 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
 
     var consumed: usize = 0;
     var keep_alive = true;
+    var scan_from = conn.scan_from;
+    conn.scan_from = 0;
     while (consumed < conn.filled) {
         const rem = conn.buf[consumed..conn.filled];
-        const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
+        const header_end = std.mem.indexOfPos(u8, rem, scan_from, "\r\n\r\n") orelse {
             if (rem.len >= conn.buf.len) {
                 core.writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                 return .close;
             }
+
+            // Partial head: record the scan watermark so the next readable
+            // event resumes the terminator search here instead of rescanning
+            // every previously searched byte (recvHead's search_from, ported
+            // to the event loop).
+            conn.scan_from = if (rem.len > 3) rem.len - 3 else 0;
             break;
         };
-
-        if (comptime raw_fn != null) {
-            if (raw_fn.?(rem, header_end, fd)) |end| {
-                consumed += end;
-                tl_requests_served += 1;
-                continue;
-            }
-        }
+        scan_from = 0;
 
         const parsed = parseGetFastPath(rem, header_end) orelse
             core.parseHeadAt(rem, header_end) catch {
@@ -461,7 +466,8 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
                 // not the bytes), then drain the rest off the socket over later
                 // events so the connection stays usable for keep-alive.
                 if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
-                handler_fn(&head, &.{}, fd);
+                _ = arena.reset(.retain_capacity);
+                core.invokeHandler(handler_fn, &head, &.{}, fd, io, arena.allocator());
                 tl_requests_served += 1;
 
                 // Widen the receive window for the upcoming large-body drain (uploads). Only this
@@ -481,7 +487,8 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.Ra
         }
 
         if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
-        handler_fn(&head, body, fd);
+        _ = arena.reset(.retain_capacity);
+        core.invokeHandler(handler_fn, &head, body, fd, io, arena.allocator());
 
         consumed += request_len;
         tl_requests_served += 1;
@@ -626,7 +633,7 @@ const EpollWorkerCtx = struct {
 /// Return a concrete epoll worker function with handler_fn baked in at compile
 /// time. Thread.spawn receives the returned function, eliminating the indirect
 /// HandlerFn call on every request in the event loop.
-fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) fn (EpollWorkerCtx) void {
+fn epollWorkerFn(comptime handler_fn: HandlerFn) fn (EpollWorkerCtx) void {
     return struct {
         fn run(ctx: EpollWorkerCtx) void {
             pinToCpu(ctx.worker_id);
@@ -636,9 +643,15 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             const config = ctx.config;
             const io = config.io;
 
+            // Per-request scratch for the handler trio, reset before each request
+            // so a long keep-alive connection never grows without bound.
+            var req_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer req_arena.deinit();
+
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
             core.setStatic(config.public_dir, io);
+            core.setMaxResponseHeaders(config.max_response_headers.value());
 
             // Bind under the order gate: REUSEPORT group index i = worker i,
             // so the cpu-mod-N steering lands on the worker pinned to that slot.
@@ -786,7 +799,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
                     else if (conn.ws) |on_frame|
                         serveEpollWs(conn, on_frame, body_buf, out_buf)
                     else
-                        serveEpollConn(handler_fn, raw_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd);
+                        serveEpollConn(handler_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd, io, &req_arena);
 
                     if (outcome == .close) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
@@ -801,7 +814,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
     }.run;
 }
 
-pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) !void {
+pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn) !void {
     const cpu = getAvailableCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
@@ -822,7 +835,7 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
-    const worker = epollWorkerFn(handler_fn, raw_fn);
+    const worker = epollWorkerFn(handler_fn);
     for (threads, 0..) |*thread, worker_id| {
         thread.* = try std.Thread.spawn(
             .{ .stack_size = worker_stack },
@@ -834,8 +847,10 @@ pub fn runEpoll(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     for (threads) |thread| thread.join();
 }
 
-fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    core.sendSimpleFD(fd, 200, "text/plain", "ok") catch {};
+fn testOkHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("ok");
 }
 
 fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
@@ -862,9 +877,12 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
     var body_buf: [1024]u8 = undefined;
     var out_buf: [4 * 1024]u8 = undefined;
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     // epfd = -1: EPOLLOUT staging won't trigger for this burst (socketpair
     // buffer fits all 16 responses), so no epoll_ctl calls are made.
-    const outcome = serveEpollConn(testOkHandler, null, &conn, &body_buf, &out_buf, 0, -1);
+    const outcome = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
 
@@ -875,13 +893,51 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
     try std.testing.expectEqual(@as(usize, depth), std.mem.count(u8, recv[0..n], "\r\n\r\nok"));
 }
 
-fn testCacheHandler(head: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    if (core.cacheLookup(head)) |bytes| {
-        core.writeAllFD(fd, bytes) catch {};
+test "zix http1: EPOLL split head resumes the terminator scan from the watermark" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // First event delivers a head with no terminator: nothing parses and the
+    // watermark records how far the scan got (three bytes back, so a
+    // terminator split across events is still found).
+    const part1 = "GET /pipeline HTTP/1.1\r\nHost: t";
+    try std.testing.expectEqual(part1.len, std.os.linux.write(fds[0], part1, part1.len));
+    const first = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(part1.len, conn.filled);
+    try std.testing.expectEqual(part1.len - 3, conn.scan_from);
+
+    // The terminator arrives: the request completes and the watermark resets.
+    const part2 = "\r\n\r\n";
+    try std.testing.expectEqual(part2.len, std.os.linux.write(fds[0], part2, part2.len));
+    const second = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.scan_from);
+
+    var recv: [1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\nok"));
+}
+
+fn testCacheHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    if (core.cacheLookup(req.head)) |bytes| {
+        try res.sendRaw(bytes);
         return;
     }
 
-    core.sendWithCacheFD(fd, head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl()) catch {};
+    return core.sendWithCacheFD(req.fd, req.head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl());
 }
 
 test "zix http1: EPOLL path serves a miss then a hit from the cache" {
@@ -909,7 +965,10 @@ test "zix http1: EPOLL path serves a miss then a hit from the cache" {
     var body_buf: [1024]u8 = undefined;
     var out_buf: [4 * 1024]u8 = undefined;
 
-    const outcome = serveEpollConn(testCacheHandler, null, &conn, &body_buf, &out_buf, 0, -1);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const outcome = serveEpollConn(testCacheHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
 
     var recv: [4 * 1024]u8 = undefined;

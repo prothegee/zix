@@ -198,7 +198,7 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
             };
         }
 
-        const result = tls_serve.runHandlerToBuffer(conn.handler, &head, body, &response_buf) catch {
+        const result = tls_serve.runHandlerToBuffer(conn.handler, &head, body, &response_buf, core.tl_static_io orelse undefined) catch {
             _ = core.takeWebSocket(); // failed upgrade or oversized response: drop any handoff
             conn.transport.wclose = true;
             return true;
@@ -328,6 +328,7 @@ const WorkerCtx = struct {
     handler: HandlerFn,
     ctx: *const Tls.Context,
     public_dir: []const u8 = "",
+    max_response_headers: usize = 16,
 };
 
 fn workerRun(worker: WorkerCtx) void {
@@ -336,6 +337,7 @@ fn workerRun(worker: WorkerCtx) void {
     common.pinToCpu(worker.worker_id);
 
     core.setStatic(worker.public_dir, worker.io);
+    core.setMaxResponseHeaders(worker.max_response_headers);
 
     const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
     var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
@@ -422,6 +424,7 @@ pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
             .handler = handler,
             .ctx = ctx,
             .public_dir = config.public_dir,
+            .max_response_headers = config.max_response_headers.value(),
         }});
 
     for (threads) |t| t.join();
@@ -430,25 +433,21 @@ pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-/// Test handler: write a fixed 200 response via the fd-handler write path (core.writeAllFD, so the
+/// Test handler: write a fixed 200 response via the raw write path (core.writeAllFD, so the
 /// response sink installed by runHandlerToBuffer captures it), ignoring the request.
-fn epollTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
-    _ = head;
-    _ = body;
-
-    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+fn epollTestHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    try res.sendRaw("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
 }
 
 /// Test handler: engine-owned WebSocket upgrade (the cleartext WebSocket.serve API, honored on the
 /// TLS mux loop).
-fn wsUpgradeTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
-    _ = body;
-
-    const key = core.getHeader(head, "sec-websocket-key") orelse {
-        core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+fn wsUpgradeTestHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    const key = req.header("sec-websocket-key") orelse {
+        try res.sendRaw("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
         return;
     };
-    ws.serve(fd, key, wsEchoTestFrame) catch {};
+
+    return ws.serve(req.fd, key, wsEchoTestFrame);
 }
 
 fn wsEchoTestFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
@@ -457,13 +456,10 @@ fn wsEchoTestFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
 
 /// Test handler: SSE-style streaming response (beginStream detaches the capture sink, every write
 /// seals records through the connection's stream sink).
-fn sseTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
-    _ = head;
-    _ = body;
-
+fn sseTestHandler(req: *core.Request, _: *core.Response, _: *core.Context) anyerror!void {
     core.beginStream();
-    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
-    core.writeAllFD(fd, "data: one\n\n") catch return;
+    core.writeAllFD(req.fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.writeAllFD(req.fd, "data: one\n\n") catch return;
 }
 
 /// Read exactly one TLS record (5-byte header + body) from a blocking fd into buf, returning its full

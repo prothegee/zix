@@ -6,12 +6,12 @@
 //!   the others. The worker reads the ClientHello, then branches on the version policy: a 1.3-capable
 //!   client takes the TLS 1.3 path (zix.Tls), a 1.2-only client takes the TLS 1.2 path (zix.Tls
 //!   tls12_connection), each subject to the context's min_version / max_version. Either way it then
-//!   per request decrypts the record, reuses core.parseHead, runs the existing fd-handler against a
-//!   pipe (so the handler writes plaintext unchanged), reads that back, encrypts it, and sends it.
+//!   per request decrypts the record, reuses core.parseHead, runs the handler with an in-memory
+//!   response sink capturing its plaintext (runHandlerToBuffer), encrypts that, and sends it.
 //! - The cleartext EPOLL / URING hot path is untouched: this whole file is reached only when
 //!   config.tls is set (gated in server.zig before the dispatch switch). .EPOLL / .URING terminate
 //!   TLS in the event-driven tls_mux worker instead. https is a separate path on its own perf band
-//!   (not the 1% gate), so the per-request pipe is acceptable.
+//!   (not the 1% gate), so the per-request capture copy is acceptable.
 //! - The cert / key are loaded and validated once in Tls.Context.init (the cold path), so the
 //!   accept loop reads a ready context with no per-connection PEM work.
 //! - Keep-alive (RFC 9112 9.3): once the handshake completes the connection serves requests in a
@@ -101,7 +101,7 @@ pub fn runTls(handler: HandlerFn, config: Config) !void {
         const conn_fd = stream.socket.handle;
 
         const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, connWorker, .{
-            ConnCtx{ .fd = conn_fd, .handler = handler, .ctx = ctx, .io = io, .public_dir = config.public_dir },
+            ConnCtx{ .fd = conn_fd, .handler = handler, .ctx = ctx, .io = io, .public_dir = config.public_dir, .max_response_headers = config.max_response_headers.value() },
         }) catch {
             // Spawn failed (thread / pid limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
@@ -122,11 +122,13 @@ const ConnCtx = struct {
     ctx: *const Tls.Context,
     io: std.Io,
     public_dir: []const u8 = "",
+    max_response_headers: usize = 16,
 };
 
 /// Drive one https/1.1 connection (handshake + keep-alive request loop), then close it.
 fn connWorker(conn_ctx: ConnCtx) void {
     core.setStatic(conn_ctx.public_dir, conn_ctx.io);
+    core.setMaxResponseHeaders(conn_ctx.max_response_headers);
 
     serveConnTls(conn_ctx.fd, conn_ctx.handler, conn_ctx.ctx) catch {};
 
@@ -235,7 +237,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
 }
 
 /// Serve application requests over an established TLS session until the client signals close.
-/// Each request: decrypt -> parse -> handler (over a pipe) -> encrypt -> write. The handshake is
+/// Each request: decrypt -> parse -> handler (captured by the response sink) -> encrypt -> write. The handshake is
 /// already paid, so this loop is what makes the cost per connection rather than per request.
 ///
 /// Note:
@@ -301,7 +303,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             };
         }
 
-        const result = try runHandlerToBuffer(handler, &head, body, &response_buf);
+        const result = try runHandlerToBuffer(handler, &head, body, &response_buf, core.tl_static_io orelse undefined);
 
         if (core.takeWebSocket()) |handoff| {
             // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
@@ -449,7 +451,7 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
     try serveRequests(fd, handler, ctx, &conn, &record_buf);
 }
 
-/// The sentinel fd handed to the fd-handler while a response sink is installed: its writeAllFD
+/// The sentinel fd handed to the handler while a response sink is installed: its writeAllFD
 /// calls match the sink by this fd and append to the buffer, they never touch a real descriptor.
 const sink_fd: posix.fd_t = -1;
 
@@ -461,7 +463,7 @@ pub const HandlerResult = struct {
     streamed: bool = false,
 };
 
-/// Run the fd-handler with a response sink installed, returning the plaintext response it wrote into
+/// Run the handler with a response sink installed, returning the plaintext response it wrote into
 /// `out`. The handler's writeAllFD appends to `out` directly (core.tl_resp_sink), so there is no
 /// pipe2 / read / close per request, just an in-memory copy. An overflowing response (the sink would
 /// flush to the sentinel fd, which fails) surfaces as error.ResponseTooLarge.
@@ -469,13 +471,16 @@ pub const HandlerResult = struct {
 /// Note:
 /// - A streaming handler calls beginStream(), which detaches the capture sink. With the stream sink
 ///   armed it already streamed over TLS (ADR-054), reported as streamed = true.
-pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8) !HandlerResult {
+pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8, io: std.Io) !HandlerResult {
     var sink = core.RespSink{ .fd = sink_fd, .buf = out };
     const prev = core.tl_resp_sink;
     core.tl_resp_sink = &sink;
     defer core.tl_resp_sink = prev;
 
-    handler(head, body, sink_fd);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    core.invokeHandler(handler, head, body, sink_fd, io, arena.allocator());
 
     if (core.tl_resp_sink != &sink) {
         if (core.tl_tls_stream != null) return .{ .bytes = &.{}, .streamed = true };
@@ -575,11 +580,8 @@ test "zix test: tls_serve, hostFromHead extracts the Host header" {
 }
 
 /// Test handler: write a fixed 200 response, ignoring the request (keep-alive loop exercise).
-fn keepAliveTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
-    _ = head;
-    _ = body;
-
-    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch {};
+fn keepAliveTestHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    try res.sendRaw("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
 }
 
 /// Test-only fixture: the localhost ECDSA P-256 cert DER (SAN localhost + 127.0.0.1), in hex. Public so
@@ -681,13 +683,10 @@ test "zix test: tls_serve, keep-alive serves many requests then honors Connectio
 }
 
 /// Test handler: an SSE stream that opts in via beginStream(), then writes one event and returns.
-fn sseTestHandler(head: *const core.ParsedHead, body: []const u8, fd: posix.fd_t) void {
-    _ = head;
-    _ = body;
-
+fn sseTestHandler(req: *core.Request, _: *core.Response, _: *core.Context) anyerror!void {
     core.beginStream();
-    core.writeAllFD(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
-    core.writeAllFD(fd, "data: hello\n\n") catch return;
+    core.writeAllFD(req.fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.writeAllFD(req.fd, "data: hello\n\n") catch return;
 }
 
 /// Capture stream sink for the test: a streaming handler's writes land in `buf` instead of a socket.
@@ -718,7 +717,7 @@ test "zix test: tls_serve, runHandlerToBuffer streams over TLS when the stream s
     var out: [4096]u8 = undefined;
 
     // beginStream() detaches the capture sink, so both writes route through the stream sink.
-    const result = try runHandlerToBuffer(sseTestHandler, &parsed.head, req[parsed.body_offset..], &out);
+    const result = try runHandlerToBuffer(sseTestHandler, &parsed.head, req[parsed.body_offset..], &out, undefined);
     try std.testing.expect(result.streamed);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "data: hello") != null);

@@ -75,7 +75,7 @@ const ConnQueue = struct {
     }
 };
 
-const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0, send_date_header: bool = true, large_body_rcvbuf: usize = 0, public_dir: []const u8 = "" };
+const PoolCtx = struct { queue: *ConnQueue, io: std.Io, handler: HandlerFn, handler_timeout_ms: u32 = 0, conn_timeout_ms: u32 = 0, registry: ?*common.ConnRegistry = null, send_date_header: bool = true, large_body_rcvbuf: usize = 0, public_dir: []const u8 = "", max_response_headers: usize = 16 };
 
 const AcceptCtx = struct {
     queue: *ConnQueue,
@@ -88,11 +88,20 @@ const AcceptCtx = struct {
 fn poolEntry(ctx: PoolCtx) void {
     core.setDateHeader(ctx.send_date_header);
     core.setStatic(ctx.public_dir, ctx.io);
+    core.setMaxResponseHeaders(ctx.max_response_headers);
 
     while (ctx.queue.pop(ctx.io)) |stream| {
         defer stream.close(ctx.io);
         const fd = stream.socket.handle;
-        core.serveConn(fd, ctx.handler, .{ .handler_timeout_ms = ctx.handler_timeout_ms, .large_body_rcvbuf = ctx.large_body_rcvbuf });
+
+        var guard: ?common.ConnEntry = null;
+        if (ctx.registry) |registry| {
+            guard = common.ConnEntry{ .fd = fd, .deadline = common.connDeadline(ctx.io, ctx.conn_timeout_ms) };
+            registry.register(&guard.?, ctx.io);
+        }
+        defer if (ctx.registry) |registry| registry.deregister(&guard.?, ctx.io);
+
+        core.serveConn(fd, ctx.handler, .{ .handler_timeout_ms = ctx.handler_timeout_ms, .large_body_rcvbuf = ctx.large_body_rcvbuf }, ctx.io);
     }
 }
 
@@ -122,13 +131,20 @@ pub fn runPool(config: Config, handler: HandlerFn) !void {
     var queue = ConnQueue{};
     defer queue.deinit();
 
+    var conn_registry = common.ConnRegistry{};
+    const registry: ?*common.ConnRegistry = if (config.conn_timeout_ms > 0) &conn_registry else null;
+    if (config.conn_timeout_ms > 0) {
+        const sweeper = try std.Thread.spawn(.{}, common.connTimerLoop, .{ io, &conn_registry });
+        sweeper.detach();
+    }
+
     const pool_threads = try std.heap.smp_allocator.alloc(std.Thread, pool_count);
     defer std.heap.smp_allocator.free(pool_threads);
     for (pool_threads) |*t| {
         t.* = try std.Thread.spawn(
             .{ .stack_size = config.worker_stack_size_bytes },
             poolEntry,
-            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir }},
+            .{PoolCtx{ .queue = &queue, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .conn_timeout_ms = config.conn_timeout_ms, .registry = registry, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir, .max_response_headers = config.max_response_headers.value() }},
         );
     }
 

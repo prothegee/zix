@@ -4,6 +4,7 @@ const std = @import("std");
 const DispatchModel = @import("../config.zig").DispatchModel;
 const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
+const HeaderSize = @import("response.zig").HeaderSize;
 
 /// HTTP/1 server configuration.
 pub const Http1ServerConfig = struct {
@@ -64,11 +65,19 @@ pub const Http1ServerConfig = struct {
     /// (references only, fd + generation) and retried next loop pass instead of closing the
     /// connection. 0 (default) = off. No effect under the other models.
     process_queue_len: usize = 0,
-    /// No-op with the lazy engine. Kept for source compatibility.
-    max_headers: u8 = 16,
+    /// Cap on custom response headers a handler may add per request (Response.addHeader).
+    /// The backing buffer is arena-allocated lazily on the first addHeader call, so requests
+    /// that add none pay nothing.
+    max_response_headers: HeaderSize = .MINIMAL,
+    /// Whole-connection wall-clock budget in milliseconds on the blocking models (.ASYNC,
+    /// .POOL, .MIXED): a timer sweep shuts down any connection older than this.
+    /// Should be >= handler_timeout_ms to avoid cutting off an in-flight response.
+    /// 0 = disabled. No-op under .EPOLL and .URING (those event loops own connection lifetime).
+    conn_timeout_ms: u32 = 0,
     /// Per-handler execution budget in milliseconds. 0 = disabled. When non-zero, a thread-local
-    /// deadline is armed before each dispatch: handlers opt in via zix.Http1.isExpired() between
-    /// expensive steps and may shorten their own budget via zix.Http1.setTimeout().
+    /// deadline is armed before each dispatch: handlers opt in via ctx.timedOut() (or
+    /// zix.Http1.isExpired()) between expensive steps and may shorten their own budget via
+    /// ctx.setTimeout().
     handler_timeout_ms: u32 = 0,
     /// Include the Date header in every response. Default true for RFC 7231 compliance.
     /// Set false to reduce response size by 37 bytes per response.
@@ -83,7 +92,8 @@ pub const Http1ServerConfig = struct {
     public_dir_upload: []const u8 = "u",
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default
     /// false: compression spends CPU and only pays off over a real network, so off keeps the perf
-    /// gate untouched. Active under .EPOLL / .URING. A handler opts in via sendNegotiateCachedFD.
+    /// gate untouched. Active under .EPOLL / .URING. A handler opts in via res.sendNegotiated or
+    /// the raw sendNegotiateCachedFD.
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body under this floor
     /// is sent uncompressed, since the header and CPU cost outweighs the saving.
@@ -93,8 +103,9 @@ pub const Http1ServerConfig = struct {
     /// brotli). A response whose compressed form would exceed this is sent uncompressed instead.
     compression_max_out: usize = 256 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache
-    /// API (cacheLookup / cacheStore / sendWithCacheFD) degrades to a no-op. Active under .EPOLL
-    /// and .URING (both shared-nothing, one owner thread per cache).
+    /// API (res.sendFromCache / res.sendCached and the raw cacheLookup / cacheStore /
+    /// sendWithCacheFD) degrades to a no-op. Active under .EPOLL and .URING (both shared-nothing,
+    /// one owner thread per cache).
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -117,8 +128,8 @@ pub const Http1ServerConfig = struct {
     /// cleartext on port AND https on tls_port from one worker fleet. Ignored when tls is null.
     tls_port: u16 = 0,
     /// Optional logger for server lifecycle lines (listening, fallback notices). null = std.debug.print.
-    /// The Http1 handler writes the fd and returns void, so per-request access logging is the handler's
-    /// job: call logger.access() where status and byte count are known. Caller owns, must outlive.
+    /// Per-request access logging is the handler's job: call logger.access() where status and byte
+    /// count are known (res.bytes_written after a send). Caller owns, must outlive.
     logger: ?*Logger = null,
 };
 

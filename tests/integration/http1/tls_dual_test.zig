@@ -20,8 +20,8 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 /// blocks, so the tests never read more than the server will send).
 const OK_RESPONSE: []const u8 = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndual";
 
-fn okHandler(_: *const zix.Http1.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    zix.Http1.writeAllFD(fd, OK_RESPONSE) catch {};
+fn okHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) anyerror!void {
+    return res.sendRaw(OK_RESPONSE);
 }
 
 const ServeArgs = struct {

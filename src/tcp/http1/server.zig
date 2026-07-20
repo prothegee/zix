@@ -16,13 +16,11 @@ const tls_mux = @import("tls_mux.zig");
 
 // --------------------------------------------------------- //
 
-/// Server type specialized over a comptime handler and optional raw interceptor.
+/// Server type specialized over a comptime handler.
 ///
 /// Note:
-/// - handler and raw_fn are baked into the type, so run() takes no argument.
-/// - raw_fn is null in the normal path: the if(comptime raw_fn != null) block
-///   compiles away entirely, adding zero overhead to servers that don't use it.
-fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) type {
+/// - handler is baked into the type, so run() takes no argument.
+fn Http1ServerImpl(comptime handler: HandlerFn) type {
     return struct {
         config: Config,
 
@@ -58,9 +56,9 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
                     if (self.config.tls_port == self.config.port) return error.TlsPortConflict;
 
                     if (is_linux and self.config.dispatch_model == .EPOLL)
-                        return epoll_model.runEpoll(self.config, handler, raw_fn);
+                        return epoll_model.runEpoll(self.config, handler);
                     if (is_linux and self.config.dispatch_model == .URING)
-                        return uring_model.runUring(self.config, handler, raw_fn);
+                        return uring_model.runUring(self.config, handler);
 
                     // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
                     // TLS on tls_port (thread-per-connection, WebSocket + SSE included), the
@@ -87,13 +85,13 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
                 .POOL => pool_model.runPool(self.config, handler),
                 .MIXED => mixed_model.runMixed(self.config, handler),
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
-                    epoll_model.runEpoll(self.config, handler, raw_fn)
+                    epoll_model.runEpoll(self.config, handler)
                 else blk: {
                     common.logSystem(self.config, "EPOLL is Linux-only. Falling back to POOL.", .{});
                     break :blk pool_model.runPool(self.config, handler);
                 },
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
-                    uring_model.runUring(self.config, handler, raw_fn)
+                    uring_model.runUring(self.config, handler)
                 else blk: {
                     common.logSystem(self.config, "URING is Linux-only. Falling back to POOL.", .{});
                     break :blk pool_model.runPool(self.config, handler);
@@ -108,8 +106,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn, comptime raw_fn: ?core.RawFn) ty
 /// Note:
 /// - handler must be comptime: it is baked into the server type, so there is no
 ///   dynamic registration after init. Pass a Router(routes).dispatch, a bare
-///   handler, or a middleware chain.
-/// - For raw-bytes interception before parsing, use initRaw.
+///   handler, or a comptime wrapper that runs steps around an inner handler.
 ///
 /// Usage:
 /// ```zig
@@ -129,32 +126,16 @@ pub const Server = struct {
     /// config - Http1ServerConfig
     ///
     /// Return:
-    /// - Http1ServerImpl(handler, null)
-    pub fn init(comptime handler: HandlerFn, config: Config) Http1ServerImpl(handler, null) {
-        return Http1ServerImpl(handler, null).init(config);
-    }
-
-    /// Like init, but also installs a raw-request interceptor for the EPOLL
-    /// dispatch model. raw_fn is called before any header parsing on each
-    /// request. Returning a non-null offset skips the full parse-and-dispatch
-    /// path for that request. Only effective under EPOLL, other models ignore it.
-    ///
-    /// Param:
-    /// handler - comptime HandlerFn
-    /// raw_fn - comptime RawFn (called before parsing on every EPOLL request)
-    /// config - Http1ServerConfig
-    ///
-    /// Return:
-    /// - Http1ServerImpl(handler, raw_fn)
-    pub fn initRaw(comptime handler: HandlerFn, comptime raw_fn: core.RawFn, config: Config) Http1ServerImpl(handler, raw_fn) {
-        return Http1ServerImpl(handler, raw_fn).init(config);
+    /// - Http1ServerImpl(handler)
+    pub fn init(comptime handler: HandlerFn, config: Config) Http1ServerImpl(handler) {
+        return Http1ServerImpl(handler).init(config);
     }
 };
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-fn testNoopHandler(_: *const core.ParsedHead, _: []const u8, _: std.posix.fd_t) void {}
+fn testNoopHandler(_: *core.Request, _: *core.Response, _: *core.Context) anyerror!void {}
 
 test "zix http1: Server.init valid config, deinit is safe" {
     var server = Server.init(testNoopHandler, .{
