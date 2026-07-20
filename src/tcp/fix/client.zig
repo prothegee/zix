@@ -6,18 +6,16 @@ const FixClientConfig = @import("config.zig").FixClientConfig;
 
 // --------------------------------------------------------- //
 
-fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
-    if (recv_ms == 0 and send_ms == 0) return;
+/// Poll fd for the given event with a millisecond timeout.
+///
+/// Return:
+/// - true when the event is ready
+/// - false when the timeout elapsed first
+fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
+    const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
 
-    if (recv_ms > 0) {
-        const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
-        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
-    }
-
-    if (send_ms > 0) {
-        const send_tv = std.posix.timeval{ .sec = @intCast(send_ms / 1000), .usec = @intCast((send_ms % 1000) * 1000) };
-        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&send_tv)) catch {};
-    }
+    return try std.posix.poll(&pfd, ms) > 0;
 }
 
 // --------------------------------------------------------- //
@@ -46,6 +44,7 @@ pub const FixClient = struct {
     recv_buf: [core.MAX_MSG_SIZE * 2]u8,
     recv_len: usize,
     recv_timeout_ms: u32,
+    send_timeout_ms: u32,
 
     // --------------------------------------------------------- //
 
@@ -67,6 +66,7 @@ pub const FixClient = struct {
             .recv_buf = undefined,
             .recv_len = 0,
             .recv_timeout_ms = config.recv_timeout_ms,
+            .send_timeout_ms = config.send_timeout_ms,
         };
     }
 
@@ -108,10 +108,20 @@ pub const FixClient = struct {
     }
 
     /// Build and send a FIX message. Increments the outgoing sequence number.
+    ///
+    /// Return:
+    /// - error.SendTimeout if send_timeout_ms is set and the socket is not writable in time
     pub fn sendMessage(self: *Self, io: std.Io, msg_type: []const u8, extra: []const core.BuildField) !void {
         var out_buf: [core.MAX_MSG_SIZE]u8 = undefined;
         const n = try core.buildMessage(&out_buf, self.comp_id, self.target_comp_id, self.seq_out, msg_type, extra);
         self.seq_out += 1;
+
+        if (self.send_timeout_ms > 0) {
+            // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
+            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.OUT, self.send_timeout_ms)) {
+                return error.SendTimeout;
+            }
+        }
 
         var wr_buf: [core.MAX_MSG_SIZE]u8 = undefined;
         var writer = self.stream.writer(io, &wr_buf);
@@ -143,14 +153,9 @@ pub const FixClient = struct {
             if (self.recv_len >= self.recv_buf.len) return error.MessageTooLarge;
 
             if (self.recv_timeout_ms > 0) {
-                var pfd = [1]std.posix.pollfd{.{
-                    .fd = fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                }};
-                const ms: i32 = @intCast(@min(self.recv_timeout_ms, @as(u32, std.math.maxInt(i32))));
-                const ready = try std.posix.poll(&pfd, ms);
-                if (ready == 0) return error.RecvTimeout;
+                if (!try pollReady(fd, std.posix.POLL.IN, self.recv_timeout_ms)) {
+                    return error.RecvTimeout;
+                }
             }
 
             const n = try std.posix.read(fd, self.recv_buf[self.recv_len..]);
@@ -177,36 +182,6 @@ test "zix fix: FixClient.connect port zero returns PortNotConfigured" {
             .target_comp_id = "SERVER",
         }, io),
     );
-}
-
-test "zix test: applySocketTimeout fix, zero ms is a no-op on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 0, 0);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
-}
-
-test "zix test: applySocketTimeout fix, sets SO_RCVTIMEO on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 1500, 0);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 1), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
 }
 
 test "zix fix: FixClient.recvMessage reassembles message split across two reads" {
@@ -246,6 +221,7 @@ test "zix fix: FixClient.recvMessage reassembles message split across two reads"
         .recv_buf = undefined,
         .recv_len = 0,
         .recv_timeout_ms = 0,
+        .send_timeout_ms = 0,
     };
     @memcpy(client.recv_buf[0..half], full_msg[0..half]);
     client.recv_len = half;
@@ -257,7 +233,7 @@ test "zix fix: FixClient.recvMessage reassembles message split across two reads"
     try std.testing.expectEqualSlices(u8, full_msg, msg);
 }
 
-test "zix test: applySocketTimeout fix, short timeout does not fire when data arrives immediately" {
+test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arrives" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -265,13 +241,109 @@ test "zix test: applySocketTimeout fix, short timeout does not fire when data ar
         _ = std.os.linux.close(fds[1]);
     }
 
-    applySocketTimeout(fds[0], 50, 0);
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    const written: usize = @intCast(std.os.linux.write(fds[1], "ping".ptr, 4));
-    try std.testing.expectEqual(@as(usize, 4), written);
+    var client = FixClient{
+        .stream = .{ .socket = .{
+            .handle = fds[0],
+            .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+        } },
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .seq_out = 1,
+        .recv_buf = undefined,
+        .recv_len = 0,
+        .recv_timeout_ms = 50,
+        .send_timeout_ms = 0,
+    };
 
-    var buf: [8]u8 = undefined;
-    const n: usize = @intCast(std.os.linux.read(fds[0], &buf, buf.len));
+    try std.testing.expectError(error.RecvTimeout, client.recvMessage(io));
+}
+
+test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the peer drains" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = FixClient{
+        .stream = .{ .socket = .{
+            .handle = fds[0],
+            .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+        } },
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .seq_out = 1,
+        .recv_buf = undefined,
+        .recv_len = 0,
+        .recv_timeout_ms = 0,
+        .send_timeout_ms = 50,
+    };
+
+    const extra = [_]core.BuildField{
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
+    };
+    try client.sendMessage(io, core.MsgType.Logon, &extra);
+
+    var wire: [core.MAX_MSG_SIZE]u8 = undefined;
+    const n: usize = @intCast(std.os.linux.read(fds[1], &wire, wire.len));
     try std.testing.expect(n > 0);
-    try std.testing.expectEqualSlices(u8, "ping", buf[0..n]);
+}
+
+test "zix fix: FixClient.sendMessage returns error.SendTimeout when the peer's buffer is full" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    // Fill fds[0]'s send buffer so poll(POLLOUT) reports not-ready: switch to
+    // non-blocking, write until the kernel refuses more (the peer never
+    // reads), then restore blocking mode for the client under test.
+    const linux = std.os.linux;
+    const flags = linux.fcntl(fds[0], std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, flags | @as(usize, nonblock_bit));
+
+    var chunk: [4096]u8 = undefined;
+    while (std.posix.errno(linux.write(fds[0], &chunk, chunk.len)) == .SUCCESS) {}
+
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, flags);
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = FixClient{
+        .stream = .{ .socket = .{
+            .handle = fds[0],
+            .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+        } },
+        .comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .seq_out = 1,
+        .recv_buf = undefined,
+        .recv_len = 0,
+        .recv_timeout_ms = 0,
+        .send_timeout_ms = 50,
+    };
+
+    const extra = [_]core.BuildField{
+        .{ .tag = .EncryptMethod, .value = "0" },
+        .{ .tag = .HeartBtInt, .value = "30" },
+    };
+    try std.testing.expectError(error.SendTimeout, client.sendMessage(io, core.MsgType.Logon, &extra));
 }
