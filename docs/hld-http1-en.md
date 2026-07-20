@@ -7,7 +7,7 @@ Lean HTTP/1.x server engine on raw fd I/O. Zero-allocation request parsing and r
 ## Goals
 
 - Zero heap allocation on the hot path: parse and write operate on stack or pre-allocated buffers.
-- No request/response objects: the handler receives a parsed head plus body slice and writes to the fd directly through write helpers.
+- The handler trio (`Request`, `Response`, `Context`) is built per request from stack-cheap views over those buffers: `Response` delegates to the direct fd write helpers, so ergonomics cost no wire change (ADR-062).
 - Comptime everything: the handler is baked into the server type, the route table is partitioned at compile time.
 - Raw `std.posix` I/O on the data path: `std.Io` is used only for listen/accept plumbing.
 - Minimal surface: one handler signature, a small set of write helpers, an optional comptime router.
@@ -20,16 +20,17 @@ Both are HTTP/1.1 servers. `zix.Http` is the full-featured layer, `zix.Http1` is
 
 | Aspect | `zix.Http` | `zix.Http1` |
 | :- | :- | :- |
-| Handler signature | `fn(*Request, *Response, *Context) !void` | `fn(*const ParsedHead, []const u8, fd) void` |
-| Request parsing | `std.http.Server` | own zero-copy `parseHead` |
-| Per-request allocator | per-connection arena | none (caller-owned buffers) |
-| Response writing | buffered `Response` object | direct fd write helpers |
-| Static files / multipart / SSE writer | built in | not built in (handlers compose from helpers) |
+| Handler signature | `fn(*Request, *Response, *Context) anyerror!void` | `fn(*Request, *Response, *Context) anyerror!void` (same trio, ADR-062) |
+| Request parsing | own parser (`parser.zig`) | own zero-copy `parseHead` (`parser.zig` copy) |
+| Request body | lazy socket read in `body()` | engine-delivered slice (drained + dechunked before invoke) |
+| Per-request allocator | per-connection arena | per-request arena (`ctx.allocator`, reset per dispatch) |
+| Response writing | buffered `Response` object | `Response` builder delegating to direct fd write helpers |
+| Static files / multipart / SSE writer | built in | `public_dir` static fallback, shared `Multipart`, `SseWriter` |
 | Routing | comptime route table | comptime route table (optional, handler can be bare) |
-| WebSocket | handler-owned frame loop | engine-owned frame pump (.EPOLL) |
+| WebSocket | handler-owned frame loop | engine-owned frame pump (.EPOLL / .URING) |
 | Dispatch models | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
 
-Use `zix.Http` when handlers need an allocator, static file serving, or the richer request/response API. Use `zix.Http1` when raw throughput and predictable per-request cost matter more than convenience.
+The trio surface is caller-identical across both engines (a compile-time parity test in `src/lib.zig` enforces it). Use `zix.Http` when handlers need the richer client-facing layer. Use `zix.Http1` when raw throughput and predictable per-request cost matter more: the trio is views plus an arena reset, and the escape hatch (`ctx.fd` plus the `*FD` write helpers) keeps the raw path open.
 
 ---
 
@@ -133,13 +134,18 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` |
-| `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: register a `RawFn` that owns the connection fd directly |
+| `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` (the single entry, ADR-062) |
 | `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
-| `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
-| `zix.Http1.RawFn` | type | Raw handler given the fd and parsed head, owns the wire directly (custom framing, streaming) |
-| `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, raw_headers, flags) |
+| `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (the trio, ADR-062) |
+| `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
+| `zix.Http1.Response` | struct | Response builder over the fd writers: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus the `sent` flag |
+| `zix.Http1.Context` | struct | io, per-request arena allocator, fd escape hatch, `withDeadline` |
+| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespaces | Typed trio surface (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` returns `Method.Code`), identical across both engines |
+| `zix.Http1.Header` / `HeaderSize` | struct / enum | `addHeader` entry and its capacity class (`max_response_headers`) |
+| `zix.Http1.Multipart` / `MultipartField` | struct | Shared multipart parser |
+| `zix.Http1.SseWriter` | struct | SSE event writer returned by `res.sendStream()` |
+| `zix.Http1.ParsedHead` | struct | Zero-copy parsed request head (method, path, query, raw_headers, flags, accept_encoding span) |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` from `parseRange` |
 | `zix.Http1.ServeOpts` | struct | `serveConn` options: `nodelay`, `handler_timeout_ms` |
 | `zix.Http1.ConnOutcome` | enum | `.keep_alive` or `.close` (EPOLL one-shot result) |
@@ -154,6 +160,8 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.isExpired` | fn | Whether the current handler's deadline has passed |
 | `zix.Http1.parseHead` | fn | Parse a complete request head from a buffer (zero copy) |
 | `zix.Http1.getHeader` | fn | Case-insensitive header lookup on a ParsedHead |
+| `zix.Http1.acceptEncoding` | fn | Accept-Encoding value for a ParsedHead: O(1) from the parse-pass span, getHeader fallback otherwise |
+| `zix.Http1.setCache` | fn | Install or clear the per-worker response cache |
 | `zix.Http1.queryParam` | fn | Linear scan for one query parameter by exact name |
 | `zix.Http1.percentDecode` | fn | Percent-decode a buffer in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` into a `Range` |
@@ -184,10 +192,11 @@ pub const Http1ServerConfig = struct {
     max_recv_buf:       usize = 6 * 1024,      // per-connection buffer (.EPOLL / .URING, see note)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via core.sendNegotiateFD (.EPOLL/.URING)
+    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (.EPOLL/.URING)
     compression_min_size: usize = 256,           // skip bodies under this floor
     compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
-    max_headers:        u8    = 16,            // no-op, kept for source compatibility
+    max_response_headers: HeaderSize = .MINIMAL, // addHeader capacity class (ADR-062)
+    conn_timeout_ms:    u32   = 0,             // connection lifetime, .ASYNC/.POOL/.MIXED only (no-op on .EPOLL/.URING)
     workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL only
     handler_timeout_ms: u32   = 0,             // per-handler budget, 0 = disabled
@@ -197,7 +206,9 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in by calling `core.sendNegotiateFD` instead of `sendSimpleFD`. The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`, and `max_headers` is a no-op kept for source compatibility (the lazy engine has no header-count cap).
+The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
+
+Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -207,45 +218,45 @@ Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false`
 
 `zix.Http1` exposes one timeout, `handler_timeout_ms`, the per-handler execution budget. When non-zero, the server arms a thread-local deadline before each dispatch. The handler opts in by calling `zix.Http1.isExpired()` between expensive steps and responding early, or shortens its own budget with `zix.Http1.setTimeout()`. This is the same Layer B budget as `zix.Http`'s `handler_timeout_ms`.
 
-`zix.Http1` has no `conn_timeout_ms`. This is deliberate, not an omission.
-
-- The connection-lifetime guard in `zix.Http` (`conn_timeout_ms`, Layer D) is enforced by a `ConnRegistry` plus a background timer thread that shuts down connections exceeding the configured lifetime. `zix.Http1` is the lean, zero-alloc engine and carries none of that standing infrastructure: the handler is `fn(head, body, fd) void` with no `Request` / `Response` / registry to track a connection against, and no socket-level receive timeout (`setNoDelay` and `SO_BUSY_POLL` are the only socket options set).
-- Under `.EPOLL`, the model `zix.Http1` is tuned for, an idle keep-alive connection holds no thread, just one epoll slot and its buffer. The main reason `conn_timeout_ms` exists in `zix.Http` (reclaiming pool threads parked on slow or idle connections) does not apply to the shared-nothing level-triggered loop.
+`conn_timeout_ms` (ADR-062) is the connection-lifetime guard, a port of `zix.Http`'s Layer D: a `ConnRegistry` plus a background timer thread shuts down connections exceeding the configured lifetime. It is active on the blocking models (`.ASYNC`, `.POOL`, `.MIXED`), where a slow or idle connection parks a thread or task. On `.EPOLL` and `.URING` it is a documented no-op: their event loops own connection lifetime, and an idle keep-alive connection holds no thread, just one slot and its buffer.
 
 | Timeout | `zix.Http` | `zix.Http1` | Mechanism |
 | :- | :- | :- | :- |
 | `handler_timeout_ms` | yes | yes | thread-local deadline armed per dispatch, handler-opt-in |
-| `conn_timeout_ms` | yes (`.POOL`) | no | `ConnRegistry` + background timer thread (Http only) |
+| `conn_timeout_ms` | yes | yes (`.ASYNC` / `.POOL` / `.MIXED`) | `ConnRegistry` + background timer thread |
 
-If connection-lifetime enforcement under `.EPOLL` is ever needed, the natural fit is an idle-deadline sweep over the per-worker `ConnTable` (no extra thread), not a port of Http's timer-thread `ConnRegistry`.
+If connection-lifetime enforcement under `.EPOLL` / `.URING` is ever needed, the natural fit is an idle-deadline sweep over the per-worker table (no extra thread), not the timer-thread `ConnRegistry`.
 
 ---
 
 ## Handler Model
 
 ```zig
-fn home(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
+fn home(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) anyerror!void {
+    _ = ctx;
 
-    if (zix.Http1.queryParam(head, "name")) |name| {
+    if (req.queryParam("name")) |name| {
         _ = name; // slices into the receive buffer, valid only for this call
     }
 
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello") catch {};
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("hello");
 }
 
 var server = zix.Http1.Server.init(home, .{
     .io = process.io,
     .ip = "0.0.0.0",
     .port = 8080,
+    .dispatch_model = .EPOLL,
 });
 try server.run();
 ```
 
 - The handler is a comptime argument: it is baked into the server type, there is no dynamic registration after init.
-- All slices in `head` and `body` point into the receive buffer and are valid only for the duration of the call.
-- The handler returns `void`: errors are handled inside the handler (typically `catch {}` on write helpers, the connection closes on broken pipe anyway).
-- The handler may be a bare function, a `Router(routes).dispatch`, or a middleware chain composed at comptime.
+- The trio is built per request by `core.invokeHandler`: `Request` is a zero-copy view (all slices point into the receive buffer, valid only for the call), `Response` delegates to the fd write helpers byte-identically, `Context` carries io, the per-request arena, and the fd escape hatch.
+- A handler error is completed by the engine as one 500, only when nothing was sent yet (`Response.sent`). The house idiom is `try res.foo(...)`, never `return res.foo(...)`.
+- The handler may be a bare function, a `Router(routes).dispatch`, or a comptime wrapper chain (the middleware idiom, see `examples/http1_middleware.zig`).
 
 ### ParsedHead
 
@@ -260,6 +271,7 @@ try server.run();
 | `content_length` | `u64` | 0 when absent or unparseable |
 | `chunked_request` | `bool` | `Transfer-Encoding: chunked` present |
 | `expect_continue` | `bool` | `Expect: 100-continue` present |
+| `accept_encoding` | `HeaderSpan` | Accept-Encoding value span captured in the parse pass, read via `acceptEncoding()` |
 
 ---
 
@@ -339,24 +351,26 @@ Routes are partitioned by kind at compile time: exact paths into a `StaticString
 When `config.handler_timeout_ms > 0` the engine arms a thread-local deadline before each dispatch. Handlers opt in by calling `zix.Http1.isExpired()` between expensive steps:
 
 ```zig
-fn slow(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
+fn slow(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) anyerror!void {
+    _ = req;
+    _ = ctx;
 
     doStep1();
     if (zix.Http1.isExpired()) {
-        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\"}") catch {};
+        res.setStatus(.REQUEST_TIMEOUT);
+        try res.sendJson("{\"error\":\"timeout\"}");
         return;
     }
 
     doStep2();
-    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\"}") catch {};
+
+    try res.sendJson("{\"result\":\"ok\"}");
 }
 ```
 
 - `isExpired()` is always safe: it returns `false` when no deadline is armed. The check is one `clock_gettime` plus a compare.
-- `setTimeout(ms)` re-arms the deadline for the current handler (shorten or extend), `setTimeout(0)` clears it.
-- The deadline is thread-local, mirroring the one-request-per-worker execution model. There is no Context object to carry it.
+- `setTimeout(ms)` re-arms the deadline for the current handler (shorten or extend), `setTimeout(0)` clears it, and `ctx.withDeadline` is the trio-side wrapper.
+- The deadline is thread-local, mirroring the one-request-per-worker execution model.
 
 ---
 
@@ -372,7 +386,7 @@ sequenceDiagram
     participant F as on_frame callback
 
     C->>E: GET /ws (Upgrade: websocket)
-    E->>H: handler(head, body, fd)
+    E->>H: handler(req, res, ctx)
     H->>H: WebSocket.serve(fd, key, on_frame)
     Note over H: 101 written, promotion requested
     H->>E: handler returns
@@ -404,7 +418,7 @@ See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zi
 
 `config.logger` receives server lifecycle lines only (listening notices, EPOLL fallback). When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds (so a release server with no logger emits no lifecycle output).
 
-Per-request access logging is the handler's responsibility: the Http1 handler writes to the fd directly and returns `void`, so the engine cannot observe response status or byte counts. Call `logger.access()` inside the handler where the final status and size are known.
+Per-request access logging is the handler's responsibility: the response bytes go to the fd through the write helpers, so the engine does not observe response status or byte counts centrally. Call `logger.access()` inside the handler where the final status and size are known.
 
 ---
 
@@ -414,10 +428,12 @@ Per-request access logging is the handler's responsibility: the Http1 handler wr
 | :- | :- | :- |
 | Route table | comptime (zero heap cost) | Process |
 | Receive + body buffers (.ASYNC/.POOL/.MIXED) | stack of the serving thread/task (16 KB + 8 KB) | Connection |
-| Per-connection buffer (.EPOLL) | `smp_allocator`, `max_recv_buf` bytes | Connection |
-| Body + output staging (.EPOLL) | `smp_allocator`, 16 KB each, per worker | Worker thread |
-| gzip scratch (`sendGzipFD`) | `smp_allocator` (256 KB out + flate window + compressor) | One call |
-| Handler allocations | none provided (bring your own allocator if needed) | n/a |
+| Per-connection buffer (.EPOLL) | per-worker slab, compact page-aligned slots, `max_recv_buf` bytes usable | Connection |
+| Per-connection recv + send buffers (.URING) | per-worker mmap'd stride slab, compact slots, THP opted out | Connection |
+| Body + output staging (.EPOLL) | `smp_allocator`, per worker | Worker thread |
+| Compression scratch (gzip / negotiate) | one lazily mmap'd per-worker block, reused across calls | Worker thread |
+| Per-request arena (`ctx.allocator`) | per worker (event loops) or per connection (blocking models), reset per dispatch | Request |
+| Handler allocations | `ctx.allocator` (arena), or bring your own | Request |
 
 ---
 
