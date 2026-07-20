@@ -33,7 +33,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0) with dispatch_model required (set explicitly), `TcpClientConfig` defaults (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_recv_buf=4096, workers=0, pool_size=0) with dispatch_model required (set explicitly), `TcpClientConfig` defaults (max_recv_buf=4096) |
 | `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -76,7 +76,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `uds/config.zig` | `refAllDecls` + defaults: `UdsServerConfig` (backlog=128, max_msg_len=4096), `UdsClientConfig` |
+| `uds/config.zig` | `refAllDecls` + defaults: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
 | `uds/server.zig` | `refAllDecls` + behavioral: empty path -> `error.PathEmpty`, valid path succeeds and deinit is safe |
 | `uds/client.zig` | `refAllDecls` |
 
@@ -361,10 +361,10 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | :- | :- |
 | `TcpServerConfig` dispatch_model is required (set explicitly) | `.ASYNC` stored as set |
 | `TcpServerConfig` kernel_backlog default | 4096 |
-| `TcpServerConfig` max_msg_len default | 4096 |
+| `TcpServerConfig` max_recv_buf default | 4096 |
 | `TcpServerConfig` workers default | 0 (auto) |
 | `TcpServerConfig` pool_size default | 0 (auto) |
-| `TcpClientConfig` max_msg_len default | 4096 |
+| `TcpClientConfig` max_recv_buf default | 4096 |
 | TCP frame length header | 4-byte big-endian u32 encodes and decodes correctly |
 | TCP frame zero-length payload | encodes as four zero bytes |
 | TCP frame header size | always exactly 4 bytes |
@@ -491,9 +491,9 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Test | What it verifies |
 | :- | :- |
 | `UdsServerConfig` backlog default | 128 |
-| `UdsServerConfig` max_msg_len default | 4096 |
+| `UdsServerConfig` max_recv_buf default | 4096 |
 | `UdsClientConfig` stores path | path field preserved |
-| UDS frame length header | 4-byte little-endian u32 encodes and decodes correctly |
+| UDS frame length header | 4-byte big-endian u32 encodes and decodes correctly |
 | UDS frame zero-length payload | encodes as four zero bytes |
 | UDS frame header size | always exactly 4 bytes |
 
@@ -607,8 +607,8 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | LF in header name -> `InvalidHeaderName` | injection guard |
 | CR in header value -> `InvalidHeaderValue` | injection guard |
 | LF in header value -> `InvalidHeaderValue` | injection guard |
-| Buffer grows from 4 to 5 on 5th header | initial cap=4, growth to min(8, max_headers) |
-| `max_headers=1` rejects second header | no growth: `TooManyHeaders` immediately |
+| Buffer grows from 4 to 5 on 5th header | initial cap=4, growth to min(8, max_response_headers) |
+| `max_response_headers=1` rejects second header | no growth: `TooManyHeaders` immediately |
 | `HeaderSize.CUSTOM(0).value()` | returns 0 |
 
 #### `content_test.zig`

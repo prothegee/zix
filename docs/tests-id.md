@@ -33,7 +33,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_msg_len=4096, workers=0, pool_size=0) dengan dispatch_model wajib (disetel eksplisit), default `TcpClientConfig` (max_msg_len=4096) |
+| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_recv_buf=4096, workers=0, pool_size=0) dengan dispatch_model wajib (disetel eksplisit), default `TcpClientConfig` (max_recv_buf=4096) |
 | `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -76,7 +76,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `uds/config.zig` | `refAllDecls` + default: `UdsServerConfig` (backlog=128, max_msg_len=4096), `UdsClientConfig` |
+| `uds/config.zig` | `refAllDecls` + default: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
 | `uds/server.zig` | `refAllDecls` + perilaku: path kosong menghasilkan `error.PathEmpty`, path valid berhasil dan deinit aman |
 | `uds/client.zig` | `refAllDecls` |
 
@@ -355,10 +355,10 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | :- | :- |
 | Default dispatch_model `TcpServerConfig` | `.POOL` (nilai nol) |
 | Default kernel_backlog `TcpServerConfig` | 4096 |
-| Default max_msg_len `TcpServerConfig` | 4096 |
+| Default max_recv_buf `TcpServerConfig` | 4096 |
 | Default workers `TcpServerConfig` | 0 (otomatis) |
 | Default pool_size `TcpServerConfig` | 0 (otomatis) |
-| Default max_msg_len `TcpClientConfig` | 4096 |
+| Default max_recv_buf `TcpClientConfig` | 4096 |
 | Header panjang frame TCP | u32 big-endian 4-byte di-encode dan di-decode dengan benar |
 | Payload panjang nol frame TCP | di-encode sebagai empat byte nol |
 | Ukuran header frame TCP | selalu tepat 4 byte |
@@ -485,9 +485,9 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | Default backlog `UdsServerConfig` | 128 |
-| Default max_msg_len `UdsServerConfig` | 4096 |
+| Default max_recv_buf `UdsServerConfig` | 4096 |
 | `UdsClientConfig` menyimpan path | field path tersimpan |
-| Header panjang frame UDS | u32 little-endian 4-byte di-encode dan di-decode dengan benar |
+| Header panjang frame UDS | u32 big-endian 4-byte di-encode dan di-decode dengan benar |
 | Payload panjang nol frame UDS | di-encode sebagai empat byte nol |
 | Ukuran header frame UDS | selalu tepat 4 byte |
 
@@ -601,8 +601,8 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | LF dalam nama header menghasilkan `InvalidHeaderName` | penjaga injeksi |
 | CR dalam nilai header menghasilkan `InvalidHeaderValue` | penjaga injeksi |
 | LF dalam nilai header menghasilkan `InvalidHeaderValue` | penjaga injeksi |
-| Buffer tumbuh dari 4 ke 5 pada header ke-5 | kapasitas awal=4, pertumbuhan ke min(8, max_headers) |
-| `max_headers=1` menolak header kedua | tanpa pertumbuhan: `TooManyHeaders` segera |
+| Buffer tumbuh dari 4 ke 5 pada header ke-5 | kapasitas awal=4, pertumbuhan ke min(8, max_response_headers) |
+| `max_response_headers=1` menolak header kedua | tanpa pertumbuhan: `TooManyHeaders` segera |
 | `HeaderSize.CUSTOM(0).value()` | menghasilkan 0 |
 
 #### `content_test.zig`
