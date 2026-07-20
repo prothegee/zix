@@ -13,7 +13,6 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .lean => 4 * 1024,
     .throughput => 16 * 1024,
 };
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0;
 
 // --------------------------------------------------------- //
@@ -36,24 +35,28 @@ fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 // Connect:
 // wscat    -c "ws://localhost:9029/ws"
 // websocat    "ws://localhost:9029/ws"
-fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
+fn wsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
 
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
-    const upgrade_val = zix.Http1.getHeader(head, "upgrade") orelse "";
-    const ws_key = zix.Http1.getHeader(head, "sec-websocket-key");
+    const upgrade_val = req.header("upgrade") orelse "";
+    const ws_key = req.header("sec-websocket-key");
 
     if (!std.ascii.eqlIgnoreCase(upgrade_val, "websocket") or ws_key == null) {
-        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"not a websocket upgrade request\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"not a websocket upgrade request\"}");
         return;
     }
 
-    zix.Http1.WebSocket.serve(fd, ws_key.?, wsOnFrame) catch {
-        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"handshake failed\"}") catch {};
+    zix.Http1.WebSocket.serve(req.fd, ws_key.?, wsOnFrame) catch {
+        res.setStatus(.INTERNAL_SERVER_ERROR);
+
+        try res.sendJson("{\"error\":\"handshake failed\"}");
         return;
     };
 }
@@ -72,7 +75,6 @@ pub fn main(process: std.process.Init) !void {
         .dispatch_model = DISPATCH_MODEL,
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
     });
     defer server.deinit();
