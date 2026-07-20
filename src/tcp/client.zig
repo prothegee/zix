@@ -6,18 +6,16 @@ const TcpClientConfig = Config.TcpClientConfig;
 
 // --------------------------------------------------------- //
 
-fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
-    if (recv_ms == 0 and send_ms == 0) return;
+/// Poll fd for the given event with a millisecond timeout.
+///
+/// Return:
+/// - true when the event is ready
+/// - false when the timeout elapsed first
+fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
+    const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
 
-    if (recv_ms > 0) {
-        const recv_tv = std.posix.timeval{ .sec = @intCast(recv_ms / 1000), .usec = @intCast((recv_ms % 1000) * 1000) };
-        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_tv)) catch {};
-    }
-
-    if (send_ms > 0) {
-        const send_tv = std.posix.timeval{ .sec = @intCast(send_ms / 1000), .usec = @intCast((send_ms % 1000) * 1000) };
-        std.posix.setsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&send_tv)) catch {};
-    }
+    return try std.posix.poll(&pfd, ms) > 0;
 }
 
 // --------------------------------------------------------- //
@@ -79,8 +77,17 @@ pub const TcpClient = struct {
     ///
     /// Return:
     /// - error.MessageTooLarge if msg.len exceeds config.max_recv_buf
+    /// - error.SendTimeout if send_timeout_ms is set and the socket is not writable in time
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         if (msg.len > self.config.max_recv_buf) return error.MessageTooLarge;
+
+        if (self.config.send_timeout_ms > 0) {
+            // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
+            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.OUT, self.config.send_timeout_ms)) {
+                return error.SendTimeout;
+            }
+        }
+
         var write_buf: [4096 + 4]u8 = undefined;
         var writer = self.stream.writer(io, &write_buf);
         var hdr: [4]u8 = undefined;
@@ -100,14 +107,9 @@ pub const TcpClient = struct {
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         if (self.config.recv_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
-            var pfd = [1]std.posix.pollfd{.{
-                .fd = self.stream.socket.handle,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            const ms: i32 = @intCast(@min(self.config.recv_timeout_ms, @as(u32, std.math.maxInt(i32))));
-            const ready = try std.posix.poll(&pfd, ms);
-            if (ready == 0) return error.RecvTimeout;
+            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.IN, self.config.recv_timeout_ms)) {
+                return error.RecvTimeout;
+            }
         }
 
         var read_buf: [4096 + 4]u8 = undefined;
@@ -123,52 +125,7 @@ pub const TcpClient = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: applySocketTimeout tcp, zero ms is a no-op on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 0, 0);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 0), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
-}
-
-test "zix test: applySocketTimeout tcp, sets SO_RCVTIMEO on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 1500, 0);
-
-    var recv_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, @ptrCast(&recv_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 1), recv_tv.sec);
-    try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
-}
-
-test "zix test: applySocketTimeout tcp, sets SO_SNDTIMEO on real socket" {
-    const linux = std.os.linux;
-    const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
-    try std.testing.expect(sock_fd > 0);
-    defer _ = linux.close(sock_fd);
-
-    applySocketTimeout(sock_fd, 0, 2000);
-
-    var send_tv: std.posix.timeval = undefined;
-    var opt_len: std.posix.socklen_t = @sizeOf(std.posix.timeval);
-    _ = linux.getsockopt(sock_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&send_tv), &opt_len);
-    try std.testing.expectEqual(@as(isize, 2), send_tv.sec);
-    try std.testing.expectEqual(@as(i64, 0), send_tv.usec);
-}
-
-test "zix test: applySocketTimeout tcp, short timeout does not fire when data arrives immediately" {
+test "zix test: TcpClient.recvMsg does not time out when data arrives immediately" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -176,13 +133,101 @@ test "zix test: applySocketTimeout tcp, short timeout does not fire when data ar
         _ = std.os.linux.close(fds[1]);
     }
 
-    applySocketTimeout(fds[0], 50, 0);
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    const written: usize = @intCast(std.os.linux.write(fds[1], "hello".ptr, 5));
-    try std.testing.expectEqual(@as(usize, 5), written);
+    const frame = [_]u8{ 0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o' };
+    _ = std.os.linux.write(fds[1], &frame, frame.len);
+
+    var client = TcpClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .ip = "127.0.0.1", .port = 9300, .recv_timeout_ms = 50 },
+    };
 
     var buf: [8]u8 = undefined;
-    const n: usize = @intCast(std.os.linux.read(fds[0], &buf, buf.len));
-    try std.testing.expect(n > 0);
-    try std.testing.expectEqualSlices(u8, "hello", buf[0..n]);
+    const reply = try client.recvMsg(io, &buf);
+    try std.testing.expectEqualSlices(u8, "hello", reply);
+}
+
+test "zix test: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = TcpClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .ip = "127.0.0.1", .port = 9300, .recv_timeout_ms = 50 },
+    };
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectError(error.RecvTimeout, client.recvMsg(io, &buf));
+}
+
+test "zix test: TcpClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = TcpClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .ip = "127.0.0.1", .port = 9300, .send_timeout_ms = 50 },
+    };
+
+    try client.sendMsg(io, "hello");
+
+    var wire: [9]u8 = undefined;
+    const n: usize = @intCast(std.os.linux.read(fds[1], &wire, wire.len));
+    try std.testing.expectEqual(@as(usize, 9), n);
+}
+
+test "zix test: TcpClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer {
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
+    }
+
+    // Fill fds[0]'s send buffer so poll(POLLOUT) reports not-ready: switch to
+    // non-blocking, write until the kernel refuses more (the peer never
+    // reads), then restore blocking mode for the client under test.
+    const linux = std.os.linux;
+    const flags = linux.fcntl(fds[0], std.posix.F.GETFL, 0);
+    const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, flags | @as(usize, nonblock_bit));
+
+    var chunk: [4096]u8 = undefined;
+    while (std.posix.errno(linux.write(fds[0], &chunk, chunk.len)) == .SUCCESS) {}
+
+    _ = linux.fcntl(fds[0], std.posix.F.SETFL, flags);
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client = TcpClient{
+        .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
+        .config = .{ .ip = "127.0.0.1", .port = 9300, .send_timeout_ms = 50 },
+    };
+
+    try std.testing.expectError(error.SendTimeout, client.sendMsg(io, "hello"));
 }

@@ -22,6 +22,8 @@ _out: ?*ReplyStage = null,          // diset pada jalur inline/mux: stage alih-a
 
 `sendMessage` / `sendHeaders` / `finish` bercabang pada `_out`: saat diset, mereka meng-append frame terenkode ke cork (tanpa lock per panggilan, tanpa `write` langsung). Saat null, mereka menulis langsung ke fd, mengambil `_write_mutex` jika ada task streaming konkuren yang mungkin menulis. Dispatch unary inline dan setiap dispatch mux memakai jalur staged. Server-streaming pada model blocking memakai jalur langsung.
 
+Cache response unary per-worker (ADR-036) juga hidup di sini: `tl_cache`, `GrpcContext.serveCached` / `sendCached`, dengan key `requestKey(path, body)` (Wyhash atas path gRPC plus raw request body). `serveCached` melakukan lookup, replay lewat `sendMessage` dan `finish(.OK, "")` saat hit, dan mengembalikan false saat miss, tanpa cache, atau path kosong (caller lalu membangun response seperti biasa). `sendCached` mengirim lalu menyimpan, melewati penyimpanan pada kondisi yang sama. Dipasang oleh worker `.EPOLL` / `.URING`, opt-in lewat `response_cache`.
+
 ### ReplyStage
 
 Penulis cork untuk satu koneksi. Dipakai oleh dispatch unary inline (model blocking) dan oleh setiap dispatch pada jalur mux.

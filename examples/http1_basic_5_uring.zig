@@ -14,7 +14,6 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .throughput => 16 * 1024,
 };
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count ring workers (shared-nothing, one listener + ring each)
 const POOL_SIZE: usize = 0; // ignored by .URING (used only on the non-Linux POOL fallback)
 
@@ -33,24 +32,22 @@ const POOL_SIZE: usize = 0; // ignored by .URING (used only on the non-Linux POO
 // --------------------------------------------------------- //
 
 // curl usage: curl -X GET "http://localhost:9019/"
-fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "Hello, World!") catch {};
+fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("Hello, World!");
 }
 
 // curl usage: curl -X GET "http://localhost:9019/echo"
-fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendJsonFD(fd, 200, "{\"status\":\"ok\"}") catch {};
+fn echoHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    try res.sendJson("{\"status\":\"ok\"}");
 }
 
 // curl usage: curl -X GET "http://localhost:9019/about"
-fn aboutHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "zix http1 basic server example") catch {};
+fn aboutHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("zix http1 basic server example");
 }
 
 // --------------------------------------------------------- //
@@ -70,7 +67,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });

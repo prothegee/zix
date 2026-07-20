@@ -5,7 +5,7 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-fn noopHandler(_: *const zix.Http1.ParsedHead, _: []const u8, _: std.posix.fd_t) void {}
+fn noopHandler(_: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) anyerror!void {}
 
 test "zix integration: Http1 Server.init valid config, deinit is safe" {
     var server = zix.Http1.Server.init(noopHandler, .{

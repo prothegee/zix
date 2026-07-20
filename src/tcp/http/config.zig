@@ -23,7 +23,7 @@ pub const HttpServerConfig = struct {
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
-    kernel_backlog: u31 = 1024 * 4,
+    kernel_backlog: u31 = 1024,
     /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
     workers: usize = 0,
     /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL,
@@ -45,7 +45,7 @@ pub const HttpServerConfig = struct {
     /// on the core that received it. Opt-in, default false. Silent no-op on a kernel pre-4.5.
     reuseport_cbpf: bool = false,
     /// Read buffer size in bytes per request. Requests exceeding this are rejected with 431.
-    max_recv_buf: usize = 1024 * 4,
+    max_recv_buf: usize = 6 * 1024,
     /// SO_RCVBUF in bytes, applied only while reading a large request body (uploads). Default 0 keeps
     /// the kernel default plus receive autotuning, which already sizes the upload window well. An
     /// explicit value caps the window AND disables autotuning, set it only to FORCE a larger window.
@@ -61,7 +61,10 @@ pub const HttpServerConfig = struct {
     /// Minimum warm idle-connection pool size for the .URING dispatch model: a closed connection is
     /// pooled (recv and send buffers intact) so a later accept reuses the allocation. The pool cap
     /// scales with the worker's live concurrency, this is the idle floor. Mirrors zix.Http1.
-    uring_idle_pool_floor: usize = 64,
+    uring_idle_pool_floor: usize = 8,
+    /// Absolute warm idle-connection pool ceiling for the .URING dispatch model: the effective
+    /// cap is clamped between uring_idle_pool_floor and this. Mirrors zix.Http1.
+    uring_idle_pool_ceiling: usize = 256,
     /// Process queue capacity (entry count) for the .URING dispatch model: a recv or send that
     /// finds the submission queue full is parked on a per-worker FIFO ring of this length
     /// (references only, fd + generation) and retried next loop pass instead of closing the
@@ -84,6 +87,9 @@ pub const HttpServerConfig = struct {
     /// 0 = disabled. When non-zero, ctx.deadline is set before each handler dispatch and handlers
     /// opt in by checking ctx.isExpired() between expensive steps.
     handler_timeout_ms: u32 = 0,
+    /// Include the Date header in every response. Default true for RFC 7231 compliance.
+    /// Set false to reduce response size by 37 bytes per response. Mirrors zix.Http1.
+    send_date_header: bool = true,
     /// Root directory for static file serving. Empty string disables static serving.
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Receives multipart uploads.
@@ -100,7 +106,7 @@ pub const HttpServerConfig = struct {
     /// brotli). A response whose compressed form would exceed this is sent uncompressed instead.
     compression_max_out: usize = 256 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache
-    /// API (res.serveCached / res.sendCached) degrades to a plain send. Active under .EPOLL / .URING.
+    /// API (res.sendFromCache / res.sendCached) degrades to a plain send. Active under .EPOLL / .URING.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -134,7 +140,11 @@ test "zix http: HttpServerConfig uring_send_buf_size default" {
 
     const cfg = HttpServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 8080, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 16 * 1024), cfg.uring_send_buf_size);
-    try std.testing.expectEqual(@as(usize, 64), cfg.uring_idle_pool_floor);
+    try std.testing.expectEqual(@as(usize, 8), cfg.uring_idle_pool_floor);
+    try std.testing.expectEqual(@as(usize, 256), cfg.uring_idle_pool_ceiling);
+    try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+    try std.testing.expectEqual(@as(usize, 6 * 1024), cfg.max_recv_buf);
+    try std.testing.expect(cfg.send_date_header);
     try std.testing.expectEqual(@as(usize, 0), cfg.process_queue_len);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(u32, 50), cfg.busy_poll_us);

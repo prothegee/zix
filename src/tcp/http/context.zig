@@ -6,7 +6,6 @@ const Logger = @import("../../logger/logger.zig").Logger;
 pub const Context = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    response_sent: bool = false,
     /// Logger injected by the server from HttpServerConfig.logger.
     /// Null when the server was started without a logger.
     logger: ?*Logger = null,

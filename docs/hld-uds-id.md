@@ -43,8 +43,8 @@ pub const Uds = @import("uds/Uds.zig");
 | :- | :- | :- |
 | `zix.Uds.Server` | namespace | `init(handler, config)` mengembalikan server dengan `run()` / `deinit()`. `echoHandler` bawaan dilewatkan secara eksplisit |
 | `zix.Uds.Client` | struct | `connect(config, io)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Uds.ServerConfig` | struct | `io`, `path`, `allocator`, `kernel_backlog` (128), `max_recv_buf` (4096) |
-| `zix.Uds.ClientConfig` | struct | `path` |
+| `zix.Uds.ServerConfig` | struct | `io`, `path`, `allocator`, `kernel_backlog` (128), `max_recv_buf` (4096), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
+| `zix.Uds.ClientConfig` | struct | `path`, `recv_timeout_ms` (0), `send_timeout_ms` (0) |
 | `zix.Uds.HandlerFn` | type | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` |
 | `zix.Uds.echoHandler` | fn | Default echo handler: membaca frame berbasis length-prefix dan mengembalikan setiap frame |
 
@@ -55,11 +55,11 @@ pub const Uds = @import("uds/Uds.zig");
 Baik `echoHandler` bawaan maupun `UdsClient.sendMsg`/`recvMsg` menggunakan format frame sederhana berbasis length-prefix:
 
 ```
-[ u32 payload_len, 4 bytes, native little-endian ]
+[ u32 payload_len, 4 bytes, big-endian ]
 [ payload bytes, payload_len bytes ]
 ```
 
-Frame dengan `payload_len > max_msg_len` (default 4096) akan menutup koneksi.
+Frame dengan `payload_len > max_recv_buf` (default 4096) akan menutup koneksi.
 
 ---
 
@@ -130,13 +130,11 @@ sequenceDiagram
 
 ---
 
-## Keterbatasan Timeout
+## Timeout dan Keterbatasan
 
-`std.Io.net.UnixAddress.connect` tidak menerima parameter timeout. Berbeda dengan `IpAddress.connect` pada TCP yang menerima `ConnectOptions.timeout`, path connect UDS tidak memiliki hook di stdlib untuk deadline. Timeout connect tidak dapat diimplementasi tanpa perubahan di stdlib.
+`recv_timeout_ms` / `send_timeout_ms` (kedua config, default 0 = dinonaktifkan) membatasi socket, bukan call connect. Pada server, `applyConnTimeout` menyetel `SO_RCVTIMEO` / `SO_SNDTIMEO` pada tiap koneksi yang diterima sebelum handler berjalan. Pada client, `recvMsg` / `sendMsg` masing-masing poll (`POLLIN` / `POLLOUT`) sebelum read atau write, mengembalikan `error.RecvTimeout` / `error.SendTimeout` saat expired, alih-alih `SO_RCVTIMEO` / `SO_SNDTIMEO`, karena `std.Io.Threaded` panic pada `EAGAIN`.
 
-`echoHandler` dan handler kustom membaca frame dengan blocking I/O. Timeout per-read maupun per-frame tidak tersedia karena alasan yang sama: tidak ada API stdlib yang menyediakan timed read untuk stream socket selain path TCP.
-
-Kedua keterbatasan ini disebabkan oleh stdlib, bukan keputusan desain zix. Akan ditinjau kembali saat stdlib menyediakan primitif yang diperlukan.
+`std.Io.net.UnixAddress.connect` tidak menerima parameter timeout. Berbeda dengan `IpAddress.connect` pada TCP yang menerima `ConnectOptions.timeout`, path connect UDS tidak memiliki hook di stdlib untuk deadline, jadi timeout saat connect tidak dapat diimplementasi tanpa perubahan di stdlib. Keterbatasan ini disebabkan oleh stdlib, bukan keputusan desain zix, dan akan ditinjau kembali saat stdlib menyediakan primitif yang diperlukan.
 
 ---
 

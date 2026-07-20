@@ -20,7 +20,7 @@ fn rootHandler(_: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Conte
 }
 
 fn eventsHandler(_: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
-    const sse = try res.stream();
+    const sse = try res.sendStream();
 
     try sse.writeEvent("tick one");
 }

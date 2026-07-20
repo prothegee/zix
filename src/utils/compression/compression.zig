@@ -271,6 +271,38 @@ pub fn encode(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8
     };
 }
 
+/// Encode a body with the chosen coding into a caller-provided buffer.
+///
+/// Note:
+/// - The into-buffer counterpart of encode, for a caller that assembles a
+///   response around the encoded bytes with no extra copy (reserve-prefix
+///   assembly). The allocator feeds only transient codec scratch, freed or
+///   reclaimed before return.
+///
+/// Param:
+/// allocator - std.mem.Allocator (transient codec scratch)
+/// encoding - Encoding (chosen coding)
+/// data - []const u8 (uncompressed body)
+/// out_buf - []u8 (destination)
+/// level - Level (effort, ignored for identity)
+///
+/// Return:
+/// - usize (encoded byte count written into out_buf)
+/// - error.BufferTooSmall when out_buf cannot hold the result
+pub fn encodeInto(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8, out_buf: []u8, level: Level) !usize {
+    switch (encoding) {
+        .IDENTITY => {
+            if (out_buf.len < data.len) return error.BufferTooSmall;
+
+            @memcpy(out_buf[0..data.len], data);
+            return data.len;
+        },
+        .GZIP => return flate.compressGzip(allocator, data, out_buf, level),
+        .DEFLATE => return flate.compressDeflate(allocator, data, out_buf, level),
+        .BR => return brotli.compressBrotli(allocator, data, out_buf, level),
+    }
+}
+
 /// Decode a body encoded with the given coding into a freshly allocated buffer.
 ///
 /// Param:
@@ -467,6 +499,28 @@ test "encode then decode brotli roundtrips" {
     defer testing.allocator.free(restored);
 
     try testing.expectEqualStrings(original, restored);
+}
+
+test "encodeInto: gzip writes into the caller buffer and roundtrips" {
+    const original = "facade into-buffer roundtrip over the gzip codec, repeated for a real match. " ++
+        "facade into-buffer roundtrip over the gzip codec, repeated for a real match.";
+
+    var out: [512]u8 = undefined;
+    const written = try encodeInto(testing.allocator, .GZIP, original, &out, .DEFAULT);
+
+    const restored = try decode(testing.allocator, .GZIP, out[0..written], 1024);
+    defer testing.allocator.free(restored);
+
+    try testing.expectEqualStrings(original, restored);
+}
+
+test "encodeInto: identity copies and rejects a short buffer" {
+    var out: [8]u8 = undefined;
+    const written = try encodeInto(testing.allocator, .IDENTITY, "abc", &out, .DEFAULT);
+    try testing.expectEqualStrings("abc", out[0..written]);
+
+    var tiny: [2]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, encodeInto(testing.allocator, .IDENTITY, "abc", &tiny, .DEFAULT));
 }
 
 test "negotiate: supported_default leads with gzip, brotli when the client prefers it" {

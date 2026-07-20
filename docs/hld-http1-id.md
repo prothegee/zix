@@ -7,7 +7,7 @@ Engine server HTTP/1.x ramping di atas raw fd I/O. Parsing request dan penulisan
 ## Tujuan
 
 - Nol alokasi heap pada hot path: parse dan write beroperasi pada buffer stack atau buffer yang dialokasikan di muka.
-- Tanpa objek request/response: handler menerima head hasil parse plus slice body, lalu menulis langsung ke fd melalui write helper.
+- Trio handler (`Request`, `Response`, `Context`) dibangun per request dari view murah di stack atas buffer itu: `Response` mendelegasikan ke write helper fd langsung, jadi ergonomi tidak mengubah wire (ADR-062).
 - Comptime untuk semuanya: handler dibakukan ke dalam tipe server, tabel route dipartisi saat kompilasi.
 - Raw `std.posix` I/O pada jalur data: `std.Io` hanya dipakai untuk plumbing listen/accept.
 - Permukaan API minimal: satu signature handler, sekumpulan kecil write helper, dan router comptime yang opsional.
@@ -20,16 +20,17 @@ Keduanya server HTTP/1.1. `zix.Http` adalah lapisan berfitur lengkap, `zix.Http1
 
 | Aspek | `zix.Http` | `zix.Http1` |
 | :- | :- | :- |
-| Signature handler | `fn(*Request, *Response, *Context) !void` | `fn(*const ParsedHead, []const u8, fd) void` |
-| Parsing request | `std.http.Server` | `parseHead` zero-copy milik sendiri |
-| Allocator per-request | arena per-connection | tidak ada (buffer milik pemanggil) |
-| Penulisan response | objek `Response` ter-buffer | write helper langsung ke fd |
-| Static files / multipart / SSE writer | built in | tidak built in (handler merangkai dari helper) |
+| Signature handler | `fn(*Request, *Response, *Context) anyerror!void` | `fn(*Request, *Response, *Context) anyerror!void` (trio yang sama, ADR-062) |
+| Parsing request | parser milik sendiri (`parser.zig`) | `parseHead` zero-copy milik sendiri (salinan `parser.zig`) |
+| Body request | baca socket lazy di `body()` | slice yang diantar engine (di-drain + di-dechunk sebelum invoke) |
+| Allocator per-request | arena per-connection | arena per-request (`ctx.allocator`, di-reset per dispatch) |
+| Penulisan response | objek `Response` ter-buffer | builder `Response` yang mendelegasikan ke write helper fd langsung |
+| Static files / multipart / SSE writer | built in | fallback static `public_dir`, `Multipart` bersama, `SseWriter` |
 | Routing | tabel route comptime | tabel route comptime (opsional, handler boleh polos) |
-| WebSocket | frame loop milik handler | frame pump milik engine (.EPOLL) |
+| WebSocket | frame loop milik handler | frame pump milik engine (.EPOLL / .URING) |
 | Model dispatch | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
 
-Pakai `zix.Http` saat handler membutuhkan allocator, static file serving, atau API request/response yang lebih kaya. Pakai `zix.Http1` saat raw throughput dan biaya per-request yang terprediksi lebih penting daripada kenyamanan.
+Permukaan trio identik bagi caller di kedua engine (test paritas compile-time di `src/lib.zig` menegakkannya). Pakai `zix.Http` saat handler membutuhkan lapisan client-facing yang lebih kaya. Pakai `zix.Http1` saat raw throughput dan biaya per-request yang terprediksi lebih penting: trio hanyalah view plus reset arena, dan escape hatch (`ctx.fd` plus write helper `*FD`) menjaga jalur raw tetap terbuka.
 
 ---
 
@@ -133,13 +134,18 @@ Diakses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` |
-| `zix.Http1.Server.initRaw` | fn | `initRaw(comptime raw, config)`: mendaftarkan `RawFn` yang memiliki fd koneksi secara langsung |
+| `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` (pintu tunggal, ADR-062) |
 | `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
-| `zix.Http1.HandlerFn` | type | `*const fn(head: *const ParsedHead, body: []const u8, fd: std.posix.fd_t) void` |
-| `zix.Http1.RawFn` | type | Handler raw yang diberi fd dan head hasil parse, memiliki wire langsung (framing kustom, streaming) |
-| `zix.Http1.ParsedHead` | struct | Head request hasil parse zero-copy (method, path, query, raw_headers, flags) |
+| `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio, ADR-062) |
+| `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
+| `zix.Http1.Response` | struct | Builder response di atas writer fd: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus flag `sent` |
+| `zix.Http1.Context` | struct | io, arena allocator per-request, escape hatch fd, `withDeadline` |
+| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine |
+| `zix.Http1.Header` / `HeaderSize` | struct / enum | Entri `addHeader` dan kelas kapasitasnya (`max_response_headers`) |
+| `zix.Http1.Multipart` / `MultipartField` | struct | Parser multipart bersama |
+| `zix.Http1.SseWriter` | struct | Writer event SSE yang dikembalikan `res.sendStream()` |
+| `zix.Http1.ParsedHead` | struct | Head request hasil parse zero-copy (method, path, query, raw_headers, flags, span accept_encoding) |
 | `zix.Http1.Range` | struct | `{ start: u64, end: u64 }` dari `parseRange` |
 | `zix.Http1.ServeOpts` | struct | Opsi `serveConn`: `nodelay`, `handler_timeout_ms` |
 | `zix.Http1.ConnOutcome` | enum | `.keep_alive` atau `.close` (hasil one-shot EPOLL) |
@@ -154,6 +160,8 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.isExpired` | fn | Apakah deadline handler saat ini sudah lewat |
 | `zix.Http1.parseHead` | fn | Parse head request lengkap dari buffer (zero copy) |
 | `zix.Http1.getHeader` | fn | Pencarian header case-insensitive pada ParsedHead |
+| `zix.Http1.acceptEncoding` | fn | Nilai Accept-Encoding sebuah ParsedHead: O(1) dari span parse-pass, fallback getHeader selain itu |
+| `zix.Http1.setCache` | fn | Memasang atau melepas response cache per-worker |
 | `zix.Http1.queryParam` | fn | Pemindaian linear satu query parameter berdasarkan nama persis |
 | `zix.Http1.percentDecode` | fn | Percent-decode buffer secara in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` menjadi `Range` |
@@ -184,10 +192,11 @@ pub const Http1ServerConfig = struct {
     max_recv_buf:       usize = 6 * 1024,      // buffer per-connection (.EPOLL / .URING, lihat catatan)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
     ws_recv_buf:        usize = 0,             // buffer WebSocket (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via core.sendNegotiateFD (.EPOLL/.URING)
+    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via res.sendNegotiated / core.sendNegotiateFD (.EPOLL/.URING)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
     compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
-    max_headers:        u8    = 16,            // no-op, dipertahankan untuk kompatibilitas sumber
+    max_response_headers: HeaderSize = .MINIMAL, // kelas kapasitas addHeader (ADR-062)
+    conn_timeout_ms:    u32   = 0,             // masa hidup koneksi, hanya .ASYNC/.POOL/.MIXED (no-op di .EPOLL/.URING)
     workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
     pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL saja
     handler_timeout_ms: u32   = 0,             // budget per-handler, 0 = nonaktif
@@ -197,7 +206,9 @@ pub const Http1ServerConfig = struct {
 };
 ```
 
-Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan memanggil `core.sendNegotiateFD` alih-alih `sendSimpleFD`. Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`, dan `max_headers` adalah no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
+Listing di atas diringkas: referensi field lengkap (cache, tuning uring, dual listener TLS, steering) ada di [`docs/zix-config-id.md`](zix-config-id.md).
+
+Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`.
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
 
@@ -207,45 +218,45 @@ Catatan: `send_date_header` default `true` untuk kepatuhan RFC 7231. Set `false`
 
 `zix.Http1` mengekspos satu timeout, `handler_timeout_ms`, budget eksekusi per-handler. Saat non-zero, server memasang deadline thread-local sebelum setiap dispatch. Handler ikut serta dengan memanggil `zix.Http1.isExpired()` di antara langkah mahal dan merespons lebih awal, atau memperpendek budget-nya sendiri dengan `zix.Http1.setTimeout()`. Ini budget Layer B yang sama dengan `handler_timeout_ms` milik `zix.Http`.
 
-`zix.Http1` tidak memiliki `conn_timeout_ms`. Ini disengaja, bukan kelalaian.
-
-- Guard masa hidup koneksi pada `zix.Http` (`conn_timeout_ms`, Layer D) ditegakkan oleh `ConnRegistry` plus background timer thread yang menutup koneksi melebihi masa hidup terkonfigurasi. `zix.Http1` adalah engine ramping zero-alloc dan tidak membawa infrastruktur tetap itu: handler-nya `fn(head, body, fd) void` tanpa `Request` / `Response` / registry untuk melacak koneksi, dan tanpa receive timeout level-socket (`setNoDelay` dan `SO_BUSY_POLL` adalah satu-satunya opsi socket yang dipasang).
-- Pada `.EPOLL`, model yang menjadi target tuning `zix.Http1`, koneksi keep-alive idle tidak menahan thread, hanya satu slot epoll dan buffernya. Alasan utama `conn_timeout_ms` ada pada `zix.Http` (mengklaim ulang pool thread yang tertahan pada koneksi lambat atau idle) tidak berlaku untuk loop level-triggered shared-nothing.
+`conn_timeout_ms` (ADR-062) adalah guard masa hidup koneksi, port dari Layer D milik `zix.Http`: `ConnRegistry` plus background timer thread menutup koneksi yang melebihi masa hidup terkonfigurasi. Aktif pada model blocking (`.ASYNC`, `.POOL`, `.MIXED`), tempat koneksi lambat atau idle menahan thread atau task. Pada `.EPOLL` dan `.URING` ia no-op terdokumentasi: event loop-nya memiliki umur koneksi, dan koneksi keep-alive idle tidak menahan thread, hanya satu slot dan buffernya.
 
 | Timeout | `zix.Http` | `zix.Http1` | Mekanisme |
 | :- | :- | :- | :- |
 | `handler_timeout_ms` | ya | ya | deadline thread-local dipasang per dispatch, opt-in handler |
-| `conn_timeout_ms` | ya (`.POOL`) | tidak | `ConnRegistry` + background timer thread (Http saja) |
+| `conn_timeout_ms` | ya | ya (`.ASYNC` / `.POOL` / `.MIXED`) | `ConnRegistry` + background timer thread |
 
-Jika penegakan masa hidup koneksi pada `.EPOLL` suatu saat dibutuhkan, yang paling cocok adalah sweep idle-deadline atas `ConnTable` per-worker (tanpa thread tambahan), bukan port `ConnRegistry` timer-thread milik Http.
+Jika penegakan masa hidup koneksi pada `.EPOLL` / `.URING` suatu saat dibutuhkan, yang paling cocok adalah sweep idle-deadline atas tabel per-worker (tanpa thread tambahan), bukan `ConnRegistry` timer-thread.
 
 ---
 
 ## Model Handler
 
 ```zig
-fn home(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
+fn home(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) anyerror!void {
+    _ = ctx;
 
-    if (zix.Http1.queryParam(head, "name")) |name| {
+    if (req.queryParam("name")) |name| {
         _ = name; // slice ke receive buffer, hanya valid selama pemanggilan ini
     }
 
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "hello") catch {};
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("hello");
 }
 
 var server = zix.Http1.Server.init(home, .{
     .io = process.io,
     .ip = "0.0.0.0",
     .port = 8080,
+    .dispatch_model = .EPOLL,
 });
 try server.run();
 ```
 
 - Handler adalah argumen comptime: dibakukan ke dalam tipe server, tidak ada registrasi dinamis setelah init.
-- Semua slice di `head` dan `body` menunjuk ke receive buffer dan hanya valid selama pemanggilan berlangsung.
-- Handler mengembalikan `void`: error ditangani di dalam handler (biasanya `catch {}` pada write helper, koneksi toh akan ditutup saat broken pipe).
-- Handler boleh berupa fungsi polos, `Router(routes).dispatch`, atau rantai middleware yang dirangkai saat comptime.
+- Trio dibangun per request oleh `core.invokeHandler`: `Request` adalah view zero-copy (semua slice menunjuk ke receive buffer, hanya valid selama pemanggilan), `Response` mendelegasikan ke write helper fd secara byte-identik, `Context` membawa io, arena per-request, dan escape hatch fd.
+- Handler yang error dilengkapi engine dengan satu 500, hanya bila belum ada yang terkirim (`Response.sent`). Idiom rumahnya `try res.foo(...)`, tidak pernah `return res.foo(...)`.
+- Handler boleh berupa fungsi polos, `Router(routes).dispatch`, atau rantai wrapper comptime (idiom middleware, lihat `examples/http1_middleware.zig`).
 
 ### ParsedHead
 
@@ -260,6 +271,7 @@ try server.run();
 | `content_length` | `u64` | 0 saat tidak ada atau tidak bisa di-parse |
 | `chunked_request` | `bool` | Ada `Transfer-Encoding: chunked` |
 | `expect_continue` | `bool` | Ada `Expect: 100-continue` |
+| `accept_encoding` | `HeaderSpan` | Span nilai Accept-Encoding yang ditangkap parse pass, dibaca via `acceptEncoding()` |
 
 ---
 
@@ -283,7 +295,7 @@ sequenceDiagram
         end
         Serve->>Serve: baca body (Content-Length atau decode chunked)
         Serve->>Serve: setTimeout(handler_timeout_ms)
-        Serve->>Handler: handler(head, body, fd)
+        Serve->>Handler: handler(req, res, ctx)
         Handler->>Client: response via write helpers
         Serve->>Serve: geser sisa pipelined ke depan buffer
     end
@@ -339,24 +351,26 @@ Route dipartisi berdasarkan kind saat kompilasi: path exact masuk `StaticStringM
 Saat `config.handler_timeout_ms > 0` engine memasang deadline thread-local sebelum setiap dispatch. Handler ikut serta dengan memanggil `zix.Http1.isExpired()` di antara langkah-langkah yang mahal:
 
 ```zig
-fn slow(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
+fn slow(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) anyerror!void {
+    _ = req;
+    _ = ctx;
 
     doStep1();
     if (zix.Http1.isExpired()) {
-        zix.Http1.sendJsonFD(fd, 408, "{\"error\":\"timeout\"}") catch {};
+        res.setStatus(.REQUEST_TIMEOUT);
+        try res.sendJson("{\"error\":\"timeout\"}");
         return;
     }
 
     doStep2();
-    zix.Http1.sendJsonFD(fd, 200, "{\"result\":\"ok\"}") catch {};
+
+    try res.sendJson("{\"result\":\"ok\"}");
 }
 ```
 
 - `isExpired()` selalu aman dipanggil: mengembalikan `false` saat tidak ada deadline terpasang. Pengecekannya satu `clock_gettime` plus satu perbandingan.
-- `setTimeout(ms)` memasang ulang deadline untuk handler saat ini (memperpendek atau memperpanjang), `setTimeout(0)` menghapusnya.
-- Deadline bersifat thread-local, mengikuti model eksekusi satu-request-per-worker. Tidak ada objek Context yang membawanya.
+- `setTimeout(ms)` memasang ulang deadline untuk handler saat ini (memperpendek atau memperpanjang), `setTimeout(0)` menghapusnya, dan `ctx.withDeadline` adalah pembungkus sisi trio.
+- Deadline bersifat thread-local, mengikuti model eksekusi satu-request-per-worker.
 
 ---
 
@@ -372,7 +386,7 @@ sequenceDiagram
     participant F as on_frame callback
 
     C->>E: GET /ws (Upgrade: websocket)
-    E->>H: handler(head, body, fd)
+    E->>H: handler(req, res, ctx)
     H->>H: WebSocket.serve(fd, key, on_frame)
     Note over H: 101 ditulis, promosi diminta
     H->>E: handler return
@@ -414,10 +428,12 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | :- | :- | :- |
 | Tabel route | comptime (nol biaya heap) | Proses |
 | Buffer receive + body (.ASYNC/.POOL/.MIXED) | stack thread/task yang melayani (16 KB + 8 KB) | Koneksi |
-| Buffer per-connection (.EPOLL) | `smp_allocator`, `max_recv_buf` byte | Koneksi |
-| Staging body + output (.EPOLL) | `smp_allocator`, masing-masing 16 KB, per worker | Worker thread |
-| Scratch gzip (`sendGzipFD`) | `smp_allocator` (256 KB out + flate window + compressor) | Satu pemanggilan |
-| Alokasi handler | tidak disediakan (bawa allocator sendiri bila perlu) | n/a |
+| Buffer per-connection (.EPOLL) | slab per-worker, slot kompak page-aligned, `max_recv_buf` byte terpakai | Koneksi |
+| Buffer recv + send per-connection (.URING) | slab stride mmap per-worker, slot kompak, THP di-opt-out | Koneksi |
+| Staging body + output (.EPOLL) | `smp_allocator`, per worker | Worker thread |
+| Scratch kompresi (gzip / negotiate) | satu blok mmap lazy per-worker, dipakai ulang antar pemanggilan | Worker thread |
+| Arena per-request (`ctx.allocator`) | per worker (event loop) atau per koneksi (model blocking), di-reset per dispatch | Request |
+| Alokasi handler | `ctx.allocator` (arena), atau bawa sendiri | Request |
 
 ---
 

@@ -590,15 +590,28 @@ pub fn processRequest(
     var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
 
     // Zero-syscall Date: one atomic load from the global double-buffered cache.
-    const idx = g_date_active.load(.acquire);
-    res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
+    // config.send_date_header = false leaves date_cache null, so no Date is emitted.
+    if (cfg.send_date_header) {
+        const idx = g_date_active.load(.acquire);
+        res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
+    }
 
     var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
 
     // Layer B: optional handler deadline.
     if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
-    const matched = server.router.dispatch(&req, &res, &ctx) catch false;
+    // A handler error is completed as one 500, but only when the handler wrote
+    // nothing, so a partially sent response is not corrupted (same policy as the
+    // zix.Http1 invokeHandler).
+    const matched = server.router.dispatch(&req, &res, &ctx) catch blk: {
+        if (!res.sent) {
+            res.setStatus(.INTERNAL_SERVER_ERROR);
+            res.setContentType(.TEXT_PLAIN);
+            res.send("Internal Server Error") catch {};
+        }
+        break :blk true;
+    };
     if (res.streaming) return .close;
 
     if (!matched) {

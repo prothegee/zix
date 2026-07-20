@@ -6,7 +6,7 @@ Internal implementation details for the lean HTTP/1.x engine. For design rationa
 
 ## Http1.zig: namespace
 
-Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the core types (`HandlerFn`, `RawFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, and the core functions (deadline, parse, write helpers) into one public surface.
+Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the trio (`Request`, `Response`, `Context`) with its typed namespaces (`Method`, `Status`, `Content`, `ContentType`, `Header`, `HeaderSize`), the core types (`HandlerFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, shared utilities (`Multipart`, `MultipartField`, `SseWriter`), and the core functions (deadline, parse incl. `acceptEncoding`, cache, write helpers) into one public surface (ADR-062).
 
 ---
 
@@ -28,7 +28,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |
 
-`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `core.sendNegotiateFD`. The legacy `core.sendGzipFD` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB), and `max_headers` is not read at runtime: it is a no-op kept for source compatibility (the lazy engine has no header-count cap).
+`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `res.sendNegotiated` or `core.sendNegotiateFD`. The legacy `core.sendGzipFD` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (the `addHeader` capacity class) and `conn_timeout_ms` (blocking models only) landed with ADR-062.
 
 ---
 
@@ -380,13 +380,18 @@ UringConn = {
     fd, gen, buf, filled,             // gen: u24 generation tag against fd reuse
     send_buf, staged, inflight,       // send_buf[0..inflight] held by the kernel while a send is in flight
     closing,                          // free once the last send lands
+    slot: u32 = 0,                    // compact buffer-slab slot backing buf + send_buf
+    send_heap: bool = false,          // send_buf switched to a heap buffer by the sink's grow path
+    scan_from: usize = 0,             // split-head scan watermark (resume the CRLFCRLF search)
     drain: usize = 0,                 // oversize-body bytes still to discard (mirrors Conn.drain)
     drain_close: bool = false,
     ws: ?WsFrameFn = null,
+    direct: []const u8 = &.{},        // zero-copy cache replay in flight (pinned slab bytes)
+    direct_slot: u32 = 0,
 }
 ```
 
-`slots` is a flat `[]?*UringConn` indexed by fd (`MAX_FD` entries). Every completion's `user_data` packs `{ op, gen, fd }`, and `lookup` rejects a CQE whose `gen` no longer matches the slot, which closes the close-versus-recv race on a reused fd. A connection is half-duplex (at most one recv or one send in flight), so a blocking sink flush can never interleave with an in-flight send.
+`slots` is a flat inline `[]UringConn` table indexed by fd (`MAX_FD` entries, mapped zeroed and demand-paged, an empty slot reads as `buf.len == 0`). The recv and send buffers live in one per-worker mmap'd slab of page-multiple strides: a connection draws a compact slot from a LIFO free-list on accept (zero allocator calls), close returns the slot, and past the warm cap the oldest warm stride's pages go back to the OS (`MADV_DONTNEED`). The slab explicitly opts out of transparent huge pages (`MADV_NOHUGEPAGE`), so residency tracks the pages actually written on any host THP policy. Every completion's `user_data` packs `{ op, gen, fd }`, and `lookup` rejects a CQE whose `gen` no longer matches the slot, which closes the close-versus-recv race on a reused fd. A connection is half-duplex (at most one recv or one send in flight), so a blocking sink flush can never interleave with an in-flight send.
 
 #### initUringRing()
 
@@ -418,7 +423,7 @@ A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs
 
 #### finishClose(): ring teardown (ADR-041)
 
-Teardown closes the fd on the ring, not synchronously. `finishClose` reads the fd, recycles the connection slot first (`destroyConn`, which clears the slot and returns the connection to the free list), then submits a `prep_close` SQE tagged with `OpKind.close`. It falls back to a synchronous `linux.close` only when the SQ is momentarily full. The half-duplex per-connection state guarantees no in-flight op targets the closing fd, and recycling the slot before the close completes is safe because the generation tag rejects any late CQE against the reused fd. The `close` completion is a no-op (the slot is already free). This matters under connection churn: a synchronous `close` per teardown blocks the worker between connections, so on the 64-core box the ring barely engaged its cores under reconnect storms (limited-conn, json). Keeping the close on the ring lets the worker keep reaping completions across teardowns, so the cores fill. See ADR-041 for the 64-core measurement.
+Teardown closes the fd on the ring, not synchronously. `finishClose` reads the fd, recycles the connection slot first (`destroyConn`, which frees a heap-grown send buffer, unpins a borrowed cache replay, returns the buffer-slab slot to the free-list, and zeroes the fd slot), then submits a `prep_close` SQE tagged with `OpKind.close`. It falls back to a synchronous `linux.close` only when the SQ is momentarily full. The half-duplex per-connection state guarantees no in-flight op targets the closing fd, and recycling the slot before the close completes is safe because the generation tag rejects any late CQE against the reused fd. The `close` completion is a no-op (the slot is already free). This matters under connection churn: a synchronous `close` per teardown blocks the worker between connections, so on the 64-core box the ring barely engaged its cores under reconnect storms (limited-conn, json). Keeping the close on the ring lets the worker keep reaping completions across teardowns, so the cores fill. See ADR-041 for the 64-core measurement.
 
 The shared `OpKind` (with the `close` variant) lives in `src/multiplexers/ring.zig` (relocated from `src/tcp/io_uring`), so every io_uring engine carries a `.close => {}` arm. Only `zix.Http1` arms it for now.
 

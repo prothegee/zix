@@ -10,7 +10,6 @@ pub const ServerConfig = @import("config.zig").Http1ServerConfig;
 pub const DispatchModel = @import("../config.zig").DispatchModel;
 
 pub const HandlerFn = core.HandlerFn;
-pub const RawFn = core.RawFn;
 pub const ParsedHead = core.ParsedHead;
 pub const ParseResult = core.ParseResult;
 pub const Range = core.Range;
@@ -23,6 +22,20 @@ pub const Router = router.Router;
 pub const PathParam = router.PathParam;
 pub const pathParam = router.pathParam;
 
+pub const Request = @import("request.zig").Request;
+pub const Response = @import("response.zig").Response;
+pub const Context = @import("context.zig").Context;
+
+pub const Method = @import("method.zig");
+pub const Status = @import("status.zig");
+pub const Content = @import("content.zig");
+pub const ContentType = @import("content.zig").Type;
+pub const SseWriter = @import("response.zig").SseWriter;
+pub const Header = @import("response.zig").HttpHeader;
+pub const HeaderSize = @import("response.zig").HeaderSize;
+pub const Multipart = @import("../../utils/multipart.zig").Parser;
+pub const MultipartField = @import("../../utils/multipart.zig").Field;
+
 pub const WebSocket = @import("websocket.zig");
 pub const WsFrameFn = core.WsFrameFn;
 
@@ -33,6 +46,7 @@ pub const isExpired = core.isExpired;
 
 pub const parseHead = core.parseHead;
 pub const getHeader = core.getHeader;
+pub const acceptEncoding = core.acceptEncoding;
 pub const queryParam = core.queryParam;
 pub const percentDecode = core.percentDecode;
 pub const parseRange = core.parseRange;
@@ -44,6 +58,7 @@ pub const cacheStoreEncoded = core.cacheStoreEncoded;
 pub const sendGzipCachedFD = core.sendGzipCachedFD;
 pub const sendWithCacheFD = core.sendWithCacheFD;
 pub const cacheTtl = core.cacheTtl;
+pub const setCache = core.setCache;
 pub const ResponseCache = @import("../../utils/response_cache.zig").ResponseCache;
 
 pub const writeAllFD = core.writeAllFD;

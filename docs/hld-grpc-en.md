@@ -46,6 +46,7 @@ graph LR
 | `zix.Grpc.Server` | `init(comptime routes, config)`, `deinit()`, `run()!void` |
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
+| `zix.Grpc.Context.serveCached` / `sendCached` | Per-worker unary response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` (sends UNIMPLEMENTED if no route matches) |
@@ -87,6 +88,16 @@ graph LR
 | `max_body` | 16384 | max total gRPC body buffered per stream (all DATA frames), a body past this sheds the stream with RESOURCE_EXHAUSTED |
 | `logger` | `null` | optional `*zix.Logger`, when set, logs each stream close via `rpc()` and startup/shutdown via `system()` |
 | `handler_timeout_ms` | 0 | global handler timeout cap (ms), 0 = disabled. Combined with `Route.timeout_ms` and `grpc-timeout` header at dispatch |
+| `compress` | `false` | gzip-compress DATA frames for clients advertising `grpc-accept-encoding: gzip` |
+| `response_cache` | `false` | per-worker unary response cache (ADR-036), opt-in via `ctx.serveCached` / `ctx.sendCached` (`.EPOLL` / `.URING`) |
+| `cache_max_entries` | 256 | response cache slot count, rounded down to a power of two |
+| `cache_max_value_bytes` | 16384 | per-slot response-message cap, a larger message bypasses the cache |
+| `cache_ttl_ms` | 1000 | default cache freshness, handlers may pass their own TTL per store |
+| `cache_max_total_bytes` | 0 | optional per-worker cache memory ceiling, 0 disables it |
+| `tls` | `null` | non-null serves gRPC over TLS (ALPN h2) instead of h2c, see [TLS](#tls) |
+| `tls_port` | 0 | dual-listener companion port (requires `tls`), 0 = single-listener |
+
+More tuning fields (`worker_stack_size_bytes`, `busy_poll_us`, `reuseport_cbpf`, `max_recv_buf`, `tls_write_buf_initial_bytes`) are covered in [`docs/zix-config-en.md`](zix-config-en.md).
 
 ## Handler Pattern
 
@@ -121,6 +132,7 @@ Key rules:
 - Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes (`is_server_streaming = true`) each run on a dedicated thread sharing a connection-level write mutex.
 - The server buffers all client DATA before dispatching the handler.
 - `parsePath` and path-based dispatch inside the handler are not needed: the route table handles that.
+- A unary handler may opt into the per-worker response cache: `if (ctx.serveCached(content_type)) return;` before the expensive work, `ctx.sendCached(content_type, reply, ttl_ms)` instead of `sendMessage` to store it. Requires `response_cache = true`, degrades to a plain `sendMessage` otherwise.
 
 ## Context Timeout
 
@@ -380,7 +392,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines.
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. With `tls_port` set next to `tls`, ONE server serves h2c on `port` and gRPC over TLS on `tls_port` from the same worker fleet (ADR-060).
 
 ```mermaid
 graph LR

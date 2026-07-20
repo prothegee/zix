@@ -153,7 +153,6 @@ graph TD
     Http --> request["request.zig\nRequest"]
     Http --> response["response.zig\nResponse + HttpHeader"]
     Http --> context["context.zig\nContext"]
-    Http --> middleware["middleware.zig"]
     Http --> static["static.zig"]
     Http --> multipart["utils/multipart.zig\nParser + Field"]
     Http --> websocket["websocket.zig\nWebSocket"]
@@ -213,7 +212,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http.ClientRequestOpts` | struct | Opsi per-request: `headers`, `body`, override `connect_timeout_ms` |
 | `zix.Http.Request` | struct | Reader per-request: method, path, query, header, body |
 | `zix.Http.Response` | struct | Writer per-request: send, sendJson, noContent, addHeader, stream |
-| `zix.Http.SseWriter` | struct | Penulis event SSE yang dikembalikan oleh `res.stream()`: writeEvent, writeNamedEvent, comment |
+| `zix.Http.SseWriter` | struct | Penulis event SSE yang dikembalikan oleh `res.sendStream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Konteks per-request: io, allocator, stream (TCP mentah), deadline (anggaran handler opsional), logger (pointer logger opsional) |
 | `zix.Logger` | struct | Logger berkas dan konsol: `init` / `deinit` / `flush` / `system` / `access` |
 | `zix.Logger.Config` | struct | Konfigurasi logger: console, save_path (harus sudah ada, dibuat oleh pemanggil), save_file, level minimum, max_lines |
@@ -269,9 +268,13 @@ pub const HttpServerConfig = struct {
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
     workers:              usize             = 0,          // 0 = cpu_count; accept threads untuk .POOL/.MIXED, workers untuk .EPOLL; diabaikan oleh .ASYNC
     pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (diabaikan oleh .EPOLL, .MIXED, .ASYNC)
+    tls:                  ?*zix.Tls.Context = null,       // non-null melayani engine ini lewat TLS (https native), jika tidak cleartext
+    tls_port:             u16               = 0,          // port pendamping dual-listener, 0 = single-listener; lihat docs/hld-tls-id.md
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
 };
 ```
+
+Listing di atas diringkas: referensi field lengkap (compression, response cache, uring tuning, REUSEPORT steering) ada di [`docs/zix-config-id.md`](zix-config-id.md).
 
 Pemanggil memiliki `io`: `zix.Http.Server` tidak memanggil `deinit` padanya. Tabel route dioper sebagai argumen comptime ke `Server.init` sehingga tidak ada alokasi runtime untuk routing.
 
@@ -359,8 +362,13 @@ Menyangga status response dan menulis saat `send()` atau padanannya dipanggil.
 | `addHeader(name, value)` | Hingga `max_response_headers` header tambahan. CR/LF ditolak |
 | `send(body)` | Menulis response HTTP/1.1 penuh dan flush |
 | `sendJson(body)` | Menetapkan `content_type = application/json`, lalu memanggil `send` |
-| `noContent()` | Menetapkan status `.NO_CONTENT`, mengirim body kosong |
-| `stream()` | Mengirim header SSE (tanpa `Content-Length`), mengembalikan `SseWriter`. Menetapkan `streaming = true` sehingga loop keep-alive keluar setelah handler kembali |
+| `sendText(body)` | Menetapkan `content_type = text/plain`, lalu memanggil `send` |
+| `sendRaw(bytes)` | Menulis byte wire milik caller apa adanya, tanpa serialisasi |
+| `sendNoContent()` | Menetapkan status `.NO_CONTENT`, mengirim body kosong |
+| `sendStream()` | Mengirim header SSE (tanpa `Content-Length`), mengembalikan `SseWriter`. Menetapkan `streaming = true` sehingga loop keep-alive keluar setelah handler kembali |
+| `sendFromCache(req)` | `true` saat fresh cache hit (sudah ditulis), jika tidak `false` |
+| `sendCached(req, body, ttl_ms)` | Mengirim `body`, lalu menyimpannya di bawah kunci request untuk hit `sendFromCache` berikutnya |
+| `sendNegotiated(req, body)` | Mengirim `body` terkompresi sesuai `Accept-Encoding` (opt-in lewat `setCompression`), jika tidak identik dengan `send` |
 
 Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membatasi ukuran header gabungan. `error.BufferTooSmall` dikembalikan jika terlampaui.
 
@@ -664,9 +672,9 @@ sequenceDiagram
     C->>C: auto-reconnect after retry ms
 ```
 
-### res.stream()
+### res.sendStream()
 
-`res.stream()` mengirim header response SSE (tanpa `Content-Length`) dan mengembalikan `SseWriter`. Koneksi tetap terbuka selama handler menulis event. Saat handler kembali, `handleConnection` melihat `res.streaming == true` dan menutup koneksi alih-alih mengulang untuk request berikutnya.
+`res.sendStream()` (di-rename dari `stream()`, ADR-062) mengirim header response SSE (tanpa `Content-Length`) dan mengembalikan `SseWriter`. Koneksi tetap terbuka selama handler menulis event. Saat handler kembali, `handleConnection` melihat `res.streaming == true` dan menutup koneksi alih-alih mengulang untuk request berikutnya.
 
 | Method `SseWriter` | Format wire |
 | :- | :- |
@@ -683,7 +691,7 @@ Koneksi SSE berumur panjang. Thread pool blocking milik `.POOL` akan habis (satu
 ```zig
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    const sse = try res.stream();
+    const sse = try res.sendStream();
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
         var buf: [32]u8 = undefined;
@@ -841,9 +849,10 @@ Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice 
 
 | Fitur | Lokasi | Catatan |
 | :- | :- | :- |
-| Chain runner middleware | `middleware.zig` | Pola wrapper comptime adalah pendekatan saat ini |
-| TLS (server high-level ini) | proxy-terminated secara desain: jalankan nginx / haproxy di depan (lihat [`docs/hld-proxy-id.md`](hld-proxy-id.md)). Untuk TLS in-process pakai `zix.Http1` (native https/1.1), `zix.Http2` (native h2 over TLS), atau `zix.Grpc`, yang semuanya melayani TLS langsung. | n/a |
+| Chain runner middleware | dihapus (ADR-062) | Komposisi wrapper comptime adalah idiom middleware, lihat `examples/http_middleware.zig` |
 | Penerapan timeout response/baca (client) | `client.zig` | Field konfigurasi tersimpan. Pemasangan level IO ditangguhkan |
+
+TLS untuk server ini (https native, opt-in lewat `config.tls`, dual listener lewat `config.tls_port`) sudah diimplementasikan, lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
 Untuk desain UDP lihat [`docs/hld-udp-id.md`](hld-udp-id.md). Untuk UDS lihat [`docs/hld-uds-id.md`](hld-uds-id.md).
 

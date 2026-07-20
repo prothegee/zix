@@ -45,7 +45,7 @@ pub const Tcp = @import("tcp/Tcp.zig");
 | :- | :- | :- |
 | `zix.Tcp.Server` | namespace | `init(handler, config)` / `initArgs(handler, config, args)` (per-connection), `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (per-frame ring), masing-masing mengembalikan server dengan `run()` / `deinit()` |
 | `zix.Tcp.Client` | struct | `connect(config, io)` / `connectArgs(config, io, args)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `logger` (null) |
+| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
 | `zix.Tcp.ClientConfig` | struct | `ip`, `port`, `max_recv_buf` (4096) |
 | `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `POOL=1`, `MIXED=2`, `EPOLL=3`, `URING=4`. Handler per-connection: ASYNC/POOL/MIXED/EPOLL native, URING melipat ke EPOLL. Jalur framed: URING native. |
 | `zix.Tcp.HandlerFn` | tipe | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` (per-connection, memiliki stream) |
@@ -81,9 +81,9 @@ Baik `echoHandler` bawaan maupun `TcpClient.sendMsg`/`recvMsg` menggunakan frame
 [ payload bytes, payload_len bytes ]
 ```
 
-Big-endian digunakan karena TCP adalah protokol jaringan: network byte order adalah pilihan konvensional dan sesuai dengan cara sebagian besar library protokol mengkodekan integer multi-byte melalui jaringan. (Berbeda dengan `zix.Uds`, yang menggunakan little-endian karena UDS bersifat lokal saja.)
+Big-endian digunakan karena TCP adalah protokol jaringan: network byte order adalah pilihan konvensional dan sesuai dengan cara sebagian besar library protokol mengkodekan integer multi-byte melalui jaringan. `zix.Uds` memakai format frame big-endian yang sama (ADR-010), walau bersifat lokal saja.
 
-Frame dengan `payload_len == 0` atau `payload_len > max_msg_len` (default 4096) menutup koneksi.
+Frame dengan `payload_len == 0` atau `payload_len > max_recv_buf` (default 4096) menutup koneksi.
 
 ---
 

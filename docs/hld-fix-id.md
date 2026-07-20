@@ -48,7 +48,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | :- | :- | :- |
 | `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes bertipe `[]const zix.Fix.Route`) |
 | `zix.Fix.ServerConfig` | struct | Lihat Field Konfigurasi Server di bawah |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }`: opsi untuk `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, routes }`: opsi untuk `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | Lihat Field Konfigurasi Client di bawah |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export dari `zix.Tcp.DispatchModel` |
@@ -87,9 +87,15 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Jumlah accept thread. Diabaikan oleh ASYNC |
 | `pool_size` | 0 (otomatis) | Pool thread (`max(10, cpu_count * 2)`). Hanya digunakan oleh POOL |
+| `worker_stack_size_bytes` | 512 KiB | Stack worker thread untuk handler EPOLL / URING. Demand-paged, biaya kecil sampai kedalamannya terpakai |
+| `pool_stack_size_bytes` | 256 KiB | Stack worker thread pool untuk POOL. Lebih kecil dari EPOLL / URING karena handler FIX memproses pesan fixed-format kecil |
+| `reuseport_cbpf` | false | Steering SO_ATTACH_REUSEPORT_CBPF (EPOLL / URING): koneksi baru masuk ke worker pada CPU penerima, bukan hash 4-tuple. Silent no-op pada kernel pre-4.5 |
+| `uring_send_buf_size` | 64 KiB | Buffer send per-koneksi untuk URING. Tanpa efek pada dispatch model lain |
+| `uring_max_conns_per_worker` | 65536 | Maksimum koneksi konkuren yang dilacak satu worker URING (slab fd-indexed). Koneksi melewati cap ditolak |
+| `default_heartbeat_secs` | 30 | HeartBtInt default (detik) yang di-echo pada respons Logon saat client melewatkan tag 108 |
 | `logger` | null | Logger opsional untuk event siklus hidup dan sesi per-pesan |
 | `heartbeat_timeout_ms` | 0 | Heartbeat timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: setelah interval ini tanpa pesan masuk, TestRequest (35=1) dikirim. Jika tidak ada respons yang datang dalam interval berikutnya, Logout (35=5) dikirim dan koneksi ditutup. Hanya berlaku setelah Logon, sebelum Logon, timeout menutup koneksi secara diam-diam. |
-| `connection_timeout_ms` | 0 | Idle connection timeout dalam ms. 0 = dinonaktifkan. Ketika bernilai non-zero: jika tidak ada pesan yang datang dalam interval ini (meski heartbeat dinonaktifkan), koneksi ditutup. Berbeda dari `heartbeat_timeout_ms`: tidak ada TestRequest dance, langsung tutup. |
+| `conn_timeout_ms` | 0 | Idle connection timeout dalam ms. 0 = dinonaktifkan. Hanya berlaku saat `heartbeat_timeout_ms` bernilai 0: jika tidak ada pesan yang datang dalam interval ini, koneksi ditutup, tanpa TestRequest dance, langsung tutup. |
 | `handler_timeout_ms` | 0 | Batas waktu pemrosesan handler server-wide dalam ms. 0 = tanpa batas. Diperketat per-rute oleh `Route.timeout_ms`. Mengatur `Context.deadline_ns` sebelum dispatch. |
 
 ---
@@ -280,7 +286,7 @@ var server = try zix.Fix.Server.init(
         .port                  = 9500,
         .comp_id               = "BROKER",
         .dispatch_model        = .ASYNC,
-        .connection_timeout_ms = 60_000,
+        .conn_timeout_ms       = 60_000,
         .handler_timeout_ms    = 200,
     },
 );

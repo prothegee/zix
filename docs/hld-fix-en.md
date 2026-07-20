@@ -48,7 +48,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | :- | :- | :- |
 | `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes is `[]const zix.Fix.Route`) |
 | `zix.Fix.ServerConfig` | struct | See Server Config Fields below |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, connection_timeout_ms, handler_timeout_ms, routes }`: options for `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, routes }`: options for `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | See Client Config Fields below |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export of `zix.Tcp.DispatchModel` |
@@ -87,9 +87,15 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Accept thread count. Ignored by ASYNC |
 | `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
+| `worker_stack_size_bytes` | 512 KiB | Worker thread stack for EPOLL / URING handler threads. Demand-paged, costs little until the depth is used |
+| `pool_stack_size_bytes` | 256 KiB | Pool worker thread stack for POOL. Smaller than EPOLL / URING since FIX handlers process small fixed-format messages |
+| `reuseport_cbpf` | false | SO_ATTACH_REUSEPORT_CBPF steering (EPOLL / URING): a new connection goes to the worker on the receiving CPU instead of the 4-tuple hash. Silent no-op on a kernel pre-4.5 |
+| `uring_send_buf_size` | 64 KiB | Per-connection send buffer for URING. No effect under the other dispatch models |
+| `uring_max_conns_per_worker` | 65536 | Max concurrent connections one URING worker tracks (fd-indexed slab). Connections past the cap are refused |
+| `default_heartbeat_secs` | 30 | Default HeartBtInt (seconds) echoed in the Logon response when the client omits tag 108 |
 | `logger` | null | Optional logger for lifecycle and per-message session events |
 | `heartbeat_timeout_ms` | 0 | Heartbeat timeout in ms. 0 = disabled. When non-zero: after this interval with no incoming message, TestRequest (35=1) is sent. If no response arrives within another interval, Logout (35=5) is sent and the connection closes. Only applies after Logon, before Logon, timeout closes silently. |
-| `connection_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. When non-zero: if no message arrives within this interval (even with heartbeat disabled), the connection is closed. Distinct from `heartbeat_timeout_ms`: no TestRequest dance, just close. |
+| `conn_timeout_ms` | 0 | Idle connection timeout in ms. 0 = disabled. Only takes effect when `heartbeat_timeout_ms` is 0: if no message arrives within this interval, the connection is closed, no TestRequest dance, just close. |
 | `handler_timeout_ms` | 0 | Server-wide default max handler processing time in ms. 0 = no cap. Tightened per-route by `Route.timeout_ms`. Sets `Context.deadline_ns` before dispatch. |
 
 ---
@@ -280,7 +286,7 @@ var server = try zix.Fix.Server.init(
         .port                  = 9500,
         .comp_id               = "BROKER",
         .dispatch_model        = .ASYNC,
-        .connection_timeout_ms = 60_000,
+        .conn_timeout_ms       = 60_000,
         .handler_timeout_ms    = 200,
     },
 );

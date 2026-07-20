@@ -122,14 +122,14 @@ sequenceDiagram
 
 TLS adalah jalur serve blocking ber-gate per engine, dipilih oleh `config.tls`, membiarkan setiap dispatch model cleartext tidak tersentuh.
 
-- Http1: `serveConnTls` menjalankan handshake, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan fd-handler yang ada lewat sebuah pipe (handler menulis plaintext tanpa perubahan), lalu meng-encrypt response.
+- Http1: `serveConnTls` menjalankan handshake, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan handler dengan response sink in-memory yang menangkap plaintext-nya (`runHandlerToBuffer`), lalu meng-encrypt hasilnya.
 - Http2 dan Grpc (ADR-052): dua jalur serve, dipilih oleh `dispatch_model`. ALPN memilih h2 di keduanya.
   - `.EPOLL` / `.URING`: satu worker epoll `SO_REUSEPORT` per core (`tls_mux.zig`, `grpc/tls_mux.zig`) menterminasi TLS di tempat lewat session TLS 1.3 resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker. Tanpa socketpair, tanpa thread per koneksi. Ini jalur konkurensi-tinggi.
   - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` menjalankan accept loop thread-per-koneksi di atas terminator bersama `tcp/tls/h2_terminator.zig`, yang menjalankan driver inline-mux langsung di atas record terdekripsi (frame disegel kembali ke record TLS lewat write hook thread-local). Tanpa socketpair, tanpa thread kedua. Jalur ini juga melayani fallback TLS 1.2.
 
 - Dual listener (ADR-060): dengan `tls_port` diisi bersama `tls` (Http1, Http, Http2, Grpc), SATU server melayani cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama. Mesin transport per-koneksi yang dipakai bersama jalur mux hidup di `src/multiplexers/tls_conn.zig`, dan di bawah `.URING` sisi TLS berjalan di ring (tanpa fleet epoll terpisah).
 
-Karena engine dipakai ulang tanpa perubahan, https tidak bisa meregresi hot path cleartext. Pipe blocking (Http1) dapat diterima di band https, yang bukan gate perf 1 persen.
+Karena engine dipakai ulang tanpa perubahan, https tidak bisa meregresi hot path cleartext. Copy capture per-request (Http1) dapat diterima di band https, yang bukan gate perf 1 persen.
 
 ## Misdirected Request (RFC 9110 7.4)
 

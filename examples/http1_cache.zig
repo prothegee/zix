@@ -46,8 +46,8 @@ fn buildBody(kb: usize) []const u8 {
     return body_buf[0..pos];
 }
 
-fn kbFromQuery(head: *const zix.Http1.ParsedHead) usize {
-    const value = zix.Http1.queryParam(head, "kb") orelse return 32;
+fn kbFromQuery(req: *zix.Http1.Request) usize {
+    const value = req.queryParam("kb") orelse return 32;
 
     return std.fmt.parseInt(usize, value, 10) catch 32;
 }
@@ -61,31 +61,30 @@ fn buildResponse(body: []const u8) []const u8 {
 }
 
 // curl usage: curl "http://localhost:9031/cache?kb=32"
-fn cacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (zix.Http1.cacheLookup(head)) |cached| {
-        zix.Http1.writeAllFD(fd, cached) catch {};
+fn cacheHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (zix.Http1.cacheLookup(req.head)) |cached| {
+        try res.sendRaw(cached);
         return;
     }
 
-    const built = buildBody(kbFromQuery(head));
+    const built = buildBody(kbFromQuery(req));
     const resp = buildResponse(built);
-    zix.Http1.sendWithCacheFD(fd, head, resp, zix.Http1.cacheTtl()) catch {};
+    zix.Http1.sendWithCacheFD(req.fd, req.head, resp, zix.Http1.cacheTtl()) catch {};
 }
 
 // curl usage: curl "http://localhost:9031/nocache?kb=32"
-fn nocacheHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    const built = buildBody(kbFromQuery(head));
+fn nocacheHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    const built = buildBody(kbFromQuery(req));
     const resp = buildResponse(built);
-    zix.Http1.writeAllFD(fd, resp) catch {};
+
+    try res.sendRaw(resp);
 }
 
 // curl usage: curl "http://localhost:9031/"
-fn homeHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", "Hello, World!") catch {};
+fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("Hello, World!");
 }
 
 // --------------------------------------------------------- //

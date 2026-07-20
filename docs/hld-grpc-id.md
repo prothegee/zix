@@ -46,6 +46,7 @@ graph LR
 | `zix.Grpc.Server` | `init(comptime routes, config)`, `deinit()`, `run()!void` |
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
+| `zix.Grpc.Context.serveCached` / `sendCached` | Cache response unary per-worker (ADR-036), opt-in lewat `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | tipe zero-size comptime: `dispatch(path, headers, ctx)` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok) |
@@ -87,6 +88,16 @@ graph LR
 | `max_body` | 16384 | total maksimum body gRPC yang di-buffer per stream (semua frame DATA), body di atas ini di-shed dengan RESOURCE_EXHAUSTED |
 | `logger` | `null` | `*zix.Logger` opsional, jika diatur, mencatat setiap penutupan stream melalui `rpc()` dan startup/shutdown melalui `system()` |
 | `handler_timeout_ms` | 0 | batas timeout handler global (ms), 0 = dinonaktifkan. Digabungkan dengan `Route.timeout_ms` dan header `grpc-timeout` saat dispatch |
+| `compress` | `false` | kompresi gzip frame DATA untuk client yang mengiklankan `grpc-accept-encoding: gzip` |
+| `response_cache` | `false` | cache response unary per-worker (ADR-036), opt-in lewat `ctx.serveCached` / `ctx.sendCached` (`.EPOLL` / `.URING`) |
+| `cache_max_entries` | 256 | jumlah slot cache response, dibulatkan ke bawah ke pangkat dua |
+| `cache_max_value_bytes` | 16384 | cap pesan response per slot, pesan lebih besar melewati cache |
+| `cache_ttl_ms` | 1000 | freshness cache default, handler boleh memberi TTL sendiri per store |
+| `cache_max_total_bytes` | 0 | ceiling opsional memori cache per-worker, 0 menonaktifkan ceiling |
+| `tls` | `null` | non-null melayani gRPC lewat TLS (ALPN h2) alih-alih h2c, lihat [TLS](#tls) |
+| `tls_port` | 0 | port pendamping dual-listener (butuh `tls`), 0 = single-listener |
+
+Field tuning lain (`worker_stack_size_bytes`, `busy_poll_us`, `reuseport_cbpf`, `max_recv_buf`, `tls_write_buf_initial_bytes`) dibahas di [`docs/zix-config-id.md`](zix-config-id.md).
 
 ## Pola Handler
 
@@ -121,6 +132,7 @@ Aturan penting:
 - Route unary (`is_server_streaming = false`, default) di-dispatch secara sinkron pada connection thread. Route server-streaming (`is_server_streaming = true`) masing-masing berjalan pada thread tersendiri yang berbagi write mutex tingkat koneksi.
 - Server mem-buffer semua DATA client sebelum melakukan dispatch handler.
 - `parsePath` dan dispatch berbasis path di dalam handler tidak diperlukan: tabel route menangani hal tersebut.
+- Handler unary boleh opt-in ke cache response per-worker: `if (ctx.serveCached(content_type)) return;` sebelum kerja yang mahal, `ctx.sendCached(content_type, reply, ttl_ms)` sebagai ganti `sendMessage` untuk menyimpannya. Butuh `response_cache = true`, jika tidak turun ke `sendMessage` biasa.
 
 ## Deadline Konteks
 
@@ -380,7 +392,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine.
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. Dengan `tls_port` diisi bersama `tls`, SATU server melayani h2c di `port` dan gRPC over TLS di `tls_port` dari worker fleet yang sama (ADR-060).
 
 ```mermaid
 graph LR

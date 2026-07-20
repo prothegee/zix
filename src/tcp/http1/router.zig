@@ -3,6 +3,9 @@
 const std = @import("std");
 const core = @import("core.zig");
 const static = @import("static.zig");
+const Request = @import("request.zig").Request;
+const Response = @import("response.zig").Response;
+const Context = @import("context.zig").Context;
 
 // --------------------------------------------------------- //
 
@@ -144,22 +147,20 @@ pub fn Router(comptime routes: []const Route) type {
         /// - Pass 2 param: first parameterized pattern that matches wins
         /// - Pass 3 prefix: longest matching prefix wins
         /// - Unknown paths get 404 text/plain.
-        pub fn dispatch(head: *const core.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+        pub fn dispatch(req: *Request, res: *Response, ctx: *Context) anyerror!void {
             tl_param_count = 0;
 
-            const p = head.path;
+            const path = req.head.path;
 
             // Pass 1: exact, O(1) hash lookup
-            if (exact_map.get(p)) |handler| {
-                handler(head, body, fd);
-                return;
+            if (exact_map.get(path)) |handler| {
+                return handler(req, res, ctx);
             }
 
             // Pass 2: parameterized (first match wins)
             inline for (param_routes) |route| {
-                if (matchParam(route.path, p)) {
-                    route.handler(head, body, fd);
-                    return;
+                if (matchParam(route.path, path)) {
+                    return route.handler(req, res, ctx);
                 }
             }
 
@@ -167,8 +168,8 @@ pub fn Router(comptime routes: []const Route) type {
             var best_len: usize = 0;
             var best_handler: ?core.HandlerFn = null;
             inline for (prefix_routes) |route| {
-                if (std.mem.startsWith(u8, p, route.path)) {
-                    const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
+                if (std.mem.startsWith(u8, path, route.path)) {
+                    const at_boundary = path.len == route.path.len or path[route.path.len] == '/';
                     if (at_boundary and route.path.len > best_len) {
                         best_len = route.path.len;
                         best_handler = route.handler;
@@ -176,24 +177,25 @@ pub fn Router(comptime routes: []const Route) type {
                 }
             }
 
-            if (best_handler) |h| {
-                h(head, body, fd);
-                return;
+            if (best_handler) |handler| {
+                return handler(req, res, ctx);
             }
 
             // Static file fallback: when public_dir is configured, try to serve the request path
             // as a file before returning 404. Disabled when public_dir is empty (tl_static_dir = "").
             if (core.tl_static_dir.len > 0) {
                 if (core.tl_static_io) |io| {
-                    const stripped = if (p.len > 0 and p[0] == '/') p[1..] else p;
+                    const stripped = if (path.len > 0 and path[0] == '/') path[1..] else path;
                     if (stripped.len > 0) {
-                        const served = static.serve(head, fd, stripped, core.tl_static_dir, io) catch false;
+                        const served = static.serve(req.head, req.fd, stripped, core.tl_static_dir, io) catch false;
                         if (served) return;
                     }
                 }
             }
 
-            core.sendSimpleFD(fd, 404, "text/plain", "Not Found") catch {};
+            res.setStatus(.NOT_FOUND);
+
+            try res.sendText("Not Found");
         }
     };
 }
@@ -247,10 +249,10 @@ test "zix test: http1 router matchParam" {
     try std.testing.expect(!matchParam("/users/:id", "/users/alice/posts"));
 }
 
-fn mockHandler(head: *const core.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = head;
-    _ = body;
-    _ = fd;
+fn mockHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void {
+    _ = req;
+    _ = res;
+    _ = ctx;
 }
 
 test "zix test: http1 router comptime" {

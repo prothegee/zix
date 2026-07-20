@@ -32,6 +32,15 @@ pub const Logger = @import("logger/logger.zig").Logger;
 
 // --------------------------------------------------------- //
 
+pub const Driver = struct {
+    /// zix redis internal db driver
+    pub const rediz = @import("driver/rediz/src/lib.zig");
+    /// zix postgresql internal db driver
+    pub const postgrez = @import("driver/postgrez/src/lib.zig");
+};
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
@@ -42,6 +51,48 @@ pub const utils = struct {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix tests: canonical trio surface resolves on both http namespaces" {
+    // Namespace-level names shared by zix.Http and zix.Http1.
+    const shared_names = .{
+        "Server",     "ServerConfig", "DispatchModel",  "HandlerFn",     "Route",
+        "RouteKind",  "Request",      "Response",       "Context",       "Method",
+        "Status",     "Content",      "ContentType",    "SseWriter",     "Header",
+        "HeaderSize", "Multipart",    "MultipartField", "ResponseCache", "setCache",
+        "cacheTtl",
+    };
+    inline for (shared_names) |name| {
+        _ = @field(Http, name);
+        _ = @field(Http1, name);
+    }
+
+    // Canonical caller surface on the trio types, both engines.
+    const response_fns = .{
+        "setStatus",  "setContentType", "setKeepAlive", "addHeader",     "send",
+        "sendJson",   "sendText",       "sendRaw",      "sendNoContent", "sendFromCache",
+        "sendCached", "sendNegotiated", "sendStream",
+    };
+    inline for (response_fns) |name| {
+        try std.testing.expect(@hasDecl(Http.Response, name));
+        try std.testing.expect(@hasDecl(Http1.Response, name));
+    }
+
+    const request_fns = .{
+        "method",  "path",      "query",        "queryParam", "queryParams",
+        "header",  "pathParam", "pathSegments", "body",       "keepAlive",
+        "fromRaw",
+    };
+    inline for (request_fns) |name| {
+        try std.testing.expect(@hasDecl(Http.Request, name));
+        try std.testing.expect(@hasDecl(Http1.Request, name));
+    }
+
+    const context_fns = .{ "withTimeout", "withDeadline", "setTimeout", "isExpired", "timedOut" };
+    inline for (context_fns) |name| {
+        try std.testing.expect(@hasDecl(Http.Context, name));
+        try std.testing.expect(@hasDecl(Http1.Context, name));
+    }
+}
 
 test "zix tests: unit test" {
     // # zix.Http
@@ -72,6 +123,10 @@ test "zix tests: unit test" {
 
     // # zix.Http1
     std.testing.refAllDecls(@import("tcp/http1/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/parser.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/method.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/status.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/content.zig"));
     std.testing.refAllDecls(@import("tcp/http1/config.zig"));
     std.testing.refAllDecls(@import("tcp/http1/server.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/common.zig"));
@@ -81,6 +136,9 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/request.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/response.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/context.zig"));
     std.testing.refAllDecls(@import("tcp/http1/static.zig"));
     std.testing.refAllDecls(@import("tcp/http1/websocket.zig"));
 

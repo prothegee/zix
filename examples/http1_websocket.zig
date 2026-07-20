@@ -14,7 +14,6 @@ const MAX_RECV_BUF: usize = switch (PROFILE) {
     .throughput => 16 * 1024,
 };
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0;
 
 // Room registry bounds. Each member is tracked in a fixed slot so the demo
@@ -211,36 +210,42 @@ fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 //
 // After connecting, any message is broadcast to every client in the same room,
 // prefixed with the sender's display name.
-fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
+fn wsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
 
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
-    const room_id = zix.Http1.pathParam("room-id") orelse {
-        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"missing room-id\"}") catch {};
+    const room_id = req.pathParam("room-id") orelse {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"missing room-id\"}");
         return;
     };
 
     // Read the display name NOW: it is unavailable after the upgrade.
-    const display_name = zix.Http1.queryParam(head, "name") orelse "anonymous";
+    const display_name = req.queryParam("name") orelse "anonymous";
 
-    const upgrade_val = zix.Http1.getHeader(head, "upgrade") orelse "";
-    const ws_key = zix.Http1.getHeader(head, "sec-websocket-key");
+    const upgrade_val = req.header("upgrade") orelse "";
+    const ws_key = req.header("sec-websocket-key");
 
     if (!std.ascii.eqlIgnoreCase(upgrade_val, "websocket") or ws_key == null) {
-        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"not a websocket upgrade request\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"not a websocket upgrade request\"}");
         return;
     }
 
-    zix.Http1.WebSocket.serve(fd, ws_key.?, wsOnFrame) catch {
-        zix.Http1.sendJsonFD(fd, 500, "{\"error\":\"handshake failed\"}") catch {};
+    zix.Http1.WebSocket.serve(req.fd, ws_key.?, wsOnFrame) catch {
+        res.setStatus(.INTERNAL_SERVER_ERROR);
+
+        try res.sendJson("{\"error\":\"handshake failed\"}");
         return;
     };
 
-    rooms.join(fd, room_id, display_name);
+    rooms.join(req.fd, room_id, display_name);
 }
 
 // --------------------------------------------------------- //
@@ -258,7 +263,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
     });
     defer server.deinit();

@@ -6,7 +6,7 @@ Detail implementasi internal untuk engine HTTP/1.x ramping. Untuk alasan desain 
 
 ## Http1.zig: namespace
 
-Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, tipe-tipe core (`HandlerFn`, `RawFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, dan fungsi-fungsi core (deadline, parse, write helper) menjadi satu permukaan publik.
+Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, trio (`Request`, `Response`, `Context`) dengan namespace bertipenya (`Method`, `Status`, `Content`, `ContentType`, `Header`, `HeaderSize`), tipe-tipe core (`HandlerFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, utilitas bersama (`Multipart`, `MultipartField`, `SseWriter`), dan fungsi-fungsi core (deadline, parse termasuk `acceptEncoding`, cache, write helper) menjadi satu permukaan publik (ADR-062).
 
 ---
 
@@ -28,7 +28,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
 
-`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `core.sendNegotiateFD`. Helper lama `core.sendGzipFD` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB), dan `max_headers` tidak dibaca saat runtime: ia no-op yang dipertahankan untuk kompatibilitas sumber (engine lazy tidak punya batas jumlah header).
+`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `res.sendNegotiated` atau `core.sendNegotiateFD`. Helper lama `core.sendGzipFD` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (kelas kapasitas `addHeader`) dan `conn_timeout_ms` (hanya model blocking) mendarat lewat ADR-062.
 
 ---
 
@@ -380,13 +380,18 @@ UringConn = {
     fd, gen, buf, filled,             // gen: u24 generation tag terhadap reuse fd
     send_buf, staged, inflight,       // send_buf[0..inflight] dipegang kernel selama send in-flight
     closing,                          // bebaskan setelah send terakhir mendarat
+    slot: u32 = 0,                    // slot slab buffer kompak yang menopang buf + send_buf
+    send_heap: bool = false,          // send_buf beralih ke buffer heap lewat jalur grow sink
+    scan_from: usize = 0,             // watermark scan split-head (lanjutkan pencarian CRLFCRLF)
     drain: usize = 0,                 // byte body oversize yang masih harus dibuang (mirror Conn.drain)
     drain_close: bool = false,
     ws: ?WsFrameFn = null,
+    direct: []const u8 = &.{},        // replay cache zero-copy yang in-flight (byte slab ter-pin)
+    direct_slot: u32 = 0,
 }
 ```
 
-`slots` adalah `[]?*UringConn` datar yang diindeks fd (`MAX_FD` entri). `user_data` setiap completion mengemas `{ op, gen, fd }`, dan `lookup` menolak CQE yang `gen`-nya tidak lagi cocok dengan slot, yang menutup race close-versus-recv pada fd yang digunakan ulang. Sebuah koneksi bersifat half-duplex (paling banyak satu recv atau satu send in-flight), sehingga flush sink yang blocking tidak pernah bisa menyela send yang sedang in-flight.
+`slots` adalah tabel inline `[]UringConn` datar yang diindeks fd (`MAX_FD` entri, di-map zeroed dan demand-paged, slot kosong terbaca sebagai `buf.len == 0`). Buffer recv dan send hidup di satu slab mmap per-worker dengan stride kelipatan page: koneksi menarik slot kompak dari free-list LIFO saat accept (nol pemanggilan allocator), close mengembalikan slot, dan melewati warm cap halaman stride warm tertua dikembalikan ke OS (`MADV_DONTNEED`). Slab secara eksplisit opt-out dari transparent huge page (`MADV_NOHUGEPAGE`), jadi residensi mengikuti halaman yang benar-benar ditulis pada kebijakan THP host mana pun. `user_data` setiap completion mengemas `{ op, gen, fd }`, dan `lookup` menolak CQE yang `gen`-nya tidak lagi cocok dengan slot, yang menutup race close-versus-recv pada fd yang digunakan ulang. Sebuah koneksi bersifat half-duplex (paling banyak satu recv atau satu send in-flight), sehingga flush sink yang blocking tidak pernah bisa menyela send yang sedang in-flight.
 
 #### initUringRing()
 
@@ -417,7 +422,7 @@ Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` d
 
 #### finishClose(): teardown ring (ADR-041)
 
-Teardown menutup fd di ring, bukan secara sinkron. `finishClose` membaca fd, mendaur ulang slot koneksi lebih dulu (`destroyConn`, yang membersihkan slot dan mengembalikan koneksi ke free list), lalu mengirim SQE `prep_close` yang ditag dengan `OpKind.close`. Ia jatuh ke `linux.close` sinkron hanya saat SQ sesaat penuh. State per-koneksi half-duplex menjamin tidak ada op in-flight yang menyasar fd yang sedang ditutup, dan mendaur ulang slot sebelum close selesai aman karena tag generation menolak CQE telat apa pun terhadap fd yang dipakai ulang. Completion `close` adalah no-op (slot sudah bebas). Ini penting di bawah connection churn: `close` sinkron per teardown memblokir worker antar koneksi, jadi di mesin 64-core ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm (limited-conn, json). Menjaga close di ring membuat worker terus memanen completion lintas teardown, sehingga core terisi. Lihat ADR-041 untuk pengukuran 64-core.
+Teardown menutup fd di ring, bukan secara sinkron. `finishClose` membaca fd, mendaur ulang slot koneksi lebih dulu (`destroyConn`, yang membebaskan send buffer hasil grow heap, melepas pin replay cache yang dipinjam, mengembalikan slot slab buffer ke free-list, dan men-zero slot fd), lalu mengirim SQE `prep_close` yang ditag dengan `OpKind.close`. Ia jatuh ke `linux.close` sinkron hanya saat SQ sesaat penuh. State per-koneksi half-duplex menjamin tidak ada op in-flight yang menyasar fd yang sedang ditutup, dan mendaur ulang slot sebelum close selesai aman karena tag generation menolak CQE telat apa pun terhadap fd yang dipakai ulang. Completion `close` adalah no-op (slot sudah bebas). Ini penting di bawah connection churn: `close` sinkron per teardown memblokir worker antar koneksi, jadi di mesin 64-core ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm (limited-conn, json). Menjaga close di ring membuat worker terus memanen completion lintas teardown, sehingga core terisi. Lihat ADR-041 untuk pengukuran 64-core.
 
 `OpKind` bersama (dengan varian `close`) berada di `src/multiplexers/ring.zig` (dipindahkan dari `src/tcp/io_uring`), sehingga setiap engine io_uring membawa arm `.close => {}`. Hanya `zix.Http1` yang meng-arm-nya untuk saat ini.
 

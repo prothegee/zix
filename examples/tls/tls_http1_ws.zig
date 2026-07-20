@@ -32,25 +32,25 @@ fn wsOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 }
 
 // GET /ws: validate the upgrade, then hand the connection to the https thread over TLS.
-fn wsHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
+fn wsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
 
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
-
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
-    const upgrade_val = zix.Http1.getHeader(head, "upgrade") orelse "";
-    const ws_key = zix.Http1.getHeader(head, "sec-websocket-key");
+    const upgrade_val = req.header("upgrade") orelse "";
+    const ws_key = req.header("sec-websocket-key");
 
     if (!std.ascii.eqlIgnoreCase(upgrade_val, "websocket") or ws_key == null) {
-        zix.Http1.sendJsonFD(fd, 400, "{\"error\":\"not a websocket upgrade request\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
 
+        try res.sendJson("{\"error\":\"not a websocket upgrade request\"}");
         return;
     }
 
-    zix.Http1.WebSocket.serveTls(fd, ws_key.?, wsOnFrame) catch {};
+    zix.Http1.WebSocket.serveTls(req.fd, ws_key.?, wsOnFrame) catch {};
 }
 
 // --------------------------------------------------------- //

@@ -1,6 +1,6 @@
 //! zix http1 static file serving: the public_dir fallback for unmatched routes.
 //!
-//! The Http1 handler signature carries only (head, body, fd), never io, so the router reads the
+//! The static fallback runs inside the router before any handler, so the router reads the
 //! configured public_dir and io from core threadlocals (core.setStatic, installed per worker) and
 //! calls serve here. Writes go through core.writeAllFD, so the response-coalescing sink and the TLS
 //! buffering path are honored the same as any other Http1 response.

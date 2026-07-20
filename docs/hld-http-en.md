@@ -153,7 +153,6 @@ graph TD
     Http --> request["request.zig\nRequest"]
     Http --> response["response.zig\nResponse + HttpHeader"]
     Http --> context["context.zig\nContext"]
-    Http --> middleware["middleware.zig"]
     Http --> static["static.zig"]
     Http --> multipart["utils/multipart.zig\nParser + Field"]
     Http --> websocket["websocket.zig\nWebSocket"]
@@ -213,7 +212,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.ClientRequestOpts` | struct | Per-request options: `headers`, `body`, `connect_timeout_ms` override |
 | `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
-| `zix.Http.SseWriter` | struct | SSE event writer returned by `res.stream()`: writeEvent, writeNamedEvent, comment |
+| `zix.Http.SseWriter` | struct | SSE event writer returned by `res.sendStream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget), logger (optional logger pointer) |
 | `zix.Logger` | struct | File and console logger: `init` / `deinit` / `flush` / `system` / `access` |
 | `zix.Logger.Config` | struct | Logger configuration: console, save_path (must exist, caller creates it), save_file, min levels, max_lines |
@@ -269,9 +268,13 @@ pub const HttpServerConfig = struct {
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
     workers:              usize             = 0,          // 0 = cpu_count; accept threads for .POOL/.MIXED, workers for .EPOLL; ignored by .ASYNC
     pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (ignored by .EPOLL, .MIXED, .ASYNC)
+    tls:                  ?*zix.Tls.Context = null,       // non-null serves this engine over TLS (native https), else cleartext
+    tls_port:             u16               = 0,          // dual-listener companion port, 0 = single-listener; see docs/hld-tls-en.md
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
 };
 ```
+
+The listing above is abbreviated: the full field reference (compression, response cache, uring tuning, REUSEPORT steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
 The caller owns `io`: `zix.Http.Server` does not call `deinit` on it. The route table is passed as a comptime argument to `Server.init`: no runtime allocation for routing.
 
@@ -359,8 +362,13 @@ Buffers response state, writes on `send()` or equivalent.
 | `addHeader(name, value)` | Up to `max_response_headers` extra headers rejects CR/LF |
 | `send(body)` | Writes full HTTP/1.1 response and flushes |
 | `sendJson(body)` | Sets `content_type = application/json`, then `send` |
-| `noContent()` | Sets status `.NO_CONTENT`, sends empty body |
-| `stream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`, and sets `streaming = true` so the keep-alive loop exits after the handler returns |
+| `sendText(body)` | Sets `content_type = text/plain`, then `send` |
+| `sendRaw(bytes)` | Writes caller-owned wire bytes verbatim, no serialization |
+| `sendNoContent()` | Sets status `.NO_CONTENT`, sends empty body |
+| `sendStream()` | Sends SSE headers (no `Content-Length`), returns `SseWriter`, and sets `streaming = true` so the keep-alive loop exits after the handler returns |
+| `sendFromCache(req)` | `true` on a fresh cache hit (already written), else `false` |
+| `sendCached(req, body, ttl_ms)` | Sends `body`, then stores it under the request key for later `sendFromCache` hits |
+| `sendNegotiated(req, body)` | Sends `body` compressed per `Accept-Encoding` (opt-in via `setCompression`), else identical to `send` |
 
 Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.BufferTooSmall` is returned if exceeded.
 
@@ -664,9 +672,9 @@ sequenceDiagram
     C->>C: auto-reconnect after retry ms
 ```
 
-### res.stream()
+### res.sendStream()
 
-`res.stream()` sends the SSE response headers (no `Content-Length`) and returns an `SseWriter`. The connection stays open while the handler writes events. When the handler returns, `handleConnection` sees `res.streaming == true` and closes the connection instead of looping for the next request.
+`res.sendStream()` (renamed from `stream()`, ADR-062) sends the SSE response headers (no `Content-Length`) and returns an `SseWriter`. The connection stays open while the handler writes events. When the handler returns, `handleConnection` sees `res.streaming == true` and closes the connection instead of looping for the next request.
 
 | `SseWriter` method | Wire format |
 | :- | :- |
@@ -683,7 +691,7 @@ SSE connections are long-lived. `.POOL`'s blocking thread pool would be exhauste
 ```zig
 pub fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    const sse = try res.stream();
+    const sse = try res.sendStream();
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
         var buf: [32]u8 = undefined;
@@ -841,9 +849,10 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 
 | Feature | Location | Note |
 | :- | :- | :- |
-| Middleware chain runner | `middleware.zig` | Comptime wrapper pattern is the current approach |
-| TLS (this high-level server) | proxy-terminated by design: run nginx / haproxy in front (see [`docs/hld-proxy-en.md`](hld-proxy-en.md)). For in-process TLS use `zix.Http1` (native https/1.1), `zix.Http2` (native h2 over TLS), or `zix.Grpc`, which all serve TLS directly. | n/a |
+| Middleware chain runner | deleted (ADR-062) | Comptime wrapper composition is the middleware idiom, see `examples/http_middleware.zig` |
 | response/read timeout enforcement (client) | `client.zig` | Config fields stored. IO-level wiring deferred |
+
+TLS for this server (native https, opt-in via `config.tls`, dual listener via `config.tls_port`) is implemented, see [`docs/hld-tls-en.md`](hld-tls-en.md).
 
 For UDP design see [`docs/hld-udp.md`](hld-udp.md). For UDS see [`docs/hld-uds.md`](hld-uds.md).
 

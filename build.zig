@@ -118,4 +118,52 @@ pub fn build(b: *std.Build) void {
     } else {
         std.log.info("zix build: tests/ + examples/ required for test-runner steps, skipping", .{});
     }
+
+    // --------------------------------------------------------- //
+
+    // postgrez is a standalone package (src/driver/postgrez, own build.zig):
+    // these steps delegate into it with the same compiler.
+    if (dirExists(b, "src/driver/postgrez")) {
+        const postgrez_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit" });
+        postgrez_unit.setCwd(b.path("src/driver/postgrez"));
+
+        const postgrez_unit_step = b.step("postgrez-test-unit", "Run the postgrez driver unit tests (no server needed)");
+        postgrez_unit_step.dependOn(&postgrez_unit.step);
+
+        const postgrez_integration = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-integration" });
+        postgrez_integration.setCwd(b.path("src/driver/postgrez"));
+
+        const postgrez_integration_step = b.step("postgrez-test-integration", "Run the postgrez driver integration tests (owns the PG 18 container lifecycle)");
+        postgrez_integration_step.dependOn(&postgrez_integration.step);
+
+        const postgrez_runner = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-runner" });
+        postgrez_runner.setCwd(b.path("src/driver/postgrez"));
+
+        const postgrez_runner_step = b.step("postgrez-test-runner", "Run every postgrez example against the PG 18 container (owns the lifecycle)");
+        postgrez_runner_step.dependOn(&postgrez_runner.step);
+    }
+
+    // --------------------------------------------------------- //
+
+    // rediz is a standalone package (src/driver/rediz, own build.zig):
+    // these steps delegate into it with the same compiler.
+    if (dirExists(b, "src/driver/rediz")) {
+        const rediz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit" });
+        rediz_unit.setCwd(b.path("src/driver/rediz"));
+
+        const rediz_unit_step = b.step("rediz-test-unit", "Run the rediz driver unit tests (no server needed)");
+        rediz_unit_step.dependOn(&rediz_unit.step);
+
+        const rediz_integration = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-integration" });
+        rediz_integration.setCwd(b.path("src/driver/rediz"));
+
+        const rediz_integration_step = b.step("rediz-test-integration", "Run the rediz driver integration tests (owns the Redis 8 container lifecycle)");
+        rediz_integration_step.dependOn(&rediz_integration.step);
+
+        const rediz_runner = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-runner" });
+        rediz_runner.setCwd(b.path("src/driver/rediz"));
+
+        const rediz_runner_step = b.step("rediz-test-runner", "Run every rediz example against the Redis 8 container (owns the lifecycle)");
+        rediz_runner_step.dependOn(&rediz_runner.step);
+    }
 }

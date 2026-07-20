@@ -73,22 +73,22 @@ const URING_SEND_BUF_SIZE: usize = 16 * 1024;
 /// worst-case per-connection memory.
 const URING_SEND_BUF_MAX: usize = 1024 * 1024;
 
-/// Idle-pool warm floor. The minimum number of closed connections kept warm
-/// (buffers resident, allocation-free to reuse) when the worker is otherwise idle,
-/// so a trickle of new connections after a quiet spell still skips the allocator.
-/// The effective warm cap is clamped between this floor and URING_IDLE_POOL_CEILING,
-/// see UringWorker.idleCap.
+/// Idle-pool warm floor. The minimum number of closed connections' slab strides
+/// kept warm (pages resident) when the worker is otherwise idle, so a trickle of
+/// new connections after a quiet spell still lands on resident pages. Also the
+/// number of strides pretouched at startup. The effective warm cap is clamped
+/// between this floor and URING_IDLE_POOL_CEILING, see UringWorker.idleCap.
 const URING_IDLE_POOL_FLOOR: usize = 8;
 
-/// Idle-pool warm ceiling. The absolute upper bound on the warm pool per
+/// Idle-pool warm ceiling. The absolute upper bound on warm free strides per
 /// worker, regardless of live concurrency. The earlier cap tracked live_count, so
 /// at very high concurrency (thousands of live connections on one worker) the pool
 /// kept a full reconnect of the working set warm: that doubled the resident set
 /// (recv plus send buffers for every warm connection on top of the live ones) and
 /// the L2/L3 plus TLB pressure cost more throughput than the spared allocations
-/// won back. A few hundred warm connections already absorb steady churn, so the
+/// won back. A few hundred warm strides already absorb steady churn, so the
 /// ceiling holds the warm set below live_count where it would otherwise blow up,
-/// and the rest is returned to the OS through evictColdTail. See idleCap.
+/// and the rest is returned to the OS through releaseSlot's eviction. See idleCap.
 const URING_IDLE_POOL_CEILING: usize = 256;
 
 /// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
@@ -135,12 +135,13 @@ const WS_RING_BUF_SIZE: u32 = 4096;
 
 const WS_RING_BUF_COUNT: u16 = 256;
 
-/// Per-connection ring state. buf accumulates request (or frame) bytes between
-/// recv completions. send_buf front [0..inflight] is owned by the kernel while a
-/// send SQE is outstanding, [inflight..staged] is appended and waiting.
-/// closing marks a connection that must be freed once the last send lands. ws is
-/// set once the connection upgrades to WebSocket: from then on buf holds frame
-/// bytes and the recv loop pumps frames instead of parsing HTTP.
+/// Per-connection ring state, stored inline in the fd-indexed slot table (an
+/// empty slot reads as buf.len == 0). buf accumulates request (or frame) bytes
+/// between recv completions. send_buf front [0..inflight] is owned by the
+/// kernel while a send SQE is outstanding, [inflight..staged] is appended and
+/// waiting. closing marks a connection that must be freed once the last send
+/// lands. ws is set once the connection upgrades to WebSocket: from then on buf
+/// holds frame bytes and the recv loop pumps frames instead of parsing HTTP.
 const UringConn = struct {
     fd: std.posix.fd_t,
     gen: u24,
@@ -150,6 +151,23 @@ const UringConn = struct {
     staged: usize,
     inflight: usize,
     closing: bool,
+    /// Compact buffer-slab slot backing buf and send_buf, returned to the
+    /// free-list on close so the resident slab packs to the live connection
+    /// count and every run lays the working set out identically.
+    slot: u32 = 0,
+    /// send_buf was switched to a heap buffer by the sink's grow path (an
+    /// oversized response). Freed on close: the next connection on this slot
+    /// starts from the slab slice again.
+    send_heap: bool = false,
+    /// Zero-copy cache replay in flight: the outstanding send references these
+    /// borrowed cache-slab bytes (send_buf stages nothing), and the pinned
+    /// slot is released when the send completes or the connection tears down.
+    direct: []const u8 = &.{},
+    direct_slot: u32 = 0,
+    /// Scan watermark for a split request head: bytes of buf already searched
+    /// for the header terminator by an earlier recv completion, so the next
+    /// completion resumes the scan instead of rescanning from zero.
+    scan_from: usize = 0,
     /// Request-body bytes still to read and discard off the socket for a body
     /// too large to buffer (the response was already staged). Mirrors the EPOLL
     /// Conn.drain. While > 0 the connection is draining, not parsing requests.
@@ -158,13 +176,6 @@ const UringConn = struct {
     /// keep-alive). Mirrors the EPOLL Conn.drain_close.
     drain_close: bool = false,
     ws: ?core.WsFrameFn = null,
-    /// Idle-pool links, valid only while this connection sits in the worker's
-    /// idle pool between a close and the next accept that reuses it. The warm
-    /// pool is doubly linked (most-recently-used at the head, least-recently-used
-    /// at the tail) so the release path can evict the LRU tail in O(1). The cold
-    /// stack uses next only.
-    next: ?*UringConn = null,
-    prev: ?*UringConn = null,
 };
 
 /// Which re-arm a parked process-queue entry retries.
@@ -200,10 +211,12 @@ const TlsConnTable = tls_conn.ConnTable(UringTlsConn, MAX_FD, freeUringTlsConn);
 
 /// Build a concrete io_uring worker with the handler and optional raw
 /// interceptor baked in at compile time, mirroring epollWorkerFn.
-fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) type {
+fn UringWorker(comptime handler_fn: HandlerFn) type {
     return struct {
         ring: IoUring,
-        slots: []?*UringConn,
+        /// fd-indexed inline connection table (mapZeroedSlots, demand-paged).
+        /// An empty slot reads as buf.len == 0, mirroring the EPOLL ConnTable.
+        slots: []UringConn,
         listener_fd: std.posix.fd_t,
         gen_counter: u24,
         recv_buf_size: usize,
@@ -226,26 +239,30 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// the kernel does not support buffer rings: WebSocket then falls back to
         /// the plain recv-into-conn.buf path (4a).
         ws_bufs: ?IoUring.BufferGroup,
-        /// Warm idle-connection pool, doubly linked. A closed connection is pushed
-        /// to the head (most-recently-used) with its recv and send buffers intact
-        /// instead of being freed, so a later accept reuses the allocation. This
-        /// removes the three per-connection heap allocations (struct + recv buf +
-        /// send buf) from the steady-state accept/close cycle, which dominates the
-        /// short-lived (churn) test. When the pool grows past idleCap the
-        /// least-recently-used tail is evicted, not the connection just released,
-        /// so the active working set at the head is never the one reclaimed.
-        warm_head: ?*UringConn = null,
-        warm_tail: ?*UringConn = null,
-        /// Number of connections currently in the warm pool. Compared against
-        /// idleCap to decide when to evict the LRU tail. The single worker thread
-        /// owns it, so no synchronization is needed.
-        warm_count: usize = 0,
-        /// Cold idle-connection stack. An evicted warm tail has its buffer pages
-        /// returned to the OS (MADV_DONTNEED) and is pushed here. The struct and
-        /// virtual allocation stay reusable, so an accept that drains the warm pool
-        /// reuses a cold connection with no allocator call, paying only a recv
-        /// first-touch fault to bring its pages back. Singly linked via next.
-        cold_head: ?*UringConn = null,
+        /// One contiguous buffer slab for every connection's recv and send
+        /// buffer, carved into page-multiple strides (recv + send back to back).
+        /// A connection draws a compact slot from the free-list on accept, so
+        /// the accept/close cycle does zero allocator calls and the hot working
+        /// set occupies the same addresses on every run. Mirrors the EPOLL
+        /// recv slab, extended with the per-connection send buffer URING needs.
+        conn_slab: []u8 = &.{},
+        /// Slab bytes per slot: recv_buf_size + send_buf_size rounded up to a
+        /// page, so a released slot's pages reclaim without touching a live
+        /// neighbor slot.
+        stride: usize = 0,
+        /// Stack of closed slot indices available for reuse, newest (warmest) on
+        /// top, so steady churn recycles the same resident strides.
+        free_slots: []u32 = &.{},
+        free_count: usize = 0,
+        /// Boundary inside free_slots: entries below it are cold (their slab
+        /// pages were returned to the OS with MADV_DONTNEED), entries at or
+        /// above it are warm (pages resident). When the warm span outgrows
+        /// idleCap the oldest warm entry is advised away, which is the LRU
+        /// eviction of the old linked pool with the same memory discipline.
+        cold_count: usize = 0,
+        /// Next never-used slot index. Slots are handed out compactly from 0,
+        /// so the touched slab prefix bounds the resident buffer memory.
+        slot_top: usize = 0,
         /// Live connections currently held in the slot table (this worker's
         /// concurrency). Incremented when an accepted connection installs into a
         /// slot, decremented when it is torn down. The warm idle-pool cap is
@@ -272,6 +289,12 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// increment (no contention), reported through the system logger at worker
         /// exit so REUSEPORT skew across workers is measurable.
         requests_served: u64 = 0,
+        /// The worker io, handed to the handler trio (ctx.io) for an inline driver
+        /// call. Defaulted so dispatch-level tests that never touch it can omit it.
+        io: std.Io = undefined,
+        /// Per-request scratch arena for the handler trio, reset before each
+        /// dispatch. A pointer to the run-scope arena so the worker stays movable.
+        req_arena: *std.heap.ArenaAllocator = undefined,
         /// The multishot accept re-arm was lost to a full SQ. Retried at the top
         /// of the next loop pass. Without this a full SQ at re-arm time stopped
         /// the worker from ever accepting again while the kernel backlog filled.
@@ -293,32 +316,16 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         const linux = std.os.linux;
 
         fn deinit(self: *Self) void {
-            for (self.slots) |maybe_conn| {
-                if (maybe_conn) |conn| {
-                    _ = linux.close(conn.fd);
-                    allocator.free(conn.buf);
-                    allocator.free(conn.send_buf);
-                    allocator.destroy(conn);
-                }
-            }
+            for (self.slots) |*conn| {
+                if (conn.buf.len == 0) continue;
 
-            var warm = self.warm_head;
-            while (warm) |conn| {
-                warm = conn.next;
-                allocator.free(conn.buf);
-                allocator.free(conn.send_buf);
-                allocator.destroy(conn);
-            }
-
-            var cold = self.cold_head;
-            while (cold) |conn| {
-                cold = conn.next;
-                allocator.free(conn.buf);
-                allocator.free(conn.send_buf);
-                allocator.destroy(conn);
+                _ = linux.close(conn.fd);
+                if (conn.send_heap) allocator.free(conn.send_buf);
             }
 
             slab.unmapSlots(self.slots);
+            if (self.conn_slab.len > 0) slab.unmapSlots(self.conn_slab);
+            if (self.free_slots.len > 0) allocator.free(self.free_slots);
             if (self.park_entries.len > 0) allocator.free(self.park_entries);
             allocator.free(self.ws_payload_buf);
             allocator.free(self.body_buf);
@@ -341,14 +348,15 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             return self.lookupFd(decoded.fd, decoded.gen);
         }
 
-        /// Slot lookup by fd + generation. A mismatched generation means the fd
-        /// was closed and reused, so the reference is stale and must be ignored.
+        /// Slot lookup by fd + generation. An empty slot (buf.len == 0) or a
+        /// mismatched generation means the fd was closed (and possibly reused),
+        /// so the reference is stale and must be ignored.
         fn lookupFd(self: *Self, fd: std.posix.fd_t, gen: u24) ?*UringConn {
             const idx: usize = @intCast(fd);
             if (idx >= self.slots.len) return null;
 
-            const conn = self.slots[idx] orelse return null;
-            if (conn.gen != gen) return null;
+            const conn = &self.slots[idx];
+            if (conn.buf.len == 0 or conn.gen != gen) return null;
 
             return conn;
         }
@@ -417,160 +425,93 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
         }
 
-        /// Take a connection object for a freshly accepted fd: pop one from the
-        /// idle pool (recv and send buffers intact) when available, otherwise
-        /// allocate a new one with both buffers. Returns null only when a fresh
-        /// allocation fails. The caller resets the per-connection state fields.
-        ///
-        /// Note:
-        /// - The warm pool is preferred (its pages are resident, no fault), and
-        ///   the cold pool is the fallback (reusable, but its first recv faults
-        ///   the pages back). Only when both are empty is a buffer allocated.
-        fn acquireConn(self: *Self) ?*UringConn {
-            if (self.warm_head) |conn| {
-                self.warm_head = conn.next;
-                if (self.warm_head) |head| head.prev = null else self.warm_tail = null;
-                self.warm_count -= 1;
-
-                return conn;
-            }
-
-            if (self.cold_head) |conn| {
-                self.cold_head = conn.next;
-
-                return conn;
-            }
-
-            const conn = allocator.create(UringConn) catch return null;
-            const buf = allocator.alloc(u8, self.recv_buf_size) catch {
-                allocator.destroy(conn);
-                return null;
-            };
-            const send_buf = allocator.alloc(u8, self.send_buf_size) catch {
-                allocator.free(buf);
-                allocator.destroy(conn);
-                return null;
-            };
-            conn.buf = buf;
-            conn.send_buf = send_buf;
-
-            return conn;
+        /// The slab stride backing a slot: recv buffer then send buffer, padded
+        /// to the page-multiple stride so a released slot reclaims cleanly.
+        fn slotStride(self: *Self, slot: u32) []u8 {
+            return self.conn_slab[@as(usize, slot) * self.stride ..][0..self.stride];
         }
 
-        /// Seed the warm idle pool with idle_floor connections before the accept
-        /// loop starts, so the first burst of accepts reuses resident buffers
-        /// instead of allocating and first-touch faulting them under load. Without
-        /// it the first run after startup pays every connection's allocation and
-        /// page fault while a later run (pool already warm from the prior run) does
-        /// not, which reads as a cold-first-run gap in back-to-back measurements.
-        ///
-        /// Note:
-        /// - The seed count is idle_floor, the reserve the pool settles to when
-        ///   idle (see idleCap). Seeding to it keeps the resident set identical to
-        ///   steady state, so the cost is paid once at startup, not carried as
-        ///   extra memory.
-        /// - Each connection's recv and send buffers are touched page by page so
-        ///   the pages are resident up front, not faulted on the first recv.
-        /// - A partial allocation failure stops the seed early and leaves whatever
-        ///   was already warmed. Startup never fails on a warm-pool short-fall: the
-        ///   accept path still allocates on demand when the pool is empty.
-        fn prewarmPool(self: *Self) void {
-            var seeded: usize = 0;
-            while (seeded < self.idle_floor) : (seeded += 1) {
-                const conn = allocator.create(UringConn) catch break;
-                const buf = allocator.alloc(u8, self.recv_buf_size) catch {
-                    allocator.destroy(conn);
-                    break;
-                };
-                const send_buf = allocator.alloc(u8, self.send_buf_size) catch {
-                    allocator.free(buf);
-                    allocator.destroy(conn);
-                    break;
-                };
+        fn slotRecvBuf(self: *Self, slot: u32) []u8 {
+            return self.slotStride(slot)[0..self.recv_buf_size];
+        }
 
-                @memset(buf, 0);
-                @memset(send_buf, 0);
+        fn slotSendBuf(self: *Self, slot: u32) []u8 {
+            return self.slotStride(slot)[self.recv_buf_size..][0..self.send_buf_size];
+        }
 
-                conn.buf = buf;
-                conn.send_buf = send_buf;
-                conn.prev = null;
-                conn.next = self.warm_head;
-                if (self.warm_head) |head| head.prev = conn;
-                self.warm_head = conn;
-                if (self.warm_tail == null) self.warm_tail = conn;
-                self.warm_count += 1;
+        /// Draw a compact buffer-slab slot for a freshly accepted fd: reuse the
+        /// newest freed slot (warmest, pages most likely resident), else take
+        /// the next never-used slot. Null when the slab is exhausted (every
+        /// slot live). No allocator call on any path.
+        fn acquireSlot(self: *Self) ?u32 {
+            if (self.free_count > 0) {
+                self.free_count -= 1;
+                if (self.cold_count > self.free_count) self.cold_count = self.free_count;
+
+                return self.free_slots[self.free_count];
+            }
+
+            if ((self.slot_top + 1) * self.stride > self.conn_slab.len) return null;
+
+            const slot: u32 = @intCast(self.slot_top);
+            self.slot_top += 1;
+
+            return slot;
+        }
+
+        /// Return a closed connection's slot to the free-list (warm, on top),
+        /// then trim the oldest warm free slot past the cap: its stride pages go
+        /// back to the OS with MADV_DONTNEED and the entry crosses the cold
+        /// boundary. That is the LRU-tail eviction of the old linked pool, so
+        /// the slot a churn accept is about to reuse is never the one reclaimed,
+        /// and resident memory still tracks live connections.
+        fn releaseSlot(self: *Self, slot: u32) void {
+            self.free_slots[self.free_count] = slot;
+            self.free_count += 1;
+
+            if (self.free_count - self.cold_count > self.idleCap()) {
+                slab.releaseSlabPages(self.slotStride(self.free_slots[self.cold_count]));
+                self.cold_count += 1;
             }
         }
 
-        /// Warm idle-pool cap. The pool tracks live concurrency so steady churn
-        /// finds a resident buffer at the head, but it is clamped on both ends: the
-        /// floor keeps a small warm reserve when the worker is idle, and the ceiling
-        /// bounds the warm set so it never holds a full reconnect of a large working
-        /// set. At low concurrency the cap is live_count (or the floor when idle); at
-        /// high concurrency the ceiling holds the warm set below live_count, which is
-        /// where the unclamped cap doubled the resident set and cost throughput.
+        /// Pretouch the first idle_floor strides of the buffer slab so the first
+        /// accept burst runs on resident pages instead of first-touch faulting
+        /// them under load, and the touched layout is identical on every run.
+        /// Replaces the old allocation-based pool seeding: the slab needs no
+        /// seeded objects, residency is the only startup cost left to pay.
+        fn pretouchSlab(self: *Self) void {
+            if (self.stride == 0) return;
+
+            const strides = @min(self.idle_floor, self.conn_slab.len / self.stride);
+            slab.pretouch(self.conn_slab[0 .. strides * self.stride]);
+        }
+
+        /// Warm free-slot cap. The warm span tracks live concurrency so steady
+        /// churn finds a resident stride on top of the free stack, but it is
+        /// clamped on both ends: the floor keeps a small warm reserve when the
+        /// worker is idle, and the ceiling bounds the warm set so it never holds
+        /// a full reconnect of a large working set resident. At low concurrency
+        /// the cap is live_count (or the floor when idle); at high concurrency
+        /// the ceiling holds the warm set below live_count, which is where an
+        /// unclamped cap doubled the resident set and cost throughput.
         fn idleCap(self: *const Self) usize {
             return @min(self.idle_ceiling, @max(self.live_count, self.idle_floor));
         }
 
-        /// Evict the least-recently-used warm connection (the tail) to the cold
-        /// stack: return its buffer pages to the OS with MADV_DONTNEED, unlink it
-        /// from the warm pool, and push it cold. The struct and virtual allocation
-        /// stay reusable, only the physical pages go back, and a later accept that
-        /// reaches the cold stack faults them in on the next recv. Reclaiming the
-        /// LRU tail (not the connection just released, which is the hot head) is
-        /// what keeps the active churn working set resident.
-        fn evictColdTail(self: *Self) void {
-            const victim = self.warm_tail orelse return;
-
-            self.warm_tail = victim.prev;
-            if (victim.prev) |p| p.next = null else self.warm_head = null;
-            self.warm_count -= 1;
-
-            slab.releaseSlabPages(victim.buf);
-            slab.releaseSlabPages(victim.send_buf);
-
-            victim.prev = null;
-            victim.next = self.cold_head;
-            self.cold_head = victim;
-        }
-
-        /// Return a closed connection to the warm idle pool, then trim the
-        /// cold tail if the pool now exceeds the cap. Both steps are off the parse
-        /// and handler hot path.
-        ///
-        /// Note:
-        /// - A send_buf the grow allocator doubled for an oversized response is
-        ///   shrunk back to the base size. Oversized responses are rare, so this
-        ///   realloc is off the churn path, and it stops a connection that served
-        ///   one large response from carrying a multi-MiB buffer for life.
-        /// - The connection is pushed to the warm head (most-recently-used). Past
-        ///   the cap the least-recently-used tail is evicted to the cold stack, so
-        ///   the buffer reclaimed is never the one a churn accept is about to
-        ///   reuse. The accept path overwrites buf and send_buf before reading, so
-        ///   a cold connection's zeroed pages are safe to reuse.
-        fn releaseConn(self: *Self, conn: *UringConn) void {
-            if (conn.send_buf.len > self.send_buf_size) {
-                if (allocator.realloc(conn.send_buf, self.send_buf_size)) |shrunk| {
-                    conn.send_buf = shrunk;
-                } else |_| {}
-            }
-
-            conn.prev = null;
-            conn.next = self.warm_head;
-            if (self.warm_head) |head| head.prev = conn;
-            self.warm_head = conn;
-            if (self.warm_tail == null) self.warm_tail = conn;
-            self.warm_count += 1;
-
-            if (self.warm_count > self.idleCap()) self.evictColdTail();
-        }
-
+        /// Tear down a closed connection: free a heap-grown send buffer, hand
+        /// the slab slot back (releaseSlot applies the warm cap and the page
+        /// discipline), and zero the fd slot so it reads empty. No allocator
+        /// call on the common path.
         fn destroyConn(self: *Self, conn: *UringConn) void {
-            self.slots[@intCast(conn.fd)] = null;
+            if (conn.direct.len > 0) {
+                if (core.tl_cache) |resp_cache| resp_cache.unpin(conn.direct_slot);
+            }
+            if (conn.send_heap) allocator.free(conn.send_buf);
             self.live_count -= 1;
+            if (self.free_slots.len > 0) self.releaseSlot(conn.slot);
 
-            self.releaseConn(conn);
+            conn.* = std.mem.zeroes(UringConn);
         }
 
         /// Tear a connection down via a ring close (prep_close) instead of a
@@ -604,7 +545,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             conn.closing = true;
             if (conn.inflight > 0) return;
 
-            if (conn.staged > 0) {
+            if (conn.staged > 0 or conn.direct.len > 0) {
                 self.submitSend(conn);
                 return;
             }
@@ -710,10 +651,13 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 return;
             };
 
-            sqe.prep_send(conn.fd, conn.send_buf[0..conn.staged], linux.MSG.NOSIGNAL);
+            // Zero-copy cache replay: the send references the pinned slab
+            // bytes directly, nothing was staged into send_buf for it.
+            const payload = if (conn.direct.len > 0) conn.direct else conn.send_buf[0..conn.staged];
+            sqe.prep_send(conn.fd, payload, linux.MSG.NOSIGNAL);
             sqe.user_data = uring.packUserData(.send, conn.gen, conn.fd);
 
-            conn.inflight = conn.staged;
+            conn.inflight = payload.len;
         }
 
         // ----------------------------------------------------- //
@@ -734,25 +678,24 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             setNoDelay(conn_fd);
             common.setBusyPoll(conn_fd, self.busy_poll_us);
 
-            const conn = self.acquireConn() orelse {
+            const slot = self.acquireSlot() orelse {
                 _ = linux.close(conn_fd);
                 return;
             };
 
             self.gen_counter +%= 1;
-            const buf = conn.buf;
-            const send_buf = conn.send_buf;
+            const conn = &self.slots[idx];
             conn.* = .{
                 .fd = conn_fd,
                 .gen = self.gen_counter,
-                .buf = buf,
+                .buf = self.slotRecvBuf(slot),
                 .filled = 0,
-                .send_buf = send_buf,
+                .send_buf = self.slotSendBuf(slot),
                 .staged = 0,
                 .inflight = 0,
                 .closing = false,
+                .slot = slot,
             };
-            self.slots[idx] = conn;
             self.live_count += 1;
 
             self.armRecv(conn);
@@ -843,7 +786,7 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
         /// Submit the staged send when there is one, otherwise close or re-arm a
         /// recv. Shared by the HTTP and WebSocket recv completions.
         fn afterDrain(self: *Self, conn: *UringConn, outcome: core.ConnOutcome) void {
-            if (conn.staged > 0) {
+            if (conn.staged > 0 or conn.direct.len > 0) {
                 self.submitSend(conn);
                 if (outcome == .close) conn.closing = true;
 
@@ -935,30 +878,37 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 .buf = conn.send_buf,
                 .grow_allocator = allocator,
                 .grow_cap = URING_SEND_BUF_MAX,
+                // A slab-backed send_buf cannot be realloc'd: grow switches to a
+                // heap buffer and flips buf_owned, adopted below as send_heap.
+                .buf_owned = conn.send_heap,
+                // Ring sends give borrowed cache bytes a natural lifetime (the
+                // pin drops at the send CQE), so the zero-copy replay is on.
+                .allow_direct = true,
             };
             core.tl_resp_sink = &sink;
             defer core.tl_resp_sink = null;
 
             var consumed: usize = 0;
             var keep_alive = true;
+            var scan_from = conn.scan_from;
+            conn.scan_from = 0;
             while (consumed < conn.filled) {
                 const rem = conn.buf[consumed..conn.filled];
-                const header_end = std.mem.indexOf(u8, rem, "\r\n\r\n") orelse {
+                const header_end = std.mem.indexOfPos(u8, rem, scan_from, "\r\n\r\n") orelse {
                     if (rem.len >= conn.buf.len) {
                         core.writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
                         keep_alive = false;
+                        break;
                     }
 
+                    // Partial head: record the scan watermark so the next recv
+                    // completion resumes the terminator search here instead of
+                    // rescanning every previously searched byte (recvHead's
+                    // search_from, ported to the event loop).
+                    conn.scan_from = if (rem.len > 3) rem.len - 3 else 0;
                     break;
                 };
-
-                if (comptime raw_fn != null) {
-                    if (raw_fn.?(rem, header_end, fd)) |end| {
-                        consumed += end;
-                        self.requests_served += 1;
-                        continue;
-                    }
-                }
+                scan_from = 0;
 
                 const parsed = parseGetFastPath(rem, header_end) orelse
                     core.parseHeadAt(rem, header_end) catch {
@@ -988,7 +938,8 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                         // declared remainder off the socket over later completions
                         // so the connection stays usable for keep-alive.
                         if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
-                        handler_fn(&head, &.{}, fd);
+                        _ = self.req_arena.reset(.retain_capacity);
+                        core.invokeHandler(handler_fn, &head, &.{}, fd, self.io, self.req_arena.allocator());
                         self.requests_served += 1;
 
                         // Widen the receive window for the upcoming large-body drain (uploads).
@@ -1007,7 +958,8 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
                 }
 
                 if (self.handler_timeout_ms != 0) core.setTimeout(self.handler_timeout_ms);
-                handler_fn(&head, body, fd);
+                _ = self.req_arena.reset(.retain_capacity);
+                core.invokeHandler(handler_fn, &head, body, fd, self.io, self.req_arena.allocator());
 
                 consumed += request_len;
                 self.requests_served += 1;
@@ -1034,10 +986,14 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             }
 
             // The sink may have grown send_buf to fit an oversized response, so
-            // adopt the (possibly reallocated) buffer before submitSend and
-            // handleSend reference it.
+            // adopt the (possibly heap-switched) buffer before submitSend and
+            // handleSend reference it. A captured zero-copy replay transfers
+            // with its pin, released at the send CQE (or teardown).
             conn.send_buf = sink.buf;
+            conn.send_heap = sink.buf_owned;
             conn.staged = sink.len;
+            conn.direct = sink.direct;
+            conn.direct_slot = sink.direct_slot;
             if (sink.failed) return .close;
 
             return if (keep_alive) .keep_alive else .close;
@@ -1047,24 +1003,50 @@ fn UringWorker(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) typ
             const conn = self.lookup(decoded) orelse return;
 
             if (cqe.res < 0) {
+                // The send completed (with an error), so nothing is in flight
+                // anymore: clear it or beginClose would wait for a CQE that
+                // never comes. The staged remainder (and any borrowed replay,
+                // whose pin drops here) is dropped too: the socket is dead, and
+                // beginClose would otherwise re-submit it error after error.
+                conn.inflight = 0;
+                conn.staged = 0;
+                if (conn.direct.len > 0) {
+                    if (core.tl_cache) |resp_cache| resp_cache.unpin(conn.direct_slot);
+                    conn.direct = &.{};
+                }
                 self.beginClose(conn);
                 return;
             }
 
-            // A short send leaves a remainder: shift it to the front and send
-            // again before reading the next request.
             const sent: usize = @intCast(cqe.res);
-            if (sent < conn.staged) {
+
+            // Zero-copy cache replay: advance into the borrowed bytes on a
+            // short send, release the pin once they are fully on the wire.
+            if (conn.direct.len > 0) {
+                if (sent < conn.direct.len) {
+                    conn.direct = conn.direct[sent..];
+                    conn.inflight = 0;
+                    self.submitSend(conn);
+
+                    return;
+                }
+
+                if (core.tl_cache) |resp_cache| resp_cache.unpin(conn.direct_slot);
+                conn.direct = &.{};
+                conn.inflight = 0;
+            } else if (sent < conn.staged) {
+                // A short send leaves a remainder: shift it to the front and
+                // send again before reading the next request.
                 std.mem.copyForwards(u8, conn.send_buf, conn.send_buf[sent..conn.staged]);
                 conn.staged -= sent;
                 conn.inflight = 0;
                 self.submitSend(conn);
 
                 return;
+            } else {
+                conn.staged = 0;
+                conn.inflight = 0;
             }
-
-            conn.staged = 0;
-            conn.inflight = 0;
 
             if (conn.closing) {
                 self.finishClose(conn);
@@ -1299,7 +1281,7 @@ const UringWorkerCtx = struct {
 
 /// Return a concrete io_uring worker entry with handler_fn baked in at compile
 /// time, mirroring epollWorkerFn so Thread.spawn gets a direct call.
-fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) fn (UringWorkerCtx) void {
+fn uringWorkerFn(comptime handler_fn: HandlerFn) fn (UringWorkerCtx) void {
     return struct {
         fn run(ctx: UringWorkerCtx) void {
             pinToCpu(ctx.worker_id);
@@ -1310,6 +1292,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
             core.setStatic(config.public_dir, io);
+            core.setMaxResponseHeaders(config.max_response_headers.value());
 
             // Bind under the order gate: REUSEPORT group index i = worker i,
             // so the cpu-mod-N steering lands on the worker pinned to that slot.
@@ -1347,7 +1330,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             // Both groups joined: release the bind turn to the next worker.
             bind_turn.release();
 
-            const slots = slab.mapZeroedSlots(?*UringConn, MAX_FD) catch return;
+            const slots = slab.mapZeroedSlots(UringConn, MAX_FD) catch return;
 
             // Per-connection recv buffer size. WebSocket connections accumulate
             // frame bytes in conn.buf and unmask into ws_payload_buf, so both honor
@@ -1359,6 +1342,23 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             // back to max_recv_buf. The ring stays at WS_RING_BUF_SIZE, well below
             // conn.buf, so a carried partial frame always has room.
             const conn_buf_size = @max(config.max_recv_buf, config.ws_recv_buf);
+
+            // One contiguous buffer slab for every connection (recv + send per
+            // page-multiple stride), mmap'd so the base is page-aligned and
+            // demand-paged: untouched strides cost no physical memory, exactly
+            // like the EPOLL recv slab. THP is explicitly opted OUT: on a host
+            // whose THP policy is "always", any touch in this contiguous slab
+            // would materialize a whole 2 MiB extent (dozens of neighbor
+            // strides) and khugepaged re-collapse would undo the cold-slot
+            // MADV_DONTNEED, which roughly doubled resident memory at high
+            // concurrency on the bench gate. The layout determinism comes from
+            // the compact slots and the pretouch, not from the page size.
+            const conn_stride = std.mem.alignForward(usize, conn_buf_size + config.uring_send_buf_size, std.heap.page_size_min);
+            const conn_slab = slab.mapZeroedSlots(u8, MAX_FD * conn_stride) catch return;
+            slab.adviseNoHugePages(conn_slab);
+
+            // Compact-slot free-list (closed strides for reuse, warmest on top).
+            const free_slots = std.heap.smp_allocator.alloc(u32, MAX_FD) catch return;
 
             // Per-worker scratch for unmasking WebSocket payloads. Sized to the
             // connection buffer, the largest frame a connection can accumulate.
@@ -1377,13 +1377,23 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             else
                 &.{};
 
-            const Worker = UringWorker(handler_fn, raw_fn);
+            // Per-request scratch for the handler trio, reset before each dispatch
+            // so a long pipelined burst never grows without bound.
+            var req_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer req_arena.deinit();
+
+            const Worker = UringWorker(handler_fn);
             var worker = Worker{
                 .ring = undefined,
                 .slots = slots,
+                .conn_slab = conn_slab,
+                .stride = conn_stride,
+                .free_slots = free_slots,
                 .park_entries = park_entries,
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
+                .io = io,
+                .req_arena = &req_arena,
                 .recv_buf_size = conn_buf_size,
                 .send_buf_size = config.uring_send_buf_size,
                 .idle_floor = config.uring_idle_pool_floor,
@@ -1436,9 +1446,10 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
             if (config.compress) core.setCompression(config.compress, config.compression_min_size, config.compression_max_out);
             defer core.setCompression(false, 0, 0);
 
-            // Seed the warm idle pool so the first accept burst reuses resident
-            // buffers instead of allocating and faulting them under load.
-            worker.prewarmPool();
+            // Make the first strides of the buffer slab resident so the first
+            // accept burst never first-touch faults under load, and the touched
+            // layout is identical on every run.
+            worker.pretouchSlab();
 
             worker.run();
 
@@ -1447,7 +1458,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) f
     }.run;
 }
 
-pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn: ?core.RawFn) !void {
+pub fn runUring(config: Config, comptime handler_fn: HandlerFn) !void {
     // Runtime probe: io_uring can be unavailable on this host (seccomp/sandbox,
     // RLIMIT_MEMLOCK, or an old kernel). Without this, every worker would fail
     // setup, return, and the server would vanish right after binding (a confusing
@@ -1455,7 +1466,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     var probe = initUringRing() catch |err| {
         logSystem(config, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
 
-        return epoll_model.runEpoll(config, handler_fn, raw_fn);
+        return epoll_model.runEpoll(config, handler_fn);
     };
     probe.deinit();
 
@@ -1479,7 +1490,7 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
-    const worker = uringWorkerFn(handler_fn, raw_fn);
+    const worker = uringWorkerFn(handler_fn);
     for (threads, 0..) |*thread, worker_id| {
         thread.* = try std.Thread.spawn(
             .{ .stack_size = worker_stack },
@@ -1493,23 +1504,29 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn, comptime raw_fn:
 
 // Echo the received body size: content_length when present (the large-body
 // drain path passes an empty body), otherwise the decoded body length.
-fn testEchoLenHandler(head: *const core.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
+fn testEchoLenHandler(req: *core.Request, res: *core.Response, ctx: *core.Context) anyerror!void {
+    _ = ctx;
+
     var buf: [24]u8 = undefined;
-    const n: u64 = if (head.content_length > 0) head.content_length else body.len;
+    const n: u64 = if (req.head.content_length > 0) req.head.content_length else req.body_bytes.len;
     const out = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
 
-    core.sendSimpleFD(fd, 200, "text/plain", out) catch {};
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(out);
 }
 
 // Build a UringWorker instance for dispatch-level tests. dispatch() reads only
 // body_buf and handler_timeout_ms and never touches the ring, so the ring and
 // slots can stay empty.
-fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8) UringWorker(handler, null) {
+fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8, arena: *std.heap.ArenaAllocator) UringWorker(handler) {
     return .{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = -1,
         .gen_counter = 0,
+        .io = undefined,
+        .req_arena = arena,
         .recv_buf_size = body_buf.len,
         .handler_timeout_ms = 0,
         .ws_payload_buf = &[_]u8{},
@@ -1524,8 +1541,10 @@ test "zix http1: URING dispatch decodes a fully-present chunked body" {
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var body_buf: [4096]u8 = undefined;
-    var worker = testUringWorker(testEchoLenHandler, &body_buf);
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
 
     // One chunk "20" (2 bytes) then the zero terminator: decodes to "20".
     const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
@@ -1546,14 +1565,55 @@ test "zix http1: URING dispatch decodes a fully-present chunked body" {
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n2"));
 }
 
+test "zix http1: URING dispatch resumes a split head scan from the watermark" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [256]u8 = undefined;
+    var worker = testUringWorker(testOkHandler, &body_buf, &arena);
+
+    // First completion delivers a head with no terminator: nothing parses and
+    // the watermark records how far the scan got (three bytes back, so a
+    // terminator split across completions is still found).
+    const part1 = "GET /pipeline HTTP/1.1\r\nHost: t";
+    var conn_buf: [1024]u8 = undefined;
+    @memcpy(conn_buf[0..part1.len], part1);
+    var send_buf: [1024]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = part1.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const first = worker.dispatch(&conn);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expectEqual(part1.len - 3, conn.scan_from);
+
+    // The terminator arrives: the request completes and the watermark resets.
+    const part2 = "\r\n\r\n";
+    @memcpy(conn_buf[conn.filled..][0..part2.len], part2);
+    conn.filled += part2.len;
+
+    const second = worker.dispatch(&conn);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.scan_from);
+
+    const resp = send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\nok"));
+}
+
 test "zix http1: URING dispatch arms drain for an oversized request body" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var body_buf: [256]u8 = undefined;
-    var worker = testUringWorker(testEchoLenHandler, &body_buf);
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
 
     // Content-Length far exceeds the 256-byte conn.buf, with only a partial body
     // present: dispatch must respond, arm the drain, and clear the buffer.
@@ -1577,8 +1637,10 @@ test "zix http1: URING dispatch arms drain for an oversized request body" {
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n100000"));
 }
 
-fn testOkHandler(_: *const core.ParsedHead, _: []const u8, fd: std.posix.fd_t) void {
-    core.sendSimpleFD(fd, 200, "text/plain", "ok") catch {};
+fn testOkHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("ok");
 }
 
 // Echo every WebSocket text/binary frame back to the connection, staging through
@@ -1589,10 +1651,10 @@ fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 
 test "zix http1: URING wsHandleBuf accumulates a frame split across ring deliveries" {
     var payload_buf: [256]u8 = undefined;
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 256,
@@ -1662,10 +1724,13 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
     defer _ = linux.close(fds[0]);
     // fds[1] is handed to finishClose, which closes it via the ring (not here).
 
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
+    const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
+    var free_slots: [4]u32 = undefined;
     var worker = Worker{
         .ring = initUringRing() catch return error.SkipZigTest,
-        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .slots = slots,
+        .free_slots = &free_slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1675,28 +1740,26 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
         .ws_bufs = null,
         .live_count = 1,
     };
-    @memset(worker.slots, null);
+    for (worker.slots) |*slot| slot.* = std.mem.zeroes(UringConn);
     defer {
         worker.ring.deinit();
-        gpa.free(worker.slots);
+        gpa.free(slots);
     }
 
-    // A connection parked in its fd slot. finishClose recycles it to the free
-    // list (it is not freed), so the test owns the cleanup of its buffers.
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = true };
-    worker.slots[@intCast(fds[1])] = conn;
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
+    // A connection parked in its fd slot. finishClose returns its buffer slot
+    // to the free-list and zeroes the fd slot, so the fd reads empty after.
+    var conn_buf: [64]u8 = undefined;
+    var send_buf: [64]u8 = undefined;
+    const conn = &worker.slots[@intCast(fds[1])];
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = true, .slot = 3 };
 
     worker.finishClose(conn);
 
-    // Slot cleared and the connection recycled into the warm pool for reuse.
-    try std.testing.expectEqual(@as(?*UringConn, null), worker.slots[@intCast(fds[1])]);
-    try std.testing.expectEqual(@as(?*UringConn, conn), worker.warm_head);
+    // Slot cleared (reads empty) and the buffer slot recycled for reuse.
+    try std.testing.expectEqual(@as(usize, 0), worker.slots[@intCast(fds[1])].buf.len);
+    try std.testing.expectEqual(@as(usize, 1), worker.free_count);
+    try std.testing.expectEqual(@as(u32, 3), worker.free_slots[0]);
+    try std.testing.expectEqual(@as(usize, 0), worker.live_count);
 
     // The close was staged on the ring, not run as a synchronous syscall:
     // submit and reap its CQE, which must report success and carry the .close
@@ -1711,16 +1774,25 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
     try std.testing.expectEqual(@as(i32, 0), cqes[0].res);
 }
 
-test "zix http1: URING releaseConn pools warm under cap, acquireConn reuses LIFO" {
-    const gpa = std.testing.allocator;
+test "zix http1: URING releaseSlot pools warm under cap, acquireSlot reuses LIFO" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
-    const Worker = UringWorker(testOkHandler, null);
+    const page = std.heap.page_size_min;
+
+    const Worker = UringWorker(testOkHandler);
+    const conn_slab = try slab.mapZeroedSlots(u8, page * 4);
+    defer slab.unmapSlots(conn_slab);
+    var free_slots: [4]u32 = undefined;
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
+        .conn_slab = conn_slab,
+        .stride = page,
+        .free_slots = &free_slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
+        .send_buf_size = 64,
         .handler_timeout_ms = 0,
         .ws_payload_buf = &[_]u8{},
         .body_buf = &[_]u8{},
@@ -1728,43 +1800,37 @@ test "zix http1: URING releaseConn pools warm under cap, acquireConn reuses LIFO
         .idle_floor = 4,
     };
 
-    const conn_a = try gpa.create(UringConn);
-    conn_a.* = .{ .fd = 10, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
-    const conn_b = try gpa.create(UringConn);
-    conn_b.* = .{ .fd = 11, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        gpa.free(conn_a.buf);
-        gpa.free(conn_a.send_buf);
-        gpa.destroy(conn_a);
-        gpa.free(conn_b.buf);
-        gpa.free(conn_b.send_buf);
-        gpa.destroy(conn_b);
-    }
+    // Fresh slots hand out compactly from 0.
+    try std.testing.expectEqual(@as(u32, 0), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(u32, 1), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(usize, 2), worker.slot_top);
 
-    worker.releaseConn(conn_a);
-    worker.releaseConn(conn_b);
-    try std.testing.expectEqual(@as(usize, 2), worker.warm_count);
-    try std.testing.expectEqual(@as(?*UringConn, conn_b), worker.warm_head);
-    try std.testing.expectEqual(@as(?*UringConn, conn_a), worker.warm_tail);
+    // The recv and send slices carve the same stride back to back.
+    const recv_slice = worker.slotRecvBuf(1);
+    const send_slice = worker.slotSendBuf(1);
+    try std.testing.expectEqual(@intFromPtr(recv_slice.ptr) + 64, @intFromPtr(send_slice.ptr));
 
-    // LIFO: the most recently released connection is reused first off the warm
-    // head, and the count tracks the pool so the release path can spot an
-    // overflow.
-    const first = worker.acquireConn().?;
-    try std.testing.expectEqual(@as(?*UringConn, conn_b), first);
-    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
+    // LIFO: the most recently released slot is reused first (warmest pages),
+    // and the free stack shrinks back as slots are drawn.
+    worker.releaseSlot(0);
+    worker.releaseSlot(1);
+    try std.testing.expectEqual(@as(usize, 2), worker.free_count);
+    try std.testing.expectEqual(@as(u32, 1), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(u32, 0), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(usize, 0), worker.free_count);
 
-    const second = worker.acquireConn().?;
-    try std.testing.expectEqual(@as(?*UringConn, conn_a), second);
-    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
+    // Slab exhausted (4 one-page strides): the fifth fresh slot is refused.
+    try std.testing.expectEqual(@as(u32, 2), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(u32, 3), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(?u32, null), worker.acquireSlot());
 }
 
 test "zix http1: URING process queue parks FIFO, rejects the newest at full, and wraps" {
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var entries: [2]ParkEntry = undefined;
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1800,10 +1866,10 @@ test "zix http1: URING process queue parks FIFO, rejects the newest at full, and
 }
 
 test "zix http1: URING process queue off (len 0) never parks" {
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1819,10 +1885,8 @@ test "zix http1: URING process queue off (len 0) never parks" {
 }
 
 test "zix http1: URING drainParked drops a stale gen entry without touching the connection" {
-    const gpa = std.testing.allocator;
-
-    const Worker = UringWorker(testOkHandler, null);
-    var slots: [16]?*UringConn = @splat(null);
+    const Worker = UringWorker(testOkHandler);
+    var slots: [16]UringConn = @splat(std.mem.zeroes(UringConn));
     var entries: [4]ParkEntry = undefined;
     var worker = Worker{
         .ring = undefined,
@@ -1837,14 +1901,9 @@ test "zix http1: URING drainParked drops a stale gen entry without touching the 
         .park_entries = &entries,
     };
 
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = 5, .gen = 2, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
-    slots[5] = conn;
+    var conn_buf: [64]u8 = undefined;
+    var send_buf: [64]u8 = undefined;
+    slots[5] = .{ .fd = 5, .gen = 2, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
 
     // Parked under gen 1, then the fd closed and was reused under gen 2: the
     // entry is stale and must be a no-op, never an arm on the new connection.
@@ -1853,8 +1912,8 @@ test "zix http1: URING drainParked drops a stale gen entry without touching the 
     worker.drainParked();
 
     try std.testing.expectEqual(@as(usize, 0), worker.park_len);
-    try std.testing.expect(!conn.closing);
-    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expect(!slots[5].closing);
+    try std.testing.expectEqual(@as(usize, 0), slots[5].filled);
 }
 
 test "zix http1: URING pending accept re-arm is retried by drainParked" {
@@ -1869,10 +1928,10 @@ test "zix http1: URING pending accept re-arm is retried by drainParked" {
         _ = linux.close(fds[1]);
     }
 
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var worker = Worker{
         .ring = initUringRing() catch return error.SkipZigTest,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = fds[0],
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1906,11 +1965,12 @@ test "zix http1: URING drainParked re-arms a parked recv on the ring" {
         _ = linux.close(fds[1]);
     }
 
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var entries: [4]ParkEntry = undefined;
+    const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
     var worker = Worker{
         .ring = initUringRing() catch return error.SkipZigTest,
-        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .slots = slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1920,20 +1980,16 @@ test "zix http1: URING drainParked re-arms a parked recv on the ring" {
         .ws_bufs = null,
         .park_entries = &entries,
     };
-    @memset(worker.slots, null);
+    for (worker.slots) |*slot| slot.* = std.mem.zeroes(UringConn);
     defer {
         worker.ring.deinit();
-        gpa.free(worker.slots);
+        gpa.free(slots);
     }
 
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
-    worker.slots[@intCast(fds[1])] = conn;
+    var conn_buf: [64]u8 = undefined;
+    var send_buf: [64]u8 = undefined;
+    const conn = &worker.slots[@intCast(fds[1])];
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
 
     // A recv parked while the SQ was full is re-armed on the next drain pass:
     // the entry leaves the ring and one recv SQE is staged for the connection.
@@ -1959,11 +2015,12 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
         _ = linux.close(fds[1]);
     }
 
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var entries: [4]ParkEntry = undefined;
+    const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
     var worker = Worker{
         .ring = initUringRing() catch return error.SkipZigTest,
-        .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
+        .slots = slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -1973,10 +2030,10 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
         .ws_bufs = null,
         .park_entries = &entries,
     };
-    @memset(worker.slots, null);
+    for (worker.slots) |*slot| slot.* = std.mem.zeroes(UringConn);
     defer {
         worker.ring.deinit();
-        gpa.free(worker.slots);
+        gpa.free(slots);
     }
 
     // Shared provided-buffer ring, skip where the kernel lacks buffer rings
@@ -1984,14 +2041,10 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
     worker.ws_bufs = IoUring.BufferGroup.init(&worker.ring, gpa, WS_RING_BGID, WS_RING_BUF_SIZE, 4) catch return error.SkipZigTest;
     defer if (worker.ws_bufs) |*bg| bg.deinit(gpa);
 
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = fds[1], .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 64), .staged = 0, .inflight = 0, .closing = false, .ws = testWsEcho };
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
-    worker.slots[@intCast(fds[1])] = conn;
+    var conn_buf: [64]u8 = undefined;
+    var send_buf: [64]u8 = undefined;
+    const conn = &worker.slots[@intCast(fds[1])];
+    conn.* = .{ .fd = fds[1], .gen = 1, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false, .ws = testWsEcho };
 
     // A parked upgraded connection re-arms through armRecv -> armWsRecv: the
     // entry leaves the ring and one buffer-select recv SQE is staged, the
@@ -2007,10 +2060,10 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
 }
 
 test "zix http1: URING idleCap clamps between the floor and the ceiling as live concurrency moves" {
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -2036,20 +2089,27 @@ test "zix http1: URING idleCap clamps between the floor and the ceiling as live 
     try std.testing.expectEqual(@as(usize, 256), worker.idleCap());
 }
 
-test "zix http1: URING releaseConn past the ceiling evicts even when live_count is high" {
+test "zix http1: URING releaseSlot past the ceiling returns the oldest warm stride to the OS" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
-    const page = std.heap.page_allocator;
+    const page = std.heap.page_size_min;
 
-    // Ceiling of 1 with a high live_count: the old cap (max(live, floor)) would keep
-    // both warm, the ceiling forces an eviction of the LRU tail on the second release.
-    const Worker = UringWorker(testOkHandler, null);
+    // Ceiling of 1 with a high live_count: the warm span is held at 1, so the
+    // second release advises the oldest warm stride away (the LRU eviction).
+    const Worker = UringWorker(testOkHandler);
+    const conn_slab = try slab.mapZeroedSlots(u8, page * 4);
+    defer slab.unmapSlots(conn_slab);
+    var free_slots: [4]u32 = undefined;
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
+        .conn_slab = conn_slab,
+        .stride = page,
+        .free_slots = &free_slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
+        .send_buf_size = 64,
         .handler_timeout_ms = 0,
         .ws_payload_buf = &[_]u8{},
         .body_buf = &[_]u8{},
@@ -2062,40 +2122,37 @@ test "zix http1: URING releaseConn past the ceiling evicts even when live_count 
     // Without the ceiling, idleCap would be max(4096, 1) = 4096 and never evict.
     try std.testing.expectEqual(@as(usize, 1), worker.idleCap());
 
-    const lru = try page.create(UringConn);
-    lru.* = .{ .fd = 20, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
-    const mru = try page.create(UringConn);
-    mru.* = .{ .fd = 21, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        page.free(lru.buf);
-        page.free(lru.send_buf);
-        page.destroy(lru);
-        page.free(mru.buf);
-        page.free(mru.send_buf);
-        page.destroy(mru);
-    }
+    @memset(worker.slotStride(0), 0xAA);
+    @memset(worker.slotStride(1), 0xAA);
 
-    @memset(lru.buf, 0xAA);
-    @memset(mru.buf, 0xAA);
+    // Release slot 0 (older) then slot 1 (newer). The second release overflows
+    // the warm cap and evicts the OLDEST warm entry (slot 0): its pages return
+    // to the OS and read zero, while the just-released slot 1 stays resident.
+    worker.releaseSlot(0);
+    worker.releaseSlot(1);
 
-    worker.releaseConn(lru);
-    worker.releaseConn(mru);
+    try std.testing.expectEqual(@as(usize, 2), worker.free_count);
+    try std.testing.expectEqual(@as(usize, 1), worker.cold_count);
+    try std.testing.expectEqual(@as(u8, 0), worker.slotStride(0)[0]);
+    try std.testing.expectEqual(@as(u8, 0xAA), worker.slotStride(1)[0]);
 
-    // The warm set is held at the ceiling (1), and the LRU tail was evicted cold and
-    // its pages returned, so the resident warm set does not track the 4096 live.
-    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
-    try std.testing.expectEqual(@as(?*UringConn, mru), worker.warm_head);
-    try std.testing.expectEqual(@as(?*UringConn, lru), worker.cold_head);
-    try std.testing.expectEqual(@as(u8, 0), lru.buf[0]);
+    // Reuse pops the warm slot first, then the cold one, both allocation-free,
+    // and the cold boundary clamps back as the stack drains.
+    try std.testing.expectEqual(@as(u32, 1), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(u32, 0), worker.acquireSlot().?);
+    try std.testing.expectEqual(@as(usize, 0), worker.cold_count);
 }
 
-test "zix http1: URING releaseConn shrinks a grown send_buf back to the base size" {
+test "zix http1: URING destroyConn frees a heap-grown send_buf and recycles the slot" {
     const gpa = std.heap.smp_allocator;
 
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
+    var slots: [8]UringConn = @splat(std.mem.zeroes(UringConn));
+    var free_slots: [4]u32 = undefined;
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &slots,
+        .free_slots = &free_slots,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -2103,164 +2160,137 @@ test "zix http1: URING releaseConn shrinks a grown send_buf back to the base siz
         .ws_payload_buf = &[_]u8{},
         .body_buf = &[_]u8{},
         .ws_bufs = null,
+        .live_count = 1,
     };
 
-    // A send_buf the grow allocator doubled past the base for an oversized
-    // response. recv_buf stays small so no eviction is involved (cap not reached).
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = 12, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 2 * URING_SEND_BUF_SIZE), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
+    // A connection whose send_buf was switched to a heap buffer by the sink's
+    // grow path (send_heap). destroyConn frees it, returns the slab slot, and
+    // zeroes the fd slot so the next accept starts from the slab slice again.
+    var conn_buf: [64]u8 = undefined;
+    const heap_send = try gpa.alloc(u8, 2 * URING_SEND_BUF_SIZE);
+    slots[3] = .{ .fd = 3, .gen = 1, .buf = &conn_buf, .filled = 0, .send_buf = heap_send, .staged = 0, .inflight = 0, .closing = false, .slot = 2, .send_heap = true };
 
-    worker.releaseConn(conn);
+    worker.destroyConn(&slots[3]);
 
-    try std.testing.expectEqual(@as(usize, URING_SEND_BUF_SIZE), conn.send_buf.len);
-    try std.testing.expectEqual(@as(?*UringConn, conn), worker.warm_head);
+    try std.testing.expectEqual(@as(usize, 0), slots[3].buf.len);
+    try std.testing.expect(!slots[3].send_heap);
+    try std.testing.expectEqual(@as(usize, 1), worker.free_count);
+    try std.testing.expectEqual(@as(u32, 2), worker.free_slots[0]);
+    try std.testing.expectEqual(@as(usize, 0), worker.live_count);
 }
 
-test "zix http1: URING releaseConn shrinks send_buf to the configured send_buf_size" {
-    const gpa = std.heap.smp_allocator;
+test "zix http1: URING dispatch grows a slab-backed send_buf onto the heap for an oversized response" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
 
-    const Worker = UringWorker(testOkHandler, null);
-    const custom_send_buf: usize = 8 * 1024;
-    var worker = Worker{
-        .ring = undefined,
-        .slots = &[_]?*UringConn{},
-        .listener_fd = -1,
-        .gen_counter = 0,
-        .recv_buf_size = 64,
-        .send_buf_size = custom_send_buf,
-        .handler_timeout_ms = 0,
-        .ws_payload_buf = &[_]u8{},
-        .body_buf = &[_]u8{},
-        .ws_bufs = null,
-    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [4096]u8 = undefined;
+    var worker = testUringWorker(testBigBodyHandler, &body_buf, &arena);
 
-    const conn = try gpa.create(UringConn);
-    conn.* = .{ .fd = 13, .gen = 1, .buf = try gpa.alloc(u8, 64), .filled = 0, .send_buf = try gpa.alloc(u8, 2 * custom_send_buf), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
+    // send_buf far smaller than the response: the sink must switch to a heap
+    // buffer (a slab slice cannot realloc), mark it, and stage the full bytes.
+    const req = "GET /big HTTP/1.1\r\nHost: t\r\n\r\n";
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..req.len], req);
+    var send_buf: [64]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = req.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
 
-    worker.releaseConn(conn);
+    const outcome = worker.dispatch(&conn);
+    defer if (conn.send_heap) std.heap.smp_allocator.free(conn.send_buf);
 
-    try std.testing.expectEqual(custom_send_buf, conn.send_buf.len);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(conn.send_heap);
+    try std.testing.expect(conn.send_buf.ptr != @as([*]u8, &send_buf));
+
+    // The staged response is intact end to end on the heap buffer.
+    const resp = conn.send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.endsWith(u8, resp, "Z" ** 512));
 }
 
-test "zix http1: URING releaseConn past the cap returns buffer pages to the OS" {
+test "zix http1: URING cache hit replays zero-copy with the slot pinned until teardown" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
+    defer rc.deinit();
+    core.setCache(&rc, 60_000);
+    defer core.setCache(null, 1000);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [1024]u8 = undefined;
+    var worker = testUringWorker(testCacheHitHandler, &body_buf, &arena);
+    worker.live_count = 1;
+
+    const req = "GET /cache HTTP/1.1\r\nHost: t\r\n\r\n";
+    var conn_buf: [1024]u8 = undefined;
+    @memcpy(conn_buf[0..req.len], req);
+    var send_buf: [1024]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = req.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    // Miss: the response stages through the copy path, nothing borrowed.
+    const first = worker.dispatch(&conn);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expect(conn.staged > 0);
+    try std.testing.expectEqual(@as(usize, 0), conn.direct.len);
+
+    // Hit: the whole response is the borrowed cache-slab slice, the stage
+    // buffer holds nothing, and the slot is pinned for the send lifetime.
+    conn.staged = 0;
+    @memcpy(conn_buf[0..req.len], req);
+    conn.filled = req.len;
+
+    const second = worker.dispatch(&conn);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expect(conn.direct.len > 0);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", conn.direct);
+
+    const slab_base = @intFromPtr(rc.slab.ptr);
+    const direct_base = @intFromPtr(conn.direct.ptr);
+    try std.testing.expect(direct_base >= slab_base and direct_base < slab_base + rc.slab.len);
+    try std.testing.expectEqual(@as(u32, 1), rc.pins[conn.direct_slot]);
+
+    // While pinned, a store for the same key is refused (bytes stay stable).
+    const key = cache.hashKey("GET", "/cache", "");
+    try std.testing.expect(!rc.store(key, "clobber", 60_000, cache.nowMillis()));
+
+    // Teardown releases the pin (the send-completion path unpins the same way).
+    const pinned_slot = conn.direct_slot;
+    worker.destroyConn(&conn);
+    try std.testing.expectEqual(@as(u32, 0), rc.pins[pinned_slot]);
+}
+
+// Replays the cached response on a hit (the whole-response idiom the entry
+// json path uses), stores and writes on a miss.
+fn testCacheHitHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    if (core.cacheLookup(req.head)) |bytes| {
+        try res.sendRaw(bytes);
+        return;
+    }
+
+    return core.sendWithCacheFD(req.fd, req.head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl());
+}
+
+test "zix http1: URING pretouchSlab touches only the floor strides and keeps them zero" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
-    const page = std.heap.page_allocator;
+    const page = std.heap.page_size_min;
 
-    // Cap of 1 (floor 1, no live connections): the second release overflows.
-    const Worker = UringWorker(testOkHandler, null);
+    const Worker = UringWorker(testOkHandler);
+    const conn_slab = try slab.mapZeroedSlots(u8, page * 4);
+    defer slab.unmapSlots(conn_slab);
     var worker = Worker{
         .ring = undefined,
-        .slots = &[_]?*UringConn{},
-        .listener_fd = -1,
-        .gen_counter = 0,
-        .recv_buf_size = 64,
-        .handler_timeout_ms = 0,
-        .ws_payload_buf = &[_]u8{},
-        .body_buf = &[_]u8{},
-        .ws_bufs = null,
-        .idle_floor = 1,
-    };
-
-    // Page-aligned, page-sized buffers so MADV_DONTNEED acts on exactly these
-    // pages. Both stay at or under the base size, so the shrink branch is skipped.
-    const lru = try page.create(UringConn);
-    lru.* = .{ .fd = 13, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
-    const mru = try page.create(UringConn);
-    mru.* = .{ .fd = 14, .gen = 1, .buf = try page.alloc(u8, 4096), .filled = 0, .send_buf = try page.alloc(u8, 4096), .staged = 0, .inflight = 0, .closing = false };
-    defer {
-        page.free(lru.buf);
-        page.free(lru.send_buf);
-        page.destroy(lru);
-        page.free(mru.buf);
-        page.free(mru.send_buf);
-        page.destroy(mru);
-    }
-
-    @memset(lru.buf, 0xAA);
-    @memset(lru.send_buf, 0xAA);
-    @memset(mru.buf, 0xAA);
-    @memset(mru.send_buf, 0xAA);
-
-    // Release lru first, then mru. The second release pushes mru to the warm head
-    // and overflows the cap, so the least-recently-used tail (lru) is evicted to
-    // the cold stack: its pages go back and read as zero, while mru stays warm and
-    // resident. Reclaiming the LRU tail, not the just-released mru, is the point.
-    worker.releaseConn(lru);
-    worker.releaseConn(mru);
-
-    try std.testing.expectEqual(@as(u8, 0xAA), mru.buf[0]);
-    try std.testing.expectEqual(@as(?*UringConn, mru), worker.warm_head);
-    try std.testing.expectEqual(@as(usize, 1), worker.warm_count);
-
-    try std.testing.expectEqual(@as(u8, 0), lru.buf[0]);
-    try std.testing.expectEqual(@as(u8, 0), lru.send_buf[0]);
-    try std.testing.expectEqual(@as(?*UringConn, lru), worker.cold_head);
-
-    // Reuse drains the warm head first, then the cold stack, both allocation-free.
-    try std.testing.expectEqual(@as(?*UringConn, mru), worker.acquireConn());
-    try std.testing.expectEqual(@as(?*UringConn, lru), worker.acquireConn());
-}
-
-test "zix http1: URING prewarmPool seeds the warm pool to idle_floor with sized buffers" {
-    const gpa = std.heap.smp_allocator;
-
-    const Worker = UringWorker(testOkHandler, null);
-    const recv_size: usize = 6 * 1024;
-    const send_size: usize = 8 * 1024;
-    var worker = Worker{
-        .ring = undefined,
-        .slots = &[_]?*UringConn{},
-        .listener_fd = -1,
-        .gen_counter = 0,
-        .recv_buf_size = recv_size,
-        .send_buf_size = send_size,
-        .handler_timeout_ms = 0,
-        .ws_payload_buf = &[_]u8{},
-        .body_buf = &[_]u8{},
-        .ws_bufs = null,
-        .idle_floor = 4,
-    };
-
-    worker.prewarmPool();
-
-    try std.testing.expectEqual(@as(usize, 4), worker.warm_count);
-    try std.testing.expect(worker.warm_head != null);
-    try std.testing.expect(worker.warm_tail != null);
-
-    // Every seeded connection carries buffers at the configured sizes, resident
-    // and reusable: an accept pops them from the warm pool with no allocator call.
-    var idx: usize = 0;
-    while (idx < 4) : (idx += 1) {
-        const conn = worker.acquireConn().?;
-        try std.testing.expectEqual(recv_size, conn.buf.len);
-        try std.testing.expectEqual(send_size, conn.send_buf.len);
-
-        gpa.free(conn.buf);
-        gpa.free(conn.send_buf);
-        gpa.destroy(conn);
-    }
-
-    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
-    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_head);
-    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_tail);
-}
-
-test "zix http1: URING prewarmPool with a zero floor seeds nothing" {
-    const Worker = UringWorker(testOkHandler, null);
-    var worker = Worker{
-        .ring = undefined,
-        .slots = &[_]?*UringConn{},
+        .slots = &[_]UringConn{},
+        .conn_slab = conn_slab,
+        .stride = page,
         .listener_fd = -1,
         .gen_counter = 0,
         .recv_buf_size = 64,
@@ -2269,12 +2299,27 @@ test "zix http1: URING prewarmPool with a zero floor seeds nothing" {
         .ws_payload_buf = &[_]u8{},
         .body_buf = &[_]u8{},
         .ws_bufs = null,
-        .idle_floor = 0,
+        .idle_floor = 2,
     };
 
-    worker.prewarmPool();
+    // Touches the first idle_floor strides without altering content, and a
+    // zero floor (or an empty slab in dispatch-level tests) is a no-op.
+    worker.pretouchSlab();
+    try std.testing.expectEqual(@as(u8, 0), conn_slab[0]);
+    try std.testing.expectEqual(@as(u8, 0), conn_slab[page]);
 
-    try std.testing.expectEqual(@as(usize, 0), worker.warm_count);
-    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_head);
-    try std.testing.expectEqual(@as(?*UringConn, null), worker.warm_tail);
+    worker.idle_floor = 0;
+    worker.pretouchSlab();
+
+    worker.conn_slab = &.{};
+    worker.stride = 0;
+    worker.pretouchSlab();
+}
+
+// Sends a body larger than the test connection's send_buf so the sink's
+// grow-from-slab path runs end to end through dispatch.
+fn testBigBodyHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send("Z" ** 512);
 }

@@ -22,10 +22,17 @@ pub fn runAsync(config: Config, handler: HandlerFn) !void {
     });
     defer srv.deinit(io);
 
+    var conn_registry = common.ConnRegistry{};
+    const registry: ?*common.ConnRegistry = if (config.conn_timeout_ms > 0) &conn_registry else null;
+    if (config.conn_timeout_ms > 0) {
+        const sweeper = try std.Thread.spawn(.{}, common.connTimerLoop, .{ io, &conn_registry });
+        sweeper.detach();
+    }
+
     logSystem(config, "listening on {s}:{d} (io.async)", .{ config.ip, config.port });
 
     while (true) {
         const stream = srv.accept(io) catch continue;
-        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir }});
+        _ = io.async(connEntry, .{ConnArgs{ .stream = stream, .io = io, .handler = handler, .handler_timeout_ms = config.handler_timeout_ms, .conn_timeout_ms = config.conn_timeout_ms, .registry = registry, .send_date_header = config.send_date_header, .large_body_rcvbuf = config.large_body_rcvbuf, .public_dir = config.public_dir, .max_response_headers = config.max_response_headers.value() }});
     }
 }
