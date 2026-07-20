@@ -33,6 +33,7 @@ zig-pkg
 /public
 /*poc*
 orders.jsonl
+/rnd/parser_*_write.*
 /tests/public
 /tests/logs
 /tests/runner/public
