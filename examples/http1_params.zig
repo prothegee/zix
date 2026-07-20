@@ -7,7 +7,6 @@ const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const MAX_HEADERS: u8 = 16;
 const WORKERS: usize = 0; // 0 = cpu_count accept threads
 const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 
@@ -18,15 +17,17 @@ const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
 // /echo?foo=bar&baz=qux  ->  {"foo":"bar","baz":"qux"}
 // /echo                  ->  null
 // curl usage: curl -X GET "http://localhost:9022/echo?foo=bar&baz=qux"
-fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"error\":\"method not allowed\"}") catch {};
+fn echoHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"error\":\"method not allowed\"}");
         return;
     }
 
-    if (head.query.len == 0) {
-        zix.Http1.sendJsonFD(fd, 200, "null") catch {};
+    const query = req.query();
+    if (query.len == 0) {
+        try res.sendJson("null");
         return;
     }
 
@@ -35,7 +36,7 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
 
     out.append(std.heap.smp_allocator, '{') catch return;
     var first = true;
-    var it = std.mem.splitScalar(u8, head.query, '&');
+    var it = std.mem.splitScalar(u8, query, '&');
     while (it.next()) |pair| {
         if (pair.len == 0) continue;
         if (!first) out.append(std.heap.smp_allocator, ',') catch return;
@@ -50,28 +51,32 @@ fn echoHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posi
     }
     out.append(std.heap.smp_allocator, '}') catch return;
 
-    zix.Http1.sendJsonFD(fd, 200, out.items) catch {};
+    try res.sendJson(out.items);
 }
 
 // GET /greet?name=<value>
 // /greet?name=alice  ->  {"ok":true,"message":"hello, alice"}
 // /greet             ->  {"ok":false,"message":"Error: missing required param: name"}
 // curl usage: curl -X GET "http://localhost:9022/greet?name=alice"
-fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
+fn greetHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: method not allowed\"}");
         return;
     }
 
-    const name = zix.Http1.queryParam(head, "name") orelse {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: name\"}") catch {};
+    const name = req.queryParam("name") orelse {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: missing required param: name\"}");
         return;
     };
 
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"hello, {s}\"}}", .{name}) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // GET /calc?a=<num>&b=<num>
@@ -79,34 +84,44 @@ fn greetHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.pos
 // /calc?b=4       ->  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 ->  {"ok":false,"message":"Error: a must be a number"}
 // curl usage: curl -X GET "http://localhost:9022/calc?a=3&b=4"
-fn calcHandler(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    _ = body;
-    if (!std.mem.eql(u8, head.method, "GET")) {
-        zix.Http1.sendJsonFD(fd, 405, "{\"ok\":false,\"message\":\"Error: method not allowed\"}") catch {};
+fn calcHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: method not allowed\"}");
         return;
     }
 
-    const a_str = zix.Http1.queryParam(head, "a") orelse {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: a\"}") catch {};
+    const a_str = req.queryParam("a") orelse {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: missing required param: a\"}");
         return;
     };
-    const b_str = zix.Http1.queryParam(head, "b") orelse {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: missing required param: b\"}") catch {};
+    const b_str = req.queryParam("b") orelse {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: missing required param: b\"}");
         return;
     };
 
     const a = std.fmt.parseInt(i64, a_str, 10) catch {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: a must be a number\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: a must be a number\"}");
         return;
     };
     const b = std.fmt.parseInt(i64, b_str, 10) catch {
-        zix.Http1.sendJsonFD(fd, 400, "{\"ok\":false,\"message\":\"Error: b must be a number\"}") catch {};
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: b must be a number\"}");
         return;
     };
 
     var buf: [128]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ok\":true,\"message\":\"{d} + {d} = {d}\"}}", .{ a, b, a + b }) catch return;
-    zix.Http1.sendJsonFD(fd, 200, json) catch {};
+
+    try res.sendJson(json);
 }
 
 // --------------------------------------------------------- //
@@ -126,7 +141,6 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
-        .max_headers = MAX_HEADERS,
         .workers = WORKERS,
         .pool_size = POOL_SIZE,
     });
