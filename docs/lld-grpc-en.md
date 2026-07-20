@@ -22,6 +22,8 @@ _out: ?*ReplyStage = null,          // set on the inline/mux path: stage instead
 
 `sendMessage` / `sendHeaders` / `finish` branch on `_out`: when it is set they append the encoded frames to the cork (no per-call lock, no direct `write`). When it is null they write directly to the fd, taking `_write_mutex` if a concurrent streaming task may be writing. Unary inline dispatch and every mux dispatch use the staged path. Server-streaming under the blocking models uses the direct path.
 
+The per-worker unary response cache (ADR-036) also lives here: `tl_cache`, `GrpcContext.serveCached` / `sendCached`, keyed by `requestKey(path, body)` (Wyhash over the gRPC path plus the raw request body). `serveCached` looks up, replays via `sendMessage` and `finish(.OK, "")` on a hit, and returns false on a miss, no cache, or an empty path (the caller then builds the response as usual). `sendCached` sends then stores, skipping the store on the same conditions. Installed by the `.EPOLL` / `.URING` workers, opt-in via `response_cache`.
+
 ### ReplyStage
 
 A corked writer for one connection. Used by inline unary dispatch (blocking models) and by every dispatch on the mux path.
