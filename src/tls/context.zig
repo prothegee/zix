@@ -117,7 +117,9 @@ pub const Context = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Context {
         try validate(config);
 
-        const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(1 << 20));
+        const cert_pem = std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(1 << 20)) catch {
+            return error.TlsCertFileNotFound;
+        };
         defer allocator.free(cert_pem);
         var cert_der_buf: [4096]u8 = undefined;
         const cert_der_view = try pem.pemToDer(&cert_der_buf, cert_pem);
@@ -125,7 +127,9 @@ pub const Context = struct {
         const cert_der = try allocator.dupe(u8, cert_der_view);
         errdefer allocator.free(cert_der);
 
-        const key_pem = try std.Io.Dir.cwd().readFileAlloc(io, config.key_path, allocator, .limited(1 << 20));
+        const key_pem = std.Io.Dir.cwd().readFileAlloc(io, config.key_path, allocator, .limited(1 << 20)) catch {
+            return error.TlsKeyFileNotFound;
+        };
         defer allocator.free(key_pem);
         var key_der_buf: [4096]u8 = undefined; // RSA PKCS#8 DER is far larger than an EC key
         const key_der = try pem.pemToDer(&key_der_buf, key_pem);
