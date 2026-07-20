@@ -2207,8 +2207,10 @@ test "zix http1: URING dispatch grows a slab-backed send_buf onto the heap for a
 
     // The staged response is intact end to end on the heap buffer.
     const resp = conn.send_buf[0..conn.staged];
+    const tail: [512]u8 = @splat('Z');
+
     try std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 200 OK") != null);
-    try std.testing.expect(std.mem.endsWith(u8, resp, "Z" ** 512));
+    try std.testing.expect(std.mem.endsWith(u8, resp, &tail));
 }
 
 test "zix http1: URING cache hit replays zero-copy with the slot pinned until teardown" {
@@ -2321,5 +2323,6 @@ test "zix http1: URING pretouchSlab touches only the floor strides and keeps the
 fn testBigBodyHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
     res.setContentType(.TEXT_PLAIN);
 
-    try res.send("Z" ** 512);
+    const body: [512]u8 = @splat('Z');
+    try res.send(&body);
 }
