@@ -122,6 +122,7 @@ pub const Http3ServerConfig = struct {
     max_recv_buf:   usize = 1500,  // receive buffer per slot, common Ethernet MTU
 
     busy_poll_us:            u32   = 0,          // SO_BUSY_POLL spin window (0 = unset)
+    reuseport_cbpf:          bool  = false,      // steer by receiving CPU instead of 4-tuple hash, see note below
     worker_stack_size_bytes: usize = 512 * 1024, // per-core worker thread stack
     socket_rcvbuf:           usize = 4 * 1024 * 1024, // requested SO_RCVBUF (kernel clamps)
     socket_sndbuf:           usize = 4 * 1024 * 1024, // requested SO_SNDBUF (kernel clamps)
@@ -142,6 +143,8 @@ pub const Http3ServerConfig = struct {
 ```
 
 `io`, `allocator`, `ip`, `port`, and `dispatch_model` are required (no defaults). `tls` defaults to `null` but is rejected at `init`: a QUIC server must present a TLS 1.3 certificate. `DispatchModel` is re-used from the TCP config, not defined here.
+
+`reuseport_cbpf` (ADR-061) stays available here but keep it `false`: per-packet CPU steering breaks QUIC flow affinity (a connection's packets land on workers without its state), measured as a heavy throughput drop with zero failed requests. The TCP engines are the value case for this field, not `zix.Http3`.
 
 ---
 

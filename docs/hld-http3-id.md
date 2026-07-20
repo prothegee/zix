@@ -122,6 +122,7 @@ pub const Http3ServerConfig = struct {
     max_recv_buf:   usize = 1500,  // buffer receive per slot, MTU Ethernet umum
 
     busy_poll_us:            u32   = 0,          // window spin SO_BUSY_POLL (0 = tidak diset)
+    reuseport_cbpf:          bool  = false,      // steer berdasarkan CPU penerima, bukan hash 4-tuple, lihat catatan di bawah
     worker_stack_size_bytes: usize = 512 * 1024, // stack thread worker per-core
     socket_rcvbuf:           usize = 4 * 1024 * 1024, // SO_RCVBUF yang diminta (kernel clamp)
     socket_sndbuf:           usize = 4 * 1024 * 1024, // SO_SNDBUF yang diminta (kernel clamp)
@@ -142,6 +143,8 @@ pub const Http3ServerConfig = struct {
 ```
 
 `io`, `allocator`, `ip`, `port`, dan `dispatch_model` wajib (tanpa default). `tls` default `null` tetapi ditolak di `init`: server QUIC harus menyajikan sertifikat TLS 1.3. `DispatchModel` dipakai ulang dari config TCP, bukan didefinisikan di sini.
+
+`reuseport_cbpf` (ADR-061) tetap tersedia di sini tetapi biarkan `false`: steering CPU per-paket merusak flow affinity QUIC (paket sebuah koneksi mendarat di worker tanpa state-nya), terukur sebagai penurunan throughput berat dengan nol request gagal. Engine TCP adalah kasus nilai untuk field ini, bukan `zix.Http3`.
 
 ---
 
