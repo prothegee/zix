@@ -1,11 +1,14 @@
-//! Parser PoC: JSON (std.json).
+//! Parser PoC: JSON (std.json), read/write file I/O benchmark.
 //!
 //! Note:
-//! - Generates 1,000,000 records as a JSON array, then parses with
-//!   std.json.parseFromSlice into []common.Record and reports parse time,
-//!   throughput, and peak parse-time memory. Shared harness in parser_common.zig.
-//! - std.json dupes every string, so the parsed result owns its `name` bytes
-//!   independent of the input buffer.
+//! - One record lives at `rnd/parser_json_read.json` (bootstrapped once if missing).
+//!   The read phase opens, reads, and parses that file `iterations` times (real
+//!   file I/O every time), appending each parsed record into one held []Record.
+//!   The write phase then serializes each held record back out, one at a time, to
+//!   `rnd/parser_json_write.json` (truncated every iteration). Shared harness in
+//!   parser_common.zig.
+//! - std.json dupes every string and reflects the `tags: [][]const u8` array
+//!   automatically, so the parsed result owns its bytes independent of the file.
 //!
 //! Run: zig run rnd/parser_json.zig
 //! Run (smaller set first): zig run rnd/parser_json.zig -- 10000
@@ -13,43 +16,92 @@
 const std = @import("std");
 const common = @import("parser_common.zig");
 
-/// Serialize `count` records as a JSON array into `w`.
-fn generate(w: *std.Io.Writer, count: usize) !void {
-    try w.writeByte('[');
+const read_path = "rnd/parser_json_read.json";
+const write_path = "rnd/parser_json_write.json";
 
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        if (i != 0) try w.writeByte(',');
+/// Serialize one record as a JSON object into `writer`.
+fn writeRecord(writer: *std.Io.Writer, record: common.Record) !void {
+    try writer.print("{{\"id\":{d},\"name\":\"{s}\",\"score\":{d},\"active\":{},\"tags\":[", .{ record.id, record.name, record.score, record.active });
 
-        try w.print("{{\"id\":{d},\"name\":\"foo_{d}\",\"score\":{d},\"active\":{}}}", .{ i + 1, i, common.scoreOf(i), common.activeOf(i) });
+    for (record.tags, 0..) |tag, idx| {
+        if (idx != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\"", .{tag});
     }
 
-    try w.writeByte(']');
+    try writer.writeAll("]}");
+}
+
+/// Serialize `record` and write it to `path`, truncating any existing file.
+fn writeRecordToFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, record: common.Record) !usize {
+    var writer_buf = std.Io.Writer.Allocating.init(allocator);
+    try writeRecord(&writer_buf.writer, record);
+
+    const bytes = writer_buf.writer.buffer[0..writer_buf.writer.end];
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+
+    return bytes.len;
+}
+
+/// Open, read, and parse one record from `path`.
+fn readRecordFromFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !struct { record: common.Record, bytes: usize } {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 16));
+    const parsed = try std.json.parseFromSlice(common.Record, allocator, bytes, .{});
+
+    return .{ .record = parsed.value, .bytes = bytes.len };
 }
 
 pub fn main(process: std.process.Init) !void {
-    const count = common.countFromArgs(process);
+    const io = process.io;
+    const iterations = common.countFromArgs(process);
 
-    var gen_arena = std.heap.ArenaAllocator.init(common.base_allocator);
-    defer gen_arena.deinit();
+    try common.sleepSeconds(io, 5);
 
-    var aw = std.Io.Writer.Allocating.init(gen_arena.allocator());
-    try generate(&aw.writer, count);
+    if (std.Io.Dir.cwd().access(io, read_path, .{})) |_| {} else |_| {
+        var boot_arena = std.heap.ArenaAllocator.init(common.base_allocator);
+        defer boot_arena.deinit();
 
-    const input = aw.writer.buffer[0..aw.writer.end];
+        _ = try writeRecordToFile(io, boot_arena.allocator(), read_path, try common.sampleRecord(boot_arena.allocator()));
+    }
 
-    var counter = common.CountingAllocator{ .child = common.base_allocator };
-    var parse_arena = std.heap.ArenaAllocator.init(counter.allocator());
-    defer parse_arena.deinit();
+    var read_counter = common.CountingAllocator{ .child = common.base_allocator };
+    var read_arena = std.heap.ArenaAllocator.init(read_counter.allocator());
+    defer read_arena.deinit();
 
-    const parse_alloc = if (common.use_arena) parse_arena.allocator() else counter.allocator();
+    const read_alloc = if (common.use_arena) read_arena.allocator() else read_counter.allocator();
 
-    const start_ns = common.nowNs();
-    const parsed = try std.json.parseFromSlice([]common.Record, parse_alloc, input, .{});
-    const parse_ns = common.nowNs() - start_ns;
+    var records: std.ArrayList(common.Record) = .empty;
+    try records.ensureTotalCapacity(read_alloc, iterations);
 
-    std.debug.assert(parsed.value.len == count);
-    std.debug.assert(parsed.value[count - 1].id == count);
+    var read_bytes: usize = 0;
+    var i: usize = 0;
+    const read_start_ns = common.nowNs();
+    while (i < iterations) : (i += 1) {
+        const result = try readRecordFromFile(io, read_alloc, read_path);
+        std.mem.doNotOptimizeAway(result.record.id);
 
-    common.report("json", count, input.len, parse_ns, counter.peak);
+        read_bytes += result.bytes;
+        records.appendAssumeCapacity(result.record);
+    }
+    const read_ns = common.nowNs() - read_start_ns;
+
+    std.debug.assert(records.items.len == iterations);
+    common.report("json", "read", iterations, read_bytes, read_ns, read_counter.peak);
+
+    try common.sleepSeconds(io, 5);
+
+    var write_counter = common.CountingAllocator{ .child = common.base_allocator };
+    var write_arena = std.heap.ArenaAllocator.init(write_counter.allocator());
+    defer write_arena.deinit();
+
+    const write_alloc = if (common.use_arena) write_arena.allocator() else write_counter.allocator();
+
+    var write_bytes: usize = 0;
+    i = 0;
+    const write_start_ns = common.nowNs();
+    while (i < iterations) : (i += 1) {
+        write_bytes += try writeRecordToFile(io, write_alloc, write_path, records.items[i]);
+    }
+    const write_ns = common.nowNs() - write_start_ns;
+
+    common.report("json", "write", iterations, write_bytes, write_ns, write_counter.peak);
 }

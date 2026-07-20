@@ -1,33 +1,37 @@
-//! Parser PoC: CFG (INI-style section, hand-written parser), read/write file I/O
+//! Parser PoC: TOML (hand-written parser, no std support), read/write file I/O
 //! benchmark.
 //!
 //! Note:
-//! - There is no std .cfg parser, so this is a hand-written line scanner. The
-//!   format is a single `[record]` section followed by `key=value` lines:
+//! - There is no std TOML parser, so this is a hand-written line scanner, scoped
+//!   to exactly the shape this PoC needs (one flat table, one string field, one
+//!   array-of-strings field, no nested tables, no dates, no multi-line strings).
+//!   Not a spec-complete TOML implementation. The format is a single `[record]`
+//!   table followed by `key = value` lines:
 //!     [record]
-//!     id=1
-//!     name=foo_0
-//!     score=0.5
-//!     active=true
-//!     tags=urgent,verified,retail
-//!   `tags` is comma-separated, the only array convention plain INI-style cfg has.
-//! - One record lives at `rnd/parser_cfg_read.cfg` (bootstrapped once if missing).
-//!   The read phase opens, reads, and parses that file `iterations` times (real
-//!   file I/O every time), appending each parsed record into one held []Record.
-//!   The write phase then serializes each held record back out, one at a time, to
-//!   `rnd/parser_cfg_write.cfg` (truncated every iteration). Shared harness in
-//!   parser_common.zig.
+//!     id = 1
+//!     name = "foo_0"
+//!     score = 0.5
+//!     active = true
+//!     tags = ["urgent", "verified", "retail"]
+//!   `tags` uses TOML's native array literal, unlike the comma-line convention the
+//!   cfg PoC needs for the same field.
+//! - One record lives at `rnd/parser_toml_read.toml` (bootstrapped once if
+//!   missing). The read phase opens, reads, and parses that file `iterations`
+//!   times (real file I/O every time), appending each parsed record into one held
+//!   []Record. The write phase then serializes each held record back out, one at a
+//!   time, to `rnd/parser_toml_write.toml` (truncated every iteration). Shared
+//!   harness in parser_common.zig.
 //! - The `name` and `tags` values are duped into the parse allocator, so the
 //!   parsed record owns its strings independent of the input buffer.
 //!
-//! Run: zig run rnd/parser_cfg.zig
-//! Run (smaller set first): zig run rnd/parser_cfg.zig -- 10000
+//! Run: zig run rnd/parser_toml.zig
+//! Run (smaller set first): zig run rnd/parser_toml.zig -- 10000
 
 const std = @import("std");
 const common = @import("parser_common.zig");
 
-const read_path = "rnd/parser_cfg_read.cfg";
-const write_path = "rnd/parser_cfg_write.cfg";
+const read_path = "rnd/parser_toml_read.toml";
+const write_path = "rnd/parser_toml_write.toml";
 
 const ParseError = error{
     UnknownKey,
@@ -35,18 +39,20 @@ const ParseError = error{
     OutOfMemory,
     InvalidNumber,
     InvalidBool,
+    InvalidString,
+    InvalidArray,
 };
 
-/// Serialize one record as an INI `[record]` section into `writer`.
+/// Serialize one record as a TOML `[record]` table into `writer`.
 fn writeRecord(writer: *std.Io.Writer, record: common.Record) !void {
-    try writer.print("[record]\nid={d}\nname={s}\nscore={d}\nactive={}\ntags=", .{ record.id, record.name, record.score, record.active });
+    try writer.print("[record]\nid = {d}\nname = \"{s}\"\nscore = {d}\nactive = {}\ntags = [", .{ record.id, record.name, record.score, record.active });
 
     for (record.tags, 0..) |tag, idx| {
-        if (idx != 0) try writer.writeByte(',');
-        try writer.writeAll(tag);
+        if (idx != 0) try writer.writeAll(", ");
+        try writer.print("\"{s}\"", .{tag});
     }
 
-    try writer.writeByte('\n');
+    try writer.writeAll("]\n");
 }
 
 /// Serialize `record` and write it to `path`, truncating any existing file.
@@ -67,13 +73,41 @@ fn parseBool(value: []const u8) ParseError!bool {
     return error.InvalidBool;
 }
 
-/// Parse the INI-style input into one record.
+/// Strip one pair of surrounding double quotes from `value`.
+fn unquote(value: []const u8) ParseError![]const u8 {
+    if (value.len < 2 or value[0] != '"' or value[value.len - 1] != '"') return error.InvalidString;
+
+    return value[1 .. value.len - 1];
+}
+
+/// Parse a TOML array literal `["a", "b"]` into a fresh slice of duped strings.
+fn parseTagArray(allocator: std.mem.Allocator, value: []const u8) ParseError![][]const u8 {
+    if (value.len < 2 or value[0] != '[' or value[value.len - 1] != ']') return error.InvalidArray;
+
+    const inner = std.mem.trim(u8, value[1 .. value.len - 1], " \t");
+
+    var tags: std.ArrayList([]const u8) = .empty;
+    if (inner.len == 0) return tags.toOwnedSlice(allocator);
+
+    var item_it = std.mem.splitScalar(u8, inner, ',');
+    while (item_it.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " \t");
+        const tag = try unquote(trimmed);
+
+        try tags.append(allocator, try allocator.dupe(u8, tag));
+    }
+
+    return tags.toOwnedSlice(allocator);
+}
+
+/// Parse the TOML input into one record.
 fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!common.Record {
     var record: common.Record = .{ .id = 0, .name = "", .score = 0, .active = false, .tags = &.{} };
     var seen_header = false;
 
     var lines = std.mem.splitScalar(u8, input, '\n');
-    while (lines.next()) |line| {
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
 
         if (std.mem.eql(u8, line, "[record]")) {
@@ -84,27 +118,19 @@ fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!common.Reco
         if (!seen_header) return error.MissingSection;
 
         const eq_pos = std.mem.indexOfScalar(u8, line, '=') orelse return error.UnknownKey;
-        const key = line[0..eq_pos];
-        const value = line[eq_pos + 1 ..];
+        const key = std.mem.trim(u8, line[0..eq_pos], " \t");
+        const value = std.mem.trim(u8, line[eq_pos + 1 ..], " \t");
 
         if (std.mem.eql(u8, key, "id")) {
             record.id = std.fmt.parseInt(u64, value, 10) catch return error.InvalidNumber;
         } else if (std.mem.eql(u8, key, "name")) {
-            record.name = try allocator.dupe(u8, value);
+            record.name = try allocator.dupe(u8, try unquote(value));
         } else if (std.mem.eql(u8, key, "score")) {
             record.score = std.fmt.parseFloat(f64, value) catch return error.InvalidNumber;
         } else if (std.mem.eql(u8, key, "active")) {
             record.active = try parseBool(value);
         } else if (std.mem.eql(u8, key, "tags")) {
-            var tags: std.ArrayList([]const u8) = .empty;
-
-            var tag_it = std.mem.splitScalar(u8, value, ',');
-            while (tag_it.next()) |tag| {
-                if (tag.len == 0) continue;
-                try tags.append(allocator, try allocator.dupe(u8, tag));
-            }
-
-            record.tags = try tags.toOwnedSlice(allocator);
+            record.tags = try parseTagArray(allocator, value);
         } else {
             return error.UnknownKey;
         }
@@ -158,7 +184,7 @@ pub fn main(process: std.process.Init) !void {
     const read_ns = common.nowNs() - read_start_ns;
 
     std.debug.assert(records.items.len == iterations);
-    common.report("cfg", "read", iterations, read_bytes, read_ns, read_counter.peak);
+    common.report("toml", "read", iterations, read_bytes, read_ns, read_counter.peak);
 
     try common.sleepSeconds(io, 5);
 
@@ -176,5 +202,5 @@ pub fn main(process: std.process.Init) !void {
     }
     const write_ns = common.nowNs() - write_start_ns;
 
-    common.report("cfg", "write", iterations, write_bytes, write_ns, write_counter.peak);
+    common.report("toml", "write", iterations, write_bytes, write_ns, write_counter.peak);
 }
