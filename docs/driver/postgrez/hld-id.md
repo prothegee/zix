@@ -134,6 +134,8 @@ Executor menjawab pertanyaan yang dihadapi server sinkron thread-per-core: bagai
 
 `.ASYNC` adalah Executor di atas. `.EPOLL` dan `.URING` adalah `dispatch.Transport`: ia memakai ulang `Conn` untuk connect dan handshake SCRAM, lalu menjalankan loop pipelined di atas fd koneksi mentah. Pemanggil men-stage sebuah request (helper `frontend` membangun byte-nya) di bawah routing tag, dan `dispatch.Transport` callback dengan reply mentah (decoder `backend` membacanya) dalam urutan submit per koneksi. Jadi protocol dibagi dengan jalur blocking, hanya socket pump yang berubah.
 
+`dispatch.Line` adalah saudara tanpa reactor untuk pemanggil yang memiliki event loop sendiri (external watch `.URING` zix.Http1): satu koneksi, `submit` men-stage, pemanggil melakukan `flush` sekali per batch (`pump` juga flush) sehingga banyak request keluar dalam satu write, `pump` membaca dan mengantar reply yang sudah ter-frame, dan pemanggil sendiri yang mengawasi fd untuk readable. Peer yang tertutup muncul sebagai `error.ConnectionClosed` dari `pump`.
+
 ```mermaid
 flowchart LR
     caller[loop pemanggil]
