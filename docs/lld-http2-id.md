@@ -116,7 +116,7 @@ loop:
                          panjang data; salin ke body, shed dengan 413 melewati max_body;
                          dispatch saat END_STREAM
         RST_STREAM    -> findSlot -> releaseSlot
-        PING          -> lewati ACK; sendPingAck
+        PING          -> lewati ACK; sendPingAckFD
         GOAWAY        -> return .close
         PRIORITY      -> abaikan
 ```
@@ -127,14 +127,14 @@ Kegagalan decode mengirim `RST_STREAM COMPRESSION_ERROR` dan membebaskan slot. `
 
 Mengekstrak method / path dari pseudo-header yang sudah di-decode (perbandingan ber-gate panjang: `:path` = 5, `:method` = 7), mengeset `active_conn = conn`, mencatat `tl_req_path` / `tl_req_body` hanya saat response cache terpasang, dan memanggil `core.Router(routes).dispatch`. Setelah handler kembali, slot dibebaskan kecuali body respons di-park pada window (`pending_body.len > 0`), yang dalam kasus itu `WINDOW_UPDATE` berikutnya melanjutkan dan membebaskannya.
 
-### pumpBody / resumeStream / resumeAll / sendResponseStream
+### pumpBody / resumeStream / resumeAll / sendResponseStreamFD
 
 Flow control sisi-kirim (`active_conn` adalah threadlocal yang mengikat send handler yang sedang berjalan kembali ke window koneksinya).
 
 - `pumpBody(conn, stream, body, end)`: menulis DATA hingga `min(conn.send_window, stream.send_window)` dan `max_frame_size`, mengurangi kedua window per chunk, mengeset END_STREAM hanya pada chunk terakhir setelah seluruh body keluar, dan mem-park sisanya di `pending_body` / `pending_end`.
 - `resumeStream(conn, slot)`: setelah window stream bertambah, mem-`pumpBody` ekor yang di-park dan membebaskan slot saat ia terkuras penuh.
 - `resumeAll(conn)`: setelah window koneksi bertambah, melanjutkan setiap stream yang di-park.
-- `sendResponseStream(fd, sid, status, content_type, content_encoding, body)`: entry respons ber-flow-control. Tanpa `active_conn` atau tanpa slot yang cocok, ia jatuh kembali ke `frame.sendResponseEncoded` (langsung, tanpa meter). Selain itu ia menulis HEADERS (`sendRespHeaders` -> `hpack.respHeaderBlock`) lalu `pumpBody(..., true)`. Body direferensikan, tidak disalin, jadi ia harus hidup lebih lama dari stream (cache seumur-proses).
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: entry respons ber-flow-control. Tanpa `active_conn` atau tanpa slot yang cocok, ia jatuh kembali ke `frame.sendResponseEncodedFD` (langsung, tanpa meter). Selain itu ia menulis HEADERS (`sendRespHeadersFD` -> `hpack.respHeaderBlock`) lalu `pumpBody(..., true)`. Body direferensikan, tidak disalin, jadi ia harus hidup lebih lama dari stream (cache seumur-proses).
 
 ### onReadable / processRing
 
@@ -179,7 +179,7 @@ Codec frame, pengirim control-frame, dan konstanta (`FRAME_TYPE_*`, `FLAG_*`, `E
 
 `writeAllFD` memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `writeAllRawFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `writeAllRawFD` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook.
 
-`sendSettings` / `sendSettingsAck` / `sendPingAck` / `sendGoaway` / `sendRstStream` / `sendWindowUpdate` masing-masing mengenkode satu control frame. `sendResponse` -> `sendResponseEncoded` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStream` sebagai gantinya.
+`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` masing-masing mengenkode satu control frame. `sendResponseFD` -> `sendResponseEncodedFD` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStreamFD` sebagai gantinya.
 
 ---
 
@@ -207,7 +207,7 @@ Response cache per-worker (ADR-036) juga berada di sini: `tl_cache`, `serveCache
 
 ### Jalur blocking (serveConn / serveH2cLoop)
 
-`serveConn` mengeset `TCP_NODELAY` dan memanggil `serveConnInner`, yang membaca 3 byte: `"PRI"` menjalankan preface h2c-direct (validasi, `sendSettings`, `serveH2cLoop`), selain itu menjalankan `serveH2cUpgrade` (handshake `Upgrade: h2c` HTTP/1.1, yang melayani request stream-1 awal lalu `serveH2cLoop`). `serveH2cLoop` mengalokasikan buffer payload plus tabel slot `[]Stream` dan menjalankan switch frame yang sama dengan mux memakai `readFrameHeader` + `recvExact` blocking, men-dispatch inline via `dispatchStream`. Perhatikan `Stream` blocking adalah struct inline tetap (`body: [65536]u8`, `header_scratch: [4096]u8`) yang ditahan sedalam `max_streams` per koneksi, berbeda dengan buffer ter-pool milik mux yang berukuran sesuai serve options.
+`serveConn` mengeset `TCP_NODELAY` dan memanggil `serveConnInner`, yang membaca 3 byte: `"PRI"` menjalankan preface h2c-direct (validasi, `sendSettingsFD`, `serveH2cLoop`), selain itu menjalankan `serveH2cUpgrade` (handshake `Upgrade: h2c` HTTP/1.1, yang melayani request stream-1 awal lalu `serveH2cLoop`). `serveH2cLoop` mengalokasikan buffer payload plus tabel slot `[]Stream` dan menjalankan switch frame yang sama dengan mux memakai `readFrameHeader` + `recvExact` blocking, men-dispatch inline via `dispatchStream`. Perhatikan `Stream` blocking adalah struct inline tetap (`body: [65536]u8`, `header_scratch: [4096]u8`) yang ditahan sedalam `max_streams` per koneksi, berbeda dengan buffer ter-pool milik mux yang berukuran sesuai serve options.
 
 ---
 
