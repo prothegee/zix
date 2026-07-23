@@ -96,7 +96,7 @@ test "zix tests: canonical trio surface resolves on both http namespaces" {
     }
 }
 
-test "zix tests: unit test" {
+test "zix: unit test" {
     // # zix.Http
     std.testing.refAllDecls(@import("tcp/http/method.zig"));
     std.testing.refAllDecls(@import("tcp/http/status.zig"));
@@ -210,6 +210,7 @@ test "zix tests: unit test" {
     std.testing.refAllDecls(@import("utils/multipart.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
+    std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
     std.testing.refAllDecls(@import("utils/compression/compression.zig"));
 
