@@ -163,7 +163,7 @@ pub fn applyClientArgs(config: UdpClientConfig, args: anytype) UdpClientConfig {
 // init() enforces this, port 0 in config yields error.PortNotConfigured.
 // These tests verify that defaults are safe and that enum representations are stable.
 
-test "zix test: UdpServerConfig, default field values" {
+test "zix udp: UdpServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -187,7 +187,7 @@ test "zix test: UdpServerConfig, default field values" {
     try std.testing.expect(!cfg.broadcast);
 }
 
-test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
+test "zix udp: UdpServerConfig, datagram-transport defaults (ADR-049)" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -209,7 +209,7 @@ test "zix test: UdpServerConfig, datagram-transport defaults (ADR-049)" {
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
 }
 
-test "zix test: UdpClientConfig, default field values" {
+test "zix udp: UdpClientConfig, default field values" {
     const cfg = UdpClientConfig{ .ip = "127.0.0.1", .server_port = 9100, .bind_port = 9101 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9100), cfg.server_port);
@@ -220,7 +220,7 @@ test "zix test: UdpClientConfig, default field values" {
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
 }
 
-test "zix test: Endianness enum backing values are stable" {
+test "zix udp: Endianness enum backing values are stable" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Endianness.NATIVE));
     try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Endianness.LITTLE));
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Endianness.BIG));

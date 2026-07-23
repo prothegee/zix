@@ -159,7 +159,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `utils/multipart.zig` | `refAllDecls` + behavioral: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
 
-### zix.Multiplexers
+### multiplexers (src/multiplexers/, internal)
 
 | Module | Coverage |
 | :- | :- |

@@ -238,8 +238,8 @@ __*0. Zero dependencies:*__
 
 Hanya Zig standard library. Tanpa paket pihak ketiga (dependency set `build.zig.zon` kosong),
 tanpa C library, dan tanpa linking libc: TLS 1.3 / 1.2 berjalan pure-Zig di atas `std.crypto`
-(tanpa OpenSSL), gzip / deflate di `std.compress.flate`, dan brotli, QUIC, HPACK, serta QPACK
-ditulis in-tree dari RFC masing-masing.
+(tanpa OpenSSL), gzip / deflate di `std.compress.flate` plus encoder gzip cepat in-tree untuk
+body dinamis kecil, dan brotli, QUIC, HPACK, serta QPACK ditulis in-tree dari RFC masing-masing.
 
 > Satu `zig build` mengompilasi seluruh stack dari source tanpa ada yang perlu di-vendor,
 di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus repository ini.
@@ -389,7 +389,7 @@ __*16. HTTP/3 di atas QUIC, pure-Zig:*__
 
 __*17. Kompresi respons (gzip / deflate / brotli):*__
 
-Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di atas `std.compress.flate`, plus brotli dari encoder / decoder in-tree yang ditulis dari RFC 7932 (`std` tidak punya brotli). Opt-in per server, dengan size floor, skip media-type yang sudah ter-compressed, dan `Vary: Accept-Encoding`. HTTP/3 menyajikan body statis pre-compressed dengan `content-encoding`.
+Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di atas `std.compress.flate` (body dinamis kecil memakai encoder gzip cepat in-tree), plus brotli dari encoder / decoder in-tree yang ditulis dari RFC 7932 (`std` tidak punya brotli). Opt-in per server, dengan size floor, skip media-type yang sudah ter-compressed, dan `Vary: Accept-Encoding`. HTTP/3 menyajikan body statis pre-compressed dengan `content-encoding`.
 
 > Respons lebih kecil di jaringan nyata tanpa dependensi kompresi, mati secara default jadi hot path cleartext tak tersentuh sampai di-opt-in.
 
@@ -523,53 +523,47 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 
 Ambil zix ke proyekmu:
 
-Tambahkan ke `build.zig.zon`:
-```zig
-.{
-    .name = .my_project,
-    .version = "0.1.0",
-    .fingerprint = 0x0, // required, zig prints a suggested value on first init
-    .dependencies = .{},
-    .paths = .{""},
-}
-```
-
-Lalu lakukan:
+Lakukan zig fetch save https:
+`codeberg.org`
 ```sh
-zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"`.
+zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"
+```
+`github.com`
+```sh
+zig fetch --save "https://github.com/prothegee/zix/archive/refs/heads/MAJOR.MINOR.x.tar.gz"
 ```
 
 <br>
 
 Atau,
 
-gunakan zig fetch langsung dengan source repo dan versi:
+gunakan zig fetch save git+https:
+`codeberg.org`
 ```sh
-zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
-```
-
-atau
-
-```sh
-# upstream vMAJOR.MINOR.x
 zig fetch --save "git+https://codeberg.org/prothegee/zix#MAJOR.MINOR.x"
 ```
+`github.com`
+```sh
+zig fetch --save "git+https://github.com/prothegee/zix#MAJOR.MINOR.x"
+```
 
-> Kamu juga bisa menggunakan mirror di `github.com/prothegee/zix`
->
-> Untuk versi tertentu, gunakan `MAJOR.MINOR.x`, misalnya `#0.2.x` dan ganti `#main`
+> Gunakan `.../zix#main` untuk upstream.
 
 <br>
 
 Tambahkan ke proyekmu (file `build.zig`):
 
-```sh
+```zig
+// const exe = ...;
+
 const zix = b.dependency("zix", .{
     .target = target,
     .optimize = optimize,
 });
 
 exe.root_module.addImport("zix", zix.module("zix"));
+
+// ...
 ```
 
 <br>

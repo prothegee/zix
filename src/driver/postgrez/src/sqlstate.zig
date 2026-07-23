@@ -424,7 +424,7 @@ fn copyTruncated(dst: []u8, src: []const u8) usize {
 
 const testing = std.testing;
 
-test "postgrez test: fromCode maps known codes" {
+test "postgrez: fromCode maps known codes" {
     try testing.expectEqual(SqlState.SUCCESSFUL_COMPLETION, fromCode("00000"));
     try testing.expectEqual(SqlState.UNIQUE_VIOLATION, fromCode("23505"));
     try testing.expectEqual(SqlState.SERIALIZATION_FAILURE, fromCode("40001"));
@@ -434,13 +434,13 @@ test "postgrez test: fromCode maps known codes" {
     try testing.expectEqual(SqlState.INDEX_CORRUPTED, fromCode("XX002"));
 }
 
-test "postgrez test: fromCode maps unmapped input to UNKNOWN" {
+test "postgrez: fromCode maps unmapped input to UNKNOWN" {
     try testing.expectEqual(SqlState.UNKNOWN, fromCode("ZZZZZ"));
     try testing.expectEqual(SqlState.UNKNOWN, fromCode(""));
     try testing.expectEqual(SqlState.UNKNOWN, fromCode("2350"));
 }
 
-test "postgrez test: toCode round-trips every entry" {
+test "postgrez: toCode round-trips every entry" {
     for (ENTRIES) |entry| {
         const state = fromCode(entry.code);
         try testing.expect(state != .UNKNOWN);
@@ -450,7 +450,7 @@ test "postgrez test: toCode round-trips every entry" {
     try testing.expectEqualStrings("?????", toCode(.UNKNOWN));
 }
 
-test "postgrez test: entry codes are unique and 5 chars" {
+test "postgrez: entry codes are unique and 5 chars" {
     for (ENTRIES, 0..) |entry, index| {
         try testing.expectEqual(@as(usize, 5), entry.code.len);
 
@@ -460,7 +460,7 @@ test "postgrez test: entry codes are unique and 5 chars" {
     }
 }
 
-test "postgrez test: ServerError captures an ErrorResponse" {
+test "postgrez: ServerError captures an ErrorResponse" {
     const payload = "SERROR\x00C23505\x00Mduplicate key value\x00Dalready exists\x00\x00";
     const decoded = try backend.decode('E', payload);
 
@@ -474,7 +474,7 @@ test "postgrez test: ServerError captures an ErrorResponse" {
     try testing.expectEqualStrings("already exists", server_error.detail());
 }
 
-test "postgrez test: ServerError keeps the raw code for unmapped states" {
+test "postgrez: ServerError keeps the raw code for unmapped states" {
     const payload = "SFATAL\x00CZZ123\x00Mstrange\x00\x00";
     const decoded = try backend.decode('E', payload);
 

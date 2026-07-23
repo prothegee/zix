@@ -519,7 +519,7 @@ pub fn statusLine(code: Code) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: statusLine pre-built lines" {
+test "zix http: statusLine pre-built lines" {
     // Every pre-built entry must produce exactly what bufPrint + stringFromEnum would.
     const pre_built = [_]Code{
         .OK,                     .CREATED,              .ACCEPTED,            .NO_CONTENT,
@@ -545,7 +545,7 @@ test "zix test: statusLine pre-built lines" {
     try std.testing.expectEqualStrings("", statusLine(.IM_USED));
 }
 
-test "zix test: tcp http status fn/s" {
+test "zix http: tcp http status fn/s" {
     const all_codes = [_]Code{
         // 1xx : informational
         Code.CONTINUE,

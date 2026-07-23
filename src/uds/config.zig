@@ -42,7 +42,7 @@ pub const UdsClientConfig = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: UdsServerConfig, default field values" {
+test "zix uds: UdsServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -59,7 +59,7 @@ test "zix test: UdsServerConfig, default field values" {
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
 
-test "zix test: UdsClientConfig, default field values" {
+test "zix uds: UdsClientConfig, default field values" {
     const cfg = UdsClientConfig{ .path = "/tmp/zix.sock" };
     try std.testing.expectEqualStrings("/tmp/zix.sock", cfg.path);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);

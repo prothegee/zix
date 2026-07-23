@@ -147,7 +147,7 @@ pub const BindTurn = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: steeringProgram encodes ld cpu, mod N, ret A" {
+test "zix multiplexers: steeringProgram encodes ld cpu, mod N, ret A" {
     const prog = steeringProgram(6);
 
     try std.testing.expectEqual(@as(u16, BPF_LD | BPF_W | BPF_ABS), prog[0].code);
@@ -157,17 +157,17 @@ test "zix test: steeringProgram encodes ld cpu, mod N, ret A" {
     try std.testing.expectEqual(@as(u16, BPF_RET | BPF_A), prog[2].code);
 }
 
-test "zix test: SockFprog matches the C sock_fprog layout" {
+test "zix multiplexers: SockFprog matches the C sock_fprog layout" {
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(SockFprog, "len"));
     try std.testing.expectEqual(@as(usize, @sizeOf(usize)), @offsetOf(SockFprog, "filter"));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(SockFilter));
 }
 
-test "zix test: attachCpuSteering is a no-op on a zero-size group" {
+test "zix multiplexers: attachCpuSteering is a no-op on a zero-size group" {
     attachCpuSteering(-1, 0);
 }
 
-test "zix test: BindOrderGate releases workers in id order" {
+test "zix multiplexers: BindOrderGate releases workers in id order" {
     var gate = BindOrderGate{};
 
     // Worker 0 passes immediately, later ids pass only after done() calls.
@@ -178,7 +178,7 @@ test "zix test: BindOrderGate releases workers in id order" {
     try std.testing.expectEqual(@as(usize, 2), gate.next.load(.acquire));
 }
 
-test "zix test: BindTurn release is idempotent and null steering is a no-op" {
+test "zix multiplexers: BindTurn release is idempotent and null steering is a no-op" {
     var gate = BindOrderGate{};
     const steering = Steering{ .gate = &gate, .group_size = 4 };
 

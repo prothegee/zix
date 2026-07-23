@@ -116,7 +116,7 @@ loop:
                          the data length; copy into body, shed with 413 past max_body;
                          dispatch on END_STREAM
         RST_STREAM    -> findSlot -> releaseSlot
-        PING          -> skip ACK; sendPingAck
+        PING          -> skip ACK; sendPingAckFD
         GOAWAY        -> return .close
         PRIORITY      -> ignore
 ```
@@ -127,14 +127,14 @@ A decode failure sends `RST_STREAM COMPRESSION_ERROR` and frees the slot. `sendS
 
 Extracts method / path from the decoded pseudo-headers (length-gated compares: `:path` is 5, `:method` is 7), sets `active_conn = conn`, records `tl_req_path` / `tl_req_body` only when a response cache is installed, and calls `core.Router(routes).dispatch`. After the handler returns, the slot is freed unless the response body is parked on a window (`pending_body.len > 0`), in which case a later `WINDOW_UPDATE` resumes and frees it.
 
-### pumpBody / resumeStream / resumeAll / sendResponseStream
+### pumpBody / resumeStream / resumeAll / sendResponseStreamFD
 
 The send-side flow control (`active_conn` is the threadlocal that binds a running handler's send back to its connection windows).
 
 - `pumpBody(conn, stream, body, end)`: writes DATA up to `min(conn.send_window, stream.send_window)` and `max_frame_size`, decrements both windows per chunk, sets END_STREAM only on the final chunk once the whole body has gone out, and parks the remainder in `pending_body` / `pending_end`.
 - `resumeStream(conn, slot)`: after a stream window grew, `pumpBody`s the parked tail and frees the slot when it fully drains.
 - `resumeAll(conn)`: after the connection window grew, resumes every parked stream.
-- `sendResponseStream(fd, sid, status, content_type, content_encoding, body)`: the flow-controlled response entry. With no `active_conn` or no matching slot it falls back to `frame.sendResponseEncoded` (immediate, unmetered). Otherwise it writes HEADERS (`sendRespHeaders` -> `hpack.respHeaderBlock`) then `pumpBody(..., true)`. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache).
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: the flow-controlled response entry. With no `active_conn` or no matching slot it falls back to `frame.sendResponseEncodedFD` (immediate, unmetered). Otherwise it writes HEADERS (`sendRespHeadersFD` -> `hpack.respHeaderBlock`) then `pumpBody(..., true)`. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache).
 
 ### onReadable / processRing
 
@@ -179,7 +179,7 @@ Frame codec, control-frame senders, and the constants (`FRAME_TYPE_*`, `FLAG_*`,
 
 `writeAllFD` checks a threadlocal `write_hook`: when set (the TLS seal path, or the coalescing sink) it hands the plaintext to the hook, otherwise it calls `writeAllRawFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. `writeAllRawFD` is also the hook's own flush path, so a coalescing flush does not re-enter the hook.
 
-`sendSettings` / `sendSettingsAck` / `sendPingAck` / `sendGoaway` / `sendRstStream` / `sendWindowUpdate` encode one control frame each. `sendResponse` -> `sendResponseEncoded` is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). Large bodies that may exceed the peer window use `mux.sendResponseStream` instead.
+`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` encode one control frame each. `sendResponseFD` -> `sendResponseEncodedFD` is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). Large bodies that may exceed the peer window use `mux.sendResponseStreamFD` instead.
 
 ---
 
@@ -207,7 +207,7 @@ The per-worker response cache (ADR-036) also lives here: `tl_cache`, `serveCache
 
 ### Blocking path (serveConn / serveH2cLoop)
 
-`serveConn` sets `TCP_NODELAY` and calls `serveConnInner`, which reads 3 bytes: `"PRI"` runs the h2c-direct preface (validate, `sendSettings`, `serveH2cLoop`), anything else runs `serveH2cUpgrade` (the HTTP/1.1 `Upgrade: h2c` handshake, which serves the initial stream-1 request then `serveH2cLoop`). `serveH2cLoop` allocates a payload buffer plus a `[]Stream` slot table and runs the same frame switch as the mux with blocking `readFrameHeader` + `recvExact`, dispatching inline via `dispatchStream`. Note the blocking `Stream` is a fixed inline struct (`body: [65536]u8`, `header_scratch: [4096]u8`) held `max_streams` deep per connection, in contrast to the mux's pooled buffers sized to the serve options.
+`serveConn` sets `TCP_NODELAY` and calls `serveConnInner`, which reads 3 bytes: `"PRI"` runs the h2c-direct preface (validate, `sendSettingsFD`, `serveH2cLoop`), anything else runs `serveH2cUpgrade` (the HTTP/1.1 `Upgrade: h2c` handshake, which serves the initial stream-1 request then `serveH2cLoop`). `serveH2cLoop` allocates a payload buffer plus a `[]Stream` slot table and runs the same frame switch as the mux with blocking `readFrameHeader` + `recvExact`, dispatching inline via `dispatchStream`. Note the blocking `Stream` is a fixed inline struct (`body: [65536]u8`, `header_scratch: [4096]u8`) held `max_streams` deep per connection, in contrast to the mux's pooled buffers sized to the serve options.
 
 ---
 

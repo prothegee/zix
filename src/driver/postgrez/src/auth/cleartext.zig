@@ -30,7 +30,7 @@ pub fn respond(allocator: std.mem.Allocator, out: *std.ArrayList(u8), password: 
 
 const testing = std.testing;
 
-test "postgrez test: cleartext respond frames the password message" {
+test "postgrez auth: cleartext respond frames the password message" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 

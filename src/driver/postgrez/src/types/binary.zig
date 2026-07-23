@@ -248,7 +248,7 @@ fn encodeFloat(allocator: std.mem.Allocator, value: anytype) !EncodedParam {
 
 const testing = std.testing;
 
-test "postgrez test: binary decode integers with checked narrowing" {
+test "postgrez types: binary decode integers with checked narrowing" {
     try testing.expectEqual(@as(i16, -7), try decode(i16, .INT2, &.{ 0xff, 0xf9 }));
     try testing.expectEqual(@as(i64, 1), try decode(i64, .INT8, &.{ 0, 0, 0, 0, 0, 0, 0, 1 }));
     try testing.expectEqual(@as(u8, 255), try decode(u8, .INT2, &.{ 0, 255 }));
@@ -259,14 +259,14 @@ test "postgrez test: binary decode integers with checked narrowing" {
     try testing.expectError(error.TypeMismatch, decode(i32, .TEXT, "42"));
 }
 
-test "postgrez test: binary decode date, time, timestamp as integers" {
+test "postgrez types: binary decode date, time, timestamp as integers" {
     // date: i32 days since 2000-01-01
     try testing.expectEqual(@as(i32, 9690), try decode(i32, .DATE, &.{ 0, 0, 0x25, 0xda }));
     // timestamp: i64 micros since 2000-01-01
     try testing.expectEqual(@as(i64, 1_000_000), try decode(i64, .TIMESTAMP, &.{ 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40 }));
 }
 
-test "postgrez test: binary decode floats" {
+test "postgrez types: binary decode floats" {
     var float4_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &float4_bytes, @bitCast(@as(f32, 1.5)), .big);
     try testing.expectEqual(@as(f32, 1.5), try decode(f32, .FLOAT4, &float4_bytes));
@@ -279,7 +279,7 @@ test "postgrez test: binary decode floats" {
     try testing.expectError(error.TypeMismatch, decode(f32, .FLOAT8, &float8_bytes));
 }
 
-test "postgrez test: binary decode bool" {
+test "postgrez types: binary decode bool" {
     try testing.expectEqual(true, try decode(bool, .BOOL, &.{1}));
     try testing.expectEqual(false, try decode(bool, .BOOL, &.{0}));
 
@@ -287,7 +287,7 @@ test "postgrez test: binary decode bool" {
     try testing.expectError(error.BadCell, decode(bool, .BOOL, &.{ 1, 1 }));
 }
 
-test "postgrez test: binary decode text-like, bytea, and jsonb strip" {
+test "postgrez types: binary decode text-like, bytea, and jsonb strip" {
     try testing.expectEqualStrings("hi", try decode([]const u8, .TEXT, "hi"));
     try testing.expectEqualSlices(u8, &.{ 0xde, 0xad }, try decode([]const u8, .BYTEA, &.{ 0xde, 0xad }));
 
@@ -297,7 +297,7 @@ test "postgrez test: binary decode text-like, bytea, and jsonb strip" {
     try testing.expectError(error.BadCell, decode([]const u8, .JSONB, &.{2}));
 }
 
-test "postgrez test: binary decode uuid into [16]u8" {
+test "postgrez types: binary decode uuid into [16]u8" {
     var uuid_bytes: [16]u8 = undefined;
     for (&uuid_bytes, 0..) |*byte, index| byte.* = @intCast(index);
 
@@ -308,7 +308,7 @@ test "postgrez test: binary decode uuid into [16]u8" {
     try testing.expectError(error.TypeMismatch, decode([16]u8, .BYTEA, &uuid_bytes));
 }
 
-test "postgrez test: encode integers picks stable wire width by type" {
+test "postgrez types: encode integers picks stable wire width by type" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -330,7 +330,7 @@ test "postgrez test: encode integers picks stable wire width by type" {
     try testing.expectError(error.ValueOutOfRange, encode(allocator, @as(u64, std.math.maxInt(u64))));
 }
 
-test "postgrez test: encode floats, bool, strings, null" {
+test "postgrez types: encode floats, bool, strings, null" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -357,7 +357,7 @@ test "postgrez test: encode floats, bool, strings, null" {
     try testing.expectEqual(@as(u32, @intFromEnum(Oid.INT4)), some.oid);
 }
 
-test "postgrez test: encode enum and struct as text" {
+test "postgrez types: encode enum and struct as text" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

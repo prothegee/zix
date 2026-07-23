@@ -516,7 +516,7 @@ fn wake(word: *std.atomic.Value(u32), count: usize) void {
 
 const testing = std.testing;
 
-test "postgrez test: sizeWorkers floors, scales per cpu, caps at the ceiling" {
+test "postgrez: sizeWorkers floors, scales per cpu, caps at the ceiling" {
     // no hint: conservative floor
     try testing.expectEqual(@as(usize, 16), sizeWorkers(64, 0));
 
@@ -556,7 +556,7 @@ const Probe = struct {
     }
 };
 
-test "postgrez test: executor runs a submitted job with a null batch when no server" {
+test "postgrez: executor runs a submitted job with a null batch when no server" {
     Probe.reset();
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -595,7 +595,7 @@ test "postgrez test: executor runs a submitted job with a null batch when no ser
     try testing.expectEqual(@as(u64, 1), stats.jobs);
 }
 
-test "postgrez test: executor rejects a batch_max wider than the histogram" {
+test "postgrez: executor rejects a batch_max wider than the histogram" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -608,7 +608,7 @@ test "postgrez test: executor rejects a batch_max wider than the histogram" {
     }));
 }
 
-test "postgrez test: executor submit sheds when the queue is full" {
+test "postgrez: executor submit sheds when the queue is full" {
     Probe.reset();
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});

@@ -301,7 +301,7 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: udp effectiveWorkers honors an explicit count and defaults to the cpuset-aware count" {
+test "zix udp: udp effectiveWorkers honors an explicit count and defaults to the cpuset-aware count" {
     const base = UdpServerConfig{ .allocator = std.testing.allocator, .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC };
 
     // an explicit worker count passes through unchanged
@@ -314,13 +314,13 @@ test "zix test: udp effectiveWorkers honors an explicit count and defaults to th
     try std.testing.expectEqual(getAvailableCpuCount(), effectiveWorkers(base));
 }
 
-test "zix test: udp pinToCpu is a no-op-safe call for any worker_id" {
+test "zix udp: udp pinToCpu is a no-op-safe call for any worker_id" {
     // The modulo keeps a derived slot inside the available set, so an out-of-range worker_id must
     // not crash and the process keeps a valid affinity mask.
     pinToCpu(0);
     pinToCpu(999);
 }
-test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
+test "zix udp: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
     var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
 
@@ -329,7 +329,7 @@ test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings"
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 1, 3, 5 }, &cpus);
 }
 
-test "zix test: orderPhysicalCoresFirst keeps mask order on unique keys" {
+test "zix udp: orderPhysicalCoresFirst keeps mask order on unique keys" {
     var cpus = [_]u32{ 3, 7, 11 };
     const keys = [_]u64{ 30, 10, 20 };
 

@@ -135,7 +135,7 @@ fn flattenSamples(arena: std.mem.Allocator, families: []const MetricFamily) ![]c
 
 const testing = std.testing;
 
-test "prometheuz test: snapshot fromText parses and flattens samples" {
+test "prometheuz: snapshot fromText parses and flattens samples" {
     const text =
         "# HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.\n" ++
         "# TYPE node_cpu_seconds_total counter\n" ++
@@ -152,7 +152,7 @@ test "prometheuz test: snapshot fromText parses and flattens samples" {
     try testing.expectEqual(@as(?sample_mod.MetricFamily, null), snapshot.family("missing"));
 }
 
-test "prometheuz test: snapshot failed captures the reason, never throws" {
+test "prometheuz: snapshot failed captures the reason, never throws" {
     var snapshot = try failed(testing.allocator, 1_000, 0, "ConnectionRefused");
     defer snapshot.deinit();
 
@@ -161,7 +161,7 @@ test "prometheuz test: snapshot failed captures the reason, never throws" {
     try testing.expectEqual(@as(usize, 0), snapshot.samples.len);
 }
 
-test "prometheuz test: snapshot refcount frees only at zero" {
+test "prometheuz: snapshot refcount frees only at zero" {
     var snapshot = try failed(testing.allocator, 0, 0, "x");
 
     snapshot.retain();

@@ -489,7 +489,7 @@ pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body
     }
     if (sink.failed) return error.ResponseTooLarge;
 
-    return .{ .bytes = out[0..sink.len], .streamed = false };
+    return .{ .bytes = out[sink.off..sink.len], .streamed = false };
 }
 
 /// Per-connection streaming state behind the type-erased core.TlsStreamSink (ADR-054). Generic over
@@ -563,7 +563,7 @@ fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls_serve, stripPort strips host:port and bracketed ipv6" {
+test "zix http1: tls_serve, stripPort strips host:port and bracketed ipv6" {
     try std.testing.expectEqualStrings("localhost", stripPort("localhost:9060"));
     try std.testing.expectEqualStrings("localhost", stripPort("localhost"));
     try std.testing.expectEqualStrings("127.0.0.1", stripPort("127.0.0.1:443"));
@@ -571,7 +571,7 @@ test "zix test: tls_serve, stripPort strips host:port and bracketed ipv6" {
     try std.testing.expectEqualStrings("::1", stripPort("::1")); // bare ipv6 left intact
 }
 
-test "zix test: tls_serve, hostFromHead extracts the Host header" {
+test "zix http1: tls_serve, hostFromHead extracts the Host header" {
     const head = "GET / HTTP/1.1\r\nUser-Agent: x\r\nHost: localhost:9060\r\nAccept: */*\r\n\r\n";
     try std.testing.expectEqualStrings("localhost:9060", hostFromHead(head).?);
 
@@ -591,7 +591,7 @@ pub const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914
 /// Test-only fixture: the secret key paired with fixture_cert_hex, in hex.
 pub const fixture_key_hex = "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c";
 
-test "zix test: tls_serve, keep-alive serves many requests then honors Connection: close" {
+test "zix http1: tls_serve, keep-alive serves many requests then honors Connection: close" {
     const client = @import("../../tls/client.zig");
     const context = @import("../../tls/context.zig");
 
@@ -704,7 +704,7 @@ const CaptureStream = struct {
     }
 };
 
-test "zix test: tls_serve, runHandlerToBuffer streams over TLS when the stream sink is armed" {
+test "zix http1: tls_serve, runHandlerToBuffer streams over TLS when the stream sink is armed" {
     var capture = CaptureStream{};
     var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
     const prev = core.tl_tls_stream;
@@ -729,7 +729,7 @@ fn wsNoopFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
     _ = payload;
 }
 
-test "zix test: tls_serve, serveTls encrypts the 101 through the stream sink and registers the handoff" {
+test "zix http1: tls_serve, serveTls encrypts the 101 through the stream sink and registers the handoff" {
     var capture = CaptureStream{};
     var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
     const prev = core.tl_tls_stream;

@@ -159,6 +159,12 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `utils/multipart.zig` | `refAllDecls` + perilaku: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
 
+### multiplexers (src/multiplexers/, internal)
+
+| Modul | Cakupan |
+| :- | :- |
+| `multiplexers/ring.zig` | `refAllDecls` + perilaku: round-trip `user_data` io_uring mempertahankan `{ op, gen, fd }`, setiap varian `OpKind` (`accept` / `recv` / `send` / `timeout` / `close`) ter-decode kembali, generation maksimum tidak bocor ke field fd |
+
 ---
 
 ## Pengujian Integrasi

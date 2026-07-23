@@ -278,7 +278,7 @@ pub fn UdpServer(comptime Packet: type) type {
 
 const TestPkt = extern struct { value: u32 };
 
-test "zix test: UdpServer init, port zero returns PortNotConfigured" {
+test "zix udp: UdpServer init, port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -286,7 +286,7 @@ test "zix test: UdpServer init, port zero returns PortNotConfigured" {
     try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}));
 }
 
-test "zix test: UdpServer init, nonzero port succeeds" {
+test "zix udp: UdpServer init, nonzero port succeeds" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -295,7 +295,7 @@ test "zix test: UdpServer init, nonzero port succeeds" {
     server.deinit();
 }
 
-test "zix test: UdpServer init, config fields are preserved" {
+test "zix udp: UdpServer init, config fields are preserved" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

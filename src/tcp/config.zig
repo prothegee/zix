@@ -90,7 +90,7 @@ pub const TcpClientConfig = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: TcpServerConfig, default field values" {
+test "zix tcp: TcpServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -110,13 +110,13 @@ test "zix test: TcpServerConfig, default field values" {
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
 
-test "zix test: DispatchModel, URING variant value and ordering" {
+test "zix tcp: DispatchModel, URING variant value and ordering" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(DispatchModel.ASYNC));
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(DispatchModel.EPOLL));
     try std.testing.expectEqual(@as(u8, 4), @intFromEnum(DispatchModel.URING));
 }
 
-test "zix test: TcpClientConfig, default field values" {
+test "zix tcp: TcpClientConfig, default field values" {
     const cfg = TcpClientConfig{ .ip = "127.0.0.1", .port = 9300 };
     try std.testing.expectEqualStrings("127.0.0.1", cfg.ip);
     try std.testing.expectEqual(@as(u16, 9300), cfg.port);

@@ -80,10 +80,22 @@ pub inline fn invokeHandler(
     var res = Response.init(fd, io, allocator);
     var ctx = Context.init(io, allocator, fd);
 
+    if (tl_body_received != 0) {
+        req.body_received = tl_body_received;
+        tl_body_received = 0;
+    }
+
     handler_fn(&req, &res, &ctx) catch {
         if (!res.sent) sendSimpleFD(fd, 500, "text/plain", "Internal Server Error") catch {};
     };
 }
+
+/// Received-body count for the request about to be invoked, set by a dispatch
+/// path that drained a body larger than the receive buffer (counted from the
+/// socket reads). 0 means the delivered body slice is the whole count.
+/// Consumed and reset by invokeHandler, so it never leaks into a later
+/// request.
+pub threadlocal var tl_body_received: u64 = 0;
 
 /// Options for serveConn.
 pub const ServeOpts = struct {
@@ -104,6 +116,35 @@ pub threadlocal var tl_large_body_rcvbuf: usize = 0;
 /// Install the large-body SO_RCVBUF for this worker (event-loop models).
 pub fn setLargeBodyRcvbuf(bytes: usize) void {
     tl_large_body_rcvbuf = bytes;
+}
+
+/// External fd watch (.URING): a caller-registered callback for foreign fds
+/// (driver sockets) living on the engine worker's own ring. The callback runs
+/// on the worker thread when the fd turns readable. The watch is multishot
+/// and the engine sustains it, arm once per fd via uringWatchFd.
+pub const ExternalFn = *const fn (fd: std.posix.fd_t) void;
+
+/// Per-worker external-readable callback, set once per worker by the caller.
+pub threadlocal var tl_external_cb: ?ExternalFn = null;
+
+/// Ring-arm trampoline installed by the .URING worker loop for this thread.
+pub threadlocal var tl_uring_watch: ?*const fn (ctx: *anyopaque, fd: std.posix.fd_t) bool = null;
+pub threadlocal var tl_uring_watch_ctx: ?*anyopaque = null;
+
+/// Register the external-readable callback for this worker thread.
+pub fn setExternalHandler(cb: ExternalFn) void {
+    tl_external_cb = cb;
+}
+
+/// Arm a multishot readable watch for fd on this worker's ring.
+///
+/// Return:
+/// - true when armed or parked (the callback fires on each readable)
+/// - false when this thread is not a .URING worker or the ring cannot take it
+pub fn uringWatchFd(fd: std.posix.fd_t) bool {
+    const watch = tl_uring_watch orelse return false;
+
+    return watch(tl_uring_watch_ctx.?, fd);
 }
 
 /// Widen the socket receive buffer (SO_RCVBUF) so a large request body drains in fewer cycles.
@@ -542,6 +583,11 @@ pub const RespSink = struct {
     allow_direct: bool = false,
     direct: []const u8 = &.{},
     direct_slot: u32 = 0,
+    /// Dead prefix before the staged bytes. A reserve-committed response
+    /// renders its body at HEADER_BUF_SIZE and right-aligns the header before
+    /// it, so the staged region starts here instead of 0. Always 0 outside
+    /// that path, and reset to 0 by flush.
+    off: usize = 0,
 
     /// Fold a captured zero-copy replay back into the staged batch: a later
     /// response in the same batch means the send must carry both in order, so
@@ -591,10 +637,51 @@ pub const RespSink = struct {
     pub fn flush(self: *RespSink) void {
         if (self.len == 0) return;
 
-        writeAllDirectFD(self.fd, self.buf[0..self.len]) catch {
+        writeAllDirectFD(self.fd, self.buf[self.off..self.len]) catch {
             self.failed = true;
         };
         self.len = 0;
+        self.off = 0;
+    }
+
+    /// Reserve an in-place body region for a response rendered directly into
+    /// the sink buffer, so the body bytes are written exactly once (no
+    /// handler-side scratch buffer, no append copy). The region starts at
+    /// HEADER_BUF_SIZE: commitSimple builds the header right-aligned so it
+    /// ends exactly where the body starts.
+    ///
+    /// Note:
+    /// - Returns null when the sink already stages bytes (a pipelined batch),
+    ///   a zero-copy replay is captured, or max_body does not fit. The caller
+    ///   falls back to rendering its own buffer and writeAllFD.
+    /// - Between reserve and commitSimple the caller must not stage any other
+    ///   response bytes for this sink.
+    ///
+    /// Return:
+    /// - []u8 body region of max_body bytes
+    /// - null when unavailable, the caller uses the writeAllFD path
+    pub fn reserve(self: *RespSink, max_body: usize) ?[]u8 {
+        if (self.len != 0 or self.direct.len != 0 or self.failed) return null;
+        if (HEADER_BUF_SIZE + max_body > self.buf.len) {
+            if (!self.grow(HEADER_BUF_SIZE + max_body)) return null;
+        }
+
+        return self.buf[HEADER_BUF_SIZE..][0..max_body];
+    }
+
+    /// Commit a reserved render: build the simple header right-aligned so it
+    /// ends exactly where the body starts, and stage header + body as one
+    /// contiguous region (off marks the dead prefix before the header).
+    pub fn commitSimple(self: *RespSink, status: u16, content_type: []const u8, body_len: usize) void {
+        std.debug.assert(self.len == 0 and self.direct.len == 0);
+
+        var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
+        const hdr = buildSimpleHeader(&hdr_buf, status, content_type, body_len);
+        const start = HEADER_BUF_SIZE - hdr.len;
+        @memcpy(self.buf[start..HEADER_BUF_SIZE], hdr);
+
+        self.off = start;
+        self.len = HEADER_BUF_SIZE + body_len;
     }
 
     /// Grow buf to hold at least need bytes when backed by a growable allocator.
@@ -772,6 +859,53 @@ fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void
     }
 }
 
+/// Reserve an in-place render region on the worker's response sink for fd.
+/// A handler that builds its body dynamically renders straight into the
+/// returned region and seals it with responseCommit, so the body bytes are
+/// written exactly once, into the buffer the response sends from.
+///
+/// Note:
+/// - null when no sink is installed for fd, bytes are already staged, or
+///   max_body does not fit. The caller falls back to rendering its own
+///   buffer and writeAllFD, which is always correct.
+///
+/// Usage:
+/// ```zig
+/// if (zix.Http1.responseReserve(req.fd, MAX_BODY)) |region| {
+///     const body_len = render(region);
+///     try zix.Http1.responseCommit(req.fd, 200, "application/json", body_len);
+///     return;
+/// }
+/// // writeAllFD fallback path
+/// ```
+///
+/// Return:
+/// - []u8 body region of max_body bytes
+/// - null when unavailable
+pub fn responseReserve(fd: std.posix.fd_t, max_body: usize) ?[]u8 {
+    const sink = tl_resp_sink orelse return null;
+    if (sink.fd != fd) return null;
+
+    return sink.reserve(max_body);
+}
+
+/// Seal a responseReserve render as a complete response: the simple header
+/// (status, content_type, Content-Length) is built by the engine directly in
+/// front of the rendered body. Only valid right after a successful
+/// responseReserve for the same fd, with body_len <= the reserved size.
+///
+/// Return:
+/// - void
+/// - error.BrokenPipe when the sink already failed for this connection
+pub fn responseCommit(fd: std.posix.fd_t, status: u16, content_type: []const u8, body_len: usize) error{BrokenPipe}!void {
+    const sink = tl_resp_sink orelse return error.BrokenPipe;
+    if (sink.fd != fd) return error.BrokenPipe;
+
+    sink.commitSimple(status, content_type, body_len);
+
+    return if (sink.failed) error.BrokenPipe else {};
+}
+
 /// Response with Content-Length body.
 pub fn sendSimpleFD(
     fd: std.posix.fd_t,
@@ -907,12 +1041,32 @@ fn encodeScratch() !*EncodeScratch {
 }
 
 /// Build a complete gzip HTTP response (header + compressed body) into the per-worker buffer and
-/// return the slice. Reuses the per-worker compressor, so it allocates nothing. The body compresses
-/// directly into the response buffer past the header reserve, then the header renders right-aligned
-/// so it ends exactly where the body starts: no pass over the compressed bytes. Shared by sendGzipFD
-/// and sendGzipCachedFD.
+/// return the slice. A body inside the fast encoder's cap compresses via compression.flate_fast
+/// (in-tree greedy fixed-Huffman gzip, no per-stream state init), larger bodies reuse the per-worker
+/// std compressor. Either way the body compresses directly into the response buffer past the header
+/// reserve, then the header renders right-aligned so it ends exactly where the body starts: no pass
+/// over the compressed bytes, no allocation. Shared by sendGzipFD and sendGzipCachedFD.
 fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![]const u8 {
     const scratch = try encodeScratch();
+
+    // Fast path: a body inside the fast encoder's cap compresses via the
+    // in-tree greedy fixed-Huffman encoder (flate_fast), several times
+    // faster than the std matcher on dynamic-response bodies. Larger bodies
+    // keep the std path below.
+    if (compression.flate_fast.fitsFast(body.len, GZIP_OUT_SIZE)) {
+        const compressed_len = compression.flate_fast.gzipFastInto(body, scratch.resp[HEADER_BUF_SIZE..]);
+
+        var hdr_buf: [HEADER_BUF_SIZE]u8 = undefined;
+        const header = try std.fmt.bufPrint(
+            &hdr_buf,
+            "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\n\r\n",
+            .{ status, statusPhrase(status), content_type, compressed_len },
+        );
+        const start = HEADER_BUF_SIZE - header.len;
+        @memcpy(scratch.resp[start..HEADER_BUF_SIZE], header);
+
+        return scratch.resp[start .. HEADER_BUF_SIZE + compressed_len];
+    }
 
     var out_w: std.Io.Writer = .fixed(scratch.resp[HEADER_BUF_SIZE..]);
     scratch.comp = std.compress.flate.Compress.init(
@@ -940,14 +1094,14 @@ fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![
     return scratch.resp[start .. HEADER_BUF_SIZE + compressed.len];
 }
 
-/// gzip-compressed response via std.compress.flate, reusing the per-worker compressor.
+/// gzip-compressed response: flate_fast for bodies inside its cap, std.compress.flate above it.
 pub fn sendGzipFD(fd: std.posix.fd_t, status: u16, content_type: []const u8, body: []const u8) !void {
     try writeAllFD(fd, try buildGzipResponse(status, content_type, body));
 }
 
 /// gzip response with the per-(key, encoding) cache: on a hit replay the cached compressed response
-/// with zero compression work, on a miss compress once, store, and write. Deterministic bodies (the
-/// /json family) become a cache replay after the first request, the json-comp ceiling-raiser.
+/// with zero compression work, on a miss compress once, store, and write. For a deterministic body
+/// every request after the first becomes a replay.
 pub fn sendGzipCachedFD(fd: std.posix.fd_t, head: *const ParsedHead, status: u16, content_type: []const u8, body: []const u8, ttl_ms: u32) !void {
     if (cacheLookupEncoded(head, "gzip")) |cached| return writeAllFD(fd, cached);
 
@@ -1601,6 +1755,54 @@ test "zix http1: RespSink stages writeAllFD bytes until flush" {
     try std.testing.expectEqualStrings("alphabeta", recv[0..n]);
 }
 
+test "zix http1: responseReserve renders in place and responseCommit stages header + body" {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var stage: [HEADER_BUF_SIZE + 64]u8 = undefined;
+    var sink = RespSink{ .fd = fds[1], .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    const region = responseReserve(fds[1], 32) orelse return error.ReserveUnavailable;
+    const body = "{\"ok\":true}";
+    @memcpy(region[0..body.len], body);
+    try responseCommit(fds[1], 200, "application/json", body.len);
+
+    // The staged region starts at the right-aligned header, ends after the body.
+    try std.testing.expect(sink.off > 0);
+    try std.testing.expectEqual(HEADER_BUF_SIZE + body.len, sink.len);
+
+    sink.flush();
+    try std.testing.expect(!sink.failed);
+    try std.testing.expectEqual(@as(usize, 0), sink.off);
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    var expect_buf: [HEADER_BUF_SIZE]u8 = undefined;
+    const expect_hdr = buildSimpleHeader(&expect_buf, 200, "application/json", body.len);
+    try std.testing.expectEqualStrings(expect_hdr, recv[0..expect_hdr.len]);
+    try std.testing.expectEqualStrings(body, recv[expect_hdr.len..n]);
+}
+
+test "zix http1: responseReserve refuses a sink with staged bytes or a foreign fd" {
+    var stage: [HEADER_BUF_SIZE + 64]u8 = undefined;
+    var sink = RespSink{ .fd = 7, .buf = &stage };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    try std.testing.expect(responseReserve(8, 32) == null);
+
+    sink.append("pipelined-first-response");
+    try std.testing.expect(responseReserve(7, 32) == null);
+
+    // Oversized reservation on a non-growable sink refuses too.
+    sink.len = 0;
+    try std.testing.expect(responseReserve(7, stage.len) == null);
+}
+
 test "zix http1: sendSimpleFD writes directly into active sink without buf[4096] bounce" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2189,4 +2391,29 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     var resp2: [256]u8 = undefined;
     const n2 = try std.posix.read(client_fd, &resp2);
     try std.testing.expect(std.mem.indexOf(u8, resp2[0..n2], "200 OK") != null);
+}
+
+test "zix http1: uringWatchFd routes through the installed trampoline" {
+    try std.testing.expect(!uringWatchFd(7));
+
+    const Fake = struct {
+        var seen: std.posix.fd_t = -1;
+        fn watch(ctx: *anyopaque, fd: std.posix.fd_t) bool {
+            _ = ctx;
+            seen = fd;
+
+            return true;
+        }
+    };
+
+    var ctx_dummy: u8 = 0;
+    tl_uring_watch = &Fake.watch;
+    tl_uring_watch_ctx = &ctx_dummy;
+    defer {
+        tl_uring_watch = null;
+        tl_uring_watch_ctx = null;
+    }
+
+    try std.testing.expect(uringWatchFd(7));
+    try std.testing.expectEqual(@as(std.posix.fd_t, 7), Fake.seen);
 }

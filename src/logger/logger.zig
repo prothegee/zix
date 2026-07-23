@@ -588,18 +588,18 @@ pub const Logger = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Logger init and deinit, no file" {
+test "zix logger: Logger init and deinit, no file" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{});
     defer logger.deinit();
 }
 
-test "zix test: Logger.Config write_buf_size default" {
+test "zix logger: Logger.Config write_buf_size default" {
     const cfg = Logger.Config{};
     try std.testing.expectEqual(@as(usize, 64 * 1024), cfg.write_buf_size);
 }
 
-test "zix test: Logger system call below min_level is silent" {
+test "zix logger: Logger system call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
@@ -608,28 +608,28 @@ test "zix test: Logger system call below min_level is silent" {
     logger.system(.WARN, "test", "should not panic", .{});
 }
 
-test "zix test: Logger access call below min_level is silent" {
+test "zix logger: Logger access call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
     logger.access("GET", "/", 200, 0, "", "", "");
 }
 
-test "zix test: Logger access does not panic with empty client_ip" {
+test "zix logger: Logger access does not panic with empty client_ip" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{});
     defer logger.deinit();
     logger.access("GET", "/", 200, 0, "", "", "");
 }
 
-test "zix test: Logger access does not panic with non-empty client_ip" {
+test "zix logger: Logger access does not panic with non-empty client_ip" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{});
     defer logger.deinit();
     logger.access("GET", "/", 200, 0, "10.0.0.1", "Mozilla/5.0", "https://example.com");
 }
 
-test "zix test: Logger rpc call below min_level is silent" {
+test "zix logger: Logger rpc call below min_level is silent" {
     const allocator = std.testing.allocator;
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();

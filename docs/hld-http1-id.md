@@ -162,16 +162,20 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.getHeader` | fn | Pencarian header case-insensitive pada ParsedHead |
 | `zix.Http1.acceptEncoding` | fn | Nilai Accept-Encoding sebuah ParsedHead: O(1) dari span parse-pass, fallback getHeader selain itu |
 | `zix.Http1.setCache` | fn | Memasang atau melepas response cache per-worker |
+| `zix.Http1.setExternalHandler` | fn | Mendaftarkan callback per-worker untuk readability fd eksternal (socket driver `.URING`) |
+| `zix.Http1.uringWatchFd` | fn | Memasang watch readable multishot untuk fd asing di ring milik worker |
 | `zix.Http1.queryParam` | fn | Pemindaian linear satu query parameter berdasarkan nama persis |
 | `zix.Http1.percentDecode` | fn | Percent-decode buffer secara in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` menjadi `Range` |
 | `zix.Http1.writeAllFD` | fn | Menulis semua byte ke fd (sadar sink, menangani EINTR/EAGAIN) |
+| `zix.Http1.responseReserve` | fn | Reserve region render di tempat pada response sink (byte body ditulis sekali) |
+| `zix.Http1.responseCommit` | fn | Menyegel render hasil reserve, engine membangun header sederhana di depan body |
 | `zix.Http1.flushPending` | fn | Flush byte response yang masih tertahan sebelum raw fd write (urutan pipelining) |
 | `zix.Http1.beginStream` | fn | Memulai response streaming (SSE), melepas sink jadi write flush per event (cleartext + TLS) |
 | `zix.Http1.sendSimpleFD` | fn | Response lengkap dengan body Content-Length |
 | `zix.Http1.sendSimpleNoBodyFD` | fn | Response headers saja (method HEAD) |
 | `zix.Http1.sendJsonFD` | fn | Singkatan `sendSimpleFD` dengan `application/json` |
-| `zix.Http1.sendGzipFD` | fn | Response terkompresi gzip via `std.compress.flate` |
+| `zix.Http1.sendGzipFD` | fn | Response terkompresi gzip (`flate_fast` in-tree untuk body di bawah 64 KiB, `std.compress.flate` di atasnya) |
 | `zix.Http1.sendChunkedStartFD` | fn | Memulai response `Transfer-Encoding: chunked` |
 | `zix.Http1.sendChunkFD` | fn | Menulis satu chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Mengakhiri body chunked |
@@ -443,13 +447,13 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | :- | :- |
 | Ukuran blok header | Maksimum 16 KB (`core.BUF_SIZE`, atau `max_recv_buf` pada .EPOLL). Melebihi mengembalikan `431` dan menutup |
 | Body pada .ASYNC/.POOL/.MIXED | Handler melihat sampai 8 KB (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai (handler membaca `head.content_length`, bukan byte-nya) |
-| Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar men-dispatch handler dengan slice body kosong, lalu engine membuang sisanya dari socket (`MSG_TRUNC`) sehingga koneksi tetap dapat dipakai |
+| Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar menjaga koneksi tetap dapat dipakai dengan membuang sisanya dari socket (`MSG_TRUNC`): `.EPOLL` men-dispatch handler lebih dulu dengan slice body kosong, `.URING` men-drain dan menghitung lebih dulu, lalu handler berjalan dengan total terhitung di `req.bodyReceived()` |
 | Body request besar (upload) | Drain melebarkan receive window via `large_body_rcvbuf` (SO_RCVBUF), lihat [`docs/zix-config-id.md`](zix-config-id.md) |
 | Body request chunked | Di-decode ke body buffer, kelebihan dibuang |
 | Versi HTTP | Hanya HTTP/1.0 dan HTTP/1.1, selain itu `400` |
 | TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` / `.POOL` / `.MIXED` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
 
-Endpoint yang menerima upload besar mengandalkan `head.content_length` (byte-nya dibuang, tidak di-buffer).
+Endpoint yang menerima upload besar membaca `req.bodyReceived()` pada `.URING` (byte yang dibuang dihitung, tidak di-buffer). Model lain tidak membawa hitungan itu, jadi di sana tetap mengandalkan `head.content_length`.
 
 Untuk lapisan HTTP berfitur lengkap lihat [`docs/hld-http-id.md`](hld-http-id.md). Untuk detail implementasi lihat [`docs/lld-http1-id.md`](lld-http1-id.md).
 

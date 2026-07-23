@@ -106,7 +106,7 @@ res.addHeader("X-Foo", "bar") catch |err| switch (err) {
 };
 ```
 
-See `examples/server_xtra_headers.zig` for a working demonstration of the cap, the overflow path, and the injection guard.
+See `examples/http_xtra_headers.zig` and `examples/http1_xtra_headers.zig` for a working demonstration of the cap, the overflow path, and the injection guard.
 
 ---
 

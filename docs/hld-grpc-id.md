@@ -60,10 +60,10 @@ graph LR
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
 | `zix.Grpc.readPrefix` | `fn(body: []const u8) error{TooShort}!Prefix` |
 | `zix.Grpc.writePrefix` | `fn(buf: *[5]u8, compress: bool, msg_len: u32) void` |
-| `zix.Grpc.sendHeaders` | `fn(fd, sid, content_type) !void`: kirim HEADERS awal (tanpa END_STREAM) |
-| `zix.Grpc.sendData` | `fn(fd, sid, msg) !void`: kirim DATA dengan prefix gRPC 5 byte |
-| `zix.Grpc.sendTrailer` | `fn(fd, sid, grpc_status, grpc_message) !void`: kirim HEADERS trailer (END_STREAM) |
-| `zix.Grpc.sendError` | `fn(fd, sid, grpc_status, grpc_message) !void`: error trailers-only, tanpa frame DATA |
+| `zix.Grpc.sendHeadersFD` | `fn(fd, sid, content_type) !void`: kirim HEADERS awal (tanpa END_STREAM) |
+| `zix.Grpc.sendDataFD` | `fn(fd, sid, msg) !void`: kirim DATA dengan prefix gRPC 5 byte |
+| `zix.Grpc.sendTrailerFD` | `fn(fd, sid, grpc_status, grpc_message) !void`: kirim HEADERS trailer (END_STREAM) |
+| `zix.Grpc.sendErrorFD` | `fn(fd, sid, grpc_status, grpc_message) !void`: error trailers-only, tanpa frame DATA |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanodetik) |

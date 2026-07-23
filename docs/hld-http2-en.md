@@ -26,7 +26,7 @@ All three are raw-fd engines with the same five dispatch models and a comptime r
 | Concurrency per connection | one request at a time (pipelined) | many concurrent streams | many concurrent streams |
 | Header codec | raw text parse | HPACK | HPACK |
 | Per-request allocator / context | per-request arena via `Context` | none | `GrpcContext` (recv / send / finish) |
-| Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStream`) | `ctx.sendMessage` |
+| Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStreamFD`) | `ctx.sendMessage` |
 | Layer relationship | standalone | standalone | builds on `zix.Http2` |
 
 Use `zix.Http2` for browser-grade or prior-knowledge HTTP/2 with raw frame control. Use `zix.Grpc` when the payload is gRPC (it reuses this engine's frame and HPACK layers). Use `zix.Http1` when one request per connection is enough.
@@ -98,7 +98,7 @@ graph TD
 
     Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
-    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponse / sendResponseEncoded"]
+    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponseFD / sendResponseEncodedFD"]
     Http2 --> hpack["hpack.zig\nstatic table + Huffman\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["config.zig\nHttp2ServerConfig"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
@@ -133,15 +133,15 @@ Access via `const zix = @import("zix");`
 | `zix.Http2.ServeOpts` | struct | Per-connection serve options built from the config |
 | `zix.Http2.serveConn` | fn | `serveConn(comptime routes, fd, opts)`: direct blocking connection entry point |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` decoded request header |
-| `zix.Http2.sendResponse` | fn | `sendResponse(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM on the last frame (immediate, unmetered) |
-| `zix.Http2.sendResponseEncoded` | fn | `sendResponse` plus a `content-encoding` header (serve a precompressed body) |
-| `zix.Http2.sendResponseStream` | fn | Flow-controlled send for a large, caller-owned body (paces by WINDOW_UPDATE, body must outlive the stream) |
+| `zix.Http2.sendResponseFD` | fn | `sendResponseFD(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM on the last frame (immediate, unmetered) |
+| `zix.Http2.sendResponseEncodedFD` | fn | `sendResponseFD` plus a `content-encoding` header (serve a precompressed body) |
+| `zix.Http2.sendResponseStreamFD` | fn | Flow-controlled send for a large, caller-owned body (paces by WINDOW_UPDATE, body must outlive the stream) |
 | `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Per-worker response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | HPACK codec types |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | HPACK Huffman codec |
 | `zix.Http2.respHeaderBlock` | fn | Encode a cached `[:status, content-type, content-encoding, content-length]` block |
 | `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeader` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Frame-header codec for custom framing |
-| `zix.Http2.sendSettings` / `sendSettingsAck` / `sendPingAck` / `sendGoaway` / `sendRstStream` / `sendWindowUpdate` | fn | Control-frame senders |
+| `zix.Http2.sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` | fn | Control-frame senders |
 | `zix.Http2.FRAME_TYPE_*` / `FLAG_*` / `ERR_*` / `SETTINGS_*` | const | RFC 7540 frame, flag, error, and settings constants |
 | `zix.Http2.PREFACE` / `HPACK_STATIC` | const | Connection preface string, HPACK static table |
 
@@ -194,7 +194,7 @@ fn home(
     _ = headers;
     _ = body;
 
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello") catch {};
 }
 
 var server = zix.Http2.Server.init(
@@ -210,7 +210,7 @@ try server.run();
 - Routes are a comptime argument to `Server.init`: they are baked into the server type, there is no dynamic registration after init.
 - The handler is called once per completed stream (END_HEADERS plus END_STREAM). `method`, `headers`, and `body` all point into per-stream buffers and are valid only for the duration of the call.
 - There is no per-request allocator or context object. The handler writes frames to the fd through the response helpers and returns `void`: errors are handled inline (typically `catch {}`, the connection closes on a broken pipe anyway).
-- Responses go out through `frame.sendResponse` (small, immediate), `frame.sendResponseEncoded` (a precompressed body with `content-encoding`), or `mux.sendResponseStream` (a large, process-lifetime body paced by flow control).
+- Responses go out through `frame.sendResponseFD` (small, immediate), `frame.sendResponseEncodedFD` (a precompressed body with `content-encoding`), or `mux.sendResponseStreamFD` (a large, process-lifetime body paced by flow control).
 - The engine resolves the path to a handler through the comptime `Router` before the call, so the handler does not parse or match the path itself.
 
 ---
@@ -259,7 +259,7 @@ Send-side flow control follows RFC 7540 6.9. Each `MuxConn` carries a connection
 
 - `pumpBody` sends DATA capped by `min(connection window, stream window, max_frame_size)`. What does not fit is parked on the stream (`pending_body`, `pending_end`) and the stream slot stays borrowed. END_STREAM rides the final frame only once the whole body has gone out.
 - A WINDOW_UPDATE resumes parked work: `resumeStream` for a stream-level grant, `resumeAll` for a connection-level grant. The slot is freed once its body fully drains.
-- `sendResponseStream(fd, sid, status, content_type, content_encoding, body)` is the public entry. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache, not a per-request scratch buffer). With no active connection context (the blocking non-mux serve paths) it falls back to an immediate, unmetered send.
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` is the public entry. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache, not a per-request scratch buffer). With no active connection context (the blocking non-mux serve paths) it falls back to an immediate, unmetered send.
 - Inbound DATA returns a WINDOW_UPDATE for both the connection and the stream so the peer keeps sending.
 
 ---

@@ -548,7 +548,7 @@ pub fn runUring(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
+test "zix http3: parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
     const name_reserve = mshot_name_reserve;
     var buf: [256]u8 = @splat(0);
 
@@ -578,7 +578,7 @@ test "zix test: parseMultishotBuf recovers the peer and payload at the recvmsg_o
     try std.testing.expect(parseMultishotBuf(buf[0 .. payload_off + 5], name_reserve, 0, 1500) == null);
 }
 
-test "zix test: http3 run shapes compile (monomorphize without running)" {
+test "zix http3: http3 run shapes compile (monomorphize without running)" {
     // The run shapes never return, so they cannot be run in a test. if (false) still type-checks the
     // whole call chain at comptime, so a compile error in any generic body (including the parameterized
     // workerLoop that runSingle / runMulti drive) surfaces here rather than only when an example runs it.
@@ -594,7 +594,7 @@ test "zix test: http3 run shapes compile (monomorphize without running)" {
     }
 }
 
-test "zix test: io_uring recvmsg delivers a datagram and its peer address by slot" {
+test "zix http3: io_uring recvmsg delivers a datagram and its peer address by slot" {
     if (comptime !datagram.is_linux) return;
 
     var ring = initUringRing() catch return; // skip where io_uring is unavailable (sandbox / old kernel)
@@ -638,7 +638,7 @@ test "zix test: io_uring recvmsg delivers a datagram and its peer address by slo
     try std.testing.expectEqualStrings("ping", buf[0..4]);
 }
 
-test "zix test: UringTx.activeTailPending gates the swap on a fully submitted buffer" {
+test "zix http3: UringTx.activeTailPending gates the swap on a fully submitted buffer" {
     var tx = UringTx.init(std.testing.allocator, 4, 64) catch return;
     defer tx.deinit();
 
@@ -656,7 +656,7 @@ test "zix test: UringTx.activeTailPending gates the swap on a fully submitted bu
     try std.testing.expect(!tx.activeTailPending());
 }
 
-test "zix test: armUringRecv and armMultishotRecv report the arm result" {
+test "zix http3: armUringRecv and armMultishotRecv report the arm result" {
     if (comptime !datagram.is_linux) return;
 
     var ring = initUringRing() catch return; // skip where io_uring is unavailable
@@ -694,7 +694,7 @@ test "zix test: armUringRecv and armMultishotRecv report the arm result" {
     try std.testing.expect(armMultishotRecv(&ring, &mshot_msg, fd));
 }
 
-test "zix test: UringTx.reap matches only its own two tags" {
+test "zix http3: UringTx.reap matches only its own two tags" {
     var tx = UringTx.init(std.testing.allocator, 4, 64) catch return;
     defer tx.deinit();
 
@@ -710,7 +710,7 @@ test "zix test: UringTx.reap matches only its own two tags" {
     try std.testing.expectEqual(@as(usize, 0), tx.inflight[0]);
 }
 
-test "zix test: UringTx.submitAndSwap defers the swap while the other buffer still has sends in flight" {
+test "zix http3: UringTx.submitAndSwap defers the swap while the other buffer still has sends in flight" {
     if (comptime !datagram.is_linux) return;
 
     var ring = initUringRing() catch return; // skip where io_uring is unavailable

@@ -159,7 +159,7 @@ const TestReader = struct {
     }
 };
 
-test "prometheuz test: encodeWriteRequest round-trips a labeled sample" {
+test "prometheuz: encodeWriteRequest round-trips a labeled sample" {
     const labels = [_]sample_mod.Label{.{ .name = "reason", .value = "user_create_failed" }};
     const samples = [_]Sample{.{ .name = "app_write_errors_total", .labels = &labels, .value = 3, .timestamp_ms = 1_700_000_000_000 }};
 
@@ -216,7 +216,7 @@ test "prometheuz test: encodeWriteRequest round-trips a labeled sample" {
     try testing.expectEqual(@as(i64, 1_700_000_000_000), timestamp_seen.?);
 }
 
-test "prometheuz test: encodeWriteRequest stamps now_ms when a sample has no timestamp" {
+test "prometheuz: encodeWriteRequest stamps now_ms when a sample has no timestamp" {
     const samples = [_]Sample{.{ .name = "up", .labels = &.{}, .value = 1, .timestamp_ms = null }};
 
     const body = try encodeWriteRequest(testing.allocator, &samples, 1_650_000_000_000);
@@ -249,7 +249,7 @@ test "prometheuz test: encodeWriteRequest stamps now_ms when a sample has no tim
     try testing.expectEqual(@as(i64, 1_650_000_000_000), timestamp_seen.?);
 }
 
-test "prometheuz test: remoteWrite is a no-op for an empty sample list" {
+test "prometheuz: remoteWrite is a no-op for an empty sample list" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -257,7 +257,7 @@ test "prometheuz test: remoteWrite is a no-op for an empty sample list" {
     try remoteWrite(testing.allocator, threaded.io(), .{ .ip = "127.0.0.1", .port = 1 }, &.{});
 }
 
-test "prometheuz test: remoteWrite surfaces a connection failure" {
+test "prometheuz: remoteWrite surfaces a connection failure" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -269,7 +269,7 @@ test "prometheuz test: remoteWrite surfaces a connection failure" {
     );
 }
 
-test "prometheuz test: checkStatus accepts 2xx and rejects others" {
+test "prometheuz: checkStatus accepts 2xx and rejects others" {
     try checkStatus(200);
     try checkStatus(204);
     try testing.expectError(error.RemoteWriteRejected, checkStatus(400));

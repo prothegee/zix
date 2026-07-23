@@ -95,6 +95,7 @@ The connection allocator is the caller's: an arena means mapped rows need no per
 | `Pipeline` | batch commands in one round trip: `begin`, `add`, `sync` |
 | `Executor` | batching fleet over a pool for high-throughput parameterized queries |
 | `Transport` | multiplexed EPOLL/URING dispatch (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
+| `dispatch.Line` | reactor-less single-connection pipeline for a caller-owned event loop: `open`, `submit` (stages), `flush`, `pump`, `pending` |
 | `Pool` | thread-safe connection pool: `acquire`, `release`, `discard` |
 | `CopyIn` / `CopyOut` | COPY streaming |
 

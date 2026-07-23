@@ -417,7 +417,7 @@ fn sendWindowUpdate(cc: *tls_client.ClientConnection, fd: posix.fd_t, sid: u31, 
     try writeAllBlocking(fd, cc.writeAppData(&wu, &enc));
 }
 
-test "zix test: h2 over TLS resumes flow-control-parked streams (static-h2 stall repro)" {
+test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stall repro)" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     @memset(&repro_body, 'z');

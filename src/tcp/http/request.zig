@@ -255,7 +255,7 @@ pub const Request = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http request path and query" {
+test "zix http: request path and query" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -292,7 +292,7 @@ test "zix test: http request path and query" {
     try std.testing.expect(params[1].value == null);
 }
 
-test "zix test: http request header lookup" {
+test "zix http: request header lookup" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const raw = "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n";
@@ -310,7 +310,7 @@ test "zix test: http request header lookup" {
     try std.testing.expect(req.header("x-missing") == null);
 }
 
-test "zix test: http request body must not truncate when a Content-Length body arrives in segments over a non-blocking fd" {
+test "zix http: request body must not truncate when a Content-Length body arrives in segments over a non-blocking fd" {
     // Repro for the EPOLL / URING body gap. The accepted fd is non-blocking, but body() reads the
     // remaining body with a posix.read loop that `catch break`s on the first EAGAIN. When the body is
     // split across TCP segments (only the first has arrived), the loop bails with a TRUNCATED body.
@@ -359,7 +359,7 @@ test "zix test: http request body must not truncate when a Content-Length body a
     try std.testing.expectEqualStrings("abcdefghij", body);
 }
 
-test "zix test: http request chunked body must not truncate when chunks arrive in segments over a non-blocking fd" {
+test "zix http: request chunked body must not truncate when chunks arrive in segments over a non-blocking fd" {
     // Same EPOLL / URING gap on the chunked path: readChunkedBody() reads until the terminal
     // "0\r\n\r\n" chunk, and must wait across segment boundaries instead of bailing at the first
     // EAGAIN. The writer delivers the terminator only in the second segment.
@@ -408,7 +408,7 @@ test "zix test: http request chunked body must not truncate when chunks arrive i
     try std.testing.expectEqualStrings("abcdefghij", body);
 }
 
-test "zix test: http request keepAlive reflects the parsed head" {
+test "zix http: request keepAlive reflects the parsed head" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 

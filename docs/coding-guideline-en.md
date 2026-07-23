@@ -29,7 +29,7 @@ The lowercase implementation files carry the logic, the PascalCase file is the d
 **Test discovery is not recursive.** Every new `src/` file that has tests MUST get its own `std.testing.refAllDecls(@import("..."))` line in the `lib.zig` unit-test block, grouped under its engine comment. Miss it and the file's tests silently never run while unit-test still exits 0.
 
 ```zig
-test "zix tests: unit test" {
+test "zix: unit test" {
     // # zix.Http
     std.testing.refAllDecls(@import("tcp/http/router.zig"));
     std.testing.refAllDecls(@import("tcp/http/response.zig"));
@@ -87,7 +87,7 @@ pub const TcpServerConfig = struct { ... };
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: TcpServerConfig, default field values" { ... }
+test "zix tcp: TcpServerConfig, default field values" { ... }
 ```
 
 1. **Module doc comment** `//! zix <subsystem>` on line 1, a short lowercase identity (`//! zix udp namespace aggregator`, `//! zix logger`). The one branded exception in `src/lib.zig` (`//! Zero sIX; 06;`) is intentional, never change it.
@@ -286,10 +286,10 @@ A buffer-owning type frees in `deinit`. Anything caller-provided (`io`, `logger`
 
 ## 11. Tests
 
-Tests live at the bottom of the file they cover (Zig discovers them through `refAllDecls`). The dominant name is `test "zix test: <subject>, <case>"`, with domain-prefixed variants for an engine surface (`zix grpc:`, `zix http1:`, `zix fix:`):
+Tests live at the bottom of the file they cover (Zig discovers them through `refAllDecls`). The name carries the domain prefix of the surface under test: `test "zix <domain>: <subject>, <case>"` (`zix tcp:`, `zix http1:`, `zix grpc:`, `zix tls:`, `zix channel:`), and driver tests use the driver name (`postgrez auth:`, `rediz resp:`):
 
 ```zig
-test "zix test: TcpServerConfig, default field values" {
+test "zix tcp: TcpServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -301,7 +301,7 @@ test "zix test: TcpServerConfig, default field values" {
 
 After implementing any new function, field, or behavior, add the tests covering it in the same change (unit, behaviour, edge, and integration when applicable). A file is not done, and the next file is not started, until the new code has tests.
 
-> Co-locate tests with the code. Name them `zix test: subject, case`. New behavior ships with its tests, never after.
+> Co-locate tests with the code. Name them `zix <domain>: subject, case`. New behavior ships with its tests, never after.
 
 ---
 

@@ -58,10 +58,15 @@ pub const cacheStoreEncoded = core.cacheStoreEncoded;
 pub const sendGzipCachedFD = core.sendGzipCachedFD;
 pub const sendWithCacheFD = core.sendWithCacheFD;
 pub const cacheTtl = core.cacheTtl;
+pub const ExternalFn = core.ExternalFn;
+pub const setExternalHandler = core.setExternalHandler;
+pub const uringWatchFd = core.uringWatchFd;
 pub const setCache = core.setCache;
 pub const ResponseCache = @import("../../utils/response_cache.zig").ResponseCache;
 
 pub const writeAllFD = core.writeAllFD;
+pub const responseReserve = core.responseReserve;
+pub const responseCommit = core.responseCommit;
 pub const flushPending = core.flushPending;
 pub const beginStream = core.beginStream;
 pub const sendSimpleFD = core.sendSimpleFD;

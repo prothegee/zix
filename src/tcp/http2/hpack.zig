@@ -825,7 +825,7 @@ pub fn respHeaderBlock(dst: []u8, status: u16, content_type: []const u8, content
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: huffEncode and huffDecode roundtrip ascii" {
+test "zix http2: huffEncode and huffDecode roundtrip ascii" {
     const src = "hello";
     var enc_buf: [32]u8 = undefined;
     const n = try huffEncode(src, &enc_buf);
@@ -834,7 +834,7 @@ test "zix test: huffEncode and huffDecode roundtrip ascii" {
     try std.testing.expectEqualStrings(src, dec_buf[0..m]);
 }
 
-test "zix test: HpackEncoder.writeHeader indexed from static table" {
+test "zix http2: HpackEncoder.writeHeader indexed from static table" {
     var buf: [64]u8 = undefined;
     var enc = HpackEncoder.init(&buf);
     try enc.writeHeader(":method", "GET");
@@ -842,7 +842,7 @@ test "zix test: HpackEncoder.writeHeader indexed from static table" {
     try std.testing.expectEqual(@as(u8, 0x82), enc.encoded()[0]);
 }
 
-test "zix test: HpackDecoder.decode indexed :method GET" {
+test "zix http2: HpackDecoder.decode indexed :method GET" {
     var buf: [64]u8 = undefined;
     var enc = HpackEncoder.init(&buf);
     try enc.writeHeader(":method", "GET");
@@ -857,7 +857,7 @@ test "zix test: HpackDecoder.decode indexed :method GET" {
     try std.testing.expectEqualStrings("GET", out[0].value);
 }
 
-test "zix test: HpackDecoder dynamic table eviction respects max_size" {
+test "zix http2: HpackDecoder dynamic table eviction respects max_size" {
     var dec = HpackDecoder.init();
     dec.max_size = 64;
     dec.addDynamic("x-long-name", "x-long-value");
@@ -866,7 +866,7 @@ test "zix test: HpackDecoder dynamic table eviction respects max_size" {
     try std.testing.expect(dec.dyn_count <= before + 1);
 }
 
-test "zix test: HpackDecoder addDynamic copies strings into dyn_buf" {
+test "zix http2: HpackDecoder addDynamic copies strings into dyn_buf" {
     var dec = HpackDecoder.init();
     const name = "x-custom";
     const value = "hello";
@@ -882,7 +882,7 @@ test "zix test: HpackDecoder addDynamic copies strings into dyn_buf" {
     try std.testing.expectEqualStrings(value, dec.dyn[0].value);
 }
 
-test "zix test: HpackDecoder indexed lookup after scratch zeroed returns correct value" {
+test "zix http2: HpackDecoder indexed lookup after scratch zeroed returns correct value" {
     // Regression: dyn[] entries used to alias per-stream scratch. When scratch is zeroed
     // on stream-slot reuse, indexed HPACK lookups returned empty strings -> UNIMPLEMENTED.
     var dec = HpackDecoder.init();
@@ -918,7 +918,7 @@ test "zix test: HpackDecoder indexed lookup after scratch zeroed returns correct
     try std.testing.expectEqualStrings(path_value, out2[0].value);
 }
 
-test "zix test: HpackDecoder indexed output slices point into scratch not dyn_buf" {
+test "zix http2: HpackDecoder indexed output slices point into scratch not dyn_buf" {
     var dec = HpackDecoder.init();
     dec.addDynamic("x-test", "value");
 
@@ -935,7 +935,7 @@ test "zix test: HpackDecoder indexed output slices point into scratch not dyn_bu
     try std.testing.expect(@intFromPtr(out[0].value.ptr) < scratch_end);
 }
 
-test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
+test "zix http2: HpackDecoder dyn_buf compaction triggered and entries survive" {
     var dec = HpackDecoder.init();
     // Fill dyn_buf near capacity with one large entry, then evict it and add another.
     // Compaction must run and the surviving entry must remain readable.
@@ -954,12 +954,12 @@ test "zix test: HpackDecoder dyn_buf compaction triggered and entries survive" {
     try std.testing.expectEqualStrings("world", dec.dyn[0].value);
 }
 
-test "zix test: HPACK_STATIC index 8 is :status 200" {
+test "zix http2: HPACK_STATIC index 8 is :status 200" {
     try std.testing.expectEqualStrings(":status", HPACK_STATIC[8].name);
     try std.testing.expectEqualStrings("200", HPACK_STATIC[8].value);
 }
 
-test "zix test: respHeaderBlock matches writeHeader byte-for-byte" {
+test "zix http2: respHeaderBlock matches writeHeader byte-for-byte" {
     // Reference: encode the four fields directly through writeHeader.
     var ref: [256]u8 = undefined;
     var enc = HpackEncoder.init(&ref);
@@ -988,7 +988,7 @@ test "zix test: respHeaderBlock matches writeHeader byte-for-byte" {
     try std.testing.expectEqualSlices(u8, enc3.encoded(), got3[0..n3]);
 }
 
-test "zix test: respHeaderBlock with content-encoding and bodyless response" {
+test "zix http2: respHeaderBlock with content-encoding and bodyless response" {
     // With a content-encoding header and a content-length.
     var ref: [256]u8 = undefined;
     var enc = HpackEncoder.init(&ref);
@@ -1010,7 +1010,7 @@ test "zix test: respHeaderBlock with content-encoding and bodyless response" {
     try std.testing.expectEqualSlices(u8, enc2.encoded(), got2[0..n2]);
 }
 
-test "zix test: respHeaderBlock round-trips through the decoder" {
+test "zix http2: respHeaderBlock round-trips through the decoder" {
     var block: [256]u8 = undefined;
     const n = respHeaderBlock(&block, 200, "application/json", "", 42);
 

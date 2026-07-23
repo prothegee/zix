@@ -386,7 +386,7 @@ pub fn serializeHelloRetryRequest(buf: []u8, session_id: []const u8, cipher: Cip
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: handshake, RFC 8448 ClientHello parse + negotiate + ServerHello byte-exact" {
+test "zix tls: handshake, RFC 8448 ClientHello parse + negotiate + ServerHello byte-exact" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 
@@ -416,7 +416,7 @@ test "zix test: handshake, RFC 8448 ClientHello parse + negotiate + ServerHello 
     try std.testing.expectEqualSlices(u8, &server_hello, sh);
 }
 
-test "zix test: handshake, negotiate honors the configured curve preference order" {
+test "zix tls: handshake, negotiate honors the configured curve preference order" {
     // The RFC 8448 ClientHello offers x25519 + secp256r1 in supported_groups but sends a key_share
     // only for x25519. Changing the server curve order must change the outcome (the Tls.Context.curves
     // honesty boundary), proving group_prefs is threaded into negotiation rather than hardcoded.
@@ -444,7 +444,7 @@ test "zix test: handshake, negotiate honors the configured curve preference orde
     try std.testing.expectEqual(NamedGroup.X25519, restricted.server_hello.group);
 }
 
-test "zix test: handshake, ClientHello captures the ALPN protocol list" {
+test "zix tls: handshake, ClientHello captures the ALPN protocol list" {
     var buf: [256]u8 = undefined;
     var w = Writer{ .buf = &buf };
 
@@ -481,7 +481,7 @@ test "zix test: handshake, ClientHello captures the ALPN protocol list" {
     try std.testing.expectEqual(extensions.Alpn.H2, extensions.negotiateAlpn(parsed.ok.alpn.?, &prefs).?);
 }
 
-test "zix test: handshake, an unknown extension (cookie 0x002c) is parsed past, not rejected" {
+test "zix tls: handshake, an unknown extension (cookie 0x002c) is parsed past, not rejected" {
     // A server that never emits HelloRetryRequest never asks for a cookie, so a cookie in the
     // initial ClientHello is ignored (RFC 8446 4.2.2). It must not break parsing of the rest.
     var buf: [256]u8 = undefined;
@@ -519,7 +519,7 @@ test "zix test: handshake, an unknown extension (cookie 0x002c) is parsed past, 
     try std.testing.expect(parsed.ok.offers_tls13); // the post-cookie extension was still reached
 }
 
-test "zix test: handshake, serializeHelloRetryRequest carries the HRR random + selected group" {
+test "zix tls: handshake, serializeHelloRetryRequest carries the HRR random + selected group" {
     var buf: [128]u8 = undefined;
     const hrr = serializeHelloRetryRequest(&buf, &.{}, .AES_128_GCM_SHA256, .X25519);
 
@@ -531,7 +531,7 @@ test "zix test: handshake, serializeHelloRetryRequest carries the HRR random + s
     try std.testing.expect(std.mem.indexOf(u8, hrr, &[_]u8{ 0x00, 0x33, 0x00, 0x02, 0x00, 0x1d }) != null);
 }
 
-test "zix test: handshake, offersSignatureScheme matches the offered list (Layer C)" {
+test "zix tls: handshake, offersSignatureScheme matches the offered list (Layer C)" {
     // a SignatureSchemeList body: ecdsa_secp256r1_sha256 (0x0403) then ed25519 (0x0807).
     const schemes = [_]u8{ 0x04, 0x03, 0x08, 0x07 };
     const hello = ClientHello{
@@ -557,7 +557,7 @@ test "zix test: handshake, offersSignatureScheme matches the offered list (Layer
     try std.testing.expect(!none.offersSignatureScheme(.ECDSA_SECP256R1_SHA256));
 }
 
-test "zix test: handshake, negatives (compression, no TLS 1.3)" {
+test "zix tls: handshake, negatives (compression, no TLS 1.3)" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 

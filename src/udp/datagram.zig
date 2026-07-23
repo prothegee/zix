@@ -574,7 +574,7 @@ pub fn probeGso(fd: posix.socket_t) bool {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: datagram, ip4 round trips through sockaddr.in6 as IPv4-mapped" {
+test "zix udp: datagram, ip4 round trips through sockaddr.in6 as IPv4-mapped" {
     const ip = try std.Io.net.IpAddress.parse("127.0.0.1", 9070);
     const sa = ipToSockaddr6(ip);
 
@@ -588,7 +588,7 @@ test "zix test: datagram, ip4 round trips through sockaddr.in6 as IPv4-mapped" {
     try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &back.ip4.bytes);
 }
 
-test "zix test: datagram, native IPv6 round trips through sockaddr.in6" {
+test "zix udp: datagram, native IPv6 round trips through sockaddr.in6" {
     const ip = try std.Io.net.IpAddress.parse("::1", 9071);
     const sa = ipToSockaddr6(ip);
 
@@ -597,7 +597,7 @@ test "zix test: datagram, native IPv6 round trips through sockaddr.in6" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, &back.ip6.bytes);
 }
 
-test "zix test: datagram, parseBind accepts dotted-quad and ::" {
+test "zix udp: datagram, parseBind accepts dotted-quad and ::" {
     const sa4 = try parseBind("10.0.0.1", 53);
     try std.testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 53)), sa4.port);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, sa4.addr[12..16]);
@@ -606,7 +606,7 @@ test "zix test: datagram, parseBind accepts dotted-quad and ::" {
     try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &sa6.addr);
 }
 
-test "zix test: SendBatch queues replies and reports full" {
+test "zix udp: SendBatch queues replies and reports full" {
     var batch = try SendBatch.init(std.testing.allocator, 2, 32);
     defer batch.deinit();
 
@@ -628,7 +628,7 @@ test "zix test: SendBatch queues replies and reports full" {
     try std.testing.expectEqual(@as(usize, 0), batch.used);
 }
 
-test "zix test: SendBatch rejects an oversized payload" {
+test "zix udp: SendBatch rejects an oversized payload" {
     var batch = try SendBatch.init(std.testing.allocator, 4, 4);
     defer batch.deinit();
 
@@ -637,7 +637,7 @@ test "zix test: SendBatch rejects an oversized payload" {
     try std.testing.expect(!batch.queue(dest, "x"));
 }
 
-test "zix test: SendBatch reserve + commit writes a reply in place with no copy, like queue" {
+test "zix udp: SendBatch reserve + commit writes a reply in place with no copy, like queue" {
     var batch = try SendBatch.init(std.testing.allocator, 2, 32);
     defer batch.deinit();
 
@@ -666,7 +666,7 @@ test "zix test: SendBatch reserve + commit writes a reply in place with no copy,
     try std.testing.expect(batch.reserve(32) != null); // exactly the buffer fits
 }
 
-test "zix test: RecvBatch allocates slots and wires headers" {
+test "zix udp: RecvBatch allocates slots and wires headers" {
     var batch = try RecvBatch.init(std.testing.allocator, 4, 1500);
     defer batch.deinit();
 
@@ -682,7 +682,7 @@ fn testPeer(port: u16) posix.sockaddr.in6 {
     return addr;
 }
 
-test "zix test: setSocketBuffers reads back a raised SO_RCVBUF on a real socket" {
+test "zix udp: setSocketBuffers reads back a raised SO_RCVBUF on a real socket" {
     if (!is_linux) return error.SkipZigTest;
 
     const fd = open("::1", 0, false) catch return error.SkipZigTest;
@@ -699,7 +699,7 @@ test "zix test: setSocketBuffers reads back a raised SO_RCVBUF on a real socket"
     try std.testing.expect(after > 0);
 }
 
-test "zix test: setSocketBuffers leaves the kernel default when asked for zero" {
+test "zix udp: setSocketBuffers leaves the kernel default when asked for zero" {
     if (!is_linux) return error.SkipZigTest;
 
     const fd = open("::1", 0, false) catch return error.SkipZigTest;
@@ -724,7 +724,7 @@ fn getRcvBuf(fd: posix.socket_t) ?c_int {
     return val;
 }
 
-test "zix test: gsoGroupLen coalesces a same-peer run with a shorter final segment" {
+test "zix udp: gsoGroupLen coalesces a same-peer run with a shorter final segment" {
     var buf: [1]u8 = undefined;
     const a = testPeer(1);
     var iovs = [_]posix.iovec{
@@ -736,7 +736,7 @@ test "zix test: gsoGroupLen coalesces a same-peer run with a shorter final segme
     try std.testing.expectEqual(@as(usize, 3), gsoGroupLen(&iovs, &names, 0));
 }
 
-test "zix test: gsoGroupLen stops after a short segment that is not last" {
+test "zix udp: gsoGroupLen stops after a short segment that is not last" {
     var buf: [1]u8 = undefined;
     const a = testPeer(1);
     // a short middle segment cannot be followed by another, so the run ends at the short one
@@ -750,7 +750,7 @@ test "zix test: gsoGroupLen stops after a short segment that is not last" {
     try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 2));
 }
 
-test "zix test: gsoGroupLen breaks the run at a different peer" {
+test "zix udp: gsoGroupLen breaks the run at a different peer" {
     var buf: [1]u8 = undefined;
     const a = testPeer(1);
     const b = testPeer(2);
@@ -762,7 +762,7 @@ test "zix test: gsoGroupLen breaks the run at a different peer" {
     try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 0));
 }
 
-test "zix test: gsoGroupLen rejects a larger following segment" {
+test "zix udp: gsoGroupLen rejects a larger following segment" {
     var buf: [1]u8 = undefined;
     const a = testPeer(1);
     // the second reply is larger than the first (the segment size), so it cannot ride the same GSO
@@ -774,7 +774,7 @@ test "zix test: gsoGroupLen rejects a larger following segment" {
     try std.testing.expectEqual(@as(usize, 1), gsoGroupLen(&iovs, &names, 0));
 }
 
-test "zix test: SendBatch GSO send is accepted by the kernel and delivers over loopback" {
+test "zix udp: SendBatch GSO send is accepted by the kernel and delivers over loopback" {
     if (comptime !is_linux) return;
 
     const r_fd = open("127.0.0.1", 19071, false) catch return; // skip if the port is busy
@@ -819,7 +819,7 @@ test "zix test: SendBatch GSO send is accepted by the kernel and delivers over l
     }
 }
 
-test "zix test: SendBatch.submitUring puts a queued reply on a real io_uring ring, not sendmmsg" {
+test "zix udp: SendBatch.submitUring puts a queued reply on a real io_uring ring, not sendmmsg" {
     if (comptime !is_linux) return;
 
     var ring = linux.IoUring.init(8, 0) catch return; // skip where io_uring is unavailable
@@ -854,7 +854,7 @@ test "zix test: SendBatch.submitUring puts a queued reply on a real io_uring rin
     try std.testing.expectEqualStrings("hello", rx.get(0).data);
 }
 
-test "zix test: SendBatch.flush skips the ring_sent prefix so mixing submitUring and flush never resends" {
+test "zix udp: SendBatch.flush skips the ring_sent prefix so mixing submitUring and flush never resends" {
     if (comptime !is_linux) return;
 
     const r_fd = open("127.0.0.1", 19077, false) catch return;

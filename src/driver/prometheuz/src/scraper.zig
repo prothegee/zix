@@ -98,7 +98,7 @@ pub const Scraper = struct {
 
 const testing = std.testing;
 
-test "prometheuz test: scraper publishes an initial snapshot immediately" {
+test "prometheuz: scraper publishes an initial snapshot immediately" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -113,7 +113,7 @@ test "prometheuz test: scraper publishes an initial snapshot immediately" {
     try testing.expect(snapshot.last_error != null);
 }
 
-test "prometheuz test: scraper latest refcount is independent per call" {
+test "prometheuz: scraper latest refcount is independent per call" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

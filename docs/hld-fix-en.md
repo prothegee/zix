@@ -386,7 +386,7 @@ When `config.logger` is non-null:
 - `system(.INFO, "fix", ...)` on bind and shutdown.
 - `session(msg_type, sender, target, seq, state)` after each message processed in `serveConn`.
 
-See `docs/hld-logger.md` for log line format details.
+See `docs/hld-logger-en.md` for log line format details.
 
 ---
 

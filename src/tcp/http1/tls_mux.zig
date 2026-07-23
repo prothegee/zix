@@ -594,7 +594,7 @@ fn testContext(cert_buf: *[512]u8) !Tls.Context {
     };
 }
 
-test "zix test: tls_mux, event-driven keep-alive serves many requests then Connection: close" {
+test "zix http1: tls_mux, event-driven keep-alive serves many requests then Connection: close" {
     var cert_buf: [512]u8 = undefined;
     var ctx = try testContext(&cert_buf);
 
@@ -630,7 +630,7 @@ test "zix test: tls_mux, event-driven keep-alive serves many requests then Conne
     try std.testing.expect(std.mem.indexOf(u8, resp, "200 OK") != null);
 }
 
-test "zix test: tls_mux, WebSocket.serve handoff pumps frames with encrypt-on-write" {
+test "zix http1: tls_mux, WebSocket.serve handoff pumps frames with encrypt-on-write" {
     var cert_buf: [512]u8 = undefined;
     var ctx = try testContext(&cert_buf);
 
@@ -662,7 +662,7 @@ test "zix test: tls_mux, WebSocket.serve handoff pumps frames with encrypt-on-wr
     try std.testing.expectEqualStrings("hi", parsed.frame.payload);
 }
 
-test "zix test: tls_mux, beginStream handler streams SSE records and keeps the connection" {
+test "zix http1: tls_mux, beginStream handler streams SSE records and keeps the connection" {
     var cert_buf: [512]u8 = undefined;
     var ctx = try testContext(&cert_buf);
 

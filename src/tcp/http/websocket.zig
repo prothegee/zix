@@ -583,7 +583,7 @@ pub const RoomMap = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http websocket buildHeader matches buildFrame prefix" {
+test "zix http: websocket buildHeader matches buildFrame prefix" {
     const payload = "hello";
     var frame_buf: [128]u8 = undefined;
     var hdr_buf: [ws_max_frame_header]u8 = undefined;
@@ -595,13 +595,13 @@ test "zix test: http websocket buildHeader matches buildFrame prefix" {
     try std.testing.expectEqualSlices(u8, frame_buf[0..hdr_len], hdr_buf[0..hdr_len]);
 }
 
-test "zix test: http websocket acceptKey" {
+test "zix http: websocket acceptKey" {
     var out: [64]u8 = undefined;
     const accept = try acceptKey("dGhlIHNhbXBsZSBub25jZQ==", &out);
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", accept);
 }
 
-test "zix test: http websocket frame" {
+test "zix http: websocket frame" {
     const payload = "hello";
     var buf: [128]u8 = undefined;
     const len = buildFrame(&buf, .text, payload);
@@ -619,7 +619,7 @@ test "zix test: http websocket frame" {
     try std.testing.expectEqual(len, result.consumed);
 }
 
-test "zix test: http websocket masked frame" {
+test "zix http: websocket masked frame" {
     // Masked "Hello" from RFC 6455 5.7
     const raw = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
     var payload_buf: [128]u8 = undefined;
@@ -629,7 +629,7 @@ test "zix test: http websocket masked frame" {
     try std.testing.expectEqualStrings("Hello", result.frame.payload);
 }
 
-test "zix test: http websocket SIMD unmask matches scalar for 32-byte payload" {
+test "zix http: websocket SIMD unmask matches scalar for 32-byte payload" {
     // 32 bytes exercises 2 full vector iterations (16 bytes each).
     const mask_bytes = [4]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
     const plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
@@ -646,7 +646,7 @@ test "zix test: http websocket SIMD unmask matches scalar for 32-byte payload" {
     try std.testing.expectEqual(raw.len, result.consumed);
 }
 
-test "zix test: http websocket SIMD unmask handles tail bytes (17-byte payload)" {
+test "zix http: websocket SIMD unmask handles tail bytes (17-byte payload)" {
     // 17 bytes = 1 vector iteration + 1 scalar tail byte.
     const mask_bytes = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
     const plain = "12345678901234567";

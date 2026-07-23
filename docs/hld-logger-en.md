@@ -26,7 +26,6 @@ Implemented. See ADR-023 for design rationale.
 ```
 src/logger/
     logger.zig   // Logger struct with nested Config, Level, ConsoleMode, Dir
-    Logger.zig   // namespace aggregator
 ```
 
 Export from `src/lib.zig`:

@@ -40,7 +40,7 @@ pub const HandlerFn = *const fn (datagram: []const u8, peer: *const IpAddress, s
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Sink coalesces replies into the batch" {
+test "zix udp: Sink coalesces replies into the batch" {
     var batch = try datagram.SendBatch.init(std.testing.allocator, 4, 64);
     defer batch.deinit();
 

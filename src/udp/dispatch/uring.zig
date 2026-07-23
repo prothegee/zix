@@ -324,7 +324,7 @@ pub fn runUring(comptime handler: core.HandlerFn, config: UdpServerConfig) !void
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: raw udp epoll and uring run shapes compile (monomorphize without running)" {
+test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without running)" {
     // The per-core loops never return, so they cannot be run in a test. if (false) still type-checks the
     // whole call chain at comptime: runUring -> workerLoopUring, runEpoll -> workerLoopEpoll, so a compile
     // error in either generic body surfaces here rather than only when an example instantiates it.
@@ -340,7 +340,7 @@ test "zix test: raw udp epoll and uring run shapes compile (monomorphize without
     }
 }
 
-test "zix test: raw udp parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
+test "zix udp: raw udp parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
     var buf: [256]u8 = @splat(0);
 
     // Lay out a completion buffer exactly as the kernel does: recvmsg_out header, then the peer
@@ -368,7 +368,7 @@ test "zix test: raw udp parseMultishotBuf recovers the peer and payload at the r
     try std.testing.expect(parseMultishotBuf(buf[0 .. payload_off + 4], mshot_name_reserve, 0, 1500) == null);
 }
 
-test "zix test: raw udp io_uring recvmsg delivers a datagram and its peer address by slot" {
+test "zix udp: raw udp io_uring recvmsg delivers a datagram and its peer address by slot" {
     if (comptime !datagram.is_linux) return;
 
     var ring = initUringRing() catch return; // skip where io_uring is unavailable (sandbox / old kernel)

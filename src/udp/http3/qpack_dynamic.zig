@@ -200,7 +200,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9204 3.2 dynamic table insert and eviction" {
+test "zix http3: RFC 9204 3.2 dynamic table insert and eviction" {
     try std.testing.expectEqual(@as(usize, 38), entrySize("foo", "bar"));
     try std.testing.expectEqual(@as(usize, 32), entrySize("", ""));
 
@@ -222,7 +222,7 @@ test "zix test: RFC 9204 3.2 dynamic table insert and eviction" {
     try std.testing.expect(table.count == 0 and table.size == 0);
 }
 
-test "zix test: RFC 9204 4.5.1 Required Insert Count and Base" {
+test "zix http3: RFC 9204 4.5.1 Required Insert Count and Base" {
     var sized = DynamicTable{ .capacity = 100 };
     try std.testing.expectEqual(@as(u64, 3), sized.maxEntries());
 
@@ -237,7 +237,7 @@ test "zix test: RFC 9204 4.5.1 Required Insert Count and Base" {
     try std.testing.expectEqual(@as(i64, 6), resolveBase(9, true, 2));
 }
 
-test "zix test: RFC 9204 4.4 decoder instructions and section 6 error codes" {
+test "zix http3: RFC 9204 4.4 decoder instructions and section 6 error codes" {
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &h("84"), buf[0..encodeSectionAck(&buf, 4)]);
     try std.testing.expectEqualSlices(u8, &h("ff49"), buf[0..encodeSectionAck(&buf, 200)]);

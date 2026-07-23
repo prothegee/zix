@@ -228,7 +228,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: TcpServer init, port zero returns PortNotConfigured" {
+test "zix tcp: TcpServer init, port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -238,7 +238,7 @@ test "zix test: TcpServer init, port zero returns PortNotConfigured" {
     );
 }
 
-test "zix test: TcpServer init, valid config succeeds and deinit is safe" {
+test "zix tcp: TcpServer init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -246,7 +246,7 @@ test "zix test: TcpServer init, valid config succeeds and deinit is safe" {
     server.deinit();
 }
 
-test "zix test: TcpServer init with EPOLL dispatch model succeeds and deinit is safe" {
+test "zix tcp: TcpServer init with EPOLL dispatch model succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -254,7 +254,7 @@ test "zix test: TcpServer init with EPOLL dispatch model succeeds and deinit is 
     server.deinit();
 }
 
-test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size is ignored" {
+test "zix tcp: TcpServer EPOLL uses workers field for worker count, pool_size is ignored" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -270,7 +270,7 @@ test "zix test: TcpServer EPOLL uses workers field for worker count, pool_size i
     try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
 }
 
-test "zix test: TcpServer init, timeout fields default to zero" {
+test "zix tcp: TcpServer init, timeout fields default to zero" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -279,7 +279,7 @@ test "zix test: TcpServer init, timeout fields default to zero" {
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
 
-test "zix test: TcpServer init, timeout fields stored from config" {
+test "zix tcp: TcpServer init, timeout fields stored from config" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -304,7 +304,7 @@ fn testTcpFrame(payload: []const u8, fd: std.posix.fd_t) void {
     _ = fd;
 }
 
-test "zix test: Tcp.Server.init bakes a comptime handler and stores config" {
+test "zix tcp: Tcp.Server.init bakes a comptime handler and stores config" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -319,7 +319,7 @@ test "zix test: Tcp.Server.init bakes a comptime handler and stores config" {
     try std.testing.expectEqual(DispatchModel.MIXED, server.config.dispatch_model);
 }
 
-test "zix test: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
+test "zix tcp: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -329,7 +329,7 @@ test "zix test: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
     );
 }
 
-test "zix test: Tcp.Server.initFramed, valid config succeeds and deinit is safe" {
+test "zix tcp: Tcp.Server.initFramed, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -337,7 +337,7 @@ test "zix test: Tcp.Server.initFramed, valid config succeeds and deinit is safe"
     server.deinit();
 }
 
-test "zix test: applyConnTimeout, zero ms is no-op on real socket" {
+test "zix tcp: applyConnTimeout, zero ms is no-op on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -352,7 +352,7 @@ test "zix test: applyConnTimeout, zero ms is no-op on real socket" {
     try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
 }
 
-test "zix test: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
+test "zix tcp: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -367,7 +367,7 @@ test "zix test: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
     try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
 }
 
-test "zix test: applyConnTimeout, sets SO_SNDTIMEO on real socket" {
+test "zix tcp: applyConnTimeout, sets SO_SNDTIMEO on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

@@ -289,7 +289,7 @@ pub fn nowMillis() u64 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix response cache: store then lookup returns identical bytes" {
+test "zix utils: response cache store then lookup returns identical bytes" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -300,14 +300,14 @@ test "zix response cache: store then lookup returns identical bytes" {
     try std.testing.expectEqualStrings(payload, cache.lookup(key, 200).?);
 }
 
-test "zix response cache: miss on absent key" {
+test "zix utils: response cache miss on absent key" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
     try std.testing.expect(cache.lookup(hashKey("GET", "/absent", ""), 100) == null);
 }
 
-test "zix response cache: expired entry returns null then refetches" {
+test "zix utils: response cache expired entry returns null then refetches" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -322,14 +322,14 @@ test "zix response cache: expired entry returns null then refetches" {
     try std.testing.expectEqualStrings("second", cache.lookup(key, 1300).?);
 }
 
-test "zix response cache: oversize value bypasses store" {
+test "zix utils: response cache oversize value bypasses store" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 8 });
     defer cache.deinit();
 
     try std.testing.expect(!cache.store(hashKey("GET", "/big", ""), "this is longer than eight", 1000, 100));
 }
 
-test "zix response cache: ttl 0 means never fresh" {
+test "zix utils: response cache ttl 0 means never fresh" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -338,7 +338,7 @@ test "zix response cache: ttl 0 means never fresh" {
     try std.testing.expect(cache.lookup(key, 100) == null);
 }
 
-test "zix response cache: distinct keys coexist via probing" {
+test "zix utils: response cache distinct keys coexist via probing" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 64 });
     defer cache.deinit();
 
@@ -351,7 +351,7 @@ test "zix response cache: distinct keys coexist via probing" {
     try std.testing.expectEqualStrings("bravo", cache.lookup(key_b, 200).?);
 }
 
-test "zix response cache: max_entries rounded down to power of two" {
+test "zix utils: response cache max_entries rounded down to power of two" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 100, .max_value_bytes = 32 });
     defer cache.deinit();
 
@@ -360,7 +360,7 @@ test "zix response cache: max_entries rounded down to power of two" {
     try std.testing.expectEqual(@as(usize, 64), cache.keys.len);
 }
 
-test "zix response cache: values pack compactly in first-store order" {
+test "zix utils: response cache values pack compactly in first-store order" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
     defer cache.deinit();
 
@@ -374,7 +374,7 @@ test "zix response cache: values pack compactly in first-store order" {
     try std.testing.expectEqual(@intFromPtr(val_a.ptr) + 64, @intFromPtr(val_b.ptr));
 }
 
-test "zix response cache: a refresh that fits reuses its region in place" {
+test "zix utils: response cache a refresh that fits reuses its region in place" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
     defer cache.deinit();
 
@@ -393,7 +393,7 @@ test "zix response cache: a refresh that fits reuses its region in place" {
     try std.testing.expectEqualStrings("second", second);
 }
 
-test "zix response cache: an exhausted slab fails the store gracefully" {
+test "zix utils: response cache an exhausted slab fails the store gracefully" {
     // Two slots at a 96-byte cap: 192 slab bytes, so regions of 64 + 128 fill it.
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 2, .max_value_bytes = 96 });
     defer cache.deinit();
@@ -414,7 +414,7 @@ test "zix response cache: an exhausted slab fails the store gracefully" {
     try std.testing.expectEqualStrings(&val_a, cache.lookup(key_a, 300).?);
 }
 
-test "zix response cache: hitSlot resolves only the exact last-hit slice" {
+test "zix utils: response cache hitSlot resolves only the exact last-hit slice" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -433,7 +433,7 @@ test "zix response cache: hitSlot resolves only the exact last-hit slice" {
     try std.testing.expect(cache.hitSlot("payload") == null);
 }
 
-test "zix response cache: a pinned slot is never overwritten" {
+test "zix utils: response cache a pinned slot is never overwritten" {
     var cache = try ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -455,7 +455,7 @@ test "zix response cache: a pinned slot is never overwritten" {
     try std.testing.expectEqualStrings("replacement", cache.lookup(key, 5100).?);
 }
 
-test "zix response cache: store probes past a pinned expired neighbour" {
+test "zix utils: response cache store probes past a pinned expired neighbour" {
     // Two slots: key_a lands in its home slot, expires, and gets pinned by an
     // in-flight send. A different key that probes onto it must skip to the
     // next slot instead of clobbering the pinned bytes.
@@ -477,12 +477,12 @@ test "zix response cache: store probes past a pinned expired neighbour" {
     try std.testing.expectEqualStrings("bbbb", cache.lookup(key_b, 600).?);
 }
 
-test "zix response cache: hashKey separates by query" {
+test "zix utils: response cache hashKey separates by query" {
     try std.testing.expect(hashKey("GET", "/p", "a=1") != hashKey("GET", "/p", "a=2"));
     try std.testing.expect(hashKey("GET", "/p", "") != hashKey("POST", "/p", ""));
 }
 
-test "zix response cache: hashKeyEncoded separates by encoding and from identity" {
+test "zix utils: response cache hashKeyEncoded separates by encoding and from identity" {
     const gz = hashKeyEncoded("GET", "/json", "", "gzip");
     const br = hashKeyEncoded("GET", "/json", "", "br");
     const ident = hashKey("GET", "/json", "");

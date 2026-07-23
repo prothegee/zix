@@ -331,13 +331,13 @@ fn parseMethod(str: []const u8) ?Method.Code {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: parser incomplete returns null" {
+test "zix http: parser incomplete returns null" {
     try std.testing.expect(try parse("GET / HTTP/1.1\r\n", 64) == null);
     try std.testing.expect(try parse("GET / HTTP/1.1\r\nHost: x\r\n", 64) == null);
     try std.testing.expect(try parse("", 64) == null);
 }
 
-test "zix test: parser minimal GET" {
+test "zix http: parser minimal GET" {
     const raw = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqual(Method.Code.GET, h.method);
@@ -348,14 +348,14 @@ test "zix test: parser minimal GET" {
     try std.testing.expectEqual(@as(u64, 0), h.content_length);
 }
 
-test "zix test: parser path and query" {
+test "zix http: parser path and query" {
     const raw = "GET /api/users/123?name=alice&flag HTTP/1.1\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqualStrings("/api/users/123", raw[h.path_start..][0..h.path_len]);
     try std.testing.expectEqualStrings("name=alice&flag", raw[h.query_start..][0..h.query_len]);
 }
 
-test "zix test: parser header offsets" {
+test "zix http: parser header offsets" {
     const raw = "POST /data HTTP/1.1\r\nContent-Length: 5\r\nX-Foo: bar\r\n\r\nhello";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqual(Method.Code.POST, h.method);
@@ -368,13 +368,13 @@ test "zix test: parser header offsets" {
     try std.testing.expectEqualStrings("hello", raw[h.body_offset..]);
 }
 
-test "zix test: parser keep_alive false on Connection: close" {
+test "zix http: parser keep_alive false on Connection: close" {
     const raw = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expect(!h.keep_alive);
 }
 
-test "zix test: parser all methods" {
+test "zix http: parser all methods" {
     const cases = [_]struct { raw: []const u8, code: Method.Code }{
         .{ .raw = "GET / HTTP/1.1\r\n\r\n", .code = .GET },
         .{ .raw = "HEAD / HTTP/1.1\r\n\r\n", .code = .HEAD },
@@ -390,18 +390,18 @@ test "zix test: parser all methods" {
     }
 }
 
-test "zix test: parser invalid method" {
+test "zix http: parser invalid method" {
     const raw = "BREW / HTTP/1.1\r\n\r\n";
     try std.testing.expectError(error.InvalidRequest, parse(raw, 64));
 }
 
-test "zix test: parser chunked flag set when Transfer-Encoding: chunked" {
+test "zix http: parser chunked flag set when Transfer-Encoding: chunked" {
     const raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expect(h.chunked);
 }
 
-test "zix test: parser length-switch rejects same-length non-framing headers" {
+test "zix http: parser length-switch rejects same-length non-framing headers" {
     // Names that collide in length with the framing headers must still be
     // rejected by the eqlIgnoreCase guard inside each switch arm: "User-Agent"
     // (10) vs "connection", "Accept-Charset" (14) vs "content-length".
@@ -412,54 +412,54 @@ test "zix test: parser length-switch rejects same-length non-framing headers" {
     try std.testing.expect(!h.chunked);
 }
 
-test "zix test: parser chunked flag false when Transfer-Encoding absent" {
+test "zix http: parser chunked flag false when Transfer-Encoding absent" {
     const raw = "POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expect(!h.chunked);
 }
 
-test "zix test: dechunk single chunk" {
+test "zix http: dechunk single chunk" {
     const raw = "5\r\nhello\r\n0\r\n\r\n";
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqualStrings("hello", out[0..n]);
 }
 
-test "zix test: dechunk multiple chunks" {
+test "zix http: dechunk multiple chunks" {
     const raw = "3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n";
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqualStrings("foobarr", out[0..n]);
 }
 
-test "zix test: dechunk terminal only returns empty" {
+test "zix http: dechunk terminal only returns empty" {
     const raw = "0\r\n\r\n";
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqual(@as(usize, 0), n);
 }
 
-test "zix test: dechunk chunk extension ignored" {
+test "zix http: dechunk chunk extension ignored" {
     const raw = "5;name=value\r\nhello\r\n0\r\n\r\n";
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqualStrings("hello", out[0..n]);
 }
 
-test "zix test: dechunk invalid hex returns error" {
+test "zix http: dechunk invalid hex returns error" {
     const raw = "zz\r\nhello\r\n0\r\n\r\n";
     var out: [64]u8 = undefined;
     try std.testing.expectError(error.InvalidChunkSize, dechunk(raw, &out));
 }
 
-test "zix test: dechunk uppercase hex accepted" {
+test "zix http: dechunk uppercase hex accepted" {
     const raw = "A\r\n0123456789\r\n0\r\n\r\n";
     var out: [64]u8 = undefined;
     const n = try dechunk(raw, &out);
     try std.testing.expectEqualStrings("0123456789", out[0..n]);
 }
 
-test "zix test: parseGetFast serves a plain keep-alive GET with query and headers" {
+test "zix http: parseGetFast serves a plain keep-alive GET with query and headers" {
     // No Connection / Content-Length / Transfer-Encoding header, so the fast path applies.
     const raw = "GET /search?q=zig HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n\r\n";
     const h = (try parse(raw, 64)).?;
@@ -472,33 +472,33 @@ test "zix test: parseGetFast serves a plain keep-alive GET with query and header
     try std.testing.expectEqualStrings("x", getHeader(h, raw, "host").?);
 }
 
-test "zix test: parseGetFast bails on a Connection header so keep-alive stays correct" {
+test "zix http: parseGetFast bails on a Connection header so keep-alive stays correct" {
     const raw = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqual(Method.Code.GET, h.method);
     try std.testing.expect(!h.keep_alive); // the full parse read Connection: close
 }
 
-test "zix test: parseGetFast bails on a GET body so Content-Length is framed" {
+test "zix http: parseGetFast bails on a GET body so Content-Length is framed" {
     const raw = "GET /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqualStrings("/x", raw[h.path_start..][0..h.path_len]);
     try std.testing.expectEqual(@as(u64, 5), h.content_length);
 }
 
-test "zix test: parseGetFast bail probe is case-robust for a lowercase content-length" {
+test "zix http: parseGetFast bail probe is case-robust for a lowercase content-length" {
     const raw = "GET / HTTP/1.1\r\ncontent-length: 3\r\n\r\nabc";
     const h = (try parse(raw, 64)).?;
     try std.testing.expectEqual(@as(u64, 3), h.content_length);
 }
 
-test "zix test: parseGetFast bails on Transfer-Encoding chunked" {
+test "zix http: parseGetFast bails on Transfer-Encoding chunked" {
     const raw = "GET / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
     const h = (try parse(raw, 64)).?;
     try std.testing.expect(h.chunked);
 }
 
-test "zix test: parseGetFast declines non-GET and HTTP/1.0 (full parse handles them)" {
+test "zix http: parseGetFast declines non-GET and HTTP/1.0 (full parse handles them)" {
     const post = "POST /data HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi";
     const hp = (try parse(post, 64)).?;
     try std.testing.expectEqual(Method.Code.POST, hp.method);

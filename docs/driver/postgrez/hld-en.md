@@ -134,6 +134,8 @@ The executor answers the question a synchronous, thread-per-core server asks: ho
 
 `.ASYNC` is the Executor above. `.EPOLL` and `.URING` are `dispatch.Transport`: it reuses `Conn` for the connect and the SCRAM handshake, then runs the pipelined loop on the raw connection fd. The caller stages a request (the `frontend` helpers build the bytes) under a routing tag, and `dispatch.Transport` calls back with the raw reply (the `backend` decoder reads it) in submit order per connection. So the protocol is shared with the blocking path, only the socket pump changes.
 
+`dispatch.Line` is the reactor-less sibling for a caller that owns its own event loop (zix.Http1's `.URING` external watch): one connection, `submit` stages, the caller `flush`es once per batch (`pump` flushes too) so many requests leave in one write, `pump` reads and delivers framed replies, and the caller watches the fd for readability itself. A closed peer surfaces as `error.ConnectionClosed` from `pump`.
+
 ```mermaid
 flowchart LR
     caller[caller loop]

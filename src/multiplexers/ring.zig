@@ -18,7 +18,9 @@ const linux = std.os.linux;
 /// treats it as a no-op. The tls_* ops route the dual-listener TLS side
 /// (config.tls_port): accept on the TLS listener, ciphertext recv, and the
 /// staged-ciphertext flush send. Engines without a TLS side treat them as no-ops.
-pub const OpKind = enum(u8) { accept, recv, send, timeout, close, tls_accept, tls_recv, tls_send };
+/// external routes a watched foreign fd (a driver socket living on the worker
+/// ring, zix.Http1 only), other engines treat it as a no-op.
+pub const OpKind = enum(u8) { accept, recv, send, timeout, close, tls_accept, tls_recv, tls_send, external };
 
 /// Decoded user_data fields.
 pub const Decoded = struct { op: OpKind, gen: u24, fd: linux.fd_t };
@@ -62,7 +64,7 @@ pub fn unpackUserData(user_data: u64) Decoded {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix io_uring: user_data round trip preserves op, gen, fd" {
+test "zix multiplexers io_uring: user_data round trip preserves op, gen, fd" {
     const packed_value = packUserData(.send, 0xabcdef, 1234);
     const decoded = unpackUserData(packed_value);
 
@@ -71,8 +73,8 @@ test "zix io_uring: user_data round trip preserves op, gen, fd" {
     try std.testing.expectEqual(@as(linux.fd_t, 1234), decoded.fd);
 }
 
-test "zix io_uring: user_data each op kind decodes back" {
-    inline for (.{ OpKind.accept, OpKind.recv, OpKind.send, OpKind.timeout, OpKind.close }) |op| {
+test "zix multiplexers io_uring: user_data each op kind decodes back" {
+    inline for (.{ OpKind.accept, OpKind.recv, OpKind.send, OpKind.timeout, OpKind.close, OpKind.external }) |op| {
         const decoded = unpackUserData(packUserData(op, 1, 7));
         try std.testing.expectEqual(op, decoded.op);
         try std.testing.expectEqual(@as(u24, 1), decoded.gen);
@@ -80,7 +82,7 @@ test "zix io_uring: user_data each op kind decodes back" {
     }
 }
 
-test "zix io_uring: user_data max generation does not bleed into fd" {
+test "zix multiplexers io_uring: user_data max generation does not bleed into fd" {
     const decoded = unpackUserData(packUserData(.recv, 0xff_ff_ff, 65535));
 
     try std.testing.expectEqual(@as(u24, 0xff_ff_ff), decoded.gen);

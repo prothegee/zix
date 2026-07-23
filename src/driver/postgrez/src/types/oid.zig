@@ -82,7 +82,7 @@ pub fn isJson(oid: Oid) bool {
 
 const testing = std.testing;
 
-test "postgrez test: oid values match the catalog" {
+test "postgrez types: oid values match the catalog" {
     try testing.expectEqual(@as(u32, 16), @intFromEnum(Oid.BOOL));
     try testing.expectEqual(@as(u32, 20), @intFromEnum(Oid.INT8));
     try testing.expectEqual(@as(u32, 23), @intFromEnum(Oid.INT4));
@@ -92,7 +92,7 @@ test "postgrez test: oid values match the catalog" {
     try testing.expectEqual(@as(u32, 3802), @intFromEnum(Oid.JSONB));
 }
 
-test "postgrez test: binary registry is binary-first with text fallback" {
+test "postgrez types: binary registry is binary-first with text fallback" {
     try testing.expect(hasBinaryDecode(.INT8));
     try testing.expect(hasBinaryDecode(.UUID));
     try testing.expect(hasBinaryDecode(.JSONB));
@@ -104,7 +104,7 @@ test "postgrez test: binary registry is binary-first with text fallback" {
     try testing.expect(!hasBinaryDecode(@enumFromInt(99999)));
 }
 
-test "postgrez test: text-like and json classification" {
+test "postgrez types: text-like and json classification" {
     try testing.expect(isTextLike(.TEXT));
     try testing.expect(isTextLike(.VARCHAR));
     try testing.expect(!isTextLike(.INT4));

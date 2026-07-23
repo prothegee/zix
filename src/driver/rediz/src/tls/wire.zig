@@ -121,7 +121,7 @@ pub const Writer = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "wire: reserve + patch a nested u16 vector" {
+test "rediz tls: wire reserve + patch a nested u16 vector" {
     var buf: [16]u8 = undefined;
     var writer = Writer{ .buf = &buf };
 

@@ -85,13 +85,13 @@ pub fn checkServerVersion(text: []const u8) StartupError!void {
 
 const testing = std.testing;
 
-test "postgrez test: requestedCode maps knob to wire code" {
+test "postgrez protocol: requestedCode maps knob to wire code" {
     try testing.expectEqual(frontend.PROTOCOL_V3_2, requestedCode(.AUTO));
     try testing.expectEqual(frontend.PROTOCOL_V3_0, requestedCode(.V3_0));
     try testing.expectEqual(frontend.PROTOCOL_V3_2, requestedCode(.V3_2));
 }
 
-test "postgrez test: buildStartup writes the knob's protocol code" {
+test "postgrez protocol: buildStartup writes the knob's protocol code" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -101,7 +101,7 @@ test "postgrez test: buildStartup writes the knob's protocol code" {
     try testing.expectEqual(frontend.PROTOCOL_V3_0, code);
 }
 
-test "postgrez test: handleNegotiate downgrades AUTO to 3.0 in place" {
+test "postgrez protocol: handleNegotiate downgrades AUTO to 3.0 in place" {
     const negotiate = backend.NegotiateProtocolVersion{
         .newest_code = frontend.PROTOCOL_V3_0,
         .unsupported_count = 0,
@@ -111,7 +111,7 @@ test "postgrez test: handleNegotiate downgrades AUTO to 3.0 in place" {
     try testing.expectEqual(frontend.PROTOCOL_V3_0, try handleNegotiate(.AUTO, negotiate));
 }
 
-test "postgrez test: handleNegotiate rejects under strict V3_2" {
+test "postgrez protocol: handleNegotiate rejects under strict V3_2" {
     const negotiate = backend.NegotiateProtocolVersion{
         .newest_code = frontend.PROTOCOL_V3_0,
         .unsupported_count = 0,
@@ -121,7 +121,7 @@ test "postgrez test: handleNegotiate rejects under strict V3_2" {
     try testing.expectError(error.ProtocolNotSupported, handleNegotiate(.V3_2, negotiate));
 }
 
-test "postgrez test: handleNegotiate rejects a non-3.x server" {
+test "postgrez protocol: handleNegotiate rejects a non-3.x server" {
     const negotiate = backend.NegotiateProtocolVersion{
         .newest_code = 0x0002_0000,
         .unsupported_count = 0,
@@ -131,7 +131,7 @@ test "postgrez test: handleNegotiate rejects a non-3.x server" {
     try testing.expectError(error.ProtocolNotSupported, handleNegotiate(.AUTO, negotiate));
 }
 
-test "postgrez test: serverVersionMajor parses release and pre-release" {
+test "postgrez protocol: serverVersionMajor parses release and pre-release" {
     try testing.expectEqual(@as(?u32, 18), serverVersionMajor("18.0"));
     try testing.expectEqual(@as(?u32, 15), serverVersionMajor("15.13"));
     try testing.expectEqual(@as(?u32, 18), serverVersionMajor("18beta1"));
@@ -139,7 +139,7 @@ test "postgrez test: serverVersionMajor parses release and pre-release" {
     try testing.expectEqual(@as(?u32, null), serverVersionMajor("devel"));
 }
 
-test "postgrez test: checkServerVersion gates below 15" {
+test "postgrez protocol: checkServerVersion gates below 15" {
     try checkServerVersion("15.2");
     try checkServerVersion("18beta1");
 

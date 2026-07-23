@@ -276,7 +276,7 @@ pub fn isReservedErrorCode(code: u64) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: RFC 9114 7.2 / 6.2 frame and stream type values" {
+test "zix http3: RFC 9114 7.2 / 6.2 frame and stream type values" {
     try std.testing.expectEqual(@as(u64, 0x00), @intFromEnum(FrameType.data));
     try std.testing.expectEqual(@as(u64, 0x01), @intFromEnum(FrameType.headers));
     try std.testing.expectEqual(@as(u64, 0x04), @intFromEnum(FrameType.settings));
@@ -287,7 +287,7 @@ test "zix test: RFC 9114 7.2 / 6.2 frame and stream type values" {
     try std.testing.expect(qpack_encoder_stream == 0x02 and qpack_decoder_stream == 0x03);
 }
 
-test "zix test: RFC 9114 6.2.1 control stream and SETTINGS first" {
+test "zix http3: RFC 9114 6.2.1 control stream and SETTINGS first" {
     var control = ControlStream{};
     try control.openStream();
     try control.onFrame(.settings);
@@ -299,7 +299,7 @@ test "zix test: RFC 9114 6.2.1 control stream and SETTINGS first" {
     try std.testing.expectError(error.MissingSettings, bad_control.onFrame(.goaway));
 }
 
-test "zix test: RFC 9114 7.2 frame-per-stream matrix and 4.1 request sequence" {
+test "zix http3: RFC 9114 7.2 frame-per-stream matrix and 4.1 request sequence" {
     try std.testing.expect(frameAllowedOnControl(.settings) and !frameAllowedOnRequest(.settings));
     try std.testing.expect(frameAllowedOnRequest(.headers) and !frameAllowedOnControl(.headers));
     try std.testing.expect(frameAllowedOnControl(.goaway) and !frameAllowedOnRequest(.goaway));
@@ -311,7 +311,7 @@ test "zix test: RFC 9114 7.2 frame-per-stream matrix and 4.1 request sequence" {
     try std.testing.expect(requestFrameTransition(.initial, .data) == null);
 }
 
-test "zix test: RFC 9114 4.3 message validation" {
+test "zix http3: RFC 9114 4.3 message validation" {
     const request = [_]Field{
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":scheme", .value = "https" },
@@ -343,7 +343,7 @@ test "zix test: RFC 9114 4.3 message validation" {
     try std.testing.expect(isMalformed(.response, &response, 5, 3));
 }
 
-test "zix test: RFC 9114 5.2 / 7.2.7 GOAWAY, direction, and 8.1 error codes" {
+test "zix http3: RFC 9114 5.2 / 7.2.7 GOAWAY, direction, and 8.1 error codes" {
     var goaway = GoawayTracker{};
     try goaway.receive(100);
     try goaway.receive(60);

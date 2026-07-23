@@ -280,7 +280,7 @@ const rsa_fixture_pkcs8_pem =
     \\-----END PRIVATE KEY-----
 ;
 
-test "zix test: certificate, Certificate message wraps the DER (4.4.2)" {
+test "zix tls: certificate, Certificate message wraps the DER (4.4.2)" {
     const der = [_]u8{ 0x30, 0x03, 0x01, 0x02, 0x03 };
 
     var buf: [64]u8 = undefined;
@@ -297,7 +297,7 @@ test "zix test: certificate, Certificate message wraps the DER (4.4.2)" {
     try std.testing.expectEqual(@as(u16, 0), try r.readU16());
 }
 
-test "zix test: certificate, CertificateVerify content + ECDSA P-256 sign/verify (4.4.3)" {
+test "zix tls: certificate, CertificateVerify content + ECDSA P-256 sign/verify (4.4.3)" {
     var transcript: Secret = undefined;
     _ = try std.fmt.hexToBytes(&transcript, "edb7725fa7a3473b031ec8ef65a2485493900138a2b91291407d7951a06110ed");
 
@@ -330,7 +330,7 @@ test "zix test: certificate, CertificateVerify content + ECDSA P-256 sign/verify
     try std.testing.expect(tamper_rejected);
 }
 
-test "zix test: certificate, CertificateVerify with an Ed25519 key emits scheme 0x0807 (4.4.3)" {
+test "zix tls: certificate, CertificateVerify with an Ed25519 key emits scheme 0x0807 (4.4.3)" {
     var transcript: Secret = undefined;
     _ = try std.fmt.hexToBytes(&transcript, "edb7725fa7a3473b031ec8ef65a2485493900138a2b91291407d7951a06110ed");
 
@@ -357,7 +357,7 @@ test "zix test: certificate, CertificateVerify with an Ed25519 key emits scheme 
     try signature.verify(content, key_pair.public_key);
 }
 
-test "zix test: certificate, CertificateVerify with an RSA key emits scheme 0x0804 + PSS verifies (4.4.3)" {
+test "zix tls: certificate, CertificateVerify with an RSA key emits scheme 0x0804 + PSS verifies (4.4.3)" {
     const pem = @import("pem.zig");
     const StdRsa = std.crypto.Certificate.rsa;
 
@@ -397,7 +397,7 @@ test "zix test: certificate, CertificateVerify with an RSA key emits scheme 0x08
     try StdRsa.PSSSignature.verify(256, signature[0..256].*, content, public_key, std.crypto.hash.sha2.Sha256);
 }
 
-test "zix test: certificate, Finished verify_data byte-exact vs RFC 8448 (4.4.4)" {
+test "zix tls: certificate, Finished verify_data byte-exact vs RFC 8448 (4.4.4)" {
     var server_hs_traffic: Secret = undefined;
     _ = try std.fmt.hexToBytes(&server_hs_traffic, "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38");
     var transcript: Secret = undefined;
@@ -423,7 +423,7 @@ test "zix test: certificate, Finished verify_data byte-exact vs RFC 8448 (4.4.4)
     try std.testing.expectEqualSlices(u8, &expected_vd, fin[4..]);
 }
 
-test "zix test: certificate, CertificateRequest carries signature_algorithms (4.3.2)" {
+test "zix tls: certificate, CertificateRequest carries signature_algorithms (4.3.2)" {
     var buf: [64]u8 = undefined;
     const msg = buildCertificateRequest(&buf);
 
@@ -440,7 +440,7 @@ test "zix test: certificate, CertificateRequest carries signature_algorithms (4.
     try std.testing.expectEqual(@as(u16, 0x0807), try r.readU16()); // ed25519
 }
 
-test "zix test: certificate, parseEndEntityCertificate recovers the DER + empty list is null" {
+test "zix tls: certificate, parseEndEntityCertificate recovers the DER + empty list is null" {
     const der = [_]u8{ 0x30, 0x05, 0x01, 0x02, 0x03, 0x04 };
 
     var buf: [64]u8 = undefined;
@@ -454,7 +454,7 @@ test "zix test: certificate, parseEndEntityCertificate recovers the DER + empty 
     try std.testing.expectEqual(@as(?[]const u8, null), try parseEndEntityCertificate(&empty_body));
 }
 
-test "zix test: certificate, client CertificateVerify sign + verify + tamper reject (4.4.3)" {
+test "zix tls: certificate, client CertificateVerify sign + verify + tamper reject (4.4.3)" {
     var transcript: Secret = undefined;
     _ = try std.fmt.hexToBytes(&transcript, "edb7725fa7a3473b031ec8ef65a2485493900138a2b91291407d7951a06110ed");
 

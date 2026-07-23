@@ -92,7 +92,7 @@ pub const Transcript = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "RFC 8448 key schedule: secret tree + traffic keys" {
+test "postgrez tls: RFC 8448 key schedule: secret tree + traffic keys" {
     var ecdhe: Secret = undefined;
     _ = try std.fmt.hexToBytes(&ecdhe, "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d");
 

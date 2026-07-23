@@ -96,7 +96,7 @@ fn applyQuery(config: *lib.Config, query: []const u8) !void {
 
 const testing = std.testing;
 
-test "postgrez test: url minimal user and host" {
+test "postgrez: url minimal user and host" {
     const config = try parseUrl("postgres://app@localhost");
 
     try testing.expectEqualStrings("localhost", config.ip);
@@ -107,7 +107,7 @@ test "postgrez test: url minimal user and host" {
     try testing.expectEqual(lib.TlsMode.OFF, config.tls);
 }
 
-test "postgrez test: url full form with credentials port and database" {
+test "postgrez: url full form with credentials port and database" {
     const config = try parseUrl("postgres://app:secret@127.0.0.1:54180/appdb");
 
     try testing.expectEqualStrings("127.0.0.1", config.ip);
@@ -117,14 +117,14 @@ test "postgrez test: url full form with credentials port and database" {
     try testing.expectEqualStrings("appdb", config.database.?);
 }
 
-test "postgrez test: url postgresql alias scheme" {
+test "postgrez: url postgresql alias scheme" {
     const config = try parseUrl("postgresql://app@localhost:5433/other");
 
     try testing.expectEqual(@as(u16, 5433), config.port);
     try testing.expectEqualStrings("other", config.database.?);
 }
 
-test "postgrez test: url sslmode selects tls" {
+test "postgrez: url sslmode selects tls" {
     const require = try parseUrl("postgres://app@localhost/db?sslmode=require");
     try testing.expectEqual(lib.TlsMode.REQUIRE, require.tls);
 
@@ -139,13 +139,13 @@ test "postgrez test: url sslmode selects tls" {
     try testing.expectEqual(lib.TlsMode.REQUIRE, extra.tls);
 }
 
-test "postgrez test: url trailing slash keeps database null" {
+test "postgrez: url trailing slash keeps database null" {
     const config = try parseUrl("postgres://app@localhost:5432/");
 
     try testing.expectEqual(@as(?[]const u8, null), config.database);
 }
 
-test "postgrez test: url rejects malformed input" {
+test "postgrez: url rejects malformed input" {
     try testing.expectError(error.UnsupportedScheme, parseUrl("mysql://app@localhost"));
     try testing.expectError(error.UnsupportedScheme, parseUrl("localhost:5432"));
     try testing.expectError(error.InvalidUrl, parseUrl("postgres://"));

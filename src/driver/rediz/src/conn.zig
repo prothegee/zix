@@ -879,7 +879,7 @@ fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted
     return .{ .conn = conn, .script_fd = mock.script_fd };
 }
 
-test "rediz test: conn mock hello negotiates resp3 and captures version" {
+test "rediz: conn mock hello negotiates resp3 and captures version" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -890,7 +890,7 @@ test "rediz test: conn mock hello negotiates resp3 and captures version" {
     try testing.expectEqual(@as(u32, 8), scripted.conn.server_version_major);
 }
 
-test "rediz test: conn mock noproto falls back to resp2 on auto" {
+test "rediz: conn mock noproto falls back to resp2 on auto" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -900,7 +900,7 @@ test "rediz test: conn mock noproto falls back to resp2 on auto" {
     try testing.expectEqual(lib.RespVersion.RESP2, scripted.conn.protocol_active);
 }
 
-test "rediz test: conn mock noproto fails a strict resp3 config" {
+test "rediz: conn mock noproto fails a strict resp3 config" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -911,7 +911,7 @@ test "rediz test: conn mock noproto fails a strict resp3 config" {
     ));
 }
 
-test "rediz test: conn mock resp2 fallback runs legacy auth" {
+test "rediz: conn mock resp2 fallback runs legacy auth" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -923,7 +923,7 @@ test "rediz test: conn mock resp2 fallback runs legacy auth" {
     try testing.expectEqual(lib.RespVersion.RESP2, scripted.conn.protocol_active);
 }
 
-test "rediz test: conn mock wrong password surfaces server error" {
+test "rediz: conn mock wrong password surfaces server error" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -934,7 +934,7 @@ test "rediz test: conn mock wrong password surfaces server error" {
     ));
 }
 
-test "rediz test: conn mock selects a non-zero database" {
+test "rediz: conn mock selects a non-zero database" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -945,7 +945,7 @@ test "rediz test: conn mock selects a non-zero database" {
     try testing.expectEqual(lib.RespVersion.RESP3, scripted.conn.protocol_active);
 }
 
-test "rediz test: conn mock command surface round trips" {
+test "rediz: conn mock command surface round trips" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -979,7 +979,7 @@ test "rediz test: conn mock command surface round trips" {
     try testing.expectEqualStrings("string", try conn.keyType("key"));
 }
 
-test "rediz test: conn mock set with nx miss returns false" {
+test "rediz: conn mock set with nx miss returns false" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -990,7 +990,7 @@ test "rediz test: conn mock set with nx miss returns false" {
     try testing.expectEqual(false, try scripted.conn.set("key", "value", .{ .nx = true }));
 }
 
-test "rediz test: conn mock json set and get round trip a struct" {
+test "rediz: conn mock json set and get round trip a struct" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1043,7 +1043,7 @@ test "rediz test: conn mock json set and get round trip a struct" {
     try testing.expectError(error.BadJson, conn.getJson(User, "json:broken"));
 }
 
-test "rediz test: conn mock error reply maps to ServerError" {
+test "rediz: conn mock error reply maps to ServerError" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1056,7 +1056,7 @@ test "rediz test: conn mock error reply maps to ServerError" {
     try testing.expectEqual(reply_error.Prefix.WRONGTYPE, conn.lastServerError().prefix);
 }
 
-test "rediz test: conn mock skips resp3 push before the reply" {
+test "rediz: conn mock skips resp3 push before the reply" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1069,7 +1069,7 @@ test "rediz test: conn mock skips resp3 push before the reply" {
     try scripted.conn.ping();
 }
 
-test "rediz test: conn mock deferred set drains before the next reply read" {
+test "rediz: conn mock deferred set drains before the next reply read" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1091,7 +1091,7 @@ test "rediz test: conn mock deferred set drains before the next reply read" {
     try testing.expectEqual(@as(u64, 0), conn.deferredErrorCount());
 }
 
-test "rediz test: conn mock deferred error reply is captured not thrown" {
+test "rediz: conn mock deferred error reply is captured not thrown" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1109,7 +1109,7 @@ test "rediz test: conn mock deferred error reply is captured not thrown" {
     try testing.expectEqual(reply_error.Prefix.WRONGTYPE, conn.lastServerError().prefix);
 }
 
-test "rediz test: conn mock deferred without a queue drains one at a time" {
+test "rediz: conn mock deferred without a queue drains one at a time" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1126,7 +1126,7 @@ test "rediz test: conn mock deferred without a queue drains one at a time" {
     try testing.expectEqual(@as(usize, 1), conn.pendingDeferred());
 }
 
-test "rediz test: conn mock deferred queue bound forces a drain" {
+test "rediz: conn mock deferred queue bound forces a drain" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1144,7 +1144,7 @@ test "rediz test: conn mock deferred queue bound forces a drain" {
     try testing.expectEqual(@as(usize, 1), conn.pendingDeferred());
 }
 
-test "rediz test: conn mock deferred replies drain ahead of a pipeline sync" {
+test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1168,7 +1168,7 @@ test "rediz test: conn mock deferred replies drain ahead of a pipeline sync" {
     try testing.expectEqual(@as(usize, 0), conn.pendingDeferred());
 }
 
-test "rediz test: conn mock deferred transport error surfaces on drain" {
+test "rediz: conn mock deferred transport error surfaces on drain" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 

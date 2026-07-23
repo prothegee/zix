@@ -340,10 +340,11 @@ fn serveEpollConn(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, o
     if (sink.failed) return .close;
 
     if (sink.len > 0) {
-        const written = core.writeNonBlockFD(conn.fd, sink.buf[0..sink.len]) orelse return .close;
+        const staged_resp = sink.buf[sink.off..sink.len];
+        const written = core.writeNonBlockFD(conn.fd, staged_resp) orelse return .close;
 
-        if (written < sink.len) {
-            const remaining = sink.buf[written..sink.len];
+        if (written < staged_resp.len) {
+            const remaining = staged_resp[written..];
             const staged = tl_write_pool.acquire(remaining.len) orelse return .close;
             @memcpy(staged[0..remaining.len], remaining);
             conn.write_pending = staged;

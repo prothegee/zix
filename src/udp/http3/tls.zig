@@ -129,7 +129,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9001 4 CRYPTO-frame handshake reassembly" {
+test "zix http3: RFC 9001 4 CRYPTO-frame handshake reassembly" {
     const client_hello = h("0100000401020304");
 
     var in_order = CryptoStream{};
@@ -152,7 +152,7 @@ test "zix test: RFC 9001 4 CRYPTO-frame handshake reassembly" {
     try std.testing.expect(ready[0] == 0x01 and ready[0] != 0x16);
 }
 
-test "zix test: RFC 9001 5.1 per-level quic key derivation" {
+test "zix http3: RFC 9001 5.1 per-level quic key derivation" {
     const dcid = h("8394c8f03e515708");
     var initial_key: [16]u8 = undefined;
     quicKey(&initial_key, clientInitialSecret(&dcid));
@@ -166,14 +166,14 @@ test "zix test: RFC 9001 5.1 per-level quic key derivation" {
     try std.testing.expect(!std.mem.eql(u8, &initial_key, app_key[0..16]));
 }
 
-test "zix test: RFC 9001 4.2 TLS version floor" {
+test "zix http3: RFC 9001 4.2 TLS version floor" {
     try std.testing.expect(tlsVersionAcceptable(0x0304));
     try std.testing.expect(!tlsVersionAcceptable(0x0303));
     try std.testing.expect(!tlsVersionAcceptable(0x0302));
     try std.testing.expect(tlsVersionAcceptable(0x0305));
 }
 
-test "zix test: RFC 9001 4.9.1 Initial-key discard and 4.6.2 0-RTT reject" {
+test "zix http3: RFC 9001 4.9.1 Initial-key discard and 4.6.2 0-RTT reject" {
     var server_keys = InitialKeys{ .role = .server };
     try std.testing.expect(server_keys.maySendInitial());
     server_keys.onHandshakeSent();

@@ -1,6 +1,6 @@
 # LLD: zix.Tcp (raw stream)
 
-Internal implementation details. For design rationale see [`docs/hld-tcp.md`](hld-tcp.md) and ADR-022.
+Internal implementation details. For design rationale see [`docs/hld-tcp-en.md`](hld-tcp-en.md) and ADR-022.
 
 ---
 

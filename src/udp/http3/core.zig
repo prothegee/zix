@@ -79,7 +79,7 @@ fn negotiateHandler(req: *const Request, res: *Response) void {
     }
 }
 
-test "zix test: Response setters and handler shape" {
+test "zix http3: Response setters and handler shape" {
     const req = Request{ .method = "GET", .path = "/hello", .authority = "example.com" };
     var res = Response{};
     echoHandler(&req, &res);
@@ -90,7 +90,7 @@ test "zix test: Response setters and handler shape" {
     try std.testing.expectEqual(ContentEncoding.identity, res.content_encoding);
 }
 
-test "zix test: a handler negotiates content-encoding off the request accept-encoding" {
+test "zix http3: a handler negotiates content-encoding off the request accept-encoding" {
     var br_res = Response{};
     negotiateHandler(&.{ .method = "GET", .path = "/x", .accept_encoding = "gzip, deflate, br" }, &br_res);
     try std.testing.expectEqual(ContentEncoding.br, br_res.content_encoding);

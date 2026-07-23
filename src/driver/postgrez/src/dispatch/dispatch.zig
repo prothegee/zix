@@ -390,6 +390,142 @@ pub const Transport = struct {
 
 // --------------------------------------------------------- //
 
+/// Reactor-less single-connection pipeline for a caller that owns its own
+/// event loop (zix.Http1's .URING external watch): submit stages and flushes
+/// non-blocking, pump reads and delivers framed replies, the caller watches
+/// the fd for readability itself. options.model and options.conns are
+/// ignored, a Line is always one connection.
+pub const Line = struct {
+    allocator: std.mem.Allocator,
+    channel: Channel,
+    window: usize,
+    context: ?*anyopaque,
+    on_reply: OnReply,
+
+    /// Open one connection (blocking connect, handshake, and prepare
+    /// warm-up), then switch it non-blocking for the caller's loop.
+    ///
+    /// Return:
+    /// - *Line, deinit closes the connection and frees everything
+    /// - error.TlsUnsupported when config.tls is not OFF
+    /// - connect or allocation errors
+    pub fn open(allocator: std.mem.Allocator, io: std.Io, config: lib.Config, options: Transport.Options) !*Line {
+        if (config.tls != .OFF) return error.TlsUnsupported;
+        if (options.window == 0) return error.BadOptions;
+
+        const self = try allocator.create(Line);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
+            .allocator = allocator,
+            .channel = try openChannel(allocator, io, config, options.window),
+            .window = options.window,
+            .context = options.context,
+            .on_reply = options.on_reply,
+        };
+        errdefer closeChannels(allocator, self.one());
+
+        if (options.prepare.len > 0) try prepareChannels(self.one(), options.prepare);
+
+        setNonBlock(self.channel.fd);
+
+        return self;
+    }
+
+    pub fn deinit(self: *Line) void {
+        closeChannels(self.allocator, self.one());
+        self.allocator.destroy(self);
+    }
+
+    /// The connection fd, for the caller's readable watch.
+    pub fn fd(self: *const Line) Fd {
+        return self.channel.fd;
+    }
+
+    /// Queue one pre-encoded request under a routing tag. Staged only: the
+    /// caller flushes once per batch (pump flushes too), so many requests
+    /// leave in one write instead of one packet each.
+    ///
+    /// Return:
+    /// - true when staged (its reply reaches on_reply in submit order)
+    /// - false when the window or outbound buffer is full (pump, then retry)
+    pub fn submit(self: *Line, request: []const u8, tag: u64) bool {
+        if (!self.channel.accepts(self.window, request.len)) return false;
+
+        self.channel.stage(request, tag);
+
+        return true;
+    }
+
+    /// Push staged bytes at the socket, non-blocking, safe to call any time.
+    pub fn flush(self: *Line) void {
+        const channel = &self.channel;
+        if (channel.out_sent >= channel.out_len) return;
+
+        channel.out_sent += writeNb(channel.fd, channel.out[channel.out_sent..channel.out_len]);
+        channel.clearSent();
+    }
+
+    /// Read whatever the socket holds and deliver every framed reply.
+    ///
+    /// Return:
+    /// - usize count of replies delivered this call (0 when nothing whole)
+    /// - error.ConnectionClosed when the peer closed the connection
+    pub fn pump(self: *Line) !usize {
+        const channel = &self.channel;
+
+        var completed: usize = 0;
+        while (channel.in_len < channel.in.len) {
+            const rc = linux.read(channel.fd, channel.in.ptr + channel.in_len, channel.in.len - channel.in_len);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) return error.ConnectionClosed;
+
+                    channel.in_len += rc;
+                    completed += self.deliverLine();
+                },
+                .AGAIN => break,
+                .INTR => {},
+                else => return error.ConnectionClosed,
+            }
+        }
+
+        self.flush();
+
+        return completed;
+    }
+
+    /// Requests owed on the connection.
+    pub fn pending(self: *const Line) usize {
+        return self.channel.inflight;
+    }
+
+    fn one(self: *Line) []Channel {
+        return @as(*[1]Channel, @ptrCast(&self.channel))[0..];
+    }
+
+    fn deliverLine(self: *Line) usize {
+        const channel = &self.channel;
+
+        var completed: usize = 0;
+        while (channel.in_len > 0) {
+            const len = replyLen(channel.in[0..channel.in_len]) orelse break;
+            const tag = channel.popTag();
+
+            self.on_reply(self.context, tag, channel.in[0..len]);
+            channel.inflight -= 1;
+            completed += 1;
+
+            std.mem.copyForwards(u8, channel.in[0 .. channel.in_len - len], channel.in[len..channel.in_len]);
+            channel.in_len -= len;
+        }
+
+        return completed;
+    }
+};
+
+// --------------------------------------------------------- //
+
 const OP_RECV: u64 = 0;
 const OP_SEND: u64 = 1;
 
@@ -571,7 +707,7 @@ fn recvBlocking(fd: Fd, buf: []u8) !usize {
 
 const testing = std.testing;
 
-test "postgrez test: replyLen frames up to ReadyForQuery" {
+test "postgrez dispatch: replyLen frames up to ReadyForQuery" {
     // one CommandComplete ('C', payload 5) then ReadyForQuery ('Z', payload 5)
     const one_reply = [_]u8{
         'C', 0, 0, 0, 5, 0,
@@ -584,7 +720,7 @@ test "postgrez test: replyLen frames up to ReadyForQuery" {
     try testing.expectEqual(@as(?usize, 6), replyLen(&bare_ready));
 }
 
-test "postgrez test: replyLen returns null on a partial reply" {
+test "postgrez dispatch: replyLen returns null on a partial reply" {
     // header promises a 5-byte payload but only 3 arrived
     const partial = [_]u8{ 'Z', 0, 0, 0, 5, 'I' };
     try testing.expectEqual(@as(?usize, null), replyLen(partial[0..4]));
@@ -594,7 +730,7 @@ test "postgrez test: replyLen returns null on a partial reply" {
     try testing.expectEqual(@as(?usize, null), replyLen(&no_ready));
 }
 
-test "postgrez test: replyLen frames two back-to-back replies" {
+test "postgrez dispatch: replyLen frames two back-to-back replies" {
     const two = [_]u8{
         'Z', 0, 0, 0, 5, 'I',
         'Z', 0, 0, 0, 5, 'T',
@@ -604,7 +740,7 @@ test "postgrez test: replyLen frames two back-to-back replies" {
     try testing.expectEqual(@as(?usize, 6), replyLen(two[first..]));
 }
 
-test "postgrez test: open rejects ASYNC and TLS" {
+test "postgrez dispatch: open rejects ASYNC and TLS" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -618,7 +754,7 @@ test "postgrez test: open rejects ASYNC and TLS" {
     }, .{ .model = .EPOLL, .conns = 1, .on_reply = noopReply }));
 }
 
-test "postgrez test: open surfaces the connect error with no server" {
+test "postgrez dispatch: open surfaces the connect error with no server" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -636,7 +772,7 @@ fn noopReply(context: ?*anyopaque, tag: u64, reply: []const u8) void {
     _ = reply;
 }
 
-test "postgrez test: scanReply frames a reply and flags ErrorResponse" {
+test "postgrez dispatch: scanReply frames a reply and flags ErrorResponse" {
     // ParseComplete ('1', length 4) then ReadyForQuery ('Z')
     const ok = [_]u8{ '1', 0, 0, 0, 4, 'Z', 0, 0, 0, 5, 'I' };
     const ok_framed = scanReply(&ok).?;
@@ -652,4 +788,74 @@ test "postgrez test: scanReply frames a reply and flags ErrorResponse" {
     // partial: no ReadyForQuery yet
     const partial = [_]u8{ '1', 0, 0, 0, 4 };
     try testing.expectEqual(@as(?FramedReply, null), scanReply(&partial));
+}
+
+test "postgrez dispatch: Line stages, flushes, and delivers a framed reply" {
+    var fds: [2]i32 = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var out_buf: [256]u8 = undefined;
+    var in_buf: [256]u8 = undefined;
+    var tags: [8]u64 = undefined;
+
+    const Capture = struct {
+        var got_tag: u64 = 0;
+        var got_len: usize = 0;
+        fn onReply(context: ?*anyopaque, tag: u64, reply: []const u8) void {
+            _ = context;
+            got_tag = tag;
+            got_len = reply.len;
+        }
+    };
+
+    var line = Line{
+        .allocator = testing.allocator,
+        .channel = .{ .conn = undefined, .fd = fds[0], .out = &out_buf, .in = &in_buf, .tags = &tags },
+        .window = 4,
+        .context = null,
+        .on_reply = Capture.onReply,
+    };
+    setNonBlock(fds[0]);
+
+    try testing.expect(line.submit("QRY", 42));
+    try testing.expectEqual(@as(usize, 1), line.pending());
+    line.flush();
+
+    var peer: [16]u8 = undefined;
+    const got = try recvBlocking(fds[1], &peer);
+    try testing.expectEqualStrings("QRY", peer[0..got]);
+
+    const reply = [_]u8{ 'Z', 0, 0, 0, 5, 'I' };
+    try sendAllBlocking(fds[1], &reply);
+
+    try testing.expectEqual(@as(usize, 1), try line.pump());
+    try testing.expectEqual(@as(u64, 42), Capture.got_tag);
+    try testing.expectEqual(@as(usize, reply.len), Capture.got_len);
+    try testing.expectEqual(@as(usize, 0), line.pending());
+}
+
+test "postgrez dispatch: Line pump surfaces a closed peer" {
+    var fds: [2]i32 = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+
+    var out_buf: [64]u8 = undefined;
+    var in_buf: [64]u8 = undefined;
+    var tags: [4]u64 = undefined;
+
+    var line = Line{
+        .allocator = testing.allocator,
+        .channel = .{ .conn = undefined, .fd = fds[0], .out = &out_buf, .in = &in_buf, .tags = &tags },
+        .window = 2,
+        .context = null,
+        .on_reply = noopReply,
+    };
+    setNonBlock(fds[0]);
+
+    try testing.expect(line.submit("Q", 1));
+    _ = linux.close(fds[1]);
+
+    try testing.expectError(error.ConnectionClosed, line.pump());
 }

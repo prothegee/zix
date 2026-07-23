@@ -88,14 +88,14 @@ fn decodeLiteralsOnly(allocator: std.mem.Allocator, block: []const u8) ![]u8 {
     return out;
 }
 
-test "prometheuz test: snappy empty input" {
+test "prometheuz: snappy empty input" {
     const block = try encode(testing.allocator, "");
     defer testing.allocator.free(block);
 
     try testing.expectEqualSlices(u8, &.{0x00}, block);
 }
 
-test "prometheuz test: snappy small input round-trips" {
+test "prometheuz: snappy small input round-trips" {
     const input = "hello prometheus";
     const block = try encode(testing.allocator, input);
     defer testing.allocator.free(block);
@@ -106,7 +106,7 @@ test "prometheuz test: snappy small input round-trips" {
     try testing.expectEqualStrings(input, decoded);
 }
 
-test "prometheuz test: snappy input over one chunk splits and round-trips" {
+test "prometheuz: snappy input over one chunk splits and round-trips" {
     var input: [200]u8 = undefined;
     for (&input, 0..) |*byte, index| byte.* = @intCast(index % 256);
 
@@ -119,7 +119,7 @@ test "prometheuz test: snappy input over one chunk splits and round-trips" {
     try testing.expectEqualSlices(u8, &input, decoded);
 }
 
-test "prometheuz test: snappy exactly 60 bytes stays one literal element" {
+test "prometheuz: snappy exactly 60 bytes stays one literal element" {
     var input: [60]u8 = undefined;
     for (&input, 0..) |*byte, index| byte.* = @intCast(index);
 

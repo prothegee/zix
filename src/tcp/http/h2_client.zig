@@ -490,7 +490,7 @@ fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: h2 client, methodHasBody and skipRequestHeader" {
+test "zix http: h2 client, methodHasBody and skipRequestHeader" {
     try std.testing.expect(methodHasBody(.POST));
     try std.testing.expect(methodHasBody(.PUT));
     try std.testing.expect(methodHasBody(.PATCH));
@@ -507,7 +507,7 @@ test "zix test: h2 client, methodHasBody and skipRequestHeader" {
     try std.testing.expect(!skipRequestHeader("x-custom"));
 }
 
-test "zix test: h2 client, putFrame round-trips through the frame parser" {
+test "zix http: h2 client, putFrame round-trips through the frame parser" {
     var buf: [64]u8 = undefined;
     const payload = "hello";
     const len = putFrame(&buf, Http2.FRAME_TYPE_DATA, Http2.FLAG_END_STREAM, 1, payload);
@@ -521,7 +521,7 @@ test "zix test: h2 client, putFrame round-trips through the frame parser" {
     try std.testing.expectEqualSlices(u8, payload, buf[Http2.FRAME_HEADER_LEN..len]);
 }
 
-test "zix test: h2 client, putWindowUpdate encodes the increment big-endian" {
+test "zix http: h2 client, putWindowUpdate encodes the increment big-endian" {
     var buf: [16]u8 = undefined;
     _ = putWindowUpdate(&buf, 0, WINDOW_INCREMENT);
 
@@ -533,7 +533,7 @@ test "zix test: h2 client, putWindowUpdate encodes the increment big-endian" {
     try std.testing.expectEqual(@as(u32, WINDOW_INCREMENT), inc);
 }
 
-test "zix test: h2 client, headerBlock strips PADDED and PRIORITY prefixes" {
+test "zix http: h2 client, headerBlock strips PADDED and PRIORITY prefixes" {
     // plain block, no flags.
     const plain = Http2.FrameHeader{ .length = 3, .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 };
     try std.testing.expectEqualSlices(u8, "abc", try headerBlock(plain, "abc"));
@@ -547,7 +547,7 @@ test "zix test: h2 client, headerBlock strips PADDED and PRIORITY prefixes" {
     try std.testing.expectEqualSlices(u8, "abc", try headerBlock(prio, &[_]u8{ 0, 0, 0, 0, 0, 'a', 'b', 'c' }));
 }
 
-test "zix test: h2 client, dataPayload strips DATA padding" {
+test "zix http: h2 client, dataPayload strips DATA padding" {
     const plain = Http2.FrameHeader{ .length = 3, .frame_type = Http2.FRAME_TYPE_DATA, .flags = 0, .stream_id = 1 };
     try std.testing.expectEqualSlices(u8, "abc", try dataPayload(plain, "abc"));
 

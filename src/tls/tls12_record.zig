@@ -76,12 +76,12 @@ pub fn deprotect(out: []u8, record: []const u8, key: [16]u8, salt: [salt_len]u8,
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls12 record, AAD byte layout (RFC 5246 6.2.3.3)" {
+test "zix tls: tls12 record, AAD byte layout (RFC 5246 6.2.3.3)" {
     const aad = buildAad(0x0102030405060708, 23, 0x0014);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 23, 0x03, 0x03, 0x00, 0x14 }, &aad);
 }
 
-test "zix test: tls12 record, protect -> deprotect round trip + layout" {
+test "zix tls: tls12 record, protect -> deprotect round trip + layout" {
     const key: [16]u8 = @splat(0xAB);
     const salt = [salt_len]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     const plaintext = "hello tls 1.2 record";
@@ -96,7 +96,7 @@ test "zix test: tls12 record, protect -> deprotect round trip + layout" {
     try std.testing.expectEqualSlices(u8, plaintext, opened);
 }
 
-test "zix test: tls12 record, tampered tag fails auth" {
+test "zix tls: tls12 record, tampered tag fails auth" {
     const key: [16]u8 = @splat(0x11);
     const salt = [salt_len]u8{ 1, 2, 3, 4 };
 
@@ -108,7 +108,7 @@ test "zix test: tls12 record, tampered tag fails auth" {
     try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain_buf, rec, key, salt, 0));
 }
 
-test "zix test: tls12 record, AEAD matches NIST AES-128-GCM test case 4" {
+test "zix tls: tls12 record, AEAD matches NIST AES-128-GCM test case 4" {
     var key: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "feffe9928665731c6d6a8f9467308308");
     var nonce: [12]u8 = undefined;

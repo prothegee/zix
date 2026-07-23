@@ -490,7 +490,7 @@ fn writeNb(fd: Fd, buf: []const u8) usize {
 
 const testing = std.testing;
 
-test "rediz test: replyLen frames the simple reply kinds" {
+test "rediz dispatch: replyLen frames the simple reply kinds" {
     try testing.expectEqual(@as(?usize, 5), replyLen("+OK\r\n"));
     try testing.expectEqual(@as(?usize, 4), replyLen(":1\r\n"));
     try testing.expectEqual(@as(?usize, 22), replyLen("-ERR unknown command\r\n"));
@@ -502,12 +502,12 @@ test "rediz test: replyLen frames the simple reply kinds" {
     try testing.expectEqual(@as(?usize, 5), replyLen("$-1\r\n"));
 }
 
-test "rediz test: replyLen frames a nested array in one reply" {
+test "rediz dispatch: replyLen frames a nested array in one reply" {
     const nested = "*3\r\n$1\r\na\r\n:2\r\n*1\r\n+deep\r\n";
     try testing.expectEqual(@as(?usize, nested.len), replyLen(nested));
 }
 
-test "rediz test: replyLen returns null on a partial reply" {
+test "rediz dispatch: replyLen returns null on a partial reply" {
     // bulk header promises 5 bytes, only 3 present
     try testing.expectEqual(@as(?usize, null), replyLen("$5\r\nhel"));
 
@@ -518,14 +518,14 @@ test "rediz test: replyLen returns null on a partial reply" {
     try testing.expectEqual(@as(?usize, null), replyLen("+OK"));
 }
 
-test "rediz test: replyLen frames two back-to-back replies" {
+test "rediz dispatch: replyLen frames two back-to-back replies" {
     const two = "+OK\r\n:7\r\n";
     const first = replyLen(two).?;
     try testing.expectEqual(@as(usize, 5), first);
     try testing.expectEqual(@as(?usize, 4), replyLen(two[first..]));
 }
 
-test "rediz test: open rejects ASYNC and TLS" {
+test "rediz dispatch: open rejects ASYNC and TLS" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -540,7 +540,7 @@ test "rediz test: open rejects ASYNC and TLS" {
     }, .{ .model = .EPOLL, .conns = 1, .on_reply = noopReply }));
 }
 
-test "rediz test: open surfaces the connect error with no server" {
+test "rediz dispatch: open surfaces the connect error with no server" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 

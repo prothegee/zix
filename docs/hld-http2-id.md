@@ -26,7 +26,7 @@ Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama dan tabel ro
 | Konkurensi per koneksi | satu request pada satu waktu (pipelined) | banyak stream konkuren | banyak stream konkuren |
 | Codec header | parse teks mentah | HPACK | HPACK |
 | Allocator / context per-request | arena per-request via `Context` | tidak ada | `GrpcContext` (recv / send / finish) |
-| Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStream`) | `ctx.sendMessage` |
+| Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStreamFD`) | `ctx.sendMessage` |
 | Relasi layer | standalone | standalone | dibangun di atas `zix.Http2` |
 
 Pakai `zix.Http2` untuk HTTP/2 kelas browser atau prior-knowledge dengan kontrol frame mentah. Pakai `zix.Grpc` saat payload-nya gRPC (ia memakai ulang layer frame dan HPACK engine ini). Pakai `zix.Http1` saat satu request per koneksi sudah cukup.
@@ -98,7 +98,7 @@ graph TD
 
     Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
-    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponse / sendResponseEncoded"]
+    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponseFD / sendResponseEncodedFD"]
     Http2 --> hpack["hpack.zig\nstatic table + Huffman\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["config.zig\nHttp2ServerConfig"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
@@ -133,15 +133,15 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http2.ServeOpts` | struct | Opsi serve per-connection yang dibangun dari config |
 | `zix.Http2.serveConn` | fn | `serveConn(comptime routes, fd, opts)`: entry point koneksi blocking langsung |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` header request hasil decode |
-| `zix.Http2.sendResponse` | fn | `sendResponse(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM pada frame terakhir (langsung, tanpa metering) |
-| `zix.Http2.sendResponseEncoded` | fn | `sendResponse` plus header `content-encoding` (menyajikan body pra-kompres) |
-| `zix.Http2.sendResponseStream` | fn | Pengiriman dengan flow control untuk body besar milik pemanggil (dipacu oleh WINDOW_UPDATE, body harus hidup lebih lama dari stream) |
+| `zix.Http2.sendResponseFD` | fn | `sendResponseFD(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM pada frame terakhir (langsung, tanpa metering) |
+| `zix.Http2.sendResponseEncodedFD` | fn | `sendResponseFD` plus header `content-encoding` (menyajikan body pra-kompres) |
+| `zix.Http2.sendResponseStreamFD` | fn | Pengiriman dengan flow control untuk body besar milik pemanggil (dipacu oleh WINDOW_UPDATE, body harus hidup lebih lama dari stream) |
 | `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Response cache per-worker (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | Tipe codec HPACK |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | Codec Huffman HPACK |
 | `zix.Http2.respHeaderBlock` | fn | Meng-encode blok `[:status, content-type, content-encoding, content-length]` yang di-cache |
 | `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeader` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Codec frame-header untuk framing kustom |
-| `zix.Http2.sendSettings` / `sendSettingsAck` / `sendPingAck` / `sendGoaway` / `sendRstStream` / `sendWindowUpdate` | fn | Pengirim control-frame |
+| `zix.Http2.sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` | fn | Pengirim control-frame |
 | `zix.Http2.FRAME_TYPE_*` / `FLAG_*` / `ERR_*` / `SETTINGS_*` | const | Konstanta frame, flag, error, dan settings RFC 7540 |
 | `zix.Http2.PREFACE` / `HPACK_STATIC` | const | String connection preface, static table HPACK |
 
@@ -194,7 +194,7 @@ fn home(
     _ = headers;
     _ = body;
 
-    zix.Http2.sendResponse(fd, sid, 200, "text/plain", "hello") catch {};
+    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello") catch {};
 }
 
 var server = zix.Http2.Server.init(
@@ -210,7 +210,7 @@ try server.run();
 - Route adalah argumen comptime untuk `Server.init`: dibakukan ke dalam tipe server, tidak ada registrasi dinamis setelah init.
 - Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM). `method`, `headers`, dan `body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
 - Tidak ada allocator per-request maupun objek context. Handler menulis frame ke fd melalui response helper dan mengembalikan `void`: error ditangani inline (biasanya `catch {}`, koneksi toh akan ditutup saat broken pipe).
-- Response keluar melalui `frame.sendResponse` (kecil, langsung), `frame.sendResponseEncoded` (body pra-kompres dengan `content-encoding`), atau `mux.sendResponseStream` (body besar berumur proses yang dipacu oleh flow control).
+- Response keluar melalui `frame.sendResponseFD` (kecil, langsung), `frame.sendResponseEncodedFD` (body pra-kompres dengan `content-encoding`), atau `mux.sendResponseStreamFD` (body besar berumur proses yang dipacu oleh flow control).
 - Engine memetakan path ke handler melalui `Router` comptime sebelum pemanggilan, sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
 
 ---
@@ -259,7 +259,7 @@ Flow control sisi-kirim mengikuti RFC 7540 6.9. Setiap `MuxConn` membawa send wi
 
 - `pumpBody` mengirim DATA yang dibatasi oleh `min(connection window, stream window, max_frame_size)`. Yang tidak muat diparkir pada stream (`pending_body`, `pending_end`) dan stream slot tetap dipinjam. END_STREAM menumpang pada frame terakhir hanya setelah seluruh body keluar.
 - Sebuah WINDOW_UPDATE me-resume kerja yang terparkir: `resumeStream` untuk grant level-stream, `resumeAll` untuk grant level-koneksi. Slot dibebaskan setelah body-nya terkuras penuh.
-- `sendResponseStream(fd, sid, status, content_type, content_encoding, body)` adalah entry publik. Body-nya direferensikan, bukan disalin, jadi harus hidup lebih lama dari stream (cache berumur proses, bukan scratch buffer per-request). Tanpa connection context aktif (jalur serve non-mux blocking) ia jatuh kembali ke pengiriman langsung tanpa metering.
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` adalah entry publik. Body-nya direferensikan, bukan disalin, jadi harus hidup lebih lama dari stream (cache berumur proses, bukan scratch buffer per-request). Tanpa connection context aktif (jalur serve non-mux blocking) ia jatuh kembali ke pengiriman langsung tanpa metering.
 - DATA masuk mengembalikan WINDOW_UPDATE untuk koneksi maupun stream agar peer terus mengirim.
 
 ---

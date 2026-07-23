@@ -22,7 +22,6 @@ const certificate = @import("../../tls/certificate.zig");
 const extensions = @import("../../tls/extensions.zig");
 
 const content_type_change_cipher_spec: u8 = 20;
-const content_type_alert: u8 = 21;
 const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
 
@@ -250,7 +249,7 @@ fn wrapRecord(ctype: u8, payload: []const u8, out: []u8) []const u8 {
     return out[0 .. 5 + payload.len];
 }
 
-test "zix test: resumable session drives a full 1.3 handshake + app data, sans I/O" {
+test "zix tls: resumable session drives a full 1.3 handshake + app data, sans I/O" {
     // The same fixture identity the connection.zig / client.zig round-trip tests use.
     var skey: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
@@ -301,7 +300,7 @@ test "zix test: resumable session drives a full 1.3 handshake + app data, sans I
     try std.testing.expectEqualSlices(u8, "pong from server", try finished.connection.readAppData(s2c, &c_in));
 }
 
-test "zix test: a fragmented record is held until the whole record arrives" {
+test "zix tls: a fragmented record is held until the whole record arrives" {
     var skey: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
     const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));

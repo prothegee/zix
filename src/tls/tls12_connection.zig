@@ -293,7 +293,7 @@ fn transcriptHash(state: *const State) [32]u8 {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls12 connection, serverFlight1 negotiates + emits ALPN h2" {
+test "zix tls: tls12 connection, serverFlight1 negotiates + emits ALPN h2" {
     var skey: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
     const key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
@@ -335,7 +335,7 @@ test "zix test: tls12 connection, serverFlight1 negotiates + emits ALPN h2" {
     try std.testing.expect(std.mem.indexOf(u8, flight.to_send, &[_]u8{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 0x68, 0x32 }) != null);
 }
 
-test "zix test: tls12 connection, in-memory ECDHE-ECDSA handshake round trip" {
+test "zix tls: tls12 connection, in-memory ECDHE-ECDSA handshake round trip" {
     // server identity (fixed scalar for determinism).
     var skey: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");

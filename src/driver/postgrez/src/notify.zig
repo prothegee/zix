@@ -106,7 +106,7 @@ fn buildChannelSql(buf: []u8, verb: []const u8, channel: []const u8) ![]const u8
 
 const testing = std.testing;
 
-test "postgrez test: buildChannelSql quotes and escapes" {
+test "postgrez: buildChannelSql quotes and escapes" {
     var buf: [16 + MAX_CHANNEL_LEN * 2]u8 = undefined;
 
     try testing.expectEqualStrings("LISTEN \"jobs\"", try buildChannelSql(&buf, "LISTEN", "jobs"));

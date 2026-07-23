@@ -470,6 +470,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                             .tls_accept => self.handleTlsAccept(cqe),
                             .tls_recv => self.handleTlsRecv(cqe, decoded),
                             .tls_send => self.handleTlsSend(cqe, decoded),
+                            .external => {},
                         }
                     }
                 }

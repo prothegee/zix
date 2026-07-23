@@ -111,7 +111,7 @@ pub fn UdpClient(comptime Packet: type) type {
 
 // --------------------------------------------------------- //
 
-test "zix test: UdpClient init rejects a zero port" {
+test "zix udp: UdpClient init rejects a zero port" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

@@ -132,7 +132,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 19 frame parse" {
+test "zix http3: RFC 9000 19 frame parse" {
     const padding = try parseFrame(&h("000000"));
     try std.testing.expect(padding.frame.padding == 3 and padding.len == 3);
 
@@ -156,13 +156,13 @@ test "zix test: RFC 9000 19 frame parse" {
     try std.testing.expectEqual(@as(usize, 6), stream_full.len);
 }
 
-test "zix test: RFC 9000 12.4 frame type rules" {
+test "zix http3: RFC 9000 12.4 frame type rules" {
     try std.testing.expectError(error.FrameEncodingError, parseFrame(&h("20")));
     try std.testing.expectError(error.ProtocolViolation, parseFrame(&h("4001")));
     try std.testing.expectError(error.FrameEncodingError, parseFrame(&h("0700")));
 }
 
-test "zix test: RFC 9000 12.5 / Table 3 number-space permission matrix" {
+test "zix http3: RFC 9000 12.5 / Table 3 number-space permission matrix" {
     try std.testing.expect(framePermittedIn(0x00, .initial));
     try std.testing.expect(framePermittedIn(0x01, .initial));
 

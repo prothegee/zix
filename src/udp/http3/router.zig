@@ -218,14 +218,14 @@ fn staticHandler(_: *const core.Request, res: *core.Response) void {
     res.send("static");
 }
 
-test "zix test: http3 router matchParam captures params" {
+test "zix http3: http3 router matchParam captures params" {
     try std.testing.expect(matchParam("/users/:id", "/users/alice"));
     try std.testing.expectEqualStrings("alice", pathParam("id").?);
     try std.testing.expect(!matchParam("/users/:id", "/users"));
     try std.testing.expect(!matchParam("/users/:id", "/users/alice/posts"));
 }
 
-test "zix test: http3 router dispatch by exact, param, prefix, query, and 404" {
+test "zix http3: http3 router dispatch by exact, param, prefix, query, and 404" {
     const R = Router(&[_]Route{
         .{ .path = "/", .handler = homeHandler },
         .{ .path = "/users/:id", .handler = usersHandler, .kind = .PARAM },

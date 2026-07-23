@@ -138,7 +138,7 @@ pub const Http2Server = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Http2Server.run, port zero returns PortNotConfigured" {
+test "zix http2: Http2Server.run, port zero returns PortNotConfigured" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -149,7 +149,7 @@ test "zix test: Http2Server.run, port zero returns PortNotConfigured" {
     try std.testing.expectError(error.PortNotConfigured, server.run());
 }
 
-test "zix test: Http2Server.init, valid config succeeds and deinit is safe" {
+test "zix http2: Http2Server.init, valid config succeeds and deinit is safe" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

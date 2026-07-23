@@ -141,14 +141,14 @@ pub fn encode(arena: std.mem.Allocator, value: anytype) !?[]const u8 {
 
 const testing = std.testing;
 
-test "postgrez test: text decode bool" {
+test "postgrez types: text decode bool" {
     try testing.expectEqual(true, try decode(bool, .BOOL, "t"));
     try testing.expectEqual(false, try decode(bool, .BOOL, "f"));
 
     try testing.expectError(error.BadCell, decode(bool, .BOOL, "true"));
 }
 
-test "postgrez test: text decode integers" {
+test "postgrez types: text decode integers" {
     try testing.expectEqual(@as(i64, -42), try decode(i64, .INT8, "-42"));
     try testing.expectEqual(@as(u16, 300), try decode(u16, .INT4, "300"));
 
@@ -156,7 +156,7 @@ test "postgrez test: text decode integers" {
     try testing.expectError(error.BadCell, decode(i32, .INT4, "4x2"));
 }
 
-test "postgrez test: text decode floats and numeric fallback" {
+test "postgrez types: text decode floats and numeric fallback" {
     try testing.expectEqual(@as(f64, 1.5), try decode(f64, .FLOAT8, "1.5"));
     // numeric has no binary decoder, its text form parses into a float
     try testing.expectEqual(@as(f64, 12345.678), try decode(f64, .NUMERIC, "12345.678"));
@@ -164,12 +164,12 @@ test "postgrez test: text decode floats and numeric fallback" {
     try testing.expectError(error.BadCell, decode(f64, .NUMERIC, "abc"));
 }
 
-test "postgrez test: text decode raw slice passthrough" {
+test "postgrez types: text decode raw slice passthrough" {
     try testing.expectEqualStrings("hello", try decode([]const u8, .TEXT, "hello"));
     try testing.expectEqualStrings("\\xdead", try decode([]const u8, .BYTEA, "\\xdead"));
 }
 
-test "postgrez test: text encode covers the parameter types" {
+test "postgrez types: text encode covers the parameter types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -189,7 +189,7 @@ test "postgrez test: text encode covers the parameter types" {
     try std.testing.expectEqualStrings("5", (try encode(allocator, @as(?i32, 5))).?);
 }
 
-test "postgrez test: text decode uuid" {
+test "postgrez types: text decode uuid" {
     const parsed = try decode([16]u8, .UUID, "550e8400-e29b-41d4-a716-446655440000");
 
     try testing.expectEqualSlices(u8, &.{

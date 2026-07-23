@@ -790,7 +790,7 @@ pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http response setters" {
+test "zix http: response setters" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var res = Response.init(0, true, undefined, arena.allocator(), 32);
@@ -810,7 +810,7 @@ test "zix test: http response setters" {
     try std.testing.expectEqualStrings("Value", res.extra_buf.?[0].value);
 }
 
-test "zix test: HeaderSize value()" {
+test "zix http: HeaderSize value()" {
     const minimal: HeaderSize = .MINIMAL;
     const common: HeaderSize = .COMMON;
     const large: HeaderSize = .LARGE;
@@ -822,7 +822,7 @@ test "zix test: HeaderSize value()" {
     try std.testing.expectEqual(@as(usize, 48), (HeaderSize{ .CUSTOM = 48 }).value());
 }
 
-test "zix test: addHeader injection guard" {
+test "zix http: addHeader injection guard" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var res = Response.init(0, true, undefined, arena.allocator(), 32);
@@ -830,7 +830,7 @@ test "zix test: addHeader injection guard" {
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
 }
 
-test "zix test: addHeader TooManyHeaders" {
+test "zix http: addHeader TooManyHeaders" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var res = Response.init(0, true, undefined, arena.allocator(), 2);
@@ -839,14 +839,14 @@ test "zix test: addHeader TooManyHeaders" {
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));
 }
 
-test "zix test: Response.streaming defaults to false" {
+test "zix http: Response.streaming defaults to false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const res = Response.init(0, true, undefined, arena.allocator(), 32);
     try std.testing.expect(!res.streaming);
 }
 
-test "zix test: writeDecimal" {
+test "zix http: writeDecimal" {
     var buf: [24]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), writeDecimal(&buf, 0));
     try std.testing.expectEqualStrings("0", buf[0..1]);
@@ -860,7 +860,7 @@ test "zix test: writeDecimal" {
     try std.testing.expectEqualStrings("4294967295", buf[0..10]);
 }
 
-test "zix test: formatHttpDate known timestamps" {
+test "zix http: formatHttpDate known timestamps" {
     var buf: [40]u8 = undefined;
     try std.testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", formatHttpDate(0, &buf));
     try std.testing.expectEqualStrings("Sat, 03 Jan 1970 00:00:00 GMT", formatHttpDate(2 * 86400, &buf));

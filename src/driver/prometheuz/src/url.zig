@@ -97,7 +97,7 @@ fn parseTarget(url: []const u8) !Target {
 
 const testing = std.testing;
 
-test "prometheuz test: url scrape target with explicit port and path" {
+test "prometheuz: url scrape target with explicit port and path" {
     const scrape = try parseScrapeUrl("http://127.0.0.1:9100/metrics");
 
     try testing.expectEqualStrings("127.0.0.1", scrape.ip);
@@ -105,7 +105,7 @@ test "prometheuz test: url scrape target with explicit port and path" {
     try testing.expectEqualStrings("/metrics", scrape.path);
 }
 
-test "prometheuz test: url scrape target defaults port and path" {
+test "prometheuz: url scrape target defaults port and path" {
     const scrape = try parseScrapeUrl("http://node-exporter.local");
 
     try testing.expectEqualStrings("node-exporter.local", scrape.ip);
@@ -113,7 +113,7 @@ test "prometheuz test: url scrape target defaults port and path" {
     try testing.expectEqualStrings("/metrics", scrape.path);
 }
 
-test "prometheuz test: url write target defaults path" {
+test "prometheuz: url write target defaults path" {
     const write = try parseWriteUrl("http://10.0.0.5:9090");
 
     try testing.expectEqualStrings("10.0.0.5", write.ip);
@@ -121,14 +121,14 @@ test "prometheuz test: url write target defaults path" {
     try testing.expectEqualStrings("/api/v1/write", write.path);
 }
 
-test "prometheuz test: url query target host and port only" {
+test "prometheuz: url query target host and port only" {
     const query = try parseQueryUrl("http://10.0.0.5:9090");
 
     try testing.expectEqualStrings("10.0.0.5", query.ip);
     try testing.expectEqual(@as(u16, 9090), query.port);
 }
 
-test "prometheuz test: url rejects https and malformed input" {
+test "prometheuz: url rejects https and malformed input" {
     try testing.expectError(error.UnsupportedScheme, parseScrapeUrl("https://127.0.0.1:9100/metrics"));
     try testing.expectError(error.UnsupportedScheme, parseScrapeUrl("node-exporter:9100"));
     try testing.expectError(error.InvalidUrl, parseScrapeUrl("http://"));

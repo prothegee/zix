@@ -512,7 +512,7 @@ fn udsResponseHeader(head: []const u8, name: []const u8) ?[]const u8 {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: http client, HTTP_2 over a non-https URL is rejected before connecting" {
+test "zix http: http client, HTTP_2 over a non-https URL is rejected before connecting" {
     // requestHttp2 checks the scheme up front, so io is never touched (undefined is safe here).
     var client = HttpClient.init(.{
         .allocator = std.testing.allocator,
@@ -524,7 +524,7 @@ test "zix test: http client, HTTP_2 over a non-https URL is rejected before conn
     try std.testing.expectError(error.UnsupportedScheme, client.get("http://localhost:9061/", .{}));
 }
 
-test "zix test: http client, HTTP_3 still yields UnsupportedVersion" {
+test "zix http: http client, HTTP_3 still yields UnsupportedVersion" {
     var client = HttpClient.init(.{
         .allocator = std.testing.allocator,
         .io = undefined,

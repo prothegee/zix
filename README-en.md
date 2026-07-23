@@ -238,8 +238,8 @@ __*0. Zero dependencies:*__
 
 Only the Zig standard library. No third-party packages (an empty `build.zig.zon` dependency
 set), no C libraries, and no libc linking: TLS 1.3 / 1.2 runs pure-Zig on `std.crypto` (no
-OpenSSL), gzip / deflate on `std.compress.flate`, and brotli, QUIC, HPACK, and QPACK are
-authored in-tree from their RFCs.
+OpenSSL), gzip / deflate on `std.compress.flate` plus an in-tree fast gzip encoder for small
+dynamic bodies, and brotli, QUIC, HPACK, and QPACK are authored in-tree from their RFCs.
 
 > One `zig build` compiles the whole stack from source with nothing to vendor, pin, or keep
 patched, so the supply chain is the Zig toolchain plus this repository.
@@ -389,7 +389,7 @@ __*16. HTTP/3 over QUIC, pure-Zig:*__
 
 __*17. Response compression (gzip / deflate / brotli):*__
 
-`Accept-Encoding` negotiation on `zix.Http1` and `zix.Http`: gzip and deflate on `std.compress.flate`, plus brotli from an in-tree encoder / decoder authored from RFC 7932 (`std` has no brotli). Opt-in per server, with a size floor, already-compressed media-type skip, and `Vary: Accept-Encoding`. HTTP/3 serves pre-compressed static bodies with `content-encoding`.
+`Accept-Encoding` negotiation on `zix.Http1` and `zix.Http`: gzip and deflate on `std.compress.flate` (a small dynamic body takes the in-tree fast gzip encoder instead), plus brotli from an in-tree encoder / decoder authored from RFC 7932 (`std` has no brotli). Opt-in per server, with a size floor, already-compressed media-type skip, and `Vary: Accept-Encoding`. HTTP/3 serves pre-compressed static bodies with `content-encoding`.
 
 > Smaller responses over real networks with no compression dependency, off by default so the cleartext hot path is untouched until opted in.
 
@@ -523,53 +523,47 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
 
 Fetch zix to your project:
 
-Add to `build.zig.zon`:
-```zig
-.{
-    .name = .my_project,
-    .version = "0.1.0",
-    .fingerprint = 0x0, // required, zig prints a suggested value on first init
-    .dependencies = .{},
-    .paths = .{""},
-}
-```
-
-Then do:
+Do zig fetch save https:
+`codeberg.org`
 ```sh
-zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"`.
+zig fetch --save "https://codeberg.org/prothegee/zix/archive/MAJOR.MINOR.x.tar.gz"
+```
+`github.com`
+```sh
+zig fetch --save "https://github.com/prothegee/zix/archive/refs/heads/MAJOR.MINOR.x.tar.gz"
 ```
 
 <br>
 
 Or,
 
-use zig fetch directly with source repo and version:
+use zig fetch save git+https:
+`codeberg.org`
 ```sh
-zig fetch --save "git+https://codeberg.org/prothegee/zix#main" # upstream
-```
-
-or
-
-```sh
-# upstream vMAJOR.MINOR.x
 zig fetch --save "git+https://codeberg.org/prothegee/zix#MAJOR.MINOR.x"
 ```
+`github.com`
+```sh
+zig fetch --save "git+https://github.com/prothegee/zix#MAJOR.MINOR.x"
+```
 
-> You can change to mirror too as `github.com/prothegee/zix`
->
-> For a specific version, use `MAJOR.MINOR.x`, i.e. `#0.2.x` and replace `#main`
+> Use `../zix#main` for upstream.
 
 <br>
 
 Add to your project (`build.zig` file):
 
-```sh
+```zig
+// const exe = ...;
+
 const zix = b.dependency("zix", .{
     .target = target,
     .optimize = optimize,
 });
 
 exe.root_module.addImport("zix", zix.module("zix"));
+
+// ...
 ```
 
 <br>

@@ -277,7 +277,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9001 A.1 Initial secrets and keys" {
+test "zix http3: RFC 9001 A.1 Initial secrets and keys" {
     const dcid = h("8394c8f03e515708");
     const secrets = initialSecrets(&dcid);
 
@@ -296,7 +296,7 @@ test "zix test: RFC 9001 A.1 Initial secrets and keys" {
     try std.testing.expectEqualSlices(u8, &h("c206b8d9b9f0f37644430b490eeaa314"), &server_keys.hp);
 }
 
-test "zix test: RFC 9001 A.2 client Initial packet protection" {
+test "zix http3: RFC 9001 A.2 client Initial packet protection" {
     const dcid = h("8394c8f03e515708");
     const secrets = initialSecrets(&dcid);
     const client_keys = AesKeys.fromSecret(secrets.client);
@@ -342,7 +342,7 @@ test "zix test: RFC 9001 A.2 client Initial packet protection" {
     try std.testing.expectEqualSlices(u8, &h("e221af44860018ab0856972e194cd934"), &tag);
 }
 
-test "zix test: RFC 9001 5.8 + A.4 Retry key, nonce, and integrity tag" {
+test "zix http3: RFC 9001 5.8 + A.4 Retry key, nonce, and integrity tag" {
     const kn = retryKeyNonce();
     try std.testing.expectEqualSlices(u8, &h("be0c690b9f66575a1d766b54e368c84e"), &kn.key);
     try std.testing.expectEqualSlices(u8, &h("461599d35d632bf2239825bb"), &kn.nonce);
@@ -359,7 +359,7 @@ test "zix test: RFC 9001 5.8 + A.4 Retry key, nonce, and integrity tag" {
     try std.testing.expectEqualSlices(u8, &h("04a265ba2eff4d829058fb3f0f2496ba"), &tag);
 }
 
-test "zix test: RFC 9001 A.5 ChaCha20 keys, key update, and short-header protection" {
+test "zix http3: RFC 9001 A.5 ChaCha20 keys, key update, and short-header protection" {
     const secret: Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = ChaChaKeys.fromSecret(secret);
     try std.testing.expectEqualSlices(u8, &h("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"), &keys.key);
@@ -398,7 +398,7 @@ test "zix test: RFC 9001 A.5 ChaCha20 keys, key update, and short-header protect
     try std.testing.expectEqualSlices(u8, &h("4cfe4189"), &protected_header);
 }
 
-test "zix test: RFC 9001 6.6 AEAD usage limits and accounting" {
+test "zix http3: RFC 9001 6.6 AEAD usage limits and accounting" {
     try std.testing.expectEqual(@as(u64, 1 << 23), confidentialityLimit(.aes_128_gcm));
     try std.testing.expectEqual(@as(u64, 1 << 23), confidentialityLimit(.aes_256_gcm));
     try std.testing.expectEqual(confidentiality_disregarded, confidentialityLimit(.chacha20_poly1305));
@@ -422,7 +422,7 @@ test "zix test: RFC 9001 6.6 AEAD usage limits and accounting" {
     try std.testing.expectEqual(Action.close_aead_limit_reached, recv_usage.onAuthFailure());
 }
 
-test "zix test: RFC 9001 9.5 constant-time tamper rejection" {
+test "zix http3: RFC 9001 9.5 constant-time tamper rejection" {
     const key: [16]u8 = @splat(0x2b);
     const nonce: [12]u8 = @splat(0x39);
     const header = "short-header";

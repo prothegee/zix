@@ -2262,25 +2262,25 @@ fn roundTripQuality(input: []const u8, quality: u8, wbits: u6) !void {
     try testing.expectEqualSlices(u8, input, back);
 }
 
-test "brotli: empty input round-trips at every quality" {
+test "zix compression: brotli empty input round-trips at every quality" {
     var q: u8 = 0;
     while (q <= 11) : (q += 1) try roundTripQuality("", q, 22);
 }
 
-test "brotli: short ascii round-trips at every quality" {
+test "zix compression: brotli short ascii round-trips at every quality" {
     const text = "the quick brown fox jumps over the lazy dog";
     var q: u8 = 0;
     while (q <= 11) : (q += 1) try roundTripQuality(text, q, 22);
 }
 
-test "brotli: every byte value round-trips (binary safe)" {
+test "zix compression: brotli every byte value round-trips (binary safe)" {
     var input: [256]u8 = undefined;
     for (&input, 0..) |*b, i| b.* = @intCast(i);
 
     try roundTripQuality(&input, 5, 18);
 }
 
-test "brotli: repetitive text shrinks well below the input" {
+test "zix compression: brotli repetitive text shrinks well below the input" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     var r: usize = 0;
@@ -2296,12 +2296,12 @@ test "brotli: repetitive text shrinks well below the input" {
     try testing.expectEqualSlices(u8, buf.items, back);
 }
 
-test "brotli: dictionary path round-trips short English text" {
+test "zix compression: brotli dictionary path round-trips short English text" {
     try roundTripQuality("information about the world and the people in the government", 9, 22);
     try roundTripQuality("The quick brown fox and the lazy dog went to the market.", 9, 22);
 }
 
-test "brotli: random data never expands beyond the store overhead" {
+test "zix compression: brotli random data never expands beyond the store overhead" {
     var input: [8192]u8 = undefined;
     for (&input, 0..) |*b, i| b.* = @truncate((i *% 2654435761) >> 11);
 
@@ -2315,7 +2315,7 @@ test "brotli: random data never expands beyond the store overhead" {
     try testing.expectEqualSlices(u8, &input, back);
 }
 
-test "brotli: higher quality is no worse than quality 0 on repetitive data" {
+test "zix compression: brotli higher quality is no worse than quality 0 on repetitive data" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     var r: usize = 0;
@@ -2329,7 +2329,7 @@ test "brotli: higher quality is no worse than quality 0 on repetitive data" {
     try testing.expect(q9.len <= q0.len);
 }
 
-test "brotli: long repetitive input round-trips at high quality" {
+test "zix compression: brotli long repetitive input round-trips at high quality" {
     var input: [50000]u8 = undefined;
     const unit = "abcdefghij";
     for (&input, 0..) |*b, i| b.* = unit[i % unit.len];
@@ -2337,7 +2337,7 @@ test "brotli: long repetitive input round-trips at high quality" {
     try roundTripQuality(&input, 11, 24);
 }
 
-test "brotli: Level mapping round-trips both efforts" {
+test "zix compression: brotli Level mapping round-trips both efforts" {
     const text = "facade roundtrip over the brotli codec, repeated enough to compress. " ++
         "facade roundtrip over the brotli codec, repeated enough to compress.";
 
@@ -2351,12 +2351,12 @@ test "brotli: Level mapping round-trips both efforts" {
     }
 }
 
-test "brotli: out-of-range window bits is rejected" {
+test "zix compression: brotli out-of-range window bits is rejected" {
     try testing.expectError(error.InvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 9));
     try testing.expectError(error.InvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 25));
 }
 
-test "brotli: decode past the cap errors" {
+test "zix compression: brotli decode past the cap errors" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     var r: usize = 0;
@@ -2368,7 +2368,7 @@ test "brotli: decode past the cap errors" {
     try testing.expectError(error.OutputTooLarge, decompressBrotliAlloc(testing.allocator, stream, 16));
 }
 
-test "brotli: truncated compressed stream errors as DecompressFailed" {
+test "zix compression: brotli truncated compressed stream errors as DecompressFailed" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     var r: usize = 0;
@@ -2381,7 +2381,7 @@ test "brotli: truncated compressed stream errors as DecompressFailed" {
     try testing.expectError(error.DecompressFailed, decompressBrotliAlloc(testing.allocator, stream[0 .. stream.len / 2], 1 << 20));
 }
 
-test "brotli: decodes an external brotli CLI vector (interop)" {
+test "zix compression: brotli decodes an external brotli CLI vector (interop)" {
     // printf 'the quick brown fox ' (x12) | brotli -c  (the static-dictionary vector).
     const vector = "\x1f\xef\x00\xf8\x8d\x94\x6e\xe6\xa2\x06\x31\xa3\xc3\x53\x68\x6f\x39\xc8\x24\xa3\xe5\x08\xdb\x74\x54\x16\x48\xd7\x16\x0f";
 
@@ -2395,14 +2395,14 @@ test "brotli: decodes an external brotli CLI vector (interop)" {
     try testing.expectEqualSlices(u8, &expected, back);
 }
 
-test "brotli: empty stream decodes to nothing (CLI 0x3f)" {
+test "zix compression: brotli empty stream decodes to nothing (CLI 0x3f)" {
     const back = try decompressBrotliAlloc(testing.allocator, "\x3f", 16);
     defer testing.allocator.free(back);
 
     try testing.expectEqual(@as(usize, 0), back.len);
 }
 
-test "brotli: literal context model round-trips and never enlarges vs flat" {
+test "zix compression: brotli literal context model round-trips and never enlarges vs flat" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     const lines = [_][]const u8{
@@ -2428,7 +2428,7 @@ test "brotli: literal context model round-trips and never enlarges vs flat" {
     try testing.expect(ctx.len <= flat.len);
 }
 
-test "brotli: a context split with a single populated context still round-trips" {
+test "zix compression: brotli a context split with a single populated context still round-trips" {
     // one dominant context keeps the model honest about sparse / unused trees.
     var buf: [4096]u8 = undefined;
     for (&buf, 0..) |*b, i| b.* = if (i % 8 == 0) @as(u8, 'a') else @as(u8, 'b');
@@ -2441,7 +2441,7 @@ test "brotli: a context split with a single populated context still round-trips"
     try testing.expectEqualSlices(u8, &buf, back);
 }
 
-test "brotli: compressBound holds for compressible and random input" {
+test "zix compression: brotli compressBound holds for compressible and random input" {
     var rand: [4096]u8 = undefined;
     for (&rand, 0..) |*b, i| b.* = @truncate((i *% 40503) >> 7);
 
@@ -2451,7 +2451,7 @@ test "brotli: compressBound holds for compressible and random input" {
     try testing.expect(stream.len <= compressBound(rand.len));
 }
 
-test "brotli: caller-buffer compress then decompress round-trips" {
+test "zix compression: brotli caller-buffer compress then decompress round-trips" {
     const input = "information about the world and the people in the government, repeated for ratio. " ++
         "information about the world and the people in the government, repeated for ratio.";
 
@@ -2464,7 +2464,7 @@ test "brotli: caller-buffer compress then decompress round-trips" {
     try testing.expectEqualSlices(u8, input, out_buf[0..inflated]);
 }
 
-test "brotli: caller-buffer compress never exceeds compressBound" {
+test "zix compression: brotli caller-buffer compress never exceeds compressBound" {
     var input: [2048]u8 = undefined;
     for (&input, 0..) |*b, i| b.* = @intCast('a' + (i % 16));
 
@@ -2476,7 +2476,7 @@ test "brotli: caller-buffer compress never exceeds compressBound" {
     try testing.expectEqualSlices(u8, &input, out_buf[0..inflated]);
 }
 
-test "brotli: compressBrotli reports BufferTooSmall on an undersized buffer" {
+test "zix compression: brotli compressBrotli reports BufferTooSmall on an undersized buffer" {
     // Random data brotli cannot shrink, so the store fallback is near the input size and overflows
     // the tiny destination.
     var input: [4096]u8 = undefined;
@@ -2486,7 +2486,7 @@ test "brotli: compressBrotli reports BufferTooSmall on an undersized buffer" {
     try testing.expectError(error.BufferTooSmall, compressBrotli(testing.allocator, &input, &tiny, .DEFAULT));
 }
 
-test "brotli: decompressBrotli reports BufferTooSmall when output exceeds the buffer" {
+test "zix compression: brotli decompressBrotli reports BufferTooSmall when output exceeds the buffer" {
     const input = "the quick brown fox jumps over the lazy dog. " ++
         "the quick brown fox jumps over the lazy dog.";
 
@@ -2498,7 +2498,7 @@ test "brotli: decompressBrotli reports BufferTooSmall when output exceeds the bu
 }
 
 // edge: empty and single-byte inputs through the caller-buffer pair.
-test "brotli: caller-buffer round-trips empty and single-byte input" {
+test "zix compression: brotli caller-buffer round-trips empty and single-byte input" {
     inline for (.{ "", "x" }) |input| {
         var comp: [64]u8 = undefined;
         const n = try compressBrotli(testing.allocator, input, &comp, .DEFAULT);
@@ -2510,7 +2510,7 @@ test "brotli: caller-buffer round-trips empty and single-byte input" {
 }
 
 // edge: the BufferTooSmall boundary for compress is exactly the produced length, not a gross gap.
-test "brotli: compressBrotli succeeds at the exact size and fails one byte short" {
+test "zix compression: brotli compressBrotli succeeds at the exact size and fails one byte short" {
     const input = "boundary text that compresses to a stable length under the default effort.";
 
     const ref = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
@@ -2527,7 +2527,7 @@ test "brotli: compressBrotli succeeds at the exact size and fails one byte short
 }
 
 // edge: the BufferTooSmall boundary for decompress is exactly the inflated length.
-test "brotli: decompressBrotli succeeds at the exact size and fails one byte short" {
+test "zix compression: brotli decompressBrotli succeeds at the exact size and fails one byte short" {
     const input = "boundary text that round-trips to a known length after inflation.";
 
     const stream = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
@@ -2543,7 +2543,7 @@ test "brotli: decompressBrotli succeeds at the exact size and fails one byte sho
 }
 
 // behaviour: the buffer variant is a faithful copy of the alloc variant, byte for byte.
-test "brotli: compressBrotli writes the same bytes as compressBrotliAlloc" {
+test "zix compression: brotli compressBrotli writes the same bytes as compressBrotliAlloc" {
     const input = "the buffer-into and alloc variants must produce identical brotli streams.";
 
     const ref = try compressBrotliAlloc(testing.allocator, input, .DEFAULT);
@@ -2555,7 +2555,7 @@ test "brotli: compressBrotli writes the same bytes as compressBrotliAlloc" {
 }
 
 // behaviour: binary-safe across every byte value through both caller-buffer directions.
-test "brotli: every byte value round-trips through the caller-buffer variants" {
+test "zix compression: brotli every byte value round-trips through the caller-buffer variants" {
     var input: [256]u8 = undefined;
     for (&input, 0..) |*b, i| b.* = @intCast(i);
 
@@ -2569,7 +2569,7 @@ test "brotli: every byte value round-trips through the caller-buffer variants" {
 
 // integration: the caller-buffer and alloc variants interoperate in both directions, so a stream
 // produced by one decodes through the other.
-test "brotli: caller-buffer and alloc variants interoperate both directions" {
+test "zix compression: brotli caller-buffer and alloc variants interoperate both directions" {
     const input = "interop between compressBrotli/decompressBrotli and the alloc variants, both ways.";
 
     var cbuf: [256]u8 = undefined;
@@ -2586,7 +2586,7 @@ test "brotli: caller-buffer and alloc variants interoperate both directions" {
 }
 
 // behaviour: both Level efforts survive the caller-buffer round-trip.
-test "brotli: caller-buffer round-trip holds for both Level efforts" {
+test "zix compression: brotli caller-buffer round-trip holds for both Level efforts" {
     const input = "level mapping over the caller-buffer path, long enough to actually compress a bit.";
 
     inline for (.{ Level.FASTEST, Level.DEFAULT }) |level| {

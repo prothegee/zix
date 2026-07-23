@@ -29,7 +29,7 @@ File implementasi lowercase membawa logic, file PascalCase adalah pintunya. `lib
 **Test discovery tidak rekursif.** Setiap file `src/` baru yang punya test WAJIB mendapat baris `std.testing.refAllDecls(@import("..."))` sendiri di blok unit-test `lib.zig`, dikelompokkan di bawah komentar engine-nya. Jika terlewat, test file itu diam-diam tidak pernah jalan padahal unit-test tetap exit 0.
 
 ```zig
-test "zix tests: unit test" {
+test "zix: unit test" {
     // # zix.Http
     std.testing.refAllDecls(@import("tcp/http/router.zig"));
     std.testing.refAllDecls(@import("tcp/http/response.zig"));
@@ -87,7 +87,7 @@ pub const TcpServerConfig = struct { ... };
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: TcpServerConfig, default field values" { ... }
+test "zix tcp: TcpServerConfig, default field values" { ... }
 ```
 
 1. **Module doc comment** `//! zix <subsystem>` di baris 1, sebuah identitas lowercase singkat (`//! zix udp namespace aggregator`, `//! zix logger`). Satu pengecualian branding di `src/lib.zig` (`//! Zero sIX; 06;`) memang disengaja, jangan pernah diubah.
@@ -286,10 +286,10 @@ Type yang memiliki buffer membebaskan di `deinit`. Apa pun yang disediakan calle
 
 ## 11. Test
 
-Test berada di bawah file yang dicakupnya (Zig menemukannya lewat `refAllDecls`). Nama dominannya `test "zix test: <subject>, <case>"`, dengan varian berprefix domain untuk surface engine (`zix grpc:`, `zix http1:`, `zix fix:`):
+Test berada di bawah file yang dicakupnya (Zig menemukannya lewat `refAllDecls`). Nama test membawa prefix domain dari surface yang diuji: `test "zix <domain>: <subject>, <case>"` (`zix tcp:`, `zix http1:`, `zix grpc:`, `zix tls:`, `zix channel:`), dan test driver memakai nama driver-nya (`postgrez auth:`, `rediz resp:`):
 
 ```zig
-test "zix test: TcpServerConfig, default field values" {
+test "zix tcp: TcpServerConfig, default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -301,7 +301,7 @@ test "zix test: TcpServerConfig, default field values" {
 
 Setelah mengimplementasikan function, field, atau behavior baru, tambahkan test yang mencakupnya dalam perubahan yang sama (unit, behaviour, edge, dan integration bila perlu). Sebuah file belum selesai, dan file berikutnya belum dimulai, sampai kode baru punya test.
 
-> Letakkan test berdampingan dengan kodenya. Beri nama `zix test: subject, case`. Behavior baru dikirim bersama test-nya, bukan menyusul.
+> Letakkan test berdampingan dengan kodenya. Beri nama `zix <domain>: subject, case`. Behavior baru dikirim bersama test-nya, bukan menyusul.
 
 ---
 

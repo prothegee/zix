@@ -277,7 +277,7 @@ const RFC_SERVER_FIRST = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s
 const RFC_CLIENT_FINAL = "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
 const RFC_SERVER_FINAL = "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
 
-test "postgrez test: scram client-first matches RFC 7677 vector" {
+test "postgrez auth: scram client-first matches RFC 7677 vector" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -286,7 +286,7 @@ test "postgrez test: scram client-first matches RFC 7677 vector" {
     try testing.expectEqualStrings("n,,n=user,r=rOprNGfwEbeRWgbNEkqO", client_first);
 }
 
-test "postgrez test: scram client-final and server verify match RFC 7677 vector" {
+test "postgrez auth: scram client-final and server verify match RFC 7677 vector" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -298,7 +298,7 @@ test "postgrez test: scram client-final and server verify match RFC 7677 vector"
     try scram.handleServerFinal(RFC_SERVER_FINAL);
 }
 
-test "postgrez test: scram rejects a wrong server signature" {
+test "postgrez auth: scram rejects a wrong server signature" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -311,7 +311,7 @@ test "postgrez test: scram rejects a wrong server signature" {
     );
 }
 
-test "postgrez test: scram rejects a server error reply" {
+test "postgrez auth: scram rejects a server error reply" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -321,7 +321,7 @@ test "postgrez test: scram rejects a server error reply" {
     try testing.expectError(error.ServerRejected, scram.handleServerFinal("e=invalid-proof"));
 }
 
-test "postgrez test: scram rejects a nonce that does not extend ours" {
+test "postgrez auth: scram rejects a nonce that does not extend ours" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -333,7 +333,7 @@ test "postgrez test: scram rejects a nonce that does not extend ours" {
     );
 }
 
-test "postgrez test: scram rejects malformed server-first" {
+test "postgrez auth: scram rejects malformed server-first" {
     var scram = try Scram.init(.SCRAM_SHA_256, RFC_USER, RFC_PASSWORD, RFC_CLIENT_NONCE, "");
 
     var buf: [256]u8 = undefined;
@@ -342,7 +342,7 @@ test "postgrez test: scram rejects malformed server-first" {
     try testing.expectError(error.BadServerFirst, scram.handleServerFirst("s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"));
 }
 
-test "postgrez test: scram PLUS binds the channel into gs2 and c=" {
+test "postgrez auth: scram PLUS binds the channel into gs2 and c=" {
     const cbind: [32]u8 = @splat(0xAB);
     var scram = try Scram.init(.SCRAM_SHA_256_PLUS, "", RFC_PASSWORD, RFC_CLIENT_NONCE, &cbind);
 
@@ -363,7 +363,7 @@ test "postgrez test: scram PLUS binds the channel into gs2 and c=" {
     try testing.expect(std.mem.startsWith(u8, client_final, expected_prefix));
 }
 
-test "postgrez test: scram full loop against a local verifier" {
+test "postgrez auth: scram full loop against a local verifier" {
     // A minimal server side built from the same primitives, checking the
     // client proof the way PostgreSQL does (RFC 5802 server steps).
     const password = "s3cret";
@@ -422,7 +422,7 @@ test "postgrez test: scram full loop against a local verifier" {
     try scram.handleServerFinal(server_final);
 }
 
-test "postgrez test: encodeNonce yields printable base64 text" {
+test "postgrez auth: encodeNonce yields printable base64 text" {
     var raw: [18]u8 = undefined;
     for (&raw, 0..) |*byte, index| byte.* = @intCast(index * 13 % 256);
 

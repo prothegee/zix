@@ -162,16 +162,20 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.getHeader` | fn | Case-insensitive header lookup on a ParsedHead |
 | `zix.Http1.acceptEncoding` | fn | Accept-Encoding value for a ParsedHead: O(1) from the parse-pass span, getHeader fallback otherwise |
 | `zix.Http1.setCache` | fn | Install or clear the per-worker response cache |
+| `zix.Http1.setExternalHandler` | fn | Register the per-worker callback for external fd readability (`.URING` driver sockets) |
+| `zix.Http1.uringWatchFd` | fn | Arm a multishot readable watch for a foreign fd on the worker's own ring |
 | `zix.Http1.queryParam` | fn | Linear scan for one query parameter by exact name |
 | `zix.Http1.percentDecode` | fn | Percent-decode a buffer in place |
 | `zix.Http1.parseRange` | fn | Parse `bytes=start-end` into a `Range` |
 | `zix.Http1.writeAllFD` | fn | Write all bytes to fd (sink-aware, handles EINTR/EAGAIN) |
+| `zix.Http1.responseReserve` | fn | Reserve an in-place render region on the response sink (body bytes written once) |
+| `zix.Http1.responseCommit` | fn | Seal a reserved render, the engine builds the simple header in front of the body |
 | `zix.Http1.flushPending` | fn | Flush staged response bytes before raw fd writes (pipelining order) |
 | `zix.Http1.beginStream` | fn | Begin a streaming response (SSE), detaches the sink so writes flush per event (cleartext + TLS) |
 | `zix.Http1.sendSimpleFD` | fn | Full response with Content-Length body |
 | `zix.Http1.sendSimpleNoBodyFD` | fn | Headers-only response (HEAD method) |
 | `zix.Http1.sendJsonFD` | fn | `sendSimpleFD` shorthand with `application/json` |
-| `zix.Http1.sendGzipFD` | fn | gzip-compressed response via `std.compress.flate` |
+| `zix.Http1.sendGzipFD` | fn | gzip-compressed response (in-tree `flate_fast` for bodies under 64 KiB, `std.compress.flate` above) |
 | `zix.Http1.sendChunkedStartFD` | fn | Start a `Transfer-Encoding: chunked` response |
 | `zix.Http1.sendChunkFD` | fn | Write one chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Terminate the chunked body |
@@ -443,13 +447,13 @@ Per-request access logging is the handler's responsibility: the response bytes g
 | :- | :- |
 | Header block size | Max 16 KB (`core.BUF_SIZE`, or `max_recv_buf` under .EPOLL). Exceeding returns `431` and closes |
 | Body under .ASYNC/.POOL/.MIXED | The handler sees up to 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable (the handler reads `head.content_length`, not the bytes) |
-| Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body dispatches the handler with an empty body slice, then the engine drains the remainder off the socket (`MSG_TRUNC`) keeping the connection usable |
+| Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): `.EPOLL` dispatches the handler first with an empty body slice, `.URING` drains and counts first, then the handler runs with the counted total in `req.bodyReceived()` |
 | Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
 | Chunked request body | Decoded into the body buffer, excess discarded |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
 | TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` / `.POOL` / `.MIXED` terminate per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
-Endpoints that accept large uploads rely on `head.content_length` (the bytes are drained, not buffered).
+Endpoints that accept large uploads read `req.bodyReceived()` under `.URING` (the drained bytes are counted, not buffered). The other models do not carry the count, so they rely on `head.content_length` there.
 
 For the full-featured HTTP layer see [`docs/hld-http-en.md`](hld-http-en.md). For implementation details see [`docs/lld-http1-en.md`](lld-http1-en.md).
 

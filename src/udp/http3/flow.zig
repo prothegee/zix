@@ -140,7 +140,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 4.1 stream and connection flow control" {
+test "zix http3: RFC 9000 4.1 stream and connection flow control" {
     var stream_flow = FlowLimit{ .limit = 100 };
     try stream_flow.consume(80);
     try std.testing.expectEqual(@as(u64, 80), stream_flow.used);
@@ -158,7 +158,7 @@ test "zix test: RFC 9000 4.1 stream and connection flow control" {
     try std.testing.expectError(error.FlowControlError, conn_flow.consume(1001));
 }
 
-test "zix test: RFC 9000 19.3 ACK frame parse and range arithmetic" {
+test "zix http3: RFC 9000 19.3 ACK frame parse and range arithmetic" {
     const ack_single = try parseAck(&h("020a000003"), 0);
     try std.testing.expectEqual(@as(u64, 10), ack_single.largest);
     try std.testing.expect(ack_single.range_len == 1 and ack_single.ranges[0].smallest == 7 and ack_single.ranges[0].largest == 10);
@@ -180,7 +180,7 @@ test "zix test: RFC 9000 19.3 ACK frame parse and range arithmetic" {
     try std.testing.expectError(error.FrameEncodingError, parseAck(&h("0202000005"), 0));
 }
 
-test "zix test: RFC 9000 19.17 / 19.18 path validation" {
+test "zix http3: RFC 9000 19.17 / 19.18 path validation" {
     const challenge = try parsePathData(&h("1a0102030405060708"));
     try std.testing.expect(challenge[0] == 0x01 and challenge[7] == 0x08);
 

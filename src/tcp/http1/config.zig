@@ -26,8 +26,9 @@ pub const Http1ServerConfig = struct {
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// Worker thread stack size in bytes when compression is enabled, a floor under .EPOLL / .URING:
-    /// the effective stack is max(worker_stack_size_bytes, this). std.compress.flate builds on the
-    /// handler stack frame (about 230 KB), so a compressing handler needs more. No effect when off.
+    /// the effective stack is max(worker_stack_size_bytes, this). The codec state itself lives in
+    /// per-worker mapped / heap scratch (never a stack temporary), the floor keeps headroom for the
+    /// deeper compression call chains. No effect when off.
     worker_stack_compress_bytes: usize = 2 * 1024 * 1024,
     /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING). The kernel
     /// busy-spins this long before sleeping the worker, trading CPU for lower tail latency. 0 leaves

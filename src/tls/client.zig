@@ -448,7 +448,7 @@ fn parseServerHello(sh_msg: []const u8) !ServerHelloParsed {
 // so the server's CertificateVerify verifies against it.
 const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914f4a810c1ece713402574300a06082a8648ce3d040302302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f63301e170d3236303632323132353432305a170d3336303631393132353432305a302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f633059301306072a8648ce3d020106082a8648ce3d03010703420004c2a0121b298ac9cd389200e78d94e7bde1cc7cd8074795fab4f919799d40fdc231c5a90990ac8c6166ae472f33f74fced097f2edb7b8a1974be66a4ab07f253ba37f307d301d0603551d0e04160414c34e1d0a36a43947709b539e16dd0213aa4196aa301f0603551d23041830168014c34e1d0a36a43947709b539e16dd0213aa4196aa300f0603551d130101ff040530030101ff301a0603551d110413301182096c6f63616c686f737487047f000001300e0603551d0f0101ff040403020780300a06082a8648ce3d040302034700304402200b012f119db9b95d990bc482cb63e8f81e337a08634904e4caf513dc10c8aa8302202fdfe79ff6d5403e753ddf2aa52671923b8a2c28126bcbf196bd6fb7ecbcb14e";
 
-test "zix test: tls client, 1.3 handshake against the zix server (in-memory round trip)" {
+test "zix tls: client, 1.3 handshake against the zix server (in-memory round trip)" {
     const connection = @import("connection.zig");
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -498,7 +498,7 @@ test "zix test: tls client, 1.3 handshake against the zix server (in-memory roun
     try std.testing.expectEqualSlices(u8, "pong from server", try finished.connection.readAppData(s2c, &c_in));
 }
 
-test "zix test: tls client, verifyServerCert trusts a good cert and rejects bad host / expiry / anchor" {
+test "zix tls: client, verifyServerCert trusts a good cert and rejects bad host / expiry / anchor" {
     // Drive the trust step through FinishResult.verifyServerCert, the API the request path uses.
     // The fixture is self-signed (CA:TRUE), so the anchor is the leaf itself, out-of-band.
     var cert_buf: [512]u8 = undefined;
@@ -551,7 +551,7 @@ fn writeAllFD(fd: std.posix.fd_t, bytes: []const u8) !void {
     }
 }
 
-test "zix test: tls client over a socketpair (real fds, full https/1.1 request)" {
+test "zix tls: client over a socketpair (real fds, full https/1.1 request)" {
     const connection = @import("connection.zig");
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const linux = std.os.linux;

@@ -272,7 +272,7 @@ fn setNonBlockTest(fd: posix.fd_t) void {
     _ = linux.fcntl(fd, posix.F.SETFL, cur | @as(usize, nonblock));
 }
 
-test "zix test: tls_conn, sendRaw writes through when the socket has room" {
+test "zix multiplexers: tls_conn, sendRaw writes through when the socket has room" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     var pair: [2]posix.fd_t = undefined;
@@ -292,7 +292,7 @@ test "zix test: tls_conn, sendRaw writes through when the socket has room" {
     try std.testing.expectEqualStrings("hello", got[0..@intCast(rc)]);
 }
 
-test "zix test: tls_conn, backpressure stages then onWritable flushes in order" {
+test "zix multiplexers: tls_conn, backpressure stages then onWritable flushes in order" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     var pair: [2]posix.fd_t = undefined;
@@ -345,7 +345,7 @@ test "zix test: tls_conn, backpressure stages then onWritable flushes in order" 
     try std.testing.expectEqualStrings("tail-marker", sink[drained - "tail-marker".len .. drained]);
 }
 
-test "zix test: tls_conn, stageWrite grows past wbuf_initial and keeps live bytes" {
+test "zix multiplexers: tls_conn, stageWrite grows past wbuf_initial and keeps live bytes" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     // fd -1: every write fails, but stageWrite is exercised directly so no write happens.
@@ -363,7 +363,7 @@ test "zix test: tls_conn, stageWrite grows past wbuf_initial and keeps live byte
     );
 }
 
-test "zix test: tls_conn, ConnTable put get drop frees through free_conn" {
+test "zix multiplexers: tls_conn, ConnTable put get drop frees through free_conn" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     const Probe = struct {

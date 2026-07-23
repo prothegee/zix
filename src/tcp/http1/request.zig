@@ -22,6 +22,11 @@ pub const Request = struct {
     /// resumes. The sync path leaves this empty and pathParam() reads the router
     /// threadlocal directly.
     path_params: []const router.PathParam = &.{},
+    /// Body bytes consumed off the socket for this request, counted by the
+    /// engine. Equals body().len when the body fit the receive buffer. For a
+    /// body larger than the buffer the .URING dispatch counts the drained
+    /// remainder here as well. Handlers read it through bodyReceived().
+    body_received: u64 = 0,
 
     /// Build a request view over a parsed head, body, and fd.
     ///
@@ -33,7 +38,7 @@ pub const Request = struct {
     /// Return:
     /// - Request
     pub fn init(head: *const core.ParsedHead, body_data: []const u8, fd: std.posix.fd_t) Request {
-        return .{ .head = head, .body_bytes = body_data, .fd = fd };
+        return .{ .head = head, .body_bytes = body_data, .fd = fd, .body_received = body_data.len };
     }
 
     /// The HTTP method as the typed code. An unknown or oversized method token
@@ -82,6 +87,22 @@ pub const Request = struct {
     /// - []const u8 (the engine-delivered body slice, empty when none)
     pub fn body(self: *Request) ![]const u8 {
         return self.body_bytes;
+    }
+
+    /// Bytes of this request's body consumed off the socket, counted by the
+    /// engine from the reads that received it, never taken from the
+    /// Content-Length header.
+    ///
+    /// Note:
+    /// - Equals body().len when the body fit the receive buffer.
+    /// - For a body larger than the buffer the .URING dispatch counts the
+    ///   drained remainder too. Other dispatch models report only the
+    ///   delivered slice length there.
+    ///
+    /// Return:
+    /// - u64 (counted received body bytes)
+    pub fn bodyReceived(self: Request) u64 {
+        return self.body_received;
     }
 
     /// Whether the connection is keep-alive.
@@ -145,7 +166,7 @@ pub const Request = struct {
         head.* = result.head;
 
         const body_start = @min(result.body_offset, buf.len);
-        return .{ .head = head, .body_bytes = buf[body_start..], .fd = -1 };
+        return .{ .head = head, .body_bytes = buf[body_start..], .fd = -1, .body_received = buf.len - body_start };
     }
 };
 
@@ -202,6 +223,23 @@ test "zix http1: Request body returns the engine-delivered slice" {
 
     try std.testing.expectEqualStrings("hello", try req.body());
     try std.testing.expect(req.method() == .POST);
+}
+
+test "zix http1: Request bodyReceived defaults to the body length and takes an engine override" {
+    const parsed = try core.parseHead("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
+
+    var req = Request.init(&parsed.head, "hello", -1);
+    try std.testing.expectEqual(@as(u64, 5), req.bodyReceived());
+
+    // A dispatch path that drained a larger body overrides the count.
+    req.body_received = 100000;
+    try std.testing.expectEqual(@as(u64, 100000), req.bodyReceived());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = try Request.fromRaw("POST /u HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc", arena.allocator());
+    try std.testing.expectEqual(@as(u64, 3), raw.bodyReceived());
 }
 
 test "zix http1: Request pathSegments splits non-empty segments" {

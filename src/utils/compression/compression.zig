@@ -15,6 +15,7 @@
 const std = @import("std");
 
 pub const flate = @import("flate.zig");
+pub const flate_fast = @import("flate_fast.zig");
 pub const brotli = @import("brotli.zig");
 
 /// Compression effort, forwarded to the codec.
@@ -331,130 +332,130 @@ const gzip_only = [_]Encoding{.GZIP};
 const gzip_then_deflate = [_]Encoding{ .GZIP, .DEFLATE };
 const deflate_then_gzip = [_]Encoding{ .DEFLATE, .GZIP };
 
-test "negotiate: absent header defaults to identity" {
+test "zix compression: negotiate absent header defaults to identity" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate(null, &gzip_only).?);
 }
 
-test "negotiate: empty field means identity only" {
+test "zix compression: negotiate empty field means identity only" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate("", &gzip_only).?);
     try testing.expectEqual(Encoding.IDENTITY, negotiate("   ", &gzip_only).?);
 }
 
-test "negotiate: simple gzip" {
+test "zix compression: negotiate simple gzip" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip", &gzip_only).?);
 }
 
-test "negotiate: gzip requested but not producible falls back to identity" {
+test "zix compression: negotiate gzip requested but not producible falls back to identity" {
     const none = [_]Encoding{};
 
     try testing.expectEqual(Encoding.IDENTITY, negotiate("gzip", &none).?);
 }
 
-test "negotiate: unsupported coding requested falls back to identity" {
+test "zix compression: negotiate unsupported coding requested falls back to identity" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate("br", &gzip_only).?);
     try testing.expectEqual(Encoding.IDENTITY, negotiate("deflate", &gzip_only).?);
 }
 
-test "negotiate: gzip forbidden via q=0 falls back to identity" {
+test "zix compression: negotiate gzip forbidden via q=0 falls back to identity" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0", &gzip_only).?);
     try testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0.000", &gzip_only).?);
 }
 
-test "negotiate: client prefers identity by quality" {
+test "zix compression: negotiate client prefers identity by quality" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0.5, identity;q=1", &gzip_only).?);
 }
 
-test "negotiate: client prefers gzip by quality" {
+test "zix compression: negotiate client prefers gzip by quality" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=1, identity;q=0.5", &gzip_only).?);
 }
 
-test "negotiate: equal quality prefers compression over identity" {
+test "zix compression: negotiate equal quality prefers compression over identity" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip, identity", &gzip_only).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=1, identity;q=1", &gzip_only).?);
 }
 
-test "negotiate: explicit identity with higher q suppresses compression" {
+test "zix compression: negotiate explicit identity with higher q suppresses compression" {
     try testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0.5, identity;q=0.9", &gzip_only).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=0.9, identity;q=0.5", &gzip_only).?);
 }
 
-test "negotiate: wildcard identity does not suppress compression" {
+test "zix compression: negotiate wildcard identity does not suppress compression" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=0.5, *", &gzip_only).?);
 }
 
-test "negotiate: wildcard makes gzip acceptable" {
+test "zix compression: negotiate wildcard makes gzip acceptable" {
     try testing.expectEqual(Encoding.GZIP, negotiate("*", &gzip_only).?);
 }
 
-test "negotiate: wildcard q=0 forbids everything" {
+test "zix compression: negotiate wildcard q=0 forbids everything" {
     try testing.expectEqual(@as(?Encoding, null), negotiate("*;q=0", &gzip_only));
 }
 
-test "negotiate: identity q=0 with no producible coding is 406" {
+test "zix compression: negotiate identity q=0 with no producible coding is 406" {
     try testing.expectEqual(@as(?Encoding, null), negotiate("identity;q=0", &gzip_only));
 }
 
-test "negotiate: identity q=0 but gzip offered uses gzip" {
+test "zix compression: negotiate identity q=0 but gzip offered uses gzip" {
     try testing.expectEqual(Encoding.GZIP, negotiate("identity;q=0, gzip", &gzip_only).?);
 }
 
-test "negotiate: identity q=0 with wildcard uses gzip" {
+test "zix compression: negotiate identity q=0 with wildcard uses gzip" {
     try testing.expectEqual(Encoding.GZIP, negotiate("identity;q=0, *", &gzip_only).?);
 }
 
-test "negotiate: case insensitive coding names" {
+test "zix compression: negotiate case insensitive coding names" {
     try testing.expectEqual(Encoding.GZIP, negotiate("GZIP", &gzip_only).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("GZip;Q=1", &gzip_only).?);
 }
 
-test "negotiate: surrounding whitespace tolerated" {
+test "zix compression: negotiate surrounding whitespace tolerated" {
     try testing.expectEqual(Encoding.GZIP, negotiate("  gzip , deflate  ", &gzip_only).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip; q=0.9", &gzip_only).?);
 }
 
-test "negotiate: tiny non-zero quality still acceptable" {
+test "zix compression: negotiate tiny non-zero quality still acceptable" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=0.001", &gzip_only).?);
 }
 
-test "negotiate: highest client quality wins among producible" {
+test "zix compression: negotiate highest client quality wins among producible" {
     try testing.expectEqual(Encoding.GZIP, negotiate("deflate;q=0.5, gzip;q=0.8", &gzip_then_deflate).?);
     try testing.expectEqual(Encoding.DEFLATE, negotiate("deflate;q=0.9, gzip;q=0.8", &gzip_then_deflate).?);
 }
 
-test "negotiate: equal quality breaks ties by server preference" {
+test "zix compression: negotiate equal quality breaks ties by server preference" {
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip;q=0.5, deflate;q=0.5", &gzip_then_deflate).?);
     try testing.expectEqual(Encoding.DEFLATE, negotiate("gzip;q=0.5, deflate;q=0.5", &deflate_then_gzip).?);
 }
 
-test "negotiate: unknown coding ignored, producible one chosen" {
+test "zix compression: negotiate unknown coding ignored, producible one chosen" {
     try testing.expectEqual(Encoding.GZIP, negotiate("br, gzip", &gzip_only).?);
 }
 
-test "Encoding: token and content-encoding header" {
+test "zix compression: encoding token and content-encoding header" {
     try testing.expectEqualStrings("gzip", Encoding.GZIP.token());
     try testing.expectEqualStrings("identity", Encoding.IDENTITY.token());
     try testing.expectEqualStrings("gzip", Encoding.GZIP.contentEncoding().?);
     try testing.expectEqual(@as(?[]const u8, null), Encoding.IDENTITY.contentEncoding());
 }
 
-test "shouldCompress: below the floor is skipped" {
+test "zix compression: shouldCompress below the floor is skipped" {
     try testing.expect(!shouldCompress(64, "text/html", min_size_default));
     try testing.expect(shouldCompress(4096, "text/html", min_size_default));
 }
 
-test "shouldCompress: already-compressed media types are skipped" {
+test "zix compression: shouldCompress already-compressed media types are skipped" {
     try testing.expect(!shouldCompress(4096, "image/jpeg", min_size_default));
     try testing.expect(!shouldCompress(4096, "video/mp4", min_size_default));
     try testing.expect(!shouldCompress(4096, "application/zip", min_size_default));
     try testing.expect(!shouldCompress(4096, "font/woff2", min_size_default));
 }
 
-test "shouldCompress: content-type parameters are ignored" {
+test "zix compression: shouldCompress content-type parameters are ignored" {
     try testing.expect(shouldCompress(4096, "text/html; charset=utf-8", min_size_default));
     try testing.expect(!shouldCompress(4096, "IMAGE/JPEG; quality=90", min_size_default));
 }
 
-test "encode: identity is a passthrough copy" {
+test "zix compression: encode identity is a passthrough copy" {
     const original = "passthrough body";
 
     const out = try encode(testing.allocator, .IDENTITY, original, .DEFAULT);
@@ -464,7 +465,7 @@ test "encode: identity is a passthrough copy" {
     try testing.expect(out.ptr != original.ptr);
 }
 
-test "encode then decode gzip roundtrips" {
+test "zix compression: encode then decode gzip roundtrips" {
     const original = "facade roundtrip over the gzip codec";
 
     const packed_bytes = try encode(testing.allocator, .GZIP, original, .DEFAULT);
@@ -476,7 +477,7 @@ test "encode then decode gzip roundtrips" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "encode then decode deflate roundtrips" {
+test "zix compression: encode then decode deflate roundtrips" {
     const original = "facade roundtrip over the deflate codec";
 
     const packed_bytes = try encode(testing.allocator, .DEFLATE, original, .DEFAULT);
@@ -488,7 +489,7 @@ test "encode then decode deflate roundtrips" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "encode then decode brotli roundtrips" {
+test "zix compression: encode then decode brotli roundtrips" {
     const original = "facade roundtrip over the brotli codec, repeated for a real match. " ++
         "facade roundtrip over the brotli codec, repeated for a real match.";
 
@@ -501,7 +502,7 @@ test "encode then decode brotli roundtrips" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "encodeInto: gzip writes into the caller buffer and roundtrips" {
+test "zix compression: encodeInto gzip writes into the caller buffer and roundtrips" {
     const original = "facade into-buffer roundtrip over the gzip codec, repeated for a real match. " ++
         "facade into-buffer roundtrip over the gzip codec, repeated for a real match.";
 
@@ -514,7 +515,7 @@ test "encodeInto: gzip writes into the caller buffer and roundtrips" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "encodeInto: identity copies and rejects a short buffer" {
+test "zix compression: encodeInto identity copies and rejects a short buffer" {
     var out: [8]u8 = undefined;
     const written = try encodeInto(testing.allocator, .IDENTITY, "abc", &out, .DEFAULT);
     try testing.expectEqualStrings("abc", out[0..written]);
@@ -523,7 +524,7 @@ test "encodeInto: identity copies and rejects a short buffer" {
     try testing.expectError(error.BufferTooSmall, encodeInto(testing.allocator, .IDENTITY, "abc", &tiny, .DEFAULT));
 }
 
-test "negotiate: supported_default leads with gzip, brotli when the client prefers it" {
+test "zix compression: negotiate supported_default leads with gzip, brotli when the client prefers it" {
     try testing.expectEqual(Encoding.BR, negotiate("br", &supported_default).?);
     try testing.expectEqual(Encoding.DEFLATE, negotiate("deflate", &supported_default).?);
     try testing.expectEqual(Encoding.GZIP, negotiate("gzip", &supported_default).?);
