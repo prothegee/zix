@@ -56,6 +56,34 @@ __*Update:*__
 
     ---
 
+- Fast gzip encoder for dynamic responses (`compression.flate_fast`):
+    - An in-tree gzip encoder (greedy LZ over a single-probe hash table, fixed-Huffman coding, precomputed bit-reversed code tables, 64-bit accumulator) for bodies under 64 KiB, several times faster than the std matcher at a ratio near the std fastest level. Output is standard RFC 1952 gzip, round-trip covered against the std decoder including empty, incompressible, uniform, and near-cap inputs.
+    - `zix.Http1` `sendGzipFD` takes this path automatically for bodies inside the cap, larger bodies keep the `std.compress.flate` path. No API change.
+    - On the local isolate bench the dynamic gzip json cell moved from ~35K to 154-173K across 512/4096/16384 connections.
+
+    ---
+
+- `zix.Http1` send-path latency and in-place render:
+    - `.URING` intra-batch submit: while dispatching a deep completion batch (128 or more completions), staged send SQEs are pushed to the kernel every 16 completions instead of only after the whole batch, so early responses leave immediately instead of waiting for every later request's dispatch. Shallow batches skip the stride. On the local isolate bench this lifted the dynamic-render json cell 4-5% and the 4096-connection pipelined and baseline cells 2-5%, with the 512-connection cells unchanged.
+    - `.URING` adaptive wakeup coalescing: a hot worker loop waits for up to 32 completions per enter (wait_nr = half the last reap, decaying to 1 as load drops) with a 20 microsecond timeout SQE as the stall guard, so staggered arrivals stop waking the worker once per completion. A cool loop behaves exactly as before.
+    - `.URING` accept fast path: a freshly accepted connection's recv SQE is submitted immediately inside the accept handler instead of after the rest of the completion batch dispatches, cutting accept-to-first-byte under connection churn (api-4 p99 dropped about 30% locally).
+    - `responseReserve(fd, max_body)` / `responseCommit(fd, status, content_type, body_len)`: a handler that builds its body dynamically can render straight into the response sink's buffer, so the body bytes are written exactly once (no handler-side scratch buffer, no staging copy) and the engine builds the simple header directly in front of them. A refused reserve (pipelined batch in progress, region does not fit) stages nothing and the handler falls back to `writeAllFD`. Works on `.URING`, `.EPOLL`, and the TLS capture path.
+    - `.URING` short send: the staged window now advances in place (`staged_off`) instead of shifting the remainder to the buffer front.
+
+    ---
+
+- Engine-worker DB lanes: `zix.Http1` `.URING` gains an external fd watch and `postgrez` gains `dispatch.Line`:
+    - `zix.Http1.uringWatchFd(fd)` arms a multishot readable watch for a foreign fd (a driver socket) on the worker's own ring, and `zix.Http1.setExternalHandler(cb)` registers the per-worker callback that runs on the worker thread. The engine sustains the watch (a lapsed multishot re-arms while the fd is alive), and a full submission queue parks the arm on the process queue, so a watch is never dropped while parking has room. The other `.URING` engines ignore the new completion op.
+    - `postgrez.dispatch.Line`: a reactor-less single-connection pipeline (open, submit, flush, pump, pending) for a caller that owns its own event loop. submit stages, the caller flushes once per batch (pump flushes too) so many requests leave in one write, pump reads and delivers framed replies in submit order, and a closed peer surfaces as `error.ConnectionClosed`. `Transport` is unchanged.
+    - Together a server worker can own pipelined database connections on its own ring, so a reply decodes, renders, and writes on the core that owns the client socket, with no cross-thread handoff.
+
+    ---
+
+- `zix.Http1` `.URING`: an oversized request body (larger than the receive buffer) now drains before its handler runs, and the received bytes are counted and exposed as `Request.bodyReceived()`:
+    - Previously the handler ran first with an empty body slice (so the response could leave before the body finished arriving) and the drained remainder was discarded uncounted, leaving `head.content_length` as the only size a handler could report. The engine now counts every drained byte, defers the handler to drain completion, and `req.bodyReceived()` returns the counted total. On every dispatch model it equals `body().len` whenever the body fit the buffer. Small-body requests take the identical path as before, `.EPOLL` and the thread models keep their existing order.
+
+    ---
+
 - Two internal database drivers, `postgrez` (PostgreSQL) and `rediz` (Redis), pure Zig std only, no C dependency:
     - `postgrez`: wire protocol 3.2 with an in-place 3.0 fallback (PostgreSQL 15 minimum), binary-first value encoding with a text fallback per parameter, prepared statements, query pipelining, a batching `Executor`, a thread-safe `Pool`, SCRAM and SCRAM-PLUS (channel binding) plus cleartext auth, TLS 1.3, COPY streaming, LISTEN and NOTIFY.
     - `rediz`: RESP3 via HELLO with an in-place RESP2 fallback (Redis 7 and 8), typed value helpers plus a raw command escape hatch, command pipelining and a deferred write-behind path, a thread-safe `Pool`, TLS 1.3.
@@ -160,7 +188,7 @@ __*Update:*__
     - `Accept-Encoding` negotiation with gzip and deflate. New shared codec `src/utils/compression/flate.zig` (container-parameterized over `std.compress.flate`: gzip = RFC 1952, deflate = zlib-wrapped RFC 1950, not raw) plus the `compression.zig` facade (q-value negotiation, `q=0` and wildcard handling, size floor, already-compressed media-type skip, encode/decode dispatch).
     - brotli (`br`) joins the facade as `src/utils/compression/brotli.zig`, an in-tree codec authored from RFC 7932 (std has no brotli): a complete decoder plus an encoder, embedding the 122,784-byte Appendix A static dictionary (`brotli_dictionary.bin`). `.BR` is in `supported_default`, but gzip stays the default at equal q (the in-tree encoder is not yet competitive with gzip on small bodies), so brotli is served when the client prefers it. Interop is verified both ways against the system `brotli` CLI. The encoder always also produces a store-only stream and returns the smaller, so a body never grows (a tiny body simply falls back to identity).
     - `zix.Http1` serves it via `core.writeNegotiated(fd, head, status, content_type, body)`, `zix.Http` via `Response.sendNegotiated(req, body)`, both setting `Content-Encoding` and `Vary: Accept-Encoding`. Active under `.EPOLL` and `.URING`, off by default. gRPC keeps its own per-message `grpc-encoding`, the raw transports have no HTTP negotiation.
-    - `std.compress.flate.Compress` is about 230 KB and is built on the handler stack frame, so a compressing worker spawns with a 2 MiB stack (demand-paged, near-zero RSS) instead of the default 512 KB. The brotli encoder builds its dictionary index on the heap and the dictionary itself is `@embedFile` `.rodata`, so it adds no stack pressure.
+    - `std.compress.flate.Compress` is about 230 KB and lives in a per-worker lazily mapped encode scratch (never a stack temporary), keeping the hot path free of allocation syscalls. A compressing worker still spawns with a 2 MiB stack floor (demand-paged, near-zero RSS) instead of the default 512 KB, headroom for the deeper codec call chains. The brotli encoder builds its dictionary index on the heap and the dictionary itself is `@embedFile` `.rodata`, so it adds no stack pressure.
     - Codec caller-buffer parity: `brotli.zig` gains `compressBrotli` / `decompressBrotli` (a buffer-into variant beside each alloc variant), so it mirrors `flate.zig`'s four-function shape. `flate.zig` and `brotli.zig` now expose matching named `EncodeError` / `DecodeError` (`BufferTooSmall` shared), and `compressBound` documents that brotli never expands while flate can. The bespoke `writeGzipCached` stays gzip-only by design (a json-comp A/B showed the unified replacement regresses about 1.2 to 6.8%), so no `writeBrotliCached` twin is added, brotli rides `writeNegotiated`.
     - New examples `http1_compression` (port 9058) and `http_compression` (port 9059), each with `/data` (negotiated) plus explicit `/gzip` `/deflate` `/br` routes that force one coding through the `compression.encode` facade. Individual runner steps `test-runner-http1-compression` / `test-runner-http-compression` (raw-socket, exercising br / gzip / deflate / identity / size-floor), and both examples are folded into `test-runner-all` as the `http-compression` / `http1-compression` rows (raw-socket read, decode, value-check each coding), taking the runner to 69 protocols.
 
