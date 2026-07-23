@@ -18,10 +18,8 @@ const Context = @import("../context.zig").Context;
 const method = @import("../method.zig");
 const static = @import("../static.zig");
 const parser = @import("../parser.zig");
-const rcache = @import("../../../utils/response_cache.zig");
 const setCache = @import("../response.zig").setCache;
 const RespSink = @import("../response.zig").RespSink;
-const resp_mod = @import("../response.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 
 // --------------------------------------------------------- //
