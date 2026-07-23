@@ -41,18 +41,18 @@
 #
 # Source flags (mirroring benchmark-httparena-lite.sh):
 #   --source MODE     "remote" (default, Dockerfile fetches the branch) or "local".
-#   --zix-dir DIR     Local zix checkout for --source local (default: this dir).
+#   --zix-dir DIR     Local zix checkout for --source local (default: the zix checkout above scripts/).
 #   --load-threads N  Override the derived load-gen thread count.
 #
 # Positionals (order does not matter for the last two):
 #   <framework>       Required (e.g. zix_uring_http1-1).
 #   [profile]         Bench only this profile. Validated before any build.
-#   [httparena-dir]   HttpArena folder (default: this script's directory).
+#   [httparena-dir]   HttpArena folder (default: sibling HttpArena next to the zix checkout).
 #
 # Usage (re-execs under sudo when ISOLATE_SUDO=true; rootless skips host quiesce):
-#   ./benchmark-httparena-isolate.sh zix_uring_http3-1 ../HttpArena --source local
-#   ./benchmark-httparena-isolate.sh zix_uring_http3-1 baseline-h3 ../HttpArena --sample-mem
-#   ./benchmark-httparena-isolate.sh zix_uring_http1-1 ../HttpArena --probe --sample-mem --source local
+#   ./scripts/httparena-benchmark-isolate.sh entry_name ../HttpArena --source local
+#   ./scripts/httparena-benchmark-isolate.sh entry_name baseline-h3 ../HttpArena --sample-mem
+#   ./scripts/httparena-benchmark-isolate.sh entry_name ../HttpArena --probe --sample-mem --source local
 
 set -euo pipefail
 
@@ -67,7 +67,7 @@ INVOCATION="$(printf '%q ' "$0" "$@")"
 INVOCATION="${INVOCATION% }"
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_RESULT_DIR="$SELF_DIR/logs/benchmark"
+DEFAULT_RESULT_DIR="$SELF_DIR/../logs/benchmark"
 
 # Parse flags; positionals are <framework> [profile] [httparena-dir].
 SETTLE=5
@@ -132,7 +132,7 @@ for extra in "${POSITIONAL[@]:1}"; do
         PROFILE="$extra"
     fi
 done
-REPO_DIR="${REPO_DIR:-$SELF_DIR}"
+REPO_DIR="${REPO_DIR:-$SELF_DIR/../../HttpArena}"
 if [ ! -f "$REPO_DIR/scripts/benchmark.sh" ]; then
     echo "error: '$REPO_DIR' is not an HttpArena folder (no scripts/benchmark.sh)" >&2
     exit 1
@@ -151,7 +151,7 @@ if [ -n "$PROFILE" ]; then
     esac
 fi
 
-ZIX_DIR="${ZIX_DIR:-$SELF_DIR}"
+ZIX_DIR="${ZIX_DIR:-$SELF_DIR/..}"
 
 # Canonicalize the result dir: the bench itself runs after a cd into the
 # HttpArena folder, so a relative --out-dir must be pinned to the invocation
