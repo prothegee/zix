@@ -373,7 +373,7 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
                             .send => worker.handleSend(cqe, decoded),
                             .timeout => {},
                             .close => {},
-                            .tls_accept, .tls_recv, .tls_send => {},
+                            .tls_accept, .tls_recv, .tls_send, .external => {},
                         }
                     }
                 }
