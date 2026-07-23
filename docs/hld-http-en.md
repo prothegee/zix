@@ -141,7 +141,7 @@ graph TD
     zix --> Udp["udp/Udp.zig\nzix.Udp"]
     zix --> Uds["uds/Uds.zig\nzix.Uds"]
     zix --> Channel["channel/Channel.zig\nzix.Channel"]
-    zix --> Logger["logger/Logger.zig\nzix.Logger"]
+    zix --> Logger["logger/logger.zig\nzix.Logger"]
     zix --> utils["utils/file.zig\nzix.utils.file"]
     Tcp -.->|re-exports| Http
 
