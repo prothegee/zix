@@ -22,7 +22,6 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 
-const Config = @import("config.zig").HttpServerConfig;
 const common = @import("dispatch/common.zig");
 const parser = @import("parser.zig");
 const ws = @import("websocket.zig");
