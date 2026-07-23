@@ -121,7 +121,7 @@ pub fn serve(
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http static mimeType" {
+test "zix http: static mimeType" {
     try std.testing.expectEqualStrings("text/html", content.fromExtension("html"));
     try std.testing.expectEqualStrings("text/css", content.fromExtension("css"));
     try std.testing.expectEqualStrings("application/json", content.fromExtension("json"));
@@ -129,7 +129,7 @@ test "zix test: http static mimeType" {
     try std.testing.expectEqualStrings("application/octet-stream", content.fromExtension("unknown"));
 }
 
-test "zix test: http static parseRangeHeader" {
+test "zix http: static parseRangeHeader" {
     const r1 = parseRangeHeader("bytes=0-499").?;
     try std.testing.expectEqual(@as(u64, 0), r1.start);
     try std.testing.expectEqual(@as(u64, 499), r1.end.?);

@@ -212,7 +212,7 @@ fn fieldIs(field: Field, name: []const u8, value: []const u8) bool {
     return std.mem.eql(u8, field.name, name) and std.mem.eql(u8, field.value, value);
 }
 
-test "zix test: RFC 7541 C.1 prefixed integer decode and encode" {
+test "zix http3: RFC 7541 C.1 prefixed integer decode and encode" {
     try std.testing.expectEqual(@as(u64, 10), (try decodePrefixedInt(&h("0a"), 5)).value);
 
     const v1337 = try decodePrefixedInt(&h("1f9a0a"), 5);
@@ -230,7 +230,7 @@ test "zix test: RFC 7541 C.1 prefixed integer decode and encode" {
     try std.testing.expectEqual(big, big_round.value);
 }
 
-test "zix test: RFC 9204 Appendix A static table and 4.2 streams" {
+test "zix http3: RFC 9204 Appendix A static table and 4.2 streams" {
     try std.testing.expect(fieldIs(static_table[0], ":authority", ""));
     try std.testing.expect(fieldIs(static_table[17], ":method", "GET"));
     try std.testing.expect(fieldIs(static_table[23], ":scheme", "https"));
@@ -250,7 +250,7 @@ test "zix test: RFC 9204 Appendix A static table and 4.2 streams" {
     try std.testing.expectError(error.StreamCreationError, registry.register(decoder_stream_type));
 }
 
-test "zix test: RFC 9204 4.5 static-table field line representations" {
+test "zix http3: RFC 9204 4.5 static-table field line representations" {
     const idx_path = try decodeIndexedFieldLine(&h("c1"));
     try std.testing.expect(idx_path.static and fieldIs(static_table[idx_path.index], ":path", "/"));
 

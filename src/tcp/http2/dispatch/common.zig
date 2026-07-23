@@ -451,7 +451,7 @@ pub fn getAvailableCpuCount() usize {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http2 effectiveCacheEntries honors the memory ceiling" {
+test "zix http2: http2 effectiveCacheEntries honors the memory ceiling" {
     const base = core.ServeOpts{ .cache_max_entries = 1024, .cache_max_value_bytes = 16 * 1024 };
 
     // no ceiling: the configured entry count passes through
@@ -468,7 +468,7 @@ test "zix test: http2 effectiveCacheEntries honors the memory ceiling" {
     try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(tiny));
 }
 
-test "zix test: http2 MuxCoalesceSink stages small writes and flushes them in order" {
+test "zix http2: http2 MuxCoalesceSink stages small writes and flushes them in order" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -491,7 +491,7 @@ test "zix test: http2 MuxCoalesceSink stages small writes and flushes them in or
     try std.testing.expectEqual(@as(usize, 0), sink.len);
 }
 
-test "zix test: http2 MuxCoalesceSink flushes the buffer then writes an oversized frame straight through" {
+test "zix http2: http2 MuxCoalesceSink flushes the buffer then writes an oversized frame straight through" {
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -524,7 +524,7 @@ test "zix test: http2 MuxCoalesceSink flushes the buffer then writes an oversize
     try std.testing.expectEqual(@as(usize, 3 + big.len), got);
     try std.testing.expectEqualStrings("PFX", first3[0..3]);
 }
-test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
+test "zix http2: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
     var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
 
@@ -533,7 +533,7 @@ test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings"
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 1, 3, 5 }, &cpus);
 }
 
-test "zix test: orderPhysicalCoresFirst keeps mask order on unique keys" {
+test "zix http2: orderPhysicalCoresFirst keeps mask order on unique keys" {
     var cpus = [_]u32{ 3, 7, 11 };
     const keys = [_]u64{ 30, 10, 20 };
 

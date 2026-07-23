@@ -334,7 +334,7 @@ pub fn buildResponse(out: []u8, stream_id: u64, status: u16, body: []const u8, a
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
+test "zix http3: response carries control SETTINGS and a HEADERS/DATA reply" {
     var out: [1024]u8 = undefined;
     const len = buildResponse(&out, 0, 200, "hi", null, .{}).?;
     const payload = out[0..len];
@@ -353,7 +353,7 @@ test "zix test: response carries control SETTINGS and a HEADERS/DATA reply" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "hi") != null);
 }
 
-test "zix test: response with ack and close carries both frames" {
+test "zix http3: response with ack and close carries both frames" {
     var out: [1024]u8 = undefined;
     const len = buildResponse(&out, 0, 200, "hi", 3, .{ .close = true }).?;
     const payload = out[0..len];
@@ -365,7 +365,7 @@ test "zix test: response with ack and close carries both frames" {
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{ 0x1d, 0x41, 0x00, 0x00 }) != null);
 }
 
-test "zix test: buildAckRanges reports holes so the client retransmits the lost packet" {
+test "zix http3: buildAckRanges reports holes so the client retransmits the lost packet" {
     var out: [64]u8 = undefined;
 
     // 0..5 all received (largest 5): one contiguous range, no gaps. First ACK Range 5, range count 0.
@@ -382,7 +382,7 @@ test "zix test: buildAckRanges reports holes so the client retransmits the lost 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x09, 0x00, 0x00, 0x00 }, out[0..lone]);
 }
 
-test "zix test: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse rides it" {
+test "zix http3: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse rides it" {
     // The frame is type 0x12 then the cumulative limit as a varint (192 = 0x40c0 two-byte varint).
     var frame: [8]u8 = undefined;
     const len = buildMaxStreams(&frame, 192);
@@ -402,7 +402,7 @@ test "zix test: buildMaxStreams encodes a bidi MAX_STREAMS frame, buildResponse 
     try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x12}) == null);
 }
 
-test "zix test: buildMaxData encodes a MAX_DATA frame, buildResponse rides it" {
+test "zix http3: buildMaxData encodes a MAX_DATA frame, buildResponse rides it" {
     // The frame is type 0x10 then the cumulative byte limit as a varint (192 = 0x40c0 two-byte varint).
     var frame: [8]u8 = undefined;
     const len = buildMaxData(&frame, 192);
@@ -422,7 +422,7 @@ test "zix test: buildMaxData encodes a MAX_DATA frame, buildResponse rides it" {
     try std.testing.expect(std.mem.indexOf(u8, out2[0..without], &[_]u8{0x10}) == null);
 }
 
-test "zix test: a body larger than the buffer returns null, never overflows" {
+test "zix http3: a body larger than the buffer returns null, never overflows" {
     // A body that cannot fit the single-packet buffer must report null, not write past `out`.
     var big: [4096]u8 = undefined;
     @memset(&big, 'x');
@@ -440,7 +440,7 @@ test "zix test: a body larger than the buffer returns null, never overflows" {
     try std.testing.expect(buildResponse(&out, 0, 200, &small, null, .{}) != null);
 }
 
-test "zix test: lean framing carries only the request stream, no HANDSHAKE_DONE or control" {
+test "zix http3: lean framing carries only the request stream, no HANDSHAKE_DONE or control" {
     var out: [1024]u8 = undefined;
     const len = buildResponse(&out, 4, 200, "hi", null, .{ .handshake_done = false, .control = false }).?;
     const payload = out[0..len];
@@ -452,7 +452,7 @@ test "zix test: lean framing carries only the request stream, no HANDSHAKE_DONE 
     try std.testing.expect(std.mem.indexOf(u8, payload, &[_]u8{0x1e}) == null);
 }
 
-test "zix test: buildStreamPrefix emits HEADERS then a DATA header sized to the body" {
+test "zix http3: buildStreamPrefix emits HEADERS then a DATA header sized to the body" {
     var out: [32]u8 = undefined;
     const len = buildStreamPrefix(&out, 200, .identity, 200000).?;
     const prefix = out[0..len];
@@ -465,7 +465,7 @@ test "zix test: buildStreamPrefix emits HEADERS then a DATA header sized to the 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0x03, 0x0d, 0x40 }, prefix[6..10]);
 }
 
-test "zix test: content-encoding rides the HEADERS frame as one indexed field line" {
+test "zix http3: content-encoding rides the HEADERS frame as one indexed field line" {
     // A brotli-coded streamed body: the field section gains one byte (0xea = static index 42,
     // content-encoding: br), so the HEADERS frame length is 4 and :status is followed by 0xea.
     var out: [32]u8 = undefined;
@@ -487,7 +487,7 @@ test "zix test: content-encoding rides the HEADERS frame as one indexed field li
     try std.testing.expect(id_len < br_len); // identity prefix is one byte shorter
 }
 
-test "zix test: writeStreamFrame refuses a frame that would overflow the buffer" {
+test "zix http3: writeStreamFrame refuses a frame that would overflow the buffer" {
     var out: [8]u8 = undefined;
     var pos: usize = 0;
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };

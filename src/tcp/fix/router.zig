@@ -59,7 +59,7 @@ pub fn FixRouter(comptime routes: []const FixRoute) type {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix fix router: dispatch calls the matching handler" {
+test "zix fix: dispatch calls the matching handler" {
     const called = struct {
         var count: u32 = 0;
         fn handler(_: []const core.Field, _: *core.FixContext) void {
@@ -87,7 +87,7 @@ test "zix fix router: dispatch calls the matching handler" {
     try std.testing.expectEqual(@as(u32, 1), called.count);
 }
 
-test "zix fix router: no match leaves handler uncalled" {
+test "zix fix: no match leaves handler uncalled" {
     const called = struct {
         var count: u32 = 0;
         fn handler(_: []const core.Field, _: *core.FixContext) void {
@@ -113,7 +113,7 @@ test "zix fix router: no match leaves handler uncalled" {
     try std.testing.expectEqual(@as(u32, 0), called.count);
 }
 
-test "zix fix router: route timeout sets deadline_ns" {
+test "zix fix: route timeout sets deadline_ns" {
     const noop = struct {
         fn handler(_: []const core.Field, _: *core.FixContext) void {}
     };

@@ -380,7 +380,7 @@ const MockServer = struct {
     }
 };
 
-test "prometheuz test: http_client parses a Content-Length response" {
+test "prometheuz: http_client parses a Content-Length response" {
     const mock = try MockServer.init(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
     );
@@ -394,7 +394,7 @@ test "prometheuz test: http_client parses a Content-Length response" {
     try testing.expectEqualStrings("text/plain", resp.header("content-type").?);
 }
 
-test "prometheuz test: http_client reads to EOF when Content-Length is absent" {
+test "prometheuz: http_client reads to EOF when Content-Length is absent" {
     var fds: [2]std.posix.fd_t = undefined;
     if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     defer _ = std.os.linux.close(fds[0]);
@@ -414,7 +414,7 @@ test "prometheuz test: http_client reads to EOF when Content-Length is absent" {
     try testing.expectEqualStrings("no-length-body", resp.body());
 }
 
-test "prometheuz test: http_client surfaces a 404 status" {
+test "prometheuz: http_client surfaces a 404 status" {
     const mock = try MockServer.init("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -425,14 +425,14 @@ test "prometheuz test: http_client surfaces a 404 status" {
     try testing.expectEqualStrings("", resp.body());
 }
 
-test "prometheuz test: http_client rejects a body over max_response_body" {
+test "prometheuz: http_client rejects a body over max_response_body" {
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n");
     defer mock.deinit();
 
     try testing.expectError(error.BodyTooLarge, readResponse(testing.allocator, mock.client_fd, 16));
 }
 
-test "prometheuz test: http_client sendRequest writes a well-formed GET" {
+test "prometheuz: http_client sendRequest writes a well-formed GET" {
     const mock = try MockServer.init("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -446,7 +446,7 @@ test "prometheuz test: http_client sendRequest writes a well-formed GET" {
     try testing.expect(std.mem.indexOf(u8, sent, "Content-Length: 0\r\n") != null);
 }
 
-test "prometheuz test: http_client sendRequest carries a POST body" {
+test "prometheuz: http_client sendRequest carries a POST body" {
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -460,7 +460,7 @@ test "prometheuz test: http_client sendRequest carries a POST body" {
     try testing.expect(std.mem.endsWith(u8, sent, "\r\n\r\npayload"));
 }
 
-test "prometheuz test: http_client decodes a chunked response" {
+test "prometheuz: http_client decodes a chunked response" {
     // Same shape node-exporter actually sends: no Content-Length, chunked
     // body, a word split across a chunk boundary.
     const mock = try MockServer.init(
@@ -479,7 +479,7 @@ test "prometheuz test: http_client decodes a chunked response" {
     try testing.expectEqualStrings("hello world", resp.body());
 }
 
-test "prometheuz test: http_client chunked response spanning multiple reads" {
+test "prometheuz: http_client chunked response spanning multiple reads" {
     // A body larger than one BODY_READ_CHUNK (4096), forcing fillMore() to
     // run more than once and a chunk boundary to land mid-read.
     var large: [10_000]u8 = undefined;
@@ -510,7 +510,7 @@ test "prometheuz test: http_client chunked response spanning multiple reads" {
     try testing.expectEqualSlices(u8, &large, resp.body());
 }
 
-test "prometheuz test: http_client sendRequest carries custom headers" {
+test "prometheuz: http_client sendRequest carries custom headers" {
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 

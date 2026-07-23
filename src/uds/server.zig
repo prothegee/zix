@@ -180,7 +180,7 @@ pub fn echoHandler(stream: std.Io.net.Stream, io: std.Io) void {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: UdsServer init, empty path returns PathEmpty" {
+test "zix uds: UdsServer init, empty path returns PathEmpty" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -190,7 +190,7 @@ test "zix test: UdsServer init, empty path returns PathEmpty" {
     );
 }
 
-test "zix test: UdsServer init, valid path succeeds" {
+test "zix uds: UdsServer init, valid path succeeds" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -198,7 +198,7 @@ test "zix test: UdsServer init, valid path succeeds" {
     server.deinit();
 }
 
-test "zix test: UdsServer init, timeout fields default to zero" {
+test "zix uds: UdsServer init, timeout fields default to zero" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -207,7 +207,7 @@ test "zix test: UdsServer init, timeout fields default to zero" {
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
 
-test "zix test: echoHandler echoes big-endian frame" {
+test "zix uds: echoHandler echoes big-endian frame" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
 
@@ -244,7 +244,7 @@ test "zix test: echoHandler echoes big-endian frame" {
     try std.testing.expectEqualSlices(u8, "test", reply[4..8]);
 }
 
-test "zix test: UdsServer init, timeout fields stored from config" {
+test "zix uds: UdsServer init, timeout fields stored from config" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -259,7 +259,7 @@ test "zix test: UdsServer init, timeout fields stored from config" {
     try std.testing.expectEqual(@as(u32, 3000), server.config.send_timeout_ms);
 }
 
-test "zix test: applyConnTimeout uds, zero ms is no-op on real socket" {
+test "zix uds: applyConnTimeout uds, zero ms is no-op on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -274,7 +274,7 @@ test "zix test: applyConnTimeout uds, zero ms is no-op on real socket" {
     try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
 }
 
-test "zix test: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
+test "zix uds: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -289,7 +289,7 @@ test "zix test: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
     try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
 }
 
-test "zix test: applyConnTimeout uds, sets SO_SNDTIMEO on real socket" {
+test "zix uds: applyConnTimeout uds, sets SO_SNDTIMEO on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

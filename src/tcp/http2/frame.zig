@@ -324,7 +324,7 @@ pub fn sendResponseEncodedFD(
 
 // --------------------------------------------------------- //
 
-test "zix test: writeAllFD delivers data on a blocking fd" {
+test "zix http2: writeAllFD delivers data on a blocking fd" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -337,7 +337,7 @@ test "zix test: writeAllFD delivers data on a blocking fd" {
     try std.testing.expectEqualStrings("frame", buf[0..n]);
 }
 
-test "zix test: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
+test "zix http2: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -375,19 +375,19 @@ test "zix test: sendResponseFD chunks a body past the max frame size, END_STREAM
     try std.testing.expect((last_data_flags & FLAG_END_STREAM) != 0);
 }
 
-test "zix test: frame constants, FRAME_TYPE_HEADERS is 0x01" {
+test "zix http2: frame constants, FRAME_TYPE_HEADERS is 0x01" {
     try std.testing.expectEqual(@as(u8, 0x01), FRAME_TYPE_HEADERS);
 }
 
-test "zix test: frame constants, FLAG_END_STREAM is 0x01" {
+test "zix http2: frame constants, FLAG_END_STREAM is 0x01" {
     try std.testing.expectEqual(@as(u8, 0x01), FLAG_END_STREAM);
 }
 
-test "zix test: frame constants, ERR_NO_ERROR is 0" {
+test "zix http2: frame constants, ERR_NO_ERROR is 0" {
     try std.testing.expectEqual(@as(u32, 0), ERR_NO_ERROR);
 }
 
-test "zix test: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
+test "zix http2: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -408,12 +408,12 @@ test "zix test: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
     try std.testing.expectEqual(fh.stream_id, got.stream_id);
 }
 
-test "zix test: PREFACE starts with PRI" {
+test "zix http2: PREFACE starts with PRI" {
     try std.testing.expect(std.mem.startsWith(u8, PREFACE, "PRI"));
     try std.testing.expectEqual(@as(usize, 24), PREFACE.len);
 }
 
-test "zix test: sendSettingsFD empty params writes 9-byte SETTINGS frame via pipe" {
+test "zix http2: sendSettingsFD empty params writes 9-byte SETTINGS frame via pipe" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);

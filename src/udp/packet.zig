@@ -91,13 +91,13 @@ const TestPacket = extern struct {
 // Endianness discipline is required for cross-language interoperability (Go, C++, Rust, etc.).
 // All integer and float fields must be swapped. u8 arrays (e.g. id) must not be touched.
 
-test "zix test: toEndian, NATIVE is a no-op" {
+test "zix udp: toEndian, NATIVE is a no-op" {
     const pkt = TestPacket{ .id = "abcd".*, .value = 42, .ratio = 1.5, .coords = .{ 1.0, -2.0 } };
     const result = toEndian(TestPacket, pkt, .NATIVE);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pkt), std.mem.asBytes(&result));
 }
 
-test "zix test: toEndian, u8 array fields are never byte-swapped" {
+test "zix udp: toEndian, u8 array fields are never byte-swapped" {
     const pkt = TestPacket{ .id = "abcd".*, .value = 1, .ratio = 1.0, .coords = .{ 0.0, 0.0 } };
     const result_le = toEndian(TestPacket, pkt, .LITTLE);
     const result_be = toEndian(TestPacket, pkt, .BIG);
@@ -105,21 +105,21 @@ test "zix test: toEndian, u8 array fields are never byte-swapped" {
     try std.testing.expectEqualSlices(u8, &pkt.id, &result_be.id);
 }
 
-test "zix test: toEndian/fromEndian, round-trip is identity for LITTLE" {
+test "zix udp: toEndian/fromEndian, round-trip is identity for LITTLE" {
     const pkt = TestPacket{ .id = "test".*, .value = -12345, .ratio = 3.14, .coords = .{ 1.5, -2.5 } };
     const wire = toEndian(TestPacket, pkt, .LITTLE);
     const back = fromEndian(TestPacket, wire, .LITTLE);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pkt), std.mem.asBytes(&back));
 }
 
-test "zix test: toEndian/fromEndian, round-trip is identity for BIG" {
+test "zix udp: toEndian/fromEndian, round-trip is identity for BIG" {
     const pkt = TestPacket{ .id = "test".*, .value = -12345, .ratio = 3.14, .coords = .{ 1.5, -2.5 } };
     const wire = toEndian(TestPacket, pkt, .BIG);
     const back = fromEndian(TestPacket, wire, .BIG);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pkt), std.mem.asBytes(&back));
 }
 
-test "zix test: toEndian, non-native endian swaps integer fields" {
+test "zix udp: toEndian, non-native endian swaps integer fields" {
     const builtin = @import("builtin");
     const non_native: Endianness = if (builtin.cpu.arch.endian() == .little) .BIG else .LITTLE;
     const pkt = TestPacket{ .id = "abcd".*, .value = 0x01020304, .ratio = 1.0, .coords = .{ 1.0, 0.0 } };
@@ -127,7 +127,7 @@ test "zix test: toEndian, non-native endian swaps integer fields" {
     try std.testing.expectEqual(@byteSwap(pkt.value), result.value);
 }
 
-test "zix test: toEndian, non-native endian swaps float array elements" {
+test "zix udp: toEndian, non-native endian swaps float array elements" {
     const builtin = @import("builtin");
     const non_native: Endianness = if (builtin.cpu.arch.endian() == .little) .BIG else .LITTLE;
     const pkt = TestPacket{ .id = "abcd".*, .value = 1, .ratio = 1.0, .coords = .{ 1.0, 2.0 } };

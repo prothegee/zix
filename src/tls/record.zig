@@ -168,7 +168,7 @@ pub fn deprotect(out: []u8, record: []const u8, key: [key_length]u8, iv: [iv_len
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "record protect/deprotect round trip" {
+test "zix tls: record protect/deprotect round trip" {
     var key: [key_length]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [iv_length]u8 = undefined;
@@ -185,7 +185,7 @@ test "record protect/deprotect round trip" {
     try std.testing.expectEqualSlices(u8, message, opened.data);
 }
 
-test "record protect2 gather equals protect on the concatenation and round-trips" {
+test "zix tls: record protect2 gather equals protect on the concatenation and round-trips" {
     var key: [key_length]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [iv_length]u8 = undefined;
@@ -214,7 +214,7 @@ test "record protect2 gather equals protect on the concatenation and round-trips
     try std.testing.expectEqualSlices(u8, concat[0 .. prefix.len + payload.len], opened.data);
 }
 
-test "record deprotect failures: bad tag, wrong seq, overflow" {
+test "zix tls: record deprotect failures bad tag, wrong seq, overflow" {
     var key: [key_length]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [iv_length]u8 = undefined;

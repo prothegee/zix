@@ -166,7 +166,7 @@ fn readWireRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
 
 const testing = std.testing;
 
-test "rediz test: tls session read and write tunnel app data" {
+test "rediz: tls session read and write tunnel app data" {
     var session = try testing.allocator.create(TlsSession);
     defer testing.allocator.destroy(session);
     session.* = .{
@@ -214,7 +214,7 @@ test "rediz test: tls session read and write tunnel app data" {
     try testing.expectEqual(@as(usize, 0), session.bufferedLen());
 }
 
-test "rediz test: tls serverCertDer views the captured cert" {
+test "rediz: tls serverCertDer views the captured cert" {
     var session = try testing.allocator.create(TlsSession);
     defer testing.allocator.destroy(session);
     session.* = .{

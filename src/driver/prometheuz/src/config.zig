@@ -42,7 +42,7 @@ pub const QueryConfig = struct {
 
 const testing = std.testing;
 
-test "prometheuz test: config defaults" {
+test "prometheuz: config defaults" {
     const scrape = ScrapeConfig{};
     try testing.expectEqualStrings("127.0.0.1", scrape.ip);
     try testing.expectEqual(@as(u16, 9100), scrape.port);

@@ -123,7 +123,7 @@ pub const UdsClient = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: UdsClient.sendMsg writes big-endian length header" {
+test "zix uds: UdsClient.sendMsg writes big-endian length header" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[1]);
@@ -152,7 +152,7 @@ test "zix test: UdsClient.sendMsg writes big-endian length header" {
     try std.testing.expectEqualSlices(u8, "hello", wire[4..9]);
 }
 
-test "zix test: UdsClient.recvMsg parses big-endian length header" {
+test "zix uds: UdsClient.recvMsg parses big-endian length header" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -177,7 +177,7 @@ test "zix test: UdsClient.recvMsg parses big-endian length header" {
     try std.testing.expectEqualSlices(u8, "world", reply);
 }
 
-test "zix test: UdsClient.recvMsg does not time out when data arrives immediately" {
+test "zix uds: UdsClient.recvMsg does not time out when data arrives immediately" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -203,7 +203,7 @@ test "zix test: UdsClient.recvMsg does not time out when data arrives immediatel
     try std.testing.expectEqualSlices(u8, "hello", reply);
 }
 
-test "zix test: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -225,7 +225,7 @@ test "zix test: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives
     try std.testing.expectError(error.RecvTimeout, client.recvMsg(io, &buf));
 }
 
-test "zix test: UdsClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
+test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -250,7 +250,7 @@ test "zix test: UdsClient.sendMsg succeeds within send_timeout_ms when the peer 
     try std.testing.expectEqual(@as(usize, 9), n);
 }
 
-test "zix test: UdsClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+test "zix uds: UdsClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

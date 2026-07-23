@@ -445,7 +445,7 @@ pub fn fromExtension(ext: []const u8) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: tcp http content fn/s" {
+test "zix http: content" {
     try std.testing.expect(true);
 
     const all_types = [_]Type{

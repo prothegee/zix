@@ -189,7 +189,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: transport parameters carry the validated connection ids" {
+test "zix http3: transport parameters carry the validated connection ids" {
     var buf: [256]u8 = undefined;
     const dcid = h("8394c8f03e515708");
     const scid = h("c0ffee00");
@@ -207,7 +207,7 @@ test "zix test: transport parameters carry the validated connection ids" {
     try std.testing.expectEqualSlices(u8, &scid, params[12..16]);
 }
 
-test "zix test: EncryptedExtensions carries ALPN h3 and transport parameters" {
+test "zix http3: EncryptedExtensions carries ALPN h3 and transport parameters" {
     var buf: [512]u8 = undefined;
     const ee = buildEncryptedExtensions(&buf, &h("8394c8f03e515708"), &h("c0ffee00"), 30000, 128);
 

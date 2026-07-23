@@ -73,7 +73,7 @@ pub const ServerError = struct {
 
 const testing = std.testing;
 
-test "rediz test: server error maps known prefixes" {
+test "rediz: server error maps known prefixes" {
     var server_error = ServerError{};
 
     server_error.capture("ERR unknown command 'FOO'");
@@ -92,7 +92,7 @@ test "rediz test: server error maps known prefixes" {
     try testing.expectEqualStrings("3999 127.0.0.1:6381", server_error.message());
 }
 
-test "rediz test: server error keeps unknown prefixes raw" {
+test "rediz: server error keeps unknown prefixes raw" {
     var server_error = ServerError{};
 
     server_error.capture("SOMENEWTHING details here");
@@ -104,7 +104,7 @@ test "rediz test: server error keeps unknown prefixes raw" {
     try testing.expectEqualStrings("nolowercasematch", server_error.message());
 }
 
-test "rediz test: server error truncates an oversized line" {
+test "rediz: server error truncates an oversized line" {
     var server_error = ServerError{};
 
     var long_line: [604]u8 = undefined;

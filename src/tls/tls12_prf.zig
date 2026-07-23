@@ -108,7 +108,7 @@ pub fn finished(master: [48]u8, label: []const u8, transcript: []const u8) [12]u
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls12 prf, 100-byte known-answer vector" {
+test "zix tls: tls12 prf, 100-byte known-answer vector" {
     var secret: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&secret, "9bbe436ba940f017b17652849a71db35");
     var seed: [16]u8 = undefined;
@@ -123,7 +123,7 @@ test "zix test: tls12 prf, 100-byte known-answer vector" {
     try std.testing.expectEqualSlices(u8, &expected, &out);
 }
 
-test "zix test: tls12 prf, schedule shape (master 48, finished 12 deterministic)" {
+test "zix tls: tls12 prf, schedule shape (master 48, finished 12 deterministic)" {
     const pre_master: [32]u8 = @splat(0x5A);
     const cr: [32]u8 = @splat(0xAA);
     const sr: [32]u8 = @splat(0xBB);

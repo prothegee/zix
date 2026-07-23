@@ -273,7 +273,7 @@ fn fixtureDer(buf: []u8) ![]const u8 {
     return std.fmt.hexToBytes(buf, fixture_cert_hex);
 }
 
-test "zix test: cert verify, self-signed chain inside validity window passes" {
+test "zix tls: cert verify, self-signed chain inside validity window passes" {
     var buf: [512]u8 = undefined;
     const der = try fixtureDer(&buf);
 
@@ -281,7 +281,7 @@ test "zix test: cert verify, self-signed chain inside validity window passes" {
     try verifyCertChain(der, der, now_sec); // self-signed: anchor is the leaf itself
 }
 
-test "zix test: cert verify, before notBefore is rejected" {
+test "zix tls: cert verify, before notBefore is rejected" {
     var buf: [512]u8 = undefined;
     const der = try fixtureDer(&buf);
 
@@ -289,7 +289,7 @@ test "zix test: cert verify, before notBefore is rejected" {
     try std.testing.expectError(error.CertificateNotYetValid, verifyCertChain(der, der, too_early));
 }
 
-test "zix test: cert verify, hostname SAN match and mismatch" {
+test "zix tls: cert verify, hostname SAN match and mismatch" {
     var buf: [512]u8 = undefined;
     const der = try fixtureDer(&buf);
 
@@ -297,7 +297,7 @@ test "zix test: cert verify, hostname SAN match and mismatch" {
     try std.testing.expectError(error.CertificateHostMismatch, verifyCertHostname(der, "evil.example"));
 }
 
-test "zix test: cert verify, identity matches DNS or IP SAN (for the 421 gate)" {
+test "zix tls: cert verify, identity matches DNS or IP SAN (for the 421 gate)" {
     var buf: [512]u8 = undefined;
     const der = try fixtureDer(&buf); // SAN DNS:localhost + IP:127.0.0.1
 
@@ -308,7 +308,7 @@ test "zix test: cert verify, identity matches DNS or IP SAN (for the 421 gate)" 
     try std.testing.expectError(error.CertificateHostMismatch, verifyCertIdentity(der, "10.0.0.1"));
 }
 
-test "zix test: cert verify, peer P-256 public key matches the fixture signing key" {
+test "zix tls: cert verify, peer P-256 public key matches the fixture signing key" {
     var buf: [512]u8 = undefined;
     const der = try fixtureDer(&buf);
 
@@ -332,7 +332,7 @@ const chain_leaf_hex = "308201ad30820152a003020102021472dd9fe9aa428ce22acbb7e614
 
 const chain_now_sec: i64 = 1_800_000_000; // ~2027-01, inside the chain validity window
 
-test "zix test: cert verify, pathConstraints reads cA / keyCertSign / pathLen per cert" {
+test "zix tls: cert verify, pathConstraints reads cA / keyCertSign / pathLen per cert" {
     var rb: [512]u8 = undefined;
     var ib: [512]u8 = undefined;
     var lb: [512]u8 = undefined;
@@ -354,7 +354,7 @@ test "zix test: cert verify, pathConstraints reads cA / keyCertSign / pathLen pe
     try std.testing.expect(!lc.unknown_critical);
 }
 
-test "zix test: cert verify, multi-cert chain leaf<-intermediate<-root validates" {
+test "zix tls: cert verify, multi-cert chain leaf<-intermediate<-root validates" {
     var ib: [512]u8 = undefined;
     var lb: [512]u8 = undefined;
     var rb: [512]u8 = undefined;
@@ -367,7 +367,7 @@ test "zix test: cert verify, multi-cert chain leaf<-intermediate<-root validates
     try verifyCertHostname(leaf, "localhost"); // the leaf identity still matches
 }
 
-test "zix test: cert verify, multi-cert chain rejects wrong anchor / expiry / empty" {
+test "zix tls: cert verify, multi-cert chain rejects wrong anchor / expiry / empty" {
     var ib: [512]u8 = undefined;
     var lb: [512]u8 = undefined;
     var rb: [512]u8 = undefined;

@@ -481,18 +481,18 @@ pub fn commandCompleteRows(tag: []const u8) u64 {
 
 const testing = std.testing;
 
-test "postgrez test: parseHeader splits tag and payload length" {
+test "postgrez protocol: parseHeader splits tag and payload length" {
     const header = try parseHeader(.{ 'Z', 0, 0, 0, 5 });
 
     try testing.expectEqual(@as(u8, 'Z'), header.tag);
     try testing.expectEqual(@as(u32, 1), header.payload_len);
 }
 
-test "postgrez test: parseHeader rejects a length below 4" {
+test "postgrez protocol: parseHeader rejects a length below 4" {
     try testing.expectError(error.BadMessage, parseHeader(.{ 'Z', 0, 0, 0, 3 }));
 }
 
-test "postgrez test: auth ok, cleartext, md5 decode" {
+test "postgrez protocol: auth ok, cleartext, md5 decode" {
     const ok = try decode('R', &.{ 0, 0, 0, 0 });
     try testing.expect(ok.auth == .ok);
 
@@ -503,7 +503,7 @@ test "postgrez test: auth ok, cleartext, md5 decode" {
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &md5.auth.md5_password);
 }
 
-test "postgrez test: auth sasl lists mechanisms" {
+test "postgrez protocol: auth sasl lists mechanisms" {
     const payload = [_]u8{ 0, 0, 0, 10 } ++ "SCRAM-SHA-256-PLUS\x00SCRAM-SHA-256\x00\x00".*;
     const msg = try decode('R', &payload);
 
@@ -512,7 +512,7 @@ test "postgrez test: auth sasl lists mechanisms" {
     try testing.expect(!msg.auth.sasl.has("PLAIN"));
 }
 
-test "postgrez test: auth sasl continue and final carry raw data" {
+test "postgrez protocol: auth sasl continue and final carry raw data" {
     const cont = try decode('R', &([_]u8{ 0, 0, 0, 11 } ++ "r=abc".*));
     try testing.expectEqualStrings("r=abc", cont.auth.sasl_continue);
 
@@ -520,27 +520,27 @@ test "postgrez test: auth sasl continue and final carry raw data" {
     try testing.expectEqualStrings("v=xyz", final.auth.sasl_final);
 }
 
-test "postgrez test: auth unknown subtype maps to unsupported" {
+test "postgrez protocol: auth unknown subtype maps to unsupported" {
     const msg = try decode('R', &.{ 0, 0, 0, 7 });
 
     try testing.expectEqual(@as(i32, 7), msg.auth.unsupported);
 }
 
-test "postgrez test: backend_key_data keeps variable-length key" {
+test "postgrez protocol: backend_key_data keeps variable-length key" {
     const msg = try decode('K', &.{ 0, 0, 0, 9, 1, 2, 3, 4, 5, 6 });
 
     try testing.expectEqual(@as(i32, 9), msg.backend_key_data.pid);
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6 }, msg.backend_key_data.key);
 }
 
-test "postgrez test: parameter_status decodes name and value" {
+test "postgrez protocol: parameter_status decodes name and value" {
     const msg = try decode('S', "server_version\x0018.0\x00");
 
     try testing.expectEqualStrings("server_version", msg.parameter_status.name);
     try testing.expectEqualStrings("18.0", msg.parameter_status.value);
 }
 
-test "postgrez test: ready_for_query maps transaction status" {
+test "postgrez protocol: ready_for_query maps transaction status" {
     const idle = try decode('Z', "I");
     try testing.expectEqual(TransactionStatus.IDLE, idle.ready_for_query);
 
@@ -550,7 +550,7 @@ test "postgrez test: ready_for_query maps transaction status" {
     try testing.expectError(error.BadMessage, decode('Z', "X"));
 }
 
-test "postgrez test: error_response fields are reachable by code" {
+test "postgrez protocol: error_response fields are reachable by code" {
     const payload = "SERROR\x00C23505\x00Mduplicate key\x00\x00";
     const msg = try decode('E', payload);
 
@@ -560,7 +560,7 @@ test "postgrez test: error_response fields are reachable by code" {
     try testing.expectEqual(@as(?[]const u8, null), msg.error_response.get('H'));
 }
 
-test "postgrez test: row_description iterates columns" {
+test "postgrez protocol: row_description iterates columns" {
     const payload = [_]u8{ 0, 2 } ++
         "id\x00".* ++ [_]u8{ 0, 0, 0, 1, 0, 1, 0, 0, 0, 20, 0, 8, 0xff, 0xff, 0xff, 0xff, 0, 1 } ++
         "name\x00".* ++ [_]u8{ 0, 0, 0, 1, 0, 2, 0, 0, 0, 25, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0 };
@@ -583,7 +583,7 @@ test "postgrez test: row_description iterates columns" {
     try testing.expectEqual(@as(?Column, null), try it.next());
 }
 
-test "postgrez test: data_row iterates cells including null" {
+test "postgrez protocol: data_row iterates cells including null" {
     const payload = [_]u8{ 0, 3 } ++
         [_]u8{ 0, 0, 0, 2, 'a', 'b' } ++
         [_]u8{ 0xff, 0xff, 0xff, 0xff } ++
@@ -604,7 +604,7 @@ test "postgrez test: data_row iterates cells including null" {
     try testing.expectEqual(@as(??[]const u8, null), try it.next());
 }
 
-test "postgrez test: command_complete and row counts" {
+test "postgrez protocol: command_complete and row counts" {
     const msg = try decode('C', "UPDATE 3\x00");
 
     try testing.expectEqualStrings("UPDATE 3", msg.command_complete);
@@ -613,7 +613,7 @@ test "postgrez test: command_complete and row counts" {
     try testing.expectEqual(@as(u64, 0), commandCompleteRows("BEGIN"));
 }
 
-test "postgrez test: bare acks decode to their variants" {
+test "postgrez protocol: bare acks decode to their variants" {
     try testing.expect((try decode('I', "")) == .empty_query_response);
     try testing.expect((try decode('1', "")) == .parse_complete);
     try testing.expect((try decode('2', "")) == .bind_complete);
@@ -623,7 +623,7 @@ test "postgrez test: bare acks decode to their variants" {
     try testing.expect((try decode('c', "")) == .copy_done);
 }
 
-test "postgrez test: parameter_description lists oids" {
+test "postgrez protocol: parameter_description lists oids" {
     const msg = try decode('t', &.{ 0, 2, 0, 0, 0, 23, 0, 0, 0, 25 });
 
     var it = msg.parameter_description.iterator();
@@ -632,7 +632,7 @@ test "postgrez test: parameter_description lists oids" {
     try testing.expectEqual(@as(?u32, null), try it.next());
 }
 
-test "postgrez test: copy responses decode overall format" {
+test "postgrez protocol: copy responses decode overall format" {
     const copy_in = try decode('G', &.{ 0, 0, 2, 0, 0, 0, 0 });
     try testing.expectEqual(Format.TEXT, copy_in.copy_in_response.overall_format);
     try testing.expectEqual(@as(u16, 2), copy_in.copy_in_response.column_count);
@@ -641,13 +641,13 @@ test "postgrez test: copy responses decode overall format" {
     try testing.expectEqual(Format.BINARY, copy_out.copy_out_response.overall_format);
 }
 
-test "postgrez test: copy_data is the raw chunk" {
+test "postgrez protocol: copy_data is the raw chunk" {
     const msg = try decode('d', "line\n");
 
     try testing.expectEqualStrings("line\n", msg.copy_data);
 }
 
-test "postgrez test: notification decodes pid, channel, payload" {
+test "postgrez protocol: notification decodes pid, channel, payload" {
     const payload = [_]u8{ 0, 0, 0, 42 } ++ "jobs\x00job-42\x00".*;
     const msg = try decode('A', &payload);
 
@@ -656,21 +656,21 @@ test "postgrez test: notification decodes pid, channel, payload" {
     try testing.expectEqualStrings("job-42", msg.notification.payload);
 }
 
-test "postgrez test: negotiate_protocol_version decodes newest code" {
+test "postgrez protocol: negotiate_protocol_version decodes newest code" {
     const msg = try decode('v', &.{ 0, 0x03, 0, 0, 0, 0, 0, 0 });
 
     try testing.expectEqual(@as(i32, frontend.PROTOCOL_V3_0), msg.negotiate_protocol_version.newest_code);
     try testing.expectEqual(@as(i32, 0), msg.negotiate_protocol_version.unsupported_count);
 }
 
-test "postgrez test: unknown tag is preserved" {
+test "postgrez protocol: unknown tag is preserved" {
     const msg = try decode('!', "??");
 
     try testing.expectEqual(@as(u8, '!'), msg.unknown.tag);
     try testing.expectEqualStrings("??", msg.unknown.payload);
 }
 
-test "postgrez test: truncated payloads error instead of overread" {
+test "postgrez protocol: truncated payloads error instead of overread" {
     try testing.expectError(error.Truncated, decode('R', &.{ 0, 0 }));
     try testing.expectError(error.Truncated, decode('S', "no_terminator"));
     try testing.expectError(error.Truncated, decode('A', &.{ 0, 0, 0, 1 }));

@@ -543,7 +543,7 @@ fn fixturePublicKey() !StdRsa.PublicKey {
     return StdRsa.PublicKey.fromBytes(&e_bytes, &n_bytes);
 }
 
-test "zix test: rsa, PKCS#8 parse yields the expected modulus (R3 in-tree)" {
+test "zix tls: rsa, PKCS#8 parse yields the expected modulus (R3 in-tree)" {
     const key = try loadFixtureKey();
 
     var expected_n: [256]u8 = undefined;
@@ -553,7 +553,7 @@ test "zix test: rsa, PKCS#8 parse yields the expected modulus (R3 in-tree)" {
     try std.testing.expectEqualSlices(u8, &expected_n, key.modulus());
 }
 
-test "zix test: rsa, PKCS#1 v1.5 sign is byte-exact with openssl (deterministic)" {
+test "zix tls: rsa, PKCS#1 v1.5 sign is byte-exact with openssl (deterministic)" {
     const key = try loadFixtureKey();
 
     var sig_buf: [max_modulus_len]u8 = undefined;
@@ -565,7 +565,7 @@ test "zix test: rsa, PKCS#1 v1.5 sign is byte-exact with openssl (deterministic)
     try std.testing.expectEqualSlices(u8, &expected_sig, sig);
 }
 
-test "zix test: rsa, PKCS#1 v1.5 signature verifies with std RSA verify" {
+test "zix tls: rsa, PKCS#1 v1.5 signature verifies with std RSA verify" {
     const key = try loadFixtureKey();
     const public_key = try fixturePublicKey();
 
@@ -575,7 +575,7 @@ test "zix test: rsa, PKCS#1 v1.5 signature verifies with std RSA verify" {
     try StdRsa.PKCS1v1_5Signature.verify(256, sig[0..256].*, fixture_message, public_key, Sha256);
 }
 
-test "zix test: rsa, PSS signature verifies with std RSA verify (rsa_pss_rsae_sha256)" {
+test "zix tls: rsa, PSS signature verifies with std RSA verify (rsa_pss_rsae_sha256)" {
     const key = try loadFixtureKey();
     const public_key = try fixturePublicKey();
 
@@ -588,7 +588,7 @@ test "zix test: rsa, PSS signature verifies with std RSA verify (rsa_pss_rsae_sh
     try StdRsa.PSSSignature.verify(256, sig[0..256].*, fixture_message, public_key, Sha256);
 }
 
-test "zix test: rsa, CRT sign equals the plain m^d path (and has_crt is set)" {
+test "zix tls: rsa, CRT sign equals the plain m^d path (and has_crt is set)" {
     const key = try loadFixtureKey();
     try std.testing.expect(key.has_crt);
 
@@ -616,7 +616,7 @@ test "zix test: rsa, CRT sign equals the plain m^d path (and has_crt is set)" {
     try std.testing.expectEqualSlices(u8, plain_v15_sig, crt_v15_sig);
 }
 
-test "zix test: rsa, a tampered message fails std verify" {
+test "zix tls: rsa, a tampered message fails std verify" {
     const key = try loadFixtureKey();
     const public_key = try fixturePublicKey();
 

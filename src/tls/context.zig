@@ -240,11 +240,11 @@ fn contains(comptime T: type, list: []const T, value: T) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls context, default config validates" {
+test "zix tls: context, default config validates" {
     try validate(.{ .cert_path = "c", .key_path = "k" });
 }
 
-test "zix test: tls context, unsupported curve is rejected" {
+test "zix tls: context, unsupported curve is rejected" {
     try std.testing.expectError(error.TlsUnsupportedCurve, validate(.{
         .cert_path = "c",
         .key_path = "k",
@@ -252,7 +252,7 @@ test "zix test: tls context, unsupported curve is rejected" {
     }));
 }
 
-test "zix test: tls context, unsupported cipher is rejected" {
+test "zix tls: context, unsupported cipher is rejected" {
     try std.testing.expectError(error.TlsUnsupportedCipher, validate(.{
         .cert_path = "c",
         .key_path = "k",
@@ -260,12 +260,12 @@ test "zix test: tls context, unsupported cipher is rejected" {
     }));
 }
 
-test "zix test: tls context, empty curves / ciphers rejected" {
+test "zix tls: context, empty curves / ciphers rejected" {
     try std.testing.expectError(error.TlsNoCurves, validate(.{ .cert_path = "c", .key_path = "k", .curves = &.{} }));
     try std.testing.expectError(error.TlsNoCiphers, validate(.{ .cert_path = "c", .key_path = "k", .ciphers = &.{} }));
 }
 
-test "zix test: tls context, inverted version range rejected" {
+test "zix tls: context, inverted version range rejected" {
     try std.testing.expectError(error.TlsInvalidVersionRange, validate(.{
         .cert_path = "c",
         .key_path = "k",
@@ -274,7 +274,7 @@ test "zix test: tls context, inverted version range rejected" {
     }));
 }
 
-test "zix test: tls context, version requires its suite present" {
+test "zix tls: context, version requires its suite present" {
     // 1.3-only policy missing the 1.3 suite.
     try std.testing.expectError(error.TlsMissingCipherForVersion, validate(.{
         .cert_path = "c",
@@ -292,7 +292,7 @@ test "zix test: tls context, version requires its suite present" {
     }));
 }
 
-test "zix test: tls context, single-version policies validate" {
+test "zix tls: context, single-version policies validate" {
     // 1.3 only.
     try validate(.{
         .cert_path = "c",
@@ -314,7 +314,7 @@ test "zix test: tls context, single-version policies validate" {
     });
 }
 
-test "zix test: tls context, version range gates the serve path" {
+test "zix tls: context, version range gates the serve path" {
     // A Context built directly (no I/O) to test the pure allowsTls12 / allowsTls13 helpers that the
     // serve path uses to force the 1.2 path (ceiling 1.2) or refuse a 1.2 client (floor 1.3).
     const base = Context{

@@ -728,7 +728,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: mux sendResponseStreamFD paces a large body by the send window" {
+test "zix http2: mux sendResponseStreamFD paces a large body by the send window" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -820,7 +820,7 @@ fn feedFrame(conn: *MuxConn, ftype: u8, flags: u8, sid: u31, payload: []const u8
     conn.rend += payload.len;
 }
 
-test "zix test: mux parks a body then resumes it across WINDOW_UPDATE in the frame loop" {
+test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the frame loop" {
     @memset(&fc_test_body, 'q');
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -874,7 +874,7 @@ fn aeCheckHandler(_: []const u8, headers: []const hpack.Header, _: []const u8, f
 
 const ae_routes = [_]Route{.{ .path = "/static/x", .handler = aeCheckHandler }};
 
-test "zix test: mux passes the accept-encoding request header to the handler" {
+test "zix http2: mux passes the accept-encoding request header to the handler" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -897,7 +897,7 @@ test "zix test: mux passes the accept-encoding request header to the handler" {
     try std.testing.expectEqualStrings("br;q=1, gzip;q=0.8", ae_seen_buf[0..ae_seen_len]);
 }
 
-test "zix test: mux pooled stream is reused and reset clean on release" {
+test "zix http2: mux pooled stream is reused and reset clean on release" {
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
 
     // a fresh borrow carries buffers sized to at least the serve options
@@ -928,7 +928,7 @@ test "zix test: mux pooled stream is reused and reset clean on release" {
     releaseStream(again);
 }
 
-test "zix test: mux DATA past max_body sheds the stream with 413 instead of truncating" {
+test "zix http2: mux DATA past max_body sheds the stream with 413 instead of truncating" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -1023,7 +1023,7 @@ fn exactBodyHandler(_: []const u8, _: []const hpack.Header, body: []const u8, fd
 
 const exact_body_routes = [_]Route{.{ .path = "/", .handler = exactBodyHandler }};
 
-test "zix test: mux DATA exactly filling max_body still dispatches the full body" {
+test "zix http2: mux DATA exactly filling max_body still dispatches the full body" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -1056,7 +1056,7 @@ test "zix test: mux DATA exactly filling max_body still dispatches the full body
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
 }
 
-test "zix test: mux HEADERS past max_streams is refused, the open stream keeps its slot" {
+test "zix http2: mux HEADERS past max_streams is refused, the open stream keeps its slot" {
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -1111,7 +1111,7 @@ test "zix test: mux HEADERS past max_streams is refused, the open stream keeps i
     try std.testing.expect(saw_refused);
 }
 
-test "zix test: mux RST_STREAM reaps a slot parked on pending_body" {
+test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
     @memset(&fc_test_body, 'r');
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -1144,7 +1144,7 @@ test "zix test: mux RST_STREAM reaps a slot parked on pending_body" {
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
 }
 
-test "zix test: mux stream slots are pooled across connections" {
+test "zix http2: mux stream slots are pooled across connections" {
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -1219,7 +1219,7 @@ fn drainDataTally(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, buf: []u8) 
     return tally;
 }
 
-test "zix test: mux resumes every parked stream sharing one connection window" {
+test "zix http2: mux resumes every parked stream sharing one connection window" {
     @memset(&multi_body, 'm');
 
     // A socketpair's default buffer holds the whole reply set without blocking the writer, so a single
@@ -1284,7 +1284,7 @@ test "zix test: mux resumes every parked stream sharing one connection window" {
     try std.testing.expectEqual(@as(usize, 4), tally.end_streams);
 }
 
-test "zix test: mux parks on an exhausted stream window until a stream WINDOW_UPDATE arrives" {
+test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_UPDATE arrives" {
     @memset(&multi_body, 'm');
 
     var pair: [2]i32 = undefined;
@@ -1342,7 +1342,7 @@ fn mfsHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.pos
 
 const mfs_routes = [_]Route{.{ .path = "/", .handler = mfsHandler }};
 
-test "zix test: outbound DATA frames respect the peer default max frame size, not the server's" {
+test "zix http2: outbound DATA frames respect the peer default max frame size, not the server's" {
     @memset(&mfs_body, 'f');
 
     var pair: [2]i32 = undefined;

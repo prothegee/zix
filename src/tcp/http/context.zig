@@ -61,12 +61,12 @@ pub const Context = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Context.timedOut null deadline always false" {
+test "zix http: Context.timedOut null deadline always false" {
     const ctx = Context{ .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(!ctx.timedOut());
 }
 
-test "zix test: Context.isExpired null deadline always false" {
+test "zix http: Context.isExpired null deadline always false" {
     const ctx = Context{ .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(!ctx.isExpired());
 }

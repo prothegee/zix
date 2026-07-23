@@ -74,7 +74,7 @@ pub const Builder = struct {
 
 const testing = std.testing;
 
-test "prometheuz test: protobuf varint matches the spec example (150)" {
+test "prometheuz: protobuf varint matches the spec example (150)" {
     var builder: Builder = .{};
     defer builder.deinit(testing.allocator);
 
@@ -87,7 +87,7 @@ test "prometheuz test: protobuf varint matches the spec example (150)" {
     try testing.expectEqualSlices(u8, &.{ 0x08, 0x96, 0x01 }, bytes);
 }
 
-test "prometheuz test: protobuf string field encodes tag length and bytes" {
+test "prometheuz: protobuf string field encodes tag length and bytes" {
     var builder: Builder = .{};
     defer builder.deinit(testing.allocator);
 
@@ -100,7 +100,7 @@ test "prometheuz test: protobuf string field encodes tag length and bytes" {
     try testing.expectEqualSlices(u8, "\x0a\x07testing", bytes);
 }
 
-test "prometheuz test: protobuf double field is little-endian fixed64" {
+test "prometheuz: protobuf double field is little-endian fixed64" {
     var builder: Builder = .{};
     defer builder.deinit(testing.allocator);
 
@@ -115,7 +115,7 @@ test "prometheuz test: protobuf double field is little-endian fixed64" {
     try testing.expectEqual(@as(f64, 1.0), @as(f64, @bitCast(decoded)));
 }
 
-test "prometheuz test: protobuf embedded message nests raw bytes" {
+test "prometheuz: protobuf embedded message nests raw bytes" {
     var inner: Builder = .{};
     try inner.writeString(testing.allocator, 1, "x");
     const inner_bytes = try inner.toOwnedSlice(testing.allocator);
@@ -132,7 +132,7 @@ test "prometheuz test: protobuf embedded message nests raw bytes" {
     try testing.expectEqualSlices(u8, "\x0a\x03\x0a\x01x", bytes);
 }
 
-test "prometheuz test: protobuf varint over 127 needs a continuation byte" {
+test "prometheuz: protobuf varint over 127 needs a continuation byte" {
     var builder: Builder = .{};
     defer builder.deinit(testing.allocator);
 

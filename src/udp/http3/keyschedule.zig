@@ -87,7 +87,7 @@ pub fn applicationKeys(handshake_secret: crypto.Secret, transcript_through_finis
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: handshakeKeys is deterministic and direction-split" {
+test "zix http3: handshakeKeys is deterministic and direction-split" {
     const shared: [32]u8 = @splat(0x2b);
     const transcript: crypto.Secret = @splat(0x39);
 

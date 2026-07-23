@@ -116,7 +116,7 @@ pub fn Channel(comptime T: type) type {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Channel, basic send and recv" {
+test "zix channel: Channel, basic send and recv" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -128,7 +128,7 @@ test "zix test: Channel, basic send and recv" {
     try std.testing.expectEqual(@as(usize, 0), ch.count);
 }
 
-test "zix test: Channel, ring buffer wraps correctly" {
+test "zix channel: Channel, ring buffer wraps correctly" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 

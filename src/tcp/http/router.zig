@@ -178,7 +178,7 @@ fn matchParam(pattern: []const u8, path: []const u8, req: *Request) !bool {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http router matchParam" {
+test "zix http: router matchParam" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -211,7 +211,7 @@ fn mockHandler(req: *Request, res: *Response, ctx: *Context) !void {
     _ = ctx;
 }
 
-test "zix test: http router comptime" {
+test "zix http: router comptime" {
     const TestRouter = Router(&[_]Route{
         .{ .path = "/about", .handler = mockHandler },
         .{ .path = "/api", .handler = mockHandler, .kind = .PREFIX },

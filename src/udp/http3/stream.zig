@@ -176,7 +176,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 2.1 stream id classification" {
+test "zix http3: RFC 9000 2.1 stream id classification" {
     try std.testing.expectEqual(StreamType.client_bidi, streamType(0));
     try std.testing.expectEqual(StreamType.server_bidi, streamType(1));
     try std.testing.expectEqual(StreamType.client_uni, streamType(2));
@@ -188,7 +188,7 @@ test "zix test: RFC 9000 2.1 stream id classification" {
     try std.testing.expect(unidirectional(2) and !unidirectional(0));
 }
 
-test "zix test: RFC 9000 3.1 sending stream states" {
+test "zix http3: RFC 9000 3.1 sending stream states" {
     try std.testing.expectEqual(SendState.send, sendTransition(.ready, .send_stream).?);
     try std.testing.expectEqual(SendState.data_sent, sendTransition(.send, .send_fin).?);
     try std.testing.expectEqual(SendState.data_recvd, sendTransition(.data_sent, .recv_all_acks).?);
@@ -198,7 +198,7 @@ test "zix test: RFC 9000 3.1 sending stream states" {
     try std.testing.expect(sendTransition(.ready, .recv_all_acks) == null);
 }
 
-test "zix test: RFC 9000 3.2 receiving stream states" {
+test "zix http3: RFC 9000 3.2 receiving stream states" {
     try std.testing.expectEqual(RecvState.size_known, recvTransition(.recv, .recv_fin).?);
     try std.testing.expectEqual(RecvState.data_recvd, recvTransition(.size_known, .recv_all_data).?);
     try std.testing.expectEqual(RecvState.data_read, recvTransition(.data_recvd, .app_read_all).?);
@@ -208,7 +208,7 @@ test "zix test: RFC 9000 3.2 receiving stream states" {
     try std.testing.expect(recvTransition(.size_known, .app_read_all) == null);
 }
 
-test "zix test: RFC 9000 19.15 / 5.1.1 NEW_CONNECTION_ID validation and limit" {
+test "zix http3: RFC 9000 19.15 / 5.1.1 NEW_CONNECTION_ID validation and limit" {
     const nci_ok = try parseNewConnectionId(&h("010008" ++ "f067a5502a4262b5" ++ "0102030405060708090a0b0c0d0e0f10"));
     try std.testing.expect(nci_ok.seq == 1 and nci_ok.length == 8);
 

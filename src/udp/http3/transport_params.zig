@@ -153,7 +153,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: parse extracts initial_max_data and initial_max_stream_data_bidi_local" {
+test "zix http3: parse extracts initial_max_data and initial_max_stream_data_bidi_local" {
     // Three params: 0x04 = 1048576 (varint c0..00100000), 0x05 = 262144 (varint 80040000),
     // 0x08 = 100 (varint 4064, skipped). Each entry is id, length, value.
     const body = h("04" ++ "04" ++ "80100000" ++ "05" ++ "04" ++ "80040000" ++ "08" ++ "02" ++ "4064");
@@ -163,7 +163,7 @@ test "zix test: parse extracts initial_max_data and initial_max_stream_data_bidi
     try std.testing.expectEqual(@as(u64, 262144), params.initial_max_stream_data_bidi_local);
 }
 
-test "zix test: parse defaults absent parameters to zero" {
+test "zix http3: parse defaults absent parameters to zero" {
     // Only initial_max_data present, the per-stream limit defaults to 0.
     const body = h("04" ++ "04" ++ "80100000");
     const params = parse(&body);
@@ -175,7 +175,7 @@ test "zix test: parse defaults absent parameters to zero" {
     try std.testing.expectEqual(default_max_udp_payload_size, params.max_udp_payload_size);
 }
 
-test "zix test: parse extracts max_udp_payload_size and clamps below the 1200 floor" {
+test "zix http3: parse extracts max_udp_payload_size and clamps below the 1200 floor" {
     // 0x03 = 8192 (varint 80002000), so the server may send up to 8 KiB datagrams to this client.
     const body = h("03" ++ "04" ++ "80002000");
     try std.testing.expectEqual(@as(u64, 8192), parse(&body).max_udp_payload_size);
@@ -185,7 +185,7 @@ test "zix test: parse extracts max_udp_payload_size and clamps below the 1200 fl
     try std.testing.expectEqual(min_udp_payload_size, parse(&tiny).max_udp_payload_size);
 }
 
-test "zix test: parse extracts ack_delay_exponent, clamped to the RFC 9000 18.2 valid range" {
+test "zix http3: parse extracts ack_delay_exponent, clamped to the RFC 9000 18.2 valid range" {
     const body = h("0a" ++ "01" ++ "06");
     try std.testing.expectEqual(@as(u6, 6), parse(&body).ack_delay_exponent);
 
@@ -200,7 +200,7 @@ test "zix test: parse extracts ack_delay_exponent, clamped to the RFC 9000 18.2 
 // A 32-byte all-zero random, as the 64 hex chars the ClientHello test fixtures embed.
 const zero_random = "0000000000000000000000000000000000000000000000000000000000000000";
 
-test "zix test: fromClientHello returns null without the extension" {
+test "zix http3: fromClientHello returns null without the extension" {
     // A ClientHello with no extensions at all: handshake header + version + random + empty session id
     // + one cipher suite + null compression + empty extension list.
     const client_hello = h("01" ++ "00002d" ++ "0303" ++ zero_random ++ "00" ++ "0002" ++ "1301" ++ "01" ++ "00" ++ "0000");
@@ -208,7 +208,7 @@ test "zix test: fromClientHello returns null without the extension" {
     try std.testing.expect(fromClientHello(&client_hello) == null);
 }
 
-test "zix test: fromClientHello finds and parses the transport parameters extension" {
+test "zix http3: fromClientHello finds and parses the transport parameters extension" {
     // Same ClientHello shape, now with one extension: type 0x0039, length 6, body = {0x04, len 4,
     // value 1048576}.
     const ext_body = "04" ++ "04" ++ "80100000";

@@ -181,7 +181,7 @@ pub const CongestionController = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: RFC 9002 5 RTT estimation" {
+test "zix http3: RFC 9002 5 RTT estimation" {
     var rtt = RttEstimator{};
     rtt.onSample(100_000, 0, 25_000, true);
     try std.testing.expectEqual(@as(u64, 100_000), rtt.smoothed_rtt);
@@ -204,7 +204,7 @@ test "zix test: RFC 9002 5 RTT estimation" {
     try std.testing.expectEqual(@as(u64, (7 * 100_000 + 180_000) / 8), rtt3.smoothed_rtt);
 }
 
-test "zix test: RFC 9002 6.1 packet and time thresholds" {
+test "zix http3: RFC 9002 6.1 packet and time thresholds" {
     try std.testing.expectEqual(@as(u64, 3), packet_threshold);
     try std.testing.expect(packetLost(7, 10, 0, 100_000, 100_000));
     try std.testing.expect(!packetLost(8, 10, 0, 100_000, 100_000));
@@ -217,7 +217,7 @@ test "zix test: RFC 9002 6.1 packet and time thresholds" {
     try std.testing.expectEqual(@as(u64, 1000), lossTimeThreshold(100, 200));
 }
 
-test "zix test: RFC 9002 6.2.1 Probe Timeout" {
+test "zix http3: RFC 9002 6.2.1 Probe Timeout" {
     try std.testing.expectEqual(@as(u64, 283_748), computePto(100_000, 39_687, 25_000));
     try std.testing.expectEqual(@as(u64, 258_748), computePto(100_000, 39_687, 0));
     try std.testing.expectEqual(@as(u64, 50_000 + 1000), computePto(50_000, 100, 0));
@@ -228,7 +228,7 @@ test "zix test: RFC 9002 6.2.1 Probe Timeout" {
     try std.testing.expectEqual(@as(u64, 1_134_992), ptoWithBackoff(base, 2));
 }
 
-test "zix test: RFC 9002 7 NewReno congestion control" {
+test "zix http3: RFC 9002 7 NewReno congestion control" {
     try std.testing.expectEqual(@as(u64, 12_000), initialWindow(1200));
     try std.testing.expectEqual(@as(u64, 14_720), initialWindow(1472));
     try std.testing.expectEqual(@as(u64, 2400), minimumWindow(1200));
@@ -255,7 +255,7 @@ test "zix test: RFC 9002 7 NewReno congestion control" {
     try std.testing.expectEqual(@as(u64, 333_000), initial_rtt_us);
 }
 
-test "zix test: a configured initial window starts above the RFC ceiling and floors at the minimum" {
+test "zix http3: a configured initial window starts above the RFC ceiling and floors at the minimum" {
     // A benchmark-tuned window (64 packets * 1200 = 76,800 bytes) starts well above the RFC 14,720-byte
     // ceiling, so a large static response streams in one flight instead of ramping over several rounds.
     const wide = CongestionController.init(1200, 64 * 1200);
@@ -271,7 +271,7 @@ test "zix test: a configured initial window starts above the RFC ceiling and flo
     try std.testing.expectEqual(minimumWindow(1200), tiny.congestion_window);
 }
 
-test "zix test: nowUs is monotonic and moves in microseconds, not stuck at zero" {
+test "zix http3: nowUs is monotonic and moves in microseconds, not stuck at zero" {
     const first = nowUs();
     const second = nowUs();
 

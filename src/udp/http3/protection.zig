@@ -341,7 +341,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: open the RFC 9001 A.2 protected client Initial" {
+test "zix http3: open the RFC 9001 A.2 protected client Initial" {
     // Build the byte-exact A.2 protected packet via the seal path, then open it back.
     const dcid = h("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
@@ -388,7 +388,7 @@ test "zix test: open the RFC 9001 A.2 protected client Initial" {
     try std.testing.expectEqualSlices(u8, &crypto_frame, opened.payload[0..crypto_frame.len]);
 }
 
-test "zix test: sealInitial then openInitial round-trips the payload" {
+test "zix http3: sealInitial then openInitial round-trips the payload" {
     const dcid = h("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
     const server_keys = crypto.AesKeys.fromSecret(secrets.server);
@@ -410,7 +410,7 @@ test "zix test: sealInitial then openInitial round-trips the payload" {
     try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
 }
 
-test "zix test: sealHandshake then openHandshake round-trips the payload" {
+test "zix http3: sealHandshake then openHandshake round-trips the payload" {
     const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
 
@@ -429,7 +429,7 @@ test "zix test: sealHandshake then openHandshake round-trips the payload" {
     try std.testing.expectEqualSlices(u8, &payload, opened.payload[0..payload.len]);
 }
 
-test "zix test: sealShort then openShort round-trips the payload" {
+test "zix http3: sealShort then openShort round-trips the payload" {
     const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
     const dcid = h("c0ffee0011223344");
@@ -480,7 +480,7 @@ fn sealShortTruncated1(out: []u8, keys: crypto.AesKeys, dcid: []const u8, full_p
     return out[0..packet_len];
 }
 
-test "zix test: openShort reconstructs a truncated packet number past 256 (the ~256-packet stall)" {
+test "zix http3: openShort reconstructs a truncated packet number past 256 (the ~256-packet stall)" {
     const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
     const dcid = h("c0ffee0011223344");
@@ -507,7 +507,7 @@ test "zix test: openShort reconstructs a truncated packet number past 256 (the ~
     try std.testing.expectError(error.Decrypt, openShort(sealed, keys, dcid.len, null, &recovered2));
 }
 
-test "zix test: openInitial rejects a tampered packet" {
+test "zix http3: openInitial rejects a tampered packet" {
     const dcid = h("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
     const client_keys = crypto.AesKeys.fromSecret(secrets.client);

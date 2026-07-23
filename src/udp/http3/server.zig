@@ -122,7 +122,7 @@ pub const Server = struct {
 
 fn noopHandler(_: *const Request, _: *Response) void {}
 
-test "zix test: Http3 run rejects port zero and missing TLS" {
+test "zix http3: run rejects port zero and missing TLS" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

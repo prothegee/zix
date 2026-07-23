@@ -69,7 +69,7 @@ pub fn parseUrl(url: []const u8) !lib.Config {
 
 const testing = std.testing;
 
-test "rediz test: url minimal host only" {
+test "rediz: url minimal host only" {
     const config = try parseUrl("redis://localhost");
 
     try testing.expectEqualStrings("localhost", config.ip);
@@ -80,7 +80,7 @@ test "rediz test: url minimal host only" {
     try testing.expectEqual(lib.TlsMode.OFF, config.tls);
 }
 
-test "rediz test: url full form with credentials port and db" {
+test "rediz: url full form with credentials port and db" {
     const config = try parseUrl("redis://app:secret@127.0.0.1:6390/2");
 
     try testing.expectEqualStrings("127.0.0.1", config.ip);
@@ -90,27 +90,27 @@ test "rediz test: url full form with credentials port and db" {
     try testing.expectEqual(@as(u32, 2), config.database);
 }
 
-test "rediz test: url password only userinfo" {
+test "rediz: url password only userinfo" {
     const config = try parseUrl("redis://secret@localhost:6379");
 
     try testing.expectEqualStrings("", config.user);
     try testing.expectEqualStrings("secret", config.password);
 }
 
-test "rediz test: url rediss scheme requires tls" {
+test "rediz: url rediss scheme requires tls" {
     const config = try parseUrl("rediss://localhost:6390");
 
     try testing.expectEqual(lib.TlsMode.REQUIRE, config.tls);
     try testing.expectEqual(@as(u16, 6390), config.port);
 }
 
-test "rediz test: url trailing slash keeps db 0" {
+test "rediz: url trailing slash keeps db 0" {
     const config = try parseUrl("redis://localhost:6379/");
 
     try testing.expectEqual(@as(u32, 0), config.database);
 }
 
-test "rediz test: url rejects malformed input" {
+test "rediz: url rejects malformed input" {
     try testing.expectError(error.UnsupportedScheme, parseUrl("http://localhost"));
     try testing.expectError(error.UnsupportedScheme, parseUrl("localhost:6379"));
     try testing.expectError(error.InvalidUrl, parseUrl("redis://"));

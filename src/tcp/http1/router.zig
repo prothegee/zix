@@ -235,7 +235,7 @@ fn matchParam(pattern: []const u8, path: []const u8) bool {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: http1 router matchParam" {
+test "zix http1: router matchParam" {
     try std.testing.expect(matchParam("/users/:id", "/users/alice"));
     try std.testing.expectEqualStrings("id", tl_params[0].name);
     try std.testing.expectEqualStrings("alice", tl_params[0].value);
@@ -255,7 +255,7 @@ fn mockHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void {
     _ = ctx;
 }
 
-test "zix test: http1 router comptime" {
+test "zix http1: router comptime" {
     const TestRouter = Router(&[_]Route{
         .{ .path = "/about", .handler = mockHandler },
         .{ .path = "/api", .handler = mockHandler, .kind = .PREFIX },

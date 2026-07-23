@@ -605,7 +605,7 @@ pub fn alertRecordForError(buf: *[alert.fatal_record_len]u8, err: anyerror) ?[]c
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: connection, server flight from RFC 8448 ClientHello" {
+test "zix tls: connection, server flight from RFC 8448 ClientHello" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 
@@ -669,7 +669,7 @@ test "zix test: connection, server flight from RFC 8448 ClientHello" {
     try std.testing.expectEqual(@as(usize, 0), fr.remaining());
 }
 
-test "zix test: connection, secp256r1 ECDHE shared secret is symmetric" {
+test "zix tls: connection, secp256r1 ECDHE shared secret is symmetric" {
     var a_seed: [32]u8 = undefined;
     var b_seed: [32]u8 = undefined;
     @memset(&a_seed, 0x11);
@@ -685,7 +685,7 @@ test "zix test: connection, secp256r1 ECDHE shared secret is symmetric" {
     try std.testing.expectEqualSlices(u8, &kex_a.shared, &kex_b.shared);
 }
 
-test "zix test: connection, serverHandshake negotiates secp256r1 from a P-256-only ClientHello" {
+test "zix tls: connection, serverHandshake negotiates secp256r1 from a P-256-only ClientHello" {
     // a valid client secp256r1 key_share (a real point on the curve).
     var client_seed: [32]u8 = undefined;
     @memset(&client_seed, 0x33);
@@ -788,7 +788,7 @@ test "zix test: connection, serverHandshake negotiates secp256r1 from a P-256-on
     try std.testing.expect(found_key_share);
 }
 
-test "zix test: connection, condition -> fatal-alert matrix" {
+test "zix tls: connection, condition -> fatal-alert matrix" {
     try std.testing.expectEqual(alert.Alert.NO_APPLICATION_PROTOCOL, alertForError(error.NoApplicationProtocol).?);
     try std.testing.expectEqual(alert.Alert.MISSING_EXTENSION, alertForError(error.MissingExtension).?);
     try std.testing.expectEqual(alert.Alert.PROTOCOL_VERSION, alertForError(error.UnsupportedTlsVersion).?);
@@ -808,7 +808,7 @@ test "zix test: connection, condition -> fatal-alert matrix" {
 // scalar the other tls tests use (here it plays both the server cert and the client cert).
 const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914f4a810c1ece713402574300a06082a8648ce3d040302302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f63301e170d3236303632323132353432305a170d3336303631393132353432305a302a3112301006035504030c096c6f63616c686f737431143012060355040a0c0b7a69782d746c732d706f633059301306072a8648ce3d020106082a8648ce3d03010703420004c2a0121b298ac9cd389200e78d94e7bde1cc7cd8074795fab4f919799d40fdc231c5a90990ac8c6166ae472f33f74fced097f2edb7b8a1974be66a4ab07f253ba37f307d301d0603551d0e04160414c34e1d0a36a43947709b539e16dd0213aa4196aa301f0603551d23041830168014c34e1d0a36a43947709b539e16dd0213aa4196aa300f0603551d130101ff040530030101ff301a0603551d110413301182096c6f63616c686f737487047f000001300e0603551d0f0101ff040403020780300a06082a8648ce3d040302034700304402200b012f119db9b95d990bc482cb63e8f81e337a08634904e4caf513dc10c8aa8302202fdfe79ff6d5403e753ddf2aa52671923b8a2c28126bcbf196bd6fb7ecbcb14e";
 
-test "zix test: connection, mTLS server requests + verifies a client certificate (RFC 8446 4.3.2)" {
+test "zix tls: connection, mTLS server requests + verifies a client certificate (RFC 8446 4.3.2)" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 
@@ -881,7 +881,7 @@ test "zix test: connection, mTLS server requests + verifies a client certificate
     try result.connection.verifyClientFinished(fin_rec);
 }
 
-test "zix test: connection, mTLS rejects a tampered client CertificateVerify" {
+test "zix tls: connection, mTLS rejects a tampered client CertificateVerify" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 
@@ -937,7 +937,7 @@ test "zix test: connection, mTLS rejects a tampered client CertificateVerify" {
     try std.testing.expectError(error.SignatureVerificationFailed, result.connection.verifyClientCertFlight(cert_rec, cv_rec, &got_der_buf));
 }
 
-test "zix test: connection, mTLS verifies a coalesced client auth flight (one record)" {
+test "zix tls: connection, mTLS verifies a coalesced client auth flight (one record)" {
     var client_hello: [196]u8 = undefined;
     _ = try std.fmt.hexToBytes(&client_hello, "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001");
 
@@ -1002,7 +1002,7 @@ test "zix test: connection, mTLS verifies a coalesced client auth flight (one re
     try cert_verify.verifyCertChain(got_der, got_der, 1_800_000_000);
 }
 
-test "zix test: connection, readAppData classifies post-handshake inner types (RFC 8446 5.1)" {
+test "zix tls: connection, readAppData classifies post-handshake inner types (RFC 8446 5.1)" {
     // Only the application-key fields matter here, set them to a known key and leave the rest undefined.
     var conn: Connection = undefined;
     conn.client_app_key = @splat(0xAB);
@@ -1029,7 +1029,7 @@ test "zix test: connection, readAppData classifies post-handshake inner types (R
     try std.testing.expectError(error.PeerClosed, conn.readAppData(alert_rec, &out));
 }
 
-test "zix test: connection, writeAppData2 gather round-trips through readAppData" {
+test "zix tls: connection, writeAppData2 gather round-trips through readAppData" {
     // Server encrypts a gathered (prefix, payload); a peer with the same app key decrypts prefix||payload.
     var server: Connection = undefined;
     server.server_app_key = @splat(0x24);
@@ -1056,7 +1056,7 @@ test "zix test: connection, writeAppData2 gather round-trips through readAppData
     try std.testing.expectEqualSlices(u8, expect[0 .. prefix.len + payload.len], try client.readAppData(rec, &out));
 }
 
-test "zix test: connection, encryptedAlert emits a fatal alert decryptable as an ALERT record" {
+test "zix tls: connection, encryptedAlert emits a fatal alert decryptable as an ALERT record" {
     var conn: Connection = undefined;
     conn.server_app_key = @splat(0x11);
     conn.server_app_iv = @splat(0x22);
@@ -1130,7 +1130,7 @@ fn buildHrrClientHello(buf: []u8, x25519_share: ?[]const u8, secp_share: ?[]cons
     return w.slice();
 }
 
-test "zix test: connection, HelloRetryRequest round trip (RFC 8446 4.1.4)" {
+test "zix tls: connection, HelloRetryRequest round trip (RFC 8446 4.1.4)" {
     var scalar: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&scalar, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
     const key_pair = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(scalar));

@@ -157,7 +157,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 A.2 / A.3 packet number encode length and decode" {
+test "zix http3: RFC 9000 A.2 / A.3 packet number encode length and decode" {
     try std.testing.expectEqual(@as(usize, 2), packetNumberLength(0xac5c02, 0xabe8b3));
     try std.testing.expectEqual(@as(usize, 3), packetNumberLength(0xace8fe, 0xabe8b3));
 
@@ -175,7 +175,7 @@ test "zix test: RFC 9000 A.2 / A.3 packet number encode length and decode" {
     try std.testing.expectEqual(@as(u64, 301), decodePacketNumber(300, 0x2d, 8));
 }
 
-test "zix test: RFC 9000 17.2 long header parse and invariants" {
+test "zix http3: RFC 9000 17.2 long header parse and invariants" {
     const long = h("c300000001088394c8f03e515708041122334400");
     const header = try parseLongHeader(&long);
     try std.testing.expectEqual(@as(u2, 0), header.packet_type);
@@ -188,7 +188,7 @@ test "zix test: RFC 9000 17.2 long header parse and invariants" {
     try std.testing.expectError(error.ConnectionIdTooLong, parseLongHeader(&h("c30000000115")));
 }
 
-test "zix test: RFC 9000 17.3 short header parse and invariants" {
+test "zix http3: RFC 9000 17.3 short header parse and invariants" {
     const short = h("43cafebabe11223344aabbcc");
     const sh = try parseShortHeader(&short, 8);
     try std.testing.expect(!sh.spin_bit);

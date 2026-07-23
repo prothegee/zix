@@ -168,7 +168,7 @@ pub fn deprotect(out: []u8, record: []const u8, key: [KEY_LENGTH]u8, iv: [IV_LEN
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "record protect/deprotect round trip" {
+test "rediz tls: record protect/deprotect round trip" {
     var key: [KEY_LENGTH]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [IV_LENGTH]u8 = undefined;
@@ -185,7 +185,7 @@ test "record protect/deprotect round trip" {
     try std.testing.expectEqualSlices(u8, message, opened.data);
 }
 
-test "record protect2 gather equals protect on the concatenation and round-trips" {
+test "rediz tls: record protect2 gather equals protect on the concatenation and round-trips" {
     var key: [KEY_LENGTH]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [IV_LENGTH]u8 = undefined;
@@ -214,7 +214,7 @@ test "record protect2 gather equals protect on the concatenation and round-trips
     try std.testing.expectEqualSlices(u8, concat[0 .. prefix.len + payload.len], opened.data);
 }
 
-test "record deprotect failures: bad tag, wrong seq, overflow" {
+test "rediz tls: record deprotect failures: bad tag, wrong seq, overflow" {
     var key: [KEY_LENGTH]u8 = undefined;
     _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
     var iv: [IV_LENGTH]u8 = undefined;

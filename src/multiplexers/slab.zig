@@ -105,7 +105,7 @@ pub fn pretouch(buf: []u8) void {
     while (pos < buf.len) : (pos += std.heap.page_size_min) buf[pos] = 0;
 }
 
-test "slab: mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
+test "zix multiplexers: slab mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     // Pointer slots come back all null (zero bits).
@@ -125,7 +125,7 @@ test "slab: mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
     try std.testing.expectEqual(@as(u8, 0), mem[page]);
 }
 
-test "slab: pretouch keeps a fresh mapping zeroed and leaves data intact" {
+test "zix multiplexers: slab pretouch keeps a fresh mapping zeroed and leaves data intact" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     const page = std.heap.page_size_min;
@@ -143,7 +143,7 @@ test "slab: pretouch keeps a fresh mapping zeroed and leaves data intact" {
     try std.testing.expectEqual(@as(u8, 0xBB), buf[1]);
 }
 
-test "slab: adviseNoHugePages is a safe no-op on any page-aligned slab" {
+test "zix multiplexers: slab adviseNoHugePages is a safe no-op on any page-aligned slab" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
     const page = std.heap.page_size_min;

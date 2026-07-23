@@ -548,7 +548,7 @@ fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: http tls_serve, stripPort strips host:port and bracketed ipv6" {
+test "zix http: tls_serve, stripPort strips host:port and bracketed ipv6" {
     try std.testing.expectEqualStrings("localhost", stripPort("localhost:9071"));
     try std.testing.expectEqualStrings("localhost", stripPort("localhost"));
     try std.testing.expectEqualStrings("127.0.0.1", stripPort("127.0.0.1:443"));
@@ -556,7 +556,7 @@ test "zix test: http tls_serve, stripPort strips host:port and bracketed ipv6" {
     try std.testing.expectEqualStrings("::1", stripPort("::1"));
 }
 
-test "zix test: http tls_serve, hostFromHead extracts the Host header" {
+test "zix http: tls_serve, hostFromHead extracts the Host header" {
     const head = "GET / HTTP/1.1\r\nUser-Agent: x\r\nHost: localhost:9071\r\nAccept: */*\r\n\r\n";
     try std.testing.expectEqualStrings("localhost:9071", hostFromHead(head).?);
 
@@ -583,7 +583,7 @@ fn tlsStreamHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void 
     _ = res.sendStream() catch {};
 }
 
-test "zix test: http tls_serve, processRequestToBuffer captures the router response" {
+test "zix http: tls_serve, processRequestToBuffer captures the router response" {
     const HttpServerImpl = @import("server.zig").Server;
 
     const routes = [_]Route{
@@ -625,7 +625,7 @@ const CaptureStream = struct {
     }
 };
 
-test "zix test: http tls_serve, processRequestToBuffer streams over TLS when the stream sink is armed" {
+test "zix http: tls_serve, processRequestToBuffer streams over TLS when the stream sink is armed" {
     const HttpServerImpl = @import("server.zig").Server;
 
     const routes = [_]Route{
@@ -659,7 +659,7 @@ fn wsNoopFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
     _ = payload;
 }
 
-test "zix test: http tls_serve, WebSocket.serveTls encrypts the 101 through the stream sink and registers the handoff" {
+test "zix http: tls_serve, WebSocket.serveTls encrypts the 101 through the stream sink and registers the handoff" {
     var capture = CaptureStream{};
     var stream_sink = resp.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
     const prev = resp.tl_tls_stream;

@@ -1338,7 +1338,7 @@ pub fn sweepMaintenance(table: *ConnTable, tx: *datagram.SendBatch, fd: std.posi
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: processDatagram demuxes a long-header Initial by DCID" {
+test "zix http3: processDatagram demuxes a long-header Initial by DCID" {
     var table = ConnTable{};
 
     // A crafted Initial long header: 0xc3, version 1, 8-byte DCID, 4-byte SCID, one payload byte.
@@ -1357,7 +1357,7 @@ test "zix test: processDatagram demuxes a long-header Initial by DCID" {
     try std.testing.expectEqual(@as(u64, 40), table.find(&dcid).?.anti_amplification.received);
 }
 
-test "zix test: copyStreamSlice spans the prefix and body boundary" {
+test "zix http3: copyStreamSlice spans the prefix and body boundary" {
     const prefix = "PRE"; // 3 bytes of HTTP/3 prefix
     const body = "0123456789";
 
@@ -1372,7 +1372,7 @@ test "zix test: copyStreamSlice spans the prefix and body boundary" {
     try std.testing.expectEqualStrings("2345", &dst2);
 }
 
-test "zix test: pumpLimit caps the send at the congestion window, the window cap, and flow control" {
+test "zix http3: pumpLimit caps the send at the congestion window, the window cap, and flow control" {
     // window_cap here is 128 packets * 1200 = 153600 bytes (the default max_inflight_packets window).
     const cap = 153_600;
 
@@ -1396,7 +1396,7 @@ test "zix test: pumpLimit caps the send at the congestion window, the window cap
     try std.testing.expectEqual(@as(usize, 11_000), pumpLimit(1_000_000, 3_000, 12_000, 4_000, cap));
 }
 
-test "zix test: applyStreamCredit raises the connection and stream limits" {
+test "zix http3: applyStreamCredit raises the connection and stream limits" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
     conn.send_streams[0] = .{ .active = true, .stream_id = 0, .stream_limit = 1000 };
@@ -1420,7 +1420,7 @@ test "zix test: applyStreamCredit raises the connection and stream limits" {
     try std.testing.expectEqual(@as(u64, 2), stats.max_stream_data_recv);
 }
 
-test "zix test: applyAcks feeds a real ACK frame into Connection.onAckFrame" {
+test "zix http3: applyAcks feeds a real ACK frame into Connection.onAckFrame" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
     conn.recordSentRange(10, recovery.nowUs(), .{ .stream_id = 0, .offset = 0, .length = 100 });
@@ -1433,11 +1433,11 @@ test "zix test: applyAcks feeds a real ACK frame into Connection.onAckFrame" {
     try std.testing.expect(!conn.sent_ranges[0].in_flight);
 }
 
-test "zix test: getAvailableCpuCount returns at least 1" {
+test "zix http3: getAvailableCpuCount returns at least 1" {
     try std.testing.expect(getAvailableCpuCount() >= 1);
 }
 
-test "zix test: effectiveWorkers honors an explicit count and caps at available CPUs" {
+test "zix http3: effectiveWorkers honors an explicit count and caps at available CPUs" {
     const base = Http3ServerConfig{ .allocator = std.testing.allocator, .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC };
 
     // an explicit worker count passes through unchanged
@@ -1450,14 +1450,14 @@ test "zix test: effectiveWorkers honors an explicit count and caps at available 
     try std.testing.expectEqual(getAvailableCpuCount(), effectiveWorkers(base));
 }
 
-test "zix test: pinToCpu is a no-op-safe call for any worker_id" {
+test "zix http3: pinToCpu is a no-op-safe call for any worker_id" {
     // The process keeps its original affinity mask, so pinning to a derived slot must not crash
     // for an out-of-range worker_id (the modulo keeps it inside the available set).
     pinToCpu(0);
     pinToCpu(999);
 }
 
-test "zix test: ratioParts scales num/den to hundredths and guards a zero denominator" {
+test "zix http3: ratioParts scales num/den to hundredths and guards a zero denominator" {
     // 3/2 = 1.50, 64/32 = 2.00 (the datagrams-per-wake the stats line reports).
     try std.testing.expectEqual(@as(u64, 1), ratioParts(3, 2).whole);
     try std.testing.expectEqual(@as(u64, 50), ratioParts(3, 2).frac);
@@ -1469,7 +1469,7 @@ test "zix test: ratioParts scales num/den to hundredths and guards a zero denomi
     try std.testing.expectEqual(@as(u64, 0), ratioParts(5, 0).frac);
 }
 
-test "zix test: WorkerStats.maybeDump only reads, never mutates the counters" {
+test "zix http3: WorkerStats.maybeDump only reads, never mutates the counters" {
     // A wake count that is not a dump multiple: maybeDump must leave every counter unchanged (it only
     // reads them to format the line). The dump itself is Debug-only and compiled out of Release.
     var stats = WorkerStats{ .worker_id = 0, .wakes = 100, .datagrams = 200 };
@@ -1479,7 +1479,7 @@ test "zix test: WorkerStats.maybeDump only reads, never mutates the counters" {
     try std.testing.expectEqual(@as(u64, 200), stats.datagrams);
 }
 
-test "zix test: WorkerStats.snapshot derives wall, on-CPU time, and utilization percent" {
+test "zix http3: WorkerStats.snapshot derives wall, on-CPU time, and utilization percent" {
     // start at 1_000us, sampled at 11_000us -> 10_000us wall, blocked 9_000us -> 1_000us on CPU = 10%.
     const busy = WorkerStats{ .worker_id = 0, .start_us = 1_000, .block_us = 9_000 };
     const snap = busy.snapshot(11_000);
@@ -1508,7 +1508,7 @@ test "zix test: WorkerStats.snapshot derives wall, on-CPU time, and utilization 
     try std.testing.expectEqual(@as(u64, 0), snap_parked.active_pct);
 }
 
-test "zix test: registerWorkerStats stamps a start time and adds the worker to the dump registry" {
+test "zix http3: registerWorkerStats stamps a start time and adds the worker to the dump registry" {
     const before = g_diag_count.load(.acquire);
 
     var stats = WorkerStats{ .worker_id = 4242 };
@@ -1520,7 +1520,7 @@ test "zix test: registerWorkerStats stamps a start time and adds the worker to t
     try std.testing.expectEqual(before + 1, g_diag_count.load(.acquire));
     try std.testing.expect(g_diag_stats[before].? == &stats);
 }
-test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
+test "zix http3: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
     var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
 
@@ -1529,7 +1529,7 @@ test "zix test: orderPhysicalCoresFirst puts distinct cores before SMT siblings"
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 1, 3, 5 }, &cpus);
 }
 
-test "zix test: orderPhysicalCoresFirst keeps mask order on unique keys" {
+test "zix http3: orderPhysicalCoresFirst keeps mask order on unique keys" {
     var cpus = [_]u32{ 3, 7, 11 };
     const keys = [_]u64{ 30, 10, 20 };
 

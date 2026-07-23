@@ -221,7 +221,7 @@ pub fn decompressDeflateAlloc(allocator: std.mem.Allocator, compressed: []const 
 
 const testing = std.testing;
 
-test "flate gzip: roundtrip ascii" {
+test "zix compression: flate gzip roundtrip ascii" {
     const original = "the quick brown fox jumps over the lazy dog";
 
     const packed_bytes = try compressGzipAlloc(testing.allocator, original, .DEFAULT);
@@ -233,7 +233,7 @@ test "flate gzip: roundtrip ascii" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "flate gzip: roundtrip empty input" {
+test "zix compression: flate gzip roundtrip empty input" {
     const original = "";
 
     const packed_bytes = try compressGzipAlloc(testing.allocator, original, .DEFAULT);
@@ -245,7 +245,7 @@ test "flate gzip: roundtrip empty input" {
     try testing.expectEqual(@as(usize, 0), restored.len);
 }
 
-test "flate gzip: roundtrip every byte value (binary safe)" {
+test "zix compression: flate gzip roundtrip every byte value (binary safe)" {
     var original: [256]u8 = undefined;
     for (&original, 0..) |*byte, index| byte.* = @intCast(index);
 
@@ -258,7 +258,7 @@ test "flate gzip: roundtrip every byte value (binary safe)" {
     try testing.expectEqualSlices(u8, &original, restored);
 }
 
-test "flate gzip: highly compressible shrinks" {
+test "zix compression: flate gzip highly compressible shrinks" {
     var original: [4096]u8 = undefined;
     @memset(&original, 'A');
 
@@ -268,7 +268,7 @@ test "flate gzip: highly compressible shrinks" {
     try testing.expect(packed_bytes.len < original.len);
 }
 
-test "flate gzip: output respects compressBound" {
+test "zix compression: flate gzip output respects compressBound" {
     var original: [8192]u8 = undefined;
     var seed: u32 = 2654435761;
     for (&original) |*byte| {
@@ -282,7 +282,7 @@ test "flate gzip: output respects compressBound" {
     try testing.expect(packed_bytes.len <= compressBound(original.len));
 }
 
-test "flate gzip: header magic and method" {
+test "zix compression: flate gzip header magic and method" {
     var out_buf: [128]u8 = undefined;
     const written = try compressGzip(testing.allocator, "magic check", &out_buf, .DEFAULT);
 
@@ -292,7 +292,7 @@ test "flate gzip: header magic and method" {
     try testing.expectEqual(@as(u8, 0x08), out_buf[2]);
 }
 
-test "flate gzip: both levels roundtrip" {
+test "zix compression: flate gzip both levels roundtrip" {
     var original: [512]u8 = undefined;
     for (&original, 0..) |*byte, index| byte.* = @intCast('a' + (index % 26));
 
@@ -307,7 +307,7 @@ test "flate gzip: both levels roundtrip" {
     }
 }
 
-test "flate gzip: decode external gzip vector (CLI interop)" {
+test "zix compression: flate gzip decode external gzip vector (CLI interop)" {
     // Produced by the gzip CLI: printf 'hello, gzip' | gzip -c
     // The header mtime is zeroed here, but decode ignores it regardless.
     const vector = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xcb\x48\xcd\xc9\xc9\xd7" ++
@@ -319,7 +319,7 @@ test "flate gzip: decode external gzip vector (CLI interop)" {
     try testing.expectEqualStrings("hello, gzip", out_buf[0..n]);
 }
 
-test "flate gzip: decompress into too-small buffer errors" {
+test "zix compression: flate gzip decompress into too-small buffer errors" {
     var original: [256]u8 = undefined;
     @memset(&original, 'A');
 
@@ -331,7 +331,7 @@ test "flate gzip: decompress into too-small buffer errors" {
     try testing.expectError(error.BufferTooSmall, decompressGzip(packed_bytes, &tiny));
 }
 
-test "flate gzip: decompress past the cap errors" {
+test "zix compression: flate gzip decompress past the cap errors" {
     var original: [1024]u8 = undefined;
     @memset(&original, 'A');
 
@@ -341,7 +341,7 @@ test "flate gzip: decompress past the cap errors" {
     try testing.expectError(error.OutputTooLarge, decompressGzipAlloc(testing.allocator, packed_bytes, 16));
 }
 
-test "flate gzip: malformed stream errors" {
+test "zix compression: flate gzip malformed stream errors" {
     const garbage = "\x1f\x8b\x08\x00 not really gzip past the header";
 
     var out_buf: [64]u8 = undefined;
@@ -349,7 +349,7 @@ test "flate gzip: malformed stream errors" {
     try testing.expectError(error.DecompressFailed, decompressGzip(garbage, &out_buf));
 }
 
-test "flate gzip: compress into undersized buffer errors" {
+test "zix compression: flate gzip compress into undersized buffer errors" {
     var original: [64]u8 = undefined;
     @memset(&original, 'A');
 
@@ -358,7 +358,7 @@ test "flate gzip: compress into undersized buffer errors" {
     try testing.expectError(error.BufferTooSmall, compressGzip(testing.allocator, &original, &out_buf, .DEFAULT));
 }
 
-test "flate deflate: roundtrip ascii" {
+test "zix compression: flate deflate roundtrip ascii" {
     const original = "the quick brown fox jumps over the lazy dog";
 
     const packed_bytes = try compressDeflateAlloc(testing.allocator, original, .DEFAULT);
@@ -370,7 +370,7 @@ test "flate deflate: roundtrip ascii" {
     try testing.expectEqualStrings(original, restored);
 }
 
-test "flate deflate: roundtrip every byte value (binary safe)" {
+test "zix compression: flate deflate roundtrip every byte value (binary safe)" {
     var original: [256]u8 = undefined;
     for (&original, 0..) |*byte, index| byte.* = @intCast(index);
 
@@ -383,7 +383,7 @@ test "flate deflate: roundtrip every byte value (binary safe)" {
     try testing.expectEqualSlices(u8, &original, restored);
 }
 
-test "flate deflate: zlib container header (the deflate token is zlib-wrapped, not raw)" {
+test "zix compression: flate deflate zlib container header (the deflate token is zlib-wrapped, not raw)" {
     var out_buf: [128]u8 = undefined;
     const written = try compressDeflate(testing.allocator, "zlib header check", &out_buf, .DEFAULT);
 
@@ -394,7 +394,7 @@ test "flate deflate: zlib container header (the deflate token is zlib-wrapped, n
     try testing.expect((@as(u16, out_buf[0]) * 256 + out_buf[1]) % 31 == 0);
 }
 
-test "flate deflate: decode external zlib vector (python zlib.compress interop)" {
+test "zix compression: flate deflate decode external zlib vector (python zlib.compress interop)" {
     // Produced by python: zlib.compress(b'hello, deflate'), the RFC 1950 form an HTTP
     // client sends under Content-Encoding: deflate.
     const vector = "\x78\x9c\xcb\x48\xcd\xc9\xc9\xd7\x51\x48\x49\x4d\xcb\x49\x2c\x49\x05\x00\x26\xad\x05\x36";
@@ -405,7 +405,7 @@ test "flate deflate: decode external zlib vector (python zlib.compress interop)"
     try testing.expectEqualStrings("hello, deflate", out_buf[0..n]);
 }
 
-test "flate deflate: gzip and deflate produce distinct headers" {
+test "zix compression: flate deflate gzip and deflate produce distinct headers" {
     var gzip_buf: [128]u8 = undefined;
     var deflate_buf: [128]u8 = undefined;
 
@@ -418,7 +418,7 @@ test "flate deflate: gzip and deflate produce distinct headers" {
     try testing.expectEqual(@as(u8, 0x78), deflate_buf[0]);
 }
 
-test "flate deflate: a gzip stream does not decode as deflate" {
+test "zix compression: flate deflate a gzip stream does not decode as deflate" {
     const packed_gzip = try compressGzipAlloc(testing.allocator, "container mismatch", .DEFAULT);
     defer testing.allocator.free(packed_gzip);
 

@@ -51,7 +51,7 @@ fn durationSince(io: std.Io, start: std.Io.Timestamp) u64 {
 
 const testing = std.testing;
 
-test "prometheuz test: scrapeOnce captures a failure without throwing" {
+test "prometheuz: scrapeOnce captures a failure without throwing" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

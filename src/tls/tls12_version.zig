@@ -48,13 +48,13 @@ fn downgradeDetected(server_random: [32]u8, negotiated: Selected, client_offered
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: tls12 version, selection" {
+test "zix tls: tls12 version, selection" {
     try std.testing.expectEqual(Selected.TLS_1_3, selectVersion(true, version_tls_1_2));
     try std.testing.expectEqual(Selected.TLS_1_2, selectVersion(false, version_tls_1_2));
     try std.testing.expectEqual(Selected.UNSUPPORTED, selectVersion(false, 0x0302));
 }
 
-test "zix test: tls12 version, downgrade sentinel byte-exact + detect" {
+test "zix tls: tls12 version, downgrade sentinel byte-exact + detect" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01 }, &sentinel_tls_1_2);
 
     var rnd: [32]u8 = @splat(0xAB);

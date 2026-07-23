@@ -70,7 +70,7 @@ pub const HttpClientConfig = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: HttpClientConfig defaults" {
+test "zix http: HttpClientConfig defaults" {
     const cfg: HttpClientConfig = .{
         .allocator = std.testing.allocator,
         .io = undefined,

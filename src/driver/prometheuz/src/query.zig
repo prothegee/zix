@@ -280,7 +280,7 @@ fn jsonNumber(value: std.json.Value) !f64 {
 
 const testing = std.testing;
 
-test "prometheuz test: query parses a vector result" {
+test "prometheuz: query parses a vector result" {
     const body =
         \\{"status":"success","data":{"resultType":"vector","result":[
         \\  {"metric":{"__name__":"up","job":"prometheus"},"value":[1435781451.781,"1"]}
@@ -305,7 +305,7 @@ test "prometheuz test: query parses a vector result" {
     try testing.expect(found_job);
 }
 
-test "prometheuz test: query parses a matrix result" {
+test "prometheuz: query parses a matrix result" {
     const body =
         \\{"status":"success","data":{"resultType":"matrix","result":[
         \\  {"metric":{"__name__":"up"},"values":[[1000,"1"],[1015,"0"]]}
@@ -322,7 +322,7 @@ test "prometheuz test: query parses a matrix result" {
     try testing.expectEqual(@as(f64, 0), result.matrix[0].values[1].value);
 }
 
-test "prometheuz test: query surfaces an error status" {
+test "prometheuz: query surfaces an error status" {
     const body =
         \\{"status":"error","errorType":"bad_data","error":"parse error"}
     ;
@@ -330,11 +330,11 @@ test "prometheuz test: query surfaces an error status" {
     try testing.expectError(error.QueryFailed, parseResponse(testing.allocator, body));
 }
 
-test "prometheuz test: query rejects malformed json" {
+test "prometheuz: query rejects malformed json" {
     try testing.expectError(error.InvalidResponse, parseResponse(testing.allocator, "not json"));
 }
 
-test "prometheuz test: query url-encodes the expression" {
+test "prometheuz: query url-encodes the expression" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 

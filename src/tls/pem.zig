@@ -130,7 +130,7 @@ const DerReader = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: pem, SEC1 ECDSA key -> 32-byte scalar (fixture)" {
+test "zix tls: pem, SEC1 ECDSA key -> 32-byte scalar (fixture)" {
     const key_pem =
         \\-----BEGIN EC PRIVATE KEY-----
         \\MHcCAQEEIAt29/HHv24gAp3bVmeV5Y2lumP/vbkUv2mb++0xR9MsoAoGCCqGSM49
@@ -148,7 +148,7 @@ test "zix test: pem, SEC1 ECDSA key -> 32-byte scalar (fixture)" {
     try std.testing.expectEqualSlices(u8, &expected, &scalar);
 }
 
-test "zix test: pem, PKCS#8 Ed25519 key -> 32-byte seed (fixture)" {
+test "zix tls: pem, PKCS#8 Ed25519 key -> 32-byte seed (fixture)" {
     const key_pem =
         \\-----BEGIN PRIVATE KEY-----
         \\MC4CAQAwBQYDK2VwBCIEIFwpJTm6t3wxIBTGVqlD12tSAhCajuDznWINyTQWWiiM

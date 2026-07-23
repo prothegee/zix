@@ -629,13 +629,13 @@ fn dispatchStream(comptime routes: []const Route, stream: *Stream, fd: std.posix
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: ServeOpts defaults" {
+test "zix http2: ServeOpts defaults" {
     const opts = ServeOpts{};
     try std.testing.expectEqual(@as(usize, 128), opts.max_streams);
     try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, opts.max_frame_size);
 }
 
-test "zix test: HandlerFn is a function pointer type" {
+test "zix http2: HandlerFn is a function pointer type" {
     const h: HandlerFn = struct {
         fn f(
             method: []const u8,
@@ -666,7 +666,7 @@ fn routeHandler(comptime id: u8) HandlerFn {
     }.f;
 }
 
-test "zix test: Router strips the query before matching" {
+test "zix http2: Router strips the query before matching" {
     const R = Router(&[_]Route{
         .{ .path = "/baseline2", .handler = routeHandler(1) },
     });
@@ -677,7 +677,7 @@ test "zix test: Router strips the query before matching" {
     try std.testing.expectEqual(@as(u8, 1), tl_router_hit);
 }
 
-test "zix test: Router PREFIX matches a path subtree on a boundary" {
+test "zix http2: Router PREFIX matches a path subtree on a boundary" {
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
         .{ .path = "/static", .handler = routeHandler(3), .kind = .PREFIX },
@@ -692,7 +692,7 @@ test "zix test: Router PREFIX matches a path subtree on a boundary" {
     try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
 }
 
-test "zix test: Router EXACT wins over PREFIX and longest prefix wins" {
+test "zix http2: Router EXACT wins over PREFIX and longest prefix wins" {
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(1) },
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
@@ -710,7 +710,7 @@ test "zix test: Router EXACT wins over PREFIX and longest prefix wins" {
     try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
 }
 
-test "zix test: Router PREFIX respects the segment boundary" {
+test "zix http2: Router PREFIX respects the segment boundary" {
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
     });
@@ -727,7 +727,7 @@ test "zix test: Router PREFIX respects the segment boundary" {
     try std.testing.expectEqual(@as(u8, 0), tl_router_hit);
 }
 
-test "zix test: http2 response cache round-trips via sendCachedFD then serveCached" {
+test "zix http2: response cache round-trips via sendCachedFD then serveCached" {
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 1024 });
     defer cache.deinit();
     setCache(&cache, 1000);

@@ -299,7 +299,7 @@ pub const Registry = struct {
 
 const testing = std.testing;
 
-test "prometheuz test: registry counter records and reports a value" {
+test "prometheuz: registry counter records and reports a value" {
     var registry = Registry.init(testing.allocator);
     defer registry.deinit();
 
@@ -330,7 +330,7 @@ test "prometheuz test: registry counter records and reports a value" {
     try testing.expect(found_tx_failed);
 }
 
-test "prometheuz test: registry gauge inc dec set" {
+test "prometheuz: registry gauge inc dec set" {
     var registry = Registry.init(testing.allocator);
     defer registry.deinit();
 
@@ -345,7 +345,7 @@ test "prometheuz test: registry gauge inc dec set" {
     try testing.expectEqual(@as(f64, 42), cell.get());
 }
 
-test "prometheuz test: registry with() returns the same cell for the same labels" {
+test "prometheuz: registry with() returns the same cell for the same labels" {
     var registry = Registry.init(testing.allocator);
     defer registry.deinit();
 
@@ -356,7 +356,7 @@ test "prometheuz test: registry with() returns the same cell for the same labels
     try testing.expectEqual(first, second);
 }
 
-test "prometheuz test: registry families carries name help and type" {
+test "prometheuz: registry families carries name help and type" {
     var registry = Registry.init(testing.allocator);
     defer registry.deinit();
 

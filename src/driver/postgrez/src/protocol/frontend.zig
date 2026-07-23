@@ -331,7 +331,7 @@ pub fn copyFail(allocator: std.mem.Allocator, out: *std.ArrayList(u8), message: 
 
 const testing = std.testing;
 
-test "postgrez test: startup encodes protocol code and params" {
+test "postgrez protocol: startup encodes protocol code and params" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -344,7 +344,7 @@ test "postgrez test: startup encodes protocol code and params" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: sslRequest is the fixed 8-byte magic" {
+test "postgrez protocol: sslRequest is the fixed 8-byte magic" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -353,7 +353,7 @@ test "postgrez test: sslRequest is the fixed 8-byte magic" {
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f }, out.items);
 }
 
-test "postgrez test: cancelRequest carries a variable-length key" {
+test "postgrez protocol: cancelRequest carries a variable-length key" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -367,7 +367,7 @@ test "postgrez test: cancelRequest carries a variable-length key" {
     }, out.items);
 }
 
-test "postgrez test: passwordCleartext frames the password as cstr" {
+test "postgrez protocol: passwordCleartext frames the password as cstr" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -376,7 +376,7 @@ test "postgrez test: passwordCleartext frames the password as cstr" {
     try testing.expectEqualSlices(u8, &.{ 'p', 0, 0, 0, 7, 'p', 'w', 0 }, out.items);
 }
 
-test "postgrez test: saslInitialResponse frames mechanism and payload" {
+test "postgrez protocol: saslInitialResponse frames mechanism and payload" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -386,7 +386,7 @@ test "postgrez test: saslInitialResponse frames mechanism and payload" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: saslResponse is raw payload" {
+test "postgrez protocol: saslResponse is raw payload" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -395,7 +395,7 @@ test "postgrez test: saslResponse is raw payload" {
     try testing.expectEqualSlices(u8, &.{ 'p', 0, 0, 0, 7, 'x', 'y', 'z' }, out.items);
 }
 
-test "postgrez test: query frames sql as cstr" {
+test "postgrez protocol: query frames sql as cstr" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -405,7 +405,7 @@ test "postgrez test: query frames sql as cstr" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: parse encodes names, sql, and oids" {
+test "postgrez protocol: parse encodes names, sql, and oids" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -415,7 +415,7 @@ test "postgrez test: parse encodes names, sql, and oids" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: bind encodes formats, params, and null" {
+test "postgrez protocol: bind encodes formats, params, and null" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -431,7 +431,7 @@ test "postgrez test: bind encodes formats, params, and null" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: describe, execute, and close target the right object" {
+test "postgrez protocol: describe, execute, and close target the right object" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -449,7 +449,7 @@ test "postgrez test: describe, execute, and close target the right object" {
     try testing.expectEqualSlices(u8, &expected, out.items);
 }
 
-test "postgrez test: flush, sync, terminate are fixed empty messages" {
+test "postgrez protocol: flush, sync, terminate are fixed empty messages" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -464,7 +464,7 @@ test "postgrez test: flush, sync, terminate are fixed empty messages" {
     }, out.items);
 }
 
-test "postgrez test: copy messages frame data, done, and fail" {
+test "postgrez protocol: copy messages frame data, done, and fail" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 

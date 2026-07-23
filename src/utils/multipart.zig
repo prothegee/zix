@@ -153,7 +153,7 @@ pub const Parser = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: multipart Parser parses form and file fields" {
+test "zix utils: multipart Parser parses form and file fields" {
     const boundary = "boundary123";
     const body =
         "--boundary123\r\n" ++

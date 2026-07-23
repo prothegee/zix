@@ -384,19 +384,19 @@ fn fuzzAgainstFf(comptime bits: usize, trials: usize, seed: u64) !void {
     }
 }
 
-test "zix test: montgomery, 1024-bit modexp matches std.crypto.ff" {
+test "zix tls: montgomery, 1024-bit modexp matches std.crypto.ff" {
     try fuzzAgainstFf(1024, 64, 0x515a1); // trials 400 took to much time
 }
 
-test "zix test: montgomery, 1536-bit modexp matches std.crypto.ff" {
+test "zix tls: montgomery, 1536-bit modexp matches std.crypto.ff" {
     try fuzzAgainstFf(1536, 32, 0x6c0de); // trials 200 took to much time
 }
 
-test "zix test: montgomery, 2048-bit modexp matches std.crypto.ff" {
+test "zix tls: montgomery, 2048-bit modexp matches std.crypto.ff" {
     try fuzzAgainstFf(2048, 16, 0xa11ce); // trials 150 took to much time
 }
 
-test "zix test: montgomery, base near the modulus matches ff (conditional-subtract boundary)" {
+test "zix tls: montgomery, base near the modulus matches ff (conditional-subtract boundary)" {
     const bits = 1024;
     const bytes_len = bits / 8;
     const Mod = std.crypto.ff.Modulus(bits);

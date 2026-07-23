@@ -317,7 +317,7 @@ test "zix grpc: GrpcClient.connect port zero returns PortNotConfigured" {
     );
 }
 
-test "zix test: applySocketTimeout grpc, zero ms is a no-op on real socket" {
+test "zix grpc: applySocketTimeout, zero ms is a no-op on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -332,7 +332,7 @@ test "zix test: applySocketTimeout grpc, zero ms is a no-op on real socket" {
     try std.testing.expectEqual(@as(i64, 0), recv_tv.usec);
 }
 
-test "zix test: applySocketTimeout grpc, sets SO_RCVTIMEO on real socket" {
+test "zix grpc: applySocketTimeout, sets SO_RCVTIMEO on real socket" {
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -347,7 +347,7 @@ test "zix test: applySocketTimeout grpc, sets SO_RCVTIMEO on real socket" {
     try std.testing.expectEqual(@as(i64, 500_000), recv_tv.usec);
 }
 
-test "zix test: applySocketTimeout grpc, short timeout does not fire when data arrives immediately" {
+test "zix grpc: applySocketTimeout, short timeout does not fire when data arrives immediately" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

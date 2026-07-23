@@ -200,7 +200,7 @@ const SAMPLE_COLUMNS = [_]ColumnInfo{
     .{ .name = "bio", .type_oid = @intFromEnum(Oid.TEXT), .format = .BINARY },
 };
 
-test "postgrez test: parseRow binds by name, order-independent" {
+test "postgrez types: parseRow binds by name, order-independent" {
     const User = struct {
         name: []const u8,
         id: i64,
@@ -226,7 +226,7 @@ test "postgrez test: parseRow binds by name, order-independent" {
     try testing.expectEqual(@as(?[]const u8, null), user.bio);
 }
 
-test "postgrez test: parseRow null into non-optional errors" {
+test "postgrez types: parseRow null into non-optional errors" {
     const User = struct {
         id: i64,
         name: []const u8,
@@ -247,7 +247,7 @@ test "postgrez test: parseRow null into non-optional errors" {
     try testing.expectError(error.NullIntoNonOptional, parseRow(User, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{}));
 }
 
-test "postgrez test: parseRow unknown column errors unless opted out" {
+test "postgrez types: parseRow unknown column errors unless opted out" {
     const Narrow = struct {
         id: i64,
     };
@@ -268,7 +268,7 @@ test "postgrez test: parseRow unknown column errors unless opted out" {
     try testing.expectEqual(@as(i64, 7), narrow.id);
 }
 
-test "postgrez test: parseRow missing column falls back to default" {
+test "postgrez types: parseRow missing column falls back to default" {
     const WithDefault = struct {
         id: i64,
         score: f64 = 0.5,
@@ -294,7 +294,7 @@ test "postgrez test: parseRow missing column falls back to default" {
     try testing.expectError(error.MissingColumn, parseRow(WithoutDefault, arena.allocator(), &columns, &cells, .{}));
 }
 
-test "postgrez test: parseRow struct field parses json and jsonb" {
+test "postgrez types: parseRow struct field parses json and jsonb" {
     const Profile = struct {
         theme: []const u8,
         notifications: bool,
@@ -322,7 +322,7 @@ test "postgrez test: parseRow struct field parses json and jsonb" {
     try testing.expectEqual(true, user.profile.notifications);
 }
 
-test "postgrez test: parseRow struct field on a non-json column errors" {
+test "postgrez types: parseRow struct field on a non-json column errors" {
     const Profile = struct { theme: []const u8 };
     const User = struct { profile: Profile };
 
@@ -337,7 +337,7 @@ test "postgrez test: parseRow struct field on a non-json column errors" {
     try testing.expectError(error.TypeMismatch, parseRow(User, arena.allocator(), &columns, &cells, .{}));
 }
 
-test "postgrez test: parseRow enum field from text content" {
+test "postgrez types: parseRow enum field from text content" {
     const Kind = enum { deploy, rollback };
     const Event = struct { kind: Kind };
 
@@ -356,7 +356,7 @@ test "postgrez test: parseRow enum field from text content" {
     try testing.expectError(error.BadCell, parseRow(Event, arena.allocator(), &columns, &bad_cells, .{}));
 }
 
-test "postgrez test: parseRow duplicates strings off the receive buffer" {
+test "postgrez types: parseRow duplicates strings off the receive buffer" {
     const Named = struct { name: []const u8 };
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -375,7 +375,7 @@ test "postgrez test: parseRow duplicates strings off the receive buffer" {
     try testing.expectEqualStrings("Alice", named.name);
 }
 
-test "postgrez test: parseRow text format cells decode via fallback" {
+test "postgrez types: parseRow text format cells decode via fallback" {
     const User = struct {
         id: i64,
         active: bool,

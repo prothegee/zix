@@ -438,7 +438,7 @@ fn finishedVerifyData(finished_key: Secret, transcript_hash: Secret) Secret {
 
 const testing = std.testing;
 
-test "rediz test: tls client hello offers 1.3, x25519, aes-128-gcm" {
+test "rediz tls: client hello offers 1.3, x25519, aes-128-gcm" {
     var hello_buf: [512]u8 = undefined;
     const started = try start(.{ .client_random = @splat(0x11), .ephemeral_secret = @splat(0x42) }, &hello_buf);
     const hello = started.client_hello;
@@ -454,7 +454,7 @@ test "rediz test: tls client hello offers 1.3, x25519, aes-128-gcm" {
     try testing.expect(std.mem.indexOf(u8, hello, &client_public) != null);
 }
 
-test "rediz test: tls client finish reports NeedMoreRecords on a bare ServerHello" {
+test "rediz tls: client finish reports NeedMoreRecords on a bare ServerHello" {
     // A minimal ServerHello record with a key_share, no encrypted flight yet.
     const server_public = try X25519.recoverPublicKey(@splat(0x99));
 
@@ -493,7 +493,7 @@ test "rediz test: tls client finish reports NeedMoreRecords on a bare ServerHell
     try testing.expectError(error.NeedMoreRecords, finish(&state, records_buf[0 .. 5 + sh_msg.len], &fin_buf));
 }
 
-test "rediz test: tls ClientConnection round trip and readRecord types" {
+test "rediz tls: ClientConnection round trip and readRecord types" {
     var alice = ClientConnection{
         .client_app_key = @splat(0x01),
         .client_app_iv = @splat(0x02),

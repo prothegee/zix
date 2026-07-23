@@ -887,7 +887,7 @@ fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted
     return .{ .conn = conn, .script_fd = mock.script_fd };
 }
 
-test "postgrez test: conn mock startup reaches ready" {
+test "postgrez: conn mock startup reaches ready" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -905,7 +905,7 @@ test "postgrez test: conn mock startup reaches ready" {
     try testing.expectEqual(backend.TransactionStatus.IDLE, conn.transaction_status);
 }
 
-test "postgrez test: conn mock NegotiateProtocolVersion downgrades in place" {
+test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -922,7 +922,7 @@ test "postgrez test: conn mock NegotiateProtocolVersion downgrades in place" {
     try testing.expectEqual(@as(u32, 16), conn.server_version_major);
 }
 
-test "postgrez test: conn mock server below 15 hard rejects" {
+test "postgrez: conn mock server below 15 hard rejects" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -934,7 +934,7 @@ test "postgrez test: conn mock server below 15 hard rejects" {
     try testing.expectError(error.UnsupportedServerVersion, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
-test "postgrez test: conn mock strict V3_2 refuses negotiation" {
+test "postgrez: conn mock strict V3_2 refuses negotiation" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -949,7 +949,7 @@ test "postgrez test: conn mock strict V3_2 refuses negotiation" {
     try testing.expectError(error.ProtocolNotSupported, connectScripted(threaded.io(), script.items, config));
 }
 
-test "postgrez test: conn mock cleartext auth flow" {
+test "postgrez: conn mock cleartext auth flow" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -965,7 +965,7 @@ test "postgrez test: conn mock cleartext auth flow" {
     try testing.expectEqual(@as(u32, 18), conn.server_version_major);
 }
 
-test "postgrez test: conn mock md5 auth is rejected" {
+test "postgrez: conn mock md5 auth is rejected" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -976,7 +976,7 @@ test "postgrez test: conn mock md5 auth is rejected" {
     try testing.expectError(error.UnsupportedAuth, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
-test "postgrez test: conn mock startup ErrorResponse surfaces state" {
+test "postgrez: conn mock startup ErrorResponse surfaces state" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -987,7 +987,7 @@ test "postgrez test: conn mock startup ErrorResponse surfaces state" {
     try testing.expectError(error.ServerError, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
-test "postgrez test: conn mock exec returns affected rows" {
+test "postgrez: conn mock exec returns affected rows" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1007,7 +1007,7 @@ test "postgrez test: conn mock exec returns affected rows" {
     try testing.expectEqual(@as(u64, 3), affected);
 }
 
-test "postgrez test: conn mock exec server error maps SQLSTATE" {
+test "postgrez: conn mock exec server error maps SQLSTATE" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1065,7 +1065,7 @@ fn appendQueryScript(allocator: std.mem.Allocator, script: *std.ArrayList(u8)) !
     try appendServerMsg(allocator, script, 'Z', "I");
 }
 
-test "postgrez test: conn mock query maps typed rows" {
+test "postgrez: conn mock query maps typed rows" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1105,7 +1105,7 @@ test "postgrez test: conn mock query maps typed rows" {
     try testing.expectEqual(@as(u64, 2), result.affected);
 }
 
-test "postgrez test: conn mock rows streams with row.get" {
+test "postgrez: conn mock rows streams with row.get" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1132,7 +1132,7 @@ test "postgrez test: conn mock rows streams with row.get" {
     try testing.expectError(error.ColumnIndexOutOfRange, second.get(i64, 5));
 }
 
-test "postgrez test: conn mock queryRow returns null on empty result" {
+test "postgrez: conn mock queryRow returns null on empty result" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1162,7 +1162,7 @@ test "postgrez test: conn mock queryRow returns null on empty result" {
     try testing.expectEqual(@as(?Narrow, null), maybe_row);
 }
 
-test "postgrez test: conn mock parse error recovers via sync" {
+test "postgrez: conn mock parse error recovers via sync" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1189,7 +1189,7 @@ test "postgrez test: conn mock parse error recovers via sync" {
     try testing.expectEqual(@as(u64, 1), affected);
 }
 
-test "postgrez test: conn mock transaction callback commits" {
+test "postgrez: conn mock transaction callback commits" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1227,7 +1227,7 @@ test "postgrez test: conn mock transaction callback commits" {
     try testing.expectEqual(backend.TransactionStatus.IDLE, conn.transaction_status);
 }
 
-test "postgrez test: conn mock prepared statement lifecycle" {
+test "postgrez: conn mock prepared statement lifecycle" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1278,7 +1278,7 @@ test "postgrez test: conn mock prepared statement lifecycle" {
     try testing.expectEqual(@as(?Row, null), try result.next());
 }
 
-test "postgrez test: conn mock pipeline collects per-statement results" {
+test "postgrez: conn mock pipeline collects per-statement results" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1312,7 +1312,7 @@ test "postgrez test: conn mock pipeline collects per-statement results" {
     try testing.expectEqual(@as(u64, 1), results[0].affected);
 }
 
-test "postgrez test: conn mock pipeline failure aborts the rest" {
+test "postgrez: conn mock pipeline failure aborts the rest" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1343,7 +1343,7 @@ test "postgrez test: conn mock pipeline failure aborts the rest" {
     try testing.expectEqual(sqlstate.SqlState.UNIQUE_VIOLATION, scripted.conn.lastServerError().state);
 }
 
-test "postgrez test: conn mock pipeline sheds beyond max_pending_replies" {
+test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1373,7 +1373,7 @@ test "postgrez test: conn mock pipeline sheds beyond max_pending_replies" {
     try testing.expectEqual(@as(usize, 2), results.len);
 }
 
-test "postgrez test: conn mock copy in writes and finishes" {
+test "postgrez: conn mock copy in writes and finishes" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1395,7 +1395,7 @@ test "postgrez test: conn mock copy in writes and finishes" {
     try testing.expectEqual(@as(u64, 2), copied);
 }
 
-test "postgrez test: conn mock copy out streams chunks" {
+test "postgrez: conn mock copy out streams chunks" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1420,7 +1420,7 @@ test "postgrez test: conn mock copy out streams chunks" {
     try testing.expectEqual(@as(?[]const u8, null), try copy_out.next());
 }
 
-test "postgrez test: conn mock listen and nextNotification, pending then wire" {
+test "postgrez: conn mock listen and nextNotification, pending then wire" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1460,7 +1460,7 @@ test "postgrez test: conn mock listen and nextNotification, pending then wire" {
     try testing.expectEqual(@as(i32, 43), second.pid);
 }
 
-test "postgrez test: conn mock tls PREFER continues cleartext on N" {
+test "postgrez: conn mock tls PREFER continues cleartext on N" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1479,7 +1479,7 @@ test "postgrez test: conn mock tls PREFER continues cleartext on N" {
     try testing.expectEqual(@as(u32, 18), scripted.conn.server_version_major);
 }
 
-test "postgrez test: conn mock tls REQUIRE fails on N" {
+test "postgrez: conn mock tls REQUIRE fails on N" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1494,7 +1494,7 @@ test "postgrez test: conn mock tls REQUIRE fails on N" {
     try testing.expectError(error.TlsRefused, connectScripted(threaded.io(), script.items, config));
 }
 
-test "postgrez test: conn mock notification is captured while pumping" {
+test "postgrez: conn mock notification is captured while pumping" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1540,7 +1540,7 @@ fn appendBinaryInt8Row(allocator: std.mem.Allocator, script: *std.ArrayList(u8),
     try appendServerMsg(allocator, script, 'D', &.{ 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, value });
 }
 
-test "postgrez test: conn mock statement batch collects results in order" {
+test "postgrez: conn mock statement batch collects results in order" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1590,7 +1590,7 @@ test "postgrez test: conn mock statement batch collects results in order" {
     prepared.arena.deinit();
 }
 
-test "postgrez test: conn mock statement batch sheds beyond max_pending_replies" {
+test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1627,7 +1627,7 @@ test "postgrez test: conn mock statement batch sheds beyond max_pending_replies"
     prepared.arena.deinit();
 }
 
-test "postgrez test: conn mock statement batch failure aborts the rest" {
+test "postgrez: conn mock statement batch failure aborts the rest" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 

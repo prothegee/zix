@@ -95,7 +95,7 @@ fn writeEscaped(writer: anytype, text: []const u8, escape_quote: bool) !void {
 const testing = std.testing;
 const parser = @import("parser.zig");
 
-test "prometheuz test: expose formats a counter with labels" {
+test "prometheuz: expose formats a counter with labels" {
     var registry = registry_mod.Registry.init(testing.allocator);
     defer registry.deinit();
 
@@ -112,7 +112,7 @@ test "prometheuz test: expose formats a counter with labels" {
     try testing.expect(std.mem.indexOf(u8, body, "app_write_errors_total{reason=\"user_create_failed\"} 1\n") != null);
 }
 
-test "prometheuz test: expose escapes label values and help text" {
+test "prometheuz: expose escapes label values and help text" {
     var registry = registry_mod.Registry.init(testing.allocator);
     defer registry.deinit();
 
@@ -129,7 +129,7 @@ test "prometheuz test: expose escapes label values and help text" {
     try testing.expect(std.mem.indexOf(u8, body, "path=\"C:\\\\DIR\\\\FILE.TXT\"") != null);
 }
 
-test "prometheuz test: expose then parse round-trips a gauge value" {
+test "prometheuz: expose then parse round-trips a gauge value" {
     var registry = registry_mod.Registry.init(testing.allocator);
     defer registry.deinit();
 

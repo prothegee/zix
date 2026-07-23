@@ -97,7 +97,7 @@ pub const Http3ServerConfig = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: Http3ServerConfig default field values" {
+test "zix http3: Http3ServerConfig default field values" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

@@ -165,7 +165,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 7541 C.4 Huffman decode of www.example.com" {
+test "zix http3: RFC 7541 C.4 Huffman decode of www.example.com" {
     const encoded = h("f1e3c2e5f23a6ba0ab90f4ff");
     var out: [64]u8 = undefined;
     const len = decode(&out, &encoded).?;
@@ -173,7 +173,7 @@ test "zix test: RFC 7541 C.4 Huffman decode of www.example.com" {
     try std.testing.expectEqualSlices(u8, "www.example.com", out[0..len]);
 }
 
-test "zix test: Huffman decode of a path with digits and symbols" {
+test "zix http3: Huffman decode of a path with digits and symbols" {
     // "/baseline2?a=20&b=22" Huffman-encoded (every byte is a short code).
     const encoded = h("6231a0b41aa28bfc1c0207c470085f");
     var out: [64]u8 = undefined;
@@ -182,7 +182,7 @@ test "zix test: Huffman decode of a path with digits and symbols" {
     try std.testing.expectEqualSlices(u8, "/baseline2?a=20&b=22", out[0..len]);
 }
 
-test "zix test: Huffman decode round-trips every symbol at every code length in the table" {
+test "zix http3: Huffman decode round-trips every symbol at every code length in the table" {
     // Every one of the 256 symbols, individually encoded then padded with the all-ones EOS pattern to
     // a byte boundary, must decode back to itself. This exercises every bits_start bucket boundary the
     // table lookup relies on (5 through 30 bits), not just the handful of lengths the two tests above

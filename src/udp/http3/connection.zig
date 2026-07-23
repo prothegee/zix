@@ -567,7 +567,7 @@ pub const Connection = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: sendDatagramSize clamps to the smallest of config, client limit, and ceiling" {
+test "zix http3: sendDatagramSize clamps to the smallest of config, client limit, and ceiling" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -588,7 +588,7 @@ test "zix test: sendDatagramSize clamps to the smallest of config, client limit,
     try std.testing.expectEqual(@as(u64, 16 * 1024), conn.sendDatagramSize(65527, 16 * 1024));
 }
 
-test "zix test: Connection init derives Initial keys from DCID (RFC 9001 A.1)" {
+test "zix http3: Connection init derives Initial keys from DCID (RFC 9001 A.1)" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -604,7 +604,7 @@ test "zix test: Connection init derives Initial keys from DCID (RFC 9001 A.1)" {
     try std.testing.expect(conn.maySend(3600) and !conn.maySend(3601));
 }
 
-test "zix test: replenishBidiStreams raises the grant past the one-time allowance so a connection never stalls" {
+test "zix http3: replenishBidiStreams raises the grant past the one-time allowance so a connection never stalls" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -630,7 +630,7 @@ test "zix test: replenishBidiStreams raises the grant past the one-time allowanc
     try std.testing.expectEqual(@as(u64, 384), conn.bidi_streams_granted);
 }
 
-test "zix test: replenishMaxData raises the byte grant past the one-time budget so a connection never deadlocks" {
+test "zix http3: replenishMaxData raises the byte grant past the one-time budget so a connection never deadlocks" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -655,7 +655,7 @@ test "zix test: replenishMaxData raises the byte grant past the one-time budget 
     try std.testing.expectEqual(@as(u64, 2624), conn.data_granted);
 }
 
-test "zix test: reserveSendStream tracks max_send_streams concurrent large bodies, then reports full" {
+test "zix http3: reserveSendStream tracks max_send_streams concurrent large bodies, then reports full" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -675,7 +675,7 @@ test "zix test: reserveSendStream tracks max_send_streams concurrent large bodie
     try std.testing.expect(conn.findSendStream((max_send_streams - 1) * 4) != null);
 }
 
-test "zix test: AckTracker records packet numbers, holds a hole, then fills it" {
+test "zix http3: AckTracker records packet numbers, holds a hole, then fills it" {
     var ack = AckTracker{};
     try std.testing.expect(!ack.have_largest);
 
@@ -700,7 +700,7 @@ fn oneRangeAck(largest: u64, smallest: u64, delay_us: u64) flow.Ack {
     return .{ .largest = largest, .delay_us = delay_us, .ranges = ranges, .range_len = 1, .ecn = null, .consumed = 0 };
 }
 
-test "zix test: onAckFrame samples RTT from the packet at the newly-acked largest" {
+test "zix http3: onAckFrame samples RTT from the packet at the newly-acked largest" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -714,7 +714,7 @@ test "zix test: onAckFrame samples RTT from the packet at the newly-acked larges
     try std.testing.expect(!conn.sent_ranges[0].in_flight);
 }
 
-test "zix test: onAckFrame rewinds a SendStream's sent offset when its packet is lost" {
+test "zix http3: onAckFrame rewinds a SendStream's sent offset when its packet is lost" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -736,7 +736,7 @@ test "zix test: onAckFrame rewinds a SendStream's sent offset when its packet is
     try std.testing.expect(conn.sent_ranges[2].in_flight);
 }
 
-test "zix test: onAckFrame does not rewind past a later, still-unacked send" {
+test "zix http3: onAckFrame does not rewind past a later, still-unacked send" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -752,7 +752,7 @@ test "zix test: onAckFrame does not rewind past a later, still-unacked send" {
     try std.testing.expect(!conn.sent_ranges[0].in_flight);
 }
 
-test "zix test: recordSentRange raises bytes_in_flight and onAckFrame drains it while growing the window" {
+test "zix http3: recordSentRange raises bytes_in_flight and onAckFrame drains it while growing the window" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -770,7 +770,7 @@ test "zix test: recordSentRange raises bytes_in_flight and onAckFrame drains it 
     try std.testing.expectEqual(start_window + 2400, conn.cc.congestion_window);
 }
 
-test "zix test: onAckFrame reacts to a lost packet with one congestion event and drops its bytes from flight" {
+test "zix http3: onAckFrame reacts to a lost packet with one congestion event and drops its bytes from flight" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -795,7 +795,7 @@ test "zix test: onAckFrame reacts to a lost packet with one congestion event and
     try std.testing.expect(conn.cc.congestion_window < before);
 }
 
-test "zix test: recordSentRange reclaims in-flight bytes when the ring overwrites a still-live slot" {
+test "zix http3: recordSentRange reclaims in-flight bytes when the ring overwrites a still-live slot" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -811,7 +811,7 @@ test "zix test: recordSentRange reclaims in-flight bytes when the ring overwrite
     try std.testing.expectEqual(@as(u64, max_sent_ranges * 100), conn.bytes_in_flight);
 }
 
-test "zix test: onAckFrame retires a send stream only once it is fully sent AND fully acked" {
+test "zix http3: onAckFrame retires a send stream only once it is fully sent AND fully acked" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -833,7 +833,7 @@ test "zix test: onAckFrame retires a send stream only once it is fully sent AND 
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams[0].unacked);
 }
 
-test "zix test: an overwritten live range still drains the owning stream's unacked so its slot frees" {
+test "zix http3: an overwritten live range still drains the owning stream's unacked so its slot frees" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -855,7 +855,7 @@ test "zix test: an overwritten live range still drains the owning stream's unack
     try std.testing.expectEqual(@as(u64, max_sent_ranges * 100), conn.bytes_in_flight);
 }
 
-test "zix test: a fully-sent stream whose tail is lost stays retransmittable, not freed" {
+test "zix http3: a fully-sent stream whose tail is lost stays retransmittable, not freed" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -874,7 +874,7 @@ test "zix test: a fully-sent stream whose tail is lost stays retransmittable, no
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams[0].sent);
 }
 
-test "zix test: onMaintenance recovers a lost tail via the Probe Timeout when no ACK ever arrives" {
+test "zix http3: onMaintenance recovers a lost tail via the Probe Timeout when no ACK ever arrives" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -908,7 +908,7 @@ test "zix test: onMaintenance recovers a lost tail via the Probe Timeout when no
     try std.testing.expect(conn.send_streams[0].active);
 }
 
-test "zix test: onMaintenance evicts a connection silent past the idle limit, keeps a live one" {
+test "zix http3: onMaintenance evicts a connection silent past the idle limit, keeps a live one" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
     conn.last_activity_us = 1_000_000;
@@ -920,7 +920,7 @@ test "zix test: onMaintenance evicts a connection silent past the idle limit, ke
     try std.testing.expect(conn.onMaintenance(1_000_000 + 30_000_000, 30_000_000).idle);
 }
 
-test "zix test: onMaintenance keeps retransmitting a lossy but live connection, never evicts on loss" {
+test "zix http3: onMaintenance keeps retransmitting a lossy but live connection, never evicts on loss" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -940,7 +940,7 @@ test "zix test: onMaintenance keeps retransmitting a lossy but live connection, 
     try std.testing.expectEqual(max_pto_backoff, conn.pto_backoff);
 }
 
-test "zix test: onMaintenance evicts an idle peer even with bytes still in flight" {
+test "zix http3: onMaintenance evicts an idle peer even with bytes still in flight" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
 
@@ -955,7 +955,7 @@ test "zix test: onMaintenance evicts an idle peer even with bytes still in fligh
     try std.testing.expect(m.idle);
 }
 
-test "zix test: onMaintenance evicts a connection the peer closed, whatever its recent activity" {
+test "zix http3: onMaintenance evicts a connection the peer closed, whatever its recent activity" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
     conn.last_activity_us = 100_000_000; // just active
@@ -968,7 +968,7 @@ test "zix test: onMaintenance evicts a connection the peer closed, whatever its 
     try std.testing.expect(!m.resend);
 }
 
-test "zix test: onAckFrame resets the PTO backoff when it acknowledges new data" {
+test "zix http3: onAckFrame resets the PTO backoff when it acknowledges new data" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var conn = Connection.init(&dcid, 1200, 10);
     conn.pto_backoff = 3;

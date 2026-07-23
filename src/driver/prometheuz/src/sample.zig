@@ -99,7 +99,7 @@ pub const MetricFamily = struct {
 
 const testing = std.testing;
 
-test "prometheuz test: sample label lookup" {
+test "prometheuz: sample label lookup" {
     const labels = [_]Label{
         .{ .name = "method", .value = "post" },
         .{ .name = "code", .value = "200" },
@@ -111,7 +111,7 @@ test "prometheuz test: sample label lookup" {
     try testing.expectEqual(@as(?[]const u8, null), value_sample.label("missing"));
 }
 
-test "prometheuz test: metric family histogram sum count and bucket" {
+test "prometheuz: metric family histogram sum count and bucket" {
     const bucket_low = Sample{
         .name = "http_request_duration_seconds_bucket",
         .labels = &.{.{ .name = "le", .value = "0.1" }},
@@ -141,7 +141,7 @@ test "prometheuz test: metric family histogram sum count and bucket" {
     try testing.expectEqual(@as(f64, 144320), family.countSample().?.value);
 }
 
-test "prometheuz test: metric family summary quantile" {
+test "prometheuz: metric family summary quantile" {
     const q50 = Sample{
         .name = "rpc_duration_seconds",
         .labels = &.{.{ .name = "quantile", .value = "0.5" }},

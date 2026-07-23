@@ -74,7 +74,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 A.1 varint decode" {
+test "zix http3: RFC 9000 A.1 varint decode" {
     try std.testing.expectEqual(@as(u64, 151288809941952652), (try read(&h("c2197c5eff14e88c"))).value);
     try std.testing.expectEqual(@as(usize, 8), (try read(&h("c2197c5eff14e88c"))).len);
     try std.testing.expectEqual(@as(u64, 494878333), (try read(&h("9d7f3e7d"))).value);
@@ -89,7 +89,7 @@ test "zix test: RFC 9000 A.1 varint decode" {
     try std.testing.expectError(error.Truncated, read(&h("c2")));
 }
 
-test "zix test: RFC 9000 16 varint encode and length boundaries" {
+test "zix http3: RFC 9000 16 varint encode and length boundaries" {
     var buf: [8]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &h("25"), buf[0..write(&buf, 37)]);
     try std.testing.expectEqualSlices(u8, &h("7bbd"), buf[0..write(&buf, 15293)]);

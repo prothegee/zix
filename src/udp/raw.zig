@@ -83,7 +83,7 @@ pub fn Raw(comptime handler: HandlerFn) type {
 
 fn noopHandler(_: []const u8, _: *const std.Io.net.IpAddress, _: *Sink) void {}
 
-test "zix test: Raw init, port zero returns PortNotConfigured" {
+test "zix udp: Raw init, port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -97,7 +97,7 @@ test "zix test: Raw init, port zero returns PortNotConfigured" {
     }, .{}));
 }
 
-test "zix test: Raw init, config preserved" {
+test "zix udp: Raw init, config preserved" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

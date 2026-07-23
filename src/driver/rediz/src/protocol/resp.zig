@@ -279,7 +279,7 @@ fn decodeFixed(arena: std.mem.Allocator, bytes: []const u8) !Reply {
     return decode(arena, &source);
 }
 
-test "rediz test: encode command frames array of bulk strings" {
+test "rediz protocol: encode command frames array of bulk strings" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
@@ -287,14 +287,14 @@ test "rediz test: encode command frames array of bulk strings" {
     try testing.expectEqualStrings("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n", out.items);
 }
 
-test "rediz test: encode command rejects empty" {
+test "rediz protocol: encode command rejects empty" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
     try testing.expectError(error.EmptyCommand, encodeCommand(testing.allocator, &out, &.{}));
 }
 
-test "rediz test: decode simple string, error and integer" {
+test "rediz protocol: decode simple string, error and integer" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -314,7 +314,7 @@ test "rediz test: decode simple string, error and integer" {
     try testing.expectEqual(@as(i64, -7), negative.integer);
 }
 
-test "rediz test: decode bulk string and null bulk" {
+test "rediz protocol: decode bulk string and null bulk" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -329,7 +329,7 @@ test "rediz test: decode bulk string and null bulk" {
     try testing.expectEqual(Reply.null, null_bulk);
 }
 
-test "rediz test: decode array, null array and nesting" {
+test "rediz protocol: decode array, null array and nesting" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -344,7 +344,7 @@ test "rediz test: decode array, null array and nesting" {
     try testing.expectEqual(Reply.null, null_array);
 }
 
-test "rediz test: decode resp3 null boolean double and big number" {
+test "rediz protocol: decode resp3 null boolean double and big number" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -363,7 +363,7 @@ test "rediz test: decode resp3 null boolean double and big number" {
     try testing.expectEqualStrings("3492890328409238509324850943850943825024385", big.big_number);
 }
 
-test "rediz test: decode resp3 map set push verbatim and bulk error" {
+test "rediz protocol: decode resp3 map set push verbatim and bulk error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -389,7 +389,7 @@ test "rediz test: decode resp3 map set push verbatim and bulk error" {
     try testing.expectEqualStrings("SYNTAX invalid syntax", bulk_err.errLine().?);
 }
 
-test "rediz test: decode rejects malformed frames" {
+test "rediz protocol: decode rejects malformed frames" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -402,7 +402,7 @@ test "rediz test: decode rejects malformed frames" {
     try testing.expectError(error.ConnectionClosed, decodeFixed(allocator, "*2\r\n+only-one\r\n"));
 }
 
-test "rediz test: decode guards nesting depth" {
+test "rediz protocol: decode guards nesting depth" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

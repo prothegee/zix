@@ -162,7 +162,7 @@ pub fn Table(comptime T: type, comptime capacity: usize) type {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: ConnId build, slice, and equality" {
+test "zix http3: ConnId build, slice, and equality" {
     const a = ConnId.fromSlice(&[_]u8{ 1, 2, 3, 4 });
     const b = ConnId.fromSlice(&[_]u8{ 1, 2, 3, 4 });
     const c = ConnId.fromSlice(&[_]u8{ 1, 2, 3, 5 });
@@ -172,7 +172,7 @@ test "zix test: ConnId build, slice, and equality" {
     try std.testing.expect(!a.eql(&c));
 }
 
-test "zix test: CID table put and find" {
+test "zix http3: CID table put and find" {
     var table = Table(u32, 4){};
     const id1 = ConnId.fromSlice(&[_]u8{ 0xaa, 0xbb });
     const id2 = ConnId.fromSlice(&[_]u8{ 0xcc, 0xdd });
@@ -187,7 +187,7 @@ test "zix test: CID table put and find" {
     try std.testing.expect(table.find(&missing) == null);
 }
 
-test "zix test: CID table hash index finds every entry at capacity, rejects overflow" {
+test "zix http3: CID table hash index finds every entry at capacity, rejects overflow" {
     var table = Table(u32, 64){};
 
     // Fill the table. Two-byte ids collide into buckets, so this exercises the open-addressing probe.
@@ -208,7 +208,7 @@ test "zix test: CID table hash index finds every entry at capacity, rejects over
     try std.testing.expect(table.find(&overflow) == null);
 }
 
-test "zix test: CID table addAlias resolves a second id to the same entry" {
+test "zix http3: CID table addAlias resolves a second id to the same entry" {
     var table = Table(u32, 4){};
     const dcid = ConnId.fromSlice(&[_]u8{ 0x01, 0x02 });
     const scid = ConnId.fromSlice(&[_]u8{ 0x09, 0x08, 0x07 });
@@ -222,7 +222,7 @@ test "zix test: CID table addAlias resolves a second id to the same entry" {
     try std.testing.expect(table.find(&dcid) == table.find(&scid));
 }
 
-test "zix test: CID table remove drops an entry and its alias, leaves others, is idempotent" {
+test "zix http3: CID table remove drops an entry and its alias, leaves others, is idempotent" {
     var table = Table(u32, 8){};
     const dcid = ConnId.fromSlice(&[_]u8{ 0x01, 0x02 });
     const scid = ConnId.fromSlice(&[_]u8{ 0x09, 0x08, 0x07 });
@@ -245,7 +245,7 @@ test "zix test: CID table remove drops an entry and its alias, leaves others, is
     try std.testing.expectEqual(@as(usize, 1), table.count);
 }
 
-test "zix test: CID table reuses a freed slot on the next put" {
+test "zix http3: CID table reuses a freed slot on the next put" {
     var table = Table(u32, 2){};
     const a = ConnId.fromSlice(&[_]u8{0x01});
     const b = ConnId.fromSlice(&[_]u8{0x02});
@@ -263,7 +263,7 @@ test "zix test: CID table reuses a freed slot on the next put" {
     try std.testing.expectEqual(@as(usize, 2), table.count);
 }
 
-test "zix test: CID table survives removing entries in a probe chain, clears tombstones when empty" {
+test "zix http3: CID table survives removing entries in a probe chain, clears tombstones when empty" {
     var table = Table(u32, 64){};
 
     // Fill it: two-byte ids collide into buckets, so this builds real open-addressing probe chains.
@@ -303,7 +303,7 @@ test "zix test: CID table survives removing entries in a probe chain, clears tom
     try std.testing.expectEqual(@as(u32, 999), table.find(&fresh).?.*);
 }
 
-test "zix test: CID table at() walks live slots and skips a freed one" {
+test "zix http3: CID table at() walks live slots and skips a freed one" {
     const Small = Table(u32, 4);
     var table = Small{};
     const a = ConnId.fromSlice(&[_]u8{0x01});

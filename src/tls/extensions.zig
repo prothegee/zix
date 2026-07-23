@@ -133,7 +133,7 @@ pub fn buildEncryptedExtensions(buf: []u8, opts: EncryptedExtensionsOptions) []c
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: extensions, EncryptedExtensions byte-exact vs RFC 8448" {
+test "zix tls: extensions, EncryptedExtensions byte-exact vs RFC 8448" {
     var groups: [18]u8 = undefined;
     _ = try std.fmt.hexToBytes(&groups, "001d00170018001901000101010201030104");
 
@@ -145,7 +145,7 @@ test "zix test: extensions, EncryptedExtensions byte-exact vs RFC 8448" {
     try std.testing.expectEqualSlices(u8, &expected, ee);
 }
 
-test "zix test: extensions, ALPN negotiate + emit + no overlap" {
+test "zix tls: extensions, ALPN negotiate + emit + no overlap" {
     var client_alpn: [14]u8 = undefined; // ["h2","http/1.1"]
     _ = try std.fmt.hexToBytes(&client_alpn, "000c02683208687474702f312e31");
 
@@ -163,7 +163,7 @@ test "zix test: extensions, ALPN negotiate + emit + no overlap" {
     try std.testing.expect(negotiateAlpn(&no_overlap, &prefs) == null);
 }
 
-test "zix test: extensions, SNI single ok + duplicate rejected" {
+test "zix tls: extensions, SNI single ok + duplicate rejected" {
     var single: [11]u8 = undefined;
     _ = try std.fmt.hexToBytes(&single, "0009000006736572766572");
     try std.testing.expect(validateSni(&single) == null);

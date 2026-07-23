@@ -292,7 +292,7 @@ fn unescapeText(arena: std.mem.Allocator, raw: []const u8, allow_quote_escape: b
 
 const testing = std.testing;
 
-test "prometheuz test: parser counter with labels" {
+test "prometheuz: parser counter with labels" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -317,7 +317,7 @@ test "prometheuz test: parser counter with labels" {
     try testing.expectEqual(@as(f64, 3), family.samples[1].value);
 }
 
-test "prometheuz test: parser escaped label values" {
+test "prometheuz: parser escaped label values" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -333,7 +333,7 @@ test "prometheuz test: parser escaped label values" {
     try testing.expectEqual(@as(f64, 1.458255915e9), sample.value);
 }
 
-test "prometheuz test: parser scalar without labels or timestamp" {
+test "prometheuz: parser scalar without labels or timestamp" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -347,7 +347,7 @@ test "prometheuz test: parser scalar without labels or timestamp" {
     try testing.expectEqual(@as(?i64, null), families[0].samples[0].timestamp_ms);
 }
 
-test "prometheuz test: parser special float values and negative timestamp" {
+test "prometheuz: parser special float values and negative timestamp" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -359,7 +359,7 @@ test "prometheuz test: parser special float values and negative timestamp" {
     try testing.expectEqual(@as(?i64, -3982045), sample.timestamp_ms);
 }
 
-test "prometheuz test: parser multi-line histogram family" {
+test "prometheuz: parser multi-line histogram family" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -384,7 +384,7 @@ test "prometheuz test: parser multi-line histogram family" {
     try testing.expectEqual(@as(f64, 144320), family.countSample().?.value);
 }
 
-test "prometheuz test: parser multi-line summary family" {
+test "prometheuz: parser multi-line summary family" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -407,7 +407,7 @@ test "prometheuz test: parser multi-line summary family" {
     try testing.expectEqual(@as(f64, 2693), family.countSample().?.value);
 }
 
-test "prometheuz test: parser multiple families, comments, and blank lines" {
+test "prometheuz: parser multiple families, comments, and blank lines" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -433,7 +433,7 @@ test "prometheuz test: parser multiple families, comments, and blank lines" {
     try testing.expectEqual(@as(f64, 8589934592), families[1].samples[0].value);
 }
 
-test "prometheuz test: parser rejects an unterminated label block" {
+test "prometheuz: parser rejects an unterminated label block" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

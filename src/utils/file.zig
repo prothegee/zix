@@ -63,7 +63,7 @@ pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename:
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: utils file extension" {
+test "zix utils: file extension" {
     try std.testing.expectEqualStrings("txt", extension("file.txt"));
     try std.testing.expectEqualStrings("gz", extension("file.tar.gz"));
     try std.testing.expectEqualStrings("", extension("file"));

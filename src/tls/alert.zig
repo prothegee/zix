@@ -94,13 +94,13 @@ pub fn parseInbound(body: []const u8) error{DecodeError}!Inbound {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-test "zix test: Alert, wire values" {
+test "zix tls: Alert, wire values" {
     try std.testing.expectEqual(@as(u8, 47), @intFromEnum(Alert.ILLEGAL_PARAMETER));
     try std.testing.expectEqual(@as(u8, 109), @intFromEnum(Alert.MISSING_EXTENSION));
     try std.testing.expectEqual(@as(u8, 120), @intFromEnum(Alert.NO_APPLICATION_PROTOCOL));
 }
 
-test "zix test: Alert, fatalRecord plaintext bytes" {
+test "zix tls: Alert, fatalRecord plaintext bytes" {
     var buf: [fatal_record_len]u8 = undefined;
     const rec = fatalRecord(&buf, .NO_APPLICATION_PROTOCOL);
 
@@ -108,7 +108,7 @@ test "zix test: Alert, fatalRecord plaintext bytes" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x78 }, rec);
 }
 
-test "zix test: Alert, parseInbound classifies close_notify vs fatal" {
+test "zix tls: Alert, parseInbound classifies close_notify vs fatal" {
     // close_notify (warning level 1, desc 0): clean closure, not fatal.
     const cn = try parseInbound(&[_]u8{ level_warning, desc_close_notify });
     try std.testing.expect(cn.isCloseNotify());

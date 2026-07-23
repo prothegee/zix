@@ -125,7 +125,7 @@ pub const TcpClient = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: TcpClient.recvMsg does not time out when data arrives immediately" {
+test "zix tcp: TcpClient.recvMsg does not time out when data arrives immediately" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -151,7 +151,7 @@ test "zix test: TcpClient.recvMsg does not time out when data arrives immediatel
     try std.testing.expectEqualSlices(u8, "hello", reply);
 }
 
-test "zix test: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+test "zix tcp: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -173,7 +173,7 @@ test "zix test: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives
     try std.testing.expectError(error.RecvTimeout, client.recvMsg(io, &buf));
 }
 
-test "zix test: TcpClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
+test "zix tcp: TcpClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -198,7 +198,7 @@ test "zix test: TcpClient.sendMsg succeeds within send_timeout_ms when the peer 
     try std.testing.expectEqual(@as(usize, 9), n);
 }
 
-test "zix test: TcpClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+test "zix tcp: TcpClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

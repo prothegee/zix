@@ -194,7 +194,7 @@ fn readWireRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
 
 const testing = std.testing;
 
-test "postgrez test: tls session read and write tunnel app data" {
+test "postgrez: tls session read and write tunnel app data" {
     var session = try testing.allocator.create(TlsSession);
     defer testing.allocator.destroy(session);
     session.* = .{
@@ -242,7 +242,7 @@ test "postgrez test: tls session read and write tunnel app data" {
     try testing.expectEqual(@as(usize, 0), session.bufferedLen());
 }
 
-test "postgrez test: tls channelBindingHash is sha256 of the cert" {
+test "postgrez: tls channelBindingHash is sha256 of the cert" {
     var session = try testing.allocator.create(TlsSession);
     defer testing.allocator.destroy(session);
     session.* = .{

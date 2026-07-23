@@ -84,7 +84,7 @@ pub const Http2ServerConfig = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: Http2ServerConfig required fields" {
+test "zix http2: Http2ServerConfig required fields" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -94,7 +94,7 @@ test "zix test: Http2ServerConfig required fields" {
     try std.testing.expectEqual(@as(u16, 8082), cfg.port);
 }
 
-test "zix test: Http2ServerConfig dispatch_model is required and stored as set" {
+test "zix http2: Http2ServerConfig dispatch_model is required and stored as set" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -103,7 +103,7 @@ test "zix test: Http2ServerConfig dispatch_model is required and stored as set" 
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix test: Http2ServerConfig worker and pool defaults to zero" {
+test "zix http2: Http2ServerConfig worker and pool defaults to zero" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -113,7 +113,7 @@ test "zix test: Http2ServerConfig worker and pool defaults to zero" {
     try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
-test "zix test: Http2ServerConfig stream and frame defaults" {
+test "zix http2: Http2ServerConfig stream and frame defaults" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -124,7 +124,7 @@ test "zix test: Http2ServerConfig stream and frame defaults" {
     try std.testing.expectEqual(@as(usize, 16384), cfg.max_body);
 }
 
-test "zix test: Http2ServerConfig logger defaults to null" {
+test "zix http2: Http2ServerConfig logger defaults to null" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -133,7 +133,7 @@ test "zix test: Http2ServerConfig logger defaults to null" {
     try std.testing.expect(cfg.logger == null);
 }
 
-test "zix test: Http2ServerConfig worker_stack_size_bytes default" {
+test "zix http2: Http2ServerConfig worker_stack_size_bytes default" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

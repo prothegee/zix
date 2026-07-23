@@ -299,7 +299,7 @@ fn futexWake(word: *std.atomic.Value(u32)) void {
 
 const testing = std.testing;
 
-test "postgrez test: pool init validates pool_size and starts empty" {
+test "postgrez: pool init validates pool_size and starts empty" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -319,7 +319,7 @@ test "postgrez test: pool init validates pool_size and starts empty" {
     try testing.expectEqual(@as(usize, 0), pool.waiterCount());
 }
 
-test "postgrez test: pool acquire retries then reports the connect error" {
+test "postgrez: pool acquire retries then reports the connect error" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -338,7 +338,7 @@ test "postgrez test: pool acquire retries then reports the connect error" {
     try testing.expectEqual(@as(usize, 0), pool.idleCount());
 }
 
-test "postgrez test: pool bookkeeping cycles a slot through release and discard" {
+test "postgrez: pool bookkeeping cycles a slot through release and discard" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -370,7 +370,7 @@ test "postgrez test: pool bookkeeping cycles a slot through release and discard"
     try testing.expectEqual(@as(usize, 0), pool.idleCount());
 }
 
-test "postgrez test: pool fully held sheds when parking is off" {
+test "postgrez: pool fully held sheds when parking is off" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -395,7 +395,7 @@ fn parkedAcquire(pool: *Pool, out: *?*Conn) void {
     out.* = pool.acquire() catch null;
 }
 
-test "postgrez test: pool release hands the connection to the parked waiter" {
+test "postgrez: pool release hands the connection to the parked waiter" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -428,7 +428,7 @@ test "postgrez test: pool release hands the connection to the parked waiter" {
     pool.in_use[0] = false;
 }
 
-test "postgrez test: pool sheds PoolBusy beyond the waiter bound" {
+test "postgrez: pool sheds PoolBusy beyond the waiter bound" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 

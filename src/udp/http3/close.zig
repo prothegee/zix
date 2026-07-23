@@ -144,7 +144,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
     return out;
 }
 
-test "zix test: RFC 9000 19.19 CONNECTION_CLOSE frame variants" {
+test "zix http3: RFC 9000 19.19 CONNECTION_CLOSE frame variants" {
     const close_quic = try parseConnectionClose(&h("1c07000" ++ "26f6b"));
     try std.testing.expect(!close_quic.is_application);
     try std.testing.expectEqual(@as(u64, 7), close_quic.error_code);
@@ -157,7 +157,7 @@ test "zix test: RFC 9000 19.19 CONNECTION_CLOSE frame variants" {
     try std.testing.expectEqual(@as(usize, 0), close_app.reason.len);
 }
 
-test "zix test: RFC 9000 10.2 closing and draining states" {
+test "zix http3: RFC 9000 10.2 closing and draining states" {
     try std.testing.expectEqual(CloseState.closing, closeTransition(.open, .send_close).?);
     try std.testing.expectEqual(CloseState.draining, closeTransition(.open, .recv_close).?);
     try std.testing.expectEqual(CloseState.draining, closeTransition(.closing, .recv_close).?);
@@ -167,7 +167,7 @@ test "zix test: RFC 9000 10.2 closing and draining states" {
     try std.testing.expect(maySendInState(.closing));
 }
 
-test "zix test: RFC 9000 10.3 stateless reset detection and size" {
+test "zix http3: RFC 9000 10.3 stateless reset detection and size" {
     const token: [16]u8 = .{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf };
 
     try std.testing.expect(isStatelessReset(&h("4111223344556677" ++ "88" ++ "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"), token));
@@ -178,7 +178,7 @@ test "zix test: RFC 9000 10.3 stateless reset detection and size" {
     try std.testing.expect(resetSizeAllowed(20, 59));
 }
 
-test "zix test: RFC 9000 8.1 anti-amplification and Initial floor" {
+test "zix http3: RFC 9000 8.1 anti-amplification and Initial floor" {
     var anti = AntiAmplification{};
     anti.onReceive(1200);
     try std.testing.expect(anti.maySend(3600));

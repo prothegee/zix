@@ -293,7 +293,7 @@ pub fn encodeParamsForOids(arena: std.mem.Allocator, param_oids: []const u32, ar
 
 const testing = std.testing;
 
-test "postgrez test: encodeParamsForOids binary on match, text on mismatch" {
+test "postgrez: encodeParamsForOids binary on match, text on mismatch" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -317,7 +317,7 @@ test "postgrez test: encodeParamsForOids binary on match, text on mismatch" {
     try testing.expectEqual(@as(?[]const u8, null), with_null.values[0]);
 }
 
-test "postgrez test: encodeParamsForOids rejects a count mismatch" {
+test "postgrez: encodeParamsForOids rejects a count mismatch" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 

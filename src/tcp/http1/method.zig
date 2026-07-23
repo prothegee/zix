@@ -127,7 +127,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix test: tcp http method fn/s" {
+test "zix http1: tcp http method" {
     const all_codes = [_]Code{
         Code.GET,
         Code.HEAD,
