@@ -18,7 +18,7 @@ pub fn logSystem(cfg: TcpServerConfig, comptime fmt: []const u8, args: anytype) 
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix tcp: " ++ fmt ++ "\n", args);
+    if (comptime builtin.mode == .Debug) std.debug.print("zix tcp dispatch: " ++ fmt ++ "\n", args);
 }
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
@@ -355,7 +355,7 @@ pub fn frameAdapter(comptime frame_fn: FrameFn) HandlerFn {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix tcp: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
+test "zix tcp dispatch: orderPhysicalCoresFirst puts distinct cores before SMT siblings" {
     var cpus = [_]u32{ 0, 1, 2, 3, 4, 5 };
     const keys = [_]u64{ 0, 0, 1, 1, 2, 2 };
 
@@ -364,7 +364,7 @@ test "zix tcp: orderPhysicalCoresFirst puts distinct cores before SMT siblings" 
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 1, 3, 5 }, &cpus);
 }
 
-test "zix tcp: orderPhysicalCoresFirst keeps mask order on unique keys" {
+test "zix tcp dispatch: orderPhysicalCoresFirst keeps mask order on unique keys" {
     var cpus = [_]u32{ 3, 7, 11 };
     const keys = [_]u64{ 30, 10, 20 };
 
@@ -373,7 +373,7 @@ test "zix tcp: orderPhysicalCoresFirst keeps mask order on unique keys" {
     try std.testing.expectEqualSlices(u32, &.{ 3, 7, 11 }, &cpus);
 }
 
-test "zix tcp: orderPhysicalCoresFirst handles uneven sibling groups" {
+test "zix tcp dispatch: orderPhysicalCoresFirst handles uneven sibling groups" {
     var cpus = [_]u32{ 0, 1, 2 };
     const keys = [_]u64{ 7, 7, 9 };
 
@@ -382,6 +382,6 @@ test "zix tcp: orderPhysicalCoresFirst handles uneven sibling groups" {
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 1 }, &cpus);
 }
 
-test "zix tcp: getAvailableCpuCount is at least one" {
+test "zix tcp dispatch: getAvailableCpuCount is at least one" {
     try std.testing.expect(getAvailableCpuCount() >= 1);
 }
