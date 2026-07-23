@@ -275,7 +275,7 @@ var server = try zix.Tcp.Server.init(myHandler, .{
 });
 ```
 
-See `docs/hld-logger.md` for log line format and config details.
+See `docs/hld-logger-en.md` for log line format and config details.
 
 ---
 

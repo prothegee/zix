@@ -344,7 +344,7 @@ var server = try MyServer.init(.{
 
 `frame()` is not auto-called by the UDP server (UDP has no framing layer). Use `logger.frame()` manually inside custom processing logic if needed.
 
-See `docs/hld-logger.md` for log line format and config details.
+See `docs/hld-logger-en.md` for log line format and config details.
 
 ---
 

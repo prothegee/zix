@@ -175,7 +175,7 @@ var server = try zix.Uds.Server.init(.{
 });
 ```
 
-See `docs/hld-logger.md` for log line format and config details.
+See `docs/hld-logger-en.md` for log line format and config details.
 
 ---
 

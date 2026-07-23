@@ -1,6 +1,6 @@
 # LLD: zix.Http
 
-Internal implementation details for the HTTP layer. For design rationale see [`docs/hld-http.md`](hld-http.md).
+Internal implementation details for the HTTP layer. For design rationale see [`docs/hld-http-en.md`](hld-http-en.md).
 
 ---
 
