@@ -95,6 +95,7 @@ Allocator koneksi dipegang oleh pemanggil: memakai arena berarti row hasil map t
 | `Pipeline` | batch beberapa command dalam satu round trip: `begin`, `add`, `sync` |
 | `Executor` | fleet batching di atas pool untuk query berparameter throughput tinggi |
 | `Transport` | dispatch EPOLL/URING yang di-multiplex (`Config.dispatch_model`): `open`, `submit`, `poll`, `pending` |
+| `dispatch.Line` | pipeline satu-koneksi tanpa reactor untuk event loop milik pemanggil: `open`, `submit` (men-stage), `flush`, `pump`, `pending` |
 | `Pool` | pool koneksi thread-safe: `acquire`, `release`, `discard` |
 | `CopyIn` / `CopyOut` | streaming COPY |
 
