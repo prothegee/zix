@@ -794,6 +794,7 @@ fn UringWorker(comptime ServerPtr: type) type {
                         .tls_accept => worker.handleTlsAccept(cqe),
                         .tls_recv => worker.handleTlsRecv(cqe, decoded),
                         .tls_send => worker.handleTlsSend(cqe, decoded),
+                        .external => {},
                     }
                 }
             }
