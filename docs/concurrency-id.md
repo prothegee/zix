@@ -56,7 +56,7 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 
 **Persyaratan OS:** `SO_REUSEPORT` (Linux >= 3.9, macOS, BSD).
 
-**Contoh** (`examples/http_basic.zig` dengan POOL eksplisit):
+**Contoh** (`examples/http_basic_2_pool.zig` dengan POOL eksplisit):
 ```zig
 pub fn main(process: std.process.Init) !void {
     var server = zix.Http.Server.init(&[_]zix.Http.Route{
