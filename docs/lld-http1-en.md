@@ -96,7 +96,7 @@ takeWebSocket():          read + clear                  // called by the engine 
 ### RespSink: per-event response coalescing
 
 ```zig
-RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
+RespSink = { fd, buf, len, off, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
@@ -107,9 +107,13 @@ append(bytes):
   bytes.len > buf.len        -> grow to fit when growable, else flush + write through directly
   len + bytes.len > buf.len  -> grow to fit when growable, else flush first
   else                       -> memcpy into buf
-flush(): one writeAllDirectFD(buf[0..len]), len = 0, failed sticky on error
+flush(): one writeAllDirectFD(buf[off..len]), len = 0, off = 0, failed sticky on error
 grow(need): realloc buf (power-of-two) up to grow_cap, never shrinks, false when ungrowable
+reserve(max_body): buf[HEADER_BUF_SIZE..][0..max_body] when nothing is staged, else null
+commitSimple(status, ct, body_len): header right-aligned ending at HEADER_BUF_SIZE, off = header start
 ```
+
+`reserve` / `commitSimple` (surfaced to handlers as `responseReserve` / `responseCommit`) let a handler that builds its body dynamically render straight into the sink buffer: the body bytes are written exactly once, into the buffer the response sends from, and the engine builds the simple header directly in front of them. `off` marks the dead prefix before the right-aligned header, so the staged region is `buf[off..len]`. Nothing is staged on a refused reserve (pipelined batch in progress, or the region does not fit), and the caller falls back to the `writeAllFD` path.
 
 The EPOLL request loop (`serveEpollConn`) installs the sink with no `grow_allocator`, so a pipelined burst of N responses costs one `write()` and an oversized response flushes the batch then writes straight through. The URING loop installs the sink over the per-connection `send_buf` with `grow_allocator` set and `grow_cap = URING_SEND_BUF_MAX` (1 MiB): a response larger than the staged buffer grows it in place (power-of-two realloc) so the whole reply still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write (`writeAllDirectFD`). The grown buffer never shrinks, so the recycled connection reuses it for later requests. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
 
@@ -173,7 +177,7 @@ The IMF-fixdate string is reformatted at most once per second per thread, and th
 | `sendSimpleNoBodyFD` | `buildSimpleHeader` only, Content-Length set to the would-be body size (HEAD) |
 | `sendJsonFD` | `sendSimpleFD` with `application/json` |
 | `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `sendGzipFD` | heap-allocates 256 KB out + flate window + compressor (stack safety), compresses with `std.compress.flate` `.gzip`, then header (`Content-Encoding: gzip`) + compressed bytes |
+| `sendGzipFD` | a body under 64 KiB compresses via `compression.flate_fast` (in-tree greedy fixed-Huffman gzip, several times faster than the std matcher, no per-stream state init), larger bodies keep the `std.compress.flate` `.gzip` path over the per-worker encode scratch, then header (`Content-Encoding: gzip`) + compressed bytes |
 | `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, no Content-Length |
 | `sendChunkFD` | `{x}\r\n` + data + `\r\n`, zero-length data is a no-op (would terminate the body) |
 | `sendChunkedEndFD` | `0\r\n\r\n` |
@@ -384,7 +388,8 @@ UringConn = {
     send_heap: bool = false,          // send_buf switched to a heap buffer by the sink's grow path
     scan_from: usize = 0,             // split-head scan watermark (resume the CRLFCRLF search)
     drain: usize = 0,                 // oversize-body bytes still to discard (mirrors Conn.drain)
-    drain_close: bool = false,
+    drain_received: usize = 0,        // body bytes consumed so far, served as the received count
+    pending_head_len: usize = 0,      // head bytes kept at the buf front for the deferred invoke
     ws: ?WsFrameFn = null,
     direct: []const u8 = &.{},        // zero-copy cache replay in flight (pinned slab bytes)
     direct_slot: u32 = 0,
@@ -401,21 +406,32 @@ UringConn = {
 
 ```
 1. armAccept (multishot)
-2. submit_and_wait(1), copy_cqes into a 512-entry stack array
-3. per CQE, switch on user_data.op:
-      accept -> handleAccept   // re-arm on !IORING_CQE_F_MORE, alloc conn, armRecv
+2. wait_nr > 1: arm the 20us coalesce timer (stall guard)
+3. submit_and_wait(wait_nr), copy_cqes into a 512-entry stack array
+4. wait_nr = clamp(count / 2, 1, 32)
+5. per CQE, switch on user_data.op:
+      accept -> handleAccept   // re-arm on !IORING_CQE_F_MORE, alloc conn, armRecv, ring.submit()
       recv   -> handleRecv
       send   -> handleSend
       close  -> no-op          // teardown completion, slot already recycled
+6. every 16 CQEs of a batch >= 128 deep: ring.submit() when SQEs are staged
 ```
+
+Step 6 is the intra-batch submit: in a deep completion batch the last response would otherwise wait for every earlier request's dispatch before its send SQE even reaches the kernel, which multiplies per-request dispatch cost into closed-loop latency. Shallow batches skip the stride (they drain in microseconds, and the extra enters would tax the high-rate low-concurrency path).
+
+Steps 2 to 4 are the adaptive wakeup coalescing: a hot loop (large reaps) waits for up to 32 completions per enter instead of one, so staggered arrivals do not wake the worker once per completion, and the 20us timeout SQE guarantees a lone completion is never held past the window. A cooling loop decays back to single-completion waits within a pass. The `ring.submit()` inside handleAccept pushes the fresh connection's recv SQE immediately (accept-to-first-byte is what a churn-heavy closed loop measures), instead of after the rest of the batch dispatches.
 
 #### armRecv() / handleRecv() / dispatch()
 
-`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`. A body larger than `conn.buf` is answered with an empty body, `conn.drain` is set to the unread remainder, and the drain (below) takes over. Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`.
+`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`. A body larger than `conn.buf` defers its handler: the head bytes stay at the front of `conn.buf`, `conn.drain` is set to the unread remainder, and the drain (below) counts it off the socket before the handler runs with `req.bodyReceived()` set to the counted total (the body slice stays empty). Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`. The staged window is `send_buf[staged_off..][0..staged]`: a reserve-committed response starts at the sink's `off`, and a short send advances the window in place instead of shifting the remainder to the front.
 
 #### armDrainRecv()
 
-The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down and re-arms until `conn.drain` reaches zero, then resumes normal reads (or closes when `drain_close`). Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain-{epoll,uring}` runners, which pipeline an over-large POST then a follow-up GET on one keep-alive connection.
+The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down (accumulating `conn.drain_received`) and re-arms until `conn.drain` reaches zero, then serves the deferred request through the normal dispatch path: the head bytes survived at the front of `conn.buf` because `MSG_TRUNC` never writes it. Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain-{epoll,uring}` runners, which pipeline an over-large POST then a follow-up GET on one keep-alive connection.
+
+#### watchExternal() / the external op
+
+Multishot POLLIN watch for a foreign fd (a driver socket) on the worker's ring, armed once from handler context through `core.uringWatchFd` (the trampoline `run()` installs per worker). Each CQE routes to the caller-registered `core.tl_external_cb` on the worker thread, and the completion path re-arms a lapsed multishot itself while the fd stays alive (a negative res drops the watch). A full submission queue parks the arm as an `.external` process-queue entry (re-armed by drainParked), so a watch is never dropped while parking has room. This is what lets a worker own pipelined driver connections (`postgrez.dispatch.Line`) on its own ring.
 
 #### WebSocket on the ring
 

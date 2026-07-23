@@ -96,7 +96,7 @@ takeWebSocket():          baca + bersihkan              // dipanggil engine sete
 ### RespSink: penggabungan response per-event
 
 ```zig
-RespSink = { fd, buf, len, failed, grow_allocator, grow_cap }
+RespSink = { fd, buf, len, off, failed, grow_allocator, grow_cap }
 threadlocal tl_resp_sink: ?*RespSink = null
 ```
 
@@ -107,9 +107,13 @@ append(bytes):
   bytes.len > buf.len        -> tumbuhkan agar muat bila growable, selain itu flush + tulis langsung
   len + bytes.len > buf.len  -> tumbuhkan agar muat bila growable, selain itu flush dulu
   selain itu                 -> memcpy ke buf
-flush(): satu writeAllDirectFD(buf[0..len]), len = 0, failed lengket saat error
+flush(): satu writeAllDirectFD(buf[off..len]), len = 0, off = 0, failed lengket saat error
 grow(need): realloc buf (power-of-two) hingga grow_cap, tidak pernah menyusut, false bila tak-growable
+reserve(max_body): buf[HEADER_BUF_SIZE..][0..max_body] saat tidak ada yang ter-stage, selain itu null
+commitSimple(status, ct, body_len): header rata-kanan berakhir di HEADER_BUF_SIZE, off = awal header
 ```
+
+`reserve` / `commitSimple` (dibuka ke handler sebagai `responseReserve` / `responseCommit`) membuat handler yang membangun body secara dinamis me-render langsung ke buffer sink: byte body ditulis tepat sekali, ke buffer yang dipakai response untuk dikirim, dan engine membangun header sederhana tepat di depannya. `off` menandai prefix mati sebelum header rata-kanan, jadi region ter-stage adalah `buf[off..len]`. Tidak ada yang ter-stage saat reserve ditolak (batch pipelined sedang berjalan, atau region tidak muat), dan caller jatuh kembali ke jalur `writeAllFD`.
 
 Loop request EPOLL (`serveEpollConn`) memasang sink tanpa `grow_allocator`, jadi burst pipelined N response berbiaya satu `write()` dan response oversized mem-flush batch lalu menulis langsung. Loop URING memasang sink di atas `send_buf` per-koneksi dengan `grow_allocator` diset dan `grow_cap = URING_SEND_BUF_MAX` (1 MiB): response yang lebih besar dari buffer ter-stage menumbuhkannya di tempat (realloc power-of-two) sehingga seluruh balasan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir (`writeAllDirectFD`). Buffer yang ditumbuhkan tidak pernah menyusut, jadi koneksi yang didaur ulang memakainya ulang untuk request berikutnya. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
 
@@ -173,7 +177,7 @@ String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan
 | `sendSimpleNoBodyFD` | `buildSimpleHeader` saja, Content-Length diisi ukuran body seandainya ada (HEAD) |
 | `sendJsonFD` | `sendSimpleFD` dengan `application/json` |
 | `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `sendGzipFD` | alokasi heap 256 KB out + flate window + compressor (keamanan stack), kompresi `std.compress.flate` `.gzip`, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
+| `sendGzipFD` | body di bawah 64 KiB dikompresi via `compression.flate_fast` (gzip fixed-Huffman greedy in-tree, beberapa kali lebih cepat dari matcher std, tanpa init state per-stream), body lebih besar tetap lewat jalur `std.compress.flate` `.gzip` di atas encode scratch per-worker, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
 | `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, tanpa Content-Length |
 | `sendChunkFD` | `{x}\r\n` + data + `\r\n`, data kosong adalah no-op (akan mengakhiri body) |
 | `sendChunkedEndFD` | `0\r\n\r\n` |
@@ -384,7 +388,8 @@ UringConn = {
     send_heap: bool = false,          // send_buf beralih ke buffer heap lewat jalur grow sink
     scan_from: usize = 0,             // watermark scan split-head (lanjutkan pencarian CRLFCRLF)
     drain: usize = 0,                 // byte body oversize yang masih harus dibuang (mirror Conn.drain)
-    drain_close: bool = false,
+    drain_received: usize = 0,        // byte body yang sudah terkonsumsi, disajikan sebagai received count
+    pending_head_len: usize = 0,      // byte head disimpan di depan buf untuk invoke yang ditunda
     ws: ?WsFrameFn = null,
     direct: []const u8 = &.{},        // replay cache zero-copy yang in-flight (byte slab ter-pin)
     direct_slot: u32 = 0,
@@ -401,20 +406,31 @@ UringConn = {
 
 ```
 1. armAccept (multishot)
-2. submit_and_wait(1), copy_cqes ke array stack 512-entri
-3. per CQE, switch pada user_data.op:
-      accept -> handleAccept   // re-arm saat !IORING_CQE_F_MORE, alloc conn, armRecv
+2. wait_nr > 1: pasang timer coalesce 20us (penjaga stall)
+3. submit_and_wait(wait_nr), copy_cqes ke array stack 512-entri
+4. wait_nr = clamp(count / 2, 1, 32)
+5. per CQE, switch pada user_data.op:
+      accept -> handleAccept   // re-arm saat !IORING_CQE_F_MORE, alloc conn, armRecv, ring.submit()
       recv   -> handleRecv
       send   -> handleSend
+6. tiap 16 CQE dari batch berkedalaman >= 128: ring.submit() saat ada SQE ter-stage
 ```
+
+Langkah 6 adalah intra-batch submit: pada batch completion yang dalam, response terakhir kalau tidak begitu harus menunggu dispatch semua request sebelumnya sebelum SQE send-nya sampai ke kernel, yang melipatgandakan biaya dispatch per-request menjadi latency closed-loop. Batch dangkal melewati stride ini (habis dalam hitungan mikrodetik, dan enter ekstra malah membebani jalur high-rate low-concurrency).
+
+Langkah 2 sampai 4 adalah wakeup coalescing adaptif: loop yang panas (reap besar) menunggu hingga 32 completion per enter alih-alih satu, sehingga kedatangan yang tersebar tidak membangunkan worker sekali per completion, dan SQE timeout 20us menjamin completion tunggal tidak pernah tertahan melewati jendela itu. Loop yang mendingin turun kembali ke tunggu satu-completion dalam satu pass. `ring.submit()` di dalam handleAccept mendorong SQE recv koneksi baru segera (accept-to-first-byte adalah yang diukur closed loop dengan churn tinggi), bukan setelah sisa batch selesai di-dispatch.
 
 #### armRecv() / handleRecv() / dispatch()
 
-`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker. Body yang lebih besar dari `conn.buf` dijawab dengan body kosong, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) mengambil alih. Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`.
+`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker. Body yang lebih besar dari `conn.buf` menunda handler-nya: byte head tetap di depan `conn.buf`, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) menghitungnya dari socket sebelum handler berjalan dengan `req.bodyReceived()` berisi total terhitung (slice body tetap kosong). Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`. Jendela ter-stage adalah `send_buf[staged_off..][0..staged]`: response hasil reserve-commit mulai di `off` milik sink, dan short send memajukan jendela di tempat alih-alih menggeser sisa ke depan.
 
 #### armDrainRecv()
 
-Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras dan re-arm sampai `conn.drain` mencapai nol, lalu kembali ke pembacaan normal (atau menutup saat `drain_close`). Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain-{epoll,uring}`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive.
+Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras (mengakumulasi `conn.drain_received`) dan re-arm sampai `conn.drain` mencapai nol, lalu menyajikan request yang ditunda melalui jalur dispatch normal: byte head selamat di depan `conn.buf` karena `MSG_TRUNC` tidak pernah menulis buffer. Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain-{epoll,uring}`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive.
+
+#### watchExternal() / op external
+
+Watch POLLIN multishot untuk fd asing (socket driver) di ring milik worker, di-arm sekali dari konteks handler melalui `core.uringWatchFd` (trampoline yang dipasang `run()` per worker). Setiap CQE dirutekan ke `core.tl_external_cb` yang didaftarkan pemanggil di thread worker, dan jalur completion me-re-arm sendiri multishot yang lapsed selama fd masih hidup (res negatif menjatuhkan watch). Submission queue yang penuh mem-park arm sebagai entri process-queue `.external` (di-re-arm oleh drainParked), sehingga watch tidak pernah hilang selama parking punya ruang. Inilah yang membuat worker bisa memiliki koneksi driver pipelined (`postgrez.dispatch.Line`) di ring-nya sendiri.
 
 #### WebSocket di ring
 
