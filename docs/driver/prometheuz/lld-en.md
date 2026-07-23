@@ -22,7 +22,7 @@ flowchart TB
 
 ### Chunked decoding
 
-Real requirement, not speculative: node-exporter's Go server (`net/http`) sends `Transfer-Encoding: chunked` with no `Content-Length` for `/metrics`, so this path is exercised by the driver's most basic example. `readChunkedBody` maintains a small `carry` buffer seeded with whatever body bytes were already read into the head-scan buffer, then loops:
+Real requirement, not speculative: node-exporter sends `Transfer-Encoding: chunked` with no `Content-Length` for `/metrics`, so this path is exercised by the driver's most basic example. `readChunkedBody` maintains a small `carry` buffer seeded with whatever body bytes were already read into the head-scan buffer, then loops:
 
 1. `takeLine` - read up to the next `\r\n`, pulling more bytes from the socket into `carry` as needed. That line is the chunk-size line: a `;` extension suffix is stripped before parsing the size as hex.
 2. Size `0` ends the body (trailer headers, if any, are read but not preserved - the socket closes right after regardless).

@@ -22,7 +22,7 @@ flowchart TB
 
 ### Decoding chunked
 
-Kebutuhan nyata, bukan spekulatif: server Go milik node-exporter (`net/http`) mengirim `Transfer-Encoding: chunked` tanpa `Content-Length` untuk `/metrics`, sehingga jalur ini dilewati example paling dasar milik driver. `readChunkedBody` memegang buffer `carry` kecil yang diisi dengan byte body yang sudah terbaca ke buffer head-scan, lalu loop:
+Kebutuhan nyata, bukan spekulatif: node-exporter mengirim `Transfer-Encoding: chunked` tanpa `Content-Length` untuk `/metrics`, sehingga jalur ini dilewati example paling dasar milik driver. `readChunkedBody` memegang buffer `carry` kecil yang diisi dengan byte body yang sudah terbaca ke buffer head-scan, lalu loop:
 
 1. `takeLine` - baca sampai `\r\n` berikutnya, menarik lebih banyak byte dari socket ke `carry` sesuai kebutuhan. Baris itu adalah baris ukuran chunk: akhiran extension `;` dibuang dulu sebelum ukurannya diparse sebagai hex.
 2. Ukuran `0` mengakhiri body (header trailer, bila ada, dibaca tapi tidak disimpan - socket tetap tertutup segera setelahnya).
