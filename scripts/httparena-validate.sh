@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-httparena.sh - Validate one HttpArena framework against the LOCAL zix checkout.
+# httparena-validate.sh - Validate one HttpArena framework against the LOCAL zix checkout.
 #
 # Behaves like HttpArena/scripts/validate.sh (builds httparena-<framework>, runs it, probes the
 # subscribed endpoints, reports PASS / FAIL), but for zix entries it stages the local zix source
@@ -8,18 +8,18 @@
 #
 # Args (flags anywhere, positionals are <framework> [httparena-dir]):
 #   <framework>       Required. Framework to validate (e.g. zix_uring_http1-ed25519).
-#   [httparena-dir]   Optional. HttpArena folder (default: <script-dir>/../HttpArena).
+#   [httparena-dir]   Optional. HttpArena folder (default: sibling HttpArena next to the zix checkout).
 #   --source MODE     Optional. "local" (default, stages this zix checkout) or "remote".
-#   --zix-dir DIR     Optional. Local zix checkout for --source local (default: script's dir).
+#   --zix-dir DIR     Optional. Local zix checkout for --source local (default: the zix checkout above scripts/).
 #
 # --source local keeps artifacts temporary (removed on exit): rsyncs zix into gitignored
 # vendor/zix, swaps the Dockerfile vendor-fetch RUN for COPY, and drops a build.sh for the
 # HttpArena build hook (validate.sh runs frameworks/<fw>/build.sh when present).
 #
 # Usage:
-#   ./validate-httparena.sh zix_uring_http1-ed25519
-#   ./validate-httparena.sh zix_epoll_http1-ed25519 ../HttpArena
-#   ./validate-httparena.sh zix_uring_http2-ed25519 /path/HttpArena --source local --zix-dir /path/zix
+#   ./scripts/httparena-validate.sh entry_name
+#   ./scripts/httparena-validate.sh entry_name ../HttpArena
+#   ./scripts/httparena-validate.sh entry_name /path/HttpArena --source local --zix-dir /path/zix
 
 set -euo pipefail
 
@@ -60,10 +60,10 @@ fi
 
 # [httparena-dir] defaults to a sibling HttpArena checkout next to this repo.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${2:-$SELF_DIR/../HttpArena}"
+REPO_DIR="${2:-$SELF_DIR/../../HttpArena}"
 
-# --zix-dir defaults to this script's directory.
-ZIX_DIR="${ZIX_DIR:-$SELF_DIR}"
+# --zix-dir defaults to the zix checkout above scripts/.
+ZIX_DIR="${ZIX_DIR:-$SELF_DIR/..}"
 
 VALIDATE="$REPO_DIR/scripts/validate.sh"
 if [ ! -f "$VALIDATE" ]; then
