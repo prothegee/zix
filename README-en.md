@@ -16,6 +16,17 @@
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
+<hr>
+
+<div align="center">
+    <img src="https://img.shields.io/badge/Language-Zig-orange">
+</div>
+<div align="center">
+    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+</div>
+
+<hr>
+
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Where the wire meets the will.</i>
 </p>
@@ -28,7 +39,7 @@
     <i>No hidden cost. Just clean-metal and honest code - predictable by principle</i>
 </p>
 
----
+<hr>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>You are the thinker. Tinker.. Assembler... The builder, Not just as user/coder....</i>

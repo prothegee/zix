@@ -18,8 +18,7 @@
     <img src="https://img.shields.io/badge/Language-Zig-orange">
 </div>
 <div align="center">
-    <img src="https://img.shields.io/badge/x86_64-linux_gnu-brightgreen">
-    <img src="https://img.shields.io/badge/x86_64-linux_musl-brightgreen">
+    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
 </div>
 
 <hr>
