@@ -16,6 +16,22 @@
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
+<hr>
+
+<div align="center">
+    <img src="https://img.shields.io/badge/Language-Zig-orange">
+</div>
+<div align="center">
+    <img src="https://img.shields.io/badge/x86__64-Linux-green">
+    <img src="https://img.shields.io/badge/x86__64-Windows-red">
+    <img src="https://img.shields.io/badge/aarch64-MacOS-red">
+    <img src="https://img.shields.io/badge/x86__64-FreeBSD-red">
+    <img src="https://img.shields.io/badge/x86__64-NetBSD-red">
+    <img src="https://img.shields.io/badge/x86__64-OpenBSD-red">
+</div>
+
+<hr>
+
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Di mana penghubung bertemu kehendak.</i>
 </p>
@@ -28,7 +44,7 @@
     <i>Tanpa cost tersembunyi. Hanya clean-metal dan kode yang transparan - terprediksi berdasarkan prinsip</i>
 </p>
 
----
+<hr>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Kamu adalah pemikir. Pengutak-atik.. Perakit... Pembangun, Bukan hanya pengguna/programmer....</i>
