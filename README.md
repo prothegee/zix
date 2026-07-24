@@ -18,7 +18,12 @@
     <img src="https://img.shields.io/badge/Language-Zig-orange">
 </div>
 <div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+    <img src="https://img.shields.io/badge/x86__64-Linux-green">
+    <img src="https://img.shields.io/badge/x86__64-Windows-red">
+    <img src="https://img.shields.io/badge/aarch64-MacOS-red">
+    <img src="https://img.shields.io/badge/x86__64-FreeBSD-red">
+    <img src="https://img.shields.io/badge/x86__64-NetBSD-red">
+    <img src="https://img.shields.io/badge/x86__64-OpenBSD-red">
 </div>
 
 <hr>
