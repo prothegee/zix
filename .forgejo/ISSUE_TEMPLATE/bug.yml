@@ -31,12 +31,27 @@ body:
         - other
     validations:
       required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: "What platform are you on?"
+      options:
+        - x86_64-linux
+        - x86_64-windows
+        - x86_64-netbsd
+        - x86_64-freebsd
+        - x86_64-openbsd
+        - aarch64-linux
+        - aarch64-macos
+    validations:
+      required: true
   - type: input
     id: version
     attributes:
       label: Zix Version
       description: "The version or commit hash you are using"
-      placeholder: "0.1.0"
+      placeholder: "MAJOR.MINOR.PATCH"
     validations:
       required: true
   - type: textarea
