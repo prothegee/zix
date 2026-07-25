@@ -25,12 +25,25 @@ const MSG_MAX: usize = 4096;
 
 // --------------------------------------------------------- //
 
+/// Sentinel for "no member fd". Windows descriptors are opaque pointers, POSIX are ints.
+const NO_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
+/// Whether fd still refers to an open descriptor. Probes with fcntl(F_GETFD),
+/// a closed fd returns EBADF. Windows has no cheap probe here, so members are
+/// assumed live and pruned when a send to them fails.
+fn fdAlive(fd: std.posix.fd_t) bool {
+    if (comptime @import("builtin").os.tag == .windows) return true;
+
+    const rc = std.os.linux.fcntl(fd, std.posix.F.GETFD, 0);
+    return std.posix.errno(rc) == .SUCCESS;
+}
+
 /// One connection tracked in a room: its fd, the room it joined, and the
 /// display name to prefix its messages with. Strings are owned copies in fixed
 /// buffers so a slot never points into a request buffer that gets freed once
 /// the handler returns.
 const Member = struct {
-    fd: std.posix.fd_t = -1,
+    fd: std.posix.fd_t = NO_FD,
     active: bool = false,
     room_len: usize = 0,
     name_len: usize = 0,
@@ -91,14 +104,13 @@ const Rooms = struct {
         return null;
     }
 
-    /// Drop every slot whose descriptor the kernel has closed. Probes with
-    /// fcntl(F_GETFD): a closed fd returns EBADF. Caller holds the lock.
+    /// Drop every slot whose descriptor the kernel has closed (fdAlive probe).
+    /// Caller holds the lock.
     fn pruneDeadLocked(self: *Rooms) void {
         for (&self.members) |*member| {
             if (!member.active) continue;
 
-            const rc = std.os.linux.fcntl(member.fd, std.posix.F.GETFD, 0);
-            if (std.posix.errno(rc) != .SUCCESS) member.active = false;
+            if (!fdAlive(member.fd)) member.active = false;
         }
     }
 
@@ -151,8 +163,7 @@ const Rooms = struct {
             if (!member.active) continue;
             if (!std.mem.eql(u8, member.room_buf[0..member.room_len], room_id)) continue;
 
-            const rc = std.os.linux.fcntl(member.fd, std.posix.F.GETFD, 0);
-            if (std.posix.errno(rc) != .SUCCESS) {
+            if (!fdAlive(member.fd)) {
                 member.active = false;
                 continue;
             }
