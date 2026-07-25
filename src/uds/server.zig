@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
+const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 /// Read, write, and payload buffer size for the default echo handler. A frame
 /// whose payload exceeds this closes the connection.
@@ -18,10 +19,13 @@ fn logSystem(config: UdsServerConfig, comptime fmt: []const u8, args: anytype) v
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix uds: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix uds: " ++ fmt ++ "\n", args);
 }
 
 fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
     if (recv_ms == 0 and send_ms == 0) return;
 
     if (recv_ms > 0) {
@@ -50,7 +54,7 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
         config: UdsServerConfig,
 
         pub fn init(config: UdsServerConfig) !Self {
-            if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+            if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
             if (config.path.len == 0) return error.PathEmpty;
 
             return .{ .config = config };
@@ -65,7 +69,7 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
         /// connection (it owns the stream and must close it). io is taken from
         /// config.io (caller-provided, must outlive the server).
         pub fn run(self: *Self) !void {
-            if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+            if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
 
             const io = self.config.io;
 
@@ -208,6 +212,7 @@ test "zix uds: UdsServer init, timeout fields default to zero" {
 }
 
 test "zix uds: echoHandler echoes big-endian frame" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
 
@@ -260,6 +265,7 @@ test "zix uds: UdsServer init, timeout fields stored from config" {
 }
 
 test "zix uds: applyConnTimeout uds, zero ms is no-op on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -275,6 +281,7 @@ test "zix uds: applyConnTimeout uds, zero ms is no-op on real socket" {
 }
 
 test "zix uds: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -290,6 +297,7 @@ test "zix uds: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
 }
 
 test "zix uds: applyConnTimeout uds, sets SO_SNDTIMEO on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

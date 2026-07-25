@@ -14,7 +14,16 @@ const STREAM_BUF_SIZE: usize = 4096;
 /// Return:
 /// - true when the event is ready
 /// - false when the timeout elapsed first
+/// poll event bits, mirrored locally: std.posix.POLL is not defined for
+/// Windows (the values are unused there, pollReady returns before polling).
+const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) 0x1 else std.posix.POLL.IN;
+const POLL_OUT: i16 = if (@import("builtin").target.os.tag == .windows) 0x4 else std.posix.POLL.OUT;
+
 fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    // No poll over the ntdll path: report ready and let the read block (the
+    // timeout degrades to a blocking read on Windows).
+    if (comptime @import("builtin").target.os.tag == .windows) return true;
+
     var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
     const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
 
@@ -43,7 +52,7 @@ pub const UdsClient = struct {
 
     /// Connect to the server at config.path.
     pub fn connect(config: UdsClientConfig, io: std.Io) !Self {
-        if (!std.Io.net.has_unix_sockets) @compileError("UDS not supported on this platform");
+        if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
 
         const unix_addr = try std.Io.net.UnixAddress.init(config.path);
         const stream = try unix_addr.connect(io);
@@ -65,7 +74,7 @@ pub const UdsClient = struct {
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         if (self.config.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
-            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.OUT, self.config.send_timeout_ms)) {
+            if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.config.send_timeout_ms)) {
                 return error.SendTimeout;
             }
         }
@@ -90,7 +99,7 @@ pub const UdsClient = struct {
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         if (self.config.recv_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
-            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.IN, self.config.recv_timeout_ms)) {
+            if (!try pollReady(self.stream.socket.handle, POLL_IN, self.config.recv_timeout_ms)) {
                 return error.RecvTimeout;
             }
         }
@@ -124,6 +133,7 @@ pub const UdsClient = struct {
 // --------------------------------------------------------- //
 
 test "zix uds: UdsClient.sendMsg writes big-endian length header" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[1]);
@@ -153,6 +163,7 @@ test "zix uds: UdsClient.sendMsg writes big-endian length header" {
 }
 
 test "zix uds: UdsClient.recvMsg parses big-endian length header" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -178,6 +189,7 @@ test "zix uds: UdsClient.recvMsg parses big-endian length header" {
 }
 
 test "zix uds: UdsClient.recvMsg does not time out when data arrives immediately" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -204,6 +216,7 @@ test "zix uds: UdsClient.recvMsg does not time out when data arrives immediately
 }
 
 test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -226,6 +239,10 @@ test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives"
 }
 
 test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -251,6 +268,7 @@ test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer d
 }
 
 test "zix uds: UdsClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
