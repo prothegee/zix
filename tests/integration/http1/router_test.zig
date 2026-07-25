@@ -34,6 +34,7 @@ fn dispatchReq(head: *const zix.Http1.ParsedHead, fd: std.posix.fd_t) !void {
 }
 
 test "zix integration: Http1 Router dispatch routes to matching handler" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const pipe_fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(pipe_fds[0]);
     defer _ = std.posix.system.close(pipe_fds[1]);
@@ -46,6 +47,7 @@ test "zix integration: Http1 Router dispatch routes to matching handler" {
 }
 
 test "zix integration: Http1 Router dispatch selects correct route among multiple" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const pipe_fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(pipe_fds[0]);
     defer _ = std.posix.system.close(pipe_fds[1]);
@@ -58,6 +60,7 @@ test "zix integration: Http1 Router dispatch selects correct route among multipl
 }
 
 test "zix integration: Http1 Router dispatch unknown path writes 404" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const pipe_fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(pipe_fds[0]);
     defer _ = std.posix.system.close(pipe_fds[1]);

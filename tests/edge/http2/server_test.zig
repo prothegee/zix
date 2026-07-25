@@ -55,6 +55,7 @@ fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
 // --------------------------------------------------------- //
 
 test "zix edge: bad PRI preface causes server to close connection" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -77,6 +78,7 @@ test "zix edge: bad PRI preface causes server to close connection" {
 }
 
 test "zix edge: client sends GOAWAY and server connection loop exits" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -130,6 +132,7 @@ test "zix edge: HpackDecoder decode of empty block returns zero headers" {
 }
 
 test "zix edge: writeFrameHeader stream_id high bit is cleared on read" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);

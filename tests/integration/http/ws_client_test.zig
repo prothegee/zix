@@ -17,6 +17,7 @@ fn closefd(fd: std.posix.fd_t) void {
 // --------------------------------------------------------- //
 
 test "zix integration: WsConn.send produces a masked frame (mask bit set)" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -33,6 +34,7 @@ test "zix integration: WsConn.send produces a masked frame (mask bit set)" {
 }
 
 test "zix integration: WsConn.send + recv text frame round-trip" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -54,6 +56,7 @@ test "zix integration: WsConn.send + recv text frame round-trip" {
 }
 
 test "zix integration: WsConn.recv reads an unmasked server frame" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -74,6 +77,8 @@ test "zix integration: WsConn.recv reads an unmasked server frame" {
 }
 
 test "zix integration: WsConn.recv returns null on clean EOF before frame" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const fds = try makePair();
     defer closefd(fds[0]);
 

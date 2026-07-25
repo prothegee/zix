@@ -18,6 +18,7 @@ fn closefd(fd: std.posix.fd_t) void {
 // --------------------------------------------------------- //
 
 test "zix integration: SseWriter writeEvent, data line wire format" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fd = try makeMemFd();
     defer closefd(fd);
 
@@ -31,6 +32,7 @@ test "zix integration: SseWriter writeEvent, data line wire format" {
 }
 
 test "zix integration: SseWriter writeNamedEvent, event + data lines wire format" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fd = try makeMemFd();
     defer closefd(fd);
 
@@ -44,6 +46,7 @@ test "zix integration: SseWriter writeNamedEvent, event + data lines wire format
 }
 
 test "zix integration: SseWriter comment, comment line wire format" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fd = try makeMemFd();
     defer closefd(fd);
 

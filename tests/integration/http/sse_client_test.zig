@@ -17,6 +17,7 @@ fn closefd(fd: std.posix.fd_t) void {
 // --------------------------------------------------------- //
 
 test "zix integration: SseStream.next parses a data-only event" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -41,6 +42,7 @@ test "zix integration: SseStream.next parses a data-only event" {
 }
 
 test "zix integration: SseStream.next parses a named event with data" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -63,6 +65,7 @@ test "zix integration: SseStream.next parses a named event with data" {
 }
 
 test "zix integration: SseStream.next joins multiple data lines with newline" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -84,6 +87,8 @@ test "zix integration: SseStream.next joins multiple data lines with newline" {
 }
 
 test "zix integration: SseStream.next returns null on clean EOF with no data" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const fds = try makePair();
     defer closefd(fds[0]);
 
@@ -103,6 +108,7 @@ test "zix integration: SseStream.next returns null on clean EOF with no data" {
 }
 
 test "zix integration: SseStream.next parses id and retry fields" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);

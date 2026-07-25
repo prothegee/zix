@@ -108,6 +108,8 @@ test "zix integration: GrpcServer.run port zero returns PortNotConfigured" {
 }
 
 test "zix integration: gRPC unary returns greeting" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -133,6 +135,8 @@ test "zix integration: gRPC unary returns greeting" {
 }
 
 test "zix integration: gRPC server streaming sends multiple responses" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -171,6 +175,8 @@ test "zix integration: gRPC server streaming sends multiple responses" {
 }
 
 test "zix integration: gRPC client streaming collects all messages" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -206,6 +212,8 @@ test "zix integration: gRPC client streaming collects all messages" {
 }
 
 test "zix integration: gRPC bidirectional echoes each message" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -240,6 +248,8 @@ test "zix integration: gRPC bidirectional echoes each message" {
 }
 
 test "zix integration: gRPC unknown method returns UNIMPLEMENTED" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -270,6 +280,8 @@ test "zix integration: gRPC unknown method returns UNIMPLEMENTED" {
 }
 
 test "zix integration: gRPC trailers-only error is received as INVALID_ARGUMENT" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -300,6 +312,8 @@ test "zix integration: gRPC trailers-only error is received as INVALID_ARGUMENT"
 }
 
 test "zix integration: gRPC two streams on same connection both return OK" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -488,6 +502,7 @@ fn recvFramesUntilStatus(fd: std.posix.fd_t, stream_id: u31) !zix.Grpc.Status {
 }
 
 test "zix integration: gRPC second request HPACK indexed path returns correct response" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
     // Regression test for Bug 2 HPACK root cause.
     // Real gRPC clients (grpc-go, ghz) use incremental indexing (0x40) on request 1,
     // then fully-indexed (0x80) on request 2. Without the dyn_buf fix, the server's

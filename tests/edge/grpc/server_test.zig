@@ -67,6 +67,9 @@ fn spawnErrorServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
 
 // --------------------------------------------------------- //
 
+/// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
+const TEST_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else 0;
+
 test "zix edge: readGrpcPrefix with 4 bytes returns TooShort" {
     const body = [_]u8{ 0, 0, 0, 0 };
     try std.testing.expectError(error.TooShort, zix.Grpc.readPrefix(&body));
@@ -78,14 +81,14 @@ test "zix edge: readGrpcPrefix with empty slice returns TooShort" {
 
 test "zix edge: GrpcContext.recvMessage body shorter than prefix returns null" {
     const body = [_]u8{ 0, 0, 0 };
-    var ctx = zix.Grpc.Context{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
 test "zix edge: GrpcContext.recvMessage msg_len exceeds body returns null" {
     var body: [5]u8 = undefined;
     zix.Grpc.writePrefix(body[0..5], false, 100);
-    var ctx = zix.Grpc.Context{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
@@ -127,6 +130,7 @@ test "zix edge: GrpcClient.connect port zero returns PortNotConfigured" {
 }
 
 test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -144,6 +148,8 @@ test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
 }
 
 test "zix edge: gRPC finish-only handler delivers error status to client" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
