@@ -1,6 +1,8 @@
 //! zix http response
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 const Status = @import("status.zig");
 const Content = @import("content.zig");
 const Request = @import("request.zig").Request;
@@ -628,6 +630,8 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 /// Direct socket write, bypassing the .URING coalescing sink. Used by the sink
 /// itself (to avoid recursion) and by every non-ring dispatch model.
 fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data);
+
     var remaining = data;
     while (remaining.len > 0) {
         const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -652,6 +656,13 @@ fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 /// - usize (bytes written so far, may be less than data.len on EAGAIN)
 /// - null on a permanent write error
 pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
+    if (comptime builtin.os.tag == .windows) {
+        // Windows path is blocking (ntdll wait-on-handle): a full send buffer
+        // stalls the write instead of staging, no partial count to report.
+        win_io.writeAll(fd, data) catch return null;
+        return data.len;
+    }
+
     var written: usize = 0;
     while (written < data.len) {
         const write_result = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -790,10 +801,13 @@ pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+/// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
+const TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 test "zix http: response setters" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = Response.init(0, true, undefined, arena.allocator(), 32);
+    var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 32);
 
     res.setStatus(.CREATED);
     try std.testing.expectEqual(Status.Code.CREATED, res.status);
@@ -825,7 +839,7 @@ test "zix http: HeaderSize value()" {
 test "zix http: addHeader injection guard" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = Response.init(0, true, undefined, arena.allocator(), 32);
+    var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 32);
     try std.testing.expectError(error.InvalidHeaderName, res.addHeader("X-Bad\r\nInject", "val"));
     try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
 }
@@ -833,7 +847,7 @@ test "zix http: addHeader injection guard" {
 test "zix http: addHeader TooManyHeaders" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var res = Response.init(0, true, undefined, arena.allocator(), 2);
+    var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 2);
     try res.addHeader("X-A", "1");
     try res.addHeader("X-B", "2");
     try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));
@@ -842,7 +856,7 @@ test "zix http: addHeader TooManyHeaders" {
 test "zix http: Response.streaming defaults to false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const res = Response.init(0, true, undefined, arena.allocator(), 32);
+    const res = Response.init(TEST_FD, true, undefined, arena.allocator(), 32);
     try std.testing.expect(!res.streaming);
 }
 
@@ -875,12 +889,13 @@ test "zix http response cache: sendFromCache is a no-op when no cache is install
     defer arena.deinit();
 
     var req = try Request.fromRaw("GET /x HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
-    var res = Response.init(0, true, undefined, arena.allocator(), 16);
+    var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 16);
 
     try std.testing.expect(!res.sendFromCache(&req));
 }
 
 test "zix http response cache: sendCached stores then sendFromCache writes identical bytes" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
     defer cache.deinit();
 
@@ -930,6 +945,8 @@ fn negotiatedHttpRoundtrip(raw_req: []const u8, ct: Content.Type, body: []const 
 }
 
 test "zix http response: sendNegotiated compresses when gzip is accepted" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -954,6 +971,8 @@ test "zix http response: sendNegotiated compresses when gzip is accepted" {
 }
 
 test "zix http response: sendNegotiated sends uncompressed when compression is off" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
     setCompression(false, 0, 0);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -969,6 +988,8 @@ test "zix http response: sendNegotiated sends uncompressed when compression is o
 }
 
 test "zix http response: sendNegotiated skips bodies under the floor" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -982,6 +1003,8 @@ test "zix http response: sendNegotiated skips bodies under the floor" {
 }
 
 test "zix http response: sendNegotiated skips already-compressed media types" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -998,6 +1021,7 @@ test "zix http response: sendNegotiated skips already-compressed media types" {
 }
 
 test "zix http response cache: cached bytes match a plain send" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
     defer cache.deinit();
 
@@ -1036,6 +1060,7 @@ test "zix http response cache: cached bytes match a plain send" {
 }
 
 test "zix http response cache: sendCached without a cache falls back to a plain send" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     setCache(null, 0);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1057,6 +1082,7 @@ test "zix http response cache: sendCached without a cache falls back to a plain 
 }
 
 test "zix http response cache: distinct paths and queries are separate keys" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -1093,6 +1119,10 @@ test "zix http response cache: distinct paths and queries are separate keys" {
 }
 
 test "zix http: writeNonBlockFD stages a partial write then resumes after drain" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const linux = std.os.linux;
 
     // Nonblocking AF_UNIX stream pair with a tiny send/recv budget, so a large
@@ -1132,6 +1162,7 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
 }
 
 test "zix http: Response.stream detaches the coalescing sink for direct SSE writes" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
@@ -1164,6 +1195,7 @@ test "zix http: Response.stream detaches the coalescing sink for direct SSE writ
 }
 
 test "zix http: send() into an installed sink is byte-identical to a direct send" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1197,7 +1229,7 @@ test "zix http: send() into an installed sink is byte-identical to a direct send
 }
 
 test "zix http: buildResponse emits Content-Type and Date without bufPrint, byte-exact" {
-    var res = Response.init(-1, true, undefined, std.testing.allocator, 0);
+    var res = Response.init(TEST_FD, true, undefined, std.testing.allocator, 0);
     res.status = .OK;
     res.content_type = .TEXT_PLAIN;
     res.date_cache = "Mon, 01 Jan 2026 00:00:00 GMT";
@@ -1210,13 +1242,14 @@ test "zix http: buildResponse emits Content-Type and Date without bufPrint, byte
     );
 
     // No content-type and no date: both branches skip cleanly.
-    var bare = Response.init(-1, true, undefined, std.testing.allocator, 0);
+    var bare = Response.init(TEST_FD, true, undefined, std.testing.allocator, 0);
     bare.status = .OK;
     const m = bare.buildResponse("hi", &out).?;
     try std.testing.expectEqualStrings("HTTP/1.1 200 Ok\r\nContent-Length: 2\r\n\r\nhi", out[0..m]);
 }
 
 test "zix http response: sendText sends text/plain and marks sent" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -1240,6 +1273,7 @@ test "zix http response: sendText sends text/plain and marks sent" {
 }
 
 test "zix http response: sendRaw writes caller bytes verbatim and marks sent" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);

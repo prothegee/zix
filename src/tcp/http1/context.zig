@@ -86,16 +86,22 @@ pub const Context = struct {
 // --------------------------------------------------------- //
 
 test "zix http1: Context.timedOut null deadline always false" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const ctx = Context{ .io = undefined, .allocator = std.testing.allocator, .fd = -1 };
     try std.testing.expect(!ctx.timedOut());
 }
 
 test "zix http1: Context.isExpired null deadline always false" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const ctx = Context{ .io = undefined, .allocator = std.testing.allocator, .fd = -1 };
     try std.testing.expect(!ctx.isExpired());
 }
 
 test "zix http1: Context.withDeadline sets the exact timestamp on a copy" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -109,6 +115,8 @@ test "zix http1: Context.withDeadline sets the exact timestamp on a copy" {
 }
 
 test "zix http1: Context.init sets io, allocator, fd with no deadline" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 

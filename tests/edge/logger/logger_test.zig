@@ -5,6 +5,10 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
+/// Test fd sentinel for "no log file open": Windows descriptors are opaque
+/// pointers, POSIX are ints. Mirrors the logger's own sentinel.
+const TEST_NO_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 test "zix edge: statusLevel 2xx boundary (200 -> INFO)" {
     const Logger = zix.Logger;
     _ = Logger;
@@ -46,7 +50,7 @@ test "zix edge: system() below save_min_level is silent (no file written)" {
     logger.system(.DEBUG, "test", "filtered", .{});
     logger.system(.INFO, "test", "filtered", .{});
     logger.system(.WARN, "test", "filtered", .{});
-    try std.testing.expectEqual(@as(std.posix.fd_t, -1), logger.file_fd);
+    try std.testing.expectEqual(TEST_NO_FD, logger.file_fd);
 }
 
 test "zix edge: access() below save_min_level is silent" {
@@ -57,7 +61,7 @@ test "zix edge: access() below save_min_level is silent" {
     defer logger.deinit();
 
     logger.access("GET", "/", 200, 100, "", "UA", "origin");
-    try std.testing.expectEqual(@as(std.posix.fd_t, -1), logger.file_fd);
+    try std.testing.expectEqual(TEST_NO_FD, logger.file_fd);
 }
 
 test "zix edge: system() with empty component does not panic" {
@@ -85,7 +89,7 @@ test "zix edge: init with empty save_path, file_fd stays invalid" {
     var logger = try zix.Logger.init(std.testing.allocator, .{ .save_path = "" });
     defer logger.deinit();
 
-    try std.testing.expectEqual(@as(std.posix.fd_t, -1), logger.file_fd);
+    try std.testing.expectEqual(TEST_NO_FD, logger.file_fd);
 }
 
 test "zix edge: access() empty client_ip does not panic" {

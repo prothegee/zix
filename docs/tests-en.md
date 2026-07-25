@@ -23,6 +23,8 @@ zig build test-all
 
 `zig build` alone does **not** run tests: test steps are separate named steps not wired into the default install step.
 
+Platform behavior: with a foreign `-Dtarget` every suite compiles for that target and execution is skipped with a warning. On a non-Linux host, tests that exercise the Linux-only EPOLL / URING paths print a warn and skip, and tests scaffolded on Linux-only syscalls skip silently. The `test-runner-*` steps behave the same way: a foreign target compiles the runner plus its servers and passes, and on a non-Linux host every EPOLL / URING scenario reports a PASS line with a warn instead of running.
+
 ---
 
 ## Unit Tests

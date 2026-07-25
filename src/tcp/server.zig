@@ -120,6 +120,10 @@ fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
 /// Apply --ip and --port CLI overrides onto a config, falling back to the
 /// config defaults when an arg is absent.
 fn applyArgs(config: TcpServerConfig, args: anytype) TcpServerConfig {
+    // std.process.Args.Iterator is POSIX-only in Zig 0.16: CLI overrides are
+    // skipped on Windows, the config values stay.
+    if (comptime @import("builtin").target.os.tag == .windows) return config;
+
     var cfg = config;
     var it = std.process.Args.Iterator.init(args);
     _ = it.skip();
@@ -338,6 +342,7 @@ test "zix tcp: Tcp.Server.initFramed, valid config succeeds and deinit is safe" 
 }
 
 test "zix tcp: applyConnTimeout, zero ms is no-op on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -353,6 +358,7 @@ test "zix tcp: applyConnTimeout, zero ms is no-op on real socket" {
 }
 
 test "zix tcp: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -368,6 +374,7 @@ test "zix tcp: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
 }
 
 test "zix tcp: applyConnTimeout, sets SO_SNDTIMEO on real socket" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

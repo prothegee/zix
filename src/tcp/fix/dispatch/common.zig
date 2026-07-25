@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const core = @import("../core.zig");
 const FixServerConfig = @import("../config.zig").FixServerConfig;
 const FixServeOpts = core.FixServeOpts;
@@ -16,7 +17,8 @@ pub fn logSystem(cfg: FixServerConfig, comptime fmt: []const u8, args: anytype) 
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix fix: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix fix: " ++ fmt ++ "\n", args);
 }
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
@@ -106,6 +108,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -147,6 +151,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// fails. The per-core models default to one worker per available CPU so that
 /// multiple workers are never pinned to the same core under a cpuset.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {

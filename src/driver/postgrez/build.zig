@@ -86,6 +86,17 @@ fn addContainerTeardown(b: *std.Build) *std.Build.Step.Run {
     });
 }
 
+/// Wrap a compiled test artifact in a Run step when the target can execute on this host,
+/// otherwise return the compile step directly. Deterministic compile-only coverage for a
+/// foreign target regardless of host binfmt_misc / qemu registration making execution
+/// technically possible (e.g. aarch64-linux under a registered qemu-user interpreter).
+fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.Build.Step {
+    if (foreign) return &exe.step;
+
+    const run = b.addRunArtifact(exe);
+    return &run.step;
+}
+
 // --------------------------------------------------------- //
 
 pub fn build(b: *std.Build) void {
@@ -93,6 +104,16 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Installed example binaries carry the target triple so per-target builds
+    // coexist in zig-out/bin. A foreign target (cross build) compiles every
+    // suite and example but skips execution and the container lifecycle.
+    const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+    const host = b.graph.host.result;
+    const foreign_target = target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch;
+    if (foreign_target) {
+        std.log.info("postgrez: target {s} is foreign to this host, tests and runner compile but execution is skipped", .{triple});
+    }
 
     const postgrez = b.addModule("postgrez", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -105,7 +126,7 @@ pub fn build(b: *std.Build) void {
     // In-file tests live in the postgrez module, scenario tests in tests/unit.zig.
     // Zig collects tests per module, so each needs its own addTest.
     const module_tests = b.addTest(.{ .root_module = postgrez });
-    const module_run = b.addRunArtifact(module_tests);
+    const module_run_step = testRunStep(b, module_tests, foreign_target);
 
     const unit_module = b.createModule(.{
         .root_source_file = b.path("tests/unit.zig"),
@@ -115,12 +136,12 @@ pub fn build(b: *std.Build) void {
     unit_module.addImport("postgrez", postgrez);
 
     const unit_tests = b.addTest(.{ .root_module = unit_module });
-    const unit_run = b.addRunArtifact(unit_tests);
-    unit_run.step.dependOn(&module_run.step);
+    const unit_run_step = testRunStep(b, unit_tests, foreign_target);
+    unit_run_step.dependOn(module_run_step);
 
     const unit_step = b.step("test-unit", "Run postgrez unit tests (no server needed)");
-    unit_step.dependOn(&module_run.step);
-    unit_step.dependOn(&unit_run.step);
+    unit_step.dependOn(module_run_step);
+    unit_step.dependOn(unit_run_step);
 
     // --------------------------------------------------------- //
 
@@ -132,16 +153,22 @@ pub fn build(b: *std.Build) void {
     integration_module.addImport("postgrez", postgrez);
 
     const integration_tests = b.addTest(.{ .root_module = integration_module });
-    const integration_run = b.addRunArtifact(integration_tests);
-    // the suite talks to a fresh container every run: never cache-skip it
-    integration_run.has_side_effects = true;
-    integration_run.step.dependOn(&addContainerStart(b).step);
-
-    const integration_teardown = addContainerTeardown(b);
-    integration_teardown.step.dependOn(&integration_run.step);
 
     const integration_step = b.step("test-integration", "Run postgrez integration tests (owns the PG 18 container lifecycle)");
-    integration_step.dependOn(&integration_teardown.step);
+    if (foreign_target) {
+        // Foreign target: compile the suite, skip the run and the container.
+        integration_step.dependOn(&integration_tests.step);
+    } else {
+        const integration_run = b.addRunArtifact(integration_tests);
+        // the suite talks to a fresh container every run: never cache-skip it
+        integration_run.has_side_effects = true;
+        integration_run.step.dependOn(&addContainerStart(b).step);
+
+        const integration_teardown = addContainerTeardown(b);
+        integration_teardown.step.dependOn(&integration_run.step);
+
+        integration_step.dependOn(&integration_teardown.step);
+    }
 
     // --------------------------------------------------------- //
 
@@ -159,7 +186,7 @@ pub fn build(b: *std.Build) void {
         example_module.addImport("postgrez", postgrez);
 
         const example_exe = b.addExecutable(.{
-            .name = "postgrez-example-" ++ name,
+            .name = b.fmt("postgrez-example-{s}-{s}", .{ name, triple }),
             .root_module = example_module,
         });
         example_exes[index] = example_exe;
@@ -186,14 +213,21 @@ pub fn build(b: *std.Build) void {
         .root_module = runner_module,
     });
 
-    const runner_run = b.addRunArtifact(runner_exe);
-    runner_run.has_side_effects = true;
-    for (example_exes) |example_exe| runner_run.addArtifactArg(example_exe);
-    runner_run.step.dependOn(&addContainerStart(b).step);
-
-    const runner_teardown = addContainerTeardown(b);
-    runner_teardown.step.dependOn(&runner_run.step);
-
     const runner_step = b.step("test-runner", "Run every postgrez example against the PG 18 container (owns the lifecycle)");
-    runner_step.dependOn(&runner_teardown.step);
+    if (foreign_target) {
+        // Foreign target: compile the runner and every example, skip the run
+        // and the container.
+        runner_step.dependOn(&runner_exe.step);
+        for (example_exes) |example_exe| runner_step.dependOn(&example_exe.step);
+    } else {
+        const runner_run = b.addRunArtifact(runner_exe);
+        runner_run.has_side_effects = true;
+        for (example_exes) |example_exe| runner_run.addArtifactArg(example_exe);
+        runner_run.step.dependOn(&addContainerStart(b).step);
+
+        const runner_teardown = addContainerTeardown(b);
+        runner_teardown.step.dependOn(&runner_run.step);
+
+        runner_step.dependOn(&runner_teardown.step);
+    }
 }

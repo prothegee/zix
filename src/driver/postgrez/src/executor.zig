@@ -590,6 +590,14 @@ test "postgrez: executor runs a submitted job with a null batch when no server" 
     // acquire failed, so the batch was never connected
     try testing.expectEqual(@as(u32, 0), Probe.saw_connected.load(.monotonic));
 
+    // the worker records stats after run_batch returns: wait for the
+    // counters to land before snapshotting, or the snapshot races them
+    spins = 0;
+    while (executor.stat_batches.load(.monotonic) == 0 or executor.stat_jobs.load(.monotonic) == 0) : (spins += 1) {
+        if (spins > 5_000_000) return error.StatsNeverRecorded;
+        std.atomic.spinLoopHint();
+    }
+
     const stats = executor.snapshot();
     try testing.expectEqual(@as(u64, 1), stats.batches);
     try testing.expectEqual(@as(u64, 1), stats.jobs);

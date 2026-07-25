@@ -60,6 +60,8 @@ pub fn FixRouter(comptime routes: []const FixRoute) type {
 // --------------------------------------------------------- //
 
 test "zix fix: dispatch calls the matching handler" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const called = struct {
         var count: u32 = 0;
         fn handler(_: []const core.Field, _: *core.FixContext) void {
@@ -88,6 +90,8 @@ test "zix fix: dispatch calls the matching handler" {
 }
 
 test "zix fix: no match leaves handler uncalled" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const called = struct {
         var count: u32 = 0;
         fn handler(_: []const core.Field, _: *core.FixContext) void {
@@ -114,6 +118,8 @@ test "zix fix: no match leaves handler uncalled" {
 }
 
 test "zix fix: route timeout sets deadline_ns" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const noop = struct {
         fn handler(_: []const core.Field, _: *core.FixContext) void {}
     };

@@ -1,6 +1,9 @@
 //! zix http client
 
 const std = @import("std");
+const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
+const win_io = @import("../../utils/windows_io.zig");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
@@ -170,7 +173,10 @@ pub const HttpClient = struct {
         const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.InvalidUrl;
 
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-        const host_name = uri.getHost(&host_buf) catch return error.InvalidUrl;
+        const host_name = (if (ZIG_SEMVER.MINOR == 16)
+            uri.getHost(&host_buf)
+        else
+            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.InvalidUrl;
         const port = uri.port orelse switch (protocol) {
             .plain => @as(u16, 80),
             .tls => @as(u16, 443),
@@ -272,7 +278,10 @@ pub const HttpClient = struct {
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.UnsupportedScheme;
 
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-        const host_name = uri.getHost(&host_buf) catch return error.InvalidUrl;
+        const host_name = (if (ZIG_SEMVER.MINOR == 16)
+            uri.getHost(&host_buf)
+        else
+            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.InvalidUrl;
         const port = uri.port orelse 443;
 
         // origin-form request target (:path), the path plus any query, e.g. "/echo?foo=bar".
@@ -380,7 +389,7 @@ pub const HttpClient = struct {
         var header_end: usize = 0;
 
         while (head_scan_len < head_scan_buf.len) {
-            const n = std.posix.read(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
+            const n = readSomeFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
             if (n == 0) return error.ConnectionClosed;
             head_scan_len += n;
             if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
@@ -422,7 +431,7 @@ pub const HttpClient = struct {
             @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
             var body_received = initial;
             while (body_received < cl) {
-                const n = std.posix.read(fd, body_list.items[body_received..]) catch break;
+                const n = readSomeFD(fd, body_list.items[body_received..]) catch break;
                 if (n == 0) break;
                 body_received += n;
             }
@@ -430,7 +439,7 @@ pub const HttpClient = struct {
             if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
             var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
             while (true) {
-                const n = std.posix.read(fd, &read_chunk) catch break;
+                const n = readSomeFD(fd, &read_chunk) catch break;
                 if (n == 0) break;
                 if (body_list.items.len + n > self.config.max_response_body) return error.BodyTooLarge;
                 try body_list.appendSlice(gpa, read_chunk[0..n]);
@@ -480,7 +489,16 @@ fn udsMethodStr(method: Method.Code) []const u8 {
     };
 }
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 fn udsWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data) catch error.BrokenPipe;
+
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);

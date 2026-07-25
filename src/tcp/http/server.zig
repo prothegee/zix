@@ -108,8 +108,10 @@ fn HttpServerImpl(comptime routes: []const Route) type {
             const timer_thread = try std.Thread.spawn(.{}, common.timerLoop, .{ thread_io, &self.registry });
             defer timer_thread.detach();
 
+            const is_linux = comptime builtin.target.os.tag == .linux;
+
             const effective_model: DispatchModel = blk: {
-                if (comptime builtin.target.os.tag != .linux) {
+                if (comptime !is_linux) {
                     // EPOLL and URING are Linux-only: fall back to POOL elsewhere.
                     if (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING) {
                         common.logSystem(cfg, "EPOLL/URING are Linux-only. Falling back to POOL.", .{});
@@ -127,8 +129,8 @@ fn HttpServerImpl(comptime routes: []const Route) type {
                 // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
                 // fleet, instead of a second server launch.
                 if (cfg.tls_port != 0) {
-                    if (effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
-                    if (effective_model == .URING) return uring_model.runUring(self, thread_io);
+                    if (is_linux and effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
+                    if (is_linux and effective_model == .URING) return uring_model.runUring(self, thread_io);
 
                     // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
                     // TLS on tls_port (thread-per-connection, WebSocket + SSE included, ADR-054 /
@@ -140,7 +142,7 @@ fn HttpServerImpl(comptime routes: []const Route) type {
                     const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{ tls_server, thread_io });
                     tls_thread.detach();
                 } else {
-                    if (effective_model == .EPOLL or effective_model == .URING) {
+                    if (is_linux and (effective_model == .EPOLL or effective_model == .URING)) {
                         return tls_mux.runTlsMux(self, thread_io);
                     }
                     return tls_serve.runTls(self, thread_io);
@@ -151,9 +153,11 @@ fn HttpServerImpl(comptime routes: []const Route) type {
                 .POOL => try pool_model.runPool(self, thread_io, cpu),
                 .ASYNC => try async_model.runAsync(self, thread_io),
                 .MIXED => try mixed_model.runMixed(self, thread_io, cpu),
-                .EPOLL => try epoll_model.runEpoll(self, thread_io),
+                // effective_model already resolved .EPOLL / .URING to .POOL off Linux,
+                // the comptime gate only keeps the Linux-only loops out of analysis there.
+                .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else unreachable,
                 // Native io_uring ring path (ADR-037 Phase 4 step 4).
-                .URING => try uring_model.runUring(self, thread_io),
+                .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else unreachable,
             }
         }
     };
@@ -202,6 +206,11 @@ pub const Server = struct {
 // --------------------------------------------------------- //
 
 test "zix http: EpollConnTable slab alloc and free lifecycle" {
+    if (comptime builtin.os.tag == .windows) {
+        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var table = try common.EpollConnTable.init(256);
     defer table.deinit();
 
@@ -222,6 +231,11 @@ test "zix http: EpollConnTable slab alloc and free lifecycle" {
 }
 
 test "zix http: EpollConnTable filled tracks accumulated bytes" {
+    if (comptime builtin.os.tag == .windows) {
+        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var table = try common.EpollConnTable.init(512);
     defer table.deinit();
 
@@ -234,6 +248,11 @@ test "zix http: EpollConnTable filled tracks accumulated bytes" {
 }
 
 test "zix http: EpollConnTable get returns null for out-of-range fd" {
+    if (comptime builtin.os.tag == .windows) {
+        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var table = try common.EpollConnTable.init(64);
     defer table.deinit();
 
@@ -242,6 +261,11 @@ test "zix http: EpollConnTable get returns null for out-of-range fd" {
 }
 
 test "zix http: EpollConnTable packs recv buffers into compact slots, not the fd range" {
+    if (comptime builtin.os.tag == .windows) {
+        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var table = try common.EpollConnTable.init(4096);
     defer table.deinit();
 
@@ -289,6 +313,10 @@ fn cacheRouteHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
 }
 
 test "zix http: EPOLL processRequest serves a cache miss then a hit" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var cache = try rcache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 

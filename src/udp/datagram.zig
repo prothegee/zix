@@ -75,6 +75,10 @@ pub fn parseBind(ip: []const u8, port: u16) !posix.sockaddr.in6 {
 /// Linux syscalls (std.posix no longer wraps them since the std.Io migration). setsockopt is the
 /// std.posix safe wrapper which remains.
 pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
+    // Raw dual-stack sockets are POSIX-only here: Windows callers use the
+    // std.Io fallback path instead.
+    if (comptime builtin.os.tag == .windows) return error.SocketFailed;
+
     const srv = linux.socket(linux.AF.INET6, linux.SOCK.DGRAM, linux.IPPROTO.UDP);
     switch (posix.errno(srv)) {
         .SUCCESS => {},
@@ -121,6 +125,8 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
 /// Return:
 /// - void
 pub fn setSocketBuffers(fd: posix.socket_t, rcvbuf: usize, sndbuf: usize) void {
+    if (comptime builtin.os.tag == .windows) return;
+
     if (rcvbuf > 0) {
         const want = std.mem.toBytes(@as(c_int, @intCast(@min(rcvbuf, std.math.maxInt(c_int)))));
         posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVBUF, &want) catch {};
@@ -134,6 +140,9 @@ pub fn setSocketBuffers(fd: posix.socket_t, rcvbuf: usize, sndbuf: usize) void {
 
 /// Close a raw socket descriptor.
 pub fn close(fd: posix.socket_t) void {
+    // No raw socket ever opens on Windows (open is gated), nothing to close.
+    if (comptime builtin.os.tag == .windows) return;
+
     _ = linux.close(fd);
 }
 
@@ -354,6 +363,9 @@ pub const SendBatch = struct {
     /// already put on the ring (ring_sent), so a caller that mixes the two never re-sends a reply
     /// twice.
     pub fn flush(self: *SendBatch, fd: posix.socket_t) !void {
+        // Batched raw sends are POSIX-only (open is gated on Windows).
+        if (comptime builtin.os.tag == .windows) return error.SendFailed;
+
         if (self.gso) {
             try self.flushGso(fd);
             self.reset();
@@ -532,6 +544,8 @@ fn gsoGroupLen(iovs: []const posix.iovec, names: []const posix.sockaddr.in6, i: 
 /// kernel to split it into seg_size-byte wire datagrams (the last may be shorter). seg_size 0 sends
 /// the buffer as a single datagram.
 fn sendSeg(fd: posix.socket_t, base: [*]const u8, total: usize, seg_size: u16, dest: *const posix.sockaddr.in6) !void {
+    if (comptime builtin.os.tag == .windows) return error.SendFailed;
+
     var iov = posix.iovec_const{ .base = base, .len = total };
     var control: GsoControl align(@alignOf(usize)) = undefined;
 
@@ -565,6 +579,8 @@ fn sendSeg(fd: posix.socket_t, base: [*]const u8, total: usize, seg_size: u16, d
 /// to 0 (no socket default. The send path uses a per-message cmsg instead). Returns true when the
 /// option exists (Linux 4.18+), false otherwise, so the caller leaves gso off on older kernels.
 pub fn probeGso(fd: posix.socket_t) bool {
+    if (comptime builtin.os.tag == .windows) return false;
+
     const zero: c_int = 0;
     posix.setsockopt(fd, linux.IPPROTO.UDP, linux.UDP.SEGMENT, std.mem.asBytes(&zero)) catch return false;
 
@@ -775,6 +791,7 @@ test "zix udp: gsoGroupLen rejects a larger following segment" {
 }
 
 test "zix udp: SendBatch GSO send is accepted by the kernel and delivers over loopback" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     if (comptime !is_linux) return;
 
     const r_fd = open("127.0.0.1", 19071, false) catch return; // skip if the port is busy
@@ -820,6 +837,10 @@ test "zix udp: SendBatch GSO send is accepted by the kernel and delivers over lo
 }
 
 test "zix udp: SendBatch.submitUring puts a queued reply on a real io_uring ring, not sendmmsg" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     if (comptime !is_linux) return;
 
     var ring = linux.IoUring.init(8, 0) catch return; // skip where io_uring is unavailable
@@ -855,6 +876,10 @@ test "zix udp: SendBatch.submitUring puts a queued reply on a real io_uring ring
 }
 
 test "zix udp: SendBatch.flush skips the ring_sent prefix so mixing submitUring and flush never resends" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     if (comptime !is_linux) return;
 
     const r_fd = open("127.0.0.1", 19077, false) catch return;

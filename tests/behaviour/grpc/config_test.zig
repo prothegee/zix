@@ -5,6 +5,9 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
+/// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
+const TEST_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else 0;
+
 test "zix behaviour: GrpcServerConfig defaults" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -46,7 +49,7 @@ test "zix behaviour: GrpcStatus enum values are correct" {
 
 test "zix behaviour: GrpcContext.recvMessage empty body returns null" {
     var ctx = zix.Grpc.Context{
-        .fd = 0,
+        .fd = TEST_FD,
         .stream_id = 1,
         ._body = &.{},
         ._pos = 0,

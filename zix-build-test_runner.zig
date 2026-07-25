@@ -6,6 +6,17 @@ pub fn addSteps(
     optimize: std.builtin.OptimizeMode,
     zix: *std.Build.Module,
 ) void {
+    // Foreign target: a runner cannot spawn on this host, so each test-runner-*
+    // step compiles the runner and its server binaries for the target and skips
+    // execution with a warning. On the target's own machine the runners execute.
+    const host = b.graph.host.result;
+    const foreign_target = target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch;
+    if (foreign_target) {
+        std.log.info("zix test-runner: target {s}-{s} is foreign to this host, runners compile but execution is skipped", .{
+            @tagName(target.result.cpu.arch), @tagName(target.result.os.tag),
+        });
+    }
+
     // Each runner spawns a server as a child process and exercises the protocol via the
     // zix client. Steps are independent and not part of test-all (see zig build --help).
     //
@@ -147,7 +158,12 @@ pub fn addSteps(
         run_runner.addArg(row[7]); // argv[6]: extra (expected substr)
 
         const runner_step = b.step(row[0], "Run " ++ row[0]);
-        runner_step.dependOn(&run_runner.step);
+        if (foreign_target) {
+            runner_step.dependOn(&server_exe.step);
+            runner_step.dependOn(&runner_exe.step);
+        } else {
+            runner_step.dependOn(&run_runner.step);
+        }
     }
 
     // --------------------------------------------------------- //
@@ -186,7 +202,13 @@ pub fn addSteps(
         run_uds_http.addArg("uds-http"); // argv[3]: label
 
         const uds_http_step = b.step("test-runner-uds-http", "Run test-runner-uds-http");
-        uds_http_step.dependOn(&run_uds_http.step);
+        if (foreign_target) {
+            uds_http_step.dependOn(&uds_srv_exe.step);
+            uds_http_step.dependOn(&uds_http_exe.step);
+            uds_http_step.dependOn(&uds_http_runner_exe.step);
+        } else {
+            uds_http_step.dependOn(&run_uds_http.step);
+        }
     }
 
     // --------------------------------------------------------- //
@@ -224,7 +246,13 @@ pub fn addSteps(
         run_ipc.addArg("channel-ipc"); // argv[3]: label
 
         const ipc_step = b.step("test-runner-channel-ipc", "Run test-runner-channel-ipc");
-        ipc_step.dependOn(&run_ipc.step);
+        if (foreign_target) {
+            ipc_step.dependOn(&ipc_a_exe.step);
+            ipc_step.dependOn(&ipc_b_exe.step);
+            ipc_step.dependOn(&ipc_runner_exe.step);
+        } else {
+            ipc_step.dependOn(&run_ipc.step);
+        }
     }
 
     // --------------------------------------------------------- //
@@ -344,6 +372,8 @@ pub fn addSteps(
             .root_module = all_runner_mod,
         });
 
+        const all_step = b.step("test-runner-all", "Run test-runner-all");
+
         const run_all = b.addRunArtifact(all_runner_exe);
         inline for (all_server_srcs) |srv| {
             const srv_mod = b.createModule(.{
@@ -357,9 +387,13 @@ pub fn addSteps(
                 .root_module = srv_mod,
             });
             run_all.addFileArg(srv_exe.getEmittedBin());
+            if (foreign_target) all_step.dependOn(&srv_exe.step);
         }
 
-        const all_step = b.step("test-runner-all", "Run test-runner-all");
-        all_step.dependOn(&run_all.step);
+        if (foreign_target) {
+            all_step.dependOn(&all_runner_exe.step);
+        } else {
+            all_step.dependOn(&run_all.step);
+        }
     }
 }

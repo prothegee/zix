@@ -14,6 +14,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 
 const Config = @import("../config.zig");
 const Http3ServerConfig = Config.Http3ServerConfig;
@@ -85,7 +86,8 @@ pub fn logSystem(config: Http3ServerConfig, comptime fmt: []const u8, args: anyt
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix http3: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix http3: " ++ fmt ++ "\n", args);
 }
 
 /// What processing one datagram produced, for the recv loop to log.
@@ -302,6 +304,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
 
@@ -342,6 +346,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// fails. Used to default to one worker per available CPU so several workers are
 /// never pinned to the same core under cgroup-limited bench environments.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
         return std.Thread.getCpuCount() catch 1;
@@ -359,6 +365,8 @@ pub fn getAvailableCpuCount() usize {
 /// CPU for lower recvmmsg wake-up latency on saturated benchmarks. us = 0 leaves it unset (no
 /// syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
 pub fn setBusyPoll(fd: std.posix.socket_t, us: u32) void {
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
     if (us == 0) return;
 
     const SO_BUSY_POLL: u32 = 46;
@@ -604,7 +612,10 @@ const max_diag_workers = 512;
 
 /// The per-worker diagnostic (counters, SIGUSR1 / SIGTERM / SIGINT dump) is compiled in only outside
 /// ReleaseSafe / ReleaseFast, so a production build installs no signal handler and pays no dump cost.
-pub const diag_enabled = builtin.mode != .ReleaseSafe and builtin.mode != .ReleaseFast;
+pub const diag_enabled = if (ZIG_SEMVER.MINOR == 16)
+    builtin.mode != .ReleaseSafe and builtin.mode != .ReleaseFast
+else
+    builtin.mode != .safe and builtin.mode != .fast;
 
 /// Registry of live worker stats, so a signal handler can dump every worker's counters without the
 /// workers cooperating (they may all be parked in submit_and_wait when the signal arrives). Each worker

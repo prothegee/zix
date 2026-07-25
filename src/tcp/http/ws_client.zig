@@ -2,6 +2,8 @@
 //! RFC 6455 client: HTTP upgrade handshake, masked send, unmasked recv.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 
 /// WebSocket client send chunk buffer.
 const WS_SEND_CHUNK: usize = 4096;
@@ -169,7 +171,7 @@ pub const WsConn = struct {
 
     /// Close the underlying TCP connection.
     pub fn deinit(self: Self) void {
-        _ = std.posix.system.close(self.fd);
+        closeFD(self.fd);
     }
 };
 
@@ -220,7 +222,7 @@ pub const WsClient = struct {
         const addr = try std.Io.net.IpAddress.resolve(self.config.io, parsed.host, parsed.port);
         const stream = try addr.connect(self.config.io, .{ .mode = .stream, .protocol = .tcp });
         const fd = stream.socket.handle;
-        errdefer _ = std.posix.system.close(fd);
+        errdefer closeFD(fd);
 
         var nonce: [16]u8 = undefined;
         _ = std.os.linux.getrandom(&nonce, nonce.len, 0);
@@ -248,7 +250,7 @@ pub const WsClient = struct {
         var header_end: usize = 0;
 
         while (resp_len < resp_buf.len) {
-            const n = std.posix.read(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
+            const n = readSomeFD(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
             if (n == 0) return error.HandshakeFailed;
             resp_len += n;
             if (std.mem.indexOf(u8, resp_buf[0..resp_len], "\r\n\r\n")) |pos| {
@@ -326,7 +328,26 @@ fn parseWsUrl(url: []const u8) !WsUrlParsed {
     return WsUrlParsed{ .host = host, .port = port, .path = path_str };
 }
 
+/// Close fd: the ntdll shim on Windows, the libc close elsewhere.
+fn closeFD(fd: std.posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        win_io.close(fd);
+        return;
+    }
+
+    _ = std.posix.system.close(fd);
+}
+
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 fn writeAllFD(fd: std.posix.fd_t, data: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data) catch error.BrokenPipe;
+
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -346,7 +367,7 @@ fn recvExact(fd: std.posix.fd_t, buf: []u8) !bool {
     if (buf.len == 0) return true;
     var received: usize = 0;
     while (received < buf.len) {
-        const n = std.posix.read(fd, buf[received..]) catch return error.ConnectionClosed;
+        const n = readSomeFD(fd, buf[received..]) catch return error.ConnectionClosed;
         if (n == 0) return if (received == 0) false else error.ConnectionClosed;
         received += n;
     }

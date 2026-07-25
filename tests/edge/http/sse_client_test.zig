@@ -17,6 +17,7 @@ fn closefd(fd: std.posix.fd_t) void {
 // --------------------------------------------------------- //
 
 test "zix edge: SseStream.next skips comment lines" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -39,6 +40,7 @@ test "zix edge: SseStream.next skips comment lines" {
 }
 
 test "zix edge: SseStream.next skips empty dispatch before first data" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -61,6 +63,7 @@ test "zix edge: SseStream.next skips empty dispatch before first data" {
 }
 
 test "zix edge: SseStream.next retry field with invalid value is null" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -82,6 +85,7 @@ test "zix edge: SseStream.next retry field with invalid value is null" {
 }
 
 test "zix edge: SseStream.next data line with no colon value is empty string" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -103,6 +107,8 @@ test "zix edge: SseStream.next data line with no colon value is empty string" {
 }
 
 test "zix edge: SseClientConfig defaults" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -111,6 +117,8 @@ test "zix edge: SseClientConfig defaults" {
 }
 
 test "zix edge: SseClient.open, https:// returns TlsNotSupported" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -119,6 +127,8 @@ test "zix edge: SseClient.open, https:// returns TlsNotSupported" {
 }
 
 test "zix edge: SseClient.open, non-http scheme returns InvalidUrl" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 

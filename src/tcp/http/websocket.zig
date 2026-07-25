@@ -2,6 +2,7 @@
 //! RFC 6455: frame parsing, handshake, room-based broadcast.
 
 const std = @import("std");
+const win_io = @import("../../utils/windows_io.zig");
 const response = @import("response.zig");
 
 /// WebSocket handshake response header buffer.
@@ -63,6 +64,18 @@ pub const ParseResult = struct {
 ///
 /// Return:
 /// - ?ParseResult
+/// Read some bytes from a WebSocket connection fd, for a handler-owned frame
+/// loop. Portable: the ntdll shim on Windows, std.posix.read elsewhere.
+///
+/// Return:
+/// - usize (bytes read, 0 when the peer closed)
+/// - read error otherwise
+pub fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 pub fn parseFrame(buf: []const u8, payload_buf: []u8) ?ParseResult {
     if (buf.len < 2) return null;
 
@@ -582,6 +595,24 @@ pub const RoomMap = struct {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix http: websocket readSomeFD reads pipe bytes then reports close" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    const linux = std.os.linux;
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(linux.pipe2(&pipe_fds, .{})) == .SUCCESS);
+    defer _ = linux.close(pipe_fds[0]);
+
+    _ = linux.write(pipe_fds[1], "frame", 5);
+    _ = linux.close(pipe_fds[1]);
+
+    var buf: [16]u8 = undefined;
+    const n = try readSomeFD(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("frame", buf[0..n]);
+
+    try std.testing.expectEqual(@as(usize, 0), try readSomeFD(pipe_fds[0], &buf));
+}
 
 test "zix http: websocket buildHeader matches buildFrame prefix" {
     const payload = "hello";

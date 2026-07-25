@@ -159,7 +159,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
     var header_end: usize = 0;
 
     while (head_scan_len < head_scan_buf.len) {
-        const n = std.posix.read(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
+        const n = readSomeFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
         if (n == 0) return error.ConnectionClosed;
         head_scan_len += n;
         if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
@@ -203,7 +203,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
         var body_received = initial;
         while (body_received < body_len) {
-            const n = std.posix.read(fd, body_list.items[body_received..]) catch break;
+            const n = readSomeFD(fd, body_list.items[body_received..]) catch break;
             if (n == 0) break;
             body_received += n;
         }
@@ -211,7 +211,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         if (already_read > 0) try body_list.appendSlice(allocator, head_scan_buf[header_end..][0..already_read]);
         var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
         while (true) {
-            const n = std.posix.read(fd, &read_chunk) catch break;
+            const n = readSomeFD(fd, &read_chunk) catch break;
             if (n == 0) break;
             if (body_list.items.len + n > max_response_body) return error.BodyTooLarge;
             try body_list.appendSlice(allocator, read_chunk[0..n]);
@@ -261,7 +261,7 @@ fn readChunkedBody(allocator: std.mem.Allocator, fd: std.posix.fd_t, seed: []con
 
 fn fillMore(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.posix.fd_t) !bool {
     var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
-    const n = std.posix.read(fd, &read_chunk) catch return error.ConnectionClosed;
+    const n = readSomeFD(fd, &read_chunk) catch return error.ConnectionClosed;
     if (n == 0) return false;
     try carry.appendSlice(allocator, read_chunk[0..n]);
 
@@ -302,7 +302,58 @@ fn consume(carry: *std.ArrayList(u8), count: usize) void {
 
 // --------------------------------------------------------- //
 
+// --------------------------------------------------------- //
+// Windows socket I/O over ntdll. Zig 0.16 std drives sockets through AFD, and
+// std.posix read plus the libc write are POSIX-only, so the raw-fd paths above
+// branch here on Windows. Wait-on-handle covers handles opened async.
+
+/// One NtReadFile call, waiting on the handle when the operation goes async.
+fn windowsReadSome(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
+    const windows = std.os.windows;
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    const len = std.math.lossyCast(windows.ULONG, buf.len);
+
+    var status = windows.ntdll.NtReadFile(handle, null, null, null, &iosb, buf.ptr, len, null, null);
+    if (status == .PENDING) {
+        _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+        status = iosb.u.Status;
+    }
+    if (status == .END_OF_FILE) return 0;
+    if (status != .SUCCESS) return error.BrokenPipe;
+
+    return iosb.Information;
+}
+
+/// Write all of data via NtWriteFile, waiting on the handle when async.
+fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{BrokenPipe}!void {
+    const windows = std.os.windows;
+    var rem = data;
+    while (rem.len > 0) {
+        var iosb: windows.IO_STATUS_BLOCK = undefined;
+        const len = std.math.lossyCast(windows.ULONG, rem.len);
+
+        var status = windows.ntdll.NtWriteFile(handle, null, null, null, &iosb, rem.ptr, len, null, null);
+        if (status == .PENDING) {
+            _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+            status = iosb.u.Status;
+        }
+        if (status != .SUCCESS) return error.BrokenPipe;
+        if (iosb.Information == 0) return error.BrokenPipe;
+
+        rem = rem[iosb.Information..];
+    }
+}
+
+/// Read some bytes from fd: the ntdll path on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return windowsReadSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+    if (comptime @import("builtin").target.os.tag == .windows) return windowsWriteAll(fd, data);
+
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -381,6 +432,8 @@ const MockServer = struct {
 };
 
 test "prometheuz: http_client parses a Content-Length response" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
     );
@@ -395,6 +448,7 @@ test "prometheuz: http_client parses a Content-Length response" {
 }
 
 test "prometheuz: http_client reads to EOF when Content-Length is absent" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
     defer _ = std.os.linux.close(fds[0]);
@@ -415,6 +469,8 @@ test "prometheuz: http_client reads to EOF when Content-Length is absent" {
 }
 
 test "prometheuz: http_client surfaces a 404 status" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -426,6 +482,8 @@ test "prometheuz: http_client surfaces a 404 status" {
 }
 
 test "prometheuz: http_client rejects a body over max_response_body" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n");
     defer mock.deinit();
 
@@ -433,6 +491,8 @@ test "prometheuz: http_client rejects a body over max_response_body" {
 }
 
 test "prometheuz: http_client sendRequest writes a well-formed GET" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -447,6 +507,8 @@ test "prometheuz: http_client sendRequest writes a well-formed GET" {
 }
 
 test "prometheuz: http_client sendRequest carries a POST body" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -461,6 +523,8 @@ test "prometheuz: http_client sendRequest carries a POST body" {
 }
 
 test "prometheuz: http_client decodes a chunked response" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     // Same shape node-exporter actually sends: no Content-Length, chunked
     // body, a word split across a chunk boundary.
     const mock = try MockServer.init(
@@ -480,6 +544,8 @@ test "prometheuz: http_client decodes a chunked response" {
 }
 
 test "prometheuz: http_client chunked response spanning multiple reads" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     // A body larger than one BODY_READ_CHUNK (4096), forcing fillMore() to
     // run more than once and a chunk boundary to land mid-read.
     var large: [10_000]u8 = undefined;
@@ -511,6 +577,8 @@ test "prometheuz: http_client chunked response spanning multiple reads" {
 }
 
 test "prometheuz: http_client sendRequest carries custom headers" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 

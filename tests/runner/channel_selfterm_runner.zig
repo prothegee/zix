@@ -13,7 +13,7 @@ const TIMEOUT_MS: u64 = 30000;
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = common.argsIterator(process.minimal.args);
     _ = arg_iter.skip();
     const server_path = arg_iter.next() orelse {
         std.debug.print("FAIL: missing binary path\n", .{});

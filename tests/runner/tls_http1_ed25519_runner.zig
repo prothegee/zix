@@ -22,7 +22,7 @@ const EXPECTED_BODY: []const u8 = "hello over tls 1.3 (ed25519)";
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = common.argsIterator(process.minimal.args);
     _ = arg_iter.skip();
     const server_path = arg_iter.next() orelse {
         std.debug.print("FAIL tls-http1-ed25519: missing server path\n", .{});

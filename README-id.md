@@ -18,20 +18,6 @@
 
 <hr>
 
-<div align="center">
-    <img src="https://img.shields.io/badge/Language-Zig-orange">
-</div>
-<div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-green">
-    <img src="https://img.shields.io/badge/x86__64-Windows-red">
-    <img src="https://img.shields.io/badge/aarch64-MacOS-red">
-    <img src="https://img.shields.io/badge/x86__64-FreeBSD-red">
-    <img src="https://img.shields.io/badge/x86__64-NetBSD-red">
-    <img src="https://img.shields.io/badge/x86__64-OpenBSD-red">
-</div>
-
-<hr>
-
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Di mana penghubung bertemu kehendak.</i>
 </p>
@@ -143,8 +129,20 @@
 
 ## Catatan Penting
 
-Saat ini Zix berfokus pada Linux.
-Windows & MacOS belum di support.
+Zix dispatch model untuk IOCP dan KQUEUE tidak didukung.
+Mencari kontributor dan maintainer.
+
+__*Status:*__ <br>
+<img src="https://img.shields.io/badge/x86__64-Linux-green">
+<img src="https://img.shields.io/badge/aarch64-Linux-yellow">
+<img src="https://img.shields.io/badge/x86__64-Windows-yellow">
+<img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
+<img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
+<img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
+<img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
+
+> hijau: tervalidasi di hardware native. <br>
+> kuning: terverifikasi cross-build (module, examples, test suite, dan runner ter-compile, EPOLL / URING fallback ke POOL saat runtime).
 
 <br>
 
@@ -531,7 +529,7 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1158+1d1193aa7
+        - 0.17.0-dev.1464+6aff551f1
 
 <br>
 
@@ -595,19 +593,21 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
 | `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
-| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Jalankan dari sana. |
+| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple, jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-epoll`. |
 | `zig build test-runner-all` | Menjalankan setiap runner integrasi server plus client. |
 
 Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua example, lalu menjalankan satu di background dan menghentikannya:
 
 ```sh
-zig build examples                      # bangun setiap example ke zig-out/bin/
-./zig-out/bin/example-http1_websocket & # jalankan satu di background
-kill %1                                 # hentikan
+zig build examples                                   # bangun setiap example ke zig-out/bin/
+./zig-out/bin/example-http1_websocket-x86_64-linux & # jalankan satu di background
+kill %1                                              # hentikan
 ```
+
+Setiap step menerima `-Dtarget=<arch>-<os>`, mencakup tujuh target: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. Pada target foreign, step tes dan runner meng-compile semuanya dan melewati eksekusi dengan warning. `scripts/build-all-targets.sh` menyapu setiap opsi build zix dan para driver di ketujuh target.
 
 Tidak ada output library `zig build install` dan tidak ada `-Doptimize` yang diperlukan untuk pengecekan compile biasa. Untuk mengonsumsi zix di proyek lain, ikuti Memulai di atas: ia ditambahkan sebagai dependency `build.zig.zon` dan diimpor dengan `exe.root_module.addImport("zix", zix.module("zix"))`, tidak pernah di-link sebagai system library.
 
@@ -624,6 +624,8 @@ zig build test-all         # semua di atas
 ```
 
 `zig build` saja tidak menjalankan tes. Lihat [`docs/tests-id.md`](docs/tests-id.md) untuk detail cakupan lengkap.
+
+Cross-target: dengan `-Dtarget` foreign, setiap suite ter-compile untuk target itu dan eksekusi dilewati dengan warning. Di host non-Linux, tes yang menguji jalur EPOLL / URING (Linux-only) mencetak warn lalu skip, jadi suite tetap hijau di setiap platform yang didukung.
 
 <br>
 

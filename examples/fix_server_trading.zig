@@ -46,6 +46,10 @@ fn nextId() u32 {
 }
 
 fn appendRecord(record: []const u8) void {
+    // The raw openat / write append path is POSIX-only: records are not
+    // persisted on Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
     const fd = std.posix.openat(
         std.posix.AT.FDCWD,
         ORDERS_FILE,

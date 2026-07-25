@@ -392,6 +392,8 @@ fn socketPair(fds: *[2]i32) !void {
 }
 
 test "zix http1: Response setters mutate status, content type, keep alive" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var res = Response.init(-1, undefined, std.testing.allocator);
 
     try std.testing.expect(res.status == .OK);
@@ -407,6 +409,7 @@ test "zix http1: Response setters mutate status, content type, keep alive" {
 }
 
 test "zix http1: Response.send is byte-identical to core.sendSimpleFD" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var pair_res: [2]i32 = undefined;
     var pair_core: [2]i32 = undefined;
     try socketPair(&pair_res);
@@ -434,6 +437,7 @@ test "zix http1: Response.send is byte-identical to core.sendSimpleFD" {
 }
 
 test "zix http1: Response.sendJson is byte-identical to core.sendJsonFD" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var pair_res: [2]i32 = undefined;
     var pair_core: [2]i32 = undefined;
     try socketPair(&pair_res);
@@ -458,6 +462,7 @@ test "zix http1: Response.sendJson is byte-identical to core.sendJsonFD" {
 }
 
 test "zix http1: Response.sendText is byte-identical to core.sendSimpleFD text/plain" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var pair_res: [2]i32 = undefined;
     var pair_core: [2]i32 = undefined;
     try socketPair(&pair_res);
@@ -481,6 +486,7 @@ test "zix http1: Response.sendText is byte-identical to core.sendSimpleFD text/p
 }
 
 test "zix http1: Response.sendRaw writes caller bytes verbatim" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try socketPair(&fds);
     defer _ = std.os.linux.close(fds[0]);
@@ -498,6 +504,7 @@ test "zix http1: Response.sendRaw writes caller bytes verbatim" {
 }
 
 test "zix http1: Response.sendNoContent is byte-identical to a 204 empty send" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var pair_res: [2]i32 = undefined;
     var pair_core: [2]i32 = undefined;
     try socketPair(&pair_res);
@@ -522,6 +529,7 @@ test "zix http1: Response.sendNoContent is byte-identical to a 204 empty send" {
 }
 
 test "zix http1: Response.addHeader splices extra lines before the final CRLF" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -548,6 +556,8 @@ test "zix http1: Response.addHeader splices extra lines before the final CRLF" {
 }
 
 test "zix http1: Response.addHeader rejects CR LF injection and enforces the cap" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -563,6 +573,7 @@ test "zix http1: Response.addHeader rejects CR LF injection and enforces the cap
 }
 
 test "zix http1: Response.setKeepAlive false emits Connection close" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -584,6 +595,7 @@ test "zix http1: Response.setKeepAlive false emits Connection close" {
 }
 
 test "zix http1: Response.sendFromCache is false without a cache, hits after sendCached" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -623,6 +635,7 @@ test "zix http1: Response.sendFromCache is false without a cache, hits after sen
 }
 
 test "zix http1: Response.sendNegotiated equals plain send when compression is off" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var pair_res: [2]i32 = undefined;
     var pair_plain: [2]i32 = undefined;
     try socketPair(&pair_res);
@@ -652,6 +665,7 @@ test "zix http1: Response.sendNegotiated equals plain send when compression is o
 }
 
 test "zix http1: Response.sendStream writes the SSE header block then events" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try socketPair(&fds);
     defer _ = std.os.linux.close(fds[0]);

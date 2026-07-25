@@ -17,6 +17,8 @@
 //! - Response headers must fit in one HEADERS frame (END_HEADERS). CONTINUATION is not handled.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
@@ -458,6 +460,17 @@ fn readRecordInto(fd: posix.fd_t, buf: []u8) !usize {
 }
 
 fn readAll(fd: posix.fd_t, buf: []u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var read: usize = 0;
+        while (read < buf.len) {
+            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            if (n == 0) return error.ConnectionClosed;
+
+            read += n;
+        }
+        return;
+    }
+
     const linux = std.os.linux;
     var read: usize = 0;
     while (read < buf.len) {
@@ -473,6 +486,8 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
 }
 
 fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
+
     const linux = std.os.linux;
     var written: usize = 0;
     while (written < bytes.len) {

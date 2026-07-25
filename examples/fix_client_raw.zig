@@ -39,16 +39,20 @@ pub fn main(process: std.process.Init) !void {
     var port: u16 = DEFAULT_PORT;
     var target: []const u8 = DEFAULT_TARGET;
 
-    var args = std.process.Args.Iterator.init(process.minimal.args);
-    _ = args.next();
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--ip")) {
-            ip = args.next() orelse return error.MissingArg;
-        } else if (std.mem.eql(u8, arg, "--port")) {
-            const port_str = args.next() orelse return error.MissingArg;
-            port = try std.fmt.parseInt(u16, port_str, 10);
-        } else if (std.mem.eql(u8, arg, "--target")) {
-            target = args.next() orelse return error.MissingArg;
+    // std.process.Args.Iterator is POSIX-only in Zig 0.16: CLI overrides are
+    // skipped on Windows, the defaults stay.
+    if (comptime @import("builtin").target.os.tag != .windows) {
+        var args = std.process.Args.Iterator.init(process.minimal.args);
+        _ = args.next();
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--ip")) {
+                ip = args.next() orelse return error.MissingArg;
+            } else if (std.mem.eql(u8, arg, "--port")) {
+                const port_str = args.next() orelse return error.MissingArg;
+                port = try std.fmt.parseInt(u16, port_str, 10);
+            } else if (std.mem.eql(u8, arg, "--target")) {
+                target = args.next() orelse return error.MissingArg;
+            }
         }
     }
 

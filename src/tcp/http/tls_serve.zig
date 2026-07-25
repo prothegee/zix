@@ -16,8 +16,10 @@
 //!   scope here (ADR-055 adds the TLS read path on top of this stream sink).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
+const win_io = @import("../../utils/windows_io.zig");
 const common = @import("dispatch/common.zig");
 const resp = @import("response.zig");
 const parser = @import("parser.zig");
@@ -69,7 +71,7 @@ const ws_out_size: usize = 32 * 1024;
 
 /// The sentinel fd handed to processRequest while a response sink is installed: every writeAllFD and
 /// the Response fast path target this fd, so nothing escapes to a real descriptor (no plaintext leak).
-const sink_fd: posix.fd_t = -1;
+const sink_fd: posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 /// One captured response: the plaintext bytes the router wrote, plus the keep-alive outcome.
 /// `streamed` is true when the handler took the streaming path (res.stream / SSE) over TLS: the
@@ -151,7 +153,11 @@ pub fn runTls(server: anytype, io: std.Io) !void {
         fn handle(srv_ptr: @TypeOf(server), conn_fd: posix.fd_t, tls_ctx: *const Tls.Context, h_io: std.Io) void {
             serveConnTls(srv_ptr, h_io, conn_fd, tls_ctx) catch {};
 
-            _ = linux.close(conn_fd);
+            if (comptime builtin.os.tag == .windows) {
+                win_io.close(conn_fd);
+            } else {
+                _ = linux.close(conn_fd);
+            }
         }
     };
 
@@ -162,7 +168,11 @@ pub fn runTls(server: anytype, io: std.Io) !void {
         const worker = std.Thread.spawn(.{ .stack_size = cfg.worker_stack_size_bytes }, Spawn.handle, .{ server, conn_fd, ctx, io }) catch {
             // Spawn failed (thread / pid limit): drop this connection and keep accepting. Serving
             // inline would block the accept loop for the connection's whole lifetime.
-            _ = linux.close(conn_fd);
+            if (comptime builtin.os.tag == .windows) {
+                win_io.close(conn_fd);
+            } else {
+                _ = linux.close(conn_fd);
+            }
 
             continue;
         };
@@ -517,6 +527,17 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
 }
 
 fn readAll(fd: posix.fd_t, buf: []u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var read: usize = 0;
+        while (read < buf.len) {
+            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            if (n == 0) return error.ConnectionClosed;
+
+            read += n;
+        }
+        return;
+    }
+
     var read: usize = 0;
     while (read < buf.len) {
         const chunk = buf[read..];
@@ -532,6 +553,8 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
 }
 
 fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
+
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];
@@ -667,7 +690,8 @@ test "zix http: tls_serve, WebSocket.serveTls encrypts the 101 through the strea
     defer resp.tl_tls_stream = prev;
 
     // the 101 routes through the stream sink (encrypted over TLS in production), the handoff is set.
-    try ws.serveTls(-1, "dGhlIHNhbXBsZSBub25jZQ==", wsNoopFrame);
+    const sink_only_fd: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+    try ws.serveTls(sink_only_fd, "dGhlIHNhbXBsZSBub25jZQ==", wsNoopFrame);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "101 Switching Protocols") != null);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null);
 

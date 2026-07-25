@@ -729,6 +729,10 @@ pub fn onReadable(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 // --------------------------------------------------------------- //
 
 test "zix http2: mux sendResponseStreamFD paces a large body by the send window" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -821,6 +825,10 @@ fn feedFrame(conn: *MuxConn, ftype: u8, flags: u8, sid: u31, payload: []const u8
 }
 
 test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the frame loop" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     @memset(&fc_test_body, 'q');
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -875,6 +883,10 @@ fn aeCheckHandler(_: []const u8, headers: []const hpack.Header, _: []const u8, f
 const ae_routes = [_]Route{.{ .path = "/static/x", .handler = aeCheckHandler }};
 
 test "zix http2: mux passes the accept-encoding request header to the handler" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -929,6 +941,10 @@ test "zix http2: mux pooled stream is reused and reset clean on release" {
 }
 
 test "zix http2: mux DATA past max_body sheds the stream with 413 instead of truncating" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -1024,6 +1040,10 @@ fn exactBodyHandler(_: []const u8, _: []const hpack.Header, body: []const u8, fd
 const exact_body_routes = [_]Route{.{ .path = "/", .handler = exactBodyHandler }};
 
 test "zix http2: mux DATA exactly filling max_body still dispatches the full body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -1057,6 +1077,10 @@ test "zix http2: mux DATA exactly filling max_body still dispatches the full bod
 }
 
 test "zix http2: mux HEADERS past max_streams is refused, the open stream keeps its slot" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
@@ -1112,6 +1136,10 @@ test "zix http2: mux HEADERS past max_streams is refused, the open stream keeps 
 }
 
 test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     @memset(&fc_test_body, 'r');
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -1145,6 +1173,10 @@ test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
 }
 
 test "zix http2: mux stream slots are pooled across connections" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -1220,6 +1252,10 @@ fn drainDataTally(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, buf: []u8) 
 }
 
 test "zix http2: mux resumes every parked stream sharing one connection window" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     @memset(&multi_body, 'm');
 
     // A socketpair's default buffer holds the whole reply set without blocking the writer, so a single
@@ -1285,6 +1321,10 @@ test "zix http2: mux resumes every parked stream sharing one connection window" 
 }
 
 test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_UPDATE arrives" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     @memset(&multi_body, 'm');
 
     var pair: [2]i32 = undefined;
@@ -1343,6 +1383,10 @@ fn mfsHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.pos
 const mfs_routes = [_]Route{.{ .path = "/", .handler = mfsHandler }};
 
 test "zix http2: outbound DATA frames respect the peer default max frame size, not the server's" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     @memset(&mfs_body, 'f');
 
     var pair: [2]i32 = undefined;

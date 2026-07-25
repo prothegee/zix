@@ -1,6 +1,7 @@
 //! HTTP/2 connection loop: h2c direct (PRI preface) and h2c upgrade (HTTP/1.1 Upgrade: h2c).
 
 const std = @import("std");
+const win_io = @import("../../utils/windows_io.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
 const rc = @import("../../utils/response_cache.zig");
@@ -263,14 +264,24 @@ const Stream = struct {
 
 // --------------------------------------------------------- //
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 /// Serve one h2c connection. Takes raw fd extracted by the server dispatch layer.
 /// Caller owns the fd and must close it after this exits.
 pub fn serveConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
+        // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+        const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
         std.posix.setsockopt(
             fd,
             std.posix.IPPROTO.TCP,
-            std.posix.TCP.NODELAY,
+            nodelay,
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
@@ -329,7 +340,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
         if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = std.posix.read(fd, head_buf[filled..]) catch return error.Closed;
+        const n = readSomeFD(fd, head_buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }
@@ -667,6 +678,8 @@ fn routeHandler(comptime id: u8) HandlerFn {
 }
 
 test "zix http2: Router strips the query before matching" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const R = Router(&[_]Route{
         .{ .path = "/baseline2", .handler = routeHandler(1) },
     });
@@ -678,6 +691,8 @@ test "zix http2: Router strips the query before matching" {
 }
 
 test "zix http2: Router PREFIX matches a path subtree on a boundary" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
         .{ .path = "/static", .handler = routeHandler(3), .kind = .PREFIX },
@@ -693,6 +708,8 @@ test "zix http2: Router PREFIX matches a path subtree on a boundary" {
 }
 
 test "zix http2: Router EXACT wins over PREFIX and longest prefix wins" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(1) },
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
@@ -711,6 +728,7 @@ test "zix http2: Router EXACT wins over PREFIX and longest prefix wins" {
 }
 
 test "zix http2: Router PREFIX respects the segment boundary" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const R = Router(&[_]Route{
         .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
     });
@@ -728,6 +746,7 @@ test "zix http2: Router PREFIX respects the segment boundary" {
 }
 
 test "zix http2: response cache round-trips via sendCachedFD then serveCached" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 1024 });
     defer cache.deinit();
     setCache(&cache, 1000);

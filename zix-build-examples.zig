@@ -108,6 +108,11 @@ pub fn addSteps(
         .{ "example-grpc_multi_client", "examples/grpc_multi_client.zig", "grpc" },
     };
 
+    // Installed binaries carry the target triple (example-<name>-<arch>-<os>), so
+    // building several targets in a row never overwrites a prior target's binary
+    // in zig-out/bin. Step names stay unsuffixed.
+    const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+
     const examples_step = b.step("examples", "Build all examples");
 
     const group_tcp = b.step("example-tcp", "Build all tcp examples");
@@ -143,7 +148,7 @@ pub fn addSteps(
         exe_mod.addImport("zix", zix);
 
         const exe = b.addExecutable(.{
-            .name = pair[0],
+            .name = b.fmt("{s}-{s}", .{ pair[0], triple }),
             .root_module = exe_mod,
         });
 

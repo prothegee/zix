@@ -459,6 +459,7 @@ test "zix grpc: readGrpcPrefix exactly 5 bytes is valid" {
 }
 
 test "zix grpc: sendGrpcErrorFD includes content-type header" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const pipe_fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(pipe_fds[0]);
     defer _ = std.posix.system.close(pipe_fds[1]);

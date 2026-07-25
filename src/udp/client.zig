@@ -83,7 +83,9 @@ pub fn UdpClient(comptime Packet: type) type {
         /// Note:
         /// - for a concurrent send/receive loop, see examples/udp_client.zig
         pub fn receiveFeedback(self: *Self) !FB {
-            if (self.config.recv_timeout_ms > 0) {
+            // No poll over the ntdll path: recv_timeout_ms degrades to a blocking receive on Windows.
+            const has_poll = comptime @import("builtin").target.os.tag != .windows;
+            if (has_poll and self.config.recv_timeout_ms > 0) {
                 // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
                 var pfd = [1]std.posix.pollfd{.{
                     .fd = self.socket.handle,

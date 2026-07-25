@@ -65,6 +65,10 @@ pub fn unpackUserData(user_data: u64) Decoded {
 // --------------------------------------------------------- //
 
 test "zix multiplexers io_uring: user_data round trip preserves op, gen, fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const packed_value = packUserData(.send, 0xabcdef, 1234);
     const decoded = unpackUserData(packed_value);
 
@@ -74,6 +78,10 @@ test "zix multiplexers io_uring: user_data round trip preserves op, gen, fd" {
 }
 
 test "zix multiplexers io_uring: user_data each op kind decodes back" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     inline for (.{ OpKind.accept, OpKind.recv, OpKind.send, OpKind.timeout, OpKind.close, OpKind.external }) |op| {
         const decoded = unpackUserData(packUserData(op, 1, 7));
         try std.testing.expectEqual(op, decoded.op);
@@ -83,6 +91,10 @@ test "zix multiplexers io_uring: user_data each op kind decodes back" {
 }
 
 test "zix multiplexers io_uring: user_data max generation does not bleed into fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const decoded = unpackUserData(packUserData(.recv, 0xff_ff_ff, 65535));
 
     try std.testing.expectEqual(@as(u24, 0xff_ff_ff), decoded.gen);

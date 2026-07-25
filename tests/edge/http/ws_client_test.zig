@@ -6,6 +6,8 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix edge: WsClient.connect, wss:// returns TlsNotSupported" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -14,6 +16,8 @@ test "zix edge: WsClient.connect, wss:// returns TlsNotSupported" {
 }
 
 test "zix edge: WsClient.connect, non-ws scheme returns InvalidUrl" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -22,6 +26,7 @@ test "zix edge: WsClient.connect, non-ws scheme returns InvalidUrl" {
 }
 
 test "zix edge: WsConn.send mask bit present in every frame header" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);
@@ -42,6 +47,7 @@ test "zix edge: WsConn.send mask bit present in every frame header" {
 }
 
 test "zix edge: WsConn.send empty payload, mask bit still set" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);
@@ -60,6 +66,8 @@ test "zix edge: WsConn.send empty payload, mask bit still set" {
 }
 
 test "zix edge: WsClientConfig defaults" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 

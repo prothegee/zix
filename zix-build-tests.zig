@@ -1,16 +1,39 @@
 const std = @import("std");
 
+/// Wrap a compiled test artifact in a Run step when the target can execute on this host,
+/// otherwise return the compile step directly. Deterministic compile-only coverage for a
+/// foreign target regardless of host binfmt_misc / qemu registration making execution
+/// technically possible (e.g. aarch64-linux under a registered qemu-user interpreter).
+fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.Build.Step {
+    if (foreign) return &exe.step;
+
+    const run = b.addRunArtifact(exe);
+    return &run.step;
+}
+
 pub fn addSteps(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     zix: *std.Build.Module,
 ) void {
+    // Foreign target (e.g. -Dtarget=x86_64-windows on a Linux host): every suite
+    // still compiles for the target, and the run steps report skipped instead of
+    // failing to spawn, so `zig build test-all -Dtarget=<t>` passes as a
+    // compile-coverage pass. On the target's own machine the suites run for real.
+    const host = b.graph.host.result;
+    const foreign_target = target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch;
+    if (foreign_target) {
+        std.log.info("zix tests: target {s}-{s} is foreign to this host, suites compile but execution is skipped", .{
+            @tagName(target.result.cpu.arch), @tagName(target.result.os.tag),
+        });
+    }
+
     const zix_tests = b.addTest(.{ .root_module = zix });
-    const zix_tests_run = b.addRunArtifact(zix_tests);
+    const zix_tests_step = testRunStep(b, zix_tests, foreign_target);
 
     const test_step = b.step("unit-test", "Run unit tests");
-    test_step.dependOn(&zix_tests_run.step);
+    test_step.dependOn(zix_tests_step);
 
     // --------------------------------------------------------- //
 
@@ -66,10 +89,10 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_run = b.addRunArtifact(t_exe);
-        if (prev_integ) |p| t_run.step.dependOn(p);
-        prev_integ = &t_run.step;
-        integration_test_step.dependOn(&t_run.step);
+        const t_step = testRunStep(b, t_exe, foreign_target);
+        if (prev_integ) |p| t_step.dependOn(p);
+        prev_integ = t_step;
+        integration_test_step.dependOn(t_step);
     }
 
     // --------------------------------------------------------- //
@@ -118,10 +141,10 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_run = b.addRunArtifact(t_exe);
-        if (prev_behav) |p| t_run.step.dependOn(p);
-        prev_behav = &t_run.step;
-        behaviour_test_step.dependOn(&t_run.step);
+        const t_step = testRunStep(b, t_exe, foreign_target);
+        if (prev_behav) |p| t_step.dependOn(p);
+        prev_behav = t_step;
+        behaviour_test_step.dependOn(t_step);
     }
 
     // --------------------------------------------------------- //
@@ -170,10 +193,10 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_run = b.addRunArtifact(t_exe);
-        if (prev_edge) |p| t_run.step.dependOn(p);
-        prev_edge = &t_run.step;
-        edge_test_step.dependOn(&t_run.step);
+        const t_step = testRunStep(b, t_exe, foreign_target);
+        if (prev_edge) |p| t_step.dependOn(p);
+        prev_edge = t_step;
+        edge_test_step.dependOn(t_step);
     }
 
     // --------------------------------------------------------- //
@@ -183,7 +206,7 @@ pub fn addSteps(
     edge_test_step.dependOn(behaviour_test_step);
 
     const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
-    all_test_step.dependOn(&zix_tests_run.step);
+    all_test_step.dependOn(zix_tests_step);
     all_test_step.dependOn(integration_test_step);
     all_test_step.dependOn(behaviour_test_step);
     all_test_step.dependOn(edge_test_step);

@@ -341,6 +341,10 @@ test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without 
 }
 
 test "zix udp: raw udp parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var buf: [256]u8 = @splat(0);
 
     // Lay out a completion buffer exactly as the kernel does: recvmsg_out header, then the peer
@@ -369,6 +373,10 @@ test "zix udp: raw udp parseMultishotBuf recovers the peer and payload at the re
 }
 
 test "zix udp: raw udp io_uring recvmsg delivers a datagram and its peer address by slot" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     if (comptime !datagram.is_linux) return;
 
     var ring = initUringRing() catch return; // skip where io_uring is unavailable (sandbox / old kernel)
