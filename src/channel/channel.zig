@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
 
@@ -45,7 +46,7 @@ pub fn Channel(comptime T: type) type {
 
             // Debug-build init notice. Suppressed under the test runner: a print here runs
             // while channel tests drive concurrent send/recv and poisons the stdout IPC.
-            if (comptime builtin.mode == .Debug and !builtin.is_test)
+            if (comptime (if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug) and !builtin.is_test)
                 std.debug.print("zix channel: init {s} cap={d}\n", .{ @typeName(T), capacity });
 
             return .{ .buf = buf, .allocator = allocator };

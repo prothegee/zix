@@ -117,8 +117,10 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/http/dispatch/async.zig"));
     std.testing.refAllDecls(@import("tcp/http/dispatch/pool.zig"));
     std.testing.refAllDecls(@import("tcp/http/dispatch/mixed.zig"));
-    std.testing.refAllDecls(@import("tcp/http/dispatch/epoll.zig"));
-    std.testing.refAllDecls(@import("tcp/http/dispatch/uring.zig"));
+    // EPOLL / URING modules are Linux-only, their decls stay out of
+    // analysis elsewhere (their tests still collect and self-skip).
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http/tls_serve.zig"));
     std.testing.refAllDecls(@import("tcp/http/sse_client.zig"));
     std.testing.refAllDecls(@import("tcp/http/ws_client.zig"));
@@ -135,8 +137,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/dispatch/async.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/pool.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/mixed.zig"));
-    std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
-    std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
     std.testing.refAllDecls(@import("tcp/http1/request.zig"));
     std.testing.refAllDecls(@import("tcp/http1/response.zig"));
@@ -160,7 +162,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
     std.testing.refAllDecls(@import("tcp/tls/tls_session.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
-    std.testing.refAllDecls(@import("tcp/http1/tls_mux.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/tls_mux.zig"));
 
     // # zix.Tls (TLS 1.2 building blocks: PRF schedule, record, version select)
     std.testing.refAllDecls(@import("tls/tls12_prf.zig"));
@@ -172,23 +174,23 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/cert_verify.zig"));
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
-    std.testing.refAllDecls(@import("multiplexers/ring.zig"));
-    std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
-    std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
 
     // # zix.Http2
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));
     std.testing.refAllDecls(@import("tcp/http2/hpack.zig"));
     std.testing.refAllDecls(@import("tcp/http2/core.zig"));
-    std.testing.refAllDecls(@import("tcp/http2/mux.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http2/mux.zig"));
     std.testing.refAllDecls(@import("tcp/http2/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/server.zig"));
     std.testing.refAllDecls(@import("tcp/http2/dispatch/common.zig"));
-    std.testing.refAllDecls(@import("tcp/http2/dispatch/epoll.zig"));
-    std.testing.refAllDecls(@import("tcp/http2/dispatch/uring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http2/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http2/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http2/tls_serve.zig"));
-    std.testing.refAllDecls(@import("tcp/http2/tls_mux.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http2/tls_mux.zig"));
 
     // # zix.Grpc
     std.testing.refAllDecls(@import("tcp/http2/grpc/status.zig"));
@@ -226,8 +228,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/dispatch/async.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/pool.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/mixed.zig"));
-    std.testing.refAllDecls(@import("udp/dispatch/epoll.zig"));
-    std.testing.refAllDecls(@import("udp/dispatch/uring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/dispatch/uring.zig"));
 
     // # zix.Http3
     std.testing.refAllDecls(@import("udp/http3/crypto.zig"));
@@ -260,8 +262,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/http3/dispatch/async.zig"));
     std.testing.refAllDecls(@import("udp/http3/dispatch/pool.zig"));
     std.testing.refAllDecls(@import("udp/http3/dispatch/mixed.zig"));
-    std.testing.refAllDecls(@import("udp/http3/dispatch/epoll.zig"));
-    std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("udp/http3/Http3.zig"));
 
     // # zix.Tcp (raw)

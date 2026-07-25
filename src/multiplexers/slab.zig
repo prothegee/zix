@@ -11,6 +11,7 @@
 //!   memory tracks live connections, not the lifetime high-water of fd indices.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// mmap a zero-filled, demand-paged slots array of `count` elements of T. Works
 /// for an inline-struct slot (zero == empty) or a pointer slot (zero == null).
@@ -22,6 +23,16 @@ const std = @import("std");
 /// Return:
 /// - []T (page-aligned, all zero, demand-paged)
 pub fn mapZeroedSlots(comptime T: type, count: usize) ![]T {
+    if (comptime builtin.os.tag == .windows) {
+        // Kernel-zeroed demand-paged pages over ntdll, same contract as the
+        // POSIX mmap below.
+        const bytes = count * @sizeOf(T);
+        const base = std.heap.PageAllocator.map(bytes, .fromByteUnits(std.heap.page_size_min)) orelse return error.OutOfMemory;
+        const mapped: [*]align(std.heap.page_size_min) u8 = @alignCast(base);
+
+        return std.mem.bytesAsSlice(T, mapped[0..bytes]);
+    }
+
     const mapped = try std.posix.mmap(
         null,
         count * @sizeOf(T),
@@ -36,6 +47,11 @@ pub fn mapZeroedSlots(comptime T: type, count: usize) ![]T {
 
 /// Unmap a slots array obtained from mapZeroedSlots.
 pub fn unmapSlots(slots: anytype) void {
+    if (comptime builtin.os.tag == .windows) {
+        std.heap.PageAllocator.unmap(@alignCast(std.mem.sliceAsBytes(slots)));
+        return;
+    }
+
     std.posix.munmap(@alignCast(std.mem.sliceAsBytes(slots)));
 }
 
@@ -63,6 +79,15 @@ pub fn releaseSlabPages(buf: []u8) void {
     if (end <= start) return;
 
     const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+    if (comptime builtin.os.tag == .windows) {
+        // MEM_RESET is the ntdll analog of MADV_DONTNEED: content is discardable,
+        // the range stays mapped and refaults zero-filled.
+        var reset_addr: ?*anyopaque = ptr;
+        var reset_size: std.os.windows.SIZE_T = end - start;
+        _ = std.os.windows.ntdll.NtAllocateVirtualMemory(std.os.windows.GetCurrentProcess(), @ptrCast(&reset_addr), 0, &reset_size, .{ .RESET = true }, .{ .NOACCESS = true });
+        return;
+    }
+
     std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
 }
 
@@ -73,7 +98,8 @@ pub fn releaseSlabPages(buf: []u8) void {
 /// re-collapse undoes MADV_DONTNEED reclaim, so resident memory tracks the
 /// touched extent high-water instead of the live set. Opting out keeps
 /// resident memory equal to the pages actually written, on every host, every
-/// run. A kernel without THP ignores the advise.
+/// run. A kernel without THP ignores the advise. MADV_NOHUGEPAGE is Linux-only,
+/// so this is a no-op elsewhere.
 ///
 /// Param:
 /// buf - []u8 (the slab, page-aligned when it comes from mapZeroedSlots)
@@ -81,6 +107,8 @@ pub fn releaseSlabPages(buf: []u8) void {
 /// Return:
 /// - void
 pub fn adviseNoHugePages(buf: []u8) void {
+    if (comptime builtin.os.tag != .linux) return;
+
     const page = std.heap.page_size_min;
     const base = @intFromPtr(buf.ptr);
     const start = std.mem.alignForward(usize, base, page);

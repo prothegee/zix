@@ -48,7 +48,36 @@ fn getTimestamp() Timestamp {
     return timestamp;
 }
 
+/// Sentinel for "no log file open". Windows descriptors are opaque pointers, POSIX are ints.
+const NO_FILE_FD: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
+/// Whether fd refers to an open log file (is not the NO_FILE_FD sentinel).
+fn hasFileFd(fd: std.posix.fd_t) bool {
+    if (comptime builtin.os.tag == .windows) return fd != std.os.windows.INVALID_HANDLE_VALUE;
+
+    return fd >= 0;
+}
+
+/// Stderr descriptor for console output: the PEB handle on Windows, the POSIX
+/// descriptor elsewhere.
+fn stderrFd() std.posix.fd_t {
+    if (comptime builtin.os.tag == .windows) return std.Io.File.stderr().handle;
+
+    return std.posix.STDERR_FILENO;
+}
+
 fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
+    if (comptime builtin.os.tag == .windows) {
+        // File logging is suspended on Windows (openFileLocked), so every rawWrite
+        // targets stderr regardless of fd. The std.debug lock writer is the portable
+        // no-allocation stderr path there.
+        const stderr = std.debug.lockStderr(&.{});
+        defer std.debug.unlockStderr();
+
+        stderr.file_writer.interface.writeAll(data) catch {};
+        return;
+    }
+
     var remaining = data;
     while (remaining.len > 0) {
         const write_result = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -108,7 +137,7 @@ pub const Logger = struct {
     allocator: std.mem.Allocator,
     locked: std.atomic.Value(bool) = .init(false),
 
-    file_fd: std.posix.fd_t = -1,
+    file_fd: std.posix.fd_t = NO_FILE_FD,
     current_date: [10]u8 = undefined,
     file_seq: u32 = 0,
     line_count: u64 = 0,
@@ -177,19 +206,30 @@ pub const Logger = struct {
     }
 
     fn flushLocked(self: *Self) void {
-        if (self.buf_pos == 0 or self.file_fd < 0) return;
+        if (self.buf_pos == 0 or !hasFileFd(self.file_fd)) return;
         rawWrite(self.file_fd, self.buf[0..self.buf_pos]);
         self.buf_pos = 0;
     }
 
     fn closeFileLocked(self: *Self) void {
-        if (self.file_fd >= 0) {
+        // No log file ever opens on Windows (openFileLocked suspends), and the
+        // POSIX close below needs libc there, so this stays out of analysis.
+        if (comptime builtin.os.tag == .windows) return;
+
+        if (hasFileFd(self.file_fd)) {
             _ = std.posix.system.close(self.file_fd);
-            self.file_fd = -1;
+            self.file_fd = NO_FILE_FD;
         }
     }
 
     fn openFileLocked(self: *Self, date: *const [10]u8) void {
+        if (comptime builtin.os.tag == .windows) {
+            // File logging is not ported to Windows yet: console logging still works.
+            self.file_suspended = true;
+            rawWrite(stderrFd(), "zix: logger: file logging is not supported on Windows yet, file logging suspended\n");
+            return;
+        }
+
         var dir_buf: [DIR_PATH_BUF_SIZE:0]u8 = undefined;
         const dir_z = if (comptime ZIG_SEMVER.MINOR == 16)
             std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return
@@ -211,7 +251,7 @@ pub const Logger = struct {
             0o644,
         ) catch {
             self.file_suspended = true;
-            rawWrite(std.posix.STDERR_FILENO, "zix: logger: failed to open log file, ensure save_path exists, file logging suspended\n");
+            rawWrite(stderrFd(), "zix: logger: failed to open log file, ensure save_path exists, file logging suspended\n");
             return;
         };
     }
@@ -219,7 +259,7 @@ pub const Logger = struct {
     fn ensureFileLocked(self: *Self, date: *const [10]u8) void {
         if (self.file_suspended) return;
 
-        if (self.file_fd < 0) {
+        if (!hasFileFd(self.file_fd)) {
             self.current_date = date.*;
             self.file_seq = 0;
             self.line_count = 0;
@@ -243,7 +283,7 @@ pub const Logger = struct {
                 self.flushLocked();
                 self.closeFileLocked();
                 self.file_suspended = true;
-                rawWrite(std.posix.STDERR_FILENO, "zix: logger: file sequence exhausted, file logging suspended\n");
+                rawWrite(stderrFd(), "zix: logger: file sequence exhausted, file logging suspended\n");
                 return;
             }
             self.flushLocked();
@@ -272,7 +312,7 @@ pub const Logger = struct {
         return switch (self.config.console) {
             .OFF => false,
             .DEBUG_ONLY => blk: {
-                if (comptime builtin.mode != .Debug) break :blk false;
+                if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode != .Debug else builtin.mode != .debug) break :blk false;
                 break :blk @intFromEnum(level) >= @intFromEnum(self.config.console_min_level);
             },
             .ALWAYS => @intFromEnum(level) >= @intFromEnum(self.config.console_min_level),
@@ -320,8 +360,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -360,8 +400,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -403,8 +443,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -446,8 +486,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -488,8 +528,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -532,8 +572,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -572,8 +612,8 @@ pub const Logger = struct {
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(std.posix.STDERR_FILENO, line);
-            rawWrite(std.posix.STDERR_FILENO, "\n");
+            rawWrite(stderrFd(), line);
+            rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
