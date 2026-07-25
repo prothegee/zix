@@ -791,6 +791,10 @@ pub const Conn = struct {
 
     /// Bound the handshake replies by conn_timeout_ms (0 disables).
     fn waitReadableAfterSend(self: *Self) !void {
+        // No poll over the ntdll path: conn_timeout_ms degrades to a blocking
+        // read on Windows.
+        if (comptime @import("builtin").target.os.tag == .windows) return;
+
         if (self.config.conn_timeout_ms == 0) return;
         if (self.stream_reader.interface.bufferedLen() > 0) return;
         if (self.tls_session) |session| {
@@ -880,6 +884,8 @@ fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted
 }
 
 test "rediz: conn mock hello negotiates resp3 and captures version" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -891,6 +897,8 @@ test "rediz: conn mock hello negotiates resp3 and captures version" {
 }
 
 test "rediz: conn mock noproto falls back to resp2 on auto" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -901,6 +909,8 @@ test "rediz: conn mock noproto falls back to resp2 on auto" {
 }
 
 test "rediz: conn mock noproto fails a strict resp3 config" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -912,6 +922,8 @@ test "rediz: conn mock noproto fails a strict resp3 config" {
 }
 
 test "rediz: conn mock resp2 fallback runs legacy auth" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -924,6 +936,8 @@ test "rediz: conn mock resp2 fallback runs legacy auth" {
 }
 
 test "rediz: conn mock wrong password surfaces server error" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -935,6 +949,8 @@ test "rediz: conn mock wrong password surfaces server error" {
 }
 
 test "rediz: conn mock selects a non-zero database" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -946,6 +962,8 @@ test "rediz: conn mock selects a non-zero database" {
 }
 
 test "rediz: conn mock command surface round trips" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -980,6 +998,8 @@ test "rediz: conn mock command surface round trips" {
 }
 
 test "rediz: conn mock set with nx miss returns false" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -991,6 +1011,8 @@ test "rediz: conn mock set with nx miss returns false" {
 }
 
 test "rediz: conn mock json set and get round trip a struct" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1044,6 +1066,8 @@ test "rediz: conn mock json set and get round trip a struct" {
 }
 
 test "rediz: conn mock error reply maps to ServerError" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1057,6 +1081,8 @@ test "rediz: conn mock error reply maps to ServerError" {
 }
 
 test "rediz: conn mock skips resp3 push before the reply" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1070,6 +1096,8 @@ test "rediz: conn mock skips resp3 push before the reply" {
 }
 
 test "rediz: conn mock deferred set drains before the next reply read" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1092,6 +1120,8 @@ test "rediz: conn mock deferred set drains before the next reply read" {
 }
 
 test "rediz: conn mock deferred error reply is captured not thrown" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1110,6 +1140,8 @@ test "rediz: conn mock deferred error reply is captured not thrown" {
 }
 
 test "rediz: conn mock deferred without a queue drains one at a time" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1127,6 +1159,8 @@ test "rediz: conn mock deferred without a queue drains one at a time" {
 }
 
 test "rediz: conn mock deferred queue bound forces a drain" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1145,6 +1179,8 @@ test "rediz: conn mock deferred queue bound forces a drain" {
 }
 
 test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1169,6 +1205,10 @@ test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
 }
 
 test "rediz: conn mock deferred transport error surfaces on drain" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 

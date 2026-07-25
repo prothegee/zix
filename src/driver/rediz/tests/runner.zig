@@ -43,7 +43,23 @@ fn waitForServer(io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 /// Read a child pipe to EOF into `out`, truncating at its capacity.
+/// Args iterator that also works on Windows: std's Iterator.init is POSIX-only
+/// in Zig 0.16, Windows needs the allocating variant.
+fn argsIterator(args: std.process.Args) std.process.Args.Iterator {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        return std.process.Args.Iterator.initAllocator(args, std.heap.smp_allocator) catch {
+            std.debug.print("FAIL: args iterator allocation failed\n", .{});
+            std.process.exit(1);
+        };
+    }
+
+    return std.process.Args.Iterator.init(args);
+}
+
 fn drainPipe(file: ?std.Io.File, out: []u8) usize {
+    // std.posix.read is POSIX-only in Zig 0.16: no pipe capture on Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return 0;
+
     const handle = (file orelse return 0).handle;
 
     var total: usize = 0;
@@ -106,7 +122,7 @@ pub fn main(process: std.process.Init) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = argsIterator(process.minimal.args);
     _ = arg_iter.skip();
 
     var paths: std.ArrayList([]const u8) = .empty;

@@ -526,6 +526,11 @@ test "rediz dispatch: replyLen frames two back-to-back replies" {
 }
 
 test "rediz dispatch: open rejects ASYNC and TLS" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -541,6 +546,11 @@ test "rediz dispatch: open rejects ASYNC and TLS" {
 }
 
 test "rediz dispatch: open surfaces the connect error with no server" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
