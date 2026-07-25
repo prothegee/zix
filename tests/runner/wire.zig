@@ -34,6 +34,9 @@ pub fn tlsReadRecord(fd: std.posix.fd_t, buf: []u8) !usize {
 
 /// Read exactly buf.len bytes from fd, looping over short reads and retrying on EINTR.
 pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
+    // Raw fd TLS record I/O is POSIX-only here: not ported to Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
+
     var read: usize = 0;
     while (read < buf.len) {
         const rc = std.os.linux.read(fd, buf[read..].ptr, buf.len - read);
@@ -50,6 +53,9 @@ pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
 
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
 pub fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    // Raw fd TLS record I/O is POSIX-only here: not ported to Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
+
     var written: usize = 0;
     while (written < bytes.len) {
         const rc = std.os.linux.write(fd, bytes[written..].ptr, bytes.len - written);

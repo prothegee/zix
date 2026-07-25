@@ -581,6 +581,12 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
 
         while (check_idx < checks.len and count < wave_width) {
             const c = checks[check_idx];
+            if (common.skipDispatchOffPlatform(c.label)) {
+                tally.total += 1;
+                path_cursor += c.arity;
+                check_idx += 1;
+                continue;
+            }
             if (c.resource) |res| {
                 if (resourceBusy(slot_res[0..count], res)) break;
             }
@@ -607,7 +613,7 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
 pub fn main(process: std.process.Init) void {
     const io = process.io;
 
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = common.argsIterator(process.minimal.args);
     _ = arg_iter.skip();
 
     // Collect server paths in argv order, one slot per declared check path.

@@ -1,8 +1,47 @@
 //! Shared utilities for test runners.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const zix = @import("zix");
+
+// --------------------------------------------------------- //
+
+/// Args iterator that also works on Windows: std's Iterator.init is POSIX-only
+/// in Zig 0.16, Windows needs the allocating variant.
+pub fn argsIterator(args: std.process.Args) std.process.Args.Iterator {
+    if (comptime builtin.os.tag == .windows) {
+        return std.process.Args.Iterator.initAllocator(args, std.heap.smp_allocator) catch {
+            std.debug.print("FAIL: args iterator allocation failed\n", .{});
+            std.process.exit(1);
+        };
+    }
+
+    return std.process.Args.Iterator.init(args);
+}
+
+/// Whether an EPOLL / URING scenario must be skipped on this host: those
+/// dispatch models are Linux-only, elsewhere the server would silently run the
+/// POOL fallback instead of the model under test. Prints a PASS line with a
+/// warn so the suite stays green and the skip stays visible.
+///
+/// Return:
+/// - true when the scenario was reported and the caller must return
+pub fn skipDispatchOffPlatform(label: []const u8) bool {
+    if (comptime builtin.os.tag == .linux) return false;
+
+    const is_uring = std.mem.indexOf(u8, label, "uring") != null;
+    const is_epoll = std.mem.indexOf(u8, label, "epoll") != null;
+    if (!is_epoll and !is_uring) return false;
+
+    std.debug.print("PASS {s} (WARN: {s} is Linux-only, scenario skipped on {s})\n", .{
+        label,
+        if (is_uring) "URING" else "EPOLL",
+        @tagName(builtin.os.tag),
+    });
+
+    return true;
+}
 
 /// Ceiling for the server startup polls (waitForTcpPort / waitForUdsSocket). Generous on purpose:
 /// the polls return the instant a port accepts, so a high ceiling costs a fast server nothing and
@@ -76,6 +115,9 @@ pub fn printPass(label: []const u8) void {
 /// fd is switched to non-blocking and read once (the startup lines are already in
 /// the pipe by the time the listener accepts).
 fn captureFallbackNote(child: *std.process.Child) void {
+    // Non-blocking stderr peek uses fcntl: skipped on Windows, no note captured.
+    if (comptime builtin.os.tag == .windows) return;
+
     const f = child.stderr orelse return;
     const fd = f.handle;
     const linux = std.os.linux;
@@ -263,6 +305,9 @@ const TlsClientConn = struct {
 /// Open a TCP connection to 127.0.0.1:port and run the TLS 1.3 handshake with the native zix.Tls
 /// client. The caller owns the fd (close it) and drives application data over the returned connection.
 fn tlsConnect(port: u16) !TlsClientConn {
+    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     const linux = std.os.linux;
 
     const fd = try sseConnectLocal(port);
@@ -312,6 +357,9 @@ fn tlsConnect(port: u16) !TlsClientConn {
 /// - void on a confirmed SSE-over-TLS stream
 /// - error.NoSseOverTls when the markers never appear, plus the handshake / socket errors
 pub fn tlsSseFirstEvent(port: u16) !void {
+    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     var tc = try tlsConnect(port);
     defer _ = std.os.linux.close(tc.fd);
 
@@ -353,6 +401,9 @@ pub fn tlsSseFirstEvent(port: u16) !void {
 /// - void on a confirmed echo
 /// - error.NoWsAccept / error.NoWsEcho on a missing handshake or echo, plus handshake / socket errors
 pub fn tlsWsEcho(port: u16) !void {
+    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     var tc = try tlsConnect(port);
     defer _ = std.os.linux.close(tc.fd);
 
@@ -399,6 +450,9 @@ pub fn tlsWsEcho(port: u16) !void {
 /// Open a blocking TCP connection to 127.0.0.1:port with a receive timeout, so a stuck read fails
 /// the check rather than hanging it.
 fn sseConnectLocal(port: u16) !posix.fd_t {
+    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     const linux = std.os.linux;
 
     const fd: posix.fd_t = @intCast(linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0));
@@ -437,6 +491,8 @@ fn sseReadRecord(fd: posix.fd_t, buf: []u8) !SseRecord {
 }
 
 fn sseReadAll(fd: posix.fd_t, buf: []u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     const linux = std.os.linux;
 
     var read: usize = 0;
@@ -454,6 +510,8 @@ fn sseReadAll(fd: posix.fd_t, buf: []u8) !void {
 }
 
 fn sseWriteAll(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+
     const linux = std.os.linux;
 
     var written: usize = 0;

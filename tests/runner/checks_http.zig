@@ -208,6 +208,9 @@ pub fn runHttpCompression(io: std.Io, server_path: []const u8, port: u16) !void 
 // Content-Length body (not EOF) so a keep-alive server cannot hang it. encoding is a compressed
 // coding, so contentEncoding() is never null.
 fn checkCoding(io: std.Io, port: u16, route: []const u8, encoding: zix.utils.compression.Encoding) !void {
+    // Raw fd wire checks are POSIX-only here: not ported to Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
+
     const token = encoding.contentEncoding().?;
 
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
@@ -295,6 +298,9 @@ pub fn runWs(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u
 }
 
 pub fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
+    // Raw fd wire checks are POSIX-only here: not ported to Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
+
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 

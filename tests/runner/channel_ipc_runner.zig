@@ -17,7 +17,7 @@ const EXCHANGE_MS: u64 = 1500;
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = common.argsIterator(process.minimal.args);
     _ = arg_iter.skip();
     const ipc_a_path = arg_iter.next() orelse {
         std.debug.print("FAIL: missing ipc_a path\n", .{});

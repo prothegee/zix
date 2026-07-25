@@ -31,7 +31,7 @@ const EXPECTED_BODY: []const u8 = "Hello, World!";
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) void {
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = common.argsIterator(process.minimal.args);
     _ = arg_iter.skip();
     const server_path = arg_iter.next() orelse {
         std.debug.print("FAIL http1-drain: missing server path\n", .{});
@@ -41,6 +41,8 @@ pub fn main(process: std.process.Init) void {
         std.debug.print("FAIL http1-drain: missing label\n", .{});
         std.process.exit(1);
     };
+
+    if (common.skipDispatchOffPlatform(label)) return;
     const port_str = arg_iter.next() orelse {
         std.debug.print("FAIL {s}: missing port\n", .{label});
         std.process.exit(1);
