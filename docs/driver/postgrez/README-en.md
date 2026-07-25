@@ -65,7 +65,21 @@ The connection allocator is the caller's: an arena means mapped rows need no per
 
 ## Config
 
-`postgrez.Config` is flat. The connection reads the top group, the pool and executor add the rest.
+`postgrez.Config` is flat. The connection reads the top group, the pool and executor add the rest. The same connect can pass the struct directly instead of `parseUrl`:
+
+```zig
+const conn = try postgrez.Conn.connect(arena.allocator(), process.io, .{
+    .ip = "127.0.0.1",
+    .port = 5432,
+    .user = "app",
+    .password = "secret",
+    .database = "shop",
+    .tls = .REQUIRE,
+});
+defer conn.deinit();
+```
+
+`tls` is the config twin of the URL's `sslmode`: `.OFF` (default), `.PREFER`, `.REQUIRE`. See `config-en.md` for the per-field tuning notes.
 
 | Field | Default | Meaning |
 | :- | :- | :- |
