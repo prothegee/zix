@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../../../lib.zig").ZIG_SEMVER;
+const win_io = @import("../../../../utils/windows_io.zig");
 const core = @import("../core.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
 const Route = core.Route;
@@ -32,7 +34,8 @@ pub fn logSystem(cfg: GrpcServerConfig, comptime fmt: []const u8, args: anytype)
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix grpc: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix grpc: " ++ fmt ++ "\n", args);
 }
 
 /// Basic per-connection serve options, used by ASYNC / POOL / MIXED (the
@@ -80,17 +83,33 @@ pub const MAX_FD: usize = 1 << 16;
 
 pub fn setNoDelay(fd: std.posix.fd_t) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
+        // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+        const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
         std.posix.setsockopt(
             fd,
             std.posix.IPPROTO.TCP,
-            std.posix.TCP.NODELAY,
+            nodelay,
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
 }
 
+/// Close a connection fd: the ntdll shim on Windows, the raw close syscall elsewhere.
+pub fn closeFD(fd: std.posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        win_io.close(fd);
+        return;
+    }
+
+    _ = std.os.linux.close(fd);
+}
+
 /// Put a socket in non-blocking mode (listener and accepted fds in the event-driven paths).
 pub fn setNonBlock(fd: std.posix.fd_t) void {
+    // fcntl O_NONBLOCK is POSIX-only, and only the Linux event loops call this.
+    if (comptime builtin.os.tag == .windows) return;
+
     const linux = std.os.linux;
     const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
     const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
@@ -101,6 +120,8 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
 /// trading CPU for lower wake-up latency on saturated loopback benchmarks. us = 0 leaves it unset
 /// (no syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
 pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
+    if (comptime builtin.os.tag == .windows) return;
+
     if (us == 0) return;
 
     const SO_BUSY_POLL: u32 = 46;
@@ -128,7 +149,7 @@ pub const ConnQueue = struct {
             const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
             const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
                 self.mutex.unlock(io);
-                _ = std.os.linux.close(fd);
+                closeFD(fd);
                 return;
             };
             if (self.buf.len > 0) {
@@ -212,7 +233,7 @@ pub fn Dispatch(comptime routes: []const Route) type {
         };
 
         pub fn dispatchConn(task: ConnTask) void {
-            defer _ = std.os.linux.close(task.fd);
+            defer closeFD(task.fd);
             core.serveGrpcConn(routes, task.fd, task.opts);
         }
 
@@ -224,7 +245,7 @@ pub fn Dispatch(comptime routes: []const Route) type {
 
         pub fn poolEntry(ctx: PoolCtx) void {
             while (ctx.queue.pop(ctx.io)) |fd| {
-                defer _ = std.os.linux.close(fd);
+                defer closeFD(fd);
                 core.serveGrpcConn(routes, fd, ctx.opts);
             }
         }
@@ -283,7 +304,7 @@ fn readTopologyValue(cpu: u32, comptime leaf: []const u8) ?u32 {
         .{ .ACCMODE = .RDONLY },
         0,
     ) catch return null;
-    defer _ = std.os.linux.close(fd);
+    defer closeFD(fd);
 
     var value_buf: [TOPOLOGY_VALUE_BUF_SIZE]u8 = undefined;
     const len = std.posix.read(fd, &value_buf) catch return null;
@@ -339,6 +360,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -379,6 +402,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// restrictions (falls back to std.Thread.getCpuCount on failure). The TLS epoll default of one
 /// worker per available CPU so workers are never oversubscribed under a cgroup-limited cpuset.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {

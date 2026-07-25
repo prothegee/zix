@@ -1,6 +1,7 @@
 //! gRPC h2c connection loop, handler context, and path/content-type utilities.
 
 const std = @import("std");
+const win_io = @import("../../../utils/windows_io.zig");
 const h2 = @import("../Http2.zig");
 const frame = @import("frame.zig");
 const status = @import("status.zig");
@@ -594,7 +595,7 @@ const ConnReader = struct {
             self.end = n;
         }
 
-        const got = std.posix.read(self.fd, self.buf[self.end..]) catch return error.Closed;
+        const got = readSomeFD(self.fd, self.buf[self.end..]) catch return error.Closed;
         if (got == 0) return error.Closed;
         self.end += got;
     }
@@ -893,14 +894,24 @@ fn dispatchStream(
 
 // --------------------------------------------------------- //
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 /// Serve one gRPC h2c connection (h2c direct or h2c upgrade).
 /// Caller owns fd and must close it after this exits.
 pub fn serveGrpcConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
+        // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+        const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
         std.posix.setsockopt(
             fd,
             std.posix.IPPROTO.TCP,
-            std.posix.TCP.NODELAY,
+            nodelay,
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
@@ -959,7 +970,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
         if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = std.posix.read(fd, head_buf[filled..]) catch return error.Closed;
+        const n = readSomeFD(fd, head_buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }
@@ -2006,6 +2017,9 @@ pub fn grpcMuxProcessRing(comptime routes: []const Route, conn: *GrpcMuxConn) Gr
 }
 
 fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
+    // getpeername is POSIX-only in Zig 0.16 std: no peer string on Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return "-";
+
     var storage: std.posix.sockaddr.storage = undefined;
     var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
     std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
@@ -2103,8 +2117,11 @@ fn computeDeadline(handler_timeout_ms: u32, headers: []const h2.Header) ?u64 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+/// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
+const TEST_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 test "zix grpc: GrpcContext recvMessage empty body returns null" {
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
@@ -2113,7 +2130,7 @@ test "zix grpc: GrpcContext recvMessage parses one message" {
     var body: [10]u8 = undefined;
     frm_mod.writeGrpcPrefix(body[0..5], false, 5);
     @memcpy(body[5..], "hello");
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     const message = ctx.recvMessage().?;
     try std.testing.expectEqualStrings("hello", message);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -2126,7 +2143,7 @@ test "zix grpc: GrpcContext recvMessage two messages" {
     @memcpy(body[5..8], "foo");
     frm_mod.writeGrpcPrefix(body[8..13], false, 3);
     @memcpy(body[13..16], "bar");
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expectEqualStrings("foo", ctx.recvMessage().?);
     try std.testing.expectEqualStrings("bar", ctx.recvMessage().?);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -2185,18 +2202,18 @@ test "zix grpc: Route is_server_streaming defaults to false" {
 }
 
 test "zix grpc: GrpcContext.isExpired null deadline returns false" {
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
     try std.testing.expect(!ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired past deadline returns true" {
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1 };
     try std.testing.expect(ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired future deadline returns false" {
     const far_future: u64 = wallClockNs() + 1000 * std.time.ns_per_s;
-    var ctx = GrpcContext{ .fd = 0, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
     try std.testing.expect(!ctx.isExpired());
 }
 
@@ -2247,6 +2264,7 @@ test "zix grpc: buildSettingsFrame encodes MAX_CONCURRENT_STREAMS correctly" {
 }
 
 test "zix grpc: ReplyStage append and flush via pipe" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -2263,6 +2281,10 @@ test "zix grpc: ReplyStage append and flush via pipe" {
 }
 
 test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -2280,6 +2302,7 @@ test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
 }
 
 test "zix grpc: ReplyStage payload larger than buf writes directly" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -2325,11 +2348,11 @@ fn walkStagedDataFrames(buf: []const u8) StagedFrames {
 
 test "zix grpc: server-streaming packs many messages into one DATA frame" {
     var backing: [4096]u8 = undefined;
-    var stage = ReplyStage{ .fd = -1, .buf = &backing };
+    var stage = ReplyStage{ .fd = TEST_FD, .buf = &backing };
     var coal: [grpc_stream_coalesce_cap]u8 = undefined;
 
     var ctx = GrpcContext{
-        .fd = -1,
+        .fd = TEST_FD,
         .stream_id = 1,
         ._body = &.{},
         ._pos = 0,
@@ -2352,11 +2375,11 @@ test "zix grpc: server-streaming packs many messages into one DATA frame" {
 
 test "zix grpc: server-streaming DATA coalescing respects the frame cap" {
     var backing: [4096]u8 = undefined;
-    var stage = ReplyStage{ .fd = -1, .buf = &backing };
+    var stage = ReplyStage{ .fd = TEST_FD, .buf = &backing };
     var coal: [16]u8 = undefined; // holds two framed 2-byte messages (7 bytes each), then must flush
 
     var ctx = GrpcContext{
-        .fd = -1,
+        .fd = TEST_FD,
         .stream_id = 1,
         ._body = &.{},
         ._pos = 0,
@@ -2382,7 +2405,7 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
     setCache(null, 0);
 
     var ctx = GrpcContext{
-        .fd = 0,
+        .fd = TEST_FD,
         .stream_id = 1,
         .path = "/svc.Svc/Method",
         ._body = "req",
@@ -2406,6 +2429,7 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
 }
 
 test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -2503,7 +2527,7 @@ test "zix grpc: streaming sendMessage coalesces a small DATA frame into one writ
 
     // Streaming path: no cork (_out null) and no write mutex, so sendMessage writes
     // directly. Headers pre-marked sent so only the DATA frame goes through the hook.
-    var ctx = GrpcContext{ .fd = -1, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
 
     ctx.sendMessage("application/grpc", "pong");
 
@@ -2529,7 +2553,7 @@ test "zix grpc: streaming sendMessage past the inline cap keeps the two-write pa
         h2_frame.write_hook_ctx = null;
     }
 
-    var ctx = GrpcContext{ .fd = -1, .stream_id = 3, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 3, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
 
     // A payload larger than the inline cap is written as header then payload (two
     // writes), so it is never copied through the stack buffer.
@@ -2572,6 +2596,7 @@ test "zix grpc: pooled stream is reused and reset clean on release" {
 }
 
 test "zix grpc: stream slots are pooled across connections" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -2601,6 +2626,10 @@ test "zix grpc: stream slots are pooled across connections" {
 }
 
 test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED trailers" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 256 };
 
     const fds = try std.Io.Threaded.pipe2(.{});
@@ -2672,6 +2701,10 @@ test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED 
 }
 
 test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const opts = GrpcServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 256 };
 
     const fds = try std.Io.Threaded.pipe2(.{});

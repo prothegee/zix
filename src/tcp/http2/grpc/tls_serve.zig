@@ -12,8 +12,10 @@
 //!   separate path on its own perf band.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
+const win_io = @import("../../../utils/windows_io.zig");
 const core = @import("core.zig");
 const Route = core.Route;
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
@@ -146,7 +148,9 @@ fn TlsConn(comptime routes: []const Route) type {
         };
 
         fn entry(conn_ctx: Ctx) void {
-            defer _ = linux.close(conn_ctx.fd);
+            defer if (comptime builtin.os.tag == .windows) win_io.close(conn_ctx.fd) else {
+                _ = linux.close(conn_ctx.fd);
+            };
 
             terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(routes){ .opts = conn_ctx.opts }) catch {};
         }
@@ -177,7 +181,11 @@ pub fn runTls(comptime routes: []const Route, config: GrpcServerConfig) !void {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
             // lifetime, wedging every other pending connection. The client retries the dropped one.
-            _ = linux.close(conn_fd);
+            if (comptime builtin.os.tag == .windows) {
+                win_io.close(conn_fd);
+            } else {
+                _ = linux.close(conn_fd);
+            }
 
             continue;
         };

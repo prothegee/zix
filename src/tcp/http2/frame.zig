@@ -1,6 +1,8 @@
 //! HTTP/2 frame codec: constants, FrameHeader, read/write, control frame senders.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 
 // --------------------------------------------------------- //
 
@@ -135,6 +137,8 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 /// staged bytes through this so the flush does not re-enter the hook (which would recurse). Polls on
 /// EAGAIN for a non-blocking socket. Identical to writeAllFD minus the hook check.
 pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data);
+
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
@@ -156,10 +160,17 @@ pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!voi
     }
 }
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
     while (filled < buf.len) {
-        const n = std.posix.read(fd, buf[filled..]) catch return error.Closed;
+        const n = readSomeFD(fd, buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }
@@ -325,6 +336,7 @@ pub fn sendResponseEncodedFD(
 // --------------------------------------------------------- //
 
 test "zix http2: writeAllFD delivers data on a blocking fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -338,6 +350,7 @@ test "zix http2: writeAllFD delivers data on a blocking fd" {
 }
 
 test "zix http2: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -388,6 +401,7 @@ test "zix http2: frame constants, ERR_NO_ERROR is 0" {
 }
 
 test "zix http2: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
@@ -414,6 +428,7 @@ test "zix http2: PREFACE starts with PRI" {
 }
 
 test "zix http2: sendSettingsFD empty params writes 9-byte SETTINGS frame via pipe" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try std.Io.Threaded.pipe2(.{});
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
