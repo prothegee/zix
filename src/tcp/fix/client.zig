@@ -11,7 +11,16 @@ const FixClientConfig = @import("config.zig").FixClientConfig;
 /// Return:
 /// - true when the event is ready
 /// - false when the timeout elapsed first
+/// poll event bits, mirrored locally: std.posix.POLL is not defined for
+/// Windows (the values are unused there, pollReady returns before polling).
+const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) 0x1 else std.posix.POLL.IN;
+const POLL_OUT: i16 = if (@import("builtin").target.os.tag == .windows) 0x4 else std.posix.POLL.OUT;
+
 fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    // No poll over the ntdll path: report ready and let the read block (the
+    // timeout degrades to a blocking read on Windows).
+    if (comptime @import("builtin").target.os.tag == .windows) return true;
+
     var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
     const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
 
@@ -118,7 +127,7 @@ pub const FixClient = struct {
 
         if (self.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
-            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.OUT, self.send_timeout_ms)) {
+            if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.send_timeout_ms)) {
                 return error.SendTimeout;
             }
         }
@@ -153,12 +162,15 @@ pub const FixClient = struct {
             if (self.recv_len >= self.recv_buf.len) return error.MessageTooLarge;
 
             if (self.recv_timeout_ms > 0) {
-                if (!try pollReady(fd, std.posix.POLL.IN, self.recv_timeout_ms)) {
+                if (!try pollReady(fd, POLL_IN, self.recv_timeout_ms)) {
                     return error.RecvTimeout;
                 }
             }
 
-            const n = try std.posix.read(fd, self.recv_buf[self.recv_len..]);
+            const n = if (comptime @import("builtin").target.os.tag == .windows)
+                try @import("../../utils/windows_io.zig").readSome(fd, self.recv_buf[self.recv_len..])
+            else
+                try std.posix.read(fd, self.recv_buf[self.recv_len..]);
             if (n == 0) return error.ConnectionClosed;
             self.recv_len += n;
         }
@@ -185,6 +197,7 @@ test "zix fix: FixClient.connect port zero returns PortNotConfigured" {
 }
 
 test "zix fix: FixClient.recvMessage reassembles message split across two reads" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -234,6 +247,7 @@ test "zix fix: FixClient.recvMessage reassembles message split across two reads"
 }
 
 test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arrives" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -264,6 +278,10 @@ test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arri
 }
 
 test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the peer drains" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -302,6 +320,7 @@ test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the pe
 }
 
 test "zix fix: FixClient.sendMessage returns error.SendTimeout when the peer's buffer is full" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

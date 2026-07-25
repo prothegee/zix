@@ -3,6 +3,8 @@
 //! No heap allocation. Zero-copy field parsing (slices into caller buffer).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 const Logger = @import("../../logger/logger.zig").Logger;
 
 pub const SOH: u8 = 0x01;
@@ -305,7 +307,30 @@ pub const FixRoute = struct {
 // coalesce into one ring send, otherwise they go straight to the fd (the blocking
 // serveConn path), preserving the existing behavior.
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
+/// Poll fd for POLL.IN with a timeout. Windows has no poll here: report one
+/// ready descriptor and let the read block (session timeouts degrade there).
+///
+/// Return:
+/// - usize (ready count, 0 on timeout)
+/// - null on a poll error
+fn pollInFD(fd: std.posix.fd_t, timeout_ms: i32) ?usize {
+    if (comptime builtin.os.tag == .windows) return 1;
+
+    var poll_fd = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+
+    return std.posix.poll(&poll_fd, timeout_ms) catch null;
+}
+
 fn rawFixWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data);
+
     var remaining = data;
     while (remaining.len > 0) {
         const rc = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -460,12 +485,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :hb end;
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;
-                var poll_fd = [1]std.posix.pollfd{.{
-                    .fd = fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                }};
-                const nready = std.posix.poll(&poll_fd, timeout_ms) catch break :outer;
+                const nready = pollInFD(fd, timeout_ms) orelse break :outer;
                 if (nready == 0) {
                     if (peer_len > 0) {
                         var hb_out: [MAX_MSG_SIZE]u8 = undefined;
@@ -488,7 +508,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                     }
                     break :outer;
                 }
-                const n = std.posix.read(fd, recv_buf[recv_len..]) catch break :outer;
+                const n = readSomeFD(fd, recv_buf[recv_len..]) catch break :outer;
                 if (n == 0) break :outer;
                 recv_len += n;
             }
@@ -498,14 +518,9 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :conn_to end;
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;
-                var poll_fd = [1]std.posix.pollfd{.{
-                    .fd = fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                }};
-                const nready = std.posix.poll(&poll_fd, timeout_ms) catch break :outer;
+                const nready = pollInFD(fd, timeout_ms) orelse break :outer;
                 if (nready == 0) break :outer;
-                const n = std.posix.read(fd, recv_buf[recv_len..]) catch break :outer;
+                const n = readSomeFD(fd, recv_buf[recv_len..]) catch break :outer;
                 if (n == 0) break :outer;
                 recv_len += n;
             }
@@ -997,6 +1012,7 @@ test "zix fix: MsgType application two-char constants" {
 }
 
 test "zix fix: fixHeartbeatTick sends TestRequest then Logout on idle" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
@@ -1032,6 +1048,11 @@ test "zix fix: fixHeartbeatTick sends TestRequest then Logout on idle" {
 }
 
 test "zix fix: fixHeartbeatTick is a no-op before Logon or when disabled" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var state = FixRingState{};
     state.last_activity_ms = 0;
 
@@ -1044,6 +1065,11 @@ test "zix fix: fixHeartbeatTick is a no-op before Logon or when disabled" {
 }
 
 test "zix fix: processFixRing counts each complete message in tl_messages_served" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     var state = FixRingState{};
     const msg = "8=FIX.4.2\x019=5\x0135=A\x0110=001\x01";
 
