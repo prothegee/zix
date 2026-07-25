@@ -1,6 +1,8 @@
 //! zix http request
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 const Method = @import("method.zig");
 const parser = @import("parser.zig");
 
@@ -33,6 +35,13 @@ pub fn setBodyReadTimeout(ms: i32) void {
     tl_body_read_timeout_ms = ms;
 }
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 /// Block until fd is readable or the timeout elapses.
 ///
 /// The accepted fd is non-blocking under the EPOLL / URING models, so a body split across TCP
@@ -43,6 +52,10 @@ pub fn setBodyReadTimeout(ms: i32) void {
 /// - true when the fd became readable
 /// - false on timeout or a poll error
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
+    // The Windows read path blocks in the ntdll shim, so there is no EAGAIN
+    // wait to perform: report readable and let the read block.
+    if (comptime builtin.os.tag == .windows) return true;
+
     const linux = std.os.linux;
     var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
 
@@ -126,7 +139,7 @@ pub const Request = struct {
 
         var total: usize = already_len;
         while (total < content_len) {
-            const n = std.posix.read(self.fd, out[total..content_len]) catch |err| {
+            const n = readSomeFD(self.fd, out[total..content_len]) catch |err| {
                 // Non-blocking fd between segments: wait for the next one instead of truncating.
                 if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
 
@@ -152,7 +165,7 @@ pub const Request = struct {
         // Note: "0\r\n\r\n" pattern match is a heuristic, the dechunker handles correctness.
         while (raw_total < max_raw) {
             if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
-            const n = std.posix.read(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
+            const n = readSomeFD(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
                 // Non-blocking fd between chunks: wait for the next one instead of truncating.
                 if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
 
@@ -311,6 +324,7 @@ test "zix http: request header lookup" {
 }
 
 test "zix http: request body must not truncate when a Content-Length body arrives in segments over a non-blocking fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     // Repro for the EPOLL / URING body gap. The accepted fd is non-blocking, but body() reads the
     // remaining body with a posix.read loop that `catch break`s on the first EAGAIN. When the body is
     // split across TCP segments (only the first has arrived), the loop bails with a TRUNCATED body.
@@ -360,6 +374,7 @@ test "zix http: request body must not truncate when a Content-Length body arrive
 }
 
 test "zix http: request chunked body must not truncate when chunks arrive in segments over a non-blocking fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     // Same EPOLL / URING gap on the chunked path: readChunkedBody() reads until the terminal
     // "0\r\n\r\n" chunk, and must wait across segment boundaries instead of bailing at the first
     // EAGAIN. The writer delivers the terminator only in the second segment.

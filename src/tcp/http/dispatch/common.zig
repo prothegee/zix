@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
+const win_io = @import("../../../utils/windows_io.zig");
 const Config = @import("../config.zig").HttpServerConfig;
 const Router = @import("../router.zig").Router;
 const Route = @import("../router.zig").Route;
@@ -77,7 +79,8 @@ pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //
@@ -138,12 +141,22 @@ pub fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
 
 // --------------------------------------------------------- //
 
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 pub fn setNoDelay(fd: std.posix.fd_t) void {
     if (comptime builtin.target.os.tag != .windows) {
+        // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+        const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
         std.posix.setsockopt(
             fd,
             std.posix.IPPROTO.TCP,
-            std.posix.TCP.NODELAY,
+            nodelay,
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
@@ -151,6 +164,9 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
 
 /// Set O_NONBLOCK on a descriptor (the TLS epoll listener, so accept4 returns EAGAIN when drained).
 pub fn setNonBlock(fd: std.posix.fd_t) void {
+    // fcntl O_NONBLOCK is POSIX-only, and only the Linux event loops call this.
+    if (comptime builtin.os.tag == .windows) return;
+
     const linux = std.os.linux;
     const cur_flags = linux.fcntl(fd, std.posix.F.GETFL, 0);
     const nonblock_bit: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
@@ -160,6 +176,8 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
 /// Spin up to 50 us before blocking. Reduces wake-up latency on saturated
 /// loopback benchmarks. Silent no-op when the kernel lacks SO_BUSY_POLL support.
 pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
+    if (comptime builtin.os.tag == .windows) return;
+
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
         fd,
@@ -247,8 +265,11 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// the cgroup-allowed CPU mask so we never select a CPU the container cannot
 /// use. Slots enumerate distinct physical cores first and SMT siblings after
 /// (sysfs topology), so small worker counts never stack two workers on one
-/// core. Mask order is kept when the topology files are absent.
+/// core. Mask order is kept when the topology files are absent. Affinity is a
+/// Linux API, so this is a no-op elsewhere.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime builtin.target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -287,8 +308,10 @@ pub fn pinToCpu(worker_id: usize) void {
 
 /// Count CPUs available to this process via sched_getaffinity, respecting cgroup
 /// and taskset restrictions. Falls back to std.Thread.getCpuCount when the syscall
-/// fails.
+/// fails or the target has no sched_getaffinity (non-Linux).
 pub fn getAvailableCpuCount() usize {
+    if (comptime builtin.target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
@@ -471,6 +494,8 @@ pub const HttpProcOutcome = enum { need_more, keep_alive, close };
 /// to a flagless ring when the kernel does not support them. Mirrors the
 /// zix.Http1 ring init.
 pub fn initUringRing() !std.os.linux.IoUring {
+    if (comptime builtin.os.tag != .linux) return error.PlatformNotSupported;
+
     const linux = std.os.linux;
     var params = std.mem.zeroInit(linux.io_uring_params, .{
         .flags = linux.IORING_SETUP_SINGLE_ISSUER |
@@ -508,6 +533,8 @@ pub const UringHttpConn = struct {
 /// Accept every pending connection on listener_fd and register each in epfd.
 /// Level-triggered, draining to EAGAIN guarantees no accept is missed.
 pub fn epollAcceptAll(table: *EpollConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, busy_poll_us: u32) void {
+    if (comptime builtin.os.tag == .windows) return;
+
     const linux = std.os.linux;
 
     while (true) {
@@ -686,7 +713,7 @@ fn handleOneRequest(
     var found = false;
 
     while (filled < buf_read.len) {
-        const n = std.posix.read(fd, buf_read[filled..]) catch break;
+        const n = readSomeFD(fd, buf_read[filled..]) catch break;
         if (n == 0) break;
         const prev = filled;
         filled += n;

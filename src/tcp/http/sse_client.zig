@@ -2,6 +2,8 @@
 //! Consumes a Server-Sent Events stream: HTTP GET + line-by-line event parsing.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const win_io = @import("../../utils/windows_io.zig");
 
 /// SSE stream read buffer.
 const SSE_READ_BUF: usize = 4096;
@@ -150,7 +152,7 @@ pub const SseStream = struct {
 
     /// Close the underlying TCP connection.
     pub fn deinit(self: Self) void {
-        _ = std.posix.system.close(self.fd);
+        closeFD(self.fd);
     }
 
     // --------------------------------------------------------- //
@@ -174,7 +176,7 @@ pub const SseStream = struct {
                 }
             }
 
-            const n = std.posix.read(self.fd, &self.read_buf) catch return null;
+            const n = readSomeFD(self.fd, &self.read_buf) catch return null;
             if (n == 0) return if (line_len > 0) out[0..line_len] else null;
             self.read_pos = 0;
             self.read_len = n;
@@ -230,7 +232,7 @@ pub const SseClient = struct {
         const addr = try std.Io.net.IpAddress.resolve(self.config.io, parsed.host, parsed.port);
         const tcp_stream = try addr.connect(self.config.io, .{ .mode = .stream, .protocol = .tcp });
         const fd = tcp_stream.socket.handle;
-        errdefer _ = std.posix.system.close(fd);
+        errdefer closeFD(fd);
 
         var req_buf: [REQUEST_BUILD_BUF]u8 = undefined;
         const req = std.fmt.bufPrint(
@@ -251,7 +253,7 @@ pub const SseClient = struct {
         var header_end: usize = 0;
 
         while (head_len < head_buf.len) {
-            const n = std.posix.read(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
+            const n = readSomeFD(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
             if (n == 0) return error.ConnectionFailed;
             head_len += n;
             if (std.mem.indexOf(u8, head_buf[0..head_len], "\r\n\r\n")) |pos| {
@@ -324,7 +326,26 @@ fn splitField(line: []const u8, name: []const u8) ?[]const u8 {
     return value;
 }
 
+/// Close fd: the ntdll shim on Windows, the libc close elsewhere.
+fn closeFD(fd: std.posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        win_io.close(fd);
+        return;
+    }
+
+    _ = std.posix.system.close(fd);
+}
+
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
+}
+
 fn writeAllFD(fd: std.posix.fd_t, data: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, data) catch error.BrokenPipe;
+
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
