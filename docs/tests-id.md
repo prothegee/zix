@@ -23,6 +23,8 @@ zig build test-all
 
 `zig build` saja **tidak** menjalankan pengujian: langkah pengujian adalah langkah bernama tersendiri yang tidak terhubung ke langkah install default.
 
+Perilaku platform: dengan `-Dtarget` foreign, setiap suite ter-compile untuk target itu dan eksekusi dilewati dengan warning. Di host non-Linux, tes yang menguji jalur EPOLL / URING (Linux-only) mencetak warn lalu skip, dan tes yang berpijak pada syscall Linux-only skip tanpa pesan. Langkah `test-runner-*` berperilaku sama: target foreign meng-compile runner beserta server-nya lalu lolos, dan di host non-Linux setiap skenario EPOLL / URING melaporkan baris PASS dengan warn alih-alih berjalan.
+
 ---
 
 ## Pengujian Unit
