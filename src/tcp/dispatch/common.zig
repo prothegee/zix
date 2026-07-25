@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 const Config = @import("../config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const Logger = @import("../../logger/logger.zig").Logger;
@@ -18,7 +19,8 @@ pub fn logSystem(cfg: TcpServerConfig, comptime fmt: []const u8, args: anytype) 
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix tcp dispatch: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix tcp dispatch: " ++ fmt ++ "\n", args);
 }
 
 /// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
@@ -54,6 +56,8 @@ const FRAME_READ_BUF_SIZE: usize = 4096;
 
 /// Direct socket write, bypassing the coalescing sink.
 fn rawFrameWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (comptime @import("builtin").target.os.tag == .windows) return @import("../../utils/windows_io.zig").writeAll(fd, data);
+
     var remaining = data;
     while (remaining.len > 0) {
         const rc = std.posix.system.write(fd, remaining.ptr, remaining.len);
@@ -132,6 +136,9 @@ pub fn frameRespond(fd: std.posix.fd_t, payload: []const u8) error{BrokenPipe}!v
 // --------------------------------------------------------- //
 
 pub fn getPeerAddr(fd: std.posix.fd_t, buf: []u8) []const u8 {
+    // getpeername is POSIX-only in Zig 0.16 std: no peer string on Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return "-";
+
     var storage: std.posix.sockaddr.storage = undefined;
     var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
     std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
@@ -155,6 +162,9 @@ pub fn getMonotonicMs() u64 {
 }
 
 pub fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    // setsockopt is POSIX-only in Zig 0.16 std: no socket timeouts on Windows.
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
     if (recv_ms == 0 and send_ms == 0) return;
 
     if (recv_ms > 0) {
@@ -251,6 +261,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -292,6 +304,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// fails. The per-core models default to one worker per available CPU so that
 /// multiple workers are never pinned to the same core under a cpuset.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {

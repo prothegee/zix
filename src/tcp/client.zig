@@ -11,7 +11,16 @@ const TcpClientConfig = Config.TcpClientConfig;
 /// Return:
 /// - true when the event is ready
 /// - false when the timeout elapsed first
+/// poll event bits, mirrored locally: std.posix.POLL is not defined for
+/// Windows (the values are unused there, pollReady returns before polling).
+const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) 0x1 else std.posix.POLL.IN;
+const POLL_OUT: i16 = if (@import("builtin").target.os.tag == .windows) 0x4 else std.posix.POLL.OUT;
+
 fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    // No poll over the ntdll path: report ready and let the read block (the
+    // timeout degrades to a blocking read on Windows).
+    if (comptime @import("builtin").target.os.tag == .windows) return true;
+
     var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
     const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
 
@@ -54,6 +63,10 @@ pub const TcpClient = struct {
     /// Connect with CLI arg overrides for --ip and --port.
     /// Falls back to config defaults when args are absent.
     pub fn connectArgs(config: TcpClientConfig, io: std.Io, args: anytype) !Self {
+        // std.process.Args.Iterator is POSIX-only in Zig 0.16: CLI overrides
+        // are skipped on Windows, the config values stay.
+        if (comptime @import("builtin").target.os.tag == .windows) return connect(config, io);
+
         var cfg = config;
         var it = std.process.Args.Iterator.init(args);
         _ = it.skip();
@@ -83,7 +96,7 @@ pub const TcpClient = struct {
 
         if (self.config.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
-            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.OUT, self.config.send_timeout_ms)) {
+            if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.config.send_timeout_ms)) {
                 return error.SendTimeout;
             }
         }
@@ -107,7 +120,7 @@ pub const TcpClient = struct {
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         if (self.config.recv_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
-            if (!try pollReady(self.stream.socket.handle, std.posix.POLL.IN, self.config.recv_timeout_ms)) {
+            if (!try pollReady(self.stream.socket.handle, POLL_IN, self.config.recv_timeout_ms)) {
                 return error.RecvTimeout;
             }
         }
@@ -126,6 +139,7 @@ pub const TcpClient = struct {
 // --------------------------------------------------------- //
 
 test "zix tcp: TcpClient.recvMsg does not time out when data arrives immediately" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -152,6 +166,7 @@ test "zix tcp: TcpClient.recvMsg does not time out when data arrives immediately
 }
 
 test "zix tcp: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -174,6 +189,10 @@ test "zix tcp: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives"
 }
 
 test "zix tcp: TcpClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -199,6 +218,7 @@ test "zix tcp: TcpClient.sendMsg succeeds within send_timeout_ms when the peer d
 }
 
 test "zix tcp: TcpClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

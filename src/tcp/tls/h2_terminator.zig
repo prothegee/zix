@@ -10,8 +10,10 @@
 //!   zix.Http2 and zix.Grpc without duplicating it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
+const win_io = @import("../../utils/windows_io.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
 const record = @import("../../tls/record.zig");
@@ -200,6 +202,17 @@ pub fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
 }
 
 fn readAll(fd: posix.fd_t, buf: []u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var read: usize = 0;
+        while (read < buf.len) {
+            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            if (n == 0) return error.ConnectionClosed;
+
+            read += n;
+        }
+        return;
+    }
+
     var read: usize = 0;
     while (read < buf.len) {
         const chunk = buf[read..];
@@ -215,6 +228,8 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
 }
 
 pub fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
+
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];
