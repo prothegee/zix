@@ -678,6 +678,10 @@ pub const Conn = struct {
 
     /// Bound the startup phase by conn_timeout_ms (0 disables).
     fn waitReadable(self: *Self) !void {
+        // No poll over the ntdll path: conn_timeout_ms degrades to a blocking
+        // read on Windows.
+        if (comptime @import("builtin").target.os.tag == .windows) return;
+
         if (self.config.conn_timeout_ms == 0) return;
         if (self.stream_reader.interface.bufferedLen() > 0) return;
         if (self.tls_session) |session| {
@@ -888,6 +892,8 @@ fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted
 }
 
 test "postgrez: conn mock startup reaches ready" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -906,6 +912,8 @@ test "postgrez: conn mock startup reaches ready" {
 }
 
 test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -923,6 +931,8 @@ test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
 }
 
 test "postgrez: conn mock server below 15 hard rejects" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -935,6 +945,8 @@ test "postgrez: conn mock server below 15 hard rejects" {
 }
 
 test "postgrez: conn mock strict V3_2 refuses negotiation" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -950,6 +962,8 @@ test "postgrez: conn mock strict V3_2 refuses negotiation" {
 }
 
 test "postgrez: conn mock cleartext auth flow" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -966,6 +980,8 @@ test "postgrez: conn mock cleartext auth flow" {
 }
 
 test "postgrez: conn mock md5 auth is rejected" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -977,6 +993,8 @@ test "postgrez: conn mock md5 auth is rejected" {
 }
 
 test "postgrez: conn mock startup ErrorResponse surfaces state" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -988,6 +1006,8 @@ test "postgrez: conn mock startup ErrorResponse surfaces state" {
 }
 
 test "postgrez: conn mock exec returns affected rows" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1008,6 +1028,8 @@ test "postgrez: conn mock exec returns affected rows" {
 }
 
 test "postgrez: conn mock exec server error maps SQLSTATE" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1066,6 +1088,8 @@ fn appendQueryScript(allocator: std.mem.Allocator, script: *std.ArrayList(u8)) !
 }
 
 test "postgrez: conn mock query maps typed rows" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1106,6 +1130,8 @@ test "postgrez: conn mock query maps typed rows" {
 }
 
 test "postgrez: conn mock rows streams with row.get" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1133,6 +1159,8 @@ test "postgrez: conn mock rows streams with row.get" {
 }
 
 test "postgrez: conn mock queryRow returns null on empty result" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1163,6 +1191,8 @@ test "postgrez: conn mock queryRow returns null on empty result" {
 }
 
 test "postgrez: conn mock parse error recovers via sync" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1190,6 +1220,8 @@ test "postgrez: conn mock parse error recovers via sync" {
 }
 
 test "postgrez: conn mock transaction callback commits" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1228,6 +1260,8 @@ test "postgrez: conn mock transaction callback commits" {
 }
 
 test "postgrez: conn mock prepared statement lifecycle" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1279,6 +1313,8 @@ test "postgrez: conn mock prepared statement lifecycle" {
 }
 
 test "postgrez: conn mock pipeline collects per-statement results" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1313,6 +1349,8 @@ test "postgrez: conn mock pipeline collects per-statement results" {
 }
 
 test "postgrez: conn mock pipeline failure aborts the rest" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1344,6 +1382,8 @@ test "postgrez: conn mock pipeline failure aborts the rest" {
 }
 
 test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1374,6 +1414,8 @@ test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
 }
 
 test "postgrez: conn mock copy in writes and finishes" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1396,6 +1438,8 @@ test "postgrez: conn mock copy in writes and finishes" {
 }
 
 test "postgrez: conn mock copy out streams chunks" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1421,6 +1465,8 @@ test "postgrez: conn mock copy out streams chunks" {
 }
 
 test "postgrez: conn mock listen and nextNotification, pending then wire" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1461,6 +1507,8 @@ test "postgrez: conn mock listen and nextNotification, pending then wire" {
 }
 
 test "postgrez: conn mock tls PREFER continues cleartext on N" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1480,6 +1528,8 @@ test "postgrez: conn mock tls PREFER continues cleartext on N" {
 }
 
 test "postgrez: conn mock tls REQUIRE fails on N" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1495,6 +1545,8 @@ test "postgrez: conn mock tls REQUIRE fails on N" {
 }
 
 test "postgrez: conn mock notification is captured while pumping" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1541,6 +1593,8 @@ fn appendBinaryInt8Row(allocator: std.mem.Allocator, script: *std.ArrayList(u8),
 }
 
 test "postgrez: conn mock statement batch collects results in order" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1591,6 +1645,8 @@ test "postgrez: conn mock statement batch collects results in order" {
 }
 
 test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1628,6 +1684,8 @@ test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
 }
 
 test "postgrez: conn mock statement batch failure aborts the rest" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
