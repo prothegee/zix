@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 const Config = @import("../config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
@@ -27,7 +28,8 @@ pub fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytyp
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix udp: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix udp: " ++ fmt ++ "\n", args);
 }
 
 /// Effective worker count: the configured value, or one per available CPU when 0. cgroup-aware so a
@@ -118,6 +120,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -158,6 +162,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// restrictions (falls back to std.Thread.getCpuCount on failure). One worker per available CPU so
 /// several SO_REUSEPORT workers are never pinned to the same core under a cgroup-limited cpuset.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
@@ -176,6 +182,8 @@ pub fn getAvailableCpuCount() usize {
 /// CPU for lower recvmmsg wake-up latency on saturated benchmarks. us = 0 leaves it unset (no
 /// syscall). Silent no-op when the kernel lacks SO_BUSY_POLL. Mirrors zix.Http1's setBusyPoll.
 pub fn setBusyPoll(fd: posix.socket_t, us: u32) void {
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+
     if (us == 0) return;
 
     const SO_BUSY_POLL: u32 = 46;

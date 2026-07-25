@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
+const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
 
@@ -16,7 +17,8 @@ fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) v
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix udp: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix udp: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //

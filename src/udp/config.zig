@@ -123,6 +123,10 @@ pub const UdpClientConfig = struct {
 /// by `zix.Udp.Server` / `zix.Udp.Raw` init when `allow_args` is set. A missing arg keeps the config
 /// value.
 pub fn applyServerArgs(config: UdpServerConfig, args: anytype) UdpServerConfig {
+    // std.process.Args.Iterator is POSIX-only in Zig 0.16: CLI overrides are
+    // skipped on Windows, the config values stay.
+    if (comptime @import("builtin").target.os.tag == .windows) return config;
+
     var cfg = config;
     var it = std.process.Args.Iterator.init(args);
     _ = it.skip();
@@ -140,6 +144,10 @@ pub fn applyServerArgs(config: UdpServerConfig, args: anytype) UdpServerConfig {
 /// Apply `--bind-ip` / `--bind-port` / `--server-port` CLI overrides to a client config (space form).
 /// Called by `zix.Udp.Client` init when `allow_args` is set. A missing arg keeps the config value.
 pub fn applyClientArgs(config: UdpClientConfig, args: anytype) UdpClientConfig {
+    // std.process.Args.Iterator is POSIX-only in Zig 0.16: CLI overrides are
+    // skipped on Windows, the config values stay.
+    if (comptime @import("builtin").target.os.tag == .windows) return config;
+
     var cfg = config;
     var it = std.process.Args.Iterator.init(args);
     _ = it.skip();
