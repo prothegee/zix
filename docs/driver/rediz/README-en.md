@@ -63,7 +63,20 @@ The returned value lives in the connection's per-reply arena and stays valid unt
 
 ## Config
 
-`rediz.Config` is flat. The connection reads the top group, the pool adds the rest.
+`rediz.Config` is flat. The connection reads the top group, the pool adds the rest. The same connect can pass the struct directly instead of `parseUrl`:
+
+```zig
+const conn = try rediz.Conn.connect(arena.allocator(), process.io, .{
+    .ip = "127.0.0.1",
+    .port = 6379,
+    .password = "secret",
+    .database = 2,
+    .tls = .REQUIRE,
+});
+defer conn.deinit();
+```
+
+`tls` is the config twin of the `rediss://` scheme: `.OFF` (default), `.REQUIRE`. See `config-en.md` for the per-field tuning notes.
 
 | Field | Default | Meaning |
 | :- | :- | :- |

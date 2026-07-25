@@ -65,7 +65,21 @@ Allocator koneksi dipegang oleh pemanggil: memakai arena berarti row hasil map t
 
 ## Config
 
-`postgrez.Config` bersifat flat. Koneksi membaca grup atas, pool dan executor memakai sisanya.
+`postgrez.Config` bersifat flat. Koneksi membaca grup atas, pool dan executor memakai sisanya. Connect yang sama bisa menerima struct langsung tanpa `parseUrl`:
+
+```zig
+const conn = try postgrez.Conn.connect(arena.allocator(), process.io, .{
+    .ip = "127.0.0.1",
+    .port = 5432,
+    .user = "app",
+    .password = "secret",
+    .database = "shop",
+    .tls = .REQUIRE,
+});
+defer conn.deinit();
+```
+
+`tls` adalah padanan config dari `sslmode` di URL: `.OFF` (default), `.PREFER`, `.REQUIRE`. Lihat `config-id.md` untuk catatan tuning per field.
 
 | Field | Default | Arti |
 | :- | :- | :- |

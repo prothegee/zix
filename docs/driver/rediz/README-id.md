@@ -63,7 +63,20 @@ Nilai yang dikembalikan hidup di arena per reply koneksi dan tetap valid hingga 
 
 ## Config
 
-`rediz.Config` bersifat flat. Koneksi membaca grup atas, pool memakai sisanya.
+`rediz.Config` bersifat flat. Koneksi membaca grup atas, pool memakai sisanya. Connect yang sama bisa menerima struct langsung tanpa `parseUrl`:
+
+```zig
+const conn = try rediz.Conn.connect(arena.allocator(), process.io, .{
+    .ip = "127.0.0.1",
+    .port = 6379,
+    .password = "secret",
+    .database = 2,
+    .tls = .REQUIRE,
+});
+defer conn.deinit();
+```
+
+`tls` adalah padanan config dari skema `rediss://`: `.OFF` (default), `.REQUIRE`. Lihat `config-id.md` untuk catatan tuning per field.
 
 | Field | Default | Arti |
 | :- | :- | :- |
