@@ -2,6 +2,7 @@
 //! All parsing operates on caller-owned buffers. No std.http dependency.
 
 const std = @import("std");
+const win_io = @import("../../utils/windows_io.zig");
 const cache = @import("../../utils/response_cache.zig");
 const compression = @import("../../utils/compression/compression.zig");
 const slab_mem = @import("../../multiplexers/slab.zig");
@@ -158,6 +159,17 @@ pub fn setRecvBuf(fd: std.posix.fd_t, bytes: usize) void {
 
     const val: c_int = @intCast(@min(bytes, std.math.maxInt(c_int)));
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&val)) catch {};
+}
+
+/// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
+///
+/// Return:
+/// - usize (bytes read, 0 when the peer closed)
+/// - read error otherwise
+fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+
+    return std.posix.read(fd, buf);
 }
 
 // --------------------------------------------------------- //
@@ -782,6 +794,13 @@ pub fn flushPending(fd: std.posix.fd_t) void {
 /// On EAGAIN returns the byte count written so far (caller stages the rest).
 /// On a permanent error returns null.
 pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        // Windows path is blocking (ntdll wait-on-handle): a full send buffer
+        // stalls the write instead of staging, no partial count to report.
+        win_io.writeAll(fd, data) catch return null;
+        return data.len;
+    }
+
     var written: usize = 0;
     while (written < data.len) {
         const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
@@ -838,6 +857,8 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 }
 
 fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.writeAll(fd, data);
+
     var rem = data;
     while (rem.len > 0) {
         const rc = std.posix.system.write(fd, rem.ptr, rem.len);
@@ -949,6 +970,12 @@ pub fn sendSimpleFD(
         // Skips that sink check entirely instead,
         // and write straight to the fd since code only reaches this line.
         return writeAllDirectFD(fd, buf[0 .. hdr.len + body.len]);
+    }
+
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        // No writev over ntdll: two blocking writes keep the same wire bytes.
+        try win_io.writeAll(fd, hdr);
+        return win_io.writeAll(fd, body);
     }
 
     var sent: usize = 0;
@@ -1439,7 +1466,7 @@ fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
 
     while (true) {
         if (filled >= buf.len) return error.HeaderTooLarge;
-        const n = std.posix.read(fd, buf[filled..]) catch return error.Closed;
+        const n = readSomeFD(fd, buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         const search_from = if (filled > 3) filled - 3 else 0;
         filled += n;
@@ -1467,7 +1494,7 @@ pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize
             if (rem > 0) std.mem.copyForwards(u8, &reader.buf, reader.buf[reader.pos..reader.len]);
             reader.pos = 0;
             reader.len = rem;
-            const n = std.posix.read(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
+            const n = readSomeFD(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
             if (n == 0) return error.Closed;
             reader.len += n;
         }
@@ -1562,10 +1589,13 @@ pub const ConnOutcome = enum { keep_alive, close };
 pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: std.Io) void {
     if (opts.nodelay) {
         if (comptime @import("builtin").target.os.tag != .windows) {
+            // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+            const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
             std.posix.setsockopt(
                 fd,
                 std.posix.IPPROTO.TCP,
-                std.posix.TCP.NODELAY,
+                nodelay,
                 std.mem.asBytes(&@as(c_int, 1)),
             ) catch {};
         }
@@ -1613,7 +1643,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
             }
             body_len = from_peek;
             while (body_len < to_read) {
-                const n = std.posix.read(fd, body_buf[body_len..to_read]) catch break;
+                const n = readSomeFD(fd, body_buf[body_len..to_read]) catch break;
                 if (n == 0) break;
                 body_len += n;
             }
@@ -1628,7 +1658,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
                 var remaining = content_length - peeked;
                 while (remaining > 0) {
                     const want = @min(remaining, body_buf.len);
-                    const n = std.posix.read(fd, body_buf[0..want]) catch break;
+                    const n = readSomeFD(fd, body_buf[0..want]) catch break;
                     if (n == 0) break;
                     remaining -= n;
                 }
@@ -1704,6 +1734,7 @@ test "zix http1: buildSimpleHeaderInto baked status line is byte-identical acros
 }
 
 test "zix http1: sendSimpleFD builds header directly into active sink without hdr_buf bounce" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1731,6 +1762,7 @@ test "zix http1: sendSimpleFD builds header directly into active sink without hd
 }
 
 test "zix http1: RespSink stages writeAllFD bytes until flush" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1756,6 +1788,7 @@ test "zix http1: RespSink stages writeAllFD bytes until flush" {
 }
 
 test "zix http1: responseReserve renders in place and responseCommit stages header + body" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1788,6 +1821,8 @@ test "zix http1: responseReserve renders in place and responseCommit stages head
 }
 
 test "zix http1: responseReserve refuses a sink with staged bytes or a foreign fd" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var stage: [HEADER_BUF_SIZE + 64]u8 = undefined;
     var sink = RespSink{ .fd = 7, .buf = &stage };
     tl_resp_sink = &sink;
@@ -1804,6 +1839,7 @@ test "zix http1: responseReserve refuses a sink with staged bytes or a foreign f
 }
 
 test "zix http1: sendSimpleFD writes directly into active sink without buf[4096] bounce" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1830,6 +1866,7 @@ test "zix http1: sendSimpleFD writes directly into active sink without buf[4096]
 }
 
 test "zix http1: sendSimpleFD with no active sink writes directly to fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1857,6 +1894,7 @@ test "zix http1: cache API is a no-op when no cache is installed" {
 }
 
 test "zix http1: sendWithCacheFD stores then a later lookup hits with identical bytes" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer rc.deinit();
 
@@ -1899,6 +1937,11 @@ fn negotiatedRoundtrip(req: []const u8, content_type: []const u8, body: []const 
 }
 
 test "zix http1: sendNegotiateCachedFD compresses when gzip is accepted" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1920,6 +1963,11 @@ test "zix http1: sendNegotiateCachedFD compresses when gzip is accepted" {
 }
 
 test "zix http1: sendNegotiateCachedFD sends uncompressed when compression is off" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     setCompression(false, 0, 0);
 
     var body: [512]u8 = undefined;
@@ -1936,6 +1984,11 @@ test "zix http1: sendNegotiateCachedFD sends uncompressed when compression is of
 }
 
 test "zix http1: sendNegotiateCachedFD does not compress without Accept-Encoding" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1950,6 +2003,11 @@ test "zix http1: sendNegotiateCachedFD does not compress without Accept-Encoding
 }
 
 test "zix http1: sendNegotiateCachedFD skips bodies under the size floor" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1962,6 +2020,11 @@ test "zix http1: sendNegotiateCachedFD skips bodies under the size floor" {
 }
 
 test "zix http1: sendNegotiateCachedFD skips already-compressed media types" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -1995,6 +2058,7 @@ test "zix http1: cache keys separate distinct paths and queries" {
 }
 
 test "zix http1: RespSink oversized payload writes through in order" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -2018,6 +2082,8 @@ test "zix http1: RespSink oversized payload writes through in order" {
 }
 
 test "zix http1: RespSink grows in place instead of flushing when backed by an allocator" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
 
     // 8-byte initial buffer, fd -1 so any accidental flush would error and trip
@@ -2036,6 +2102,8 @@ test "zix http1: RespSink grows in place instead of flushing when backed by an a
 }
 
 test "zix http1: RespSink grow refuses past grow_cap" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
 
     const buf = try gpa.alloc(u8, 8);
@@ -2052,6 +2120,8 @@ test "zix http1: RespSink grow refuses past grow_cap" {
 }
 
 test "zix http1: RespSink grow switches a slab-backed buf to a heap buffer" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     const gpa = std.testing.allocator;
 
     // A borrowed (slab-slice) buffer must never be realloc'd: the first grow
@@ -2070,6 +2140,8 @@ test "zix http1: RespSink grow switches a slab-backed buf to a heap buffer" {
 }
 
 test "zix http1: RespSink captures a cache-hit replay zero-copy and materializes it for a batch" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer rc.deinit();
     setCache(&rc, 60_000);
@@ -2108,6 +2180,8 @@ test "zix http1: RespSink captures a cache-hit replay zero-copy and materializes
 }
 
 test "zix http1: RespSink without a grow allocator does not grow" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var stage: [8]u8 = undefined;
     var sink = RespSink{ .fd = -1, .buf = &stage };
 
@@ -2118,6 +2192,7 @@ test "zix http1: RespSink without a grow allocator does not grow" {
 }
 
 test "zix http1: sendGzipFD reuses the threadlocal compressor across calls, valid gzip, no leak" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const flate = @import("../../utils/compression/flate.zig");
     const linux = std.os.linux;
 
@@ -2147,6 +2222,7 @@ test "zix http1: sendGzipFD reuses the threadlocal compressor across calls, vali
 }
 
 test "zix http1: buildGzipResponse reserve-prefix bytes equal header plus the facade gzip stream" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
 
     var pipe_fds: [2]i32 = undefined;
@@ -2178,6 +2254,7 @@ test "zix http1: buildGzipResponse reserve-prefix bytes equal header plus the fa
 }
 
 test "zix http1: sendGzipCachedFD stores per-(key,encoding) and replays the same bytes on a hit" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const flate = @import("../../utils/compression/flate.zig");
     const linux = std.os.linux;
 
@@ -2215,6 +2292,7 @@ test "zix http1: sendGzipCachedFD stores per-(key,encoding) and replays the same
 }
 
 test "zix http1: sendBrotliFD emits Content-Encoding br and decodes back to the body, no leak" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
 
     var pipe_fds: [2]i32 = undefined;
@@ -2244,6 +2322,7 @@ test "zix http1: sendBrotliFD emits Content-Encoding br and decodes back to the 
 }
 
 test "zix http1: sendBrotliCachedFD stores under br and replays the same bytes on a hit" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
 
     var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 4096 });
@@ -2280,6 +2359,7 @@ test "zix http1: sendBrotliCachedFD stores under br and replays the same bytes o
 }
 
 test "zix http1: sendNegotiateFD compresses without touching the cache" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -2317,6 +2397,7 @@ test "zix http1: sendNegotiateFD compresses without touching the cache" {
 }
 
 test "zix http1: sendNegotiateFD sends uncompressed when no coding is accepted" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     setCompression(true, 256, GZIP_OUT_SIZE);
     defer setCompression(false, 0, 0);
 
@@ -2343,6 +2424,10 @@ test "zix http1: sendNegotiateFD sends uncompressed when no coding is accepted" 
 }
 
 test "zix http1: serveConn drains an over-large body so the keep-alive connection survives" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
     const linux = std.os.linux;
 
     var pair: [2]std.posix.fd_t = undefined;
@@ -2394,6 +2479,11 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
 }
 
 test "zix http1: uringWatchFd routes through the installed trampoline" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     try std.testing.expect(!uringWatchFd(7));
 
     const Fake = struct {

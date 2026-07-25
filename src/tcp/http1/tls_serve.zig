@@ -22,8 +22,10 @@
 //!   WebSocket upgrade (bidirectional) is still out of scope here (ADR-055 adds the TLS read path).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
+const win_io = @import("../../utils/windows_io.zig");
 const Config = @import("config.zig").Http1ServerConfig;
 const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
@@ -106,7 +108,11 @@ pub fn runTls(handler: HandlerFn, config: Config) !void {
             // Spawn failed (thread / pid limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
             // lifetime, wedging every other pending connection. The client retries the dropped one.
-            _ = linux.close(conn_fd);
+            if (comptime builtin.os.tag == .windows) {
+                win_io.close(conn_fd);
+            } else {
+                _ = linux.close(conn_fd);
+            }
 
             continue;
         };
@@ -132,7 +138,11 @@ fn connWorker(conn_ctx: ConnCtx) void {
 
     serveConnTls(conn_ctx.fd, conn_ctx.handler, conn_ctx.ctx) catch {};
 
-    _ = linux.close(conn_ctx.fd);
+    if (comptime builtin.os.tag == .windows) {
+        win_io.close(conn_ctx.fd);
+    } else {
+        _ = linux.close(conn_ctx.fd);
+    }
 }
 
 fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !void {
@@ -453,7 +463,7 @@ fn serveConnTls12(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, k
 
 /// The sentinel fd handed to the handler while a response sink is installed: its writeAllFD
 /// calls match the sink by this fd and append to the buffer, they never touch a real descriptor.
-const sink_fd: posix.fd_t = -1;
+const sink_fd: posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 /// One handler outcome: the buffered plaintext response, or the streamed flag when the handler took
 /// the streaming path (beginStream / SSE) over TLS. When `streamed` is true the response was already
@@ -532,6 +542,17 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
 }
 
 fn readAll(fd: posix.fd_t, buf: []u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var read: usize = 0;
+        while (read < buf.len) {
+            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            if (n == 0) return error.ConnectionClosed;
+
+            read += n;
+        }
+        return;
+    }
+
     var read: usize = 0;
     while (read < buf.len) {
         const chunk = buf[read..];
@@ -547,6 +568,8 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
 }
 
 fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
+
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk = bytes[written..];
@@ -592,6 +615,7 @@ pub const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914
 pub const fixture_key_hex = "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c";
 
 test "zix http1: tls_serve, keep-alive serves many requests then honors Connection: close" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const client = @import("../../tls/client.zig");
     const context = @import("../../tls/context.zig");
 
@@ -730,6 +754,8 @@ fn wsNoopFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
 }
 
 test "zix http1: tls_serve, serveTls encrypts the 101 through the stream sink and registers the handoff" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var capture = CaptureStream{};
     var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
     const prev = core.tl_tls_stream;

@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
+const win_io = @import("../../../utils/windows_io.zig");
 const Config = @import("../config.zig").Http1ServerConfig;
 const core = @import("../core.zig");
 const HandlerFn = core.HandlerFn;
@@ -16,7 +18,8 @@ pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
         return;
     }
 
-    if (comptime builtin.mode == .Debug) std.debug.print("zix: " ++ fmt ++ "\n", args);
+    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
+        std.debug.print("zix: " ++ fmt ++ "\n", args);
 }
 
 // --------------------------------------------------------- //
@@ -114,8 +117,13 @@ pub const ConnRegistry = struct {
 
         const now = std.Io.Clock.Timestamp.now(io, .real);
         for (self.entries.items) |entry| {
-            if (!entry.done.load(.acquire) and now.compare(.gte, entry.deadline))
-                _ = std.os.linux.shutdown(entry.fd, std.os.linux.SHUT.RDWR);
+            if (!entry.done.load(.acquire) and now.compare(.gte, entry.deadline)) {
+                if (comptime @import("builtin").target.os.tag == .windows) {
+                    win_io.shutdown(entry.fd);
+                } else {
+                    _ = std.os.linux.shutdown(entry.fd, std.os.linux.SHUT.RDWR);
+                }
+            }
         }
     }
 
@@ -183,16 +191,22 @@ pub fn decodeChunkedInBuf(src: []const u8, out: []u8) ?ChunkDecode {
 
 pub fn setNoDelay(fd: std.posix.fd_t) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
+        // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
+        const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
+
         std.posix.setsockopt(
             fd,
             std.posix.IPPROTO.TCP,
-            std.posix.TCP.NODELAY,
+            nodelay,
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
 }
 
 pub fn setNonBlock(fd: std.posix.fd_t) void {
+    // fcntl O_NONBLOCK is POSIX-only, and only the Linux event loops call this.
+    if (comptime builtin.os.tag == .windows) return;
+
     const linux = std.os.linux;
     const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
     const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
@@ -203,6 +217,8 @@ pub fn setNonBlock(fd: std.posix.fd_t) void {
 /// Reduces wake-up latency on saturated loopback benchmarks. Silent no-op when the
 /// kernel lacks SO_BUSY_POLL support.
 pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
+    if (comptime builtin.os.tag == .windows) return;
+
     const SO_BUSY_POLL: u32 = 46;
     std.posix.setsockopt(
         fd,
@@ -292,6 +308,8 @@ pub fn orderPhysicalCoresFirst(cpu_list: []u32, keys: []const u64) void {
 /// (sysfs topology), so small worker counts never stack two workers on one
 /// core. Mask order is kept when the topology files are absent.
 pub fn pinToCpu(worker_id: usize) void {
+    if (comptime @import("builtin").target.os.tag != .linux) return;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) return;
@@ -333,6 +351,8 @@ pub fn pinToCpu(worker_id: usize) void {
 /// fails. Used by EPOLL to default to one worker per available CPU so that multiple
 /// workers are never pinned to the same core under cgroup-limited bench environments.
 pub fn getAvailableCpuCount() usize {
+    if (comptime @import("builtin").target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
     const linux = std.os.linux;
     var cpu_set: linux.cpu_set_t = undefined;
     if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set) != 0) {
@@ -580,6 +600,7 @@ test "zix http1: orderPhysicalCoresFirst keeps mask order on unique keys" {
 }
 
 test "zix http1: ConnRegistry evicts a connection past its deadline" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -607,6 +628,7 @@ test "zix http1: ConnRegistry evicts a connection past its deadline" {
 }
 
 test "zix http1: ConnRegistry leaves a connection before its deadline alone" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

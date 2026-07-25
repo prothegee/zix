@@ -624,6 +624,7 @@ fn testEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 }
 
 test "zix http1 ws: pump echoes masked client frames over a socketpair" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -655,6 +656,11 @@ test "zix http1 ws: pump echoes masked client frames over a socketpair" {
 }
 
 test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     // Two pipelined masked client text frames: "hi" and "yo".
     const data = [_]u8{
         0x81, 0x82, 0x01, 0x02, 0x03, 0x04, 'h' ^ 0x01, 'i' ^ 0x02,
@@ -680,6 +686,11 @@ test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
 }
 
 test "zix http1 ws: pumpRing overflow fallback on a dead fd reports close" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     // Masked client text frame "hi": its echo is a 4-byte server frame. An
     // out_buf of 2 cannot stage it, forcing the direct-write fallback, and
     // fd -1 makes that write fail. The pump must report close: a consumer
@@ -694,6 +705,11 @@ test "zix http1 ws: pumpRing overflow fallback on a dead fd reports close" {
 }
 
 test "zix http1 ws: pumpRing reports close and consumes the close frame" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
     // Masked client close frame (opcode 0x8) with an empty payload.
     const data = [_]u8{ 0x88, 0x80, 0x01, 0x02, 0x03, 0x04 };
 
@@ -708,6 +724,7 @@ test "zix http1 ws: pumpRing reports close and consumes the close frame" {
 }
 
 test "zix http1 ws: broadcast fans one built frame out to every member" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     // Three members, each the read end of its own socketpair.
     var pairs: [3][2]i32 = undefined;
     for (&pairs) |*p| {
@@ -734,6 +751,7 @@ test "zix http1 ws: broadcast fans one built frame out to every member" {
 }
 
 test "zix http1 ws: broadcast skips a dead fd and still reaches live members" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var live: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &live));
     defer _ = std.os.linux.close(live[0]);

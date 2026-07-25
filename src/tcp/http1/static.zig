@@ -132,6 +132,8 @@ fn testHead(path: []const u8, raw_headers: []const u8) core.ParsedHead {
 }
 
 test "zix http1: static serve rejects directory traversal" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -141,6 +143,8 @@ test "zix http1: static serve rejects directory traversal" {
 }
 
 test "zix http1: static serve returns false for a missing file" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -150,6 +154,8 @@ test "zix http1: static serve returns false for a missing file" {
 }
 
 test "zix http1: static serve returns false when the path overflows the join buffer" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
