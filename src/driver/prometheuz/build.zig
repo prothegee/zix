@@ -104,6 +104,17 @@ fn addPrometheusTeardown(b: *std.Build) *std.Build.Step.Run {
     });
 }
 
+/// Wrap a compiled test artifact in a Run step when the target can execute on this host,
+/// otherwise return the compile step directly. Deterministic compile-only coverage for a
+/// foreign target regardless of host binfmt_misc / qemu registration making execution
+/// technically possible (e.g. aarch64-linux under a registered qemu-user interpreter).
+fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.Build.Step {
+    if (foreign) return &exe.step;
+
+    const run = b.addRunArtifact(exe);
+    return &run.step;
+}
+
 // --------------------------------------------------------- //
 
 pub fn build(b: *std.Build) void {
@@ -111,6 +122,16 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Installed example binaries carry the target triple so per-target builds
+    // coexist in zig-out/bin. A foreign target (cross build) compiles every
+    // suite and example but skips execution and the container lifecycle.
+    const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+    const host = b.graph.host.result;
+    const foreign_target = target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch;
+    if (foreign_target) {
+        std.log.info("prometheuz: target {s} is foreign to this host, tests and runner compile but execution is skipped", .{triple});
+    }
 
     const prometheuz = b.addModule("prometheuz", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -122,10 +143,10 @@ pub fn build(b: *std.Build) void {
 
     // In-file tests live in the prometheuz module.
     const module_tests = b.addTest(.{ .root_module = prometheuz });
-    const module_run = b.addRunArtifact(module_tests);
+    const module_run_step = testRunStep(b, module_tests, foreign_target);
 
     const unit_step = b.step("test-unit", "Run prometheuz unit tests (no server needed)");
-    unit_step.dependOn(&module_run.step);
+    unit_step.dependOn(module_run_step);
 
     // --------------------------------------------------------- //
 
@@ -143,7 +164,7 @@ pub fn build(b: *std.Build) void {
         example_module.addImport("prometheuz", prometheuz);
 
         const example_exe = b.addExecutable(.{
-            .name = "prometheuz-example-" ++ name,
+            .name = b.fmt("prometheuz-example-{s}-{s}", .{ name, triple }),
             .root_module = example_module,
         });
         example_exes[index] = example_exe;
@@ -166,7 +187,7 @@ pub fn build(b: *std.Build) void {
     live_demo_module.addImport("prometheuz", prometheuz);
 
     const live_demo_exe = b.addExecutable(.{
-        .name = "prometheuz-example-registry_live_demo",
+        .name = b.fmt("prometheuz-example-registry_live_demo-{s}", .{triple}),
         .root_module = live_demo_module,
     });
 
@@ -191,18 +212,25 @@ pub fn build(b: *std.Build) void {
         .root_module = runner_module,
     });
 
-    const runner_run = b.addRunArtifact(runner_exe);
-    runner_run.has_side_effects = true;
-    for (example_exes) |example_exe| runner_run.addArtifactArg(example_exe);
-    runner_run.step.dependOn(&addNodeExporterStart(b).step);
-    runner_run.step.dependOn(&addPrometheusStart(b).step);
-
-    const node_exporter_teardown = addNodeExporterTeardown(b);
-    node_exporter_teardown.step.dependOn(&runner_run.step);
-    const prometheus_teardown = addPrometheusTeardown(b);
-    prometheus_teardown.step.dependOn(&runner_run.step);
-
     const runner_step = b.step("test-runner", "Run every prometheuz example against the node-exporter+prometheus containers (owns the lifecycle)");
-    runner_step.dependOn(&node_exporter_teardown.step);
-    runner_step.dependOn(&prometheus_teardown.step);
+    if (foreign_target) {
+        // Foreign target: compile the runner and every example, skip the run
+        // and the containers.
+        runner_step.dependOn(&runner_exe.step);
+        for (example_exes) |example_exe| runner_step.dependOn(&example_exe.step);
+    } else {
+        const runner_run = b.addRunArtifact(runner_exe);
+        runner_run.has_side_effects = true;
+        for (example_exes) |example_exe| runner_run.addArtifactArg(example_exe);
+        runner_run.step.dependOn(&addNodeExporterStart(b).step);
+        runner_run.step.dependOn(&addPrometheusStart(b).step);
+
+        const node_exporter_teardown = addNodeExporterTeardown(b);
+        node_exporter_teardown.step.dependOn(&runner_run.step);
+        const prometheus_teardown = addPrometheusTeardown(b);
+        prometheus_teardown.step.dependOn(&runner_run.step);
+
+        runner_step.dependOn(&node_exporter_teardown.step);
+        runner_step.dependOn(&prometheus_teardown.step);
+    }
 }
