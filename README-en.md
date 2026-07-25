@@ -18,20 +18,6 @@
 
 <hr>
 
-<div align="center">
-    <img src="https://img.shields.io/badge/Language-Zig-orange">
-</div>
-<div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-green">
-    <img src="https://img.shields.io/badge/x86__64-Windows-red">
-    <img src="https://img.shields.io/badge/aarch64-MacOS-red">
-    <img src="https://img.shields.io/badge/x86__64-FreeBSD-red">
-    <img src="https://img.shields.io/badge/x86__64-NetBSD-red">
-    <img src="https://img.shields.io/badge/x86__64-OpenBSD-red">
-</div>
-
-<hr>
-
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
     <i>Where the wire meets the will.</i>
 </p>
@@ -143,8 +129,20 @@
 
 ## Important Notes
 
-Zix currently is linux-centric.
-Windows & MacOS currently not supported.
+Zix dispatch model for IOCP and KQUEUE not supported.
+Looking for contributor & maintaner.
+
+__*Status:*__ <br>
+<img src="https://img.shields.io/badge/x86__64-Linux-green">
+<img src="https://img.shields.io/badge/aarch64-Linux-yellow">
+<img src="https://img.shields.io/badge/x86__64-Windows-yellow">
+<img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
+<img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
+<img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
+<img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
+
+> green: validated on native hardware. <br>
+> yellow: cross-build verified (module, examples, test suites, and runners compile, EPOLL / URING fall back to POOL at runtime).
 
 <br>
 
@@ -531,7 +529,7 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1158+1d1193aa7
+        - 0.17.0-dev.1464+6aff551f1
 
 <br>
 
@@ -595,19 +593,21 @@ The real entry points are the named steps. List them any time with `zig build -l
 | `zig build` | Compile the module graph only. No artifact is emitted, because zix is a source module. |
 | `zig build test-all` | Run unit, integration, behaviour, and edge tests. |
 | `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Build every example into `zig-out/bin/`. |
+| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `example-<name>-<arch>-<os>`, so builds for several targets coexist. |
 | `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
-| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. Run it from there. |
+| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple, run it from there. |
 | `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-epoll`. |
 | `zig build test-runner-all` | Run every server-plus-client integration runner. |
 
 Built example binaries land in `zig-out/bin/`. To build all examples, then run one in the background and stop it:
 
 ```sh
-zig build examples                      # build every example into zig-out/bin/
-./zig-out/bin/example-http1_websocket & # run one in the background
-kill %1                                 # stop it
+zig build examples                                   # build every example into zig-out/bin/
+./zig-out/bin/example-http1_websocket-x86_64-linux & # run one in the background
+kill %1                                              # stop it
 ```
+
+Every step accepts `-Dtarget=<arch>-<os>`, covering seven targets: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. On a foreign target the test and runner steps compile everything and skip execution with a warning. `scripts/build-all-targets.sh` sweeps every build option of zix and the drivers over all seven.
 
 There is no `zig build install` library output and no `-Doptimize` is required for a plain compile check. To consume zix in another project, follow Getting Started above: it is added as a `build.zig.zon` dependency and imported with `exe.root_module.addImport("zix", zix.module("zix"))`, never linked as a system library.
 
@@ -624,6 +624,8 @@ zig build test-all         # all of the above
 ```
 
 `zig build` alone does not run tests. See [`docs/tests-en.md`](docs/tests-en.md) for full coverage details.
+
+Cross-target: with a foreign `-Dtarget` every suite compiles for that target and execution is skipped with a warning. On a non-Linux host, tests that exercise the Linux-only EPOLL / URING paths print a warn and skip, so the suites stay green on every supported platform.
 
 <br>
 
