@@ -68,7 +68,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = zix.Http.Server.init(&Routes, .{
+    var server = zix.Http.Server.init(zix.Http.Router(&Routes).dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

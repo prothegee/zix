@@ -19,7 +19,7 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
 // --------------------------------------------------------- //
 
-fn home(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+fn home(_: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
     res.send("hello over http/3\n");
 }
 
@@ -28,7 +28,7 @@ fn home(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
 threadlocal var sum_buf: [32]u8 = undefined;
 
 // /baseline2?a=1&b=1 -> sum the two query integers, the HttpArena baseline-h3 shape.
-fn baseline(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+fn baseline(req: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
     const a = queryInt(req.path, "a") orelse 0;
     const b = queryInt(req.path, "b") orelse 0;
 
@@ -43,7 +43,7 @@ fn baseline(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
 const big_body: [262144]u8 = @splat('Z');
 
 // GET /big -> the 256 KiB body, to demonstrate and check large multi-packet responses over HTTP/3.
-fn big(_: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+fn big(_: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
     res.send(&big_body);
 }
 
@@ -64,7 +64,7 @@ fn repeatComptime(comptime unit: []const u8, comptime times: usize) []const u8 {
 const negotiated_body: []const u8 = repeatComptime("zix HTTP/3 content negotiation demo line. ", 64);
 var g_br_body: []const u8 = "";
 
-fn negotiated(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+fn negotiated(req: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
     if (g_br_body.len != 0 and std.mem.indexOf(u8, req.accept_encoding, "br") != null) {
         res.setContentEncoding(.br);
         res.send(g_br_body);
