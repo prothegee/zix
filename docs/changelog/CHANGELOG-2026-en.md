@@ -44,7 +44,7 @@ __*Fix:*__
 
 <br>
 
-## MAJOR.MINOR.x (TBA)
+## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__
 
