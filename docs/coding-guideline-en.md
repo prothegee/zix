@@ -246,6 +246,8 @@ else blk: {
 
 > Prefer comptime gating for a build-time fact (`comptime builtin.target.os.tag`), a runtime probe only for a host-time fact (memlock, ring availability). Always log the fallback reason. Never let the server silently disappear after binding.
 
+The same guard applies to any hand-rolled Linux-only fast path added purely for performance, not just the dispatch model (for example a `wallClockNs` / `nowUs` helper calling `std.os.linux.clock_gettime` directly instead of going through `std.posix.system`). The Linux branch (`comptime builtin.target.os.tag == .linux`, covers both x86_64-linux and aarch64-linux identically) is the primary, guarded platform: keep it byte-identical to what is already proven, and add every other platform as its own separate branch next to it, never folded into one shared implementation.
+
 ---
 
 ## 9. Error handling
