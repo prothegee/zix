@@ -8,7 +8,7 @@ fn makeMemFd() !std.posix.fd_t {
 }
 
 fn seekToStart(fd: std.posix.fd_t) void {
-    _ = std.posix.system.lseek(fd, 0, std.os.linux.SEEK.SET);
+    _ = std.posix.system.lseek(fd, 0, std.posix.SEEK.SET);
 }
 
 fn closefd(fd: std.posix.fd_t) void {
