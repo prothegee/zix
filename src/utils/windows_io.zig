@@ -98,3 +98,33 @@ pub fn shutdown(handle: windows.HANDLE) void {
 pub fn close(handle: windows.HANDLE) void {
     _ = windows.ntdll.NtClose(handle);
 }
+
+/// Wall-clock nanoseconds since the Unix epoch (real/system time basis).
+/// Mirrors clock_gettime(CLOCK_REALTIME).
+///
+/// Return:
+/// - u64 (nanoseconds since 1970-01-01, converted from the NTFS/Windows epoch)
+pub fn wallClockNs() u64 {
+    const epoch_ns: i96 = @as(i96, std.time.epoch.windows) * std.time.ns_per_s;
+    const filetime_ns: i96 = @as(i96, windows.ntdll.RtlGetSystemTimePrecise()) * 100;
+
+    return @intCast(filetime_ns + epoch_ns);
+}
+
+/// Monotonic microseconds from the performance counter, never steps backward.
+/// Mirrors clock_gettime(CLOCK_MONOTONIC).
+///
+/// Return:
+/// - u64 (microseconds since an arbitrary reference point)
+pub fn monotonicUs() u64 {
+    var frequency: windows.LARGE_INTEGER = undefined;
+    _ = windows.ntdll.RtlQueryPerformanceFrequency(&frequency);
+
+    var counter: windows.LARGE_INTEGER = undefined;
+    _ = windows.ntdll.RtlQueryPerformanceCounter(&counter);
+
+    const frequency_u64: u64 = @bitCast(frequency);
+    const counter_u64: u64 = @bitCast(counter);
+
+    return counter_u64 * std.time.us_per_s / frequency_u64;
+}
