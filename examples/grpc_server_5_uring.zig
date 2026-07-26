@@ -33,36 +33,36 @@
 const std = @import("std");
 const zix = @import("zix");
 
-fn sayHelloHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    ctx.sendMessage("application/grpc+proto", resp);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", resp);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
-fn echoHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    while (ctx.recvMessage()) |msg| {
-        ctx.sendMessage("application/grpc+proto", msg);
+fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    while (req.recvMessage()) |msg| {
+        res.sendMessage("application/grpc+proto", msg);
     }
 
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 /// Server-streaming StreamSum: read one SumRequest{a, b, count}, then emit `count` reply messages
 /// carrying a + b + i. A large `count` exercises the streaming path's DATA-frame coalescing, which
 /// packs many messages into each h2 DATA frame instead of one frame per message.
-fn streamSumHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+fn streamSumHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -88,10 +88,10 @@ fn streamSumHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) v
     var i: i32 = 0;
     while (i < req_count) : (i += 1) {
         const reply_len = zix.Grpc.encodeInt32(1, sum + i, &reply_buf);
-        ctx.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
+        res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
     }
 
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{
@@ -102,7 +102,7 @@ const Routes = [_]zix.Grpc.Route{
 
 pub fn main(process: std.process.Init) !void {
     var server = zix.Grpc.Server.init(
-        &Routes,
+        zix.Grpc.Router(&Routes),
         .{
             .io = process.io,
             .ip = "127.0.0.1",

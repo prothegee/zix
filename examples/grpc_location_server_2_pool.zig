@@ -30,11 +30,11 @@
 const std = @import("std");
 const zix = @import("zix");
 
-fn sendLocationAndSave(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
+fn sendLocationAndSave(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
 
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -63,8 +63,8 @@ fn sendLocationAndSave(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context
     rpos += zix.Grpc.encodeString(1, "saved", resp[rpos..]);
     rpos += zix.Grpc.encodeInt32(2, 1, resp[rpos..]);
 
-    ctx.sendMessage("application/grpc+proto", resp[0..rpos]);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", resp[0..rpos]);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
@@ -75,7 +75,7 @@ const Routes = [_]zix.Grpc.Route{
 
 pub fn main(process: std.process.Init) !void {
     var server = zix.Grpc.Server.init(
-        &Routes,
+        zix.Grpc.Router(&Routes),
         .{
             .io = process.io,
             .ip = "127.0.0.1",
