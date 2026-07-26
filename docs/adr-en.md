@@ -1390,4 +1390,66 @@ Compression-capable engines expose the same six: `sendGzipFD`, `sendGzipCachedFD
 
 ---
 
+## ADR-063: engine handler trio parity (Request, Response, Context) and explicit Router across engines
+
+**Status:** Accepted
+
+**Context:** Not every engine gave its handler the same three roles. `zix.Http` and `zix.Http1` had the full trio since ADR-062. The others did not:
+
+| Engine | Request-like view | Response-like builder | Context-like env |
+| :- | :- | :- | :- |
+| Http / Http1 | yes, typed `Request` | yes, typed `Response` | yes, `Context` |
+| Http3 | yes, `Request` | yes, `Response` | missing, no ctx param, no error return |
+| Http2 | missing, raw `method` / `path` / `headers` / `body` args | missing, writes via free `sendResponseFD` on a raw `fd` / `sid` | missing |
+| Grpc | missing, raw `headers` slice | missing, writes via free `sendHeadersFD` / `sendDataFD` on `ctx`'s fd | yes, `GrpcContext` |
+| Fix | missing, raw `fields` slice | missing, writes via `buildMessage` on `ctx`'s fd | yes, `FixContext` |
+
+Router had a matching split. `Http`, `Http2`, `Grpc`, `Fix` took a route array straight into `Server.init(routes, config)`, the router built internally, the user never calling `Router(...)`. `Http1` and `Http3` required the user to call `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...})` and hand `.dispatch` to `Server.init(handler, config)`. That split is why examples read differently per engine, and why an application moving a route from one engine to another had to relearn the handler shape.
+
+**Decision:** Every engine gets the trio, protocol-shaped, and the Http1 router idiom everywhere, in one combined pass across all five engines (Fix, Http, Http2, Grpc, Http3, in that order):
+
+- Trio on all engines: `Request`, `Response`, `Context`, with `HandlerFn = *const fn(*Request, *Response, *Context) anyerror!void`. Not forced into identical structs, each engine keeps its own shapes for what its protocol actually carries, but the three roles exist everywhere and the idiom matches Http1's (`try res.foo(...)`, a `Response.sent` guard, `Context` holding io, a per-request arena, a deadline, and the fd / session escape hatch).
+- Router: `Server.init(handler, config)` everywhere, the user building the handler via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. Breaking change for `Http`, `Http2`, `Grpc`, `Fix`, mirroring ADR-062's approach on Http1. Every example and the affected test suites moved to the same call-site idiom.
+- Names stay bare per namespace (`zix.Http2.Request`), not engine-prefixed.
+- Handler-error wire policy: `Http1`, `Http2`, `Http3` auto-send one 500 when the handler errors and nothing was sent (the ADR-062 rule, extended). `Grpc` and `Fix` pass errors through silently, current wire behavior kept, invoke site is `handler(&req, &res, &ctx) catch {}`.
+- Raw expose: the raw `send*FD` surfaces stay public on `Http1`, `Http2`, `Grpc`, `Http3`. `Http` and `Fix` get no raw expose.
+- Fix timeout fold: `server_timeout_ms` stopped being a bare third `dispatch` argument. The effective-timeout calculation moved to where `Context` is built, and `deadline_ns` carries the result. No raw timeout field was added.
+
+**Rationale:** One handler vocabulary across all engines: when moving between engines the memory carries over, less learning curve. Building the trio at the invoke site keeps the tuned dispatch loops untouched, the same pattern ADR-062 proved on Http1 (stack-cheap views, byte-identical writers underneath).
+
+**Parity matrix:** same name, same behavior, only where the protocol has the concept. A "no" means the concept does not exist in that protocol, so the method is absent, never a stub that lies.
+
+| Member | Http / Http1 | Http2 | Http3 | Grpc | Fix |
+| :- | :- | :- | :- | :- | :- |
+| `Request.method` | yes | yes | yes | no (always POST) | no |
+| `Request.path` | yes | yes | yes | yes | no |
+| `Request.query` / `queryParam` / `queryParams` | yes | yes | no (handler parses `req.path` manually, no query API this pass) | no | no |
+| `Request.pathParam` / `pathSegments` | yes | pathSegments only, no PARAM route kind this pass | PARAM route kind exists, but `pathParam` is a package free function (`zix.Http3.pathParam`) off a threadlocal, not a `Request` method | no | no |
+| `Request.header` | yes | yes | no (no generic accessor, specific headers are pre-parsed into named `Request` fields: `authority`, `accept_encoding`) | yes | no |
+| `Request.body` / `bodyReceived` | yes | yes | yes (plain field, no `bodyReceived` distinction) | yes (proto bytes) | no |
+| `Request.getField` (typed field view) | no | no | no | no | yes |
+| `Request.keepAlive` | yes | no (persistent by protocol) | no (same) | no | no |
+| `Response.setStatus` / `setContentType` / `addHeader` | yes | yes | `setStatus` only, `content_type` is a plain field not wired to the wire yet, no `addHeader` (the v1 HTTP/3 response path emits only `:status` and `content-encoding`) | no | no |
+| `Response.send` / `sendJson` / `sendText` / `sendNoContent` | yes | yes | `send` only, no `sendJson` / `sendText` / `sendNoContent` this pass | no | no |
+| `Response.sendRaw` (pre-built wire bytes verbatim) | yes | no (h2 has no flat pre-buildable wire form, everything is HPACK plus framed) | no (no raw pre-built-bytes surface exposed this pass) | no | no |
+| `Response.sendNegotiated` | yes | no (no compression negotiation exists for Http2, ADR-059's own track, out of scope this pass) | no (handler negotiates manually via `accept_encoding` plus `setContentEncoding`, no `sendNegotiated` helper this pass) | no | no |
+| `Response.setKeepAlive` | yes | no | no | no | no |
+| `Response.sendStream` (SSE) / `sendFromCache` / `sendCached` | yes | out of scope this pass | out of scope this pass | `serveCached` / `sendCached` only, no SSE (a pre-existing response-cache feature, not new here) | no |
+| `Response.sendMessage` / `finish(status)` | no | no | no | yes | no |
+| `Response.sendMessage(msg_type, fields)` | no | no | no | no | yes |
+| `Context.withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` | yes | yes | yes | yes | yes |
+| `Context` io plus per-request arena | yes | yes | yes | yes | yes |
+
+**Consequences:**
+- Fix: `Request` is a typed view over `fields` reusing `getField`, `Response` is a builder over `buildMessage` plus the SOH-framed write with `sendMessage(msg_type, fields)`. `Context` folds the effective-timeout calculation in at build (`deadline_ns` carries it, no raw field) and gains `io` plus a per-request arena (a stack `FixedBufferAllocator`, no heap call, keeping the FIX core zero-heap-allocation). `Server.init(handler, config)` takes `handler: ?HandlerFn`, null keeps the existing echo-only mode. Examples migrated, tests added.
+- Http: bigger than the one-liner implied. `zix.Http.Server` was a comptime-generic-over-routes type (`HttpServerImpl(routes)`), it became one concrete struct holding a runtime `handler: HandlerFn`. `Router(routes).dispatch` changed from a `self`-taking method returning `!bool` to a plain `fn(req, res, ctx) anyerror!void` matching `HandlerFn` exactly, absorbing the static-file-fallback and 404 that `dispatch/common.zig` used to own externally (mirrors Http1's router). `Context` gained a `public_dir: []const u8` field so the router can reach it without a threadlocal (Http1 keeps its own `tl_static_dir`, unchanged). 17 examples plus `uds_http` migrated, 4 router / tls_dual test files migrated. Static-file-serving and 404 fallback verified end to end by hand (curl against a running `example-http_static`), not just compiled.
+- Http2: the biggest of the five. Routing was comptime-threaded through roughly 20 function signatures across `core.zig`, `mux.zig`, all 5 `dispatch/*.zig` files, and both TLS paths (`tls_serve.zig`, `tls_mux.zig`), not baked into the server type once like Http. Every `comptime routes: []const Route` parameter became a plain runtime `handler: HandlerFn`, and 3 comptime-generic worker-function factories (`epollMuxWorkerFn`, `uringMuxWorkerFn`, `workerFn` in `tls_mux.zig`) flattened into plain functions carrying `handler` as a struct field instead. `Request`, `Response`, `Context`, `Router` built from scratch (Http2 had none of the trio before), matching the parity matrix above (no PARAM route kind, no `sendNegotiated`, no `sendRaw`, no `keepAlive`). `handler_timeout_ms` added to `Http2ServerConfig` (Http2 had no timeout concept at all before this). Wire byte-identity against `sendResponseFD` asserted in tests. 5 `http2_basic_*` examples plus 4 test files migrated. Verified end to end by hand: curled a running `example-http2_basic_1_async` over h2c prior-knowledge.
+- Grpc: `Server.init` is the one deliberate exception to the otherwise-uniform `Server.init(handler, config)` shape. It takes `Server.init(Router(&routes), config)`, the comptime Router TYPE, not `.dispatch`, because `Route.is_server_streaming` is metadata the engine reads before invoking the handler, to pick sync-inline dispatch (unary, cheap) versus task-spawn dispatch (streaming, needed so a long-running stream does not block other h2 streams on the same connection), and a bare opaque `handler: HandlerFn` cannot carry that metadata. Settled empirically: an isolated-process scratchpad PoC measured direct-call dispatch at 44.8M RPS on 1 core, `io.async` task-spawn (64 concurrent) at 1.14M RPS needing about 4.7 cores (roughly 185x worse per core), and raw `std.Thread.spawn` at 5,954 RPS total (roughly 7,500x worse). Unifying onto always-task-spawn was not an acceptable simplification. `Router(routes)` gained `pub const route_slice: []const Route = routes`, and every dispatch model keeps `comptime RouterType: type` instead of dropping to a runtime handler value. `GrpcRequest` / `GrpcResponse` are thin delegating wrappers holding a `*GrpcContext` pointer, forwarding to the pre-existing, already-tuned `GrpcContext` methods, zero internal logic moved or duplicated. 12 examples plus 4 test files migrated. Verified end to end by hand: the gRPC example client against a running async server (unary and streaming), and `grpcurl` (real protobuf wire encoding) against a two-service, one-port example.
+- Http3: much thinner than Http2 and Grpc. Only one real handler invoke site existed in the whole engine (`dispatch/common.zig`'s per-packet request loop), so there was no comptime-routes threading to unwind, `comptime handler: core.HandlerFn` stayed exactly as it was at every `dispatch/*.zig` factory function, only the `HandlerFn` typedef's shape changed. `Context` added `stream_id` as the raw escape hatch (QUIC has no per-request fd), the timeout helper set, `io`, and a stack-arena allocator. `Response` gained a `sent: bool` flag. `core.invokeHandler` builds the Context and auto-500s only when the handler errored and nothing was sent. `Server.init(handler, config)` was already in place and needed no change. One example migrated (4 handlers). Verified end to end by hand with `curl --http3-only` against a running server: a plain body, a query-sum, a 256 KiB multi-packet body, and brotli content negotiation all round-tripped correctly.
+- Supersedes ADR-014's `Server.init(comptime routes: []const Route, config) HttpServerImpl(routes)` for `zix.Http`: `Server` is now one concrete struct, not a comptime generic, and `routes` is no longer a direct `Server.init` argument.
+- Guardrails held across all five: no change to hot-path wire mechanics (`send*FD` writers stay byte-identical, the tuned `.EPOLL` / `.URING` dispatch loops are untouched internally, only what wraps their handler call changed), and both `zig-0.16` and `zig-0.17` build clean throughout.
+- Migration surface: `test-all` 1249 of 1249 tests, 131 of 131 steps, `examples` 205 of 205 steps, both compilers, `zig fmt` clean.
+
+---
+
 ###### end of adr
