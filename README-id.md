@@ -157,6 +157,7 @@ __*Status:*__ <br>
 - Persempit pemikiran sistem lalu bersikap eksplisit.
 - "Nice to have" dan "mungkin kita perlu ini" bersifat tersier.
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
+- Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
 

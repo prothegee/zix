@@ -157,6 +157,7 @@ __*Status:*__ <br>
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
+- Linux x86_64/aarch64 raw-syscall fast path is guarded, any change there can harm the implementation.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
 - You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
 
