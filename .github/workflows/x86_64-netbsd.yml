@@ -6,6 +6,7 @@ on:
       - closed
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,12 +31,10 @@ jobs:
         with:
           release: "10.1"
           prepare: |
-            mkdir -p /usr/local/bin
             ftp -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-netbsd-0.16.0.tar.xz
             tar -C /usr/local -xf /tmp/zig.tar.xz
-
-            ln -sf /usr/local/zig-x86_64-netbsd-0.16.0/zig /usr/local/bin/zig
           run: |
+            export PATH="/usr/local/zig-x86_64-netbsd-0.16.0:$PATH"
             cd $GITHUB_WORKSPACE
             zig version
 
