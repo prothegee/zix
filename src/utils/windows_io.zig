@@ -128,3 +128,71 @@ pub fn monotonicUs() u64 {
 
     return counter_u64 * std.time.us_per_s / frequency_u64;
 }
+
+// --------------------------------------------------------- //
+// WSAPoll: the ntdll read/write helpers above block indefinitely, so a caller
+// that needs a real recv/send timeout on Windows polls readiness through here
+// first. This is the only place in the file that touches ws2_32 rather than
+// ntdll, since no AFD_POLL layout is published for Zig to bind against.
+
+/// WSAPoll event bit for readability. Mirrors POSIX POLLIN (POLLRDNORM | POLLRDBAND).
+pub const POLLIN: i16 = 0x0300;
+
+/// WSAPoll event bit for writability. Mirrors POSIX POLLOUT (POLLWRNORM).
+pub const POLLOUT: i16 = 0x0010;
+
+const WSAPOLLFD = extern struct {
+    fd: usize,
+    events: i16,
+    revents: i16,
+};
+
+/// Winsock's version-negotiation output, required once before any other
+/// ws2_32 call (including WSAPoll) will succeed. Only the version fields are
+/// read here, the rest is scratch space sized to match winsock2.h's WSADATA.
+const WSADATA = extern struct {
+    version: u16,
+    high_version: u16,
+    max_sockets: u16,
+    max_udp_dg: u16,
+    vendor_info: ?[*:0]u8,
+    description: [257]u8,
+    system_status: [129]u8,
+};
+
+extern "ws2_32" fn WSAStartup(version_requested: u16, data: *WSADATA) callconv(.winapi) i32;
+extern "ws2_32" fn WSAPoll(fds: [*]WSAPOLLFD, count: c_ulong, timeout_ms: i32) callconv(.winapi) i32;
+
+var wsa_ready: std.atomic.Value(bool) = .init(false);
+
+fn ensureWsaStarted() void {
+    if (wsa_ready.load(.acquire)) return;
+
+    var data: WSADATA = undefined;
+    _ = WSAStartup(0x0202, &data); // MAKEWORD(2, 2): request Winsock 2.2
+
+    wsa_ready.store(true, .release);
+}
+
+/// Poll a socket handle for readiness with a millisecond timeout.
+///
+/// Param:
+/// handle - windows.HANDLE (the socket, from stream.socket.handle)
+/// events - i16 (POLLIN or POLLOUT above)
+/// timeout_ms - u32 (0 polls once and returns immediately)
+///
+/// Return:
+/// - true when the event is ready before the timeout
+/// - false when the timeout elapses first
+/// - error.BrokenPipe if WSAPoll itself fails
+pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{BrokenPipe}!bool {
+    ensureWsaStarted();
+
+    var pfd = [1]WSAPOLLFD{.{ .fd = @intFromPtr(handle), .events = events, .revents = 0 }};
+    const timeout: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
+
+    const n = WSAPoll(&pfd, 1, timeout);
+    if (n < 0) return error.BrokenPipe;
+
+    return n > 0;
+}
