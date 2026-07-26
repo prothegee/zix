@@ -5,6 +5,12 @@ const win_io = @import("../../utils/windows_io.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
 const rc = @import("../../utils/response_cache.zig");
+const router_mod = @import("router.zig");
+const Request = @import("request.zig").Request;
+const Response = @import("response.zig").Response;
+const Context = @import("context.zig").Context;
+const wallClockNs = @import("context.zig").wallClockNs;
+const CTX_ARENA_BYTES = @import("context.zig").CTX_ARENA_BYTES;
 
 /// Base64 decode scratch for the HTTP2-Settings header on an h2c upgrade.
 const SETTINGS_DECODE_SCRATCH: usize = 256;
@@ -57,10 +63,11 @@ fn requestKey(path: []const u8, body: []const u8) u64 {
 ///
 /// Usage:
 /// ```zig
-/// fn handler(method: []const u8, headers: []const zix.Http2.Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void {
-///     if (zix.Http2.serveCached(fd, sid, "application/json")) return;
+/// fn handler(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) anyerror!void {
+///     _ = res;
+///     if (zix.Http2.serveCached(ctx.fd, ctx.sid, "application/json")) return;
 ///     const reply = buildExpensive();
-///     zix.Http2.sendCachedFD(fd, sid, "application/json", reply);
+///     zix.Http2.sendCachedFD(ctx.fd, ctx.sid, "application/json", reply);
 /// }
 /// ```
 ///
@@ -90,124 +97,33 @@ pub fn sendCachedFD(fd: std.posix.fd_t, sid: u31, content_type: []const u8, data
 
 // --------------------------------------------------------- //
 
-/// HTTP/2 handler function type. Called once per completed h2 stream.
+/// HTTP/2 handler function type. Called once per completed h2 stream via invokeHandler,
+/// which builds the trio (Request, Response, Context). Route matching happens in the router the
+/// caller builds (Router(routes).dispatch is itself a HandlerFn), not in the engine.
+pub const HandlerFn = router_mod.HandlerFn;
+pub const RouteKind = router_mod.RouteKind;
+pub const Route = router_mod.Route;
+pub const Router = router_mod.Router;
+
+/// Build the trio and invoke the handler, mirroring Http1's core.invokeHandler (ADR-062). A handler
+/// error is completed as one auto-500, but only when the handler wrote nothing, so a partially sent
+/// response is not corrupted.
 ///
 /// Param:
-/// method - []const u8 (HTTP method, e.g. "GET", "POST")
-/// headers - []const hpack.Header (decoded request headers including pseudo-headers)
-/// body - []const u8 (request body, empty for GET)
+/// handler - HandlerFn (built via Router(&[_]Route{...}).dispatch)
+/// req - Request (already built by the caller: method, path, query, headers, body)
 /// fd - std.posix.fd_t (connection fd for sending responses)
 /// sid - u31 (HTTP/2 stream id)
-pub const HandlerFn = *const fn (
-    method: []const u8,
-    headers: []const hpack.Header,
-    body: []const u8,
-    fd: std.posix.fd_t,
-    sid: u31,
-) void;
+/// io - std.Io (carried on Context for symmetry with the other engines)
+/// deadline_ns - ?u64 (seeded from opts.handler_timeout_ms by the caller)
+pub inline fn invokeHandler(handler: HandlerFn, req: *Request, fd: std.posix.fd_t, sid: u31, io: std.Io, deadline_ns: ?u64) void {
+    var res = Response{ .fd = fd, .sid = sid };
+    var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    var ctx = Context{ .fd = fd, .sid = sid, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator() };
 
-/// Route match strategy. EXACT matches the whole path, PREFIX matches a leading path segment
-/// (longest registered prefix wins), mirroring the zix.Http1 router.
-pub const RouteKind = enum(u8) { EXACT, PREFIX };
-
-/// HTTP/2 route: path to handler mapping.
-///
-/// Param:
-/// path - []const u8 (e.g. "/", "/json", "/static")
-/// handler - HandlerFn
-/// kind - RouteKind (EXACT by default, PREFIX for a path subtree)
-pub const Route = struct {
-    path: []const u8,
-    handler: HandlerFn,
-    kind: RouteKind = .EXACT,
-};
-
-/// Comptime path router. The query string is stripped before matching, so a route on "/json"
-/// matches ":path" values like "/json/5?m=7". EXACT routes use a StaticStringMap (O(1) lookup),
-/// PREFIX routes match the longest registered prefix on a path-segment boundary. Sends 404 when no
-/// route matches. Mirrors the zix.Http1 router.
-///
-/// Return:
-/// - type (zero-size, with a dispatch function)
-pub fn Router(comptime routes: []const Route) type {
-    const exact_count = blk: {
-        var n: usize = 0;
-        for (routes) |r| if (r.kind == .EXACT) {
-            n += 1;
-        };
-        break :blk n;
-    };
-    const prefix_count = blk: {
-        var n: usize = 0;
-        for (routes) |r| if (r.kind == .PREFIX) {
-            n += 1;
-        };
-        break :blk n;
-    };
-
-    const exact_pairs: [exact_count]struct { []const u8, HandlerFn } = blk: {
-        var arr: [exact_count]struct { []const u8, HandlerFn } = undefined;
-        var i: usize = 0;
-        for (routes) |r| {
-            if (r.kind == .EXACT) {
-                arr[i] = .{ r.path, r.handler };
-                i += 1;
-            }
-        }
-        break :blk arr;
-    };
-
-    const prefix_routes: [prefix_count]Route = blk: {
-        var arr: [prefix_count]Route = undefined;
-        var i: usize = 0;
-        for (routes) |r| {
-            if (r.kind == .PREFIX) {
-                arr[i] = r;
-                i += 1;
-            }
-        }
-        break :blk arr;
-    };
-
-    const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
-
-    return struct {
-        /// Dispatch the request to the best matching route. The query string is stripped first, then
-        /// EXACT is tried (O(1) hash lookup) before PREFIX (longest match wins).
-        pub fn dispatch(
-            method: []const u8,
-            path: []const u8,
-            headers: []const hpack.Header,
-            body: []const u8,
-            fd: std.posix.fd_t,
-            sid: u31,
-        ) void {
-            const p = if (std.mem.indexOfScalar(u8, path, '?')) |q| path[0..q] else path;
-
-            if (exact_map.get(p)) |handler| {
-                handler(method, headers, body, fd, sid);
-                return;
-            }
-
-            var best_len: usize = 0;
-            var best_handler: ?HandlerFn = null;
-            inline for (prefix_routes) |route| {
-                if (std.mem.startsWith(u8, p, route.path)) {
-                    const at_boundary = p.len == route.path.len or p[route.path.len] == '/';
-                    if (at_boundary and route.path.len > best_len) {
-                        best_len = route.path.len;
-                        best_handler = route.handler;
-                    }
-                }
-            }
-
-            if (best_handler) |h| {
-                h(method, headers, body, fd, sid);
-                return;
-            }
-
-            frame.sendResponseFD(fd, sid, 404, "text/plain", "Not Found") catch {};
-        }
+    handler(req, &res, &ctx) catch {
+        if (!res.sent) frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error") catch {};
     };
 }
 
@@ -239,6 +155,9 @@ pub const ServeOpts = struct {
     /// Optional ceiling on per-worker cache memory in bytes. 0 disables the ceiling. When set, the
     /// effective entry count is reduced so entries * value_bytes fits (see effectiveCacheEntries).
     cache_max_total_bytes: usize = 0,
+    /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
+    /// Seeds Context.deadline_ns at dispatch. The handler may extend or override via setTimeout/withTimeout.
+    handler_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -273,7 +192,7 @@ fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
 
 /// Serve one h2c connection. Takes raw fd extracted by the server dispatch layer.
 /// Caller owns the fd and must close it after this exits.
-pub fn serveConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts) void {
+pub fn serveConn(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
         // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
         const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
@@ -285,10 +204,10 @@ pub fn serveConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: Serve
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
-    serveConnInner(routes, fd, opts) catch {};
+    serveConnInner(handler, fd, opts, io) catch {};
 }
 
-fn serveConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts) !void {
+fn serveConnInner(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io) !void {
     var peek: [3]u8 = undefined;
     try frame.recvExact(fd, &peek);
 
@@ -309,9 +228,9 @@ fn serveConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: Serv
             .{ frame.SETTINGS_ENABLE_PUSH, 0 },
         });
         var hpack_dec = hpack.HpackDecoder.init();
-        try serveH2cLoop(routes, fd, &hpack_dec, opts, 0);
+        try serveH2cLoop(handler, fd, &hpack_dec, opts, 0, io);
     } else {
-        try serveH2cUpgrade(routes, fd, opts, &peek);
+        try serveH2cUpgrade(handler, fd, opts, &peek, io);
     }
 }
 
@@ -334,7 +253,7 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: ServeOpts, prefix: *const [3]u8) !void {
+fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, prefix: *const [3]u8, io: std.Io) !void {
     var head_buf: [UPGRADE_HEAD_BUF]u8 = undefined;
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
@@ -408,17 +327,21 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
         .{ .name = ":path", .value = path },
         .{ .name = ":scheme", .value = "http" },
     };
-    Router(routes).dispatch(method, path, &s1_hdrs, &.{}, fd, 1);
+    const split = Request.splitPath(path);
+    var req = Request{ .method = method, .path = split.path, .query = split.query, .headers = &s1_hdrs, .body = &.{} };
+    const deadline_ns: ?u64 = if (opts.handler_timeout_ms > 0) wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms else null;
+    invokeHandler(handler, &req, fd, 1, io, deadline_ns);
 
-    try serveH2cLoop(routes, fd, &hpack_dec, opts, 1);
+    try serveH2cLoop(handler, fd, &hpack_dec, opts, 1, io);
 }
 
 fn serveH2cLoop(
-    comptime routes: []const Route,
+    handler: HandlerFn,
     fd: std.posix.fd_t,
     hpack_dec: *hpack.HpackDecoder,
     opts: ServeOpts,
     initial_last_stream: u31,
+    io: std.Io,
 ) !void {
     const max_payload = opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
     const payload_buf = try std.heap.smp_allocator.alloc(u8, max_payload);
@@ -519,7 +442,7 @@ fn serveH2cLoop(
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
 
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(routes, s, fd);
+                    dispatchStream(handler, s, fd, opts, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -539,7 +462,7 @@ fn serveH2cLoop(
                 s.header_count += count;
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(routes, s, fd);
+                    dispatchStream(handler, s, fd, opts, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -579,7 +502,7 @@ fn serveH2cLoop(
 
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
                 if (s.end_stream) {
-                    dispatchStream(routes, s, fd);
+                    dispatchStream(handler, s, fd, opts, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -618,15 +541,15 @@ fn findSlot(sid: u31, streams: []Stream, used: []bool) ?usize {
     return null;
 }
 
-fn dispatchStream(comptime routes: []const Route, stream: *Stream, fd: std.posix.fd_t) void {
+fn dispatchStream(handler: HandlerFn, stream: *Stream, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io) void {
     var method: []const u8 = "GET";
-    var path: []const u8 = "/";
+    var raw_path: []const u8 = "/";
     for (stream.headers[0..stream.header_count]) |h| {
         // The two pseudo-headers have distinct lengths (":path" 5, ":method" 7),
         // so dispatch on length first and do at most one compare per header.
         switch (h.name.len) {
             5 => if (std.mem.eql(u8, h.name, ":path")) {
-                path = h.value;
+                raw_path = h.value;
             },
             7 => if (std.mem.eql(u8, h.name, ":method")) {
                 method = h.value;
@@ -634,7 +557,17 @@ fn dispatchStream(comptime routes: []const Route, stream: *Stream, fd: std.posix
             else => {},
         }
     }
-    Router(routes).dispatch(method, path, stream.headers[0..stream.header_count], stream.body[0..stream.body_len], fd, stream.id);
+
+    const split = Request.splitPath(raw_path);
+    var req = Request{
+        .method = method,
+        .path = split.path,
+        .query = split.query,
+        .headers = stream.headers[0..stream.header_count],
+        .body = stream.body[0..stream.body_len],
+    };
+    const deadline_ns: ?u64 = if (opts.handler_timeout_ms > 0) wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms else null;
+    invokeHandler(handler, &req, fd, stream.id, io, deadline_ns);
 }
 
 // --------------------------------------------------------- //
@@ -644,105 +577,6 @@ test "zix http2: ServeOpts defaults" {
     const opts = ServeOpts{};
     try std.testing.expectEqual(@as(usize, 128), opts.max_streams);
     try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, opts.max_frame_size);
-}
-
-test "zix http2: HandlerFn is a function pointer type" {
-    const h: HandlerFn = struct {
-        fn f(
-            method: []const u8,
-            headers: []const hpack.Header,
-            body: []const u8,
-            fd: std.posix.fd_t,
-            sid: u31,
-        ) void {
-            _ = method;
-            _ = headers;
-            _ = body;
-            _ = fd;
-            _ = sid;
-        }
-    }.f;
-    _ = h;
-}
-
-// Router test scaffolding: each handler records which route fired so a dispatch can be asserted
-// without inspecting the on-wire frames.
-var tl_router_hit: u8 = 0;
-
-fn routeHandler(comptime id: u8) HandlerFn {
-    return struct {
-        fn f(_: []const u8, _: []const hpack.Header, _: []const u8, _: std.posix.fd_t, _: u31) void {
-            tl_router_hit = id;
-        }
-    }.f;
-}
-
-test "zix http2: Router strips the query before matching" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
-
-    const R = Router(&[_]Route{
-        .{ .path = "/baseline2", .handler = routeHandler(1) },
-    });
-
-    tl_router_hit = 0;
-    R.dispatch("GET", "/baseline2?a=1&b=1", &.{}, "", -1, 1);
-
-    try std.testing.expectEqual(@as(u8, 1), tl_router_hit);
-}
-
-test "zix http2: Router PREFIX matches a path subtree on a boundary" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
-
-    const R = Router(&[_]Route{
-        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
-        .{ .path = "/static", .handler = routeHandler(3), .kind = .PREFIX },
-    });
-
-    tl_router_hit = 0;
-    R.dispatch("GET", "/json/5?m=7", &.{}, "", -1, 1);
-    try std.testing.expectEqual(@as(u8, 2), tl_router_hit);
-
-    tl_router_hit = 0;
-    R.dispatch("GET", "/static/app.js", &.{}, "", -1, 1);
-    try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
-}
-
-test "zix http2: Router EXACT wins over PREFIX and longest prefix wins" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
-
-    const R = Router(&[_]Route{
-        .{ .path = "/json", .handler = routeHandler(1) },
-        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
-        .{ .path = "/json/special", .handler = routeHandler(3), .kind = .PREFIX },
-    });
-
-    // EXACT "/json" beats the "/json" PREFIX for the bare path.
-    tl_router_hit = 0;
-    R.dispatch("GET", "/json", &.{}, "", -1, 1);
-    try std.testing.expectEqual(@as(u8, 1), tl_router_hit);
-
-    // Longest matching prefix wins for a deeper path.
-    tl_router_hit = 0;
-    R.dispatch("GET", "/json/special/x", &.{}, "", -1, 1);
-    try std.testing.expectEqual(@as(u8, 3), tl_router_hit);
-}
-
-test "zix http2: Router PREFIX respects the segment boundary" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const R = Router(&[_]Route{
-        .{ .path = "/json", .handler = routeHandler(2), .kind = .PREFIX },
-    });
-
-    // "/jsonx" is not under the "/json" subtree (no boundary), so it 404s. The fallback writes to a
-    // pipe so no real socket is needed.
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
-
-    tl_router_hit = 0;
-    R.dispatch("GET", "/jsonx", &.{}, "", fds[1], 1);
-
-    try std.testing.expectEqual(@as(u8, 0), tl_router_hit);
 }
 
 test "zix http2: response cache round-trips via sendCachedFD then serveCached" {

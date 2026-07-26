@@ -19,8 +19,10 @@ const std = @import("std");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
 const core = @import("core.zig");
-
-const Route = core.Route;
+const Request = @import("request.zig").Request;
+const Response = @import("response.zig").Response;
+const Context = @import("context.zig").Context;
+const wallClockNs = @import("context.zig").wallClockNs;
 
 /// The connection whose handler is running on this worker thread, set around each dispatch so the
 /// flow-controlled send (`sendResponseStreamFD`) can reach the connection's send windows. Null on the
@@ -66,6 +68,9 @@ const MuxStream = struct {
 pub const MuxConn = struct {
     fd: std.posix.fd_t,
     opts: core.ServeOpts,
+    /// Io backend, carried for the Context built at each muxDispatch. Worker-wide (the same value
+    /// for every connection on this worker), not per-connection.
+    io: std.Io,
 
     rbuf: []u8,
     rstart: usize,
@@ -94,7 +99,7 @@ pub const MuxConn = struct {
     peer_max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE,
 
     /// Allocate and initialize a connection. Returns null on allocation failure (caller closes fd).
-    pub fn init(fd: std.posix.fd_t, opts: core.ServeOpts) ?*MuxConn {
+    pub fn init(fd: std.posix.fd_t, opts: core.ServeOpts, io: std.Io) ?*MuxConn {
         const a = std.heap.smp_allocator;
         const conn = a.create(MuxConn) catch return null;
 
@@ -124,6 +129,7 @@ pub const MuxConn = struct {
         conn.* = .{
             .fd = fd,
             .opts = opts,
+            .io = io,
             .rbuf = rbuf,
             .rstart = 0,
             .rend = 0,
@@ -260,14 +266,14 @@ fn sendServerSettings(conn: *MuxConn) void {
 
 /// Extract method / path from the decoded pseudo-headers and dispatch the stream. The reply is
 /// written straight to the fd by the handler (via `frame.sendResponseFD`).
-fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void {
+fn muxDispatch(handler: core.HandlerFn, conn: *MuxConn, slot: usize) void {
     const s = conn.streams[slot];
     var method: []const u8 = "GET";
-    var path: []const u8 = "/";
+    var raw_path: []const u8 = "/";
     for (s.headers[0..s.header_count]) |h| {
         switch (h.name.len) {
             5 => if (std.mem.eql(u8, h.name, ":path")) {
-                path = h.value;
+                raw_path = h.value;
             },
             7 => if (std.mem.eql(u8, h.name, ":method")) {
                 method = h.value;
@@ -276,15 +282,29 @@ fn muxDispatch(comptime routes: []const Route, conn: *MuxConn, slot: usize) void
         }
     }
 
+    const split = Request.splitPath(raw_path);
+
     active_conn = conn;
     // Record the request key inputs for the response-cache API only when a cache is installed, so the
     // default (cache off) hot path pays no extra threadlocal writes. serveCached returns false without
     // a cache, so it never reads these when they go unset, and the next dispatch overwrites them.
     if (core.tl_cache != null) {
-        core.tl_req_path = path;
+        core.tl_req_path = split.path;
         core.tl_req_body = s.body[0..s.body_len];
     }
-    core.Router(routes).dispatch(method, path, s.headers[0..s.header_count], s.body[0..s.body_len], conn.fd, s.id);
+
+    var req = Request{
+        .method = method,
+        .path = split.path,
+        .query = split.query,
+        .headers = s.headers[0..s.header_count],
+        .body = s.body[0..s.body_len],
+    };
+    const deadline_ns: ?u64 = if (conn.opts.handler_timeout_ms > 0)
+        wallClockNs() + @as(u64, conn.opts.handler_timeout_ms) * std.time.ns_per_ms
+    else
+        null;
+    core.invokeHandler(handler, &req, conn.fd, s.id, conn.io, deadline_ns);
     active_conn = null;
 
     // Free the slot unless the response body is parked on a window, then a WINDOW_UPDATE resumes it.
@@ -425,7 +445,7 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
 }
 
 /// Advance the connection through the preface phases, then process buffered frames.
-fn muxProcess(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
+fn muxProcess(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
     switch (conn.phase) {
         .await_preface => {
             const avail = conn.rend - conn.rstart;
@@ -464,11 +484,11 @@ fn muxProcess(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
         .h2 => {},
     }
 
-    return muxFrameLoop(routes, conn);
+    return muxFrameLoop(handler, conn);
 }
 
 /// The h2 frame loop over buffered bytes for a connection in the .h2 phase.
-fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
+fn muxFrameLoop(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
     const max_payload = conn.opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
 
     while (true) {
@@ -600,7 +620,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
 
                 if (s.end_headers and s.end_stream) {
-                    muxDispatch(routes, conn, slot);
+                    muxDispatch(handler, conn, slot);
                 }
             },
 
@@ -619,7 +639,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
                 s.header_count += count;
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
                 if (s.end_headers and s.end_stream) {
-                    muxDispatch(routes, conn, slot);
+                    muxDispatch(handler, conn, slot);
                 }
             },
 
@@ -669,7 +689,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 
                 stream.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
                 if (stream.end_stream) {
-                    muxDispatch(routes, conn, slot);
+                    muxDispatch(handler, conn, slot);
                 }
             },
 
@@ -691,8 +711,8 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 ///
 /// Return:
 /// - .close when a protocol error occurred or the handshake was rejected
-pub fn processRing(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
-    return muxProcess(routes, conn);
+pub fn processRing(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
+    return muxProcess(handler, conn);
 }
 
 /// Drive one readable event: read available bytes (non-blocking), then process complete frames.
@@ -700,7 +720,7 @@ pub fn processRing(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
 ///
 /// Return:
 /// - .close when the peer closed, a protocol error occurred, or the handshake was rejected
-pub fn onReadable(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
+pub fn onReadable(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
     while (true) {
         if (conn.rstart == conn.rend) {
             conn.rstart = 0;
@@ -721,7 +741,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *MuxConn) ConnOutcome {
         if (got == 0) return .close;
         conn.rend += got;
 
-        if (muxProcess(routes, conn) == .close) return .close;
+        if (muxProcess(handler, conn) == .close) return .close;
     }
 }
 
@@ -738,7 +758,7 @@ test "zix http2: mux sendResponseStreamFD paces a large body by the send window"
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
 
     // tiny windows so a modest body must be paced across several WINDOW_UPDATEs
@@ -809,11 +829,11 @@ test "zix http2: mux sendResponseStreamFD paces a large body by the send window"
 
 var fc_test_body: [5000]u8 = undefined;
 
-fn fcTestHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    sendResponseStreamFD(fd, sid, 200, "text/plain", "", &fc_test_body);
+fn fcTestHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
+    sendResponseStreamFD(res.fd, res.sid, 200, "text/plain", "", &fc_test_body);
 }
 
-const fc_test_routes = [_]Route{.{ .path = "/", .handler = fcTestHandler }};
+const fc_test_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = fcTestHandler }});
 
 fn feedFrame(conn: *MuxConn, ftype: u8, flags: u8, sid: u31, payload: []const u8) void {
     var fh: [9]u8 = undefined;
@@ -836,7 +856,7 @@ test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the fr
     defer _ = std.posix.system.close(fds[1]);
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
     conn.send_window = 100;
@@ -849,7 +869,7 @@ test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the fr
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
 
-    _ = muxFrameLoop(&fc_test_routes, conn);
+    _ = muxFrameLoop(fc_test_router.dispatch, conn);
 
     // the handler sent 100 of 5000 (the window) and parked the rest, the slot stays held
     const slot = findSlot(1, conn.streams, conn.slots).?;
@@ -860,7 +880,7 @@ test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the fr
     const inc = [4]u8{ 0, 0, 0x03, 0xE8 }; // +1000
     feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 0, &inc);
     feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 1, &inc);
-    _ = muxFrameLoop(&fc_test_routes, conn);
+    _ = muxFrameLoop(fc_test_router.dispatch, conn);
 
     // 1000 more went out (the min of the two windows), 3900 remains parked
     try std.testing.expectEqual(@as(usize, 3900), conn.streams[slot].pending_body.len);
@@ -869,18 +889,19 @@ test "zix http2: mux parks a body then resumes it across WINDOW_UPDATE in the fr
 var ae_seen_buf: [128]u8 = undefined;
 var ae_seen_len: usize = 0;
 
-fn aeCheckHandler(_: []const u8, headers: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
+fn aeCheckHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
     ae_seen_len = 0;
-    for (headers) |h| {
+    for (req.headers) |h| {
         if (std.mem.eql(u8, h.name, "accept-encoding")) {
             @memcpy(ae_seen_buf[0..h.value.len], h.value);
             ae_seen_len = h.value.len;
         }
     }
-    frame.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
+
+    try res.sendText("ok");
 }
 
-const ae_routes = [_]Route{.{ .path = "/static/x", .handler = aeCheckHandler }};
+const ae_router = core.Router(&[_]core.Route{.{ .path = "/static/x", .handler = aeCheckHandler }});
 
 test "zix http2: mux passes the accept-encoding request header to the handler" {
     if (comptime @import("builtin").target.os.tag != .linux) {
@@ -892,7 +913,7 @@ test "zix http2: mux passes the accept-encoding request header to the handler" {
     defer _ = std.posix.system.close(fds[1]);
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -904,7 +925,7 @@ test "zix http2: mux passes the accept-encoding request header to the handler" {
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
 
     ae_seen_len = 0;
-    _ = muxFrameLoop(&ae_routes, conn);
+    _ = muxFrameLoop(ae_router.dispatch, conn);
 
     try std.testing.expectEqualStrings("br;q=1, gzip;q=0.8", ae_seen_buf[0..ae_seen_len]);
 }
@@ -950,7 +971,7 @@ test "zix http2: mux DATA past max_body sheds the stream with 413 instead of tru
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -960,7 +981,7 @@ test "zix http2: mux DATA past max_body sheds the stream with 413 instead of tru
     try enc.writeHeader(":method", "POST");
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
-    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(fc_test_router.dispatch, conn));
 
     // fill the body to 8 bytes short of its buffer (a pooled stream's buffer may exceed
     // max_body, the overflow boundary is the buffer itself), then send a 32-byte DATA
@@ -969,12 +990,12 @@ test "zix http2: mux DATA past max_body sheds the stream with 413 instead of tru
 
     const oversized: [32]u8 = @splat(0xaa);
     feedFrame(conn, frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &oversized);
-    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(fc_test_router.dispatch, conn));
 
     // the stream is shed: slot freed, so a follow-up DATA frame finds no slot and is RST
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
     feedFrame(conn, frame.FRAME_TYPE_DATA, 0, 1, oversized[0..8]);
-    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(fc_test_router.dispatch, conn));
 
     _ = std.posix.system.close(fds[1]);
     var buf: [4096]u8 = undefined;
@@ -1032,12 +1053,13 @@ test "zix http2: mux DATA past max_body sheds the stream with 413 instead of tru
 
 var exact_body_seen: usize = 0;
 
-fn exactBodyHandler(_: []const u8, _: []const hpack.Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    exact_body_seen = body.len;
-    frame.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
+fn exactBodyHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    exact_body_seen = req.body.len;
+
+    try res.sendText("ok");
 }
 
-const exact_body_routes = [_]Route{.{ .path = "/", .handler = exactBodyHandler }};
+const exact_body_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = exactBodyHandler }});
 
 test "zix http2: mux DATA exactly filling max_body still dispatches the full body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
@@ -1049,7 +1071,7 @@ test "zix http2: mux DATA exactly filling max_body still dispatches the full bod
     defer _ = std.posix.system.close(fds[1]);
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -1058,7 +1080,7 @@ test "zix http2: mux DATA exactly filling max_body still dispatches the full bod
     try enc.writeHeader(":method", "POST");
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
-    _ = muxFrameLoop(&exact_body_routes, conn);
+    _ = muxFrameLoop(exact_body_router.dispatch, conn);
 
     // fill the body to exactly 16 bytes short of its buffer, then a 16-byte DATA lands
     // flush on the boundary: it must copy and dispatch, not shed
@@ -1070,7 +1092,7 @@ test "zix http2: mux DATA exactly filling max_body still dispatches the full bod
     feedFrame(conn, frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &exact);
 
     exact_body_seen = 0;
-    _ = muxFrameLoop(&exact_body_routes, conn);
+    _ = muxFrameLoop(exact_body_router.dispatch, conn);
 
     try std.testing.expectEqual(full_len, exact_body_seen);
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
@@ -1086,7 +1108,7 @@ test "zix http2: mux HEADERS past max_streams is refused, the open stream keeps 
     // the write end is closed explicitly below to signal EOF, so it is not deferred.
 
     const opts = core.ServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -1104,7 +1126,7 @@ test "zix http2: mux HEADERS past max_streams is refused, the open stream keeps 
     try enc2.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 3, enc2.encoded());
 
-    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(&fc_test_routes, conn));
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(fc_test_router.dispatch, conn));
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) != null);
     try std.testing.expect(findSlot(3, conn.streams, conn.slots) == null);
 
@@ -1147,7 +1169,7 @@ test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
     defer _ = std.posix.system.close(fds[1]);
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
     conn.send_window = 100;
@@ -1159,7 +1181,7 @@ test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
     try enc.writeHeader(":method", "GET");
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
-    _ = muxFrameLoop(&fc_test_routes, conn);
+    _ = muxFrameLoop(fc_test_router.dispatch, conn);
 
     const slot = findSlot(1, conn.streams, conn.slots).?;
     try std.testing.expectEqual(@as(usize, 4900), conn.streams[slot].pending_body.len);
@@ -1167,7 +1189,7 @@ test "zix http2: mux RST_STREAM reaps a slot parked on pending_body" {
     // the peer cancels: the parked slot is released, nothing left to resume
     const cancel = [4]u8{ 0, 0, 0, 8 };
     feedFrame(conn, frame.FRAME_TYPE_RST_STREAM, 0, 1, &cancel);
-    _ = muxFrameLoop(&fc_test_routes, conn);
+    _ = muxFrameLoop(fc_test_router.dispatch, conn);
 
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
 }
@@ -1184,7 +1206,7 @@ test "zix http2: mux stream slots are pooled across connections" {
     defer _ = std.posix.system.close(fds[1]);
 
     // connection A borrows a slot, then releases it back to the per-worker pool
-    const conn_a = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn_a = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     const slot_a = slotFor(conn_a, 1).?;
     const stream_a = conn_a.streams[slot_a];
     try std.testing.expect(conn_a.slots[slot_a]);
@@ -1195,7 +1217,7 @@ test "zix http2: mux stream slots are pooled across connections" {
 
     // a second connection reuses the same pooled stream (LIFO), so stream memory is shared per worker
     // and does not scale with the connection count
-    const conn_b = MuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn_b = MuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn_b.deinit();
 
     const slot_b = slotFor(conn_b, 3).?;
@@ -1211,11 +1233,11 @@ test "zix http2: mux stream slots are pooled across connections" {
 // body at a time, so they miss a resumeAll that fails to drain the full parked set.
 var multi_body: [4000]u8 = undefined;
 
-fn multiBodyHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    sendResponseStreamFD(fd, sid, 200, "text/plain", "", &multi_body);
+fn multiBodyHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
+    sendResponseStreamFD(res.fd, res.sid, 200, "text/plain", "", &multi_body);
 }
 
-const multi_body_routes = [_]Route{.{ .path = "/", .handler = multiBodyHandler }};
+const multi_body_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = multiBodyHandler }});
 
 /// Read every byte currently in the pipe (non-blocking), tallying DATA payload and END_STREAM flags per
 /// stream. Used by the flow-control drain tests to prove the whole body reached the wire.
@@ -1266,7 +1288,7 @@ test "zix http2: mux resumes every parked stream sharing one connection window" 
     defer _ = std.posix.system.close(pair[1]);
 
     const opts = core.ServeOpts{ .max_streams = 8, .max_body = 256, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(pair[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -1285,7 +1307,7 @@ test "zix http2: mux resumes every parked stream sharing one connection window" 
         try enc.writeHeader(":path", "/");
         feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, sid, enc.encoded());
     }
-    _ = muxFrameLoop(&multi_body_routes, conn);
+    _ = muxFrameLoop(multi_body_router.dispatch, conn);
 
     // stream 1 sent the 1000-byte window, the other three could not start: four slots still parked
     var parked: usize = 0;
@@ -1307,7 +1329,7 @@ test "zix http2: mux resumes every parked stream sharing one connection window" 
         @intCast(remaining & 0xff),
     };
     feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 0, &inc);
-    _ = muxFrameLoop(&multi_body_routes, conn);
+    _ = muxFrameLoop(multi_body_router.dispatch, conn);
 
     // every slot is freed and every body reached the wire, each ending with END_STREAM
     for (sids) |sid| {
@@ -1333,7 +1355,7 @@ test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_U
     defer _ = std.posix.system.close(pair[1]);
 
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024 };
-    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(pair[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -1347,7 +1369,7 @@ test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_U
     try enc.writeHeader(":method", "GET");
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
-    _ = muxFrameLoop(&multi_body_routes, conn);
+    _ = muxFrameLoop(multi_body_router.dispatch, conn);
 
     const slot = findSlot(1, conn.streams, conn.slots).?;
     try std.testing.expectEqual(@as(usize, multi_body.len - 500), conn.streams[slot].pending_body.len);
@@ -1355,13 +1377,13 @@ test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_U
     // a connection-level grant alone leaves the body parked (the stream window is still zero)
     const conn_inc = [4]u8{ 0, 0, 0x27, 0x10 }; // +10000
     feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 0, &conn_inc);
-    _ = muxFrameLoop(&multi_body_routes, conn);
+    _ = muxFrameLoop(multi_body_router.dispatch, conn);
     try std.testing.expectEqual(@as(usize, multi_body.len - 500), conn.streams[slot].pending_body.len);
 
     // the stream-level grant resumes and fully drains the tail, freeing the slot
     const stream_inc = [4]u8{ 0, 0, 0x0f, 0xa0 }; // +4000
     feedFrame(conn, frame.FRAME_TYPE_WINDOW_UPDATE, 0, 1, &stream_inc);
-    _ = muxFrameLoop(&multi_body_routes, conn);
+    _ = muxFrameLoop(multi_body_router.dispatch, conn);
     try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
 
     var buf: [8 * 1024]u8 = undefined;
@@ -1376,11 +1398,11 @@ test "zix http2: mux parks on an exhausted stream window until a stream WINDOW_U
 // every file past 16 KiB failed while small files passed).
 var mfs_body: [40000]u8 = undefined;
 
-fn mfsHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    sendResponseStreamFD(fd, sid, 200, "application/octet-stream", "", &mfs_body);
+fn mfsHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
+    sendResponseStreamFD(res.fd, res.sid, 200, "application/octet-stream", "", &mfs_body);
 }
 
-const mfs_routes = [_]Route{.{ .path = "/", .handler = mfsHandler }};
+const mfs_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = mfsHandler }});
 
 test "zix http2: outbound DATA frames respect the peer default max frame size, not the server's" {
     if (comptime @import("builtin").target.os.tag != .linux) {
@@ -1397,7 +1419,7 @@ test "zix http2: outbound DATA frames respect the peer default max frame size, n
     // Server configured with a 24 KiB max_frame_size (its own receive-side limit), larger than the
     // 16384 the peer will accept by default: outbound DATA must still cap at 16384.
     const opts = core.ServeOpts{ .max_streams = 4, .max_body = 256, .max_header_scratch = 1024, .max_frame_size = 24 * 1024 };
-    const conn = MuxConn.init(pair[1], opts) orelse return error.OutOfMemory;
+    const conn = MuxConn.init(pair[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -1409,7 +1431,7 @@ test "zix http2: outbound DATA frames respect the peer default max frame size, n
     try enc.writeHeader(":method", "GET");
     try enc.writeHeader(":path", "/");
     feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
-    _ = muxFrameLoop(&mfs_routes, conn);
+    _ = muxFrameLoop(mfs_router.dispatch, conn);
 
     // Every DATA frame on the wire must be <= 16384, and together they must carry the whole body.
     var body_buf: [64 * 1024]u8 = undefined;
@@ -1441,6 +1463,6 @@ test "zix http2: outbound DATA frames respect the peer default max frame size, n
     // Once the peer advertises a larger max frame size, the mux records it for subsequent sends.
     const settings_mfs = [_]u8{ 0x00, 0x05, 0x00, 0x00, 0x60, 0x00 }; // SETTINGS_MAX_FRAME_SIZE = 24576
     feedFrame(conn, frame.FRAME_TYPE_SETTINGS, 0, 0, &settings_mfs);
-    _ = muxFrameLoop(&mfs_routes, conn);
+    _ = muxFrameLoop(mfs_router.dispatch, conn);
     try std.testing.expectEqual(@as(u32, 24 * 1024), conn.peer_max_frame_size);
 }

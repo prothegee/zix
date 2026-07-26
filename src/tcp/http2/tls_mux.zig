@@ -15,7 +15,9 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 const core = @import("core.zig");
-const Route = core.Route;
+const Request = @import("request.zig").Request;
+const Response = @import("response.zig").Response;
+const Context = @import("context.zig").Context;
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const mux = @import("mux.zig");
@@ -44,6 +46,8 @@ pub const TlsConn = struct {
     transport: tls_conn.Transport,
     h2: ?*mux.MuxConn = null,
     opts: core.ServeOpts,
+    /// Io backend, carried for the h2 mux Context built at each dispatch. Worker-wide.
+    io: std.Io,
 
     // Plaintext the mux emitted this pass, accumulated then sealed in record-sized chunks.
     plain: [record.max_plaintext]u8 = undefined,
@@ -120,7 +124,7 @@ fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
 
 /// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
 /// plaintext to the h2 mux and seal its reply. Returns false when the connection must close.
-pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
+pub fn onReadable(handler: core.HandlerFn, conn: *TlsConn) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
 
     while (true) {
@@ -134,7 +138,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
             else => return false,
         }
 
-        if (!onCiphertext(routes, conn, cipher[0..@intCast(rc)])) return false;
+        if (!onCiphertext(handler, conn, cipher[0..@intCast(rc)])) return false;
         if (conn.transport.wclose) return conn.transport.want_out; // flush, then close
     }
 }
@@ -143,7 +147,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
 /// core of onReadable: the .EPOLL paths call it under their own read loop, the .URING path calls
 /// it per recv completion. Returns false when the connection must close now. transport.wclose set
 /// with staged bytes means flush, then close.
-pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []const u8) bool {
+pub fn onCiphertext(handler: core.HandlerFn, conn: *TlsConn, cipher: []const u8) bool {
     var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
     var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
 
@@ -153,7 +157,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
     if (r.outcome == .established) {
         if (!conn.transport.tls.alpnIsH2()) return false;
-        conn.h2 = mux.MuxConn.init(conn.transport.fd, conn.opts) orelse return false;
+        conn.h2 = mux.MuxConn.init(conn.transport.fd, conn.opts, conn.io) orelse return false;
     }
 
     if (r.outcome == .close) {
@@ -163,7 +167,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
     if (r.plaintext.len > 0) {
         const h2 = conn.h2 orelse return false;
-        if (!feedMux(routes, conn, h2, r.plaintext)) return false;
+        if (!feedMux(handler, conn, h2, r.plaintext)) return false;
     }
 
     return true;
@@ -171,7 +175,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
 /// Append decrypted plaintext to the mux read accumulator and drive one processing pass, sealing the
 /// reply through the write hook. Returns false when the mux asks to close.
-fn feedMux(comptime routes: []const Route, conn: *TlsConn, h2: *mux.MuxConn, plaintext: []const u8) bool {
+fn feedMux(handler: core.HandlerFn, conn: *TlsConn, h2: *mux.MuxConn, plaintext: []const u8) bool {
     // Compact, then append (a record is <= 16 KiB, the mux rbuf is >= 32 KiB).
     if (h2.rstart == h2.rend) {
         h2.rstart = 0;
@@ -189,7 +193,7 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, h2: *mux.MuxConn, pla
 
     frame.write_hook = hookWrite;
     frame.write_hook_ctx = conn;
-    const outcome = mux.processRing(routes, h2);
+    const outcome = mux.processRing(handler, h2);
     flushPlain(conn);
     frame.write_hook = null;
     frame.write_hook_ctx = null;
@@ -200,7 +204,7 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, h2: *mux.MuxConn, pla
 /// Accept every pending TLS connection on listener_fd and register each in epfd with
 /// `ev_tag | fd` as the event data. The TLS-only worker passes 0 (plain fd), the dual-listener
 /// .EPOLL loop passes tls_conn.tls_event_tag so its one loop can route TLS events.
-pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.ServeOpts, ev_tag: u64) void {
+pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.ServeOpts, ev_tag: u64, io: std.Io) void {
     while (true) {
         const rc = linux.accept4(listener_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
         switch (posix.errno(rc)) {
@@ -223,7 +227,7 @@ pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, c
             _ = linux.close(fd);
             continue;
         };
-        conn.* = .{ .transport = tls_conn.Transport.init(fd, ctx), .opts = opts };
+        conn.* = .{ .transport = tls_conn.Transport.init(fd, ctx), .opts = opts, .io = io };
         conn.transport.wbuf_initial = opts.tls_write_buf_initial;
         conn.transport.ep_data = ev_tag | @as(u64, @intCast(fd));
         table.put(fd, conn);
@@ -243,73 +247,70 @@ const WorkerCtx = struct {
     kernel_backlog: u31,
     ctx: *const Tls.Context,
     opts: core.ServeOpts,
+    handler: core.HandlerFn,
     worker_id: usize,
 };
 
-fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
-    return struct {
-        fn run(worker: WorkerCtx) void {
-            // Pin to the worker's CPU slot (cgroup-mask aware) so a pinned cpuset does not
-            // oversubscribe one core under a handshake storm (mirrors http1's tls_mux).
-            common.pinToCpu(worker.worker_id);
+fn tlsMuxWorker(worker: WorkerCtx) void {
+    // Pin to the worker's CPU slot (cgroup-mask aware) so a pinned cpuset does not
+    // oversubscribe one core under a handshake storm (mirrors http1's tls_mux).
+    common.pinToCpu(worker.worker_id);
 
-            const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
-            var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
-            defer srv.deinit(worker.io);
-            const listener_fd = srv.socket.handle;
-            common.setNonBlock(listener_fd);
+    const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
+    var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
+    defer srv.deinit(worker.io);
+    const listener_fd = srv.socket.handle;
+    common.setNonBlock(listener_fd);
 
-            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-            if (posix.errno(epfd_rc) != .SUCCESS) return;
-            const epfd: posix.fd_t = @intCast(epfd_rc);
-            defer _ = linux.close(epfd);
+    const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+    if (posix.errno(epfd_rc) != .SUCCESS) return;
+    const epfd: posix.fd_t = @intCast(epfd_rc);
+    defer _ = linux.close(epfd);
 
-            var lev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = listener_fd } };
-            if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS) return;
+    var lev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = listener_fd } };
+    if (posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &lev)) != .SUCCESS) return;
 
-            var table = ConnTable.init() catch return;
-            defer table.deinit();
+    var table = ConnTable.init() catch return;
+    defer table.deinit();
 
-            var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
-            while (true) {
-                const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
-                switch (posix.errno(wait_rc)) {
-                    .SUCCESS => {},
-                    .INTR => continue,
-                    else => return,
-                }
+    var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+    while (true) {
+        const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, -1);
+        switch (posix.errno(wait_rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return,
+        }
 
-                for (events[0..@intCast(wait_rc)]) |ev| {
-                    if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts, 0);
-                        continue;
-                    }
+        for (events[0..@intCast(wait_rc)]) |ev| {
+            if (ev.data.fd == listener_fd) {
+                acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts, 0, worker.io);
+                continue;
+            }
 
-                    const conn = table.get(ev.data.fd) orelse continue;
-                    var keep = true;
+            const conn = table.get(ev.data.fd) orelse continue;
+            var keep = true;
 
-                    if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
-                        keep = false;
-                    } else {
-                        if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
-                        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(routes, conn);
-                        if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
-                        if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
-                    }
+            if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
+                keep = false;
+            } else {
+                if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
+                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(worker.handler, conn);
+                if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
+                if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
+            }
 
-                    if (!keep) {
-                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
-                        table.drop(ev.data.fd);
-                        _ = linux.close(ev.data.fd);
-                    }
-                }
+            if (!keep) {
+                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
+                table.drop(ev.data.fd);
+                _ = linux.close(ev.data.fd);
             }
         }
-    }.run;
+    }
 }
 
 /// Listen and serve h2 over TLS, multiplexed across one epoll worker per core.
-pub fn runTlsMux(comptime routes: []const Route, config: Http2ServerConfig) !void {
+pub fn runTlsMux(handler: core.HandlerFn, config: Http2ServerConfig) !void {
     const ctx = config.tls.?;
     const cpu = common.getAvailableCpuCount();
     const worker_count = if (config.pool_size == 0) cpu else config.pool_size;
@@ -320,15 +321,15 @@ pub fn runTlsMux(comptime routes: []const Route, config: Http2ServerConfig) !voi
     const workers = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(workers);
 
-    const wf = workerFn(routes);
     for (workers, 0..) |*t, i|
-        t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, wf, .{WorkerCtx{
+        t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, tlsMuxWorker, .{WorkerCtx{
             .io = config.io,
             .ip = config.ip,
             .port = config.port,
             .kernel_backlog = config.kernel_backlog,
             .ctx = ctx,
             .opts = opts,
+            .handler = handler,
             .worker_id = i,
         }});
 
@@ -354,11 +355,11 @@ const repro_key_hex = "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3
 // a connection WINDOW_UPDATE to fully drain.
 var repro_body: [70000]u8 = undefined;
 
-fn reproHandler(_: []const u8, _: []const hpack.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    mux.sendResponseStreamFD(fd, sid, 200, "text/plain", "", &repro_body);
+fn reproHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
+    mux.sendResponseStreamFD(res.fd, res.sid, 200, "text/plain", "", &repro_body);
 }
 
-const repro_routes = [_]Route{.{ .path = "/", .handler = reproHandler }};
+const repro_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = reproHandler }});
 
 /// Read one full TLS record (5-byte header + fragment) with blocking reads. Used only for the
 /// handshake flight, where every byte is already buffered by the time the client reads.
@@ -452,7 +453,7 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
     // The server drives through onReadable, which reads until EAGAIN, so its fd must be non-blocking.
     common.setNonBlock(server_fd);
 
-    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(server_fd, &ctx), .opts = .{ .max_streams = 16 } };
+    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(server_fd, &ctx), .opts = .{ .max_streams = 16 }, .io = undefined };
     defer if (server_conn.h2) |h2| h2.deinit();
     defer server_conn.transport.deinit();
 
@@ -473,7 +474,7 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
     @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
     try writeAllBlocking(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
 
-    _ = onReadable(&repro_routes, &server_conn);
+    _ = onReadable(repro_router.dispatch, &server_conn);
 
     var flight_buf: [4096]u8 = undefined;
     var flen: usize = 0;
@@ -487,7 +488,7 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
     try writeAllBlocking(client_fd, finished.client_finished);
     try std.testing.expectEqual(Tls.Alpn.H2, finished.alpn.?);
 
-    _ = onReadable(&repro_routes, &server_conn);
+    _ = onReadable(repro_router.dispatch, &server_conn);
     _ = server_conn.h2 orelse return error.HandshakeIncomplete;
 
     // Default 65535 connection and per-stream windows (the client advertised none), matching the bench:
@@ -551,7 +552,7 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
             }
         }
 
-        _ = onReadable(&repro_routes, &server_conn);
+        _ = onReadable(repro_router.dispatch, &server_conn);
         if (server_conn.transport.want_out) _ = server_conn.transport.onWritable(epfd);
 
         // Drain and decrypt every complete TLS record now available, appending plaintext to h2_acc.

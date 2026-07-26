@@ -3,15 +3,13 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 
 // --------------------------------------------------------- //
 // ASYNC model
 
-pub fn runAsync(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
-    const D = common.Dispatch(routes);
+pub fn runAsync(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     const opts = common.serveOpts(cfg);
 
@@ -32,9 +30,11 @@ pub fn runAsync(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
             }
             continue;
         };
-        _ = io.async(D.dispatchConn, .{D.ConnTask{
+        _ = io.async(common.dispatchConn, .{common.ConnTask{
             .fd = stream.socket.handle,
             .opts = opts,
+            .handler = handler,
+            .io = io,
         }});
     }
 }

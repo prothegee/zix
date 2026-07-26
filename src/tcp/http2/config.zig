@@ -79,6 +79,9 @@ pub const Http2ServerConfig = struct {
     /// (listening, fallback notices) instead of std.debug.print. The h2c handler owns its frame I/O,
     /// so per-request access logging is the handler's responsibility. Caller owns, must outlive.
     logger: ?*Logger = null,
+    /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
+    /// Seeds Context.deadline_ns at dispatch. The handler may extend or override via setTimeout/withTimeout.
+    handler_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -131,6 +134,15 @@ test "zix http2: Http2ServerConfig logger defaults to null" {
     const io = threaded.io();
     const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expect(cfg.logger == null);
+}
+
+test "zix http2: Http2ServerConfig handler_timeout_ms defaults to zero" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
+    try std.testing.expectEqual(@as(u32, 0), cfg.handler_timeout_ms);
 }
 
 test "zix http2: Http2ServerConfig worker_stack_size_bytes default" {

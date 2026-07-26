@@ -8,7 +8,6 @@ const std = @import("std");
 const core = @import("../core.zig");
 const mux = @import("../mux.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const setNoDelay = common.setNoDelay;
@@ -50,11 +49,11 @@ const ConnTable = struct {
         return self.slots[idx];
     }
 
-    fn alloc(self: *ConnTable, fd: std.posix.fd_t, opts: core.ServeOpts) ?*mux.MuxConn {
+    fn alloc(self: *ConnTable, fd: std.posix.fd_t, opts: core.ServeOpts, io: std.Io) ?*mux.MuxConn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const conn = mux.MuxConn.init(fd, opts) orelse return null;
+        const conn = mux.MuxConn.init(fd, opts, io) orelse return null;
         self.slots[idx] = conn;
 
         return conn;
@@ -73,7 +72,7 @@ const ConnTable = struct {
 
 /// Accept every pending connection on listener_fd and register each in epfd. Level-triggered,
 /// so draining to EAGAIN guarantees no accept is missed.
-fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.ServeOpts, busy_poll_us: u32) void {
+fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.ServeOpts, busy_poll_us: u32, io: std.Io) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -88,7 +87,7 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
         common.setBusyPoll(conn_fd, busy_poll_us);
-        if (table.alloc(conn_fd, opts) == null) {
+        if (table.alloc(conn_fd, opts, io) == null) {
             _ = linux.close(conn_fd);
             continue;
         }
@@ -114,6 +113,7 @@ const MuxWorkerCtx = struct {
     port: u16,
     kernel_backlog: u31,
     opts: core.ServeOpts,
+    handler: core.HandlerFn,
     worker_id: usize,
     busy_poll_us: u32,
     /// Dual-listener TLS side (config.tls + config.tls_port). Inactive when null / 0.
@@ -123,182 +123,177 @@ const MuxWorkerCtx = struct {
     steering: ?reuseport.Steering = null,
 };
 
-/// Build a concrete epoll mux worker entry with the routes baked in at compile time. One worker:
-/// a private SO_REUSEPORT listener + epoll instance driving many non-blocking connections through
-/// the resumable h2 state machine.
-fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
-    return struct {
-        /// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body
-        /// (flush staged ciphertext on EPOLLOUT, feed decrypted bytes on EPOLLIN, re-arm or reap).
-        fn serveTlsEvent(tls_conns: *tls_mux.ConnTable, epfd: std.posix.fd_t, ev: std.os.linux.epoll_event) void {
-            const linux = std.os.linux;
-            const fd: std.posix.fd_t = @intCast(ev.data.u64 & (tls_conn.tls_event_tag - 1));
+/// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body
+/// (flush staged ciphertext on EPOLLOUT, feed decrypted bytes on EPOLLIN, re-arm or reap).
+fn serveTlsEvent(handler: core.HandlerFn, tls_conns: *tls_mux.ConnTable, epfd: std.posix.fd_t, ev: std.os.linux.epoll_event) void {
+    const linux = std.os.linux;
+    const fd: std.posix.fd_t = @intCast(ev.data.u64 & (tls_conn.tls_event_tag - 1));
 
-            const conn = tls_conns.get(fd) orelse return;
-            var keep = true;
+    const conn = tls_conns.get(fd) orelse return;
+    var keep = true;
 
-            if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
-                keep = false;
-            } else {
-                if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
-                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(routes, conn);
-                if (keep and conn.transport.want_out) tls_conn.armOut(epfd, fd, conn.transport.ep_data, true);
-                if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
-            }
+    if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
+        keep = false;
+    } else {
+        if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
+        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(handler, conn);
+        if (keep and conn.transport.want_out) tls_conn.armOut(epfd, fd, conn.transport.ep_data, true);
+        if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
+    }
 
-            if (!keep) {
-                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
-                tls_conns.drop(fd);
-                _ = linux.close(fd);
-            }
+    if (!keep) {
+        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+        tls_conns.drop(fd);
+        _ = linux.close(fd);
+    }
+}
+
+/// Run one epoll mux worker: a private SO_REUSEPORT listener + epoll instance driving many
+/// non-blocking connections through the resumable h2 state machine.
+fn epollMuxWorker(ctx: MuxWorkerCtx) void {
+    const linux = std.os.linux;
+
+    // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
+    common.pinToCpu(ctx.worker_id);
+
+    // Bind under the order gate: REUSEPORT group index i = worker i,
+    // so the cpu-mod-N steering lands on the worker pinned to that slot.
+    var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
+    defer bind_turn.release();
+
+    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+    var srv = addr.listen(ctx.io, .{
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: the kernel balances accepts across workers
+        .kernel_backlog = ctx.kernel_backlog,
+    }) catch return;
+    defer srv.deinit(ctx.io);
+    const listener_fd = srv.socket.handle;
+
+    common.setNonBlock(listener_fd);
+    if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+
+    const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+    if (std.posix.errno(epfd_rc) != .SUCCESS) return;
+    const epfd: std.posix.fd_t = @intCast(epfd_rc);
+    defer _ = linux.close(epfd);
+
+    var listener_ev = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .u64 = @intCast(listener_fd) },
+    };
+    if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
+
+    var table = ConnTable.init() catch return;
+    defer table.deinit();
+
+    // Dual-listener TLS side (config.tls + config.tls_port): a second listen fd whose
+    // connections terminate TLS in this same loop via the tls_mux connection machinery.
+    // Everything below is mapped only when active, so a cleartext-only worker sees zero
+    // layout change on its hot structures.
+    const tls_ctx: ?*Tls.Context = if (ctx.tls_port != 0) ctx.tls_ctx else null;
+    var tls_listener_fd: std.posix.fd_t = -1;
+    var tls_srv: std.Io.net.Server = undefined;
+    var tls_table: ?tls_mux.ConnTable = null;
+    defer if (tls_table) |*tls_conns| tls_conns.deinit();
+    defer if (tls_ctx != null and tls_listener_fd != -1) tls_srv.deinit(ctx.io);
+
+    if (tls_ctx != null) {
+        const tls_addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.tls_port) catch return;
+        tls_srv = tls_addr.listen(ctx.io, .{
+            .reuse_address = true,
+            .kernel_backlog = ctx.kernel_backlog,
+        }) catch return;
+        tls_listener_fd = tls_srv.socket.handle;
+        common.setNonBlock(tls_listener_fd);
+        if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
+
+        var tls_lev = linux.epoll_event{
+            .events = linux.EPOLL.IN,
+            .data = .{ .u64 = @intCast(tls_listener_fd) },
+        };
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, tls_listener_fd, &tls_lev)) != .SUCCESS) return;
+
+        tls_table = tls_mux.ConnTable.init() catch return;
+    }
+
+    // Both groups joined: release the bind turn to the next worker.
+    bind_turn.release();
+
+    // Per-worker response cache: lock-free by ownership, never shared.
+    var response_cache: rcache.ResponseCache = undefined;
+    var cache_on = false;
+    if (ctx.opts.response_cache) {
+        if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
+            .max_entries = effectiveCacheEntries(ctx.opts),
+            .max_value_bytes = ctx.opts.cache_max_value_bytes,
+        })) |built| {
+            response_cache = built;
+            cache_on = true;
+            core.setCache(&response_cache, ctx.opts.cache_ttl_ms);
+        } else |_| {
+            cache_on = false;
+        }
+    }
+    defer if (cache_on) {
+        core.setCache(null, 0);
+        response_cache.deinit();
+    };
+
+    var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
+    var epoll_timeout: i32 = -1;
+    while (true) {
+        const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
+        switch (std.posix.errno(wait_rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return,
         }
 
-        fn run(ctx: MuxWorkerCtx) void {
-            const linux = std.os.linux;
+        const n: usize = @intCast(wait_rc);
+        if (n == 0) {
+            epoll_timeout = -1;
+            continue;
+        }
 
-            // Pin to one cgroup-allowed CPU so workers never oversubscribe a core under a limited cpuset.
-            common.pinToCpu(ctx.worker_id);
-
-            // Bind under the order gate: REUSEPORT group index i = worker i,
-            // so the cpu-mod-N steering lands on the worker pinned to that slot.
-            var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
-            defer bind_turn.release();
-
-            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-            var srv = addr.listen(ctx.io, .{
-                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: the kernel balances accepts across workers
-                .kernel_backlog = ctx.kernel_backlog,
-            }) catch return;
-            defer srv.deinit(ctx.io);
-            const listener_fd = srv.socket.handle;
-
-            common.setNonBlock(listener_fd);
-            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
-
-            const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-            if (std.posix.errno(epfd_rc) != .SUCCESS) return;
-            const epfd: std.posix.fd_t = @intCast(epfd_rc);
-            defer _ = linux.close(epfd);
-
-            var listener_ev = linux.epoll_event{
-                .events = linux.EPOLL.IN,
-                .data = .{ .u64 = @intCast(listener_fd) },
-            };
-            if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, listener_fd, &listener_ev)) != .SUCCESS) return;
-
-            var table = ConnTable.init() catch return;
-            defer table.deinit();
-
-            // Dual-listener TLS side (config.tls + config.tls_port): a second listen fd whose
-            // connections terminate TLS in this same loop via the tls_mux connection machinery.
-            // Everything below is mapped only when active, so a cleartext-only worker sees zero
-            // layout change on its hot structures.
-            const tls_ctx: ?*Tls.Context = if (ctx.tls_port != 0) ctx.tls_ctx else null;
-            var tls_listener_fd: std.posix.fd_t = -1;
-            var tls_srv: std.Io.net.Server = undefined;
-            var tls_table: ?tls_mux.ConnTable = null;
-            defer if (tls_table) |*tls_conns| tls_conns.deinit();
-            defer if (tls_ctx != null and tls_listener_fd != -1) tls_srv.deinit(ctx.io);
-
-            if (tls_ctx != null) {
-                const tls_addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.tls_port) catch return;
-                tls_srv = tls_addr.listen(ctx.io, .{
-                    .reuse_address = true,
-                    .kernel_backlog = ctx.kernel_backlog,
-                }) catch return;
-                tls_listener_fd = tls_srv.socket.handle;
-                common.setNonBlock(tls_listener_fd);
-                if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
-
-                var tls_lev = linux.epoll_event{
-                    .events = linux.EPOLL.IN,
-                    .data = .{ .u64 = @intCast(tls_listener_fd) },
-                };
-                if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, tls_listener_fd, &tls_lev)) != .SUCCESS) return;
-
-                tls_table = tls_mux.ConnTable.init() catch return;
+        for (events[0..n]) |ev| {
+            if (ev.data.fd == listener_fd) {
+                acceptAll(&table, epfd, listener_fd, ctx.opts, ctx.busy_poll_us, ctx.io);
+                continue;
             }
 
-            // Both groups joined: release the bind turn to the next worker.
-            bind_turn.release();
-
-            // Per-worker response cache: lock-free by ownership, never shared.
-            var response_cache: rcache.ResponseCache = undefined;
-            var cache_on = false;
-            if (ctx.opts.response_cache) {
-                if (rcache.ResponseCache.init(std.heap.smp_allocator, .{
-                    .max_entries = effectiveCacheEntries(ctx.opts),
-                    .max_value_bytes = ctx.opts.cache_max_value_bytes,
-                })) |built| {
-                    response_cache = built;
-                    cache_on = true;
-                    core.setCache(&response_cache, ctx.opts.cache_ttl_ms);
-                } else |_| {
-                    cache_on = false;
-                }
-            }
-            defer if (cache_on) {
-                core.setCache(null, 0);
-                response_cache.deinit();
-            };
-
-            var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
-            var epoll_timeout: i32 = -1;
-            while (true) {
-                const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, epoll_timeout);
-                switch (std.posix.errno(wait_rc)) {
-                    .SUCCESS => {},
-                    .INTR => continue,
-                    else => return,
-                }
-
-                const n: usize = @intCast(wait_rc);
-                if (n == 0) {
-                    epoll_timeout = -1;
+            if (tls_ctx) |tls_context| {
+                if (ev.data.fd == tls_listener_fd) {
+                    tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, tls_context, ctx.opts, tls_conn.tls_event_tag, ctx.io);
                     continue;
                 }
-
-                for (events[0..n]) |ev| {
-                    if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, ctx.opts, ctx.busy_poll_us);
-                        continue;
-                    }
-
-                    if (tls_ctx) |tls_context| {
-                        if (ev.data.fd == tls_listener_fd) {
-                            tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, tls_context, ctx.opts, tls_conn.tls_event_tag);
-                            continue;
-                        }
-                        if (ev.data.u64 & tls_conn.tls_event_tag != 0) {
-                            serveTlsEvent(&tls_table.?, epfd, ev);
-                            continue;
-                        }
-                    }
-
-                    const conn = table.get(ev.data.fd) orelse continue;
-                    const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
-                        mux.ConnOutcome.close
-                    else blk: {
-                        // Coalesce every frame this readable batch writes into one send instead of one
-                        // write per frame (HEADERS + DATA per stream, times the streams in the batch).
-                        common.beginCoalesce(conn.fd);
-                        const oc = mux.onReadable(routes, conn);
-                        if (common.endCoalesce()) break :blk mux.ConnOutcome.close;
-
-                        break :blk oc;
-                    };
-
-                    if (outcome == .close) {
-                        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
-                        table.free(ev.data.fd);
-                        _ = linux.close(ev.data.fd);
-                    }
+                if (ev.data.u64 & tls_conn.tls_event_tag != 0) {
+                    serveTlsEvent(ctx.handler, &tls_table.?, epfd, ev);
+                    continue;
                 }
+            }
 
-                epoll_timeout = 0;
+            const conn = table.get(ev.data.fd) orelse continue;
+            const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
+                mux.ConnOutcome.close
+            else blk: {
+                // Coalesce every frame this readable batch writes into one send instead of one
+                // write per frame (HEADERS + DATA per stream, times the streams in the batch).
+                common.beginCoalesce(conn.fd);
+                const oc = mux.onReadable(ctx.handler, conn);
+                if (common.endCoalesce()) break :blk mux.ConnOutcome.close;
+
+                break :blk oc;
+            };
+
+            if (outcome == .close) {
+                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
+                table.free(ev.data.fd);
+                _ = linux.close(ev.data.fd);
             }
         }
-    }.run;
+
+        epoll_timeout = 0;
+    }
 }
 
 // --------------------------------------------------------- //
@@ -309,7 +304,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 /// Note:
 /// - worker_count = pool_size (0 = cpu count). A handler runs on the event loop, so it must stay
 ///   bounded (it blocks the worker's other connections while running).
-pub fn runEpoll(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
+pub fn runEpoll(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
     const cpu = common.getAvailableCpuCount();
@@ -327,17 +322,17 @@ pub fn runEpoll(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
-    const worker_fn = epollMuxWorkerFn(routes);
     for (workers, 0..) |*thread, idx|
         thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
-            worker_fn,
+            epollMuxWorker,
             .{MuxWorkerCtx{
                 .io = io,
                 .ip = cfg.ip,
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .opts = opts,
+                .handler = handler,
                 .worker_id = idx,
                 .busy_poll_us = cfg.busy_poll_us,
                 .tls_ctx = cfg.tls,
