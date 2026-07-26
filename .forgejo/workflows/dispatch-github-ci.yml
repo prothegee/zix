@@ -18,7 +18,7 @@ jobs:
       # of relying on a GitHub-native push or pull_request event.
       - name: Dispatch GitHub Actions workflows
         env:
-          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN_ZIX }}
         run: |
           workflows=(
             x86_64-linux
