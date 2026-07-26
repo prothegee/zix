@@ -26,7 +26,7 @@ Sudah diimplementasikan. Lihat ADR-024 untuk alasan desain.
 ```
 src/tcp/fix/
     Fix.zig      // namespace aggregator
-    core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
+    core.zig     // parsing, building, checksum, serveConn, MsgType, FixRequest, FixResponse, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
     server.zig   // FixServer: run() switch tipis di atas dispatch/ (POOL, ASYNC, MIXED, EPOLL, URING)
     dispatch/    // berkas per-model: async.zig, pool.zig, mixed.zig, epoll.zig, uring.zig, common.zig
@@ -46,18 +46,20 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes bertipe `[]const zix.Fix.Route`) |
+| `zix.Fix.Server` | struct | `init(handler, config)` / `deinit()` / `run()` (ADR-063: `handler: ?HandlerFn`, dibangun via `Router(&routes).dispatch`; `null` mempertahankan mode echo) |
 | `zix.Fix.ServerConfig` | struct | Lihat Field Konfigurasi Server di bawah |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, routes }`: opsi untuk `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, handler }`: opsi untuk `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | Lihat Field Konfigurasi Client di bawah |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export dari `zix.Tcp.DispatchModel` |
 | `zix.Fix.Tag` | enum(u16) | Enum nonexhaustive dari nomor tag FIX 4.x standar. Gunakan `@enumFromInt` untuk tag kustom yang tidak terdaftar |
 | `zix.Fix.MsgType` | struct | Namespace konstanta string compile-time untuk nilai MsgType (tag 35) FIX. Lihat bagian Konstanta MsgType |
-| `zix.Fix.HandlerFn` | tipe | `*const fn (fields: []const Field, ctx: *Context) void`: handler pesan aplikasi |
+| `zix.Fix.HandlerFn` | tipe | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063): handler pesan aplikasi |
 | `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }`: satu rute pesan aplikasi |
-| `zix.Fix.Context` | struct | Konteks per-koneksi yang diteruskan ke setiap handler. Field: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Method: `sendMessage`, `isExpired` |
-| `zix.Fix.Router(routes)` | comptime fn | Menghasilkan tipe dispatch comptime dengan `dispatch(fields, ctx, server_timeout_ms)` |
+| `zix.Fix.Request` | struct | `{ fields: []const Field }`, `getField(tag) ?[]const u8`: view zero-copy atas pesan yang diterima |
+| `zix.Fix.Response` | struct | `sendMessage(msg_type, fields)`: builder atas `buildMessage` plus penulisan ber-frame SOH, independen dari `Context` |
+| `zix.Fix.Context` | struct | Konteks per-koneksi yang diteruskan ke setiap handler. Field: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Method: `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` |
+| `zix.Fix.Router(routes)` | comptime fn | Menghasilkan tipe dispatch comptime dengan `dispatch(req, res, ctx) anyerror!void`, cocok persis dengan `HandlerFn` |
 | `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` menghasilkan u64 nanosecond (sama dengan `zix.Grpc.wallClockNs`) |
 | `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }`: zero-copy slice ke receive buffer |
 | `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }`: input untuk `buildMessage` |
@@ -262,7 +264,7 @@ Penggunaan dalam tabel rute dan `sendMessage`:
 },
 
 // di dalam handler:
-ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{ ... });
+res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{ ... });
 
 // di client:
 try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
@@ -272,14 +274,16 @@ try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
 
 ## Router dan Dispatch Pesan Aplikasi
 
-Routes diteruskan saat `Fix.Server.init()`. Pesan sesi (Logon/Logout/Heartbeat/TestRequest) selalu ditangani secara internal oleh `serveConn`. Hanya pesan aplikasi (lainnya) yang mencapai router.
+Route dibungkus dalam `Fix.Router(&routes)` dan `.dispatch`-nya diteruskan ke `Fix.Server.init()` (ADR-063, mencerminkan engine lainnya). Pesan sesi (Logon/Logout/Heartbeat/TestRequest) selalu ditangani secara internal oleh `serveConn`. Hanya pesan aplikasi (lainnya) yang mencapai router.
 
 ```zig
+const router = zix.Fix.Router(&[_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder,   .timeout_ms = 500 },
+    .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel,     .timeout_ms = 500 },
+});
+
 var server = try zix.Fix.Server.init(
-    &[_]zix.Fix.Route{
-        .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder,   .timeout_ms = 500 },
-        .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel,     .timeout_ms = 500 },
-    },
+    router.dispatch,
     .{
         .io                    = process.io,
         .ip                    = "0.0.0.0",
@@ -292,48 +296,49 @@ var server = try zix.Fix.Server.init(
 );
 ```
 
-Routes kosong (`&.{}`) mengaktifkan mode echo (backward-compatible: semua pesan non-sesi di-echo).
+`Server.init` menerima `handler: ?HandlerFn`. Memberi `null` mengaktifkan mode echo (backward-compatible: semua pesan non-sesi di-echo).
 
 ### HandlerFn
 
 ```zig
-fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) !void {
     if (ctx.isExpired()) return;
-    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
-    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    const symbol = req.getField(.Symbol) orelse return;
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .Symbol,    .value = symbol },
         .{ .tag = .OrdStatus, .value = "0" },
     });
 }
 ```
 
-### Field FixContext
+### FixRequest / FixResponse / FixContext (trio ADR-063)
 
-| Field | Tipe | Deskripsi |
-| :- | :- | :- |
-| `sender_comp_id` | `[]const u8` | SenderCompID peer dari session Logon |
-| `target_comp_id` | `[]const u8` | comp_id server (identitas kita) |
-| `deadline_ns` | `?u64` | Deadline absolut (nanosecond CLOCK_REALTIME). Diatur dari yang paling ketat antara `handler_timeout_ms` dan `Route.timeout_ms`. Null = tanpa deadline |
-
-### Method FixContext
-
-| Method | Deskripsi |
+| Tipe | Anggota |
 | :- | :- |
-| `sendMessage(msg_type, fields)` | Bangun dan kirim respons FIX pada koneksi ini (CompID dibalik) |
-| `isExpired()` bool | Mengembalikan true ketika `deadline_ns` diatur dan sudah terlewati |
+| `FixRequest` | `fields: []const Field`, `getField(tag) ?[]const u8` (view zero-copy atas field pesan yang diterima) |
+| `FixResponse` | `sendMessage(msg_type, fields)`: bangun dan kirim respons FIX pada koneksi ini (CompID dibalik), independen dari `FixContext` sehingga handler bisa mengirim dari closure yang di-capture setelah context keluar dari scope |
+| `FixContext` | `sender_comp_id`, `target_comp_id` (identitas sesi), `deadline_ns: ?u64` (deadline absolut, nanosecond CLOCK_REALTIME, paling ketat antara `handler_timeout_ms` / `Route.timeout_ms`, null = tanpa deadline), `withTimeout` / `setTimeout` / `withDeadline` / `isExpired()` / `timedOut()`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
 
 ### Override Deadline
 
 ```zig
 ctx.deadline_ns = zix.Fix.wallClockNs() + 2 * std.time.ns_per_s; // perpanjang ke 2 detik
 ctx.deadline_ns = null;                                            // nonaktifkan
+// atau lewat helper: ctx.setTimeout(2_000); ctx.withDeadline(deadline_ns);
 ```
 
 ### FixRouter (comptime)
 
-`FixRouter(routes)` menghasilkan fungsi `dispatch` comptime yang di-unroll menggunakan `inline for` saat kompilasi, tanpa overhead runtime.
+`FixRouter(routes)` menghasilkan fungsi `dispatch` comptime yang cocok persis dengan `HandlerFn`, di-unroll menggunakan `inline for` saat kompilasi, tanpa overhead runtime.
 
-Routes kosong (`&.{}`) melewati router sepenuhnya: semua pesan aplikasi di-echo.
+```zig
+const r = zix.Fix.Router(&[_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder },
+});
+try r.dispatch(req, res, ctx);
+```
+
+`dispatch` membaca tipe pesan dari `req.getField(.MsgType)` sendiri, mencocokkannya dengan tabel route, memperketat `ctx.deadline_ns` dengan `Route.timeout_ms` bila diset, lalu memanggil `route.handler(req, res, ctx)`. Berikan `router.dispatch` ke `Server.init` untuk jalur server normal, panggil langsung hanya saat menjalankan `serveConn` secara manual. Memberi `null` ke `Server.init` melewati router sepenuhnya: semua pesan aplikasi di-echo.
 
 ---
 
@@ -366,7 +371,7 @@ Sama seperti lima model di `zix.Http.Server`. Default adalah ASYNC (sesi FIX ber
 ## Siklus Hidup Server
 
 ```
-Fix.Server.init(config): validates port != 0, io taken from config
+Fix.Server.init(handler, config): validates port != 0, io taken from config
     -> .run(): dispatches via dispatch_model, blocks until error
 Fix.Server.deinit(): no-op (resources released in run() via defer)
 ```
