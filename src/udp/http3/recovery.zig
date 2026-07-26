@@ -8,6 +8,7 @@
 //!   reproducible. Proven against the RFC 9002 formulas and constants in the tests below.
 
 const std = @import("std");
+const win_io = @import("../../utils/windows_io.zig");
 
 /// The local timer granularity (RFC 9002 6.1.2): 1 millisecond, in microseconds.
 pub const granularity_us: u64 = 1000;
@@ -30,8 +31,17 @@ pub const default_max_ack_delay_us: u64 = 25_000;
 /// sent-packet record in this engine uses. Monotonic rather than wall-clock, so a system time step
 /// never corrupts an RTT measurement or a loss-detection deadline.
 pub fn nowUs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    if (comptime @import("builtin").target.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+
+        return @as(u64, @intCast(ts.sec)) * std.time.us_per_s + @as(u64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_us)));
+    }
+
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.monotonicUs();
+
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
 
     return @as(u64, @intCast(ts.sec)) * std.time.us_per_s + @as(u64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_us)));
 }
