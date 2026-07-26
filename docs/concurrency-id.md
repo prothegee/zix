@@ -59,9 +59,9 @@ Pool threads (pool_size, default max(10, cpu_count * 2)):
 **Contoh** (`examples/http_basic_2_pool.zig` dengan POOL eksplisit):
 ```zig
 pub fn main(process: std.process.Init) !void {
-    var server = zix.Http.Server.init(&[_]zix.Http.Route{
+    var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/", .handler = homeHandler },
-    }, .{
+    }).dispatch, .{
         .io             = process.io,
         .dispatch_model = .POOL,
         // workers   = 0  -> cpu_count accept threads
@@ -73,9 +73,9 @@ pub fn main(process: std.process.Init) !void {
 
 **Jumlah thread eksplisit:**
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
-}, .{
+}).dispatch, .{
     .io        = process.io,
     .workers   = 4,   // 4 accept threads
     .pool_size = 32,  // 32 pool threads
@@ -108,9 +108,9 @@ Handler tasks (one per active connection):
 
 **Contoh** (`examples/http_sse.zig`, `examples/http_websocket.zig`):
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/events", .handler = eventsHandler },
-}, .{
+}).dispatch, .{
     .io             = process.io,
     .dispatch_model = .ASYNC,
 });
@@ -123,9 +123,9 @@ var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
 });
 defer threaded.deinit();
 
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
-}, .{
+}).dispatch, .{
     .io             = threaded.io(),
     .dispatch_model = .ASYNC,
 });
@@ -155,9 +155,9 @@ Accept threads (worker_count, default cpu_count):
 
 **Contoh:**
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
-}, .{
+}).dispatch, .{
     .io             = process.io,
     .dispatch_model = .MIXED,
 });
@@ -216,9 +216,9 @@ dan hanya menempati satu entri di epoll set per-worker.
 
 **Contoh (`zix.Http`):**
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/", .handler = homeHandler },
-}, .{
+}).dispatch, .{
     .io             = process.io,
     .dispatch_model = .EPOLL,
     .workers        = 0, // 0 = cpu_count worker (default)
