@@ -56,6 +56,8 @@ test "zix behaviour: GrpcContext.recvMessage empty body returns null" {
         ._hdr_sent = false,
         ._sent_bytes = 0,
         ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
     try std.testing.expect(ctx.recvMessage() == null);
 }

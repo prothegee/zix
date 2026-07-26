@@ -13,14 +13,16 @@ const ServerCtx = struct {
     err: ?anyerror = null,
 };
 
-fn nopHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    ctx.finish(zix.Grpc.Status.OK, "");
+fn nopHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = req;
+    _ = ctx;
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
-fn errorOnlyHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad");
+fn errorOnlyHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = req;
+    _ = ctx;
+    res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad");
 }
 
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
@@ -29,7 +31,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
         return;
     };
     const fd = stream.socket.handle;
-    zix.Grpc.serveConn(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = nopHandler }}, fd, .{});
+    zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = nopHandler }}), fd, .{}, io);
     _ = std.posix.system.close(fd);
 }
 
@@ -39,7 +41,7 @@ fn runErrorServer(ctx: *ServerCtx, io: std.Io) void {
         return;
     };
     const fd = stream.socket.handle;
-    zix.Grpc.serveConn(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = errorOnlyHandler }}, fd, .{});
+    zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = errorOnlyHandler }}), fd, .{}, io);
     _ = std.posix.system.close(fd);
 }
 
@@ -81,14 +83,14 @@ test "zix edge: readGrpcPrefix with empty slice returns TooShort" {
 
 test "zix edge: GrpcContext.recvMessage body shorter than prefix returns null" {
     const body = [_]u8{ 0, 0, 0 };
-    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
 test "zix edge: GrpcContext.recvMessage msg_len exceeds body returns null" {
     var body: [5]u8 = undefined;
     zix.Grpc.writePrefix(body[0..5], false, 100);
-    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = zix.Grpc.Context{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
