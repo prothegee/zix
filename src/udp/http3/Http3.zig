@@ -18,6 +18,8 @@ pub const HandlerFn = core.HandlerFn;
 pub const Request = core.Request;
 /// The response the handler fills.
 pub const Response = core.Response;
+/// The per-request env: deadline, io, allocator.
+pub const Context = core.Context;
 /// The content coding a handler sets on its response body (`res.content_encoding`).
 pub const ContentEncoding = core.ContentEncoding;
 /// The HTTP/3 server config.

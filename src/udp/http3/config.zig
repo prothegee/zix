@@ -92,6 +92,10 @@ pub const Http3ServerConfig = struct {
     tls: ?*Tls.Context = null,
     /// Optional logger. When non-null, the server calls logger.system() for lifecycle events.
     logger: ?*Logger = null,
+    /// Global handler deadline in milliseconds, seeded onto Context.deadline_ns at dispatch. 0
+    /// (default) leaves no deadline. A handler may still tighten or clear its own via
+    /// Context.setTimeout / withDeadline.
+    handler_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------------- //

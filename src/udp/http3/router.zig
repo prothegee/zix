@@ -59,6 +59,10 @@ pub fn pathParam(name: []const u8) ?[]const u8 {
 ///     .{ .path = "/users/:id", .handler = userHandler, .kind = .PARAM },
 /// });
 ///
+/// fn homeHandler(req: *const zix.Http3.Request, res: *zix.Http3.Response, ctx: *zix.Http3.Context) !void {
+///     res.send("home");
+/// }
+///
 /// var server = zix.Http3.Server.init(R.dispatch, config);
 /// ```
 ///
@@ -128,7 +132,7 @@ pub fn Router(comptime routes: []const Route) type {
     return struct {
         /// Dispatch the request to the best matching route. Usable as a HandlerFn. Unknown paths get
         /// a 404 text/plain response.
-        pub fn dispatch(req: *const core.Request, res: *core.Response) void {
+        pub fn dispatch(req: *const core.Request, res: *core.Response, ctx: *core.Context) !void {
             tl_param_count = 0;
 
             // Match on the path before the query string.
@@ -137,15 +141,13 @@ pub fn Router(comptime routes: []const Route) type {
 
             // Pass 1: exact, O(1) hash lookup.
             if (exact_map.get(p)) |handler| {
-                handler(req, res);
-                return;
+                return handler(req, res, ctx);
             }
 
             // Pass 2: parameterized (first match wins).
             inline for (param_routes) |route| {
                 if (matchParam(route.path, p)) {
-                    route.handler(req, res);
-                    return;
+                    return route.handler(req, res, ctx);
                 }
             }
 
@@ -163,8 +165,7 @@ pub fn Router(comptime routes: []const Route) type {
             }
 
             if (best_handler) |h| {
-                h(req, res);
-                return;
+                return h(req, res, ctx);
             }
 
             res.setStatus(404);
@@ -206,15 +207,15 @@ fn matchParam(pattern: []const u8, path: []const u8) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn homeHandler(_: *const core.Request, res: *core.Response) void {
+fn homeHandler(_: *const core.Request, res: *core.Response, _: *core.Context) !void {
     res.send("home");
 }
 
-fn usersHandler(_: *const core.Request, res: *core.Response) void {
+fn usersHandler(_: *const core.Request, res: *core.Response, _: *core.Context) !void {
     res.send(pathParam("id") orelse "none");
 }
 
-fn staticHandler(_: *const core.Request, res: *core.Response) void {
+fn staticHandler(_: *const core.Request, res: *core.Response, _: *core.Context) !void {
     res.send("static");
 }
 
@@ -233,29 +234,30 @@ test "zix http3: http3 router dispatch by exact, param, prefix, query, and 404" 
     });
 
     var res = core.Response{};
+    var ctx = core.Context{ .stream_id = 0, .io = undefined, .allocator = std.testing.allocator };
 
     var home = core.Request{ .method = "GET", .path = "/" };
-    R.dispatch(&home, &res);
+    try R.dispatch(&home, &res, &ctx);
     try std.testing.expectEqualSlices(u8, "home", res.body);
 
     // The query string is ignored for matching (baseline-style request).
     var home_q = core.Request{ .method = "GET", .path = "/?a=1&b=1" };
     res = .{};
-    R.dispatch(&home_q, &res);
+    try R.dispatch(&home_q, &res, &ctx);
     try std.testing.expectEqualSlices(u8, "home", res.body);
 
     var user = core.Request{ .method = "GET", .path = "/users/bob" };
     res = .{};
-    R.dispatch(&user, &res);
+    try R.dispatch(&user, &res, &ctx);
     try std.testing.expectEqualSlices(u8, "bob", res.body);
 
     var asset = core.Request{ .method = "GET", .path = "/static/app.js" };
     res = .{};
-    R.dispatch(&asset, &res);
+    try R.dispatch(&asset, &res, &ctx);
     try std.testing.expectEqualSlices(u8, "static", res.body);
 
     var missing = core.Request{ .method = "GET", .path = "/nope" };
     res = .{};
-    R.dispatch(&missing, &res);
+    try R.dispatch(&missing, &res, &ctx);
     try std.testing.expectEqual(@as(u16, 404), res.status);
 }

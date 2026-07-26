@@ -1244,7 +1244,11 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
             .accept_encoding = decodeAcceptEncoding(&ae_scratch, stream_req.request),
         };
         var res = core.Response{};
-        handler(&req, &res);
+        const deadline_ns: ?u64 = if (config.handler_timeout_ms == 0)
+            null
+        else
+            core.wallClockNs() + @as(u64, config.handler_timeout_ms) * std.time.ns_per_ms;
+        core.invokeHandler(handler, &req, &res, stream_req.stream_id, config.io, deadline_ns);
         tl_requests_served += 1;
 
         var content: [1024]u8 = undefined;

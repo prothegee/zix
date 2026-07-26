@@ -13,6 +13,10 @@ const response = @import("response.zig");
 /// the wire layer so a handler names it as `zix.Http3.ContentEncoding` without reaching into internals.
 pub const ContentEncoding = response.ContentEncoding;
 
+/// Backing size of the per-request stack arena on Context.allocator. Stack-based
+/// (std.heap.FixedBufferAllocator), no heap call.
+pub const CTX_ARENA_BYTES: usize = 4096;
+
 /// A decoded HTTP/3 request handed to the application handler. The slices point into the engine's
 /// per-connection decode buffer and are valid only for the duration of the handler call.
 pub const Request = struct {
@@ -41,6 +45,10 @@ pub const Response = struct {
     /// with it (the engine never compresses on the send path).
     content_encoding: ContentEncoding = .identity,
 
+    /// Whether `send` has been called. Read by `invokeHandler` to decide whether a handler error still
+    /// gets an auto-500, so an intentionally sent response is never overwritten.
+    sent: bool = false,
+
     /// Set the HTTP status code.
     pub fn setStatus(self: *Response, status: u16) void {
         self.status = status;
@@ -49,6 +57,7 @@ pub const Response = struct {
     /// Set the response body.
     pub fn send(self: *Response, body: []const u8) void {
         self.body = body;
+        self.sent = true;
     }
 
     /// Set the content coding of the body (the handler must have encoded `body` accordingly).
@@ -57,20 +66,102 @@ pub const Response = struct {
     }
 };
 
+/// The per-request env: deadline and the io/allocator carried for symmetry with the other engines'
+/// Context. HTTP/3 has no per-request fd (QUIC multiplexes many requests per connection), so
+/// `stream_id` is the raw escape hatch.
+pub const Context = struct {
+    /// QUIC request stream id this call was decoded from.
+    stream_id: u64,
+    /// Absolute deadline in nanoseconds (wall clock). Null = no deadline.
+    /// Set at dispatch from the server-wide handler_timeout_ms. Handler may read and overwrite.
+    deadline_ns: ?u64 = null,
+    /// Io backend for the connection. Carried for symmetry with the other engines' Context.
+    io: std.Io,
+    /// Per-request scratch allocator, backed by a stack buffer (no heap call).
+    allocator: std.mem.Allocator,
+
+    /// Return a copy with the deadline set to now + ms.
+    pub fn withTimeout(self: Context, ms: u64) Context {
+        var ctx = self;
+        ctx.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+
+        return ctx;
+    }
+
+    /// Set the deadline to now + ms in place.
+    pub fn setTimeout(self: *Context, ms: u64) void {
+        self.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+    }
+
+    /// Return a copy with an explicit absolute deadline (wall-clock nanoseconds).
+    pub fn withDeadline(self: Context, deadline_ns: u64) Context {
+        var ctx = self;
+        ctx.deadline_ns = deadline_ns;
+
+        return ctx;
+    }
+
+    /// Whether the deadline has passed. False when no deadline is set.
+    pub fn isExpired(self: *const Context) bool {
+        return self.timedOut();
+    }
+
+    /// Whether the deadline has passed. False when no deadline is set. The
+    /// handler must check this explicitly, it does not interrupt anything.
+    pub fn timedOut(self: *const Context) bool {
+        const deadline = self.deadline_ns orelse return false;
+
+        return wallClockNs() >= deadline;
+    }
+};
+
+/// Return the current wall-clock time in nanoseconds (Unix epoch basis).
+pub fn wallClockNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 /// The application request handler, baked into the server type at comptime.
-pub const HandlerFn = *const fn (req: *const Request, res: *Response) void;
+pub const HandlerFn = *const fn (req: *const Request, res: *Response, ctx: *Context) anyerror!void;
+
+/// Build the Context and invoke the handler. A handler error is completed as one auto-500, but only
+/// when the handler wrote nothing, so an intentionally sent response is never overwritten.
+///
+/// Param:
+/// handler - HandlerFn (built via Router(&[_]Route{...}).dispatch or a bare handler)
+/// req - Request (already decoded by the caller)
+/// res - Response (defaults, filled by the handler)
+/// stream_id - u64 (QUIC request stream id, carried on Context as the raw escape hatch)
+/// io - std.Io (carried on Context for symmetry with the other engines)
+/// deadline_ns - ?u64 (seeded from config.handler_timeout_ms by the caller)
+pub inline fn invokeHandler(handler: HandlerFn, req: *const Request, res: *Response, stream_id: u64, io: std.Io, deadline_ns: ?u64) void {
+    var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    var ctx = Context{ .stream_id = stream_id, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator() };
+
+    handler(req, res, &ctx) catch {
+        if (!res.sent) {
+            res.status = 500;
+            res.body = "";
+        }
+    };
+}
 
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn echoHandler(req: *const Request, res: *Response) void {
+fn echoHandler(req: *const Request, res: *Response, ctx: *Context) !void {
+    _ = ctx;
     res.setStatus(200);
     res.send(req.path);
 }
 
 // A handler that serves a pre-compressed brotli variant when the client accepts br, else identity: the
 // content-negotiation shape the static routes use.
-fn negotiateHandler(req: *const Request, res: *Response) void {
+fn negotiateHandler(req: *const Request, res: *Response, ctx: *Context) !void {
+    _ = ctx;
     if (std.mem.indexOf(u8, req.accept_encoding, "br") != null) {
         res.setContentEncoding(.br);
         res.send("<brotli-bytes>");
@@ -79,24 +170,94 @@ fn negotiateHandler(req: *const Request, res: *Response) void {
     }
 }
 
+fn erroringHandler(req: *const Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = res;
+    _ = ctx;
+    return error.Boom;
+}
+
+fn erroringAfterSendHandler(req: *const Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+    res.send("partial");
+    return error.Boom;
+}
+
 test "zix http3: Response setters and handler shape" {
     const req = Request{ .method = "GET", .path = "/hello", .authority = "example.com" };
     var res = Response{};
-    echoHandler(&req, &res);
+    var ctx = Context{ .stream_id = 0, .io = undefined, .allocator = std.testing.allocator };
+    try echoHandler(&req, &res, &ctx);
 
     try std.testing.expectEqual(@as(u16, 200), res.status);
     try std.testing.expectEqualSlices(u8, "/hello", res.body);
     try std.testing.expectEqualSlices(u8, "text/plain", res.content_type);
     try std.testing.expectEqual(ContentEncoding.identity, res.content_encoding);
+    try std.testing.expect(res.sent);
 }
 
 test "zix http3: a handler negotiates content-encoding off the request accept-encoding" {
+    var ctx = Context{ .stream_id = 0, .io = undefined, .allocator = std.testing.allocator };
+
     var br_res = Response{};
-    negotiateHandler(&.{ .method = "GET", .path = "/x", .accept_encoding = "gzip, deflate, br" }, &br_res);
+    try negotiateHandler(&.{ .method = "GET", .path = "/x", .accept_encoding = "gzip, deflate, br" }, &br_res, &ctx);
     try std.testing.expectEqual(ContentEncoding.br, br_res.content_encoding);
     try std.testing.expectEqualSlices(u8, "<brotli-bytes>", br_res.body);
 
     var plain_res = Response{};
-    negotiateHandler(&.{ .method = "GET", .path = "/x" }, &plain_res);
+    try negotiateHandler(&.{ .method = "GET", .path = "/x" }, &plain_res, &ctx);
     try std.testing.expectEqual(ContentEncoding.identity, plain_res.content_encoding);
+}
+
+test "zix http3: invokeHandler auto-500s when the handler errors and sent nothing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const req = Request{ .method = "GET", .path = "/boom" };
+    var res = Response{};
+    invokeHandler(erroringHandler, &req, &res, 0, io, null);
+
+    try std.testing.expectEqual(@as(u16, 500), res.status);
+    try std.testing.expectEqualSlices(u8, "", res.body);
+}
+
+test "zix http3: invokeHandler keeps a partially sent response on handler error" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const req = Request{ .method = "GET", .path = "/partial" };
+    var res = Response{};
+    invokeHandler(erroringAfterSendHandler, &req, &res, 0, io, null);
+
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualSlices(u8, "partial", res.body);
+}
+
+test "zix http3: Context.withTimeout, withDeadline, and timedOut" {
+    const base = Context{ .stream_id = 0, .io = undefined, .allocator = std.testing.allocator };
+
+    try std.testing.expect(!base.isExpired());
+    try std.testing.expect(!base.timedOut());
+
+    const future = base.withTimeout(60_000);
+    try std.testing.expect(future.deadline_ns != null);
+    try std.testing.expect(!future.timedOut());
+
+    const past = base.withDeadline(1);
+    try std.testing.expect(past.timedOut());
+    try std.testing.expect(past.isExpired());
+}
+
+test "zix http3: Context.setTimeout mutates the deadline in place" {
+    var ctx = Context{ .stream_id = 0, .io = undefined, .allocator = std.testing.allocator };
+
+    try std.testing.expect(ctx.deadline_ns == null);
+
+    ctx.setTimeout(60_000);
+
+    try std.testing.expect(ctx.deadline_ns != null);
+    try std.testing.expect(!ctx.timedOut());
 }
