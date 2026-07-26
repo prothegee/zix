@@ -1,0 +1,39 @@
+name: dispatch-github-ci
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+jobs:
+  dispatch:
+    name: dispatch-github-ci
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # Codeberg holds the real merge, GitHub only runs CI, so this job pushes
+      # a workflow_dispatch call to GitHub for each platform workflow instead
+      # of relying on a GitHub-native push or pull_request event.
+      - name: Dispatch GitHub Actions workflows
+        env:
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+        run: |
+          workflows=(
+            x86_64-linux
+            aarch64-linux
+            aarch64-macos
+            x86_64-windows
+            x86_64-freebsd
+            x86_64-netbsd
+            x86_64-openbsd
+          )
+
+          for workflow in "${workflows[@]}"; do
+            curl -fsSL -X POST \
+              -H "Authorization: Bearer ${GH_DISPATCH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/prothegee/zix/actions/workflows/${workflow}.yml/dispatches" \
+              -d '{"ref":"main"}'
+          done
