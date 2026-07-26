@@ -29,6 +29,7 @@ const Routes = [_]zix.Http.Route{
     .{ .path = "/", .handler = rootHandler },
     .{ .path = "/events", .handler = eventsHandler },
 };
+const router = zix.Http.Router(&Routes);
 
 const ServeArgs = struct {
     port: u16,
@@ -39,7 +40,7 @@ const ServeArgs = struct {
 /// The server thread runs forever (run() never returns), so everything it touches is intentionally
 /// leaked for the lifetime of the test binary.
 fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: ServeArgs) void {
-    var server = zix.Http.Server.init(&Routes, .{
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = io,
         .ip = IP,
         .port = args.port,
@@ -307,7 +308,7 @@ test "zix integration: Http tls_port equal to port is rejected at run" {
     });
     defer tls.deinit();
 
-    var server = zix.Http.Server.init(&Routes, .{
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = io,
         .ip = IP,
         .port = 9234,
