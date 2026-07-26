@@ -1,7 +1,11 @@
 name: x86_64-linux
 
 on:
-  workflow_dispatch:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -9,10 +13,13 @@ permissions:
 jobs:
   test:
     name: x86_64-linux
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: main
 
       - name: Install zig 0.16.0
         run: |
