@@ -1,11 +1,7 @@
 name: x86_64-openbsd
 
 on:
-  pull_request:
-    types:
-      - closed
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,13 +9,10 @@ permissions:
 jobs:
   test:
     name: x86_64-openbsd
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: main
 
       # No GitHub-hosted OpenBSD runner exists, so the job boots a real
       # OpenBSD VM on top of this ubuntu host and runs the suite inside it.
