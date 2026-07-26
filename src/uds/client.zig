@@ -3,6 +3,7 @@
 const std = @import("std");
 const Config = @import("config.zig");
 const UdsClientConfig = Config.UdsClientConfig;
+const win_io = @import("../utils/windows_io.zig");
 
 /// Scratch buffer size backing the stream reader and writer for one framed message.
 const STREAM_BUF_SIZE: usize = 4096;
@@ -14,15 +15,12 @@ const STREAM_BUF_SIZE: usize = 4096;
 /// Return:
 /// - true when the event is ready
 /// - false when the timeout elapsed first
-/// poll event bits, mirrored locally: std.posix.POLL is not defined for
-/// Windows (the values are unused there, pollReady returns before polling).
-const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) 0x1 else std.posix.POLL.IN;
-const POLL_OUT: i16 = if (@import("builtin").target.os.tag == .windows) 0x4 else std.posix.POLL.OUT;
+/// poll event bits, mirrored locally: std.posix.POLL is not defined for Windows.
+const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) win_io.POLLIN else std.posix.POLL.IN;
+const POLL_OUT: i16 = if (@import("builtin").target.os.tag == .windows) win_io.POLLOUT else std.posix.POLL.OUT;
 
 fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
-    // No poll over the ntdll path: report ready and let the read block (the
-    // timeout degrades to a blocking read on Windows).
-    if (comptime @import("builtin").target.os.tag == .windows) return true;
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.pollReady(sock_fd, events, timeout_ms);
 
     var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
     const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
