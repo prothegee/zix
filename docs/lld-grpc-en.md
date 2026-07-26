@@ -4,13 +4,15 @@ Internal implementation details. For design rationale see [`docs/hld-grpc-en.md`
 
 The blocking models (`.ASYNC`, `.POOL`, `.MIXED`) share one connection path (`serveGrpcConn` -> `serveGrpcLoop`). The `.EPOLL` model is a separate, multiplexed, non-blocking path (`grpcMuxOnReadable`) that owns the bulk of this document.
 
+Every route-table-dependent internal function below still takes `comptime RouterType: type` (ADR-063), not a flattened runtime `handler: HandlerFn` like Http2's equivalents. This is deliberate: the engine reads `Route.is_server_streaming` off `RouterType.route_slice` before invoking the handler, to pick sync-inline vs task-spawn dispatch, and a bare `HandlerFn` pointer cannot carry that metadata. See `docs/hld-grpc-en.md`'s Handler Pattern section for the measured cost of losing it.
+
 ---
 
 ## core.zig
 
 ### GrpcContext
 
-The per-stream handler context. Fields relevant to output:
+The per-stream handler state. `GrpcRequest` (`recvMessage`) and `GrpcResponse` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) are thin wrappers holding a `*GrpcContext` pointer, one-line delegations to the methods below: the public trio (ADR-063) adds no new logic here, it only renames the call site from `ctx.foo()` to `req.foo()` / `res.foo()`. Fields relevant to output:
 
 ```zig
 fd: std.posix.fd_t,
@@ -84,6 +86,7 @@ Heap-owned per-connection state for the multiplexed model. One worker thread own
 pub const GrpcMuxConn = struct {
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
+    io: std.Io,                 // carried for the Context built at each muxDispatch, worker-wide
 
     rbuf: []u8,                 // read accumulator, persists across events, holds partial frames
     rstart: usize,
@@ -99,7 +102,7 @@ pub const GrpcMuxConn = struct {
     stage_buf: [65536]u8,       // 64 KB backing for stage
     stage: ReplyStage,          // stage.buf = &stage_buf
 
-    pub fn init(fd, opts) ?*GrpcMuxConn   // one allocation per buffer; null on OOM
+    pub fn init(fd, opts, io) ?*GrpcMuxConn   // one allocation per buffer; null on OOM
     pub fn deinit(self) void
 };
 ```
@@ -108,7 +111,7 @@ pub const GrpcMuxConn = struct {
 
 `init` calls `buildSettingsFrame(&settings_frame, opts)` once to encode the 33-byte server SETTINGS blob (9-byte header + 4 params), and points `stage.buf` at the 64 KB `stage_buf`. The handshake appends `settings_frame` as-is (no per-connection encode loop). The 64 KB stage coalesces ~100 concurrent unary replies (~6 KB) into one write, and a server-streaming reply packs its messages into fewer, larger DATA frames (see `muxDispatch`), so even a ~5000-message reply stays well under the stage and leaves in one write.
 
-### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
+### grpcMuxOnReadable(comptime RouterType, conn) -> GrpcConnOutcome
 
 One readable event. Returns `.close` (peer closed, protocol error, or rejected handshake) or `.keep_alive`.
 
@@ -121,12 +124,12 @@ One readable event. Returns `.close` (peer closed, protocol error, or rejected h
           WouldBlock -> flush, return .keep_alive
           other error or 0 -> flush, return .close
      d. rend += got
-     e. if muxProcess(routes, conn) == .close -> flush, return .close
+     e. if muxProcess(RouterType, conn) == .close -> flush, return .close
 ```
 
 Reads a chunk, processes complete frames, repeats until `EAGAIN`. Level-triggered epoll re-fires if more arrives.
 
-### muxProcess(comptime routes, conn) -> GrpcConnOutcome
+### muxProcess(comptime RouterType, conn) -> GrpcConnOutcome
 
 Handshake phase machine, then the frame loop.
 
@@ -139,7 +142,7 @@ Handshake phase machine, then the frame loop.
 
 Accumulate to `\r\n\r\n`. Without an `Upgrade: h2c` header, stage `400` and return `.close` (the validate probe path). With it, stage `101`, consume the request headers, set `await_preface2`, return `.keep_alive`. An initial request on stream 1 of the upgrade is not served (prior-knowledge clients do not use this path).
 
-### muxFrameLoop(comptime routes, conn) -> GrpcConnOutcome
+### muxFrameLoop(comptime RouterType, conn) -> GrpcConnOutcome
 
 ```
 loop:
@@ -160,13 +163,13 @@ loop:
 
 Control frames are staged via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, so they leave in the same coalesced write as the replies. `muxStageServerSettings` appends the precomputed `conn.settings_frame` (built once in `init` by `buildSettingsFrame`), not a fresh parameter encode.
 
-### muxDispatch(comptime routes, conn, stream)
+### muxDispatch(comptime RouterType, conn, stream)
 
-Builds a `GrpcContext` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), then `Router(routes).dispatch`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
+Builds a `GrpcContext` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), wraps it in a `GrpcRequest` / `GrpcResponse` pair (thin delegating views, zero extra logic), then calls `RouterType.dispatch(&req, &res, &ctx)`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
 
 Server-streaming replies coalesce at the gRPC layer. `muxDispatch` gives a streaming route a per-call coalesce buffer (`ctx._coal`), and `sendMessage` packs consecutive gRPC-framed messages into it, emitting one HTTP/2 DATA frame per `grpc_stream_coalesce_cap` (16 KiB, the HTTP/2 default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. Unary keeps one frame per message (`_coal` is null), so it is byte-for-byte unchanged.
 
-For a streaming route (detected by `routeIsStreaming(routes, path)`), the dispatch is wrapped in `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments. Unary routes are not corked (they already leave in one write). `setTcpCork` is a no-op on non-Linux targets.
+For a streaming route (detected by `routeIsStreaming(RouterType.route_slice, path)`), the dispatch is wrapped in `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments. Unary routes are not corked (they already leave in one write). `setTcpCork` is a no-op on non-Linux targets.
 
 ### Blocking path (serveGrpcConn / serveGrpcLoop)
 
@@ -215,13 +218,13 @@ The `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, and `runEpoll` symbols bel
 
 Private per-worker fd to `*GrpcMuxConn` map, indexed directly by fd (sparse, `MAX_FD = 1 << 16`). `alloc` builds a `GrpcMuxConn`, `free`/`deinit` release it. Not shared between workers.
 
-### acceptAll(table, epfd, listener_fd, opts)
+### acceptAll(table, epfd, listener_fd, opts, io)
 
-Drains `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` to `EAGAIN` (level-triggered). Each accepted fd gets `TCP_NODELAY`, a `GrpcMuxConn`, and an `EPOLL.IN | RDHUP` registration. On allocation or registration failure the fd is closed.
+Drains `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` to `EAGAIN` (level-triggered). Each accepted fd gets `TCP_NODELAY`, a `GrpcMuxConn` (built with `io`, carried on `Context` for the trio), and an `EPOLL.IN | RDHUP` registration. On allocation or registration failure the fd is closed.
 
-### epollMuxWorkerFn(routes)(ctx)
+### epollMuxWorkerFn(RouterType)(ctx)
 
-`epollMuxWorkerFn(comptime routes)` returns the worker entry function. One worker thread:
+`epollMuxWorkerFn(comptime RouterType: type)` returns the worker entry function. One worker thread:
 
 ```
 1. private SO_REUSEPORT listener on ip:port; setNonBlock
@@ -230,13 +233,13 @@ Drains `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` to `EAGAIN` (level-triggered). Ea
 4. loop epoll_wait (up to EPOLL_MAX_EVENTS = 512 events per call):
      for each event:
        listener fd  -> acceptAll
-       conn fd      -> outcome = (HUP|ERR) ? .close : grpcMuxOnReadable(routes, conn)
+       conn fd      -> outcome = (HUP|ERR) ? .close : grpcMuxOnReadable(RouterType, conn)
                        if .close -> epoll_ctl DEL, table.free, close
 ```
 
-### runEpoll(comptime routes, cfg)
+### runEpoll(comptime RouterType: type, cfg)
 
-`worker_count = pool_size` (0 = cpu count). Spawns `worker_count` `epollMuxWorkerFn(routes)` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
+`worker_count = pool_size` (0 = cpu count). Spawns `worker_count` `epollMuxWorkerFn(RouterType)` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
 
 ---
 
