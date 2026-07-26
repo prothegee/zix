@@ -740,9 +740,12 @@ test "postgrez dispatch: replyLen frames two back-to-back replies" {
     try testing.expectEqual(@as(?usize, 6), replyLen(two[first..]));
 }
 
-test "postgrez dispatch: open rejects ASYNC and TLS" {
+test "postgrez dispatch: open rejects ASYNC" {
+    // Transport.open unconditionally references armReactor's io_uring code
+    // below this guard, so the whole function fails to compile outside
+    // Linux regardless of which dispatch model is actually passed here.
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        std.debug.print("note: Transport is Linux-only to compile, test skipped\n", .{});
         return error.SkipZigTest;
     }
 
@@ -752,6 +755,16 @@ test "postgrez dispatch: open rejects ASYNC and TLS" {
     try testing.expectError(error.AsyncUsesExecutor, Transport.open(testing.allocator, threaded.io(), .{
         .user = "tester",
     }, .{ .model = .ASYNC, .conns = 1, .on_reply = noopReply }));
+}
+
+test "postgrez dispatch: open rejects TLS" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
 
     try testing.expectError(error.TlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
         .user = "tester",
@@ -761,7 +774,7 @@ test "postgrez dispatch: open rejects ASYNC and TLS" {
 
 test "postgrez dispatch: open surfaces the connect error with no server" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
         return error.SkipZigTest;
     }
 
