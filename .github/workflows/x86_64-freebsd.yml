@@ -1,7 +1,11 @@
 name: x86_64-freebsd
 
 on:
-  workflow_dispatch:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -9,10 +13,13 @@ permissions:
 jobs:
   test:
     name: x86_64-freebsd
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: main
 
       # No GitHub-hosted FreeBSD runner exists, so the job boots a real
       # FreeBSD VM on top of this ubuntu host and runs the suite inside it.
