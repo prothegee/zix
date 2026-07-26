@@ -1,0 +1,47 @@
+name: aarch64-macos
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: aarch64-macos
+    if: github.event.pull_request.merged == true
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Install zig 0.16.0
+        run: |
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
+          tar -xf zig.tar.xz
+
+          echo "$PWD/zig-aarch64-macos-0.16.0" >> "$GITHUB_PATH"
+
+      - name: zig version
+        run: zig version
+
+      - name: zix unit, integration, behaviour, edge tests
+        run: zig build test-all
+
+      - name: postgrez unit tests
+        run: zig build postgrez-test-unit
+
+      - name: rediz unit tests
+        run: zig build rediz-test-unit
+
+      - name: prometheuz unit tests
+        run: zig build prometheuz-test-unit
+
+      # no docker daemon on GitHub-hosted macOS runners, so postgrez and rediz
+      # test-integration (container lifecycle) are skipped here.

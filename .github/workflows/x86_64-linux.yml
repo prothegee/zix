@@ -1,0 +1,52 @@
+name: x86_64-linux
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: x86_64-linux
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Install zig 0.16.0
+        run: |
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          tar -xf zig.tar.xz
+
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+
+      - name: zig version
+        run: zig version
+
+      - name: zix unit, integration, behaviour, edge tests
+        run: zig build test-all
+
+      - name: postgrez unit tests
+        run: zig build postgrez-test-unit
+
+      - name: rediz unit tests
+        run: zig build rediz-test-unit
+
+      - name: prometheuz unit tests
+        run: zig build prometheuz-test-unit
+
+      # docker ships preinstalled on ubuntu-latest, so postgrez and rediz can
+      # own their own container lifecycle here. test-runner is out of scope.
+      - name: postgrez integration tests
+        run: zig build postgrez-test-integration
+
+      - name: rediz integration tests
+        run: zig build rediz-test-integration

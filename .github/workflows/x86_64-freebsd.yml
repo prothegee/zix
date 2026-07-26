@@ -1,0 +1,46 @@
+name: x86_64-freebsd
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: x86_64-freebsd
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      # No GitHub-hosted FreeBSD runner exists, so the job boots a real
+      # FreeBSD VM on top of this ubuntu host and runs the suite inside it.
+      # No docker daemon in that VM, so postgrez and rediz test-integration
+      # (container lifecycle) are skipped here.
+      - name: Test in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          prepare: |
+            mkdir -p /usr/local/bin
+            fetch -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-freebsd-0.16.0.tar.xz
+            tar -C /usr/local -xf /tmp/zig.tar.xz
+
+            ln -sf /usr/local/zig-x86_64-freebsd-0.16.0/zig /usr/local/bin/zig
+          run: |
+            cd $GITHUB_WORKSPACE
+            zig version
+
+            zig build test-all
+            zig build postgrez-test-unit
+            zig build rediz-test-unit
+            zig build prometheuz-test-unit
