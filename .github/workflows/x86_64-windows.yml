@@ -1,0 +1,53 @@
+name: x86_64-windows
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: x86_64-windows
+    if: github.event.pull_request.merged == true
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Install zig 0.16.0
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip" -OutFile zig.zip
+          Expand-Archive -Path zig.zip -DestinationPath .
+
+          Add-Content -Path $env:GITHUB_PATH -Value "$PWD\zig-x86_64-windows-0.16.0"
+
+      - name: zig version
+        shell: pwsh
+        run: zig version
+
+      - name: zix unit, integration, behaviour, edge tests
+        shell: pwsh
+        run: zig build test-all
+
+      - name: postgrez unit tests
+        shell: pwsh
+        run: zig build postgrez-test-unit
+
+      - name: rediz unit tests
+        shell: pwsh
+        run: zig build rediz-test-unit
+
+      - name: prometheuz unit tests
+        shell: pwsh
+        run: zig build prometheuz-test-unit
+
+      # no Linux container support on this runner, so postgrez and rediz
+      # test-integration (container lifecycle) are skipped here.
