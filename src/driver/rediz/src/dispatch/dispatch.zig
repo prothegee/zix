@@ -525,9 +525,12 @@ test "rediz dispatch: replyLen frames two back-to-back replies" {
     try testing.expectEqual(@as(?usize, 4), replyLen(two[first..]));
 }
 
-test "rediz dispatch: open rejects ASYNC and TLS" {
+test "rediz dispatch: open rejects ASYNC" {
+    // Transport.open unconditionally references armReactor's io_uring code
+    // below this guard, so the whole function fails to compile outside
+    // Linux regardless of which dispatch model is actually passed here.
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        std.debug.print("note: Transport is Linux-only to compile, test skipped\n", .{});
         return error.SkipZigTest;
     }
 
@@ -539,6 +542,16 @@ test "rediz dispatch: open rejects ASYNC and TLS" {
         .conns = 1,
         .on_reply = noopReply,
     }));
+}
+
+test "rediz dispatch: open rejects TLS" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
 
     try testing.expectError(error.TlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
         .tls = .REQUIRE,
@@ -547,7 +560,7 @@ test "rediz dispatch: open rejects ASYNC and TLS" {
 
 test "rediz dispatch: open surfaces the connect error with no server" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
+        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
         return error.SkipZigTest;
     }
 

@@ -32,7 +32,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
     };
     const fd = stream.socket.handle;
     zix.Http2.serveConn(&[_]zix.Http2.Route{.{ .path = "/", .handler = nopHandler }}, fd, .{});
-    _ = std.os.linux.close(fd);
+    _ = std.posix.system.close(fd);
 }
 
 fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {

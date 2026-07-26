@@ -49,7 +49,7 @@ fn makeRunner(comptime routes: []const zix.Http2.Route) type {
             };
             const fd = stream.socket.handle;
             zix.Http2.serveConn(routes, fd, .{});
-            _ = std.os.linux.close(fd);
+            _ = std.posix.system.close(fd);
         }
     };
 }

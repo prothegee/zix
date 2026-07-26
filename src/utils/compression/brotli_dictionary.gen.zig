@@ -1674,7 +1674,9 @@ pub fn main(process: std.process.Init) !void {
 
     const allocator = arena.allocator();
 
-    var arg_iter = std.process.Args.Iterator.init(process.minimal.args);
+    var arg_iter = try std.process.Args.Iterator.initAllocator(process.minimal.args, allocator);
+    defer arg_iter.deinit();
+
     _ = arg_iter.skip();
     const out_path = arg_iter.next() orelse return error.MissingOutputPath;
 

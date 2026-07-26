@@ -399,41 +399,81 @@ fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
 const testing = std.testing;
 
 /// A scripted mock server: server bytes pre-written into one end of a
-/// socketpair before the client ever reads. The client's own writes land in
-/// the socketpair's other read buffer, so a test can also assert on the
-/// exact request bytes sent.
+/// loopback TCP pair before the client ever reads. The client's own writes
+/// land in the peer's read buffer, so a test can also assert on the exact
+/// request bytes sent.
+///
+/// Note:
+/// - This file works on raw fds throughout (readResponse/sendRequest take a
+///   plain fd_t), so init/deinit each spin up a short-lived std.Io.Threaded
+///   just to set up or tear down the loopback pair, not shared with callers.
+const MOCK_SERVER_PORT: u16 = 19300;
+
+fn loopbackStream(fd: std.posix.fd_t) std.Io.net.Stream {
+    return .{ .socket = .{ .handle = fd, .address = .{ .ip4 = .loopback(0) } } };
+}
+
+fn closeLoopbackFd(fd: std.posix.fd_t) void {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    loopbackStream(fd).close(threaded.io());
+}
+
 const MockServer = struct {
     client_fd: std.posix.fd_t,
     script_fd: std.posix.fd_t,
 
     fn init(script: []const u8) !MockServer {
-        var fds: [2]std.posix.fd_t = undefined;
-        if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+        var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
 
-        var written: usize = 0;
-        while (written < script.len) {
-            const n = std.os.linux.write(fds[1], script.ptr + written, script.len - written);
-            written += n;
-        }
+        const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", MOCK_SERVER_PORT);
+        var listener = try addr.listen(io, .{ .mode = .stream, .reuse_address = true });
+        defer listener.deinit(io);
 
-        return .{ .client_fd = fds[0], .script_fd = fds[1] };
+        const Accepted = struct {
+            listener: *std.Io.net.Server,
+            io: std.Io,
+            stream: std.Io.net.Stream = undefined,
+            err: ?anyerror = null,
+
+            fn run(self: *@This()) void {
+                self.stream = self.listener.accept(self.io) catch |e| {
+                    self.err = e;
+                    return;
+                };
+            }
+        };
+
+        var accepted = Accepted{ .listener = &listener, .io = io };
+        const t = try std.Thread.spawn(.{}, Accepted.run, .{&accepted});
+
+        const client_stream = try addr.connect(io, .{ .mode = .stream });
+        t.join();
+        if (accepted.err) |e| return e;
+
+        var write_buf: [8192]u8 = undefined;
+        var writer = accepted.stream.writer(io, &write_buf);
+        try writer.interface.writeAll(script);
+        try writer.interface.flush();
+
+        return .{ .client_fd = client_stream.socket.handle, .script_fd = accepted.stream.socket.handle };
     }
 
     fn deinit(self: *const MockServer) void {
-        _ = std.os.linux.close(self.client_fd);
-        _ = std.os.linux.close(self.script_fd);
+        closeLoopbackFd(self.client_fd);
+        closeLoopbackFd(self.script_fd);
     }
 
     fn readSent(self: *const MockServer, buf: []u8) []u8 {
-        const n = std.os.linux.read(self.script_fd, buf.ptr, buf.len);
-
+        const n = readSomeFD(self.script_fd, buf) catch return buf[0..0];
         return buf[0..n];
     }
 };
 
 test "prometheuz: http_client parses a Content-Length response" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
     );
@@ -448,20 +488,14 @@ test "prometheuz: http_client parses a Content-Length response" {
 }
 
 test "prometheuz: http_client reads to EOF when Content-Length is absent" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    var fds: [2]std.posix.fd_t = undefined;
-    if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
-    defer _ = std.os.linux.close(fds[0]);
+    const mock = try MockServer.init("HTTP/1.1 200 OK\r\n\r\nno-length-body");
+    defer closeLoopbackFd(mock.client_fd);
 
-    const script = "HTTP/1.1 200 OK\r\n\r\nno-length-body";
-    var written: usize = 0;
-    while (written < script.len) {
-        const n = std.os.linux.write(fds[1], script.ptr + written, script.len - written);
-        written += n;
-    }
-    _ = std.os.linux.close(fds[1]);
+    // Peer goes away right after the script: the client must read to EOF
+    // since there is no Content-Length to bound the body.
+    closeLoopbackFd(mock.script_fd);
 
-    var resp = try readResponse(testing.allocator, fds[0], 1024 * 1024);
+    var resp = try readResponse(testing.allocator, mock.client_fd, 1024 * 1024);
     defer resp.deinit();
 
     try testing.expectEqual(@as(u16, 200), resp.status());
@@ -469,8 +503,6 @@ test "prometheuz: http_client reads to EOF when Content-Length is absent" {
 }
 
 test "prometheuz: http_client surfaces a 404 status" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -482,8 +514,6 @@ test "prometheuz: http_client surfaces a 404 status" {
 }
 
 test "prometheuz: http_client rejects a body over max_response_body" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n");
     defer mock.deinit();
 
@@ -491,8 +521,6 @@ test "prometheuz: http_client rejects a body over max_response_body" {
 }
 
 test "prometheuz: http_client sendRequest writes a well-formed GET" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -507,8 +535,6 @@ test "prometheuz: http_client sendRequest writes a well-formed GET" {
 }
 
 test "prometheuz: http_client sendRequest carries a POST body" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 
@@ -523,8 +549,6 @@ test "prometheuz: http_client sendRequest carries a POST body" {
 }
 
 test "prometheuz: http_client decodes a chunked response" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     // Same shape node-exporter actually sends: no Content-Length, chunked
     // body, a word split across a chunk boundary.
     const mock = try MockServer.init(
@@ -544,8 +568,6 @@ test "prometheuz: http_client decodes a chunked response" {
 }
 
 test "prometheuz: http_client chunked response spanning multiple reads" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     // A body larger than one BODY_READ_CHUNK (4096), forcing fillMore() to
     // run more than once and a chunk boundary to land mid-read.
     var large: [10_000]u8 = undefined;
@@ -577,8 +599,6 @@ test "prometheuz: http_client chunked response spanning multiple reads" {
 }
 
 test "prometheuz: http_client sendRequest carries custom headers" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     defer mock.deinit();
 

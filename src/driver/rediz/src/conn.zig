@@ -832,23 +832,46 @@ const TransportSource = struct {
 const testing = std.testing;
 
 /// A scripted mock server: all server bytes are pre-written into one end
-/// of a socketpair, the Conn reads them as the flow advances. Client writes
-/// land in the socket buffer unread, which is fine for scripted flows.
+/// of a loopback TCP pair, the Conn reads them as the flow advances. Client
+/// writes land in the socket buffer unread, which is fine for scripted flows.
+const MOCK_SERVER_PORT: u16 = 19200;
+
 const MockServer = struct {
     conn_fd: std.posix.fd_t,
-    script_fd: std.posix.fd_t,
+    script_stream: std.Io.net.Stream,
 
-    fn init(script: []const u8) !MockServer {
-        var fds: [2]std.posix.fd_t = undefined;
-        if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+    fn init(io: std.Io, script: []const u8) !MockServer {
+        const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", MOCK_SERVER_PORT);
+        var listener = try addr.listen(io, .{ .mode = .stream, .reuse_address = true });
+        defer listener.deinit(io);
 
-        var written: usize = 0;
-        while (written < script.len) {
-            const sent = std.os.linux.write(fds[1], script.ptr + written, script.len - written);
-            written += sent;
-        }
+        const Accepted = struct {
+            listener: *std.Io.net.Server,
+            io: std.Io,
+            stream: std.Io.net.Stream = undefined,
+            err: ?anyerror = null,
 
-        return .{ .conn_fd = fds[0], .script_fd = fds[1] };
+            fn run(self: *@This()) void {
+                self.stream = self.listener.accept(self.io) catch |e| {
+                    self.err = e;
+                    return;
+                };
+            }
+        };
+
+        var accepted = Accepted{ .listener = &listener, .io = io };
+        const t = try std.Thread.spawn(.{}, Accepted.run, .{&accepted});
+
+        const client_stream = try addr.connect(io, .{ .mode = .stream });
+        t.join();
+        if (accepted.err) |e| return e;
+
+        var write_buf: [4096]u8 = undefined;
+        var writer = accepted.stream.writer(io, &write_buf);
+        try writer.interface.writeAll(script);
+        try writer.interface.flush();
+
+        return .{ .conn_fd = client_stream.socket.handle, .script_stream = accepted.stream };
     }
 
     fn stream(self: *const MockServer) std.Io.net.Stream {
@@ -856,15 +879,15 @@ const MockServer = struct {
     }
 };
 
-/// A live scripted connection. The script side of the socketpair stays open
-/// for the whole test so post-handshake sends do not hit EPIPE.
+/// A live scripted connection. The script side of the loopback pair stays
+/// open for the whole test so post-handshake sends do not hit EPIPE.
 const Scripted = struct {
     conn: *Conn,
-    script_fd: std.posix.fd_t,
+    script_stream: std.Io.net.Stream,
 
-    fn deinit(self: *const Scripted) void {
+    fn deinit(self: *const Scripted, io: std.Io) void {
         self.conn.deinit();
-        _ = std.os.linux.close(self.script_fd);
+        self.script_stream.close(io);
     }
 };
 
@@ -875,42 +898,36 @@ const HELLO_OK_SCRIPT =
     "$5\r\nproto\r\n:3\r\n";
 
 fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted {
-    const mock = try MockServer.init(script);
-    errdefer _ = std.os.linux.close(mock.script_fd);
+    const mock = try MockServer.init(io, script);
+    errdefer mock.script_stream.close(io);
 
     const conn = try Conn.fromStream(testing.allocator, io, config, mock.stream());
 
-    return .{ .conn = conn, .script_fd = mock.script_fd };
+    return .{ .conn = conn, .script_stream = mock.script_stream };
 }
 
 test "rediz: conn mock hello negotiates resp3 and captures version" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const scripted = try connectScripted(threaded.io(), HELLO_OK_SCRIPT, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(lib.RespVersion.RESP3, scripted.conn.protocol_active);
     try testing.expectEqual(@as(u32, 8), scripted.conn.server_version_major);
 }
 
 test "rediz: conn mock noproto falls back to resp2 on auto" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const scripted = try connectScripted(threaded.io(), "-NOPROTO unsupported protocol version\r\n", .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(lib.RespVersion.RESP2, scripted.conn.protocol_active);
 }
 
 test "rediz: conn mock noproto fails a strict resp3 config" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -922,22 +939,18 @@ test "rediz: conn mock noproto fails a strict resp3 config" {
 }
 
 test "rediz: conn mock resp2 fallback runs legacy auth" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     // HELLO refused, then AUTH accepted
     const script = "-ERR unknown command 'HELLO'\r\n" ++ "+OK\r\n";
     const scripted = try connectScripted(threaded.io(), script, .{ .password = "secret" });
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(lib.RespVersion.RESP2, scripted.conn.protocol_active);
 }
 
 test "rediz: conn mock wrong password surfaces server error" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -949,21 +962,17 @@ test "rediz: conn mock wrong password surfaces server error" {
 }
 
 test "rediz: conn mock selects a non-zero database" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const script = HELLO_OK_SCRIPT ++ "+OK\r\n";
     const scripted = try connectScripted(threaded.io(), script, .{ .database = 2 });
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(lib.RespVersion.RESP3, scripted.conn.protocol_active);
 }
 
 test "rediz: conn mock command surface round trips" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -978,7 +987,7 @@ test "rediz: conn mock command surface round trips" {
         "*3\r\n$1\r\na\r\n$-1\r\n$1\r\nc\r\n" ++ // mget
         "+string\r\n"; // type
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.ping();
@@ -998,21 +1007,17 @@ test "rediz: conn mock command surface round trips" {
 }
 
 test "rediz: conn mock set with nx miss returns false" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const script = HELLO_OK_SCRIPT ++ "$-1\r\n";
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(false, try scripted.conn.set("key", "value", .{ .nx = true }));
 }
 
 test "rediz: conn mock json set and get round trip a struct" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1043,7 +1048,7 @@ test "rediz: conn mock json set and get round trip a struct" {
     try script.appendSlice(testing.allocator, "$8\r\nnot-json\r\n"); // getJson bad payload
 
     const scripted = try connectScripted(threaded.io(), script.items, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectEqual(true, try conn.setJson("json:user", User{
@@ -1066,14 +1071,12 @@ test "rediz: conn mock json set and get round trip a struct" {
 }
 
 test "rediz: conn mock error reply maps to ServerError" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const script = HELLO_OK_SCRIPT ++ "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectError(error.ServerError, conn.get("a-list"));
@@ -1081,8 +1084,6 @@ test "rediz: conn mock error reply maps to ServerError" {
 }
 
 test "rediz: conn mock skips resp3 push before the reply" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1090,14 +1091,12 @@ test "rediz: conn mock skips resp3 push before the reply" {
         ">2\r\n$7\r\nmessage\r\n$4\r\nnews\r\n" ++
         "+PONG\r\n";
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try scripted.conn.ping();
 }
 
 test "rediz: conn mock deferred set drains before the next reply read" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1108,7 +1107,7 @@ test "rediz: conn mock deferred set drains before the next reply read" {
         "+OK\r\n" ++ // deferred set
         "$5\r\nhello\r\n"; // get
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.setDeferred("key", "hello", .{ .ex_s = 1 });
@@ -1120,8 +1119,6 @@ test "rediz: conn mock deferred set drains before the next reply read" {
 }
 
 test "rediz: conn mock deferred error reply is captured not thrown" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1129,7 +1126,7 @@ test "rediz: conn mock deferred error reply is captured not thrown" {
         "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" ++ // deferred set
         "+PONG\r\n"; // ping
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.setDeferred("a-list", "value", .{});
@@ -1140,14 +1137,12 @@ test "rediz: conn mock deferred error reply is captured not thrown" {
 }
 
 test "rediz: conn mock deferred without a queue drains one at a time" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const script = HELLO_OK_SCRIPT ++ "+OK\r\n+OK\r\n"; // two deferred sets
     const scripted = try connectScripted(threaded.io(), script, .{ .max_pending_replies = 0 });
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.setDeferred("one", "1", .{});
@@ -1159,14 +1154,12 @@ test "rediz: conn mock deferred without a queue drains one at a time" {
 }
 
 test "rediz: conn mock deferred queue bound forces a drain" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
     const script = HELLO_OK_SCRIPT ++ ":1\r\n:1\r\n:1\r\n"; // three deferred dels
     const scripted = try connectScripted(threaded.io(), script, .{ .max_pending_replies = 2 });
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.delDeferred(&.{"one"});
@@ -1179,8 +1172,6 @@ test "rediz: conn mock deferred queue bound forces a drain" {
 }
 
 test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1188,7 +1179,7 @@ test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
         ":1\r\n" ++ // deferred del
         "+OK\r\n:5\r\n"; // pipeline: set, incr
     const scripted = try connectScripted(threaded.io(), script, .{});
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try conn.delDeferred(&.{"stale"});
@@ -1205,14 +1196,10 @@ test "rediz: conn mock deferred replies drain ahead of a pipeline sync" {
 }
 
 test "rediz: conn mock deferred transport error surfaces on drain" {
-    if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
-    }
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    const mock = try MockServer.init(HELLO_OK_SCRIPT);
+    const mock = try MockServer.init(threaded.io(), HELLO_OK_SCRIPT);
     const conn = try Conn.fromStream(testing.allocator, threaded.io(), .{}, mock.stream());
     defer conn.deinit();
 
@@ -1220,6 +1207,6 @@ test "rediz: conn mock deferred transport error surfaces on drain" {
 
     // The peer goes away with a reply still owed: the next command fails
     // on the transport, the consumer drops the connection.
-    _ = std.os.linux.close(mock.script_fd);
+    mock.script_stream.close(threaded.io());
     try testing.expectError(error.ConnectionClosed, conn.get("key"));
 }
