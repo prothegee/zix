@@ -17,16 +17,18 @@ Engine server HTTP/2 (h2c) pure-Zig: frame codec, HPACK, dan state machine multi
 
 ## Posisi: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama dan tabel route comptime. Perbedaannya pada protokol dan bentuk handler.
+Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama, tabel route comptime, dan (sejak ADR-063) trio handler `req`/`res`/`ctx` yang sama. Perbedaannya pada protokol dan apa yang diekspos `Response` / `Context` masing-masing.
 
 | Aspek | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
 | Protokol | HTTP/1.1 | HTTP/2 h2c | gRPC di atas HTTP/2 h2c |
-| Signature handler | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
+| Signature handler | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-063) | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-063) |
 | Konkurensi per koneksi | satu request pada satu waktu (pipelined) | banyak stream konkuren | banyak stream konkuren |
 | Codec header | parse teks mentah | HPACK | HPACK |
-| Allocator / context per-request | arena per-request via `Context` | tidak ada | `GrpcContext` (recv / send / finish) |
-| Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStreamFD`) | `ctx.sendMessage` |
+| Allocator / context per-request | arena per-request via `Context` | stack arena per-request via `Context` | stack arena per-request via `Context` |
+| Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStreamFD`, raw escape hatch) | `res.sendMessage` |
+| Kebijakan error handler | auto-500 jika belum ada yang terkirim | auto-500 jika belum ada yang terkirim | diteruskan diam-diam (`catch {}`, perilaku wire saat ini dipertahankan) |
+| Bentuk `Server.init` | `init(handler, config)`, `Router(routes).dispatch` | `init(handler, config)`, `Router(routes).dispatch` | `init(Router(routes), config)` (satu pengecualian: engine harus melihat `Route.is_server_streaming` sebelum dispatch) |
 | Relasi layer | standalone | standalone | dibangun di atas `zix.Http2` |
 
 Pakai `zix.Http2` untuk HTTP/2 kelas browser atau prior-knowledge dengan kontrol frame mentah. Pakai `zix.Grpc` saat payload-nya gRPC (ia memakai ulang layer frame dan HPACK engine ini). Pakai `zix.Http1` saat satu request per koneksi sudah cukup.
@@ -123,15 +125,18 @@ Diakses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http2.Server` | struct | `init(comptime routes, config)`, lalu `run()` / `deinit()` |
+| `zix.Http2.Server` | struct | `init(handler, config)`, lalu `run()` / `deinit()` (ADR-063: `handler` adalah `HandlerFn` runtime, bukan tabel route comptime) |
 | `zix.Http2.ServerConfig` | struct | Konfigurasi server (lihat bagian Http2ServerConfig) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
-| `zix.Http2.HandlerFn` | type | `*const fn(method: []const u8, headers: []const Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void` |
+| `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, mencerminkan Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
-| `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` |
-| `zix.Http2.Router` | fn | `Router(comptime routes) type`, memetakan path ke handler (dipakai oleh engine) |
+| `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (tanpa `.PARAM` pada tahap ini) |
+| `zix.Http2.Router` | fn | `Router(comptime routes) type`, mengembalikan tipe dengan `dispatch` yang cocok persis dengan `HandlerFn` (bisa langsung dipakai sebagai handler `Server.init`); path tak cocok mendapat 404 `text/plain` |
+| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, view zero-copy atas header/body stream yang di-decode, plus `header(name)` dan `queryParam(name)` |
+| `zix.Http2.Response` | struct | Builder tipis atas `frame.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, semuanya `!void`. `sent: bool` menjaga auto-500 |
+| `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
 | `zix.Http2.ServeOpts` | struct | Opsi serve per-connection yang dibangun dari config |
-| `zix.Http2.serveConn` | fn | `serveConn(comptime routes, fd, opts)`: entry point koneksi blocking langsung |
+| `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: entry point koneksi blocking langsung |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` header request hasil decode |
 | `zix.Http2.sendResponseFD` | fn | `sendResponseFD(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM pada frame terakhir (langsung, tanpa metering) |
 | `zix.Http2.sendResponseEncodedFD` | fn | `sendResponseFD` plus header `content-encoding` (menyajikan body pra-kompres) |
@@ -169,6 +174,7 @@ pub const Http2ServerConfig = struct {
     max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     response_cache: bool  = false, // response cache per-worker (ADR-036), .EPOLL/.URING
+    handler_timeout_ms: u32 = 0,   // deadline global yang diseed ke Context.deadline_ns, 0 = tanpa deadline
     tls:            ?*Tls.Context = null,   // non-null menyajikan h2 di atas TLS (ALPN h2), selain itu h2c cleartext
     logger:         ?*Logger = null,        // baris lifecycle saja, lihat bagian Logging
 };
@@ -176,42 +182,38 @@ pub const Http2ServerConfig = struct {
 
 Catatan: `pool_size` di-overload oleh model. Pada `.POOL` ia adalah jumlah pool-thread blocking. Pada `.EPOLL` / `.URING` ia adalah jumlah mux worker (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
 
-`zix.Http2` tidak memiliki field timeout per-handler maupun per-connection. Handler memiliki frame I/O-nya sendiri dan mengembalikan `void`, sehingga sebuah deadline tidak akan punya objek context untuk disandarkan. `zix.Grpc`, yang dibangun di atas engine ini, menambahkan `handler_timeout_ms` dan deadline `GrpcContext` untuk model handler gRPC.
+`handler_timeout_ms` (ADR-063) adalah deadline global: diseed ke `Context.deadline_ns` saat dispatch, 0 berarti tanpa deadline. Handler bisa memperketat atau menghapus deadline-nya sendiri via `ctx.setTimeout` / `withDeadline`, dicek dengan `ctx.isExpired()` di antara langkah-langkah (engine tidak pernah menginterupsi handler yang sedang berjalan, ini opt-in).
 
 ---
 
 ## Model Handler
 
 ```zig
-fn home(
-    method:  []const u8,
-    headers: []const zix.Http2.Header,
-    body:    []const u8,
-    fd:      std.posix.fd_t,
-    sid:     u31,
-) void {
-    _ = method;
-    _ = headers;
-    _ = body;
+fn home(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) !void {
+    _ = req;
+    _ = ctx;
 
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello") catch {};
+    try res.sendText("hello");
 }
 
+const router = zix.Http2.Router(&[_]zix.Http2.Route{
+    .{ .path = "/", .handler = home },
+});
+
 var server = zix.Http2.Server.init(
-    &[_]zix.Http2.Route{
-        .{ .path = "/", .handler = home },
-    },
+    router.dispatch,
     .{ .io = process.io, .ip = "0.0.0.0", .port = 8082, .dispatch_model = .EPOLL },
 );
 defer server.deinit();
 try server.run();
 ```
 
-- Route adalah argumen comptime untuk `Server.init`: dibakukan ke dalam tipe server, tidak ada registrasi dinamis setelah init.
-- Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM). `method`, `headers`, dan `body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
-- Tidak ada allocator per-request maupun objek context. Handler menulis frame ke fd melalui response helper dan mengembalikan `void`: error ditangani inline (biasanya `catch {}`, koneksi toh akan ditutup saat broken pipe).
-- Response keluar melalui `frame.sendResponseFD` (kecil, langsung), `frame.sendResponseEncodedFD` (body pra-kompres dengan `content-encoding`), atau `mux.sendResponseStreamFD` (body besar berumur proses yang dipacu oleh flow control).
-- Engine memetakan path ke handler melalui `Router` comptime sebelum pemanggilan, sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
+- `Server.init` menerima `handler: HandlerFn` runtime (ADR-063), dibangun via `Router(&[_]Route{...}).dispatch`. Route sendiri tetap comptime (dibakukan ke dalam tipe router), tapi server tidak lagi membakukan tabel route ke dalam tipenya sendiri, sehingga `Server` adalah satu struct konkret, bukan generik.
+- Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `core.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
+- `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline_ns` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
+- Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya ketika `!res.sent`, sehingga response yang sudah terkirim sebagian tidak pernah rusak.
+- Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `frame.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
+- Engine memetakan path ke handler melalui `Router(routes).dispatch` sebelum pemanggilan (EXACT lalu PREFIX terpanjang, path tak cocok mendapat 404 `text/plain`), sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
 
 ---
 
@@ -293,7 +295,7 @@ Access logging per-stream adalah tanggung jawab handler: handler memiliki frame 
 | State stream terbuka (.EPOLL/.URING) | pool `MuxStream` thread-local per-worker (free-list), buffer `max_body` dan `max_header_scratch` tiap slot dipakai ulang lintas peminjaman | Stream konkuren (dikembalikan ke pool saat close) |
 | Dynamic table HPACK | inline di decoder koneksi (`dyn_buf`, 8 KB) | Koneksi |
 | Response cache per-worker (opt-in) | `smp_allocator`, `cache_max_entries` * `cache_max_value_bytes` per worker | Worker thread |
-| Alokasi handler | tidak disediakan (bawa allocator sendiri bila perlu) | n/a |
+| Alokasi handler | `ctx.allocator`: stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, tanpa pemanggilan heap), direset per request | Request |
 
 Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-worker (free-list berisi `MuxStream`), sehingga memori stream residen mengikuti jumlah stream konkuren pada worker itu, bukan jumlah koneksi dikali `max_streams`. Koneksi idle hanya menahan array pointer selebar `max_streams` dan read buffer-nya, bukan `max_streams` buffer stream penuh. Stream yang tertutup mengembalikan slot-nya (buffer dipertahankan) ke pool untuk peminjaman berikutnya, sehingga steady state tidak melakukan alokasi per-stream. Jalur blocking `.ASYNC` / `.POOL` / `.MIXED` sebaliknya menyediakan array `Stream` inline per-connection di muka.
 

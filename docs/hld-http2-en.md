@@ -17,16 +17,18 @@ Pure-Zig HTTP/2 (h2c) server engine: frame codec, HPACK, and a resumable multipl
 
 ## Positioning: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-All three are raw-fd engines with the same five dispatch models and a comptime route table. They differ in protocol and handler shape.
+All three are raw-fd engines with the same five dispatch models, a comptime route table, and (since ADR-063) the same `req`/`res`/`ctx` handler trio. They differ in protocol and what each `Response` / `Context` exposes for it.
 
 | Aspect | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
 | Protocol | HTTP/1.1 | HTTP/2 h2c | gRPC over HTTP/2 h2c |
-| Handler signature | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(method, headers, body, fd, sid)` | `fn(headers, *Context)` |
+| Handler signature | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-062) | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-063) | `fn(*Request, *Response, *Context) anyerror!void` (trio, ADR-063) |
 | Concurrency per connection | one request at a time (pipelined) | many concurrent streams | many concurrent streams |
 | Header codec | raw text parse | HPACK | HPACK |
-| Per-request allocator / context | per-request arena via `Context` | none | `GrpcContext` (recv / send / finish) |
-| Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStreamFD`) | `ctx.sendMessage` |
+| Per-request allocator / context | per-request arena via `Context` | per-request stack arena via `Context` | per-request stack arena via `Context` |
+| Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStreamFD`, raw escape hatch) | `res.sendMessage` |
+| Handler error policy | auto-500 when nothing sent | auto-500 when nothing sent | passes through silently (`catch {}`, current wire behavior kept) |
+| `Server.init` shape | `init(handler, config)`, `Router(routes).dispatch` | `init(handler, config)`, `Router(routes).dispatch` | `init(Router(routes), config)` (the one exception: the engine must see `Route.is_server_streaming` before dispatch) |
 | Layer relationship | standalone | standalone | builds on `zix.Http2` |
 
 Use `zix.Http2` for browser-grade or prior-knowledge HTTP/2 with raw frame control. Use `zix.Grpc` when the payload is gRPC (it reuses this engine's frame and HPACK layers). Use `zix.Http1` when one request per connection is enough.
@@ -123,15 +125,18 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http2.Server` | struct | `init(comptime routes, config)`, then `run()` / `deinit()` |
+| `zix.Http2.Server` | struct | `init(handler, config)`, then `run()` / `deinit()` (ADR-063: `handler` is a runtime `HandlerFn`, not a comptime route table) |
 | `zix.Http2.ServerConfig` | struct | Server configuration (see Http2ServerConfig section) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
-| `zix.Http2.HandlerFn` | type | `*const fn(method: []const u8, headers: []const Header, body: []const u8, fd: std.posix.fd_t, sid: u31) void` |
+| `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, mirrors Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
-| `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` |
-| `zix.Http2.Router` | fn | `Router(comptime routes) type`, resolves a path to a handler (used by the engine) |
+| `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (no `.PARAM` this pass) |
+| `zix.Http2.Router` | fn | `Router(comptime routes) type`, returns a type whose `dispatch` matches `HandlerFn` exactly (usable directly as the `Server.init` handler); unmatched paths get a 404 `text/plain` |
+| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, zero-copy view over the stream's decoded headers/body, plus `header(name)` and `queryParam(name)` |
+| `zix.Http2.Response` | struct | Thin builder over `frame.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, all `!void`. `sent: bool` guards the auto-500 |
+| `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
 | `zix.Http2.ServeOpts` | struct | Per-connection serve options built from the config |
-| `zix.Http2.serveConn` | fn | `serveConn(comptime routes, fd, opts)`: direct blocking connection entry point |
+| `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: direct blocking connection entry point |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` decoded request header |
 | `zix.Http2.sendResponseFD` | fn | `sendResponseFD(fd, sid, status, content_type, body)`: HEADERS plus DATA, END_STREAM on the last frame (immediate, unmetered) |
 | `zix.Http2.sendResponseEncodedFD` | fn | `sendResponseFD` plus a `content-encoding` header (serve a precompressed body) |
@@ -169,6 +174,7 @@ pub const Http2ServerConfig = struct {
     max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     response_cache: bool  = false, // per-worker response cache (ADR-036), .EPOLL/.URING
+    handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline_ns, 0 = no deadline
     tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
     logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
 };
@@ -176,42 +182,38 @@ pub const Http2ServerConfig = struct {
 
 Note: `pool_size` is overloaded by model. Under `.POOL` it is the blocking pool-thread count. Under `.EPOLL` / `.URING` it is the mux worker count (0 = cpu count), and oversubscribing it only adds scheduler churn. `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
 
-`zix.Http2` has no per-handler or per-connection timeout field. The handler owns its frame I/O and returns `void`, so a deadline would have no context object to hang on. `zix.Grpc`, which builds on this engine, adds `handler_timeout_ms` and a `GrpcContext` deadline for the gRPC handler model.
+`handler_timeout_ms` (ADR-063) is the global deadline: seeded onto `Context.deadline_ns` at dispatch, 0 leaves no deadline. A handler may tighten or clear its own via `ctx.setTimeout` / `withDeadline`, checked with `ctx.isExpired()` between steps (the engine never interrupts a running handler, this is opt-in).
 
 ---
 
 ## Handler Model
 
 ```zig
-fn home(
-    method:  []const u8,
-    headers: []const zix.Http2.Header,
-    body:    []const u8,
-    fd:      std.posix.fd_t,
-    sid:     u31,
-) void {
-    _ = method;
-    _ = headers;
-    _ = body;
+fn home(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) !void {
+    _ = req;
+    _ = ctx;
 
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello") catch {};
+    try res.sendText("hello");
 }
 
+const router = zix.Http2.Router(&[_]zix.Http2.Route{
+    .{ .path = "/", .handler = home },
+});
+
 var server = zix.Http2.Server.init(
-    &[_]zix.Http2.Route{
-        .{ .path = "/", .handler = home },
-    },
+    router.dispatch,
     .{ .io = process.io, .ip = "0.0.0.0", .port = 8082, .dispatch_model = .EPOLL },
 );
 defer server.deinit();
 try server.run();
 ```
 
-- Routes are a comptime argument to `Server.init`: they are baked into the server type, there is no dynamic registration after init.
-- The handler is called once per completed stream (END_HEADERS plus END_STREAM). `method`, `headers`, and `body` all point into per-stream buffers and are valid only for the duration of the call.
-- There is no per-request allocator or context object. The handler writes frames to the fd through the response helpers and returns `void`: errors are handled inline (typically `catch {}`, the connection closes on a broken pipe anyway).
-- Responses go out through `frame.sendResponseFD` (small, immediate), `frame.sendResponseEncodedFD` (a precompressed body with `content-encoding`), or `mux.sendResponseStreamFD` (a large, process-lifetime body paced by flow control).
-- The engine resolves the path to a handler through the comptime `Router` before the call, so the handler does not parse or match the path itself.
+- `Server.init` takes a runtime `handler: HandlerFn` (ADR-063), built via `Router(&[_]Route{...}).dispatch`. Routes themselves stay comptime (baked into the router type), but the server no longer bakes the route table into its own type, so `Server` is one concrete struct, not a generic.
+- The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `core.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
+- `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline_ns` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
+- The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
+- Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `frame.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
+- The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths get 404 `text/plain`), so the handler does not parse or match the path itself.
 
 ---
 
@@ -293,7 +295,7 @@ Per-stream access logging is the handler's responsibility: the handler owns its 
 | Open stream state (.EPOLL/.URING) | per-worker thread-local `MuxStream` pool (free-list), each slot's `max_body` and `max_header_scratch` buffers reused across borrows | Concurrent stream (returned to the pool on close) |
 | HPACK dynamic table | inline in the connection's decoder (`dyn_buf`, 8 KB) | Connection |
 | Per-worker response cache (opt-in) | `smp_allocator`, `cache_max_entries` * `cache_max_value_bytes` per worker | Worker thread |
-| Handler allocations | none provided (bring your own allocator if needed) | n/a |
+| Handler allocations | `ctx.allocator`: a stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, no heap call), reset per request | Request |
 
 The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-local pool (a free-list of `MuxStream`), so resident stream memory tracks the number of concurrent streams on that worker, not connections times `max_streams`. An idle connection holds only its `max_streams`-wide pointer array and its read buffer, not `max_streams` full stream buffers. A closed stream returns its slot (buffers retained) to the pool for the next borrow, so the steady state does no per-stream allocation. The blocking `.ASYNC` / `.POOL` / `.MIXED` path instead reserves a per-connection inline `Stream` array up front.
 

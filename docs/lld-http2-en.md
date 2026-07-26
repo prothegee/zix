@@ -201,7 +201,7 @@ Shared request processing, the router, and the blocking connection path.
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
 
-`HandlerFn` is `fn(method, headers, body, fd, sid) void`. `Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`.
+`HandlerFn` is `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, built at dispatch by `core.invokeHandler`). `Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
 
 The per-worker response cache (ADR-036) also lives here: `tl_cache`, `serveCached` / `sendCached`, and `requestKey` (Wyhash over path + body). It is installed by the `.EPOLL` / `.URING` workers and keyed off `tl_req_path` / `tl_req_body`, which `muxDispatch` records.
 
