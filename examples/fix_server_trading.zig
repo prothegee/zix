@@ -63,15 +63,15 @@ fn appendRecord(record: []const u8) void {
 
 // --------------------------------------------------------- //
 
-fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) anyerror!void {
     if (ctx.isExpired()) return;
 
-    const cl_ord_id = zix.Fix.getField(fields, .ClOrdID) orelse return;
-    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
-    const side_str = zix.Fix.getField(fields, .Side) orelse return;
-    const qty_str = zix.Fix.getField(fields, .OrderQty) orelse "0";
-    const price_str = zix.Fix.getField(fields, .Price) orelse "0";
-    const account = zix.Fix.getField(fields, .Account) orelse "UNKNOWN";
+    const cl_ord_id = req.getField(.ClOrdID) orelse return;
+    const symbol = req.getField(.Symbol) orelse return;
+    const side_str = req.getField(.Side) orelse return;
+    const qty_str = req.getField(.OrderQty) orelse "0";
+    const price_str = req.getField(.Price) orelse "0";
+    const account = req.getField(.Account) orelse "UNKNOWN";
 
     const record_id = nextId();
     var order_id_buf: [20]u8 = undefined;
@@ -91,7 +91,7 @@ fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
     , .{ record_id, ts, account, ctx.sender_comp_id, symbol, side_label, qty_str, price_str, cl_ord_id, order_id_str }) catch return;
     appendRecord(rec);
 
-    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .ClOrdID, .value = cl_ord_id },
         .{ .tag = .OrderID, .value = order_id_str },
         .{ .tag = .ExecID, .value = exec_id_str },
@@ -104,14 +104,14 @@ fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
     });
 }
 
-fn handleCancelOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+fn handleCancelOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) anyerror!void {
     if (ctx.isExpired()) return;
 
-    const cl_ord_id = zix.Fix.getField(fields, .ClOrdID) orelse return;
-    const orig_cl_ord_id = zix.Fix.getField(fields, .OrigClOrdID) orelse return;
-    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
-    const side_str = zix.Fix.getField(fields, .Side) orelse return;
-    const account = zix.Fix.getField(fields, .Account) orelse "UNKNOWN";
+    const cl_ord_id = req.getField(.ClOrdID) orelse return;
+    const orig_cl_ord_id = req.getField(.OrigClOrdID) orelse return;
+    const symbol = req.getField(.Symbol) orelse return;
+    const side_str = req.getField(.Side) orelse return;
+    const account = req.getField(.Account) orelse "UNKNOWN";
 
     const record_id = nextId();
     var order_id_buf: [20]u8 = undefined;
@@ -131,7 +131,7 @@ fn handleCancelOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void 
     , .{ record_id, ts, account, ctx.sender_comp_id, symbol, side_label, orig_cl_ord_id, cl_ord_id, order_id_str }) catch return;
     appendRecord(rec);
 
-    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .ClOrdID, .value = cl_ord_id },
         .{ .tag = .OrigClOrdID, .value = orig_cl_ord_id },
         .{ .tag = .OrderID, .value = order_id_str },
@@ -146,10 +146,10 @@ fn handleCancelOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void 
 
 // --------------------------------------------------------- //
 
-const Routes = [_]zix.Fix.Route{
+const router = zix.Fix.Router(&[_]zix.Fix.Route{
     .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder, .timeout_ms = 500 },
     .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancelOrder, .timeout_ms = 500 },
-};
+});
 
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
@@ -164,7 +164,7 @@ pub fn main(process: std.process.Init) !void {
     defer logger.deinit();
 
     var server = try zix.Fix.Server.init(
-        &Routes,
+        router.dispatch,
         .{
             .io = io,
             .ip = IP,

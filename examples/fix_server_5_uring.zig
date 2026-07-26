@@ -26,7 +26,7 @@ const POOL_SIZE: usize = 0; // ignored by URING
 // --------------------------------------------------------- //
 
 pub fn main(process: std.process.Init) !void {
-    var server = try zix.Fix.Server.init(&.{}, .{
+    var server = try zix.Fix.Server.init(null, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
