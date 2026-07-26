@@ -32,8 +32,20 @@ jobs:
       - name: zig version
         run: zig version
 
-      - name: zix unit, integration, behaviour, edge tests
-        run: zig build test-all
+      - name: zix unit tests
+        run: zig build unit-test
+
+      - name: zix integration tests
+        if: always()
+        run: zig build integration-test
+
+      - name: zix behaviour tests
+        if: always()
+        run: zig build behaviour-test
+
+      - name: zix edge tests
+        if: always()
+        run: zig build edge-test
 
       - name: postgrez unit tests
         run: zig build postgrez-test-unit

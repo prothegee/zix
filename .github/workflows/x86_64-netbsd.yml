@@ -38,7 +38,17 @@ jobs:
             cd $GITHUB_WORKSPACE
             zig version
 
-            zig build test-all
-            zig build postgrez-test-unit
-            zig build rediz-test-unit
-            zig build prometheuz-test-unit
+            failures=""
+
+            zig build unit-test || failures="$failures unit-test"
+            zig build integration-test || failures="$failures integration-test"
+            zig build behaviour-test || failures="$failures behaviour-test"
+            zig build edge-test || failures="$failures edge-test"
+            zig build postgrez-test-unit || failures="$failures postgrez-test-unit"
+            zig build rediz-test-unit || failures="$failures rediz-test-unit"
+            zig build prometheuz-test-unit || failures="$failures prometheuz-test-unit"
+
+            if [ -n "$failures" ]; then
+              echo "failed:$failures"
+              exit 1
+            fi

@@ -29,8 +29,16 @@ pub const GrpcStatus = status.GrpcStatus;
 /// Return the current wall-clock time in nanoseconds (CLOCK_REALTIME basis).
 /// Use this when overriding ctx.deadline_ns at runtime inside a handler.
 pub fn wallClockNs() u64 {
-    var timespec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &timespec);
+    if (comptime @import("builtin").target.os.tag == .linux) {
+        var timespec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &timespec);
+        return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
+    }
+
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.wallClockNs();
+
+    var timespec: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &timespec);
     return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
 }
 

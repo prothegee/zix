@@ -277,8 +277,16 @@ pub fn buildMessage(
 
 /// Return the current wall-clock time in nanoseconds (Unix epoch basis).
 pub fn wallClockNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (comptime builtin.target.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
+    if (comptime builtin.target.os.tag == .windows) return win_io.wallClockNs();
+
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 

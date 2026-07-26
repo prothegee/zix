@@ -246,6 +246,8 @@ else blk: {
 
 > Pilih comptime gating untuk fakta build-time (`comptime builtin.target.os.tag`), runtime probe hanya untuk fakta host-time (memlock, ketersediaan ring). Selalu catat alasan fallback. Jangan pernah biarkan server diam-diam hilang setelah bind.
 
+Guard yang sama berlaku untuk fast path Linux-only manapun yang ditambahkan murni demi performa, bukan cuma dispatch model (misalnya helper `wallClockNs` / `nowUs` yang memanggil `std.os.linux.clock_gettime` langsung, bukan lewat `std.posix.system`). Branch Linux (`comptime builtin.target.os.tag == .linux`, mencakup x86_64-linux dan aarch64-linux secara identik) adalah platform utama yang guarded: pertahankan agar tetap byte-identical dengan yang sudah terbukti, dan tambahkan tiap platform lain sebagai branch terpisah di sampingnya, jangan digabung jadi satu implementasi bersama.
+
 ---
 
 ## 9. Penanganan error
