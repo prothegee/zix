@@ -1,13 +1,13 @@
 //! zix http server: the public Server type and the dispatch_model switch. The
 //! shared request pipeline and the per-model dispatch loops live under dispatch/
-//! (ADR-043). The server holds the comptime-baked router plus the connection
-//! registry, run() spawns the date/eviction timer and hands off to the model.
+//! (ADR-043). The server holds the handler plus the connection registry, run()
+//! spawns the date/eviction timer and hands off to the model.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Config = @import("config.zig").HttpServerConfig;
 const DispatchModel = @import("config.zig").DispatchModel;
-const Router = @import("router.zig").Router;
+const HandlerFn = @import("router.zig").HandlerFn;
 const Route = @import("router.zig").Route;
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
@@ -25,180 +25,150 @@ const tls_mux = @import("tls_mux.zig");
 
 // --------------------------------------------------------- //
 
-// Internal generic implementation: use `Server.init(routes, config)` publicly.
-fn HttpServerImpl(comptime routes: []const Route) type {
-    return struct {
-        config: Config,
-        router: Router(routes) = .{},
-        registry: common.ConnRegistry = .{},
-
-        const Self = @This();
-
-        // --------------------------------------------------------- //
-
-        /// Parse and dispatch one complete HTTP request from buf. Thin delegate to
-        /// the shared pipeline (dispatch/common.processRequest), kept as a method so
-        /// callers and tests can drive a single request without a live socket loop.
-        ///
-        /// Return:
-        /// - .keep_alive when the connection may serve another request
-        /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
-        pub fn processRequest(
-            self: *Self,
-            stream: std.Io.net.Stream,
-            fd: std.posix.fd_t,
-            io: std.Io,
-            buf: []u8,
-            arena: *std.heap.ArenaAllocator,
-        ) common.ReqOutcome {
-            return common.processRequest(self, stream, fd, io, buf, arena);
-        }
-
-        /// Initialize the HTTP server with the given config
-        ///
-        /// Param:
-        /// config - HttpServerConfig
-        ///
-        /// Return:
-        /// - Self
-        pub fn init(config: Config) Self {
-            return .{ .config = config };
-        }
-
-        /// Free registry storage
-        pub fn deinit(self: *Self) void {
-            self.registry.deinit();
-        }
-
-        /// Dual-listener TLS accept thread for the thread models: serves https on config.port
-        /// (already overridden to tls_port by the caller) while the cleartext model runs on the
-        /// original port.
-        fn serveTlsThread(server_copy: Self, tls_io: std.Io) void {
-            tls_serve.runTls(&server_copy, tls_io) catch {};
-        }
-
-        /// Start listening and accepting connections
-        ///
-        /// Note:
-        /// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
-        /// - workers = N: exactly N accept threads, same pool sizing formula
-        /// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
-        /// - Accept threads listen on the same port via SO_REUSEPORT
-        /// - Pool threads handle connections synchronously via a shared work queue
-        ///
-        /// Return:
-        /// - !void
-        pub fn run(self: *Self) !void {
-            const cfg = self.config;
-
-            // Reject an impossible dual-listener bind before the timer thread spawns, so an
-            // error return leaves no detached thread reading this server's registry.
-            if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
-
-            const cpu = try std.Thread.getCpuCount();
-
-            const thread_io: std.Io = cfg.io;
-
-            if (cfg.public_dir.len > 0) {
-                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
-                dir.close(thread_io);
-            }
-
-            // Background timer: updates date cache every 500ms, evicts timed-out connections.
-            const timer_thread = try std.Thread.spawn(.{}, common.timerLoop, .{ thread_io, &self.registry });
-            defer timer_thread.detach();
-
-            const is_linux = comptime builtin.target.os.tag == .linux;
-
-            const effective_model: DispatchModel = blk: {
-                if (comptime !is_linux) {
-                    // EPOLL and URING are Linux-only: fall back to POOL elsewhere.
-                    if (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING) {
-                        common.logSystem(cfg, "EPOLL/URING are Linux-only. Falling back to POOL.", .{});
-                        break :blk .POOL;
-                    }
-                }
-                break :blk cfg.dispatch_model;
-            };
-
-            // https opt-in (config.tls): terminate TLS on a gated path, the cleartext models above
-            // are untouched. EPOLL / URING multiplex TLS in the event-driven worker (one SO_REUSEPORT
-            // epoll worker per core, many connections each), the thread models hand each connection to
-            // its own worker thread.
-            if (cfg.tls != null) {
-                // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
-                // fleet, instead of a second server launch.
-                if (cfg.tls_port != 0) {
-                    if (is_linux and effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
-                    if (is_linux and effective_model == .URING) return uring_model.runUring(self, thread_io);
-
-                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
-                    // TLS on tls_port (thread-per-connection, WebSocket + SSE included, ADR-054 /
-                    // ADR-055), the cleartext model runs below unchanged.
-                    var tls_server = self.*;
-                    tls_server.config.port = cfg.tls_port;
-                    tls_server.config.tls_port = 0;
-
-                    const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{ tls_server, thread_io });
-                    tls_thread.detach();
-                } else {
-                    if (is_linux and (effective_model == .EPOLL or effective_model == .URING)) {
-                        return tls_mux.runTlsMux(self, thread_io);
-                    }
-                    return tls_serve.runTls(self, thread_io);
-                }
-            }
-
-            switch (effective_model) {
-                .POOL => try pool_model.runPool(self, thread_io, cpu),
-                .ASYNC => try async_model.runAsync(self, thread_io),
-                .MIXED => try mixed_model.runMixed(self, thread_io, cpu),
-                // effective_model already resolved .EPOLL / .URING to .POOL off Linux,
-                // the comptime gate only keeps the Linux-only loops out of analysis there.
-                .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else unreachable,
-                // Native io_uring ring path (ADR-037 Phase 4 step 4).
-                .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else unreachable,
-            }
-        }
-    };
-}
-
-// --------------------------------------------------------- //
-
-/// HTTP server: initialize with a comptime route table
+/// HTTP server: initialize with a handler built via Router(routes).dispatch.
 ///
 /// Note:
-/// - routes must be comptime: the router is baked into the server type at compile time
-///   (no heap allocation, no dynamic registration after init)
-/// - The per-connection read buffer lives on the connection thread stack when
-///   max_recv_buf <= dispatch/common.stack_read_buf_max (4096), otherwise it
-///   heap-allocates. max_recv_buf (config) is the tuning knob.
-/// - workers in config controls accept thread count:
-///   0 (default) = cpu_count accept threads, max(10, cpu_count * 2) pool threads.
-///   N           = exactly N accept threads, same pool sizing formula.
+/// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
+/// - workers = N: exactly N accept threads, same pool sizing formula
+/// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
+/// - Accept threads listen on the same port via SO_REUSEPORT
+/// - Pool threads handle connections synchronously via a shared work queue
 ///
 /// Usage:
 /// ```zig
-/// var server = zix.Http.Server.init(&[_]zix.Http.Route{
+/// const router = zix.Http.Router(&[_]zix.Http.Route{
 ///     .{ .path = "/",      .handler = homeHandler },
 ///     .{ .path = "/api",   .handler = apiHandler,  .kind = .PREFIX },
 ///     .{ .path = "/u/:id", .handler = userHandler, .kind = .PARAM },
-/// }, .{ .ip = "0.0.0.0", .port = 8080, ... });
+/// });
+/// var server = zix.Http.Server.init(router.dispatch, .{ .ip = "0.0.0.0", .port = 8080, ... });
 /// ```
 pub const Server = struct {
+    handler: HandlerFn,
+    config: Config,
+    registry: common.ConnRegistry = .{},
+
+    const Self = @This();
+
+    // --------------------------------------------------------- //
+
+    /// Parse and dispatch one complete HTTP request from buf. Thin delegate to
+    /// the shared pipeline (dispatch/common.processRequest), kept as a method so
+    /// callers and tests can drive a single request without a live socket loop.
+    ///
+    /// Return:
+    /// - .keep_alive when the connection may serve another request
+    /// - .close on error, streaming, unconsumed body, Connection: close, or peer hangup
+    pub fn processRequest(
+        self: *Self,
+        stream: std.Io.net.Stream,
+        fd: std.posix.fd_t,
+        io: std.Io,
+        buf: []u8,
+        arena: *std.heap.ArenaAllocator,
+    ) common.ReqOutcome {
+        return common.processRequest(self, stream, fd, io, buf, arena);
+    }
+
     /// Initialize the HTTP server
     ///
     /// Param:
-    /// routes - comptime []const Route (route table baked into server type)
+    /// handler - HandlerFn (built via Router(&[_]Route{...}).dispatch)
     /// config - HttpServerConfig
     ///
     /// Return:
-    /// - HttpServerImpl(routes)
-    pub fn init(
-        comptime routes: []const Route,
-        config: Config,
-    ) HttpServerImpl(routes) {
-        return HttpServerImpl(routes).init(config);
+    /// - Self
+    pub fn init(handler: HandlerFn, config: Config) Self {
+        return .{ .handler = handler, .config = config };
+    }
+
+    /// Free registry storage
+    pub fn deinit(self: *Self) void {
+        self.registry.deinit();
+    }
+
+    /// Dual-listener TLS accept thread for the thread models: serves https on config.port
+    /// (already overridden to tls_port by the caller) while the cleartext model runs on the
+    /// original port.
+    fn serveTlsThread(server_copy: Self, tls_io: std.Io) void {
+        tls_serve.runTls(&server_copy, tls_io) catch {};
+    }
+
+    /// Start listening and accepting connections
+    ///
+    /// Return:
+    /// - !void
+    pub fn run(self: *Self) !void {
+        const cfg = self.config;
+
+        // Reject an impossible dual-listener bind before the timer thread spawns, so an
+        // error return leaves no detached thread reading this server's registry.
+        if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
+
+        const cpu = try std.Thread.getCpuCount();
+
+        const thread_io: std.Io = cfg.io;
+
+        if (cfg.public_dir.len > 0) {
+            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+            dir.close(thread_io);
+        }
+
+        // Background timer: updates date cache every 500ms, evicts timed-out connections.
+        const timer_thread = try std.Thread.spawn(.{}, common.timerLoop, .{ thread_io, &self.registry });
+        defer timer_thread.detach();
+
+        const is_linux = comptime builtin.target.os.tag == .linux;
+
+        const effective_model: DispatchModel = blk: {
+            if (comptime !is_linux) {
+                // EPOLL and URING are Linux-only: fall back to POOL elsewhere.
+                if (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING) {
+                    common.logSystem(cfg, "EPOLL/URING are Linux-only. Falling back to POOL.", .{});
+                    break :blk .POOL;
+                }
+            }
+            break :blk cfg.dispatch_model;
+        };
+
+        // https opt-in (config.tls): terminate TLS on a gated path, the cleartext models above
+        // are untouched. EPOLL / URING multiplex TLS in the event-driven worker (one SO_REUSEPORT
+        // epoll worker per core, many connections each), the thread models hand each connection to
+        // its own worker thread.
+        if (cfg.tls != null) {
+            // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
+            // fleet, instead of a second server launch.
+            if (cfg.tls_port != 0) {
+                if (is_linux and effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
+                if (is_linux and effective_model == .URING) return uring_model.runUring(self, thread_io);
+
+                // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
+                // TLS on tls_port (thread-per-connection, WebSocket + SSE included, ADR-054 /
+                // ADR-055), the cleartext model runs below unchanged.
+                var tls_server = self.*;
+                tls_server.config.port = cfg.tls_port;
+                tls_server.config.tls_port = 0;
+
+                const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{ tls_server, thread_io });
+                tls_thread.detach();
+            } else {
+                if (is_linux and (effective_model == .EPOLL or effective_model == .URING)) {
+                    return tls_mux.runTlsMux(self, thread_io);
+                }
+                return tls_serve.runTls(self, thread_io);
+            }
+        }
+
+        switch (effective_model) {
+            .POOL => try pool_model.runPool(self, thread_io, cpu),
+            .ASYNC => try async_model.runAsync(self, thread_io),
+            .MIXED => try mixed_model.runMixed(self, thread_io, cpu),
+            // effective_model already resolved .EPOLL / .URING to .POOL off Linux,
+            // the comptime gate only keeps the Linux-only loops out of analysis there.
+            .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else unreachable,
+            // Native io_uring ring path (ADR-037 Phase 4 step 4).
+            .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else unreachable,
+        }
     }
 };
 
@@ -324,8 +294,8 @@ test "zix http: EPOLL processRequest serves a cache miss then a hit" {
     defer setCache(null, 0);
 
     const routes = [_]Route{.{ .path = "/cached", .handler = cacheRouteHandler }};
-    const ServerImpl = HttpServerImpl(&routes);
-    var server = ServerImpl.init(.{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .response_cache = true });
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .response_cache = true });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

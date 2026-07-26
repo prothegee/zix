@@ -1,24 +1,22 @@
 //! zix http dispatch: the shared request pipeline plus the helpers every model
 //! reuses (ADR-043). processRequest / handleOneRequest / handleConnection are
-//! the engine core (routes ride on the server's comptime-baked router, so they
-//! take server: anytype). The connection registry, work queue, date cache,
-//! cpu-affinity helpers, and the EPOLL / URING per-connection tables live here
-//! too. The dispatch loops themselves are one file per model under dispatch/.
+//! the engine core (server: anytype, though Server is a concrete type now, kept
+//! generic for parity with the other dispatch files). The connection registry,
+//! work queue, date cache, cpu-affinity helpers, and the EPOLL / URING
+//! per-connection tables live here too. The dispatch loops themselves are one
+//! file per model under dispatch/.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../../utils/windows_io.zig");
 const Config = @import("../config.zig").HttpServerConfig;
-const Router = @import("../router.zig").Router;
-const Route = @import("../router.zig").Route;
 const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
 const writeAllFD = @import("../response.zig").writeAllFD;
 const formatHttpDate = @import("../response.zig").formatHttpDate;
 const Context = @import("../context.zig").Context;
 const method = @import("../method.zig");
-const static = @import("../static.zig");
 const parser = @import("../parser.zig");
 const setCache = @import("../response.zig").setCache;
 const RespSink = @import("../response.zig").RespSink;
@@ -621,38 +619,23 @@ pub fn processRequest(
         res.date_cache = g_date_bufs[idx][0..g_date_lens[idx]];
     }
 
-    var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger };
+    var ctx = Context{ .io = io, .allocator = allocator, .stream = stream, .logger = cfg.logger, .public_dir = cfg.public_dir };
 
     // Layer B: optional handler deadline.
     if (cfg.handler_timeout_ms > 0) ctx = ctx.withTimeout(cfg.handler_timeout_ms);
 
     // A handler error is completed as one 500, but only when the handler wrote
     // nothing, so a partially sent response is not corrupted (same policy as the
-    // zix.Http1 invokeHandler).
-    const matched = server.router.dispatch(&req, &res, &ctx) catch blk: {
+    // zix.Http1 invokeHandler). The static-file fallback and 404 live inside
+    // the router's dispatch itself (ctx.public_dir), same as zix.Http1.
+    server.handler(&req, &res, &ctx) catch {
         if (!res.sent) {
             res.setStatus(.INTERNAL_SERVER_ERROR);
             res.setContentType(.TEXT_PLAIN);
             res.send("Internal Server Error") catch {};
         }
-        break :blk true;
     };
     if (res.streaming) return .close;
-
-    if (!matched) {
-        var served = false;
-        if (cfg.public_dir.len > 0) {
-            const request_path = req.path();
-            const stripped = if (request_path.len > 0 and request_path[0] == '/') request_path[1..] else request_path;
-            if (stripped.len > 0) {
-                served = static.serve(&req, fd, stripped, cfg.public_dir, io) catch false;
-            }
-        }
-        if (!served) {
-            res.setStatus(.NOT_FOUND);
-            res.send("Not Found") catch {};
-        }
-    }
 
     if (cfg.logger) |lg| {
         const forwarded_for = req.header("x-forwarded-for") orelse "";
@@ -690,7 +673,7 @@ pub fn processRequest(
 /// - Falls back to static file serving, then 404, when no route matches
 ///
 /// Param:
-/// server - anytype (pointer to the HttpServerImpl instance)
+/// server - anytype (pointer to the Server instance)
 /// stream - std.Io.net.Stream (passed to Context for upgrade handlers)
 /// fd - std.posix.fd_t (raw socket for recv/send on the hot path)
 /// io - std.Io
@@ -753,7 +736,7 @@ pub const stack_read_buf_max: usize = 4096;
 /// Param:
 /// stream - std.Io.net.Stream
 /// io - std.Io
-/// server - anytype (pointer to the HttpServerImpl instance)
+/// server - anytype (pointer to the Server instance)
 pub fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: anytype) void {
     defer stream.close(io);
     setNoDelay(stream.socket.handle);

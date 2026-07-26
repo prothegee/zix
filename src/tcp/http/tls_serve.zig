@@ -591,6 +591,7 @@ const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 const Route = @import("router.zig").Route;
+const Router = @import("router.zig").Router;
 
 fn tlsTestHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void {
     _ = req;
@@ -613,7 +614,8 @@ test "zix http: tls_serve, processRequestToBuffer captures the router response" 
         .{ .path = "/", .handler = tlsTestHandler },
         .{ .path = "/sse", .handler = tlsStreamHandler },
     };
-    var server = HttpServerImpl.init(&routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    const router = Router(&routes);
+    var server = HttpServerImpl.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -654,7 +656,8 @@ test "zix http: tls_serve, processRequestToBuffer streams over TLS when the stre
     const routes = [_]Route{
         .{ .path = "/sse", .handler = tlsStreamHandler },
     };
-    var server = HttpServerImpl.init(&routes, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    const router = Router(&routes);
+    var server = HttpServerImpl.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
