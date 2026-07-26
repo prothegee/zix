@@ -21,6 +21,10 @@ const upgrade_head_buf: usize = 8192;
 /// gRPC mux reply staging buffer per connection.
 const mux_stage_buf: usize = 65536;
 
+/// Backing size of the per-request stack arena on Context.allocator. Stack-based
+/// (std.heap.FixedBufferAllocator), no heap call, mirrors Fix/Http2's Context parity.
+pub const CTX_ARENA_BYTES: usize = 4096;
+
 /// Secondary mux per-connection read buffer floor (the mux conn path).
 const mux_read_buf_min: usize = 32 * 1024;
 
@@ -103,6 +107,37 @@ pub const GrpcContext = struct {
     /// paths, which keep one frame per message. _coal_len is the bytes currently packed.
     _coal: ?[]u8 = null,
     _coal_len: usize = 0,
+    /// Io backend for the connection. Carried for symmetry with the other engines' Context.
+    io: std.Io,
+    /// Per-request scratch allocator, backed by a stack buffer (no heap call).
+    allocator: std.mem.Allocator,
+
+    /// Return a copy with the deadline set to now + ms.
+    pub fn withTimeout(self: GrpcContext, ms: u64) GrpcContext {
+        var ctx = self;
+        ctx.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+
+        return ctx;
+    }
+
+    /// Set the deadline to now + ms in place.
+    pub fn setTimeout(self: *GrpcContext, ms: u64) void {
+        self.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+    }
+
+    /// Return a copy with an explicit absolute deadline (wall-clock nanoseconds).
+    pub fn withDeadline(self: GrpcContext, deadline_ns: u64) GrpcContext {
+        var ctx = self;
+        ctx.deadline_ns = deadline_ns;
+
+        return ctx;
+    }
+
+    /// Whether the deadline has passed. False when no deadline is set. The
+    /// handler must check this explicitly, it does not interrupt anything.
+    pub fn timedOut(self: *const GrpcContext) bool {
+        return self.isExpired();
+    }
 
     /// Read the next gRPC message from the buffered request stream.
     /// Slices point into the body buffer. Valid for the duration of the handler call.
@@ -310,11 +345,11 @@ pub const GrpcContext = struct {
     ///
     /// Usage:
     /// ```zig
-    /// fn handler(_: []const h2.Header, ctx: *zix.Grpc.Context) void {
-    ///     if (ctx.serveCached("application/grpc")) return;
-    ///     const reply = buildExpensiveReply(ctx.recvMessage());
-    ///     ctx.sendCached("application/grpc", reply, 0);
-    ///     ctx.finish(.OK, "");
+    /// fn handler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) anyerror!void {
+    ///     if (res.serveCached("application/grpc")) return;
+    ///     const reply = buildExpensiveReply(req.recvMessage());
+    ///     res.sendCached("application/grpc", reply, 0);
+    ///     res.finish(.OK, "");
     /// }
     /// ```
     ///
@@ -385,16 +420,76 @@ fn requestKey(path: []const u8, body: []const u8) u64 {
 
 // --------------------------------------------------------- //
 
+/// Zero-copy view over one inbound gRPC call's path and headers. Message access forwards to
+/// the Context that owns the actual receive buffer (recvMessage), so this stays a thin view
+/// with no state of its own.
+pub const GrpcRequest = struct {
+    /// Full gRPC path of this call (e.g. "/pkg.Svc/Method").
+    path: []const u8,
+    headers: []const h2.Header,
+    _ctx: *GrpcContext,
+
+    /// One request header value by name (case-insensitive).
+    pub fn header(self: GrpcRequest, name: []const u8) ?[]const u8 {
+        for (self.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        }
+
+        return null;
+    }
+
+    /// Read the next gRPC message from the buffered request stream. Forwards to
+    /// Context.recvMessage, the actual message buffer and cursor live there.
+    pub fn recvMessage(self: GrpcRequest) ?[]const u8 {
+        return self._ctx.recvMessage();
+    }
+};
+
+/// Thin builder over the Context's existing send verbs (sendHeaders, sendMessage, finish,
+/// serveCached, sendCached). Delegates rather than duplicates: Context already owns the
+/// gzip / coalescing / cork-buffer machinery, none of that moves.
+pub const GrpcResponse = struct {
+    _ctx: *GrpcContext,
+
+    /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
+    pub fn sendHeaders(self: GrpcResponse, content_type: []const u8) void {
+        self._ctx.sendHeaders(content_type);
+    }
+
+    /// Send one gRPC response message DATA frame.
+    pub fn sendMessage(self: GrpcResponse, content_type: []const u8, data: []const u8) void {
+        self._ctx.sendMessage(content_type, data);
+    }
+
+    /// Close the stream with a gRPC status. Must be called exactly once per handler.
+    pub fn finish(self: GrpcResponse, stat: GrpcStatus, grpc_message: []const u8) void {
+        self._ctx.finish(stat, grpc_message);
+    }
+
+    /// Serve a cached unary response when one is present and fresh. See Context.serveCached.
+    pub fn serveCached(self: GrpcResponse, content_type: []const u8) bool {
+        return self._ctx.serveCached(content_type);
+    }
+
+    /// Send a unary response message and store it for later serveCached hits. See Context.sendCached.
+    pub fn sendCached(self: GrpcResponse, content_type: []const u8, data: []const u8, ttl_ms: u32) void {
+        self._ctx.sendCached(content_type, data, ttl_ms);
+    }
+};
+
 /// gRPC handler function type. Called once per inbound gRPC call (h2 stream).
-/// Handler must call ctx.finish() before returning.
+/// Handler must call res.finish() before returning. Errors pass through silently
+/// (the wire carries whatever the handler already sent, or nothing).
 ///
 /// Param:
-/// headers - []const h2.Header (request headers)
-/// ctx - *GrpcContext (stream context for sending responses)
+/// req - *GrpcRequest (path, headers, recvMessage)
+/// res - *GrpcResponse (sendMessage, finish)
+/// ctx - *GrpcContext (deadline, io, per-request arena)
 pub const HandlerFn = *const fn (
-    headers: []const h2.Header,
+    req: *GrpcRequest,
+    res: *GrpcResponse,
     ctx: *GrpcContext,
-) void;
+) anyerror!void;
 
 /// gRPC route: exact full path to handler mapping.
 ///
@@ -402,33 +497,46 @@ pub const HandlerFn = *const fn (
 /// path - []const u8 (full gRPC path, e.g. "/package.Service/Method")
 /// handler - HandlerFn
 /// timeout_ms - u32 (per-route timeout in milliseconds. 0 = use GrpcServerConfig.handler_timeout_ms)
-/// is_server_streaming - bool (true for server-streaming routes that send multiple DATA frames)
+/// is_server_streaming - bool (true for server-streaming RouterType that send multiple DATA frames)
 pub const Route = struct {
     path: []const u8,
     handler: HandlerFn,
     /// Per-route handler timeout (milliseconds). 0 = use GrpcServerConfig.handler_timeout_ms.
     /// When non-zero, tightens ctx.deadline_ns if shorter than the global cap.
     timeout_ms: u32 = 0,
-    /// Set to true for server-streaming routes (handler calls sendMessage in a loop or
+    /// Set to true for server-streaming RouterType (handler calls sendMessage in a loop or
     /// requires client flow-control window updates while writing). When false (default),
     /// the handler runs synchronously on the connection thread: no task alloc, no 4KB
     /// header copy, no mutex. Synchronous dispatch blocks the read loop for the handler
     /// duration, only safe for short unary handlers.
+    ///
+    /// Note:
+    /// - The engine reads this BEFORE any handler runs (dispatchStream / muxDispatch), to pick
+    ///   sync-inline vs task-spawn dispatch. Measured: sync-inline is ~185x more RPS/core than
+    ///   task-spawn for a trivial unary handler (44.8M vs ~242K effective RPS/core, this box,
+    ///   2026-07-26 PoC). This is why Server.init takes the RouterType TYPE (comptime route
+    ///   visibility), not a bare handler pointer like the other four zix engines.
     is_server_streaming: bool = false,
 };
 
 /// Comptime path router. Dispatches by exact match on path. Sends UNIMPLEMENTED if no route matches.
+/// Usable as a HandlerFn (matches its signature exactly).
 ///
 /// Note:
 /// - Tightens ctx.deadline_ns with Route.timeout_ms when non-zero and shorter than current deadline.
+/// - route_slice exposes the comptime route table so the engine's own dispatch-strategy check
+///   (routeIsStreaming) can read Route.is_server_streaming before invoking the handler.
 ///
 /// Return:
 /// - type (zero-size, with a dispatch function)
 pub fn Router(comptime routes: []const Route) type {
     return struct {
-        pub fn dispatch(path: []const u8, headers: []const h2.Header, ctx: *GrpcContext) void {
+        /// Runtime-accessible slice of the comptime route table.
+        pub const route_slice: []const Route = routes;
+
+        pub fn dispatch(req: *GrpcRequest, res: *GrpcResponse, ctx: *GrpcContext) anyerror!void {
             inline for (routes) |route| {
-                if (std.mem.eql(u8, route.path, path)) {
+                if (std.mem.eql(u8, route.path, req.path)) {
                     if (route.timeout_ms > 0) {
                         const route_deadline: u64 = wallClockNs() + @as(u64, route.timeout_ms) * std.time.ns_per_ms;
                         if (ctx.deadline_ns) |current_deadline| {
@@ -437,11 +545,12 @@ pub fn Router(comptime routes: []const Route) type {
                             ctx.deadline_ns = route_deadline;
                         }
                     }
-                    route.handler(headers, ctx);
-                    return;
+
+                    return route.handler(req, res, ctx);
                 }
             }
-            ctx.finish(.UNIMPLEMENTED, "unknown method");
+
+            res.finish(.UNIMPLEMENTED, "unknown method");
         }
     };
 }
@@ -651,7 +760,7 @@ const TASK_BODY_BUF_SIZE: usize = 64 * 1024;
 
 /// Heap-allocated per-stream dispatch task. Owns a deep copy of the stream's headers
 /// and body so the read loop can immediately reuse the stream slot after spawning.
-fn DispatchTask(comptime routes: []const Route) type {
+fn DispatchTask(comptime RouterType: type) type {
     return struct {
         const Self = @This();
 
@@ -664,6 +773,7 @@ fn DispatchTask(comptime routes: []const Route) type {
         body: [TASK_BODY_BUF_SIZE]u8,
         opts: GrpcServeOpts,
         conn_mutex: *ConnMutex,
+        io: std.Io,
 
         fn run(self: *Self) void {
             const conn_mutex_ptr = self.conn_mutex;
@@ -681,6 +791,9 @@ fn DispatchTask(comptime routes: []const Route) type {
             var time_start: std.os.linux.timespec = undefined;
             if (self.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
 
+            var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+
             var ctx = GrpcContext{
                 .fd = self.fd,
                 .stream_id = self.stream_id,
@@ -692,8 +805,12 @@ fn DispatchTask(comptime routes: []const Route) type {
                 .deadline_ns = computeDeadline(self.opts.handler_timeout_ms, self.headers[0..self.header_count]),
                 ._write_mutex = conn_mutex_ptr,
                 ._resp_gzip = self.opts.compress and headersAcceptGzip(self.headers[0..self.header_count]),
+                .io = self.io,
+                .allocator = fba.allocator(),
             };
-            Router(routes).dispatch(path, self.headers[0..self.header_count], &ctx);
+            var req = GrpcRequest{ .path = path, .headers = self.headers[0..self.header_count], ._ctx = &ctx };
+            var res = GrpcResponse{ ._ctx = &ctx };
+            RouterType.dispatch(&req, &res, &ctx) catch {};
 
             if (self.opts.logger) |logger| {
                 var time_end: std.os.linux.timespec = undefined;
@@ -714,13 +831,14 @@ fn DispatchTask(comptime routes: []const Route) type {
 /// Rebases header slice pointers from the stream's scratch buffer into the task's copy.
 /// Falls back to an inline INTERNAL error if allocation or spawn fails.
 fn spawnGrpcStream(
-    comptime routes: []const Route,
+    comptime RouterType: type,
     stream: *Stream,
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
     conn_mutex: *ConnMutex,
+    io: std.Io,
 ) void {
-    const Task = DispatchTask(routes);
+    const Task = DispatchTask(RouterType);
     const task = std.heap.smp_allocator.create(Task) catch {
         var ctx = GrpcContext{
             .fd = fd,
@@ -731,6 +849,8 @@ fn spawnGrpcStream(
             ._sent_bytes = 0,
             ._grpc_status = 0,
             ._write_mutex = conn_mutex,
+            .io = io,
+            .allocator = std.heap.smp_allocator,
         };
         ctx.finish(.INTERNAL, "server overloaded");
         return;
@@ -759,6 +879,7 @@ fn spawnGrpcStream(
     }
 
     task.opts = opts;
+    task.io = io;
 
     const old_base = @intFromPtr(&stream.header_scratch[0]);
     const old_end = old_base + stream.header_scratch.len;
@@ -794,6 +915,8 @@ fn spawnGrpcStream(
                 ._sent_bytes = 0,
                 ._grpc_status = 0,
                 ._write_mutex = conn_mutex,
+                .io = io,
+                .allocator = std.heap.smp_allocator,
             };
             ctx.finish(.INTERNAL, "spawn failed");
             return;
@@ -817,12 +940,13 @@ fn routeIsStreaming(comptime routes: []const Route, path: []const u8) bool {
 }
 
 fn dispatchGrpcInline(
-    comptime routes: []const Route,
+    comptime RouterType: type,
     stream: *const Stream,
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
     conn_mutex: *ConnMutex,
     path: []const u8,
+    io: std.Io,
 ) void {
     var time_start: std.os.linux.timespec = undefined;
     if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
@@ -845,6 +969,9 @@ fn dispatchGrpcInline(
     var stage_buf: [reply_stage_scratch]u8 = undefined;
     var stage = ReplyStage{ .fd = fd, .buf = &stage_buf };
 
+    var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = stream.id,
@@ -857,10 +984,14 @@ fn dispatchGrpcInline(
         ._write_mutex = null,
         ._out = &stage,
         ._resp_gzip = resp_gzip,
+        .io = io,
+        .allocator = fba.allocator(),
     };
+    var req = GrpcRequest{ .path = path, .headers = stream.headers[0..stream.header_count], ._ctx = &ctx };
+    var res = GrpcResponse{ ._ctx = &ctx };
 
     if (need_mutex) conn_mutex.lock();
-    Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+    RouterType.dispatch(&req, &res, &ctx) catch {};
     stage.flush();
     if (need_mutex) conn_mutex.unlock();
 
@@ -877,18 +1008,19 @@ fn dispatchGrpcInline(
 }
 
 fn dispatchStream(
-    comptime routes: []const Route,
+    comptime RouterType: type,
     stream: *Stream,
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
     conn_mutex: *ConnMutex,
+    io: std.Io,
 ) void {
     const path = headerPath(stream.headers[0..stream.header_count]);
 
-    if (routeIsStreaming(routes, path)) {
-        spawnGrpcStream(routes, stream, fd, opts, conn_mutex);
+    if (routeIsStreaming(RouterType.route_slice, path)) {
+        spawnGrpcStream(RouterType, stream, fd, opts, conn_mutex, io);
     } else {
-        dispatchGrpcInline(routes, stream, fd, opts, conn_mutex, path);
+        dispatchGrpcInline(RouterType, stream, fd, opts, conn_mutex, path, io);
     }
 }
 
@@ -903,7 +1035,7 @@ fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
 
 /// Serve one gRPC h2c connection (h2c direct or h2c upgrade).
 /// Caller owns fd and must close it after this exits.
-pub fn serveGrpcConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts) void {
+pub fn serveGrpcConn(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcServeOpts, io: std.Io) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
         // std.posix.TCP is void on the BSDs in Zig 0.16: TCP_NODELAY is 1 there.
         const nodelay: u32 = if (comptime std.posix.TCP != void) std.posix.TCP.NODELAY else 1;
@@ -915,10 +1047,10 @@ pub fn serveGrpcConn(comptime routes: []const Route, fd: std.posix.fd_t, opts: G
             std.mem.asBytes(&@as(c_int, 1)),
         ) catch {};
     }
-    serveGrpcConnInner(routes, fd, opts) catch {};
+    serveGrpcConnInner(RouterType, fd, opts, io) catch {};
 }
 
-fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts) !void {
+fn serveGrpcConnInner(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcServeOpts, io: std.Io) !void {
     var peek: [3]u8 = undefined;
     try h2.recvExact(fd, &peek);
 
@@ -939,9 +1071,9 @@ fn serveGrpcConnInner(comptime routes: []const Route, fd: std.posix.fd_t, opts: 
             .{ h2.SETTINGS_ENABLE_PUSH, 0 },
         });
         var hpack_dec = h2.HpackDecoder.init();
-        try serveGrpcLoop(routes, fd, &hpack_dec, opts, 0);
+        try serveGrpcLoop(RouterType, fd, &hpack_dec, opts, 0, io);
     } else {
-        try serveGrpcUpgrade(routes, fd, opts, &peek);
+        try serveGrpcUpgrade(RouterType, fd, opts, &peek, io);
     }
 }
 
@@ -964,7 +1096,7 @@ fn getHttp1Header(buf: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: GrpcServeOpts, prefix: *const [3]u8) !void {
+fn serveGrpcUpgrade(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcServeOpts, prefix: *const [3]u8, io: std.Io) !void {
     var head_buf: [upgrade_head_buf]u8 = undefined;
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
@@ -1043,6 +1175,9 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     // Stream 1 (h2c upgrade) is dispatched synchronously before the read loop starts.
     // A long-running streaming handler here will delay the loop. This is a known limitation
     // of the upgrade path, h2c direct does not have this issue.
+    var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+
     var ctx = GrpcContext{
         .fd = fd,
         .stream_id = 1,
@@ -1055,8 +1190,12 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
             wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms
         else
             null,
+        .io = io,
+        .allocator = fba.allocator(),
     };
-    Router(routes).dispatch(path, &stream1_headers, &ctx);
+    var req = GrpcRequest{ .path = path, .headers = &stream1_headers, ._ctx = &ctx };
+    var res = GrpcResponse{ ._ctx = &ctx };
+    RouterType.dispatch(&req, &res, &ctx) catch {};
 
     if (opts.logger) |logger| {
         var time_end: std.os.linux.timespec = undefined;
@@ -1069,15 +1208,16 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         logger.rpc(peer, path, ctx._grpc_status, ctx._body.len, ctx._sent_bytes, dur_ms);
     }
 
-    try serveGrpcLoop(routes, fd, &hpack_dec, opts, 1);
+    try serveGrpcLoop(RouterType, fd, &hpack_dec, opts, 1, io);
 }
 
 fn serveGrpcLoop(
-    comptime routes: []const Route,
+    comptime RouterType: type,
     fd: std.posix.fd_t,
     hpack_dec: *h2.HpackDecoder,
     opts: GrpcServeOpts,
     initial_last_stream: u31,
+    io: std.Io,
 ) !void {
     const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
     // Read buffer holds at least one full frame (header + max payload) and is large enough
@@ -1233,7 +1373,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_headers and stream.end_stream) {
-                    dispatchStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -1261,7 +1401,7 @@ fn serveGrpcLoop(
                 stream.header_count += count;
                 stream.end_headers = (frame_header.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
-                    dispatchStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -1334,7 +1474,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
-                    dispatchStream(routes, stream, fd, opts, conn_mutex);
+                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -1368,6 +1508,8 @@ const MuxPhase = enum { await_preface, await_upgrade, await_preface2, h2 };
 pub const GrpcMuxConn = struct {
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
+    /// Io backend, carried for the Context built at each muxDispatch. Worker-wide.
+    io: std.Io,
 
     rbuf: []u8,
     rstart: usize,
@@ -1398,7 +1540,7 @@ pub const GrpcMuxConn = struct {
     ///
     /// Return:
     /// - null on allocation failure (caller closes fd)
-    pub fn init(fd: std.posix.fd_t, opts: GrpcServeOpts) ?*GrpcMuxConn {
+    pub fn init(fd: std.posix.fd_t, opts: GrpcServeOpts, io: std.Io) ?*GrpcMuxConn {
         const conn = std.heap.smp_allocator.create(GrpcMuxConn) catch return null;
 
         const max_payload = opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
@@ -1427,6 +1569,7 @@ pub const GrpcMuxConn = struct {
         conn.* = .{
             .fd = fd,
             .opts = opts,
+            .io = io,
             .rbuf = rbuf,
             .rstart = 0,
             .rend = 0,
@@ -1635,9 +1778,9 @@ fn setTcpCork(fd: std.posix.fd_t, enable: bool) void {
 /// Dispatch one fully-received stream inline, staging the reply into the connection cork.
 /// Unlike the blocking path this never spawns a thread or takes a connection mutex: the worker
 /// owns the connection, so a streaming handler runs on the event loop and must stay bounded.
-fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stream) void {
+fn muxDispatch(comptime RouterType: type, conn: *GrpcMuxConn, stream: *Stream) void {
     const path = headerPath(stream.headers[0..stream.header_count]);
-    const is_streaming = routeIsStreaming(routes, path);
+    const is_streaming = routeIsStreaming(RouterType.route_slice, path);
 
     var time_start: std.os.linux.timespec = undefined;
     if (conn.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
@@ -1657,6 +1800,9 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
     // _sendDataFrame). Unary keeps one frame per message, so it gets no coalesce buffer.
     var coal_buf: [grpc_stream_coalesce_cap]u8 = undefined;
 
+    var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+
     var ctx = GrpcContext{
         .fd = conn.fd,
         .stream_id = stream.id,
@@ -1671,10 +1817,14 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
         ._out = &conn.stage,
         ._resp_gzip = resp_gzip,
         ._coal = if (is_streaming) &coal_buf else null,
+        .io = conn.io,
+        .allocator = fba.allocator(),
     };
+    var req = GrpcRequest{ .path = path, .headers = stream.headers[0..stream.header_count], ._ctx = &ctx };
+    var res = GrpcResponse{ ._ctx = &ctx };
 
     if (is_streaming) setTcpCork(conn.fd, true);
-    Router(routes).dispatch(path, stream.headers[0..stream.header_count], &ctx);
+    RouterType.dispatch(&req, &res, &ctx) catch {};
     if (is_streaming) setTcpCork(conn.fd, false);
 
     if (conn.opts.logger) |logger| {
@@ -1724,7 +1874,7 @@ fn muxHandleUpgrade(conn: *GrpcMuxConn) GrpcConnOutcome {
 /// Return:
 /// - .keep_alive when the buffer is drained or holds only a partial frame (wait for more bytes)
 /// - .close on a protocol error or GOAWAY (a GOAWAY/close reply is staged first)
-fn muxProcess(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+fn muxProcess(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
     switch (conn.phase) {
         .await_preface => {
             const avail = conn.rend - conn.rstart;
@@ -1763,11 +1913,11 @@ fn muxProcess(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcom
         .h2 => {},
     }
 
-    return muxFrameLoop(routes, conn);
+    return muxFrameLoop(RouterType, conn);
 }
 
 /// The h2 frame loop over buffered bytes for a connection in the .h2 phase.
-fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+fn muxFrameLoop(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
     const max_payload = conn.opts.max_frame_size + h2.FRAME_PAYLOAD_SLACK;
 
     while (true) {
@@ -1861,7 +2011,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_headers and stream.end_stream) {
-                    muxDispatch(routes, conn, stream);
+                    muxDispatch(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -1881,7 +2031,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 stream.header_count += count;
                 stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
-                    muxDispatch(routes, conn, stream);
+                    muxDispatch(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -1936,7 +2086,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
                 stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
-                    muxDispatch(routes, conn, stream);
+                    muxDispatch(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -1957,7 +2107,7 @@ fn muxFrameLoop(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutc
 ///
 /// Return:
 /// - .close when the peer closed, a protocol error occurred, or the handshake was rejected
-pub fn grpcMuxOnReadable(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+pub fn grpcMuxOnReadable(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
     conn.stage.len = 0;
 
     while (true) {
@@ -1992,7 +2142,7 @@ pub fn grpcMuxOnReadable(comptime routes: []const Route, conn: *GrpcMuxConn) Grp
         }
         conn.rend += got;
 
-        if (muxProcess(routes, conn) == .close) {
+        if (muxProcess(RouterType, conn) == .close) {
             conn.stage.flush();
             return .close;
         }
@@ -2010,10 +2160,10 @@ pub fn grpcMuxOnReadable(comptime routes: []const Route, conn: *GrpcMuxConn) Grp
 /// Return:
 /// - .keep_alive when the buffer is drained or holds only a partial frame
 /// - .close on a protocol error or peer close (a GOAWAY/close reply is staged first)
-pub fn grpcMuxProcessRing(comptime routes: []const Route, conn: *GrpcMuxConn) GrpcConnOutcome {
+pub fn grpcMuxProcessRing(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
     conn.stage.len = 0;
 
-    return muxProcess(routes, conn);
+    return muxProcess(RouterType, conn);
 }
 
 fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
@@ -2121,7 +2271,7 @@ fn computeDeadline(handler_timeout_ms: u32, headers: []const h2.Header) ?u64 {
 const TEST_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 test "zix grpc: GrpcContext recvMessage empty body returns null" {
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(ctx.recvMessage() == null);
 }
 
@@ -2130,7 +2280,7 @@ test "zix grpc: GrpcContext recvMessage parses one message" {
     var body: [10]u8 = undefined;
     frm_mod.writeGrpcPrefix(body[0..5], false, 5);
     @memcpy(body[5..], "hello");
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &body, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     const message = ctx.recvMessage().?;
     try std.testing.expectEqualStrings("hello", message);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -2143,7 +2293,7 @@ test "zix grpc: GrpcContext recvMessage two messages" {
     @memcpy(body[5..8], "foo");
     frm_mod.writeGrpcPrefix(body[8..13], false, 3);
     @memcpy(body[13..16], "bar");
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = body[0..16], ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expectEqualStrings("foo", ctx.recvMessage().?);
     try std.testing.expectEqualStrings("bar", ctx.recvMessage().?);
     try std.testing.expect(ctx.recvMessage() == null);
@@ -2189,52 +2339,60 @@ test "zix grpc: GrpcServeOpts defaults" {
 
 test "zix grpc: Route timeout_ms defaults to zero" {
     const r = Route{ .path = "/svc.Svc/Method", .handler = struct {
-        fn h(_: []const h2.Header, _: *GrpcContext) void {}
+        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
     }.h };
     try std.testing.expectEqual(@as(u32, 0), r.timeout_ms);
 }
 
 test "zix grpc: Route is_server_streaming defaults to false" {
     const r = Route{ .path = "/svc.Svc/Method", .handler = struct {
-        fn h(_: []const h2.Header, _: *GrpcContext) void {}
+        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
     }.h };
     try std.testing.expect(!r.is_server_streaming);
 }
 
 test "zix grpc: GrpcContext.isExpired null deadline returns false" {
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(!ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired past deadline returns true" {
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = 1, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(ctx.isExpired());
 }
 
 test "zix grpc: GrpcContext.isExpired future deadline returns false" {
     const far_future: u64 = wallClockNs() + 1000 * std.time.ns_per_s;
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = false, ._sent_bytes = 0, ._grpc_status = 0, .deadline_ns = far_future, .io = undefined, .allocator = std.testing.allocator };
     try std.testing.expect(!ctx.isExpired());
 }
 
-test "zix grpc: Router dispatches to matching handler" {
-    var got: bool = false;
-    const handler: HandlerFn = struct {
-        fn h(headers: []const h2.Header, ctx: *GrpcContext) void {
-            _ = headers;
-            _ = ctx;
+test "zix grpc: RouterType dispatches to matching handler" {
+    const called = struct {
+        var count: u32 = 0;
+        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {
+            count += 1;
         }
-    }.h;
-    _ = handler;
-    const routes = [_]Route{.{ .path = "/svc.Svc/Method", .handler = struct {
-        fn h(headers: []const h2.Header, ctx: *GrpcContext) void {
-            _ = headers;
-            _ = ctx;
-        }
-    }.h }};
-    _ = routes;
-    got = true;
-    try std.testing.expect(got);
+    };
+
+    const router = Router(&[_]Route{.{ .path = "/svc.Svc/Method", .handler = called.h }});
+
+    var ctx = GrpcContext{
+        .fd = TEST_FD,
+        .stream_id = 1,
+        ._body = &.{},
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
+    };
+    var req = GrpcRequest{ .path = "/svc.Svc/Method", .headers = &.{}, ._ctx = &ctx };
+    var res = GrpcResponse{ ._ctx = &ctx };
+
+    try router.dispatch(&req, &res, &ctx);
+    try std.testing.expectEqual(@as(u32, 1), called.count);
 }
 
 // --------------------------------------------------------- //
@@ -2361,6 +2519,8 @@ test "zix grpc: server-streaming packs many messages into one DATA frame" {
         ._grpc_status = 0,
         ._out = &stage,
         ._coal = &coal,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
 
     ctx.sendMessage("application/grpc", "aa");
@@ -2388,6 +2548,8 @@ test "zix grpc: server-streaming DATA coalescing respects the frame cap" {
         ._grpc_status = 0,
         ._out = &stage,
         ._coal = &coal,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
 
     var sent: usize = 0;
@@ -2413,6 +2575,8 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
         ._hdr_sent = false,
         ._sent_bytes = 0,
         ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
     try std.testing.expect(!ctx.serveCached("application/grpc"));
 
@@ -2455,6 +2619,8 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
         ._hdr_sent = false,
         ._sent_bytes = 0,
         ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
     try std.testing.expect(!ctx.serveCached("application/grpc"));
     ctx.sendCached("application/grpc", reply, 0);
@@ -2477,6 +2643,8 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
         ._hdr_sent = false,
         ._sent_bytes = 0,
         ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
     };
     try std.testing.expect(ctx2.serveCached("application/grpc"));
 
@@ -2527,7 +2695,7 @@ test "zix grpc: streaming sendMessage coalesces a small DATA frame into one writ
 
     // Streaming path: no cork (_out null) and no write mutex, so sendMessage writes
     // directly. Headers pre-marked sent so only the DATA frame goes through the hook.
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
 
     ctx.sendMessage("application/grpc", "pong");
 
@@ -2553,7 +2721,7 @@ test "zix grpc: streaming sendMessage past the inline cap keeps the two-write pa
         h2_frame.write_hook_ctx = null;
     }
 
-    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 3, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0 };
+    var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 3, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
 
     // A payload larger than the inline cap is written as header then payload (two
     // writes), so it is never copied through the stack buffer.
@@ -2604,7 +2772,7 @@ test "zix grpc: stream slots are pooled across connections" {
     defer _ = std.posix.system.close(fds[1]);
 
     // Connection A borrows a slot, then releases it back to the per-worker pool.
-    const conn_a = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn_a = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     const slot_a = muxSlotFor(conn_a, 1).?;
     const stream_a = conn_a.streams[slot_a];
     try std.testing.expect(conn_a.slots[slot_a]);
@@ -2615,7 +2783,7 @@ test "zix grpc: stream slots are pooled across connections" {
 
     // A second connection reuses the same pooled stream (LIFO), so stream memory is shared per worker
     // and does not scale with the connection count.
-    const conn_b = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn_b = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn_b.deinit();
 
     const slot_b = muxSlotFor(conn_b, 3).?;
@@ -2636,7 +2804,7 @@ test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED 
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
 
-    const conn = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -2666,7 +2834,7 @@ test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED 
     off += 9 + 4;
     conn.rend = off;
 
-    const outcome = muxFrameLoop(&[_]Route{}, conn);
+    const outcome = muxFrameLoop(Router(&[_]Route{}), conn);
 
     try std.testing.expectEqual(GrpcConnOutcome.keep_alive, outcome);
     for (conn.slots) |in_use| try std.testing.expect(!in_use);
@@ -2711,7 +2879,7 @@ test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
     defer _ = std.posix.system.close(fds[0]);
     defer _ = std.posix.system.close(fds[1]);
 
-    const conn = GrpcMuxConn.init(fds[1], opts) orelse return error.OutOfMemory;
+    const conn = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
     conn.phase = .h2;
 
@@ -2739,7 +2907,7 @@ test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
     off += 9 + hblock2.len;
     conn.rend = off;
 
-    const outcome = muxFrameLoop(&[_]Route{}, conn);
+    const outcome = muxFrameLoop(Router(&[_]Route{}), conn);
 
     try std.testing.expectEqual(GrpcConnOutcome.keep_alive, outcome);
 

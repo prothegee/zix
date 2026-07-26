@@ -1,8 +1,9 @@
 //! zix grpc dispatch: helpers shared across the dispatch models (ADR-043).
 //! The route-agnostic pieces (logSystem, opts builders, setNoDelay, ConnQueue,
-//! the accept worker) are plain decls. The route-table-dependent per-connection
-//! helpers live in Dispatch(routes), since core.serveGrpcConn takes comptime
-//! routes. EPOLL and URING keep their own (route-baked) workers in their files.
+//! the accept worker) are plain decls. The Router-type-dependent per-connection
+//! helpers live in Dispatch(RouterType), since core.serveGrpcConn takes a
+//! comptime Router type (is_server_streaming must be visible before dispatch).
+//! EPOLL and URING keep their own (Router-baked) workers in their files.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,7 +11,6 @@ const ZIG_SEMVER = @import("../../../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../../../utils/windows_io.zig");
 const core = @import("../core.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
-const Route = core.Route;
 
 /// Effective cache slot count for a worker, honoring cache_max_total_bytes.
 /// When a memory ceiling is set, the entry count is reduced so the slab
@@ -222,19 +222,21 @@ pub fn workerEntry(ctx: WorkerCtx) void {
 
 // --------------------------------------------------------- //
 
-/// Route-table-dependent dispatch helpers for ASYNC / POOL / MIXED. The route
-/// set is comptime, so every function that calls core.serveGrpcConn(routes, ...)
-/// is baked per route table.
-pub fn Dispatch(comptime routes: []const Route) type {
+/// Router-type-dependent dispatch helpers for ASYNC / POOL / MIXED. The Router
+/// type is comptime (is_server_streaming must be visible before dispatch), so
+/// every function that calls core.serveGrpcConn(RouterType, ...) is baked per
+/// Router type.
+pub fn Dispatch(comptime RouterType: type) type {
     return struct {
         pub const ConnTask = struct {
             fd: std.posix.fd_t,
             opts: core.GrpcServeOpts,
+            io: std.Io,
         };
 
         pub fn dispatchConn(task: ConnTask) void {
             defer closeFD(task.fd);
-            core.serveGrpcConn(routes, task.fd, task.opts);
+            core.serveGrpcConn(RouterType, task.fd, task.opts, task.io);
         }
 
         pub const PoolCtx = struct {
@@ -246,7 +248,7 @@ pub fn Dispatch(comptime routes: []const Route) type {
         pub fn poolEntry(ctx: PoolCtx) void {
             while (ctx.queue.pop(ctx.io)) |fd| {
                 defer closeFD(fd);
-                core.serveGrpcConn(routes, fd, ctx.opts);
+                core.serveGrpcConn(RouterType, fd, ctx.opts, ctx.io);
             }
         }
 
@@ -274,6 +276,7 @@ pub fn Dispatch(comptime routes: []const Route) type {
                 _ = ctx.io.async(dispatchConn, .{ConnTask{
                     .fd = stream.socket.handle,
                     .opts = ctx.opts,
+                    .io = ctx.io,
                 }});
             }
         }
