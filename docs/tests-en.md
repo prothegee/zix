@@ -334,7 +334,7 @@ Ports: 18200-18206.
 | gRPC client streaming collects all messages | `collectHandler` buffers three messages, replies with count `"got 3"` |
 | gRPC bidirectional echoes each message | `echoHandler` echoes `"ping"` then `"pong"` from two client messages |
 | gRPC unknown method returns UNIMPLEMENTED | `dispatchHandler` replies with `GrpcStatus.UNIMPLEMENTED` for unknown path |
-| gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `ctx.finish(INVALID_ARGUMENT, ...)` without sending data, client receives the error status |
+| gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `res.finish(INVALID_ARGUMENT, ...)` without sending data, client receives the error status |
 | gRPC two streams on same connection both return OK | two sequential unary RPCs on one connection, both streams receive correct responses |
 
 ### tests/integration/channel/
@@ -732,7 +732,7 @@ Ports: 18220-18221.
 | `parseTimeout` single character | returns null |
 | `GrpcClient.connect` port zero | returns `error.PortNotConfigured` |
 | `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately, no crash or error |
-| gRPC finish-only handler delivers error status to client | handler calls `ctx.finish(INVALID_ARGUMENT, ...)` only, client receives the error status without any data frames |
+| gRPC finish-only handler delivers error status to client | handler calls `res.finish(INVALID_ARGUMENT, ...)` only, client receives the error status without any data frames |
 
 ### tests/edge/channel/
 
