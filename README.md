@@ -74,7 +74,7 @@
     <img src="https://img.shields.io/badge/Language-Zig-orange">
 </div>
 <h4 align="center">
-    <b><i>Status:</i></b>
+    <b><i>Platform Development Status:</i></b>
 </h4>
 <div align="center">
     <img src="https://img.shields.io/badge/x86__64-Linux-green">
