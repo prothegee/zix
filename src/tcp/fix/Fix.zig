@@ -31,6 +31,8 @@ pub const serveConn = core.serveConn;
 
 pub const HandlerFn = core.HandlerFn;
 pub const Route = core.FixRoute;
+pub const Request = core.FixRequest;
+pub const Response = core.FixResponse;
 pub const Context = core.FixContext;
 pub const Router = @import("router.zig").FixRouter;
 pub const wallClockNs = core.wallClockNs;

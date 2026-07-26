@@ -94,6 +94,8 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         hb_ms: u32,
         hb_timespec: lx.kernel_timespec,
         send_buf_size: usize = URING_SEND_BUF_SIZE,
+        /// Io backend, carried for the FixContext built at each processFixRing dispatch.
+        io: std.Io,
 
         const W = @This();
         const allocator = std.heap.smp_allocator;
@@ -302,7 +304,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
             core.tl_resp_sink = &sink;
             defer core.tl_resp_sink = null;
 
-            const result = core.processFixRing(&conn.fix_state, worker.comp_id, worker.opts, conn.buf[0..conn.filled], fd);
+            const result = core.processFixRing(&conn.fix_state, worker.comp_id, worker.opts, conn.buf[0..conn.filled], fd, worker.io);
 
             if (result.consumed >= conn.filled) {
                 conn.filled = 0;
@@ -402,6 +404,7 @@ fn uringFixWorker(ctx: UringFixCtx) void {
         .hb_ms = hb_ms,
         .hb_timespec = .{ .sec = @intCast(hb_ms / 1000), .nsec = @intCast((hb_ms % 1000) * 1_000_000) },
         .send_buf_size = ctx.send_buf_size,
+        .io = ctx.io,
     };
     worker.ring = initUringRing() catch return;
     defer worker.deinit();

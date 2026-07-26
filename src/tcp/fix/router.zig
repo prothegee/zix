@@ -4,6 +4,8 @@ const std = @import("std");
 const core = @import("core.zig");
 const Field = core.Field;
 const FixContext = core.FixContext;
+const FixRequest = core.FixRequest;
+const FixResponse = core.FixResponse;
 const FixRoute = core.FixRoute;
 const wallClockNs = core.wallClockNs;
 
@@ -15,11 +17,12 @@ const wallClockNs = core.wallClockNs;
 ///
 /// Usage:
 /// ```zig
-/// const r = zix.Fix.Router(&[_]zix.Fix.Route{
+/// const router = zix.Fix.Router(&[_]zix.Fix.Route{
 ///     .{ .msg_type = "D", .handler = handleOrder },
 ///     .{ .msg_type = "F", .handler = handleCancel, .timeout_ms = 500 },
 /// });
-/// // pass r.routes to Server.init for server-level dispatch, or call r.dispatch directly.
+/// var server = try zix.Fix.Server.init(router.dispatch, .{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV", .dispatch_model = .ASYNC });
+/// try server.run();
 /// ```
 ///
 /// Param:
@@ -29,27 +32,26 @@ pub fn FixRouter(comptime routes: []const FixRoute) type {
         /// Runtime-accessible slice of the comptime route table.
         pub const route_slice: []const FixRoute = routes;
 
-        /// Dispatch fields to the matching route handler.
-        /// If no route matches, the message is silently ignored.
+        /// Dispatch to the matching route handler. Usable as a HandlerFn.
+        /// If no route matches, the message is silently ignored. A route with its
+        /// own timeout_ms tightens ctx.deadline_ns (already seeded from the
+        /// server-wide handler_timeout_ms at Context build), never widens it.
         ///
         /// Param:
-        /// fields - []const Field (parsed fields from the received FIX message)
+        /// req - *FixRequest (typed view over the received message's fields)
+        /// res - *FixResponse (builder for the reply)
         /// ctx - *FixContext (per-connection context)
-        /// server_timeout_ms - u32 (server-wide handler timeout. 0 = disabled)
-        pub fn dispatch(fields: []const Field, ctx: *FixContext, server_timeout_ms: u32) void {
-            const msgtype = core.getField(fields, .MsgType) orelse return;
+        pub fn dispatch(req: *FixRequest, res: *FixResponse, ctx: *FixContext) anyerror!void {
+            const msgtype = req.getField(.MsgType) orelse return;
+
             inline for (routes) |route| {
                 if (std.mem.eql(u8, msgtype, route.msg_type)) {
-                    const effective_ms = blk: {
-                        const a = route.timeout_ms;
-                        const b = server_timeout_ms;
-                        break :blk if (a > 0 and b > 0) @min(a, b) else if (a > 0) a else b;
-                    };
-                    if (effective_ms > 0) {
-                        ctx.deadline_ns = wallClockNs() + @as(u64, effective_ms) * std.time.ns_per_ms;
+                    if (route.timeout_ms > 0) {
+                        const route_deadline = wallClockNs() + @as(u64, route.timeout_ms) * std.time.ns_per_ms;
+                        ctx.deadline_ns = if (ctx.deadline_ns) |server_deadline| @min(server_deadline, route_deadline) else route_deadline;
                     }
-                    route.handler(fields, ctx);
-                    return;
+
+                    return route.handler(req, res, ctx);
                 }
             }
         }
@@ -64,12 +66,12 @@ test "zix fix: dispatch calls the matching handler" {
 
     const called = struct {
         var count: u32 = 0;
-        fn handler(_: []const core.Field, _: *core.FixContext) void {
+        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
             count += 1;
         }
     };
 
-    const R = FixRouter(&[_]FixRoute{
+    const router = FixRouter(&[_]FixRoute{
         .{ .msg_type = "D", .handler = called.handler },
     });
 
@@ -77,6 +79,8 @@ test "zix fix: dispatch calls the matching handler" {
     var ctx = FixContext{
         .sender_comp_id = "CLIENT",
         .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
         ._fd = 0,
         ._seq_out = &seq,
     };
@@ -85,7 +89,9 @@ test "zix fix: dispatch calls the matching handler" {
         .{ .tag = .MsgType, .value = "D" },
         .{ .tag = .Symbol, .value = "AAPL" },
     };
-    R.dispatch(&fields, &ctx, 0);
+    var req = FixRequest{ .fields = &fields };
+    var res = FixResponse{ .sender_comp_id = ctx.sender_comp_id, .target_comp_id = ctx.target_comp_id, ._fd = ctx._fd, ._seq_out = ctx._seq_out };
+    try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(@as(u32, 1), called.count);
 }
 
@@ -94,13 +100,13 @@ test "zix fix: no match leaves handler uncalled" {
 
     const called = struct {
         var count: u32 = 0;
-        fn handler(_: []const core.Field, _: *core.FixContext) void {
+        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
             count += 1;
         }
     };
     called.count = 0;
 
-    const R = FixRouter(&[_]FixRoute{
+    const router = FixRouter(&[_]FixRoute{
         .{ .msg_type = "D", .handler = called.handler },
     });
 
@@ -108,12 +114,16 @@ test "zix fix: no match leaves handler uncalled" {
     var ctx = FixContext{
         .sender_comp_id = "CLIENT",
         .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
         ._fd = 0,
         ._seq_out = &seq,
     };
 
     const fields = [_]Field{.{ .tag = .MsgType, .value = "F" }};
-    R.dispatch(&fields, &ctx, 0);
+    var req = FixRequest{ .fields = &fields };
+    var res = FixResponse{ .sender_comp_id = ctx.sender_comp_id, .target_comp_id = ctx.target_comp_id, ._fd = ctx._fd, ._seq_out = ctx._seq_out };
+    try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(@as(u32, 0), called.count);
 }
 
@@ -121,10 +131,10 @@ test "zix fix: route timeout sets deadline_ns" {
     if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
 
     const noop = struct {
-        fn handler(_: []const core.Field, _: *core.FixContext) void {}
+        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {}
     };
 
-    const R = FixRouter(&[_]FixRoute{
+    const router = FixRouter(&[_]FixRoute{
         .{ .msg_type = "D", .handler = noop.handler, .timeout_ms = 100 },
     });
 
@@ -133,11 +143,45 @@ test "zix fix: route timeout sets deadline_ns" {
         .sender_comp_id = "CLIENT",
         .target_comp_id = "SERVER",
         .deadline_ns = null,
+        .io = undefined,
+        .allocator = std.testing.allocator,
         ._fd = 0,
         ._seq_out = &seq,
     };
 
     const fields = [_]Field{.{ .tag = .MsgType, .value = "D" }};
-    R.dispatch(&fields, &ctx, 0);
+    var req = FixRequest{ .fields = &fields };
+    var res = FixResponse{ .sender_comp_id = ctx.sender_comp_id, .target_comp_id = ctx.target_comp_id, ._fd = ctx._fd, ._seq_out = ctx._seq_out };
+    try router.dispatch(&req, &res, &ctx);
     try std.testing.expect(ctx.deadline_ns != null);
+}
+
+test "zix fix: route timeout tightens a wider server-wide deadline, never widens it" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
+    const noop = struct {
+        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {}
+    };
+
+    const router = FixRouter(&[_]FixRoute{
+        .{ .msg_type = "D", .handler = noop.handler, .timeout_ms = 50 },
+    });
+
+    var seq: u32 = 1;
+    const server_deadline = wallClockNs() + 10 * std.time.ns_per_s;
+    var ctx = FixContext{
+        .sender_comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .deadline_ns = server_deadline,
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        ._fd = 0,
+        ._seq_out = &seq,
+    };
+
+    const fields = [_]Field{.{ .tag = .MsgType, .value = "D" }};
+    var req = FixRequest{ .fields = &fields };
+    var res = FixResponse{ .sender_comp_id = ctx.sender_comp_id, .target_comp_id = ctx.target_comp_id, ._fd = ctx._fd, ._seq_out = ctx._seq_out };
+    try router.dispatch(&req, &res, &ctx);
+    try std.testing.expect(ctx.deadline_ns.? < server_deadline);
 }
