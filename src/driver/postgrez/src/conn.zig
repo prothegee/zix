@@ -840,23 +840,46 @@ fn appendStartupOk(allocator: std.mem.Allocator, script: *std.ArrayList(u8), ser
 }
 
 /// A scripted mock backend: all server bytes are pre-written into one end
-/// of a socketpair, the Conn reads them as the flow advances. Client writes
-/// land in the socket buffer unread, which is fine for scripted flows.
+/// of a loopback TCP pair, the Conn reads them as the flow advances. Client
+/// writes land in the socket buffer unread, which is fine for scripted flows.
+const MOCK_BACKEND_PORT: u16 = 19100;
+
 const MockBackend = struct {
     conn_fd: std.posix.fd_t,
-    script_fd: std.posix.fd_t,
+    script_stream: std.Io.net.Stream,
 
-    fn init(script: []const u8) !MockBackend {
-        var fds: [2]std.posix.fd_t = undefined;
-        if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds) != 0) return error.SocketPairFailed;
+    fn init(io: std.Io, script: []const u8) !MockBackend {
+        const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", MOCK_BACKEND_PORT);
+        var listener = try addr.listen(io, .{ .mode = .stream, .reuse_address = true });
+        defer listener.deinit(io);
 
-        var written: usize = 0;
-        while (written < script.len) {
-            const n = std.os.linux.write(fds[1], script.ptr + written, script.len - written);
-            written += n;
-        }
+        const Accepted = struct {
+            listener: *std.Io.net.Server,
+            io: std.Io,
+            stream: std.Io.net.Stream = undefined,
+            err: ?anyerror = null,
 
-        return .{ .conn_fd = fds[0], .script_fd = fds[1] };
+            fn run(self: *@This()) void {
+                self.stream = self.listener.accept(self.io) catch |e| {
+                    self.err = e;
+                    return;
+                };
+            }
+        };
+
+        var accepted = Accepted{ .listener = &listener, .io = io };
+        const t = try std.Thread.spawn(.{}, Accepted.run, .{&accepted});
+
+        const client_stream = try addr.connect(io, .{ .mode = .stream });
+        t.join();
+        if (accepted.err) |e| return e;
+
+        var write_buf: [4096]u8 = undefined;
+        var writer = accepted.stream.writer(io, &write_buf);
+        try writer.interface.writeAll(script);
+        try writer.interface.flush();
+
+        return .{ .conn_fd = client_stream.socket.handle, .script_stream = accepted.stream };
     }
 
     fn stream(self: *const MockBackend) std.Io.net.Stream {
@@ -864,15 +887,15 @@ const MockBackend = struct {
     }
 };
 
-/// A live scripted connection. The script side of the socketpair stays open
-/// for the whole test so post-startup sends do not hit EPIPE.
+/// A live scripted connection. The script side of the loopback pair stays
+/// open for the whole test so post-startup sends do not hit EPIPE.
 const Scripted = struct {
     conn: *Conn,
-    script_fd: std.posix.fd_t,
+    script_stream: std.Io.net.Stream,
 
-    fn deinit(self: *const Scripted) void {
+    fn deinit(self: *const Scripted, io: std.Io) void {
         self.conn.deinit();
-        _ = std.os.linux.close(self.script_fd);
+        self.script_stream.close(io);
     }
 };
 
@@ -883,17 +906,15 @@ const TEST_CONFIG = lib.Config{
 };
 
 fn connectScripted(io: std.Io, script: []const u8, config: lib.Config) !Scripted {
-    const mock = try MockBackend.init(script);
-    errdefer _ = std.os.linux.close(mock.script_fd);
+    const mock = try MockBackend.init(io, script);
+    errdefer mock.script_stream.close(io);
 
     const conn = try Conn.fromStream(testing.allocator, io, config, mock.stream());
 
-    return .{ .conn = conn, .script_fd = mock.script_fd };
+    return .{ .conn = conn, .script_stream = mock.script_stream };
 }
 
 test "postgrez: conn mock startup reaches ready" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -902,7 +923,7 @@ test "postgrez: conn mock startup reaches ready" {
     try appendStartupOk(testing.allocator, &script, "18.0");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectEqual(@as(u32, 18), conn.server_version_major);
@@ -912,8 +933,6 @@ test "postgrez: conn mock startup reaches ready" {
 }
 
 test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -923,7 +942,7 @@ test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
     try appendStartupOk(testing.allocator, &script, "16.4");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectEqual(frontend.PROTOCOL_V3_0, conn.protocol_code);
@@ -931,8 +950,6 @@ test "postgrez: conn mock NegotiateProtocolVersion downgrades in place" {
 }
 
 test "postgrez: conn mock server below 15 hard rejects" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -945,8 +962,6 @@ test "postgrez: conn mock server below 15 hard rejects" {
 }
 
 test "postgrez: conn mock strict V3_2 refuses negotiation" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -962,8 +977,6 @@ test "postgrez: conn mock strict V3_2 refuses negotiation" {
 }
 
 test "postgrez: conn mock cleartext auth flow" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -973,15 +986,13 @@ test "postgrez: conn mock cleartext auth flow" {
     try appendStartupOk(testing.allocator, &script, "18.0");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectEqual(@as(u32, 18), conn.server_version_major);
 }
 
 test "postgrez: conn mock md5 auth is rejected" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -993,8 +1004,6 @@ test "postgrez: conn mock md5 auth is rejected" {
 }
 
 test "postgrez: conn mock startup ErrorResponse surfaces state" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1006,8 +1015,6 @@ test "postgrez: conn mock startup ErrorResponse surfaces state" {
 }
 
 test "postgrez: conn mock exec returns affected rows" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1020,7 +1027,7 @@ test "postgrez: conn mock exec returns affected rows" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     const affected = try conn.exec("UPDATE t SET x = $1", .{7});
@@ -1028,8 +1035,6 @@ test "postgrez: conn mock exec returns affected rows" {
 }
 
 test "postgrez: conn mock exec server error maps SQLSTATE" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1042,7 +1047,7 @@ test "postgrez: conn mock exec server error maps SQLSTATE" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectError(error.ServerError, conn.exec("INSERT ...", .{}));
@@ -1088,8 +1093,6 @@ fn appendQueryScript(allocator: std.mem.Allocator, script: *std.ArrayList(u8)) !
 }
 
 test "postgrez: conn mock query maps typed rows" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1099,7 +1102,7 @@ test "postgrez: conn mock query maps typed rows" {
     try appendQueryScript(testing.allocator, &script);
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     const User = struct {
@@ -1130,8 +1133,6 @@ test "postgrez: conn mock query maps typed rows" {
 }
 
 test "postgrez: conn mock rows streams with row.get" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1141,7 +1142,7 @@ test "postgrez: conn mock rows streams with row.get" {
     try appendQueryScript(testing.allocator, &script);
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     var result = try conn.rows("SELECT id, name FROM users", .{});
@@ -1159,8 +1160,6 @@ test "postgrez: conn mock rows streams with row.get" {
 }
 
 test "postgrez: conn mock queryRow returns null on empty result" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1182,7 +1181,7 @@ test "postgrez: conn mock queryRow returns null on empty result" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     const Narrow = struct { id: i64 };
@@ -1191,8 +1190,6 @@ test "postgrez: conn mock queryRow returns null on empty result" {
 }
 
 test "postgrez: conn mock parse error recovers via sync" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1209,7 +1206,7 @@ test "postgrez: conn mock parse error recovers via sync" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     try testing.expectError(error.ServerError, conn.rows("SELEC 1", .{}));
@@ -1220,8 +1217,6 @@ test "postgrez: conn mock parse error recovers via sync" {
 }
 
 test "postgrez: conn mock transaction callback commits" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1245,7 +1240,7 @@ test "postgrez: conn mock transaction callback commits" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     const insertOne = struct {
@@ -1260,8 +1255,6 @@ test "postgrez: conn mock transaction callback commits" {
 }
 
 test "postgrez: conn mock prepared statement lifecycle" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1292,7 +1285,7 @@ test "postgrez: conn mock prepared statement lifecycle" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var prepared = try scripted.conn.prepare("INSERT INTO t (id) VALUES ($1)");
     defer prepared.deinit();
@@ -1313,8 +1306,6 @@ test "postgrez: conn mock prepared statement lifecycle" {
 }
 
 test "postgrez: conn mock pipeline collects per-statement results" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1335,7 +1326,7 @@ test "postgrez: conn mock pipeline collects per-statement results" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var pipe = try scripted.conn.pipeline();
     try pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"a"});
@@ -1349,8 +1340,6 @@ test "postgrez: conn mock pipeline collects per-statement results" {
 }
 
 test "postgrez: conn mock pipeline failure aborts the rest" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1367,7 +1356,7 @@ test "postgrez: conn mock pipeline failure aborts the rest" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var pipe = try scripted.conn.pipeline();
     try pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"a"});
@@ -1382,8 +1371,6 @@ test "postgrez: conn mock pipeline failure aborts the rest" {
 }
 
 test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1402,7 +1389,7 @@ test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
     config.max_pending_replies = 2;
 
     const scripted = try connectScripted(threaded.io(), script.items, config);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var pipe = try scripted.conn.pipeline();
     try pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"a"});
@@ -1414,8 +1401,6 @@ test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
 }
 
 test "postgrez: conn mock copy in writes and finishes" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1427,7 +1412,7 @@ test "postgrez: conn mock copy in writes and finishes" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var copy_in = try scripted.conn.copyIn("COPY metrics (ts, value) FROM STDIN");
     try copy_in.write("2026-07-14 10:00:00\t42\n");
@@ -1438,8 +1423,6 @@ test "postgrez: conn mock copy in writes and finishes" {
 }
 
 test "postgrez: conn mock copy out streams chunks" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1454,7 +1437,7 @@ test "postgrez: conn mock copy out streams chunks" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var copy_out = try scripted.conn.copyOut("COPY metrics TO STDOUT");
     defer copy_out.deinit();
@@ -1465,8 +1448,6 @@ test "postgrez: conn mock copy out streams chunks" {
 }
 
 test "postgrez: conn mock listen and nextNotification, pending then wire" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1492,7 +1473,7 @@ test "postgrez: conn mock listen and nextNotification, pending then wire" {
     try appendServerMsg(testing.allocator, &script, 'A', second_note.items);
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try scripted.conn.listen("jobs");
 
@@ -1507,8 +1488,6 @@ test "postgrez: conn mock listen and nextNotification, pending then wire" {
 }
 
 test "postgrez: conn mock tls PREFER continues cleartext on N" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1521,15 +1500,13 @@ test "postgrez: conn mock tls PREFER continues cleartext on N" {
     config.tls = .PREFER;
 
     const scripted = try connectScripted(threaded.io(), script.items, config);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     try testing.expectEqual(@as(?*tls_mod.TlsSession, null), scripted.conn.tls_session);
     try testing.expectEqual(@as(u32, 18), scripted.conn.server_version_major);
 }
 
 test "postgrez: conn mock tls REQUIRE fails on N" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1545,8 +1522,6 @@ test "postgrez: conn mock tls REQUIRE fails on N" {
 }
 
 test "postgrez: conn mock notification is captured while pumping" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1564,7 +1539,7 @@ test "postgrez: conn mock notification is captured while pumping" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
     _ = try conn.exec("UPDATE t SET x = 1", .{});
@@ -1593,8 +1568,6 @@ fn appendBinaryInt8Row(allocator: std.mem.Allocator, script: *std.ArrayList(u8),
 }
 
 test "postgrez: conn mock statement batch collects results in order" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1617,7 +1590,7 @@ test "postgrez: conn mock statement batch collects results in order" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var prepared = try scripted.conn.prepare("SELECT id FROM t WHERE id = $1");
 
@@ -1645,8 +1618,6 @@ test "postgrez: conn mock statement batch collects results in order" {
 }
 
 test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1666,7 +1637,7 @@ test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
     config.max_pending_replies = 2;
 
     const scripted = try connectScripted(threaded.io(), script.items, config);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var prepared = try scripted.conn.prepare("SELECT id FROM t WHERE id = $1");
 
@@ -1684,8 +1655,6 @@ test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
 }
 
 test "postgrez: conn mock statement batch failure aborts the rest" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1707,7 +1676,7 @@ test "postgrez: conn mock statement batch failure aborts the rest" {
     try appendServerMsg(testing.allocator, &script, 'Z', "I");
 
     const scripted = try connectScripted(threaded.io(), script.items, TEST_CONFIG);
-    defer scripted.deinit();
+    defer scripted.deinit(threaded.io());
 
     var prepared = try scripted.conn.prepare("SELECT id FROM t WHERE id = $1");
 
