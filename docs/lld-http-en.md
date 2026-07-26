@@ -8,9 +8,9 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 ### Public API
 
-`Server` is a namespace struct with a single `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. `HttpServerImpl` is the private generic. Callers use `var server = zix.Http.Server.init(&routes, .{...})` without naming the generic type.
+`Server` is one concrete struct (`{ handler: HandlerFn, config: Config, registry: ConnRegistry }`), not a comptime generic (ADR-063). `pub fn init(handler: HandlerFn, config: Config) Self` just stores both fields. Callers build `handler` via `zix.Http.Router(&[_]zix.Http.Route{...}).dispatch` and pass it in: `var server = zix.Http.Server.init(router.dispatch, .{...})`.
 
-`HttpServerImpl.init(config)` stores the config, nothing else: the `Router` is comptime-baked into the type (zero-size at runtime) and no socket is opened. The socket is opened in `run()`.
+`init(handler, config)` stores the handler and config, nothing else: no socket is opened. The socket is opened in `run()`. `Router(routes).dispatch` itself absorbs the static-file-fallback and 404 (mirrors Http1's router), so `dispatch/common.zig` no longer owns that logic externally.
 
 ### ConnQueue
 

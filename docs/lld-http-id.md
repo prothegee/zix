@@ -8,9 +8,9 @@ Detail implementasi internal untuk lapisan HTTP. Untuk dasar pertimbangan desain
 
 ### API Publik
 
-`Server` adalah namespace struct dengan satu `pub fn init(comptime routes: []const Route, config: Config) HttpServerImpl(routes)`. `HttpServerImpl` adalah generik privat. Pemanggil menggunakan `var server = zix.Http.Server.init(&routes, .{...})` tanpa menyebutkan tipe generiknya.
+`Server` adalah satu struct konkret (`{ handler: HandlerFn, config: Config, registry: ConnRegistry }`), bukan generik comptime (ADR-063). `pub fn init(handler: HandlerFn, config: Config) Self` hanya menyimpan kedua field tersebut. Pemanggil membangun `handler` via `zix.Http.Router(&[_]zix.Http.Route{...}).dispatch` dan meneruskannya: `var server = zix.Http.Server.init(router.dispatch, .{...})`.
 
-`HttpServerImpl.init(config)` menyimpan config, tidak ada yang lain: `Router` dibaked comptime ke dalam tipe (berukuran nol saat runtime) dan tidak ada socket yang dibuka. Socket dibuka di `run()`.
+`init(handler, config)` menyimpan handler dan config, tidak ada yang lain: tidak ada socket yang dibuka. Socket dibuka di `run()`. `Router(routes).dispatch` sendiri menyerap fallback file statis dan 404 (mencerminkan router Http1), jadi `dispatch/common.zig` tidak lagi memiliki logika itu secara eksternal.
 
 ### ConnQueue
 
