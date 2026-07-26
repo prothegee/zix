@@ -13,29 +13,15 @@ const ServerCtx = struct {
     err: ?anyerror = null,
 };
 
-fn echoHandler(
-    method: []const u8,
-    headers: []const zix.Http2.Header,
-    body: []const u8,
-    fd: std.posix.fd_t,
-    sid: u31,
-) void {
-    _ = method;
-    _ = headers;
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", body) catch {};
+fn echoHandler(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) anyerror!void {
+    _ = ctx;
+    try res.sendText(req.body);
 }
 
-fn helloHandler(
-    method: []const u8,
-    headers: []const zix.Http2.Header,
-    body: []const u8,
-    fd: std.posix.fd_t,
-    sid: u31,
-) void {
-    _ = method;
-    _ = headers;
-    _ = body;
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "Hello, World!") catch {};
+fn helloHandler(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) anyerror!void {
+    _ = req;
+    _ = ctx;
+    try res.sendText("Hello, World!");
 }
 
 // --------------------------------------------------------- //
@@ -48,7 +34,8 @@ fn makeRunner(comptime routes: []const zix.Http2.Route) type {
                 return;
             };
             const fd = stream.socket.handle;
-            zix.Http2.serveConn(routes, fd, .{});
+            const router = zix.Http2.Router(routes);
+            zix.Http2.serveConn(router.dispatch, fd, .{}, io);
             _ = std.os.linux.close(fd);
         }
     };
@@ -172,7 +159,8 @@ test "zix integration: Http2Server.init and deinit do not error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
+    const empty_router = zix.Http2.Router(&[_]zix.Http2.Route{});
+    var server = zix.Http2.Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -181,7 +169,8 @@ test "zix integration: Http2Server.run port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    const empty_router = zix.Http2.Router(&[_]zix.Http2.Route{});
+    var server = zix.Http2.Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     try std.testing.expectError(error.PortNotConfigured, server.run());

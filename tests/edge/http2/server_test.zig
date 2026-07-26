@@ -12,18 +12,13 @@ const ServerCtx = struct {
     err: ?anyerror = null,
 };
 
-fn nopHandler(
-    method: []const u8,
-    headers: []const zix.Http2.Header,
-    body: []const u8,
-    fd: std.posix.fd_t,
-    sid: u31,
-) void {
-    _ = method;
-    _ = headers;
-    _ = body;
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "ok") catch {};
+fn nopHandler(req: *zix.Http2.Request, res: *zix.Http2.Response, ctx: *zix.Http2.Context) anyerror!void {
+    _ = req;
+    _ = ctx;
+    try res.sendText("ok");
 }
+
+const nop_router = zix.Http2.Router(&[_]zix.Http2.Route{.{ .path = "/", .handler = nopHandler }});
 
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
     const stream = ctx.listener.accept(io) catch |e| {
@@ -31,7 +26,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
         return;
     };
     const fd = stream.socket.handle;
-    zix.Http2.serveConn(&[_]zix.Http2.Route{.{ .path = "/", .handler = nopHandler }}, fd, .{});
+    zix.Http2.serveConn(nop_router.dispatch, fd, .{}, io);
     _ = std.os.linux.close(fd);
 }
 
@@ -117,7 +112,8 @@ test "zix edge: Http2Server.run rejects port zero" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = zix.Http2.Server.init(&[_]zix.Http2.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    const empty_router = zix.Http2.Router(&[_]zix.Http2.Route{});
+    var server = zix.Http2.Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     try std.testing.expectError(error.PortNotConfigured, server.run());

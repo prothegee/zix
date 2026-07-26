@@ -17,13 +17,14 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 const h2_preface: []const u8 = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const settings_frame_type: u8 = 0x04;
 
-fn okHandler(_: []const u8, _: []const zix.Http2.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "dual") catch {};
+fn okHandler(_: *zix.Http2.Request, res: *zix.Http2.Response, _: *zix.Http2.Context) anyerror!void {
+    try res.sendText("dual");
 }
 
 const Routes = [_]zix.Http2.Route{
     .{ .path = "/", .handler = okHandler },
 };
+const router = zix.Http2.Router(&Routes);
 
 const ServeArgs = struct {
     port: u16,
@@ -34,7 +35,7 @@ const ServeArgs = struct {
 /// The server thread runs forever (run() never returns), so everything it touches is intentionally
 /// leaked for the lifetime of the test binary.
 fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: ServeArgs) void {
-    var server = zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(router.dispatch, .{
         .io = io,
         .ip = IP,
         .port = args.port,
@@ -244,7 +245,7 @@ test "zix integration: Http2 tls_port equal to port is rejected at run" {
     });
     defer tls.deinit();
 
-    var server = zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(router.dispatch, .{
         .io = io,
         .ip = IP,
         .port = 9224,
