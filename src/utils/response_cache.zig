@@ -8,7 +8,9 @@
 //! engines. See ADR-036.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const slab_mem = @import("../multiplexers/slab.zig");
+const win_io = @import("windows_io.zig");
 
 /// Granularity of a slot's slab region. Values pack at this rounding, so the
 /// hot entries of a worker sit within a few pages of each other instead of one
@@ -280,8 +282,18 @@ pub fn hashKeyEncoded(method: []const u8, path: []const u8, query: []const u8, e
 /// Coarse monotonic milliseconds for TTL. CLOCK_MONOTONIC_COARSE is served from
 /// the vDSO without a syscall, and millisecond resolution is enough for TTL.
 pub fn nowMillis() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC_COARSE, &ts);
+    if (comptime builtin.target.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC_COARSE, &ts);
+
+        return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) return win_io.monotonicUs() / std.time.us_per_ms;
+
+    // CLOCK_MONOTONIC_COARSE is a Linux-only clock ID: plain MONOTONIC is the portable equivalent.
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
 
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
