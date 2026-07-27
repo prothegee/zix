@@ -51,7 +51,7 @@ try_build() {
     local dir="$2"
     shift 2
 
-    if ! (cd "$dir" && $ZIG_BIN build "$@" --summary all); then
+    if ! (cd "$dir" && $ZIG_BIN build "$@" --summary failures); then
         echo "FAIL: $label"
         failures+=("$label")
     fi
