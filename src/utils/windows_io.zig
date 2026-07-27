@@ -4,8 +4,8 @@
 //! - The engine fast paths talk to sockets through raw POSIX descriptors. On
 //!   Windows a socket is an AFD handle driven through ntdll (Zig 0.16 std does
 //!   the same), so these helpers wrap NtReadFile / NtWriteFile / NtClose plus
-//!   the AFD partial-disconnect ioctl with a wait-on-handle loop for the
-//!   thread dispatch models.
+//!   the AFD partial-disconnect ioctl, each completed through its own event,
+//!   for the thread dispatch models.
 //!
 //! Note:
 //! - Windows-only: every caller comptime-gates on builtin.os.tag == .windows,
@@ -16,18 +16,48 @@
 const std = @import("std");
 const windows = std.os.windows;
 
-/// One NtWriteFile call, waiting on the handle when the operation goes async.
+/// Per-call completion event for the NT I/O helpers below.
+///
+/// Note:
+/// - The socket handles Zig 0.16 std hands out are AFD endpoints opened
+///   asynchronous, and a socket's file object is signaled by EVERY completed
+///   operation on it (std's own connect and send ioctls included). Waiting on
+///   the socket handle can therefore return before this call's operation
+///   finished, reading the status block too early. A fresh event per call is
+///   signaled only by this one operation.
+///
+/// Return:
+/// - windows.HANDLE (release with close())
+/// - error.BrokenPipe if event creation fails
+fn createIoEvent() error{BrokenPipe}!windows.HANDLE {
+    var event: windows.HANDLE = undefined;
+    const status = windows.ntdll.NtCreateEvent(
+        &event,
+        windows.ACCESS_MASK.Specific.Event.ALL_ACCESS,
+        null,
+        .Notification,
+        .FALSE,
+    );
+    if (status != .SUCCESS) return error.BrokenPipe;
+
+    return event;
+}
+
+/// One NtWriteFile call, waiting on a per-call event when the operation goes async.
 ///
 /// Return:
 /// - usize (bytes written)
 /// - error.BrokenPipe on any failed status
 pub fn writeOnce(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!usize {
+    const event = try createIoEvent();
+    defer close(event);
+
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, data.len);
 
-    var status = windows.ntdll.NtWriteFile(handle, null, null, null, &iosb, data.ptr, len, null, null);
+    var status = windows.ntdll.NtWriteFile(handle, event, null, null, &iosb, data.ptr, len, null, null);
     if (status == .PENDING) {
-        _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+        _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
         status = iosb.u.Status;
     }
     if (status != .SUCCESS) return error.BrokenPipe;
@@ -50,18 +80,21 @@ pub fn writeAll(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!void
     }
 }
 
-/// One NtReadFile call, waiting on the handle when the operation goes async.
+/// One NtReadFile call, waiting on a per-call event when the operation goes async.
 ///
 /// Return:
 /// - usize (bytes read, 0 when the peer closed)
 /// - error.BrokenPipe on any failed status
 pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
+    const event = try createIoEvent();
+    defer close(event);
+
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, buf.len);
 
-    var status = windows.ntdll.NtReadFile(handle, null, null, null, &iosb, buf.ptr, len, null, null);
+    var status = windows.ntdll.NtReadFile(handle, event, null, null, &iosb, buf.ptr, len, null, null);
     if (status == .PENDING) {
-        _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+        _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
         status = iosb.u.Status;
     }
     if (status == .END_OF_FILE) return 0;
@@ -73,6 +106,9 @@ pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
 /// Best-effort full shutdown (send + receive) of a socket handle, so a thread
 /// blocked reading it wakes with end-of-stream. Mirrors shutdown(fd, SHUT_RDWR).
 pub fn shutdown(handle: windows.HANDLE) void {
+    const event = createIoEvent() catch return;
+    defer close(event);
+
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const info = windows.AFD.PARTIAL_DISCONNECT_INFO{
         .DisconnectMode = .{ .SEND = true, .RECEIVE = true },
@@ -81,7 +117,7 @@ pub fn shutdown(handle: windows.HANDLE) void {
 
     const status = windows.ntdll.NtDeviceIoControlFile(
         handle,
-        null,
+        event,
         null,
         null,
         &iosb,
@@ -91,7 +127,7 @@ pub fn shutdown(handle: windows.HANDLE) void {
         null,
         0,
     );
-    if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+    if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
 }
 
 /// Close a socket handle. Mirrors close(fd).
@@ -140,6 +176,10 @@ pub const POLLIN: i16 = 0x0300;
 
 /// WSAPoll event bit for writability. Mirrors POSIX POLLOUT (POLLWRNORM).
 pub const POLLOUT: i16 = 0x0010;
+
+/// WSAPoll revents bit for an invalid socket: the poll did not watch the
+/// handle at all, so it must not count as ready.
+const POLLNVAL: i16 = 0x0004;
 
 const WSAPOLLFD = extern struct {
     fd: usize,
@@ -193,6 +233,7 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
 
     const n = WSAPoll(&pfd, 1, timeout);
     if (n < 0) return error.BrokenPipe;
+    if (pfd[0].revents & POLLNVAL != 0) return error.BrokenPipe;
 
     return n > 0;
 }
