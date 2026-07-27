@@ -305,17 +305,39 @@ fn consume(carry: *std.ArrayList(u8), count: usize) void {
 // --------------------------------------------------------- //
 // Windows socket I/O over ntdll. Zig 0.16 std drives sockets through AFD, and
 // std.posix read plus the libc write are POSIX-only, so the raw-fd paths above
-// branch here on Windows. Wait-on-handle covers handles opened async.
+// branch here on Windows. Each call completes through its own event: a
+// socket's file object is signaled by every completed operation on it, so
+// waiting on the handle itself can return before this call's operation is
+// done and the status block would be read too early.
 
-/// One NtReadFile call, waiting on the handle when the operation goes async.
+/// Per-call completion event for the ntdll socket I/O below.
+fn windowsIoEvent() error{BrokenPipe}!std.os.windows.HANDLE {
+    const windows = std.os.windows;
+    var event: windows.HANDLE = undefined;
+    const status = windows.ntdll.NtCreateEvent(
+        &event,
+        windows.ACCESS_MASK.Specific.Event.ALL_ACCESS,
+        null,
+        .Notification,
+        .FALSE,
+    );
+    if (status != .SUCCESS) return error.BrokenPipe;
+
+    return event;
+}
+
+/// One NtReadFile call, waiting on a per-call event when the operation goes async.
 fn windowsReadOnce(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     const windows = std.os.windows;
+    const event = try windowsIoEvent();
+    defer _ = windows.ntdll.NtClose(event);
+
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, buf.len);
 
-    var status = windows.ntdll.NtReadFile(handle, null, null, null, &iosb, buf.ptr, len, null, null);
+    var status = windows.ntdll.NtReadFile(handle, event, null, null, &iosb, buf.ptr, len, null, null);
     if (status == .PENDING) {
-        _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+        _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
         status = iosb.u.Status;
     }
     if (status == .END_OF_FILE) return 0;
@@ -324,17 +346,20 @@ fn windowsReadOnce(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!u
     return iosb.Information;
 }
 
-/// Write all of data via NtWriteFile, waiting on the handle when async.
+/// Write all of data via NtWriteFile, waiting on a per-call event when async.
 fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{BrokenPipe}!void {
     const windows = std.os.windows;
     var rem = data;
     while (rem.len > 0) {
+        const event = try windowsIoEvent();
+        defer _ = windows.ntdll.NtClose(event);
+
         var iosb: windows.IO_STATUS_BLOCK = undefined;
         const len = std.math.lossyCast(windows.ULONG, rem.len);
 
-        var status = windows.ntdll.NtWriteFile(handle, null, null, null, &iosb, rem.ptr, len, null, null);
+        var status = windows.ntdll.NtWriteFile(handle, event, null, null, &iosb, rem.ptr, len, null, null);
         if (status == .PENDING) {
-            _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
+            _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
             status = iosb.u.Status;
         }
         if (status != .SUCCESS) return error.BrokenPipe;
