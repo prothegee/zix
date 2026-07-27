@@ -15,6 +15,7 @@
 //!   is discarded after a transport failure.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lib = @import("lib.zig");
 const conn_mod = @import("conn.zig");
 const statement_mod = @import("statement.zig");
@@ -497,8 +498,28 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
 // --------------------------------------------------------- //
 
 fn nowNanos() u64 {
-    var time_spec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &time_spec);
+    if (comptime builtin.target.os.tag == .linux) {
+        var time_spec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_spec);
+
+        return @as(u64, @intCast(time_spec.sec)) * 1_000_000_000 + @as(u64, @intCast(time_spec.nsec));
+    }
+
+    if (comptime builtin.target.os.tag == .windows) {
+        // postgrez is its own Zig module (build.zig cannot import across into zix's src/utils),
+        // so this mirrors windows_io.zig's monotonicUs() locally instead of reaching across.
+        const windows = std.os.windows;
+        var frequency: windows.LARGE_INTEGER = undefined;
+        _ = windows.ntdll.RtlQueryPerformanceFrequency(&frequency);
+        var counter: windows.LARGE_INTEGER = undefined;
+        _ = windows.ntdll.RtlQueryPerformanceCounter(&counter);
+        const frequency_u64: u64 = @bitCast(frequency);
+        const counter_u64: u64 = @bitCast(counter);
+        return counter_u64 * 1_000_000_000 / frequency_u64;
+    }
+
+    var time_spec: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &time_spec);
 
     return @as(u64, @intCast(time_spec.sec)) * 1_000_000_000 + @as(u64, @intCast(time_spec.nsec));
 }
