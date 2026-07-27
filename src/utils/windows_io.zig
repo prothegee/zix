@@ -213,15 +213,20 @@ pub fn monotonicUs() u64 {
 }
 
 // --------------------------------------------------------- //
-// WSAPoll: the ntdll read/write helpers above block indefinitely, so a caller
-// that needs a real recv/send timeout on Windows polls readiness through here
-// first. This is the only place in the file that touches ws2_32 rather than
-// ntdll, since no AFD_POLL layout is published for Zig to bind against.
+// Readiness gates: the ntdll read/write helpers above block indefinitely, so
+// a caller that needs a real recv/send timeout on Windows polls readiness
+// first. POLLIN is answered over ntdll (recvReady below): a peek receive
+// pends in AFD until data arrives, so waiting on its event with a timeout
+// gives exact readable semantics. WSAPoll is kept only for POLLOUT, where no
+// peek equivalent exists and no AFD_POLL layout is published for Zig to bind
+// against. WSAPoll readiness is not trusted for the receive gates: on these
+// std-opened endpoints it can claim ready with nothing to read, and the
+// blocking read behind the gate would then wait forever.
 
-/// WSAPoll event bit for readability. Mirrors POSIX POLLIN (POLLRDNORM | POLLRDBAND).
+/// Readiness selector for readability. Mirrors POSIX POLLIN (POLLRDNORM | POLLRDBAND).
 pub const POLLIN: i16 = 0x0300;
 
-/// WSAPoll event bit for writability. Mirrors POSIX POLLOUT (POLLWRNORM).
+/// Readiness selector for writability. Mirrors POSIX POLLOUT (POLLWRNORM).
 pub const POLLOUT: i16 = 0x0010;
 
 /// WSAPoll revents bit for an invalid socket: the poll did not watch the
@@ -261,7 +266,67 @@ fn ensureWsaStarted() void {
     wsa_ready.store(true, .release);
 }
 
-/// Poll a socket handle for readiness with a millisecond timeout.
+/// Readable-readiness with a real timeout, entirely over ntdll. A peek
+/// receive (the AFD receive ioctl with the TDI PEEK flag) pends until data
+/// or end-of-stream without consuming bytes, so a timed wait on its event
+/// plus a cancel on expiry gives POLLIN semantics the blocking readOnce can
+/// safely follow.
+///
+/// Return:
+/// - true when data or end-of-stream is available before the timeout
+/// - false when the timeout elapses first
+/// - error.BrokenPipe on any failed status
+fn recvReady(handle: windows.HANDLE, timeout_ms: u32) error{BrokenPipe}!bool {
+    const event = try createIoEvent();
+    defer close(event);
+
+    var peek_byte: [1]u8 = undefined;
+    const iovecs = [1]windows.AFD.WSABUF(.@"var"){.{
+        .len = 1,
+        .buf = &peek_byte,
+    }};
+    const info = windows.AFD.RECV_INFO{
+        .BufferArray = &iovecs,
+        .BufferCount = 1,
+        .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true },
+        .TdiFlags = .{ .NORMAL = true, .PEEK = true },
+    };
+
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var status = windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        event,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.RECEIVE,
+        @ptrCast(&info),
+        @sizeOf(windows.AFD.RECV_INFO),
+        null,
+        0,
+    );
+    if (status == .PENDING) {
+        // Relative NT timeout: negative value in 100ns units.
+        const timeout: windows.LARGE_INTEGER = -(@as(i64, timeout_ms) * (std.time.ns_per_ms / 100));
+        const waited = windows.ntdll.NtWaitForSingleObject(event, .FALSE, &timeout);
+        if (waited != .SUCCESS) {
+            // Not signaled in time: cancel forces the peek to complete, so
+            // the follow-up wait is bounded and the status block is final.
+            var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+            _ = windows.ntdll.NtCancelIoFileEx(handle, &iosb, &cancel_iosb);
+            _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+        }
+        status = iosb.u.Status;
+    }
+    if (status == .CANCELLED) return false;
+    if (status == .END_OF_FILE) return true;
+    if (status != .SUCCESS) return error.BrokenPipe;
+
+    return true;
+}
+
+/// Poll a socket handle for readiness with a millisecond timeout. POLLIN is
+/// answered by the ntdll peek receive (recvReady), POLLOUT by WSAPoll.
 ///
 /// Param:
 /// handle - windows.HANDLE (the socket, from stream.socket.handle)
@@ -271,8 +336,10 @@ fn ensureWsaStarted() void {
 /// Return:
 /// - true when the event is ready before the timeout
 /// - false when the timeout elapses first
-/// - error.BrokenPipe if WSAPoll itself fails
+/// - error.BrokenPipe if the underlying poll fails
 pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{BrokenPipe}!bool {
+    if (events == POLLIN) return recvReady(handle, timeout_ms);
+
     ensureWsaStarted();
 
     var pfd = [1]WSAPOLLFD{.{ .fd = @intFromPtr(handle), .events = events, .revents = 0 }};

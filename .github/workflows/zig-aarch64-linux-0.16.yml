@@ -1,13 +1,11 @@
-name: x86_64-linux
+name: zig-aarch64-linux-0.16
 
-# x86_64-linux test leg. Runs when a pull request into main is merged, or on
-# a manual workflow_dispatch.
+# aarch64-linux test leg, pinned to zig 0.16. Runs when a pull request is merged
+# (any target branch), or on a manual workflow_dispatch.
 on:
   pull_request:
     types:
       - closed
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -15,24 +13,23 @@ permissions:
 
 jobs:
   test:
-    name: x86_64-linux
+    name: aarch64-linux
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
-      # always tests main, whatever ref triggered the run
+      # tests the ref that triggered the run: the dispatched branch, or the
+      # merged pull request result
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: main
 
       # toolchain comes from the official tarball: the runner image does not
       # ship the pinned 0.16.0
       - name: Install zig 0.16.0
         run: |
-          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
           tar -xf zig.tar.xz
 
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          echo "$PWD/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
 
       # sanity print so the log records the exact toolchain in use
       - name: zig version
@@ -67,8 +64,9 @@ jobs:
       - name: prometheuz unit tests
         run: zig build prometheuz-test-unit
 
-      # docker ships preinstalled on ubuntu-latest, so postgrez and rediz can
-      # own their own container lifecycle here. test-runner is out of scope.
+      # docker ships preinstalled on this arm64 ubuntu runner, so postgrez and
+      # rediz can own their own container lifecycle here. test-runner is out
+      # of scope.
       - name: postgrez integration tests
         run: zig build postgrez-test-integration
 
