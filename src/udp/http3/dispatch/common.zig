@@ -1366,18 +1366,22 @@ pub fn sweepMaintenance(table: *ConnTable, tx: *datagram.SendBatch, fd: std.posi
 // --------------------------------------------------------------- //
 
 test "zix http3: processDatagram demuxes a long-header Initial by DCID" {
-    var table = ConnTable{};
+    // Heap like the worker loops: the 256-slot table is multi-MB and overflows
+    // smaller default test-thread stacks.
+    const table = try std.testing.allocator.create(ConnTable);
+    defer std.testing.allocator.destroy(table);
+    table.* = .{};
 
     // A crafted Initial long header: 0xc3, version 1, 8-byte DCID, 4-byte SCID, one payload byte.
     const initial = [_]u8{ 0xc3, 0x00, 0x00, 0x00, 0x01, 0x08, 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00 };
-    _ = processDatagram(&table, &initial, 8, 1200, 10);
+    _ = processDatagram(table, &initial, 8, 1200, 10);
 
     const dcid = demux.ConnId.fromSlice(&[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 });
     try std.testing.expectEqual(@as(usize, 1), table.count);
     try std.testing.expect(table.find(&dcid) != null);
 
     // A second datagram for the same connection reuses the slot, not a new one.
-    _ = processDatagram(&table, &initial, 8, 1200, 10);
+    _ = processDatagram(table, &initial, 8, 1200, 10);
     try std.testing.expectEqual(@as(usize, 1), table.count);
 
     // The anti-amplification budget reflects both received datagrams.
