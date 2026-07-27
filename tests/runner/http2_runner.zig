@@ -84,7 +84,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var acc_len: usize = 0;
     var rounds: usize = 0;
     while (rounds < 64) : (rounds += 1) {
-        const got = try fdReadSome(fd, acc[acc_len..]);
+        const got = try fdReadOnce(fd, acc[acc_len..]);
         if (got == 0) return error.ConnectionClosed;
         acc_len += got;
 
@@ -130,7 +130,7 @@ fn fdWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     }
 }
 
-fn fdReadSome(fd: std.posix.fd_t, buf: []u8) !usize {
+fn fdReadOnce(fd: std.posix.fd_t, buf: []u8) !usize {
     while (true) {
         const rc = std.os.linux.read(fd, buf.ptr, buf.len);
         switch (std.posix.errno(rc)) {

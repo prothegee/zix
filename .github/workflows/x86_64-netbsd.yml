@@ -32,6 +32,7 @@ jobs:
           release: "10.1"
           prepare: |
             ftp -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-netbsd-0.16.0.tar.xz
+            mkdir -p /usr/local
             tar -C /usr/local -xf /tmp/zig.tar.xz
           run: |
             export PATH="/usr/local/zig-x86_64-netbsd-0.16.0:$PATH"
