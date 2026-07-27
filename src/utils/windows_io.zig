@@ -322,12 +322,9 @@ fn getAfdPollDevice() error{BrokenPipe}!windows.HANDLE {
 /// - false when the timeout elapses first
 /// - error.BrokenPipe if the poll device or the poll request fails
 pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{BrokenPipe}!bool {
-    std.debug.print("DIAG pollReady: enter timeout_ms={d}\n", .{timeout_ms});
     const poll_device = try getAfdPollDevice();
-    std.debug.print("DIAG pollReady: poll device ready\n", .{});
     const event = try createIoEvent();
     defer close(event);
-    std.debug.print("DIAG pollReady: event created\n", .{});
 
     const afd_events: windows.ULONG = if (events == POLLIN)
         AFD_POLL_RECEIVE | AFD_POLL_DISCONNECT | AFD_POLL_ABORT
@@ -357,22 +354,18 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
         @ptrCast(&info),
         @sizeOf(AFD_POLL_INFO),
     );
-    std.debug.print("DIAG pollReady: ioctl submit returned status={any}\n", .{status});
     if (status == .PENDING) {
         // Relative NT timeout: negative value in 100ns units.
         const wait_deadline: windows.LARGE_INTEGER = -(@as(i64, timeout_ms) * (std.time.ns_per_ms / 100));
         const wait_status = windows.ntdll.NtWaitForSingleObject(event, .FALSE, &wait_deadline);
-        std.debug.print("DIAG pollReady: wait returned status={any}\n", .{wait_status});
         if (wait_status == .TIMEOUT) {
             var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
             _ = windows.ntdll.NtCancelIoFileEx(poll_device, &iosb, &cancel_iosb);
             _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
-            std.debug.print("DIAG pollReady: cancelled, returning not-ready\n", .{});
             return false;
         }
         status = iosb.u.Status;
     }
-    std.debug.print("DIAG pollReady: final status={any} num_handles={d}\n", .{ status, info.NumberOfHandles });
     if (status != .SUCCESS) return error.BrokenPipe;
 
     return info.NumberOfHandles != 0;
