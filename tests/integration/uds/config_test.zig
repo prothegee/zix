@@ -1,6 +1,7 @@
 //! Integration tests: UDS Server.init, HandlerFn wiring, and client timeout.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 test "zix integration: UdsServer.init, valid path succeeds and deinit is safe" {
@@ -26,8 +27,13 @@ test "zix integration: UdsClient, recv_timeout_ms fires when server sends no dat
     defer threaded.deinit();
     const io = threaded.io();
 
-    const sock_path = "/tmp/zix_stall_uds_client_test.sock";
-    std.Io.Dir.deleteFileAbsolute(io, sock_path) catch {};
+    // cwd-relative on Windows: the CI runner's work drive has no /tmp, so an
+    // absolute unix-style path fails the bind with OBJECT_PATH_NOT_FOUND.
+    const sock_path = if (builtin.os.tag == .windows)
+        "zix_stall_uds_client_test.sock"
+    else
+        "/tmp/zix_stall_uds_client_test.sock";
+    std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
 
     const unix_addr = try std.Io.net.UnixAddress.init(sock_path);
     var stall_listener = try unix_addr.listen(io, .{ .kernel_backlog = 2 });
@@ -50,7 +56,7 @@ test "zix integration: UdsClient, recv_timeout_ms fires when server sends no dat
 
     client.deinit(io);
     stall_listener.deinit(io);
-    std.Io.Dir.deleteFileAbsolute(io, sock_path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
     stall_thread.join();
 
     if (result) |_| return error.ExpectedRecvTimeout else |_| {}
