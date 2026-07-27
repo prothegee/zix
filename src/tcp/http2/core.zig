@@ -265,8 +265,8 @@ const Stream = struct {
 // --------------------------------------------------------- //
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -340,7 +340,7 @@ fn serveH2cUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Ser
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
         if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = readSomeFD(fd, head_buf[filled..]) catch return error.Closed;
+        const n = readOnceFD(fd, head_buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }
