@@ -5,12 +5,15 @@ const h2 = @import("../Http2.zig");
 const frm = @import("frame.zig");
 const status_mod = @import("status.zig");
 const GrpcClientConfig = @import("config.zig").GrpcClientConfig;
+const win_io = @import("../../../utils/windows_io.zig");
 
 pub const GrpcStatus = status_mod.GrpcStatus;
 
 // --------------------------------------------------------- //
 
 fn applySocketTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
+    // setsockopt timeouts are POSIX-only: on Windows recvResponse gates the
+    // blocking frame read with a poll instead.
     if (comptime @import("builtin").target.os.tag == .windows) return;
 
     if (recv_ms == 0 and send_ms == 0) return;
@@ -55,6 +58,9 @@ pub const GrpcClient = struct {
 
     fd: std.posix.fd_t,
     next_sid: u31,
+    /// Receive timeout carried for the Windows poll gate in recvResponse.
+    /// POSIX targets enforce it through SO_RCVTIMEO on the socket instead.
+    recv_timeout_ms: u32,
     hdec: h2.HpackDecoder,
     hdec_scratch: [HDEC_SCRATCH_SIZE]u8,
     resp_hdrs: [h2.MAX_HEADERS]h2.Header,
@@ -105,6 +111,7 @@ pub const GrpcClient = struct {
         return .{
             .fd = fd,
             .next_sid = 1,
+            .recv_timeout_ms = config.recv_timeout_ms,
             .hdec = h2.HpackDecoder.init(),
             .hdec_scratch = undefined,
             .resp_hdrs = undefined,
@@ -190,6 +197,8 @@ pub const GrpcClient = struct {
     ///
     /// Return:
     /// - !GrpcClientResponse (.data for each gRPC response message, .status for the trailer)
+    /// - error.RecvTimeout when recv_timeout_ms is set and no frame arrives in
+    ///   time on Windows (POSIX targets time out through SO_RCVTIMEO instead)
     pub fn recvResponse(self: *Self, sid: u31, buf: []u8) !GrpcClientResponse {
         while (true) {
             // Drain the next message still packed in the last DATA frame before reading a new one. A
@@ -217,6 +226,16 @@ pub const GrpcClient = struct {
                 return .{ .status = GrpcStatus.OK };
             }
             self.data_rest = &.{};
+
+            if (comptime @import("builtin").target.os.tag == .windows) {
+                // SO_RCVTIMEO does not apply to the ntdll read path, so gate
+                // the blocking frame read with a poll on Windows.
+                if (self.recv_timeout_ms > 0) {
+                    if (!try win_io.pollReady(self.fd, win_io.POLLIN, self.recv_timeout_ms)) {
+                        return error.RecvTimeout;
+                    }
+                }
+            }
 
             const fh = try h2.readFrameHeader(self.fd);
             if (fh.length > self.payload_scratch.len) return error.FrameTooLarge;
@@ -410,6 +429,7 @@ test "zix grpc: recvResponse drains multiple messages coalesced in one DATA fram
     var client = GrpcClient{
         .fd = fds[0],
         .next_sid = 3,
+        .recv_timeout_ms = 0,
         .hdec = h2.HpackDecoder.init(),
         .hdec_scratch = undefined,
         .resp_hdrs = undefined,

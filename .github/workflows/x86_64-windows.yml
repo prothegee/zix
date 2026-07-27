@@ -1,5 +1,7 @@
 name: x86_64-windows
 
+# x86_64-windows test leg. Runs when a pull request into main is merged, or on
+# a manual workflow_dispatch.
 on:
   pull_request:
     types:
@@ -17,11 +19,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: windows-latest
     steps:
+      # always tests main, whatever ref triggered the run
       - name: Checkout
         uses: actions/checkout@v7
         with:
           ref: main
 
+      # toolchain comes from the official zip: the runner image does not ship
+      # the pinned 0.16.0
       - name: Install zig 0.16.0
         shell: pwsh
         run: |
@@ -30,10 +35,14 @@ jobs:
 
           Add-Content -Path $env:GITHUB_PATH -Value "$PWD\zig-x86_64-windows-0.16.0"
 
+      # sanity print so the log records the exact toolchain in use
       - name: zig version
         shell: pwsh
         run: zig version
 
+      # zix suites run one step each so a red step names the failing suite.
+      # if: always() keeps the later suites running after an earlier failure,
+      # so one run reports every failing suite at once.
       - name: zix unit tests
         shell: pwsh
         run: zig build unit-test
@@ -53,6 +62,8 @@ jobs:
         shell: pwsh
         run: zig build edge-test
 
+      # driver unit steps carry no if: always(), so they are skipped when a
+      # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
         shell: pwsh
         run: zig build postgrez-test-unit
