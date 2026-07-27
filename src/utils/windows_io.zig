@@ -221,6 +221,12 @@ pub fn monotonicUs() u64 {
 // deadline passes, and nothing is consumed from the stream. std publishes
 // the ioctl code but not the request layout, so the structs below define
 // the layout (stable public knowledge, unchanged since Windows 2000).
+//
+// The poll ioctl is issued on a separate, bare AFD handle, never on the
+// socket handle being watched: the socket's own handle goes inside the
+// request as the watched Handle, matching every known implementation of
+// this ioctl (wepoll, the pre-Vista mswsock provider). A self-submitted
+// poll never completes, which is why the first cut of this gate hung.
 
 /// Readiness selector for readability. Mirrors POSIX POLLIN (POLLRDNORM | POLLRDBAND).
 pub const POLLIN: i16 = 0x0300;
@@ -257,6 +263,44 @@ const AFD_POLL_INFO = extern struct {
     Handles: [1]AFD_POLL_HANDLE_INFO,
 };
 
+var afd_poll_handle: windows.HANDLE = undefined;
+var afd_poll_ready: std.atomic.Value(bool) = .init(false);
+
+/// Bare AFD handle used only to submit poll ioctls, opened once and reused:
+/// unlike a socket endpoint it carries no EA packet, so it is never bound to
+/// any transport and never watches itself.
+///
+/// Return:
+/// - windows.HANDLE
+/// - error.BrokenPipe if the device open fails
+fn getAfdPollDevice() error{BrokenPipe}!windows.HANDLE {
+    if (afd_poll_ready.load(.acquire)) return afd_poll_handle;
+
+    var fresh_handle: windows.HANDLE = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var name = windows.UNICODE_STRING.init(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'A', 'f', 'd', '\\', 'Z', 'i', 'x' });
+    const attrs = windows.OBJECT.ATTRIBUTES{ .ObjectName = &name };
+
+    const status = windows.ntdll.NtCreateFile(
+        &fresh_handle,
+        .{ .STANDARD = .{ .SYNCHRONIZE = true } },
+        &attrs,
+        &iosb,
+        null,
+        .{},
+        .{ .READ = true, .WRITE = true },
+        .OPEN,
+        .{ .IO = .ASYNCHRONOUS },
+        null,
+        0,
+    );
+    if (status != .SUCCESS) return error.BrokenPipe;
+
+    afd_poll_handle = fresh_handle;
+    afd_poll_ready.store(true, .release);
+    return fresh_handle;
+}
+
 /// Poll a socket handle for readiness with a millisecond timeout, entirely
 /// over ntdll via the AFD poll ioctl. The timeout lives inside the request
 /// and the kernel completes the request itself on expiry, so the wait here
@@ -272,8 +316,9 @@ const AFD_POLL_INFO = extern struct {
 ///   aborted connections count as ready, the following read or write then
 ///   reports the close to the caller)
 /// - false when the timeout elapses first
-/// - error.BrokenPipe if the poll request itself fails
+/// - error.BrokenPipe if the poll device or the poll request fails
 pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{BrokenPipe}!bool {
+    const poll_device = try getAfdPollDevice();
     const event = try createIoEvent();
     defer close(event);
 
@@ -295,7 +340,7 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
 
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     var status = windows.ntdll.NtDeviceIoControlFile(
-        handle,
+        poll_device,
         event,
         null,
         null,
