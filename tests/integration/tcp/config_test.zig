@@ -4,6 +4,8 @@ const std = @import("std");
 const zix = @import("zix");
 
 test "zix integration: TcpServer.init, valid config succeeds and deinit is safe" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpServer.init, valid config succeeds and deinit is safe\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
@@ -17,6 +19,8 @@ test "zix integration: TcpServer.init, valid config succeeds and deinit is safe"
 }
 
 test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and deinit is safe" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpServer.init with EPOLL dispatch model succeeds and deinit is safe\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
@@ -30,6 +34,8 @@ test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and dei
 }
 
 test "zix integration: TcpServer EPOLL, workers governs worker count and pool_size is ignored" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpServer EPOLL, workers governs worker count and pool_size is ignored\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
@@ -46,6 +52,8 @@ test "zix integration: TcpServer EPOLL, workers governs worker count and pool_si
 }
 
 test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpServer.init, port zero returns PortNotConfigured\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
@@ -59,11 +67,15 @@ test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
 }
 
 test "zix integration: HandlerFn, echoHandler satisfies the type" {
+    std.log.info("DIAG tcp config: test process started, entering \"HandlerFn, echoHandler satisfies the type\"", .{});
+
     const handler: zix.Tcp.HandlerFn = zix.Tcp.echoHandler;
     _ = handler;
 }
 
 test "zix integration: TcpClient.connect, port zero returns PortNotConfigured" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpClient.connect, port zero returns PortNotConfigured\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -75,6 +87,8 @@ test "zix integration: TcpClient.connect, port zero returns PortNotConfigured" {
 }
 
 test "zix integration: TcpClient, recv_timeout_ms fires when server sends no data" {
+    std.log.info("DIAG tcp config: test process started, entering \"TcpClient, recv_timeout_ms fires when server sends no data\"", .{});
+
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
