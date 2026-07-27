@@ -308,7 +308,7 @@ fn consume(carry: *std.ArrayList(u8), count: usize) void {
 // branch here on Windows. Wait-on-handle covers handles opened async.
 
 /// One NtReadFile call, waiting on the handle when the operation goes async.
-fn windowsReadSome(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
+fn windowsReadOnce(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     const windows = std.os.windows;
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, buf.len);
@@ -346,7 +346,7 @@ fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{Broken
 
 /// Read some bytes from fd: the ntdll path on Windows, std.posix.read elsewhere.
 fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime @import("builtin").target.os.tag == .windows) return windowsReadSome(fd, buf);
+    if (comptime @import("builtin").target.os.tag == .windows) return windowsReadOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -467,9 +467,36 @@ const MockServer = struct {
         closeLoopbackFd(self.script_fd);
     }
 
+    /// Read the client's request bytes, looping until the full request has
+    /// arrived (headers plus the Content-Length body), so a request split
+    /// across TCP segments cannot truncate the capture.
     fn readSent(self: *const MockServer, buf: []u8) []u8 {
-        const n = readOnceFD(self.script_fd, buf) catch return buf[0..0];
-        return buf[0..n];
+        var filled: usize = 0;
+
+        while (filled < buf.len) {
+            const n = readOnceFD(self.script_fd, buf[filled..]) catch break;
+            if (n == 0) break;
+
+            filled += n;
+            if (requestComplete(buf[0..filled])) break;
+        }
+
+        return buf[0..filled];
+    }
+
+    /// A sendRequest wire request is complete once the header block ends and
+    /// the Content-Length body bytes follow (sendRequest always writes the field).
+    fn requestComplete(data: []const u8) bool {
+        const label = "Content-Length: ";
+
+        const header_end = (std.mem.indexOf(u8, data, "\r\n\r\n") orelse return false) + 4;
+
+        const label_pos = std.mem.indexOf(u8, data[0..header_end], label) orelse return true;
+        const digits_start = label_pos + label.len;
+        const digits_end = std.mem.indexOfScalarPos(u8, data, digits_start, '\r') orelse return true;
+        const content_len = std.fmt.parseInt(usize, data[digits_start..digits_end], 10) catch return true;
+
+        return data.len >= header_end + content_len;
     }
 };
 
@@ -611,4 +638,13 @@ test "prometheuz: http_client sendRequest carries custom headers" {
     const sent = mock.readSent(&sent_buf);
 
     try testing.expect(std.mem.indexOf(u8, sent, "Content-Encoding: snappy\r\n") != null);
+}
+
+test "prometheuz: http_client requestComplete detects a split request" {
+    const full = "POST /w HTTP/1.1\r\nContent-Length: 7\r\n\r\npayload";
+
+    try testing.expect(!MockServer.requestComplete(full[0..10]));
+    try testing.expect(!MockServer.requestComplete(full[0 .. full.len - 3]));
+    try testing.expect(MockServer.requestComplete(full));
+    try testing.expect(MockServer.requestComplete("GET /m HTTP/1.1\r\n\r\n"));
 }
