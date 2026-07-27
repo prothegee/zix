@@ -1,13 +1,11 @@
-name: aarch64-macos
+name: zig-aarch64-macos-0.16
 
-# aarch64-macos test leg. Runs when a pull request into main is merged, or on
-# a manual workflow_dispatch.
+# aarch64-macos test leg, pinned to zig 0.16. Runs when a pull request is merged
+# (any target branch), or on a manual workflow_dispatch.
 on:
   pull_request:
     types:
       - closed
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -19,11 +17,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: macos-14
     steps:
-      # always tests main, whatever ref triggered the run
+      # tests the ref that triggered the run: the dispatched branch, or the
+      # merged pull request result
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: main
 
       # toolchain comes from the official tarball: the runner image does not
       # ship the pinned 0.16.0
