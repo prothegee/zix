@@ -113,7 +113,7 @@ pub fn fetch(
 
 fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Client.ClientConnection {
     var seed: [64]u8 = undefined;
-    _ = std.os.linux.getrandom(&seed, seed.len, 0);
+    secureRandom(&seed);
 
     var ch_buf: [CLIENT_HELLO_BUF]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = seed[0..32].*, .ephemeral_secret = seed[32..64].*, .alpn = &.{.H2} }, &ch_buf);
@@ -431,10 +431,34 @@ fn skipRequestHeader(name: []const u8) bool {
 }
 
 fn nowSec() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (comptime builtin.target.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+
+        return ts.sec;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) return @intCast(win_io.wallClockNs() / std.time.ns_per_s);
+
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
 
     return ts.sec;
+}
+
+/// Fill buf with cryptographically secure random bytes.
+fn secureRandom(buf: []u8) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.getrandom(buf.ptr, buf.len, 0);
+        return;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) {
+        win_io.secureRandom(buf) catch {};
+        return;
+    }
+
+    std.c.arc4random_buf(buf.ptr, buf.len);
 }
 
 // --------------------------------------------------------- //
@@ -463,7 +487,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     if (comptime builtin.os.tag == .windows) {
         var read: usize = 0;
         while (read < buf.len) {
-            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
 
             read += n;
