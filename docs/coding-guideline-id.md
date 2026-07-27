@@ -305,6 +305,23 @@ Setelah mengimplementasikan function, field, atau behavior baru, tambahkan test 
 
 > Letakkan test berdampingan dengan kodenya. Beri nama `zix <domain>: subject, case`. Behavior baru dikirim bersama test-nya, bukan menyusul.
 
+Kalau sebuah test cuma relevan di satu platform (contohnya dispatch model EPOLL/URING yang Linux-only), bungkus skip-nya dalam block eksplisit, bukan satu baris guard polos, supaya pemisahan platform-nya kebaca sebagai dua region yang beda:
+
+```zig
+test "zix grpc: dual listener, EPOLL serves h2c on port" {
+    if (builtin.os.tag != .linux) {
+        // windows / other-platform region: EPOLL/URING dispatch models are
+        // Linux-only, nothing is spawned here, nothing to retry or clean up.
+        return error.SkipZigTest;
+    }
+
+    // linux region: real server + retry + timeout
+    ...
+}
+```
+
+Kalau region linux-nya spawn server di background buat ditest, retry connect-nya pakai jumlah percobaan tetap (batas atas yang pasti, bukan loop tanpa batas). Cleanup/shutdown eksplisit buat server itu cuma ditambahkan kalau engine-nya memang punya jalur stop: jangan pura-pura cleanup thread yang memang tidak pernah bisa return.
+
 ---
 
 ## 12. Komentar dan prosa (di kode dan dokumen)

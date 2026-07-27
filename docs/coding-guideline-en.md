@@ -305,6 +305,23 @@ After implementing any new function, field, or behavior, add the tests covering 
 
 > Co-locate tests with the code. Name them `zix <domain>: subject, case`. New behavior ships with its tests, never after.
 
+When a test only makes sense on one platform (e.g. an EPOLL/URING dispatch model that is Linux-only), wrap the skip in an explicit block instead of a bare guard line, so the platform split reads as two distinct regions:
+
+```zig
+test "zix grpc: dual listener, EPOLL serves h2c on port" {
+    if (builtin.os.tag != .linux) {
+        // windows / other-platform region: EPOLL/URING dispatch models are
+        // Linux-only, nothing is spawned here, nothing to retry or clean up.
+        return error.SkipZigTest;
+    }
+
+    // linux region: real server + retry + timeout
+    ...
+}
+```
+
+If the linux region spawns a background server to test against, retry the connect with a fixed attempt count (a hard ceiling, not an unbounded loop). Only add explicit shutdown/deinit for that server if the engine actually exposes a stop path: do not fake cleanup on a thread that can never return.
+
 ---
 
 ## 12. Comments and prose (in code and docs)
