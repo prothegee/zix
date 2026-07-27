@@ -110,6 +110,7 @@ flowchart TB
 
 - Intake ring: a fixed-size ring guarded by a spinlock. Each queued job adds one futex credit to `pending`, workers consume credits and pop jobs. A full ring makes `submit` return false so the caller sheds.
 - Worker loop: a worker blocks on the futex for the first job, then drains up to `batch_max` more without blocking, so a batch fills as deep as the arrival rate allows.
+- The pending futex is the raw futex syscall on Linux (the fast path stays untouched), on other targets the wait and wake go through the `std.Io` backend with the same semantics.
 - Statement cache: a `Table` per pooled connection holds `[statement_count]?Statement`. `Batch.statement(slot, sql)` prepares on first use and reuses after, keyed by the held connection.
 - Sizing: `workers = 0` computes `min(cpu_count x 8, hint / 2)` floored at 16, capped at 128. A fleet far wider than the CPU budget collapses into single-job batches, so the cap matters. The internal pool is `pool_size = workers`, `process_queue_len = workers + margin`.
 - Lifecycle: `submit` queues for a worker, `runInline` runs one job on the caller thread (for a request whose connection is about to close, where a deferred write would race the close). `deinit` stops the workers (a shutdown flag plus a futex wake, with a `pending` bump to defeat a lost wakeup), then closes the connections.
@@ -132,6 +133,7 @@ flowchart TB
 ```
 
 - A spinlock guards the slot and waiter bookkeeping, the connect itself runs outside the lock.
+- Parking sleeps on a futex word per waiter. On Linux this is the raw futex syscall (the fast path stays untouched), on other targets the wait and wake go through the `std.Io` backend with the same semantics.
 - `release` hands a healthy connection directly to the oldest parked waiter (the slot stays held through the handoff), or marks it idle.
 - `discard` frees a broken slot, granting it to a waiter (who reconnects) or leaving it for the next acquire.
 - Beyond the waiter bound `acquire` sheds `error.PoolBusy`, with parking off it sheds `error.PoolExhausted`.
