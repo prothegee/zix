@@ -13,6 +13,7 @@ const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 const is_linux = builtin.target.os.tag == .linux;
 
