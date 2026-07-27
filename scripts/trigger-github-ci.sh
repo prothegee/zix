@@ -58,9 +58,9 @@ fi
 
 workflows=(
     x86_64-linux
-    aarch64-linux
-    aarch64-macos
     x86_64-windows
+    aarch64-macos
+    aarch64-linux
     x86_64-freebsd
     x86_64-netbsd
     x86_64-openbsd
