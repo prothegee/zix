@@ -79,9 +79,7 @@ test "zix integration: TcpClient, recv_timeout_ms fires when server sends no dat
     defer threaded.deinit();
     const io = threaded.io();
 
-    std.debug.print("DIAG test: resolving addr\n", .{});
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9341);
-    std.debug.print("DIAG test: listening\n", .{});
     var stall_listener = try addr.listen(io, .{
         .mode = .stream,
         .reuse_address = true,
@@ -89,7 +87,6 @@ test "zix integration: TcpClient, recv_timeout_ms fires when server sends no dat
     });
     defer stall_listener.deinit(io);
 
-    std.debug.print("DIAG test: connecting client\n", .{});
     var client = try zix.Tcp.Client.connect(.{
         .ip = "127.0.0.1",
         .port = 9341,
@@ -97,9 +94,7 @@ test "zix integration: TcpClient, recv_timeout_ms fires when server sends no dat
     }, io);
     defer client.deinit(io);
 
-    std.debug.print("DIAG test: calling recvMsg\n", .{});
     var buf: [4096]u8 = undefined;
     const result = client.recvMsg(io, &buf);
-    std.debug.print("DIAG test: recvMsg returned\n", .{});
     if (result) |_| return error.ExpectedRecvTimeout else |_| {}
 }
