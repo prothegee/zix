@@ -44,6 +44,15 @@ __*Fix:*__
 
 <br>
 
+## 0.5.x-rc3 (2026-07-27)
+
+__*Update:*__
+
+- Named test-run build steps for `--summary all` diagnostics:
+    - `zix-build-tests.zig`'s `testRunStep` now tags each integration / behaviour / edge test's `Run` step with its source path (`run.setName(src)`), so `zig build <step> --summary all` shows which file a pending or still-running step belongs to instead of a generic `run test`. No build-command or test-execution change.
+
+<br>
+
 ## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__
