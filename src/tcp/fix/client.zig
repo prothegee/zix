@@ -166,7 +166,7 @@ pub const FixClient = struct {
             }
 
             const n = if (comptime @import("builtin").target.os.tag == .windows)
-                try win_io.readSome(fd, self.recv_buf[self.recv_len..])
+                try win_io.readOnce(fd, self.recv_buf[self.recv_len..])
             else
                 try std.posix.read(fd, self.recv_buf[self.recv_len..]);
             if (n == 0) return error.ConnectionClosed;
