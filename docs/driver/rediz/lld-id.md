@@ -133,6 +133,7 @@ flowchart TB
 ```
 
 - Sebuah spinlock menjaga pembukuan slot dan waiter, connect berjalan di luar lock.
+- Parkir tidur di satu futex word per waiter. Di Linux ini syscall futex raw (fast path tetap tak tersentuh), di target lain wait dan wake lewat backend `std.Io` dengan semantik yang sama.
 - `release` menyerahkan koneksi sehat langsung ke waiter parkir tertua (slot tetap dipegang lewat handoff), atau menandainya idle.
 - `discard` membebaskan slot rusak, memberikannya ke waiter atau membiarkannya untuk acquire berikutnya.
 - Melewati batas waiter `acquire` shed `error.PoolBusy`, dengan parkir mati ia shed `error.PoolExhausted`.
