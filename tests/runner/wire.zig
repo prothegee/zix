@@ -104,7 +104,7 @@ pub fn parseContentLength(head: []const u8) ?usize {
 /// ```zig
 /// var scanner: wire.H2Scanner = .{};
 /// while (rounds < 64) : (rounds += 1) {
-///     const plain = try readSomeBytes();
+///     const plain = try readOnceBytes();
 ///     if (try scanner.push(plain)) return; // saw :status 200
 /// }
 /// return error.NoStatus200;
