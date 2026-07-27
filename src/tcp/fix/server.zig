@@ -11,6 +11,7 @@ const pool_model = @import("dispatch/pool.zig");
 const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 // --------------------------------------------------------- //
 
@@ -61,6 +62,8 @@ pub const FixServer = struct {
 
     /// Listen and serve FIX sessions using the server's comp_id.
     pub fn run(self: *Self) !void {
+        ignoreSigpipe();
+
         const cfg = self.config;
         const conn_opts = FixServeOpts{
             .logger = cfg.logger,
