@@ -110,6 +110,7 @@ flowchart TB
 
 - Intake ring: ring berukuran tetap yang dijaga spinlock. Tiap job yang diantre menambah satu futex credit ke `pending`, worker mengonsumsi credit dan mem-pop job. Ring penuh membuat `submit` mengembalikan false sehingga pemanggil shed.
 - Worker loop: worker memblokir di futex untuk job pertama, lalu menguras hingga `batch_max` job lagi tanpa memblokir, jadi sebuah batch terisi sedalam laju kedatangan mengizinkan.
+- Futex `pending` adalah syscall futex raw di Linux (fast path tetap tak tersentuh), di target lain wait dan wake lewat backend `std.Io` dengan semantik yang sama.
 - Cache statement: satu `Table` per koneksi pool menyimpan `[statement_count]?Statement`. `Batch.statement(slot, sql)` mem-prepare pada pemakaian pertama dan memakai ulang sesudahnya, berkunci koneksi yang dipegang.
 - Sizing: `workers = 0` menghitung `min(cpu_count x 8, hint / 2)` dengan lantai 16, batas atas 128. Fleet yang jauh lebih lebar dari budget CPU runtuh menjadi batch satu job, jadi batasnya penting. Pool internal adalah `pool_size = workers`, `process_queue_len = workers + margin`.
 - Siklus hidup: `submit` mengantre untuk worker, `runInline` menjalankan satu job di thread pemanggil (untuk request yang koneksinya akan segera ditutup, di mana tulisan yang ditunda akan berlomba dengan penutupan). `deinit` menghentikan worker (flag shutdown plus futex wake, dengan bump `pending` untuk mematahkan lost wakeup), lalu menutup koneksi.
@@ -132,6 +133,7 @@ flowchart TB
 ```
 
 - Sebuah spinlock menjaga pembukuan slot dan waiter, connect-nya sendiri berjalan di luar lock.
+- Parkir tidur di satu futex word per waiter. Di Linux ini syscall futex raw (fast path tetap tak tersentuh), di target lain wait dan wake lewat backend `std.Io` dengan semantik yang sama.
 - `release` menyerahkan koneksi sehat langsung ke waiter parkir tertua (slot tetap dipegang lewat handoff), atau menandainya idle.
 - `discard` membebaskan slot rusak, memberikannya ke waiter (yang connect ulang) atau membiarkannya untuk acquire berikutnya.
 - Melewati batas waiter `acquire` shed `error.PoolBusy`, dengan parkir mati ia shed `error.PoolExhausted`.
