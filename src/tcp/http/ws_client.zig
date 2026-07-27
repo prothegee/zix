@@ -27,6 +27,21 @@ const WS_ACCEPT_HASH_INPUT_SIZE: usize = 128;
 
 // --------------------------------------------------------- //
 
+/// Fill buf with cryptographically secure random bytes.
+fn secureRandom(buf: []u8) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.getrandom(buf.ptr, buf.len, 0);
+        return;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) {
+        win_io.secureRandom(buf) catch {};
+        return;
+    }
+
+    std.c.arc4random_buf(buf.ptr, buf.len);
+}
+
 /// RFC 6455 5.2 WebSocket opcodes.
 pub const Opcode = enum(u8) {
     continuation = 0x0,
@@ -80,7 +95,7 @@ pub const WsConn = struct {
     /// - !void
     pub fn send(self: Self, opcode: Opcode, payload: []const u8) !void {
         var mask_key: [ws_mask_len]u8 = undefined;
-        _ = std.os.linux.getrandom(&mask_key, mask_key.len, 0);
+        secureRandom(&mask_key);
 
         var header: [ws_max_frame_header]u8 = undefined;
         var header_len: usize = 0;
@@ -225,7 +240,7 @@ pub const WsClient = struct {
         errdefer closeFD(fd);
 
         var nonce: [16]u8 = undefined;
-        _ = std.os.linux.getrandom(&nonce, nonce.len, 0);
+        secureRandom(&nonce);
         var key_buf: [24]u8 = undefined;
         const key_enc_len = std.base64.standard.Encoder.calcSize(16);
         const ws_key = std.base64.standard.Encoder.encode(key_buf[0..key_enc_len], &nonce);
@@ -250,7 +265,7 @@ pub const WsClient = struct {
         var header_end: usize = 0;
 
         while (resp_len < resp_buf.len) {
-            const n = readSomeFD(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
+            const n = readOnceFD(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
             if (n == 0) return error.HandshakeFailed;
             resp_len += n;
             if (std.mem.indexOf(u8, resp_buf[0..resp_len], "\r\n\r\n")) |pos| {
@@ -339,8 +354,8 @@ fn closeFD(fd: std.posix.fd_t) void {
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -367,7 +382,7 @@ fn recvExact(fd: std.posix.fd_t, buf: []u8) !bool {
     if (buf.len == 0) return true;
     var received: usize = 0;
     while (received < buf.len) {
-        const n = readSomeFD(fd, buf[received..]) catch return error.ConnectionClosed;
+        const n = readOnceFD(fd, buf[received..]) catch return error.ConnectionClosed;
         if (n == 0) return if (received == 0) false else error.ConnectionClosed;
         received += n;
     }

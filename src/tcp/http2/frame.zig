@@ -161,8 +161,8 @@ pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!voi
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -170,7 +170,7 @@ fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
 pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
     while (filled < buf.len) {
-        const n = readSomeFD(fd, buf[filled..]) catch return error.Closed;
+        const n = readOnceFD(fd, buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }

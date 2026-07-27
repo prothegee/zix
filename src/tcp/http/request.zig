@@ -36,8 +36,8 @@ pub fn setBodyReadTimeout(ms: i32) void {
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -139,7 +139,7 @@ pub const Request = struct {
 
         var total: usize = already_len;
         while (total < content_len) {
-            const n = readSomeFD(self.fd, out[total..content_len]) catch |err| {
+            const n = readOnceFD(self.fd, out[total..content_len]) catch |err| {
                 // Non-blocking fd between segments: wait for the next one instead of truncating.
                 if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
 
@@ -165,7 +165,7 @@ pub const Request = struct {
         // Note: "0\r\n\r\n" pattern match is a heuristic, the dechunker handles correctness.
         while (raw_total < max_raw) {
             if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
-            const n = readSomeFD(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
+            const n = readOnceFD(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
                 // Non-blocking fd between chunks: wait for the next one instead of truncating.
                 if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
 

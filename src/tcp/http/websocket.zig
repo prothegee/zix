@@ -70,8 +70,8 @@ pub const ParseResult = struct {
 /// Return:
 /// - usize (bytes read, 0 when the peer closed)
 /// - read error otherwise
-pub fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+pub fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -596,7 +596,7 @@ pub const RoomMap = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix http: websocket readSomeFD reads pipe bytes then reports close" {
+test "zix http: websocket readOnceFD reads pipe bytes then reports close" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
     const linux = std.os.linux;
@@ -608,10 +608,10 @@ test "zix http: websocket readSomeFD reads pipe bytes then reports close" {
     _ = linux.close(pipe_fds[1]);
 
     var buf: [16]u8 = undefined;
-    const n = try readSomeFD(pipe_fds[0], &buf);
+    const n = try readOnceFD(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("frame", buf[0..n]);
 
-    try std.testing.expectEqual(@as(usize, 0), try readSomeFD(pipe_fds[0], &buf));
+    try std.testing.expectEqual(@as(usize, 0), try readOnceFD(pipe_fds[0], &buf));
 }
 
 test "zix http: websocket buildHeader matches buildFrame prefix" {

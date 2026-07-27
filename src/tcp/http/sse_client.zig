@@ -176,7 +176,7 @@ pub const SseStream = struct {
                 }
             }
 
-            const n = readSomeFD(self.fd, &self.read_buf) catch return null;
+            const n = readOnceFD(self.fd, &self.read_buf) catch return null;
             if (n == 0) return if (line_len > 0) out[0..line_len] else null;
             self.read_pos = 0;
             self.read_len = n;
@@ -253,7 +253,7 @@ pub const SseClient = struct {
         var header_end: usize = 0;
 
         while (head_len < head_buf.len) {
-            const n = readSomeFD(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
+            const n = readOnceFD(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
             if (n == 0) return error.ConnectionFailed;
             head_len += n;
             if (std.mem.indexOf(u8, head_buf[0..head_len], "\r\n\r\n")) |pos| {
@@ -337,8 +337,8 @@ fn closeFD(fd: std.posix.fd_t) void {
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }

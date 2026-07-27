@@ -389,7 +389,7 @@ pub const HttpClient = struct {
         var header_end: usize = 0;
 
         while (head_scan_len < head_scan_buf.len) {
-            const n = readSomeFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
+            const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
             if (n == 0) return error.ConnectionClosed;
             head_scan_len += n;
             if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
@@ -431,7 +431,7 @@ pub const HttpClient = struct {
             @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
             var body_received = initial;
             while (body_received < cl) {
-                const n = readSomeFD(fd, body_list.items[body_received..]) catch break;
+                const n = readOnceFD(fd, body_list.items[body_received..]) catch break;
                 if (n == 0) break;
                 body_received += n;
             }
@@ -439,7 +439,7 @@ pub const HttpClient = struct {
             if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
             var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
             while (true) {
-                const n = readSomeFD(fd, &read_chunk) catch break;
+                const n = readOnceFD(fd, &read_chunk) catch break;
                 if (n == 0) break;
                 if (body_list.items.len + n > self.config.max_response_body) return error.BodyTooLarge;
                 try body_list.appendSlice(gpa, read_chunk[0..n]);
@@ -490,8 +490,8 @@ fn udsMethodStr(method: Method.Code) []const u8 {
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }

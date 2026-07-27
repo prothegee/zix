@@ -90,7 +90,7 @@ pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 
     outer: while (true) {
         // One syscall: returns whatever bytes arrived without blocking for more.
-        const n = zix.Http.WebSocket.readSomeFD(req.fd, frame_buf[buf_used..]) catch break;
+        const n = zix.Http.WebSocket.readOnceFD(req.fd, frame_buf[buf_used..]) catch break;
         if (n == 0) break;
         buf_used += n;
 

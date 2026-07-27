@@ -15,14 +15,25 @@ targets=(
     "x86_64-openbsd"
 )
 
-ZIG_BIN=$@
+ZIG_BIN="${1:-zig}"
+TARGET_FILTER="${2:-}"
 
-if [[ "$ZIG_BIN" == ""  ]]; then
-    ZIG_BIN=zig
-fi
-if [[ "$ZIG_BIN" == ""  ]]; then
-    echo "can't found zig in this system"
-    exit 1
+if [[ -n "$TARGET_FILTER" ]]; then
+    matched=false
+    for target in "${targets[@]}"; do
+        if [[ "$target" == "$TARGET_FILTER" ]]; then
+            matched=true
+            break
+        fi
+    done
+
+    if [[ "$matched" == false ]]; then
+        echo "unknown target: $TARGET_FILTER"
+        echo "valid targets: ${targets[*]}"
+        exit 1
+    fi
+
+    targets=("$TARGET_FILTER")
 fi
 
 echo "zig version: $($ZIG_BIN version)"

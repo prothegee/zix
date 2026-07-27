@@ -142,8 +142,8 @@ pub fn timerLoop(io: std.Io, registry: *ConnRegistry) void {
 // --------------------------------------------------------- //
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -713,7 +713,7 @@ fn handleOneRequest(
     var found = false;
 
     while (filled < buf_read.len) {
-        const n = readSomeFD(fd, buf_read[filled..]) catch break;
+        const n = readOnceFD(fd, buf_read[filled..]) catch break;
         if (n == 0) break;
         const prev = filled;
         filled += n;

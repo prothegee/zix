@@ -14,7 +14,9 @@
 //!   for the ASYNC / POOL models.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
+const win_io = @import("../../utils/windows_io.zig");
 
 const Tls = @import("../../tls/Tls.zig");
 const connection = @import("../../tls/connection.zig");
@@ -50,6 +52,21 @@ pub const FeedResult = struct {
     outcome: Outcome = .ok,
 };
 
+/// Fill buf with cryptographically secure random bytes.
+fn secureRandom(buf: []u8) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = linux.getrandom(buf.ptr, buf.len, 0);
+        return;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) {
+        win_io.secureRandom(buf) catch {};
+        return;
+    }
+
+    std.c.arc4random_buf(buf.ptr, buf.len);
+}
+
 /// One TLS server connection's resumable state. The handshake inputs (cert / key / alpn) are borrowed
 /// from the Tls.Context and must outlive the session.
 pub const Session = struct {
@@ -74,9 +91,9 @@ pub const Session = struct {
     /// borrowed (typically from the Tls.Context).
     pub fn init(cert_der: []const u8, signing_key: certificate.SigningKey, alpn_prefs: []const extensions.Alpn) Session {
         var self = Session{ .cert_der = cert_der, .signing_key = signing_key, .alpn_prefs = alpn_prefs };
-        _ = linux.getrandom(&self.ephemeral, self.ephemeral.len, 0);
-        _ = linux.getrandom(&self.server_random, self.server_random.len, 0);
-        _ = linux.getrandom(&self.pss_salt, self.pss_salt.len, 0);
+        secureRandom(&self.ephemeral);
+        secureRandom(&self.server_random);
+        secureRandom(&self.pss_salt);
 
         return self;
     }

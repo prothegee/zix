@@ -316,8 +316,8 @@ pub const FixRoute = struct {
 // serveConn path), preserving the existing behavior.
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime builtin.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -516,7 +516,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                     }
                     break :outer;
                 }
-                const n = readSomeFD(fd, recv_buf[recv_len..]) catch break :outer;
+                const n = readOnceFD(fd, recv_buf[recv_len..]) catch break :outer;
                 if (n == 0) break :outer;
                 recv_len += n;
             }
@@ -528,7 +528,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
                 if (recv_len >= recv_buf.len) return error.MessageTooLarge;
                 const nready = pollInFD(fd, timeout_ms) orelse break :outer;
                 if (nready == 0) break :outer;
-                const n = readSomeFD(fd, recv_buf[recv_len..]) catch break :outer;
+                const n = readOnceFD(fd, recv_buf[recv_len..]) catch break :outer;
                 if (n == 0) break :outer;
                 recv_len += n;
             }
@@ -813,8 +813,19 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
 
 /// Monotonic clock in milliseconds, for the .URING heartbeat timer.
 pub fn monotonicMs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    if (comptime builtin.target.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        const s: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
+        const ms: u64 = if (ts.nsec >= 0) @as(u64, @intCast(ts.nsec)) / 1_000_000 else 0;
+
+        return s * 1000 + ms;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) return win_io.monotonicUs() / std.time.us_per_ms;
+
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
     const s: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
     const ms: u64 = if (ts.nsec >= 0) @as(u64, @intCast(ts.nsec)) / 1_000_000 else 0;
 

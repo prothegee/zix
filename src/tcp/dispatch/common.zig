@@ -10,6 +10,7 @@ const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 const Config = @import("../config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const Logger = @import("../../logger/logger.zig").Logger;
+const win_io = @import("../../utils/windows_io.zig");
 
 /// Emit a server lifecycle line. Routes through cfg.logger when present.
 /// Without a logger it prints to stderr only in Debug builds (silent in release).
@@ -56,7 +57,7 @@ const FRAME_READ_BUF_SIZE: usize = 4096;
 
 /// Direct socket write, bypassing the coalescing sink.
 fn rawFrameWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
-    if (comptime @import("builtin").target.os.tag == .windows) return @import("../../utils/windows_io.zig").writeAll(fd, data);
+    if (comptime builtin.target.os.tag == .windows) return win_io.writeAll(fd, data);
 
     var remaining = data;
     while (remaining.len > 0) {
@@ -154,8 +155,18 @@ pub fn getPeerAddr(fd: std.posix.fd_t, buf: []u8) []const u8 {
 }
 
 pub fn getMonotonicMs() u64 {
-    var spec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &spec);
+    if (comptime builtin.target.os.tag == .linux) {
+        var spec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &spec);
+        const s: u64 = if (spec.sec >= 0) @intCast(spec.sec) else 0;
+        const millis: u64 = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
+        return s * 1000 + millis;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) return win_io.monotonicUs() / std.time.us_per_ms;
+
+    var spec: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &spec);
     const s: u64 = if (spec.sec >= 0) @intCast(spec.sec) else 0;
     const millis: u64 = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
     return s * 1000 + millis;

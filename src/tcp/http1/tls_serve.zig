@@ -545,7 +545,7 @@ fn readAll(fd: posix.fd_t, buf: []u8) !void {
     if (comptime builtin.os.tag == .windows) {
         var read: usize = 0;
         while (read < buf.len) {
-            const n = win_io.readSome(fd, buf[read..]) catch return error.ReadFailed;
+            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
 
             read += n;

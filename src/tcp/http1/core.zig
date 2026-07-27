@@ -166,8 +166,8 @@ pub fn setRecvBuf(fd: std.posix.fd_t, bytes: usize) void {
 /// Return:
 /// - usize (bytes read, 0 when the peer closed)
 /// - read error otherwise
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -480,9 +480,7 @@ pub fn setMaxResponseHeaders(count: usize) void {
 fn cachedDate() []const u8 {
     tl_date_tick +%= 1;
     if (tl_date_tick == 0 or tl_date.len == 0) {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-        const secs: u64 = if (ts.sec >= 0) @intCast(ts.sec) else 0;
+        const secs: u64 = wallClockNs() / std.time.ns_per_s;
         if (secs != tl_date.secs or tl_date.len == 0) {
             const d = formatHttpDate(secs, &tl_date.buf);
             tl_date.secs = secs;
@@ -1475,7 +1473,7 @@ fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
 
     while (true) {
         if (filled >= buf.len) return error.HeaderTooLarge;
-        const n = readSomeFD(fd, buf[filled..]) catch return error.Closed;
+        const n = readOnceFD(fd, buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         const search_from = if (filled > 3) filled - 3 else 0;
         filled += n;
@@ -1503,7 +1501,7 @@ pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize
             if (rem > 0) std.mem.copyForwards(u8, &reader.buf, reader.buf[reader.pos..reader.len]);
             reader.pos = 0;
             reader.len = rem;
-            const n = readSomeFD(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
+            const n = readOnceFD(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
             if (n == 0) return error.Closed;
             reader.len += n;
         }
@@ -1652,7 +1650,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
             }
             body_len = from_peek;
             while (body_len < to_read) {
-                const n = readSomeFD(fd, body_buf[body_len..to_read]) catch break;
+                const n = readOnceFD(fd, body_buf[body_len..to_read]) catch break;
                 if (n == 0) break;
                 body_len += n;
             }
@@ -1667,7 +1665,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
                 var remaining = content_length - peeked;
                 while (remaining > 0) {
                     const want = @min(remaining, body_buf.len);
-                    const n = readSomeFD(fd, body_buf[0..want]) catch break;
+                    const n = readOnceFD(fd, body_buf[0..want]) catch break;
                     if (n == 0) break;
                     remaining -= n;
                 }

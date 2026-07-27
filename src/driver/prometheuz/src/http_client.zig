@@ -159,7 +159,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
     var header_end: usize = 0;
 
     while (head_scan_len < head_scan_buf.len) {
-        const n = readSomeFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
+        const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
         if (n == 0) return error.ConnectionClosed;
         head_scan_len += n;
         if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
@@ -203,7 +203,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
         var body_received = initial;
         while (body_received < body_len) {
-            const n = readSomeFD(fd, body_list.items[body_received..]) catch break;
+            const n = readOnceFD(fd, body_list.items[body_received..]) catch break;
             if (n == 0) break;
             body_received += n;
         }
@@ -211,7 +211,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         if (already_read > 0) try body_list.appendSlice(allocator, head_scan_buf[header_end..][0..already_read]);
         var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
         while (true) {
-            const n = readSomeFD(fd, &read_chunk) catch break;
+            const n = readOnceFD(fd, &read_chunk) catch break;
             if (n == 0) break;
             if (body_list.items.len + n > max_response_body) return error.BodyTooLarge;
             try body_list.appendSlice(allocator, read_chunk[0..n]);
@@ -261,7 +261,7 @@ fn readChunkedBody(allocator: std.mem.Allocator, fd: std.posix.fd_t, seed: []con
 
 fn fillMore(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.posix.fd_t) !bool {
     var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
-    const n = readSomeFD(fd, &read_chunk) catch return error.ConnectionClosed;
+    const n = readOnceFD(fd, &read_chunk) catch return error.ConnectionClosed;
     if (n == 0) return false;
     try carry.appendSlice(allocator, read_chunk[0..n]);
 
@@ -345,7 +345,7 @@ fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{Broken
 }
 
 /// Read some bytes from fd: the ntdll path on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
     if (comptime @import("builtin").target.os.tag == .windows) return windowsReadSome(fd, buf);
 
     return std.posix.read(fd, buf);
@@ -468,7 +468,7 @@ const MockServer = struct {
     }
 
     fn readSent(self: *const MockServer, buf: []u8) []u8 {
-        const n = readSomeFD(self.script_fd, buf) catch return buf[0..0];
+        const n = readOnceFD(self.script_fd, buf) catch return buf[0..0];
         return buf[0..n];
     }
 };

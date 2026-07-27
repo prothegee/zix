@@ -21,7 +21,7 @@ const windows = std.os.windows;
 /// Return:
 /// - usize (bytes written)
 /// - error.BrokenPipe on any failed status
-pub fn writeSome(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!usize {
+pub fn writeOnce(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!usize {
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, data.len);
 
@@ -43,7 +43,7 @@ pub fn writeSome(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!usi
 pub fn writeAll(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!void {
     var rem = data;
     while (rem.len > 0) {
-        const n = try writeSome(handle, rem);
+        const n = try writeOnce(handle, rem);
         if (n == 0) return error.BrokenPipe;
 
         rem = rem[n..];
@@ -55,7 +55,7 @@ pub fn writeAll(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!void
 /// Return:
 /// - usize (bytes read, 0 when the peer closed)
 /// - error.BrokenPipe on any failed status
-pub fn readSome(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
+pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const len = std.math.lossyCast(windows.ULONG, buf.len);
 
@@ -195,4 +195,63 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
     if (n < 0) return error.BrokenPipe;
 
     return n > 0;
+}
+
+// --------------------------------------------------------- //
+// Secure random: mirrors std.Io.Threaded's own Windows randomSecure, reading
+// straight from the CNG device rather than ProcessPrng (bcryptprimitives.dll
+// heap-allocates per call and reruns a self-test on every load). ntdll-only,
+// no new DLL dependency.
+
+var cng_handle: ?windows.HANDLE = null;
+var cng_ready: std.atomic.Value(bool) = .init(false);
+
+fn getCngDevice() error{EntropyUnavailable}!windows.HANDLE {
+    if (cng_ready.load(.acquire)) return cng_handle.?;
+
+    var fresh_handle: windows.HANDLE = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var name = windows.UNICODE_STRING.init(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'C', 'N', 'G' });
+    const attrs = windows.OBJECT.ATTRIBUTES{ .ObjectName = &name };
+
+    const status = windows.ntdll.NtOpenFile(
+        &fresh_handle,
+        .{ .STANDARD = .{ .SYNCHRONIZE = true }, .SPECIFIC = .{ .FILE = .{ .READ_DATA = true } } },
+        &attrs,
+        &iosb,
+        .VALID_FLAGS,
+        .{ .IO = .SYNCHRONOUS_NONALERT },
+    );
+    if (status != .SUCCESS) return error.EntropyUnavailable;
+
+    cng_handle = fresh_handle;
+    cng_ready.store(true, .release);
+    return fresh_handle;
+}
+
+/// Fill buf with cryptographically secure random bytes. Mirrors getrandom(buf, buf.len, 0).
+///
+/// Return:
+/// - void
+/// - error.EntropyUnavailable if the device open or the read fails
+pub fn secureRandom(buf: []u8) error{EntropyUnavailable}!void {
+    if (buf.len == 0) return;
+
+    const handle = try getCngDevice();
+
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    const len: windows.ULONG = std.math.lossyCast(windows.ULONG, buf.len);
+    const status = windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        null,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.KSEC.GEN_RANDOM,
+        null,
+        0,
+        buf.ptr,
+        len,
+    );
+    if (status != .SUCCESS) return error.EntropyUnavailable;
 }

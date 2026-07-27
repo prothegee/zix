@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
+const win_io = @import("../../../utils/windows_io.zig");
 
 const Config = @import("../config.zig");
 const Http3ServerConfig = Config.Http3ServerConfig;
@@ -40,6 +41,21 @@ const SendStream = @import("../connection.zig").SendStream;
 const SentRangeInfo = @import("../connection.zig").SentRangeInfo;
 const max_sent_ranges = @import("../connection.zig").max_sent_ranges;
 const tls_handshake = @import("../../../tls/handshake.zig");
+
+/// Fill buf with cryptographically secure random bytes.
+fn secureRandom(buf: []u8) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = linux.getrandom(buf.ptr, buf.len, 0);
+        return;
+    }
+
+    if (comptime builtin.target.os.tag == .windows) {
+        win_io.secureRandom(buf) catch {};
+        return;
+    }
+
+    std.c.arc4random_buf(buf.ptr, buf.len);
+}
 
 /// Maximum connections one v1 worker tracks. The table is heap-allocated, each Connection is large.
 pub const max_connections = 256;
@@ -762,7 +778,7 @@ fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatc
     // per-connection randoms.
     const cid_len: usize = @min(config.cid_len, 20);
     var scid_bytes: [20]u8 = undefined;
-    _ = std.os.linux.getrandom(&scid_bytes, cid_len, 0);
+    secureRandom(scid_bytes[0..cid_len]);
     conn.our_scid = demux.ConnId.fromSlice(scid_bytes[0..cid_len]);
 
     // Index the connection under the SCID we issued too: the client uses it as its Destination CID for
@@ -770,9 +786,9 @@ fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatc
     table.addAlias(conn.our_scid, conn);
 
     var server_random: [32]u8 = undefined;
-    _ = std.os.linux.getrandom(&server_random, server_random.len, 0);
+    secureRandom(&server_random);
     var ephemeral: [32]u8 = undefined;
-    _ = std.os.linux.getrandom(&ephemeral, ephemeral.len, 0);
+    secureRandom(&ephemeral);
 
     var out: [1500]u8 = undefined;
     const built = serverhello.buildServerHelloInitial(&out, &hello, client_hello, conn.initial_server, hdr.scid, conn.our_scid.slice(), server_random, ephemeral) orelse {
