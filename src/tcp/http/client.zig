@@ -23,6 +23,10 @@ const HEAD_SCAN_BUF: usize = 8192;
 const BODY_READ_CHUNK: usize = 4096;
 /// Response head buffer for a redirect hop (caps the redirect response head size).
 const REDIRECT_HEAD_BUF: usize = 8 * 1024;
+/// AF_UNIX socket path limit (classic 108-byte sun_path). std caps the path
+/// at the filesystem limit on Windows, so the socket limit is enforced here
+/// for the same error on every platform.
+const UDS_PATH_MAX: usize = 108;
 
 // --------------------------------------------------------- //
 
@@ -344,10 +348,11 @@ pub const HttpClient = struct {
     /// Return:
     /// - ClientResponse
     /// - error.UdsNotSupported (non-Unix platform)
-    /// - error.InvalidPath (socket path rejected by OS, e.g. too long)
+    /// - error.InvalidPath (socket path longer than 108 bytes or rejected by OS)
     /// - error.BodyTooLarge (response body exceeded config.max_response_body)
     pub fn requestUds(self: *Self, method: Method.Code, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
         if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
+        if (socket_path.len > UDS_PATH_MAX) return error.InvalidPath;
 
         const gpa = self.config.allocator;
 
