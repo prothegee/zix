@@ -47,13 +47,13 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            zig build unit-test --summary failures || failures="$failures unit-test"
-            zig build integration-test --summary failures || failures="$failures integration-test"
-            zig build behaviour-test --summary failures || failures="$failures behaviour-test"
-            zig build edge-test --summary failures || failures="$failures edge-test"
-            zig build postgrez-test-unit --summary failures || failures="$failures postgrez-test-unit"
-            zig build rediz-test-unit --summary failures || failures="$failures rediz-test-unit"
-            zig build prometheuz-test-unit --summary failures || failures="$failures prometheuz-test-unit"
+            zig build unit-test --summary all || failures="$failures unit-test"
+            zig build integration-test --summary all || failures="$failures integration-test"
+            zig build behaviour-test --summary all || failures="$failures behaviour-test"
+            zig build edge-test --summary all || failures="$failures edge-test"
+            zig build postgrez-test-unit --summary all || failures="$failures postgrez-test-unit"
+            zig build rediz-test-unit --summary all || failures="$failures rediz-test-unit"
+            zig build prometheuz-test-unit --summary all || failures="$failures prometheuz-test-unit"
 
             if [ -n "$failures" ]; then
               echo "failed:$failures"
