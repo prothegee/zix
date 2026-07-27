@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
+const win_io = @import("../utils/windows_io.zig");
 
 // --------------------------------------------------------- //
 
@@ -24,10 +25,24 @@ const Timestamp = struct {
 };
 
 fn getTimestamp() Timestamp {
-    var spec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &spec);
-    const secs: u64 = if (spec.sec >= 0) @intCast(spec.sec) else 0;
-    const ms_part: u64 = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
+    var secs: u64 = 0;
+    var ms_part: u64 = 0;
+
+    if (comptime builtin.target.os.tag == .linux) {
+        var spec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &spec);
+        secs = if (spec.sec >= 0) @intCast(spec.sec) else 0;
+        ms_part = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
+    } else if (comptime builtin.target.os.tag == .windows) {
+        const ns = win_io.wallClockNs();
+        secs = ns / std.time.ns_per_s;
+        ms_part = (ns % std.time.ns_per_s) / 1_000_000;
+    } else {
+        var spec: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.REALTIME, &spec);
+        secs = if (spec.sec >= 0) @intCast(spec.sec) else 0;
+        ms_part = if (spec.nsec >= 0) @as(u64, @intCast(spec.nsec)) / 1_000_000 else 0;
+    }
 
     const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs };
     const day_secs = epoch_secs.getDaySeconds();
