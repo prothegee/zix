@@ -13,6 +13,7 @@ const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 const rcache = @import("../../utils/response_cache.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const setCache = @import("response.zig").setCache;
 const common = @import("dispatch/common.zig");
 const pool_model = @import("dispatch/pool.zig");
@@ -94,6 +95,8 @@ fn HttpServerImpl(comptime routes: []const Route) type {
             // Reject an impossible dual-listener bind before the timer thread spawns, so an
             // error return leaves no detached thread reading this server's registry.
             if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
+
+            ignoreSigpipe();
 
             const cpu = try std.Thread.getCpuCount();
 
