@@ -305,10 +305,10 @@ fn consume(carry: *std.ArrayList(u8), count: usize) void {
 // --------------------------------------------------------- //
 // Windows socket I/O over ntdll. Zig 0.16 std drives sockets through AFD, and
 // std.posix read plus the libc write are POSIX-only, so the raw-fd paths above
-// branch here on Windows. Each call completes through its own event: a
-// socket's file object is signaled by every completed operation on it, so
-// waiting on the handle itself can return before this call's operation is
-// done and the status block would be read too early.
+// branch here on Windows. The helpers issue the AFD send and receive ioctls
+// (the requests std itself uses: the plain NtReadFile / NtWriteFile path
+// fails on raw AFD endpoints) and each call completes through its own event,
+// so the status block is never read before the operation finished.
 
 /// Per-call completion event for the ntdll socket I/O below.
 fn windowsIoEvent() error{BrokenPipe}!std.os.windows.HANDLE {
@@ -326,16 +326,37 @@ fn windowsIoEvent() error{BrokenPipe}!std.os.windows.HANDLE {
     return event;
 }
 
-/// One NtReadFile call, waiting on a per-call event when the operation goes async.
+/// One AFD receive ioctl, waiting on a per-call event when the operation goes
+/// async. A graceful peer close completes with SUCCESS and 0 bytes.
 fn windowsReadOnce(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     const windows = std.os.windows;
     const event = try windowsIoEvent();
     defer _ = windows.ntdll.NtClose(event);
 
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
-    const len = std.math.lossyCast(windows.ULONG, buf.len);
+    const iovecs = [1]windows.AFD.WSABUF(.@"var"){.{
+        .len = std.math.lossyCast(windows.ULONG, buf.len),
+        .buf = buf.ptr,
+    }};
+    const info = windows.AFD.RECV_INFO{
+        .BufferArray = &iovecs,
+        .BufferCount = 1,
+        .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true },
+        .TdiFlags = .{ .NORMAL = true },
+    };
 
-    var status = windows.ntdll.NtReadFile(handle, event, null, null, &iosb, buf.ptr, len, null, null);
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var status = windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        event,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.RECEIVE,
+        @ptrCast(&info),
+        @sizeOf(windows.AFD.RECV_INFO),
+        null,
+        0,
+    );
     if (status == .PENDING) {
         _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
         status = iosb.u.Status;
@@ -346,7 +367,7 @@ fn windowsReadOnce(handle: std.os.windows.HANDLE, buf: []u8) error{BrokenPipe}!u
     return iosb.Information;
 }
 
-/// Write all of data via NtWriteFile, waiting on a per-call event when async.
+/// Write all of data via AFD send ioctls, waiting on a per-call event when async.
 fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{BrokenPipe}!void {
     const windows = std.os.windows;
     var rem = data;
@@ -354,10 +375,30 @@ fn windowsWriteAll(handle: std.os.windows.HANDLE, data: []const u8) error{Broken
         const event = try windowsIoEvent();
         defer _ = windows.ntdll.NtClose(event);
 
-        var iosb: windows.IO_STATUS_BLOCK = undefined;
-        const len = std.math.lossyCast(windows.ULONG, rem.len);
+        const iovecs = [1]windows.AFD.WSABUF(.@"const"){.{
+            .len = std.math.lossyCast(windows.ULONG, rem.len),
+            .buf = rem.ptr,
+        }};
+        const info = windows.AFD.SEND_INFO{
+            .BufferArray = &iovecs,
+            .BufferCount = 1,
+            .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true },
+            .TdiFlags = .{},
+        };
 
-        var status = windows.ntdll.NtWriteFile(handle, event, null, null, &iosb, rem.ptr, len, null, null);
+        var iosb: windows.IO_STATUS_BLOCK = undefined;
+        var status = windows.ntdll.NtDeviceIoControlFile(
+            handle,
+            event,
+            null,
+            null,
+            &iosb,
+            windows.IOCTL.AFD.SEND,
+            @ptrCast(&info),
+            @sizeOf(windows.AFD.SEND_INFO),
+            null,
+            0,
+        );
         if (status == .PENDING) {
             _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
             status = iosb.u.Status;
