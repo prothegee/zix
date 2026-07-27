@@ -39,35 +39,35 @@ jobs:
       # if: always() keeps the later suites running after an earlier failure,
       # so one run reports every failing suite at once.
       - name: zix unit tests
-        run: zig build unit-test --summary all
+        run: zig build unit-test --summary failures
 
       - name: zix integration tests
         if: always()
-        run: zig build integration-test --summary all
+        run: zig build integration-test --summary failures
 
       - name: zix behaviour tests
         if: always()
-        run: zig build behaviour-test --summary all
+        run: zig build behaviour-test --summary failures
 
       - name: zix edge tests
         if: always()
-        run: zig build edge-test --summary all
+        run: zig build edge-test --summary failures
 
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
-        run: zig build postgrez-test-unit --summary all
+        run: zig build postgrez-test-unit --summary failures
 
       - name: rediz unit tests
-        run: zig build rediz-test-unit --summary all
+        run: zig build rediz-test-unit --summary failures
 
       - name: prometheuz unit tests
-        run: zig build prometheuz-test-unit --summary all
+        run: zig build prometheuz-test-unit --summary failures
 
       # docker ships preinstalled on ubuntu-latest, so postgrez and rediz can
       # own their own container lifecycle here. test-runner is out of scope.
       - name: postgrez integration tests
-        run: zig build postgrez-test-integration --summary all
+        run: zig build postgrez-test-integration --summary failures
 
       - name: rediz integration tests
-        run: zig build rediz-test-integration --summary all
+        run: zig build rediz-test-integration --summary failures
