@@ -1,13 +1,11 @@
-name: x86_64-openbsd
+name: zig-x86_64-openbsd-0.16
 
-# x86_64-openbsd test leg. Runs when a pull request into main is merged, or on
-# a manual workflow_dispatch.
+# x86_64-openbsd test leg, pinned to zig 0.16. Runs when a pull request is merged
+# (any target branch), or on a manual workflow_dispatch.
 on:
   pull_request:
     types:
       - closed
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -19,11 +17,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      # always tests main, whatever ref triggered the run
+      # tests the ref that triggered the run: the dispatched branch, or the
+      # merged pull request result
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: main
 
       # No GitHub-hosted OpenBSD runner exists, so the job boots a real
       # OpenBSD VM on top of this ubuntu host and runs the suite inside it.
