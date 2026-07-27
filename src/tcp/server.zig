@@ -14,6 +14,7 @@ const pool_model = @import("dispatch/pool.zig");
 const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
+const ignoreSigpipe = @import("../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 // --------------------------------------------------------- //
 // Public surface re-exported from the dispatch helpers.
@@ -34,6 +35,8 @@ pub const FRAME_MAX_PAYLOAD = common.FRAME_MAX_PAYLOAD;
 /// Shared by the per-connection server (TcpServerImpl) and the framed adapter
 /// fallback (TcpFramedServerImpl on every model except .URING).
 fn serveDispatch(cfg: TcpServerConfig, handler: HandlerFn) !void {
+    ignoreSigpipe();
+
     return switch (cfg.dispatch_model) {
         .ASYNC => async_model.runAsync(cfg, handler),
         .POOL => pool_model.runPool(cfg, handler),
