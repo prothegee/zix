@@ -42,6 +42,22 @@ pub fn wallClockNs() u64 {
     return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
 }
 
+/// Return the current monotonic time in nanoseconds (CLOCK_MONOTONIC basis).
+/// Use this for elapsed-duration measurements (request timing).
+fn monotonicNs() u64 {
+    if (comptime @import("builtin").target.os.tag == .linux) {
+        var timespec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &timespec);
+        return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
+    }
+
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.monotonicUs() * std.time.ns_per_us;
+
+    var timespec: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.MONOTONIC, &timespec);
+    return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
+}
+
 // --------------------------------------------------------- //
 
 pub const GrpcContentType = enum { PROTO, JSON, UNKNOWN };
@@ -603,7 +619,7 @@ const ConnReader = struct {
             self.end = n;
         }
 
-        const got = readSomeFD(self.fd, self.buf[self.end..]) catch return error.Closed;
+        const got = readOnceFD(self.fd, self.buf[self.end..]) catch return error.Closed;
         if (got == 0) return error.Closed;
         self.end += got;
     }
@@ -686,8 +702,8 @@ fn DispatchTask(comptime routes: []const Route) type {
                 if (header.name.len == 5 and std.mem.eql(u8, header.name, ":path")) path = header.value;
             }
 
-            var time_start: std.os.linux.timespec = undefined;
-            if (self.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+            var time_start: u64 = undefined;
+            if (self.opts.logger != null) time_start = monotonicNs();
 
             var ctx = GrpcContext{
                 .fd = self.fd,
@@ -704,11 +720,7 @@ fn DispatchTask(comptime routes: []const Route) type {
             Router(routes).dispatch(path, self.headers[0..self.header_count], &ctx);
 
             if (self.opts.logger) |logger| {
-                var time_end: std.os.linux.timespec = undefined;
-                _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
-                const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
-                    (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
-                const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+                const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
                 var peer_buf: [64]u8 = undefined;
                 const peer = peerStr(self.fd, &peer_buf);
                 logger.rpc(peer, path, ctx._grpc_status, self.body_len, ctx._sent_bytes, dur_ms);
@@ -832,8 +844,8 @@ fn dispatchGrpcInline(
     conn_mutex: *ConnMutex,
     path: []const u8,
 ) void {
-    var time_start: std.os.linux.timespec = undefined;
-    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+    var time_start: u64 = undefined;
+    if (opts.logger != null) time_start = monotonicNs();
 
     var decomp_buf: ?[]u8 = null;
     defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
@@ -873,11 +885,7 @@ fn dispatchGrpcInline(
     if (need_mutex) conn_mutex.unlock();
 
     if (opts.logger) |logger| {
-        var time_end: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
-        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
-            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
-        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+        const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
         var peer_buf: [64]u8 = undefined;
         const peer = peerStr(fd, &peer_buf);
         logger.rpc(peer, path, ctx._grpc_status, stream.body_len, ctx._sent_bytes, dur_ms);
@@ -903,8 +911,8 @@ fn dispatchStream(
 // --------------------------------------------------------- //
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
-fn readSomeFD(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readSome(fd, buf);
+fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.readOnce(fd, buf);
 
     return std.posix.read(fd, buf);
 }
@@ -978,7 +986,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
         if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = readSomeFD(fd, head_buf[filled..]) catch return error.Closed;
+        const n = readOnceFD(fd, head_buf[filled..]) catch return error.Closed;
         if (n == 0) return error.Closed;
         filled += n;
     }
@@ -1044,8 +1052,8 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
         .{ .name = ":scheme", .value = "http" },
     };
 
-    var time_start: std.os.linux.timespec = undefined;
-    if (opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+    var time_start: u64 = undefined;
+    if (opts.logger != null) time_start = monotonicNs();
 
     // Note:
     // Stream 1 (h2c upgrade) is dispatched synchronously before the read loop starts.
@@ -1067,11 +1075,7 @@ fn serveGrpcUpgrade(comptime routes: []const Route, fd: std.posix.fd_t, opts: Gr
     Router(routes).dispatch(path, &stream1_headers, &ctx);
 
     if (opts.logger) |logger| {
-        var time_end: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
-        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
-            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
-        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+        const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
         var peer_buf: [64]u8 = undefined;
         const peer = peerStr(fd, &peer_buf);
         logger.rpc(peer, path, ctx._grpc_status, ctx._body.len, ctx._sent_bytes, dur_ms);
@@ -1647,8 +1651,8 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
     const path = headerPath(stream.headers[0..stream.header_count]);
     const is_streaming = routeIsStreaming(routes, path);
 
-    var time_start: std.os.linux.timespec = undefined;
-    if (conn.opts.logger != null) _ = std.os.linux.clock_gettime(.MONOTONIC, &time_start);
+    var time_start: u64 = undefined;
+    if (conn.opts.logger != null) time_start = monotonicNs();
 
     var decomp_buf: ?[]u8 = null;
     defer if (decomp_buf) |buf| std.heap.smp_allocator.free(buf);
@@ -1686,11 +1690,7 @@ fn muxDispatch(comptime routes: []const Route, conn: *GrpcMuxConn, stream: *Stre
     if (is_streaming) setTcpCork(conn.fd, false);
 
     if (conn.opts.logger) |logger| {
-        var time_end: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &time_end);
-        const dur_ns: i64 = (@as(i64, time_end.sec) - @as(i64, time_start.sec)) * 1_000_000_000 +
-            (@as(i64, time_end.nsec) - @as(i64, time_start.nsec));
-        const dur_ms: u64 = @intCast(@max(0, @divTrunc(dur_ns, 1_000_000)));
+        const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
         var peer_buf: [64]u8 = undefined;
         const peer = peerStr(conn.fd, &peer_buf);
         logger.rpc(peer, path, ctx._grpc_status, stream.body_len, ctx._sent_bytes, dur_ms);
