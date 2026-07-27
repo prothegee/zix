@@ -43,42 +43,42 @@ jobs:
       # a hung suite (a test blocked in socket io never completes on its own)
       # into a red step with logs instead of a job spinning for hours.
       - name: zix unit tests
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build unit-test
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build integration-test
 
       - name: zix behaviour tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build behaviour-test
 
       - name: zix edge tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build edge-test
 
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build postgrez-test-unit
 
       - name: rediz unit tests
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build rediz-test-unit
 
       - name: prometheuz unit tests
-        timeout-minutes: 15
+        timeout-minutes: 6
         shell: pwsh
         run: zig build prometheuz-test-unit
 
