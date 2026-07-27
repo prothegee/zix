@@ -18,6 +18,7 @@
 //!   destroys a broken one and frees its slot for reconnect.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lib = @import("lib.zig");
 const conn_mod = @import("conn.zig");
 
@@ -130,7 +131,7 @@ pub const Pool = struct {
         self.enqueueWaiter(&waiter);
         self.unlock();
 
-        while (waiter.ready.load(.acquire) == 0) futexWait(&waiter.ready);
+        while (waiter.ready.load(.acquire) == 0) futexWait(self.io, &waiter.ready);
 
         if (waiter.grant_conn) |granted| return granted;
 
@@ -154,7 +155,7 @@ pub const Pool = struct {
         self.unlock();
 
         // direct handoff: the slot stays held, ownership moves over
-        if (maybe_waiter) |waiter| grantConn(waiter, pooled);
+        if (maybe_waiter) |waiter| grantConn(self.io, waiter, pooled);
     }
 
     /// Destroy a broken connection and free its slot. With a parked waiter
@@ -171,7 +172,7 @@ pub const Pool = struct {
                 self.unlock();
 
                 pooled.deinit();
-                if (maybe_waiter) |waiter| grantSlot(waiter, index);
+                if (maybe_waiter) |waiter| grantSlot(self.io, waiter, index);
 
                 return;
             }
@@ -212,7 +213,7 @@ pub const Pool = struct {
             if (maybe_waiter == null) self.in_use[index] = false;
             self.unlock();
 
-            if (maybe_waiter) |waiter| grantSlot(waiter, index);
+            if (maybe_waiter) |waiter| grantSlot(self.io, waiter, index);
 
             return err;
         };
@@ -274,24 +275,39 @@ pub const Pool = struct {
 
 // --------------------------------------------------------- //
 
-fn grantConn(waiter: *Waiter, granted: *Conn) void {
+fn grantConn(io: std.Io, waiter: *Waiter, granted: *Conn) void {
     waiter.grant_conn = granted;
     waiter.ready.store(1, .release);
-    futexWake(&waiter.ready);
+    futexWake(io, &waiter.ready);
 }
 
-fn grantSlot(waiter: *Waiter, index: usize) void {
+fn grantSlot(io: std.Io, waiter: *Waiter, index: usize) void {
     waiter.grant_slot = index;
     waiter.ready.store(1, .release);
-    futexWake(&waiter.ready);
+    futexWake(io, &waiter.ready);
 }
 
-fn futexWait(word: *std.atomic.Value(u32)) void {
-    _ = std.os.linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, 0, null);
+/// Park the calling thread while the word is 0. Linux keeps the raw futex
+/// fast path, other targets park through the io backend.
+fn futexWait(io: std.Io, word: *std.atomic.Value(u32)) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, 0, null);
+
+        return;
+    }
+
+    io.futexWaitUncancelable(u32, &word.raw, 0);
 }
 
-fn futexWake(word: *std.atomic.Value(u32)) void {
-    _ = std.os.linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, 1);
+/// Wake one thread parked on the word. Same branch split as futexWait.
+fn futexWake(io: std.Io, word: *std.atomic.Value(u32)) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, 1);
+
+        return;
+    }
+
+    io.futexWake(u32, &word.raw, 1);
 }
 
 // --------------------------------------------------------- //

@@ -133,6 +133,7 @@ flowchart TB
 ```
 
 - A spinlock guards the slot and waiter bookkeeping, the connect runs outside the lock.
+- Parking sleeps on a futex word per waiter. On Linux this is the raw futex syscall (the fast path stays untouched), on other targets the wait and wake go through the `std.Io` backend with the same semantics.
 - `release` hands a healthy connection directly to the oldest parked waiter (the slot stays held through the handoff), or marks it idle.
 - `discard` frees a broken slot, granting it to a waiter or leaving it for the next acquire.
 - Beyond the waiter bound `acquire` sheds `error.PoolBusy`, with parking off it sheds `error.PoolExhausted`.

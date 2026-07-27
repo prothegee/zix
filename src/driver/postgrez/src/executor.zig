@@ -143,6 +143,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
         };
 
         allocator: std.mem.Allocator,
+        io: std.Io,
         pool: lib.Pool,
         run_batch: *const fn (*Batch, []const Job) void,
         worker_count: usize,
@@ -216,6 +217,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
 
             self.* = .{
                 .allocator = allocator,
+                .io = io,
                 .pool = try lib.Pool.init(allocator, io, pool_config),
                 .run_batch = options.run_batch,
                 .worker_count = workers,
@@ -283,7 +285,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
             if (self.stats_on) self.recordDepth(depth);
 
             _ = self.pending.fetchAdd(1, .release);
-            wake(&self.pending, 1);
+            wake(self.io, &self.pending, 1);
 
             return true;
         }
@@ -415,7 +417,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
 
                 const owed = self.pending.load(.acquire);
                 if (owed == 0) {
-                    waitZero(&self.pending);
+                    waitZero(self.io, &self.pending);
 
                     continue;
                 }
@@ -456,7 +458,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
             // checks shutdown before touching pending, so this credit is
             // never consumed as a job.
             _ = self.pending.fetchAdd(1, .release);
-            wake(&self.pending, spawned);
+            wake(self.io, &self.pending, spawned);
 
             for (self.threads[0..spawned]) |thread| thread.join();
         }
@@ -524,12 +526,27 @@ fn nowNanos() u64 {
     return @as(u64, @intCast(time_spec.sec)) * 1_000_000_000 + @as(u64, @intCast(time_spec.nsec));
 }
 
-fn waitZero(word: *std.atomic.Value(u32)) void {
-    _ = std.os.linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, 0, null);
+/// Park the calling thread while the word is 0. Linux keeps the raw futex
+/// fast path, other targets park through the io backend.
+fn waitZero(io: std.Io, word: *std.atomic.Value(u32)) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, 0, null);
+
+        return;
+    }
+
+    io.futexWaitUncancelable(u32, &word.raw, 0);
 }
 
-fn wake(word: *std.atomic.Value(u32), count: usize) void {
-    _ = std.os.linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(count));
+/// Wake up to count threads parked on the word. Same branch split as waitZero.
+fn wake(io: std.Io, word: *std.atomic.Value(u32), count: usize) void {
+    if (comptime builtin.target.os.tag == .linux) {
+        _ = std.os.linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(count));
+
+        return;
+    }
+
+    io.futexWake(u32, &word.raw, @intCast(count));
 }
 
 // --------------------------------------------------------- //
