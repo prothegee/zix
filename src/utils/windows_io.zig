@@ -215,10 +215,7 @@ pub fn monotonicUs() u64 {
 // --------------------------------------------------------- //
 // Readiness gates: the ntdll read/write helpers above block indefinitely, so
 // a caller that needs a real recv/send timeout on Windows polls readiness
-// first. Both directions are answered by the AFD poll ioctl, the request
-// readiness checks in Windows itself are built on: it carries its own
-// timeout, the kernel completes it when the socket becomes ready or the
-// deadline passes, and nothing is consumed from the stream. std publishes
+// first. Both directions are answered by the AFD poll ioctl. std publishes
 // the ioctl code but not the request layout, so the structs below define
 // the layout (stable public knowledge, unchanged since Windows 2000).
 //
@@ -227,6 +224,13 @@ pub fn monotonicUs() u64 {
 // request as the watched Handle, matching every known implementation of
 // this ioctl (wepoll, the pre-Vista mswsock provider). A self-submitted
 // poll never completes, which is why the first cut of this gate hung.
+//
+// The request's own Timeout field is set to effectively never (matching
+// wepoll's INT64_MAX), the timeout enforced here instead: the wait below
+// carries the real deadline, and an expired wait cancels the still-pending
+// poll request rather than trusting the kernel to complete it on its own.
+// A second cut trusted that field and hung the exact same way as the
+// self-submitted poll: proof it does not fire a completion by itself.
 
 /// Readiness selector for readability. Mirrors POSIX POLLIN (POLLRDNORM | POLLRDBAND).
 pub const POLLIN: i16 = 0x0300;
@@ -302,9 +306,9 @@ fn getAfdPollDevice() error{BrokenPipe}!windows.HANDLE {
 }
 
 /// Poll a socket handle for readiness with a millisecond timeout, entirely
-/// over ntdll via the AFD poll ioctl. The timeout lives inside the request
-/// and the kernel completes the request itself on expiry, so the wait here
-/// is bounded with no cancel path.
+/// over ntdll via the AFD poll ioctl. The request itself is submitted with
+/// no real deadline, an expired wait cancels it instead of trusting the
+/// kernel to complete it on its own.
 ///
 /// Param:
 /// handle - windows.HANDLE (the socket, from stream.socket.handle)
@@ -327,8 +331,7 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
     else
         AFD_POLL_SEND | AFD_POLL_CONNECT_FAIL | AFD_POLL_ABORT;
     var info = AFD_POLL_INFO{
-        // Relative NT timeout: negative value in 100ns units.
-        .Timeout = -(@as(i64, timeout_ms) * (std.time.ns_per_ms / 100)),
+        .Timeout = std.math.maxInt(i64),
         .NumberOfHandles = 1,
         .Exclusive = 0,
         .Handles = .{.{
@@ -352,7 +355,15 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
         @sizeOf(AFD_POLL_INFO),
     );
     if (status == .PENDING) {
-        _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+        // Relative NT timeout: negative value in 100ns units.
+        const wait_deadline: windows.LARGE_INTEGER = -(@as(i64, timeout_ms) * (std.time.ns_per_ms / 100));
+        const wait_status = windows.ntdll.NtWaitForSingleObject(event, .FALSE, &wait_deadline);
+        if (wait_status == .TIMEOUT) {
+            var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+            _ = windows.ntdll.NtCancelIoFileEx(poll_device, &iosb, &cancel_iosb);
+            _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+            return false;
+        }
         status = iosb.u.Status;
     }
     if (status != .SUCCESS) return error.BrokenPipe;
