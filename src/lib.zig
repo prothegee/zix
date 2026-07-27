@@ -211,6 +211,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/multipart.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
+    std.testing.refAllDecls(@import("utils/ignore_sigpipe.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
