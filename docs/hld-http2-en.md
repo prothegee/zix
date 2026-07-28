@@ -7,9 +7,9 @@ Pure-Zig HTTP/2 (h2c) server engine: frame codec, HPACK, and a resumable multipl
 ## Goals
 
 - Pure-Zig h2c: frame codec plus HPACK (static table, dynamic table, Huffman) with no C FFI and no `std.http` in the frame path.
-- One handler per completed stream: the handler receives the method, decoded headers, body slice, fd, and stream id, and writes frames straight to the fd.
+- One handler per completed stream: the handler receives the `req`/`res`/`ctx` trio (ADR-063), `Response` writing straight to the fd underneath.
 - Multiplexed by construction: the `.EPOLL` / `.URING` models drive many connections and many concurrent streams from one worker thread through a resumable state machine, with no thread per stream.
-- Comptime route table baked into the server type, zero heap for routing.
+- Router built at comptime, `Server.init` takes a runtime handler (ADR-063), zero heap for routing.
 - Raw `std.posix` I/O on the data path: `std.Io` is used only for listen/accept plumbing.
 - Native TLS (ALPN h2) additive over the h2c default, so cleartext dispatch is untouched.
 
@@ -17,7 +17,7 @@ Pure-Zig HTTP/2 (h2c) server engine: frame codec, HPACK, and a resumable multipl
 
 ## Positioning: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-All three are raw-fd engines with the same five dispatch models, a comptime route table, and (since ADR-063) the same `req`/`res`/`ctx` handler trio. They differ in protocol and what each `Response` / `Context` exposes for it.
+All three are raw-fd engines with the same five dispatch models and (since ADR-063) the same `req`/`res`/`ctx` handler trio. `zix.Http1` and `zix.Grpc` still bake routing into the `Server` type at comptime, `zix.Http2`'s `Server` takes a runtime handler built from a comptime `Router` (see `Server.init` shape below). They differ in protocol and what each `Response` / `Context` exposes for it.
 
 | Aspect | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |

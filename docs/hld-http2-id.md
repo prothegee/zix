@@ -7,9 +7,9 @@ Engine server HTTP/2 (h2c) pure-Zig: frame codec, HPACK, dan state machine multi
 ## Tujuan
 
 - h2c pure-Zig: frame codec plus HPACK (static table, dynamic table, Huffman) tanpa C FFI dan tanpa `std.http` pada jalur frame.
-- Satu handler per stream yang selesai: handler menerima method, header hasil decode, slice body, fd, dan stream id, lalu menulis frame langsung ke fd.
+- Satu handler per stream yang selesai: handler menerima trio `req`/`res`/`ctx` (ADR-063), `Response` menulis langsung ke fd di baliknya.
 - Multiplexed sejak rancangan: model `.EPOLL` / `.URING` menggerakkan banyak koneksi dan banyak stream konkuren dari satu worker thread melalui state machine yang resumable, tanpa thread per stream.
-- Tabel route comptime dibakukan ke dalam tipe server, nol heap untuk routing.
+- Router dibangun saat comptime, `Server.init` menerima handler runtime (ADR-063), nol heap untuk routing.
 - Raw `std.posix` I/O pada jalur data: `std.Io` hanya dipakai untuk plumbing listen/accept.
 - TLS native (ALPN h2) bersifat tambahan di atas default h2c, sehingga dispatch cleartext tidak tersentuh.
 
@@ -17,7 +17,7 @@ Engine server HTTP/2 (h2c) pure-Zig: frame codec, HPACK, dan state machine multi
 
 ## Posisi: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama, tabel route comptime, dan (sejak ADR-063) trio handler `req`/`res`/`ctx` yang sama. Perbedaannya pada protokol dan apa yang diekspos `Response` / `Context` masing-masing.
+Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama dan (sejak ADR-063) trio handler `req`/`res`/`ctx` yang sama. `zix.Http1` dan `zix.Grpc` tetap membakukan routing ke dalam tipe `Server` saat comptime, `Server` milik `zix.Http2` menerima handler runtime yang dibangun dari `Router` comptime (lihat bentuk `Server.init` di bawah). Perbedaannya pada protokol dan apa yang diekspos `Response` / `Context` masing-masing.
 
 | Aspek | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
