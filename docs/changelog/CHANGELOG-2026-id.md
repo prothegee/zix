@@ -59,6 +59,26 @@ __*Update:*__
 
 __*Update:*__
 
+- Breaking: `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix` mendapat trio Request/Response/Context dan idiom Router eksplisit (ADR-063), menyamai `zix.Http1` (ADR-062) dan `zix.Http3`:
+    - `HandlerFn` sekarang `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` pada setiap engine. `zix.Http2` sebelumnya tidak punya trio sama sekali (argumen mentah `method`/`headers`/`body`/`fd`/`sid`), `zix.Grpc` punya headers mentah plus `GrpcContext`, `zix.Fix` punya fields mentah plus `FixContext`. `Request` dan `Response` adalah view/builder tipis atas writer wire yang sudah ada di tiap engine (keluaran byte-identical), `Context` membawa `io`, allocator stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), dan helper timeout `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`.
+    - Router: `Server.init(handler, config)` di mana-mana, `handler` dibangun via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. `zix.Fix.Server.init` menerima `handler: ?HandlerFn`, `null` mempertahankan mode echo-only yang sudah ada. `zix.Grpc.Server.init` adalah satu pengecualian: ia menerima `Router(&routes)` itu sendiri, bukan `.dispatch`, karena engine membaca `Route.is_server_streaming` sebelum dispatch untuk memilih sync-inline vs task-spawn, dan pointer handler polos tidak bisa membawa metadata itu (terukur berbeda jauh RPS per-core antara kedua jalur sebelum diputuskan).
+    - `zix.Http3` mendapat `Context` dan error channel `anyerror!void` (`Request` / `Response` sudah ada sebelumnya), `Server.init(handler, config)` sudah ada sebelumnya dan tidak berubah.
+    - Kebijakan wire saat handler error: `zix.Http`, `zix.Http2`, `zix.Http3` otomatis mengirim satu 500 saat handler error dan belum ada yang terkirim. `zix.Grpc` dan `zix.Fix` meneruskan error secara diam-diam, perilaku wire saat ini dipertahankan.
+    - Field config baru per engine: `handler_timeout_ms` pada `Http2ServerConfig` dan `Http3ServerConfig` (keduanya sebelumnya tidak punya konsep timeout), diseed ke `Context.deadline_ns` saat dispatch.
+    - Migrasi: setiap example dan tes integration/edge/behaviour di kelima engine diperbarui ke bentuk pemanggilan baru. `zig build test-all` dan `zig build examples` hijau pada `zig-0.16` dan `zig-0.17`.
+
+<br>
+
+__*Fix:*__
+
+- TBA
+
+<br>
+
+## 0.5.x-rc2 (2026-07-27)
+
+__*Update:*__
+
 - Dukungan cross-build platform, example dengan suffix target, tes dan runner yang sadar platform:
     - Seluruh tree (module, examples, keempat test suite, test runner, dan driver postgrez / rediz / prometheuz) ter-build dengan Zig 0.16.x dan Zig 0.17.x untuk x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, dan x86_64-openbsd. Socket I/O Windows menumpang shim ntdll kecil (`src/utils/windows_io.zig`: NtReadFile / NtWriteFile / NtClose plus AFD partial-disconnect), BSD mendapat TCP_NODELAY yang diresolusi comptime (`std.posix.TCP` bernilai void di sana pada Zig 0.16), dan setiap jalur Linux-only (loop EPOLL / URING, CPU affinity, madvise, batching raw UDP) dijaga comptime. Di target non-Linux `.EPOLL` / `.URING` tetap fallback ke `.POOL`. Windows menurun di tempat platformnya tidak punya primitif: file logging pada logger ditangguhkan (console logging tetap jalan), timeout berbasis poll menjadi blocking read, tanpa CPU pinning, UDS dan raw UDP mengembalikan error runtime.
     - Binary example yang terinstal dinamai `example-<name>-<arch>-<os>` (driver: `<driver>-example-<name>-<arch>-<os>`), jadi hasil build per target hidup berdampingan di `zig-out/bin`.

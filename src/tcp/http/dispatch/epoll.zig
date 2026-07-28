@@ -42,7 +42,7 @@ const writeAllFD = resp_mod.writeAllFD;
 /// - Arena and slab are allocated once per worker and reused across all connections.
 ///
 /// Param:
-/// server - anytype (pointer to the HttpServerImpl instance)
+/// server - anytype (pointer to the Server instance)
 /// io - std.Io
 /// worker_id - usize (used for pinToCpu)
 /// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body (flush
@@ -381,7 +381,7 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
 /// - workers = N: exactly N workers.
 ///
 /// Param:
-/// server - anytype (pointer to the HttpServerImpl instance)
+/// server - anytype (pointer to the Server instance)
 /// io - std.Io
 ///
 /// Return:

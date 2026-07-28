@@ -18,24 +18,22 @@ const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 /// FIX 4.x session server. Dispatches connections via POOL, ASYNC, MIXED,
 /// or EPOLL / URING (Linux-only: non-Linux falls back to POOL).
 /// Session messages (Logon, Logout, Heartbeat, TestRequest) are handled internally.
-/// Application messages are dispatched to registered routes.
+/// Application messages are dispatched to the handler.
 ///
 /// Usage:
 /// ```zig
-/// var server = try FixServer.init(
-///     &[_]FixRoute{
-///         .{ .msg_type = "D", .handler = handleOrder },
-///         .{ .msg_type = "F", .handler = handleCancel },
-///     },
-///     .{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" },
-/// );
+/// const router = FixRouter(&[_]FixRoute{
+///     .{ .msg_type = "D", .handler = handleOrder },
+///     .{ .msg_type = "F", .handler = handleCancel },
+/// });
+/// var server = try FixServer.init(router.dispatch, .{ .io = io, .ip = "0.0.0.0", .port = 9500, .comp_id = "SRV" });
 /// defer server.deinit();
 /// try server.run();
 /// ```
 pub const FixServer = struct {
     const Self = @This();
 
-    routes: []const core.FixRoute,
+    handler: ?core.HandlerFn,
     config: FixServerConfig,
 
     // --------------------------------------------------------- //
@@ -43,16 +41,17 @@ pub const FixServer = struct {
     /// Initialize.
     ///
     /// Param:
-    /// routes - []const FixRoute (application message route table. pass &.{} for echo-only mode)
+    /// handler - ?core.HandlerFn (built via FixRouter(&[_]FixRoute{...}).dispatch. null for
+    ///   echo-only mode: reply to every non-session message as itself, backward compat)
     /// config - FixServerConfig
     ///
     /// Return:
     /// - !Self
     /// - error.PortNotConfigured if config.port is 0
-    pub fn init(routes: []const core.FixRoute, config: FixServerConfig) !Self {
+    pub fn init(handler: ?core.HandlerFn, config: FixServerConfig) !Self {
         if (config.port == 0) return error.PortNotConfigured;
 
-        return .{ .routes = routes, .config = config };
+        return .{ .handler = handler, .config = config };
     }
 
     /// No-op, resources released inside run via defer.
@@ -71,7 +70,7 @@ pub const FixServer = struct {
             .heartbeat_timeout_ms = cfg.heartbeat_timeout_ms,
             .conn_timeout_ms = cfg.conn_timeout_ms,
             .handler_timeout_ms = cfg.handler_timeout_ms,
-            .routes = self.routes,
+            .handler = self.handler,
         };
 
         return switch (cfg.dispatch_model) {
@@ -107,7 +106,7 @@ test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
     const io = threaded.io();
     try std.testing.expectError(
         error.PortNotConfigured,
-        FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER", .dispatch_model = .ASYNC }),
+        FixServer.init(null, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER", .dispatch_model = .ASYNC }),
     );
 }
 
@@ -116,7 +115,7 @@ test "zix fix: FixServer.init, valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC });
+    var server = try FixServer.init(null, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -125,7 +124,7 @@ test "zix fix: FixServer.init with EPOLL dispatch model succeeds" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try FixServer.init(&.{}, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
+    var server = try FixServer.init(null, .{ .io = io, .ip = "127.0.0.1", .port = 9500, .comp_id = "SERVER", .dispatch_model = .EPOLL });
     server.deinit();
 }
 
@@ -134,7 +133,7 @@ test "zix fix: FixServer EPOLL uses workers field for worker count, pool_size is
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const server = try FixServer.init(&.{}, .{
+    const server = try FixServer.init(null, .{
         .io = io,
         .ip = "127.0.0.1",
         .port = 9500,

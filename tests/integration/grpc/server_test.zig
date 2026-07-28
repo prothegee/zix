@@ -18,44 +18,45 @@ const ServerCtx = struct {
 // --------------------------------------------------------- //
 // Handlers
 
-fn echoHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    while (ctx.recvMessage()) |msg| {
-        ctx.sendMessage("application/grpc+proto", msg);
+fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    while (req.recvMessage()) |msg| {
+        res.sendMessage("application/grpc+proto", msg);
     }
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
-fn greetHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const name = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
+fn greetHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    const name = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
         return;
     };
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{name}) catch "Hello!";
-    ctx.sendMessage("application/grpc+proto", resp);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", resp);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
-fn errorOnlyHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad req");
+fn errorOnlyHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = req;
+    _ = ctx;
+    res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad req");
 }
 
-fn collectHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
+fn collectHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
     var count: usize = 0;
-    while (ctx.recvMessage()) |_| count += 1;
+    while (req.recvMessage()) |_| count += 1;
     var out: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&out, "got {d}", .{count}) catch "got ?";
-    ctx.sendMessage("application/grpc+proto", s);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", s);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
 
-fn makeRunner(comptime routes: []const zix.Grpc.Route) type {
+fn makeRunner(comptime RouterType: type) type {
     return struct {
         fn run(ctx: *ServerCtx, io: std.Io) void {
             const stream = ctx.listener.accept(io) catch |e| {
@@ -63,7 +64,7 @@ fn makeRunner(comptime routes: []const zix.Grpc.Route) type {
                 return;
             };
             const fd = stream.socket.handle;
-            zix.Grpc.serveConn(routes, fd, .{});
+            zix.Grpc.serveConn(RouterType, fd, .{}, io);
             _ = std.posix.system.close(fd);
         }
     };
@@ -92,7 +93,7 @@ test "zix integration: GrpcServer.init and deinit do not error" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
+    var server = zix.Grpc.Server.init(zix.Grpc.Router(&[_]zix.Grpc.Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
     server.deinit();
 }
 
@@ -101,7 +102,7 @@ test "zix integration: GrpcServer.run port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = zix.Grpc.Server.init(&[_]zix.Grpc.Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    var server = zix.Grpc.Server.init(zix.Grpc.Router(&[_]zix.Grpc.Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     try std.testing.expectError(error.PortNotConfigured, server.run());
@@ -115,9 +116,9 @@ test "zix integration: gRPC unary returns greeting" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT, Runner.run);
 
@@ -142,9 +143,9 @@ test "zix integration: gRPC server streaming sends multiple responses" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Echo", .handler = echoHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 1, Runner.run);
 
@@ -182,9 +183,9 @@ test "zix integration: gRPC client streaming collects all messages" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Collect", .handler = collectHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 2, Runner.run);
 
@@ -219,9 +220,9 @@ test "zix integration: gRPC bidirectional echoes each message" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/BidiEcho", .handler = echoHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 3, Runner.run);
 
@@ -255,9 +256,9 @@ test "zix integration: gRPC unknown method returns UNIMPLEMENTED" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 4, Runner.run);
 
@@ -287,9 +288,9 @@ test "zix integration: gRPC trailers-only error is received as INVALID_ARGUMENT"
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Fail", .handler = errorOnlyHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 5, Runner.run);
 
@@ -319,9 +320,9 @@ test "zix integration: gRPC two streams on same connection both return OK" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
-    });
+    }));
     var ctx: ServerCtx = undefined;
     const t = try spawnServer(&ctx, io, TEST_PORT + 6, Runner.run);
 
@@ -513,9 +514,9 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
     defer threaded.deinit();
     const io = threaded.io();
 
-    const Runner = makeRunner(&[_]zix.Grpc.Route{
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
-    });
+    }));
     var server_ctx: ServerCtx = undefined;
 
     // This server must handle 2 requests, so use a loop runner.
@@ -526,9 +527,9 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
                 return;
             };
             const fd = stream.socket.handle;
-            zix.Grpc.serveConn(&[_]zix.Grpc.Route{
+            zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{
                 .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
-            }, fd, .{});
+            }), fd, .{}, run_io);
             _ = std.posix.system.close(fd);
         }
     };

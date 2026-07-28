@@ -18,7 +18,12 @@ pub const Route = core.Route;
 
 // --------------------------------------------------------- //
 
-fn GrpcServerImpl(comptime routes: []const Route) type {
+/// Note:
+/// - RouterType is the comptime type returned by `zix.Grpc.Router(&routes)`, not a bare
+///   `HandlerFn`. The engine reads `Route.is_server_streaming` off `RouterType.route_slice`
+///   before dispatch (sync-inline vs task-spawn), so route metadata must stay visible at
+///   compile time. See core.Route.is_server_streaming for the measured cost of losing it.
+fn GrpcServerImpl(comptime RouterType: type) type {
     return struct {
         const Self = @This();
 
@@ -41,10 +46,10 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         /// config.port (already overridden to tls_port by the caller) while the cleartext model
         /// runs on the original port.
         fn serveTlsThread(config: GrpcServerConfig) void {
-            tls_serve.runTls(routes, config) catch {};
+            tls_serve.runTls(RouterType, config) catch {};
         }
 
-        /// Listen and serve. Routes are baked in at compile time via Server.init.
+        /// Listen and serve. The Router type is baked in at compile time via Server.init.
         ///
         /// Return:
         /// - !void
@@ -65,9 +70,9 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     if (cfg.tls_port == cfg.port) return error.TlsPortConflict;
 
                     if (is_linux and cfg.dispatch_model == .EPOLL)
-                        return epoll_model.runEpoll(routes, cfg);
+                        return epoll_model.runEpoll(RouterType, cfg);
                     if (is_linux and cfg.dispatch_model == .URING)
-                        return uring_model.runUring(routes, cfg);
+                        return uring_model.runUring(RouterType, cfg);
 
                     // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
                     // TLS on tls_port (thread-per-connection), the cleartext model runs below
@@ -83,30 +88,30 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
                     // core terminates TLS in place and serves the resumable grpc mux. ASYNC / POOL / MIXED
                     // keep the thread-per-conn terminator (which also serves TLS 1.2).
                     if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
-                        return tls_mux.runTlsMux(routes, cfg);
+                        return tls_mux.runTlsMux(RouterType, cfg);
 
-                    return tls_serve.runTls(routes, cfg);
+                    return tls_serve.runTls(RouterType, cfg);
                 }
             }
 
             return switch (cfg.dispatch_model) {
-                .ASYNC => async_model.runAsync(routes, cfg),
-                .POOL => pool_model.runPool(routes, cfg),
-                .MIXED => mixed_model.runMixed(routes, cfg),
+                .ASYNC => async_model.runAsync(RouterType, cfg),
+                .POOL => pool_model.runPool(RouterType, cfg),
+                .MIXED => mixed_model.runMixed(RouterType, cfg),
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
-                    epoll_model.runEpoll(routes, cfg)
+                    epoll_model.runEpoll(RouterType, cfg)
                 else blk: {
                     common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
 
-                    break :blk pool_model.runPool(routes, cfg);
+                    break :blk pool_model.runPool(RouterType, cfg);
                 },
                 // Native io_uring ring path (ADR-037 Phase 4 step 3).
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
-                    uring_model.runUring(routes, cfg)
+                    uring_model.runUring(RouterType, cfg)
                 else blk: {
                     common.logSystem(cfg, "URING is Linux-only. Falling back to POOL.", .{});
 
-                    break :blk pool_model.runPool(routes, cfg);
+                    break :blk pool_model.runPool(RouterType, cfg);
                 },
             };
         }
@@ -115,14 +120,17 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 
 // --------------------------------------------------------- //
 
-/// gRPC h2c server. Routes are baked in at compile time.
+/// gRPC h2c server. Takes the comptime Router type built by `zix.Grpc.Router(&routes)`, the one
+/// deliberate exception to the zix.Http1 `Server.init(handler, config)` idiom: the engine must see
+/// route metadata (Route.is_server_streaming) before dispatch, which a bare handler pointer cannot
+/// carry.
 ///
 /// Usage:
 /// ```zig
 /// var server = zix.Grpc.Server.init(
-///     &[_]zix.Grpc.Route{
+///     zix.Grpc.Router(&[_]zix.Grpc.Route{
 ///         .{ .path = "/pkg.Svc/Method", .handler = myHandler },
-///     },
+///     }),
 ///     .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC },
 /// );
 /// defer server.deinit();
@@ -130,10 +138,10 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
 /// ```
 pub const GrpcServer = struct {
     pub fn init(
-        comptime routes: []const Route,
+        comptime RouterType: type,
         config: GrpcServerConfig,
-    ) GrpcServerImpl(routes) {
-        return GrpcServerImpl(routes).init(config);
+    ) GrpcServerImpl(RouterType) {
+        return GrpcServerImpl(RouterType).init(config);
     }
 };
 
@@ -145,7 +153,7 @@ test "zix grpc: GrpcServer.run port zero returns PortNotConfigured" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    var server = GrpcServer.init(core.Router(&[_]Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
     try std.testing.expectError(error.PortNotConfigured, server.run());
@@ -156,7 +164,7 @@ test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = GrpcServer.init(&[_]Route{}, .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
+    var server = GrpcServer.init(core.Router(&[_]Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC });
     server.deinit();
 }
 

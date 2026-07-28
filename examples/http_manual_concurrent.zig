@@ -46,14 +46,16 @@ pub fn infoHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // Comparison:
 // Auto (default in other examples):
 // pub fn main(process: std.process.Init) !void {
-//     var server = zix.Http.Server.init(&Routes, .{ .io = process.io, ... });
+//     const router = zix.Http.Router(&Routes);
+//     var server = zix.Http.Server.init(router.dispatch, .{ .io = process.io, ... });
 //     // ...
 // }
 //
 // Manual (this example):
 // pub fn main() !void {
 //     var threaded = std.Io.Threaded.init(allocator, .{ .concurrent_limit = ... });
-//     var server = zix.Http.Server.init(&Routes, .{ .io = threaded.io(), ... });
+//     const router = zix.Http.Router(&Routes);
+//     var server = zix.Http.Server.init(router.dispatch, .{ .io = threaded.io(), ... });
 //     // ...
 // }
 
@@ -73,7 +75,8 @@ pub fn main() !void {
     });
     defer threaded.deinit();
 
-    var server = zix.Http.Server.init(&Routes, .{
+    const router = zix.Http.Router(&Routes);
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = threaded.io(),
         .ip = IP,
         .port = PORT,

@@ -3,15 +3,13 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 
 // --------------------------------------------------------- //
 // MIXED model
 
-pub fn runMixed(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
-    const D = common.Dispatch(routes);
+pub fn runMixed(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     const cpu = try std.Thread.getCpuCount();
     const opts = common.serveOpts(cfg);
@@ -24,13 +22,14 @@ pub fn runMixed(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     for (acc_threads) |*t|
         t.* = try std.Thread.spawn(
             .{},
-            D.asyncWorkerEntry,
-            .{D.AsyncWorkerCtx{
+            common.asyncWorkerEntry,
+            .{common.AsyncWorkerCtx{
                 .io = io,
                 .ip = cfg.ip,
                 .port = cfg.port,
                 .kernel_backlog = cfg.kernel_backlog,
                 .opts = opts,
+                .handler = handler,
             }},
         );
 

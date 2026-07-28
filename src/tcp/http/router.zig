@@ -5,6 +5,7 @@ const Request = @import("request.zig").Request;
 const PathParam = @import("request.zig").PathParam;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
+const static = @import("static.zig");
 
 // --------------------------------------------------------- //
 
@@ -95,35 +96,32 @@ pub fn Router(comptime routes: []const Route) type {
     const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
 
     return struct {
-        /// Dispatch the request to the best matching route
+        /// Dispatch the request to the best matching route. Usable as a HandlerFn.
         ///
         /// Note:
         /// - Pass 1 exact: O(1) comptime-built hash lookup
         /// - Pass 2 param: first parameterized pattern that matches wins, path_params written to req
         /// - Pass 3 prefix: longest matching prefix wins
         /// - Priority is independent of registration order
+        /// - Static file fallback: when ctx.public_dir is set, try to serve the request
+        ///   path as a file before returning 404
         ///
         /// Param:
         /// req - *Request
         /// res - *Response
         /// ctx - *Context
-        ///
-        /// Return:
-        /// - !bool
-        pub fn dispatch(_: @This(), req: *Request, res: *Response, ctx: *Context) !bool {
+        pub fn dispatch(req: *Request, res: *Response, ctx: *Context) anyerror!void {
             const p = req.path();
 
             // Pass 1: exact, O(1) hash lookup
             if (exact_map.get(p)) |handler| {
-                try handler(req, res, ctx);
-                return true;
+                return handler(req, res, ctx);
             }
 
             // Pass 2: parameterized (first match wins)
             inline for (param_routes) |route| {
                 if (try matchParam(route.path, p, req)) {
-                    try route.handler(req, res, ctx);
-                    return true;
+                    return route.handler(req, res, ctx);
                 }
             }
 
@@ -139,12 +137,22 @@ pub fn Router(comptime routes: []const Route) type {
                     }
                 }
             }
+
             if (best_handler) |h| {
-                try h(req, res, ctx);
-                return true;
+                return h(req, res, ctx);
             }
 
-            return false;
+            if (ctx.public_dir.len > 0) {
+                const stripped = if (p.len > 0 and p[0] == '/') p[1..] else p;
+                if (stripped.len > 0) {
+                    const served = static.serve(req, req.fd, stripped, ctx.public_dir, ctx.io) catch false;
+                    if (served) return;
+                }
+            }
+
+            res.setStatus(.NOT_FOUND);
+
+            try res.send("Not Found");
         }
     };
 }

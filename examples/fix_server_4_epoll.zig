@@ -46,7 +46,7 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    var server = try zix.Fix.Server.init(&.{}, .{
+    var server = try zix.Fix.Server.init(null, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

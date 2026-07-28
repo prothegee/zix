@@ -17,16 +17,17 @@ const SERVER_PORT: u16 = 9066;
 
 // --------------------------------------------------------- //
 
-fn home(_: []const u8, _: []const zix.Http2.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello from zix h2c (pool)\n") catch {};
+fn home(_: *zix.Http2.Request, res: *zix.Http2.Response, _: *zix.Http2.Context) anyerror!void {
+    try res.sendText("hello from zix h2c (pool)\n");
 }
 
 const Routes = [_]zix.Http2.Route{
     .{ .path = "/", .handler = home },
 };
+const router = zix.Http2.Router(&Routes);
 
 pub fn main(process: std.process.Init) !void {
-    var server = zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(router.dispatch, .{
         .io = process.io,
         .ip = SERVER_IP,
         .port = SERVER_PORT,

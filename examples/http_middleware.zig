@@ -164,7 +164,8 @@ const Routes = [_]zix.Http.Route{
 };
 
 pub fn main(process: std.process.Init) !void {
-    var server = zix.Http.Server.init(&Routes, .{
+    const router = zix.Http.Router(&Routes);
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

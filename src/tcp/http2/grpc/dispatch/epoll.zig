@@ -6,7 +6,6 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const effectiveCacheEntries = common.effectiveCacheEntries;
@@ -50,11 +49,11 @@ const GrpcConnTable = struct {
         return self.slots[idx];
     }
 
-    fn alloc(self: *GrpcConnTable, fd: std.posix.fd_t, opts: core.GrpcServeOpts) ?*core.GrpcMuxConn {
+    fn alloc(self: *GrpcConnTable, fd: std.posix.fd_t, opts: core.GrpcServeOpts, io: std.Io) ?*core.GrpcMuxConn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const conn = core.GrpcMuxConn.init(fd, opts) orelse return null;
+        const conn = core.GrpcMuxConn.init(fd, opts, io) orelse return null;
         self.slots[idx] = conn;
 
         return conn;
@@ -73,7 +72,7 @@ const GrpcConnTable = struct {
 
 /// Accept every pending connection on listener_fd and register each in epfd. Level-triggered,
 /// so draining to EAGAIN guarantees no accept is missed.
-fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.GrpcServeOpts, busy_poll_us: u32) void {
+fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_t, opts: core.GrpcServeOpts, busy_poll_us: u32, io: std.Io) void {
     const linux = std.os.linux;
 
     while (true) {
@@ -88,7 +87,7 @@ fn acceptAll(table: *GrpcConnTable, epfd: std.posix.fd_t, listener_fd: std.posix
         const conn_fd: std.posix.fd_t = @intCast(rc);
         setNoDelay(conn_fd);
         common.setBusyPoll(conn_fd, busy_poll_us);
-        if (table.alloc(conn_fd, opts) == null) {
+        if (table.alloc(conn_fd, opts, io) == null) {
             _ = linux.close(conn_fd);
             continue;
         }
@@ -123,10 +122,10 @@ const MuxWorkerCtx = struct {
     steering: ?reuseport.Steering = null,
 };
 
-/// Build a concrete epoll mux worker entry with the routes baked in at compile
+/// Build a concrete epoll mux worker entry with the Router type baked in at compile
 /// time. One multiplexed worker: a private SO_REUSEPORT listener + epoll instance
 /// driving many non-blocking connections through the resumable h2 state machine.
-fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
+fn epollMuxWorkerFn(comptime RouterType: type) fn (MuxWorkerCtx) void {
     return struct {
         /// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body
         /// (flush staged ciphertext on EPOLLOUT, feed decrypted bytes on EPOLLIN, re-arm or reap).
@@ -141,7 +140,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
                 keep = false;
             } else {
                 if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
-                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(routes, conn);
+                if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = tls_mux.onReadable(RouterType, conn);
                 if (keep and conn.transport.want_out) tls_conn.armOut(epfd, fd, conn.transport.ep_data, true);
                 if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
             }
@@ -260,13 +259,13 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 
                 for (events[0..n]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, ctx.opts, ctx.busy_poll_us);
+                        acceptAll(&table, epfd, listener_fd, ctx.opts, ctx.busy_poll_us, ctx.io);
                         continue;
                     }
 
                     if (tls_ctx) |tls_context| {
                         if (ev.data.fd == tls_listener_fd) {
-                            tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, tls_context, ctx.opts, tls_conn.tls_event_tag);
+                            tls_mux.acceptAll(&tls_table.?, epfd, tls_listener_fd, tls_context, ctx.opts, tls_conn.tls_event_tag, ctx.io);
                             continue;
                         }
                         if (ev.data.u64 & tls_conn.tls_event_tag != 0) {
@@ -279,7 +278,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
                     const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
                         core.GrpcConnOutcome.close
                     else
-                        core.grpcMuxOnReadable(routes, conn);
+                        core.grpcMuxOnReadable(RouterType, conn);
 
                     if (outcome == .close) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
@@ -304,7 +303,7 @@ fn epollMuxWorkerFn(comptime routes: []const Route) fn (MuxWorkerCtx) void {
 /// Note:
 /// - worker_count = pool_size (0 = cpu count). A streaming handler runs on the event
 ///   loop, so it must stay bounded (it blocks the worker's other connections while running).
-pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
+pub fn runEpoll(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     const io = cfg.io;
     // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
     const cpu = common.getAvailableCpuCount();
@@ -322,7 +321,7 @@ pub fn runEpoll(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
-    const worker_fn = epollMuxWorkerFn(routes);
+    const worker_fn = epollMuxWorkerFn(RouterType);
     for (workers, 0..) |*thread, idx|
         thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },

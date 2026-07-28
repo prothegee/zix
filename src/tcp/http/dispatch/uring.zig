@@ -66,7 +66,7 @@ const ParkEntry = struct {
 /// pool and prewarm be unit-tested directly, mirroring the zix.Http1 URING worker.
 ///
 /// Param:
-/// ServerPtr - type (pointer to the HttpServerImpl instance)
+/// ServerPtr - type (pointer to the Server instance)
 fn UringWorker(comptime ServerPtr: type) type {
     return struct {
         ring: IoUring,

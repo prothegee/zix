@@ -20,14 +20,14 @@ graph LR
     Z --> TO[timeout.zig]
 ```
 
-`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveGrpcConn`) replicates the h2c stream loop from `zix.Http2.serveConn` with a different handler signature (`GrpcContext` instead of raw body bytes) to support streaming without inter-thread queues.
+`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveGrpcConn`) replicates the h2c stream loop from `zix.Http2.serveConn`, both dispatch the same `req`/`res`/`ctx` trio shape (ADR-063), but gRPC's engine additionally reads `Route.is_server_streaming` before invoking the handler to support streaming without inter-thread queues (see Handler Pattern).
 
 ## Source Layout
 
 | File | Role |
 | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
-| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `HandlerFn`, `serveGrpcConn` (blocking models), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplexed `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
+| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `GrpcRequest`, `GrpcResponse`, `HandlerFn`, `Router`, `serveGrpcConn` (blocking models), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplexed `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
 | `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
 | `src/tcp/http2/grpc/server.zig` | `GrpcServer`: thin `run()` switch that dispatches to the per-model files under `dispatch/` (and to the TLS serve paths when `cfg.tls != null`) |
 | `src/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplexed `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (shared helpers) |
@@ -43,13 +43,14 @@ graph LR
 
 | Symbol | Notes |
 | :- | :- |
-| `zix.Grpc.Server` | `init(comptime routes, config)`, `deinit()`, `run()!void` |
+| `zix.Grpc.Server` | `init(Router(&routes), config)`, `deinit()`, `run()!void` (ADR-063: the one exception to the family's `init(handler, config)`, see Handler Pattern below) |
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
-| `zix.Grpc.Context` | `recvMessage()`, `sendHeaders()`, `sendMessage()`, `finish()`, `isExpired()` |
-| `zix.Grpc.Context.serveCached` / `sendCached` | Per-worker unary response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
-| `zix.Grpc.HandlerFn` | `*const fn (headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void` |
+| `zix.Grpc.Request` | `{ path, headers }` view, `header(name)`, `recvMessage()`. Thin delegating wrapper over `Context`, zero internal logic moved |
+| `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Thin delegating wrapper over `Context`, byte-identical wire |
+| `zix.Grpc.Context` | `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
+| `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio). Errors pass through silently (`catch {}`), current wire behavior kept |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
-| `zix.Grpc.Router(routes)` | comptime zero-size type: `dispatch(path, headers, ctx)` (sends UNIMPLEMENTED if no route matches) |
+| `zix.Grpc.Router(routes)` | comptime type: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (sends UNIMPLEMENTED if no route matches). `Server.init` takes the Router TYPE itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off `route_slice` before dispatch |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
 | `zix.Grpc.DispatchModel` | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 (Linux-only), URING=4 (Linux-only), required with no default |
@@ -67,7 +68,7 @@ graph LR
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanoseconds) |
-| `zix.Grpc.serveConn` | `fn(comptime routes, fd, opts) void`: direct connection entry point |
+| `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: direct connection entry point |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
 | `zix.Grpc.wallClockNs` | `fn() u64`: current wall-clock time in nanoseconds (CLOCK_REALTIME). Used to override `ctx.deadline_ns` at runtime. |
 
@@ -89,7 +90,7 @@ graph LR
 | `logger` | `null` | optional `*zix.Logger`, when set, logs each stream close via `rpc()` and startup/shutdown via `system()` |
 | `handler_timeout_ms` | 0 | global handler timeout cap (ms), 0 = disabled. Combined with `Route.timeout_ms` and `grpc-timeout` header at dispatch |
 | `compress` | `false` | gzip-compress DATA frames for clients advertising `grpc-accept-encoding: gzip` |
-| `response_cache` | `false` | per-worker unary response cache (ADR-036), opt-in via `ctx.serveCached` / `ctx.sendCached` (`.EPOLL` / `.URING`) |
+| `response_cache` | `false` | per-worker unary response cache (ADR-036), opt-in via `res.serveCached` / `res.sendCached` (`.EPOLL` / `.URING`) |
 | `cache_max_entries` | 256 | response cache slot count, rounded down to a power of two |
 | `cache_max_value_bytes` | 16384 | per-slot response-message cap, a larger message bypasses the cache |
 | `cache_ttl_ms` | 1000 | default cache freshness, handlers may pass their own TTL per store |
@@ -101,38 +102,38 @@ More tuning fields (`worker_stack_size_bytes`, `busy_poll_us`, `reuseport_cbpf`,
 
 ## Handler Pattern
 
-Routes are registered at compile time via `Server.init`. The handler receives request headers and a `GrpcContext`, the path is already resolved by the route table.
+Routes are registered at compile time and wrapped in `Router(&routes)`. The handler receives the `req`/`res`/`ctx` trio (ADR-063), the path is already resolved by the route table.
 
 ```zig
-fn echoHandler(
-    headers: []const zix.Http2.Header,
-    ctx:     *zix.Grpc.Context,
-) void {
-    _ = headers;
-    while (ctx.recvMessage()) |msg| {
-        ctx.sendMessage("application/grpc+proto", msg);
+fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    while (req.recvMessage()) |msg| {
+        res.sendMessage("application/grpc+proto", msg);
     }
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 var server = zix.Grpc.Server.init(
-    &[_]zix.Grpc.Route{
+    zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/pkg.Svc/Echo", .handler = echoHandler, .is_server_streaming = true },
-    },
+    }),
     .{ .io = io, .ip = "127.0.0.1", .port = 8083 },
 );
 defer server.deinit();
 try server.run();
 ```
 
+`Server.init` is gRPC's one deliberate exception to the family's `Server.init(handler, config)` shape (ADR-063): it takes `Router(&routes)` itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off the router's `route_slice` before invoking the handler, to pick sync-inline dispatch (unary, cheap) vs task-spawn dispatch (streaming). Measured: sync-inline is roughly two orders of magnitude more RPS per core than task-spawn for a trivial unary handler, so a bare `HandlerFn` pointer losing that metadata was not an acceptable simplification.
+
 Key rules:
-- `ctx.finish()` must always be called before returning. It sends the grpc-status trailer.
-- `ctx.sendMessage()` sends initial response HEADERS on the first call. Do not call `ctx.sendHeaders()` manually if using `sendMessage`.
-- `ctx.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
+- `res.finish()` must always be called before returning. It sends the grpc-status trailer.
+- `res.sendMessage()` sends initial response HEADERS on the first call. Do not call `res.sendHeaders()` manually if using `sendMessage`.
+- `req.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
+- A handler error is passed through silently (`catch {}` at the invoke site), matching the wire behavior from before ADR-063: no auto-500-equivalent for gRPC.
 - Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes (`is_server_streaming = true`) each run on a dedicated thread sharing a connection-level write mutex.
 - The server buffers all client DATA before dispatching the handler.
 - `parsePath` and path-based dispatch inside the handler are not needed: the route table handles that.
-- A unary handler may opt into the per-worker response cache: `if (ctx.serveCached(content_type)) return;` before the expensive work, `ctx.sendCached(content_type, reply, ttl_ms)` instead of `sendMessage` to store it. Requires `response_cache = true`, degrades to a plain `sendMessage` otherwise.
+- A unary handler may opt into the per-worker response cache: `if (res.serveCached(content_type)) return;` before the expensive work, `res.sendCached(content_type, reply, ttl_ms)` instead of `sendMessage` to store it. Requires `response_cache = true`, degrades to a plain `sendMessage` otherwise.
 
 ## Context Timeout
 
@@ -149,18 +150,17 @@ Three inputs determine `ctx.deadline_ns` at dispatch time:
 Handlers check the deadline explicitly:
 
 ```zig
-fn slowHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
+fn slowHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     if (ctx.isExpired()) {
-        ctx.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
+        res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
         return;
     }
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
         return;
     };
-    ctx.sendMessage("application/grpc+proto", msg);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", msg);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 ```
 
@@ -169,6 +169,7 @@ Handler deadline override pattern (canonical):
 ```zig
 ctx.deadline_ns = wallClockNs() + 60 * std.time.ns_per_s; // extend to 60 s from now
 ctx.deadline_ns = null; // disable for this call
+// or via the helpers: ctx.setTimeout(60_000); ctx.withDeadline(deadline_ns);
 ```
 
 Risks on override:
@@ -180,10 +181,10 @@ Per-route timeout example:
 
 ```zig
 var server = zix.Grpc.Server.init(
-    &[_]zix.Grpc.Route{
+    zix.Grpc.Router(&[_]zix.Grpc.Route{
         .{ .path = "/svc.Svc/FastOp", .handler = fastHandler, .timeout_ms = 500    },
         .{ .path = "/svc.Svc/SlowOp", .handler = slowHandler, .timeout_ms = 30_000 },
-    },
+    }),
     .{ .io = process.io, .ip = "127.0.0.1", .port = 8083, .handler_timeout_ms = 5000 },
 );
 ```
@@ -195,53 +196,53 @@ Unary and client-streaming handlers use `is_server_streaming = false` (the defau
 ### Unary (1 request, 1 response)
 
 ```zig
-fn unaryHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const req = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
+fn unaryHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
         return;
     };
-    ctx.sendMessage("application/grpc+proto", req);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", msg);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 ```
 
 ### Server Streaming (1 request, N responses)
 
 ```zig
-fn serverStreamHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    _ = ctx.recvMessage();
-    ctx.sendMessage("application/grpc+proto", "result-1");
-    ctx.sendMessage("application/grpc+proto", "result-2");
-    ctx.sendMessage("application/grpc+proto", "result-3");
-    ctx.finish(zix.Grpc.Status.OK, "");
+fn serverStreamHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    _ = req.recvMessage();
+    res.sendMessage("application/grpc+proto", "result-1");
+    res.sendMessage("application/grpc+proto", "result-2");
+    res.sendMessage("application/grpc+proto", "result-3");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 ```
 
 ### Client Streaming (N requests, 1 response)
 
 ```zig
-fn clientStreamHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
+fn clientStreamHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
     var count: usize = 0;
-    while (ctx.recvMessage()) |_| count += 1;
+    while (req.recvMessage()) |_| count += 1;
     var buf: [32]u8 = undefined;
     const reply = std.fmt.bufPrint(&buf, "got {d}", .{count}) catch "got ?";
-    ctx.sendMessage("application/grpc+proto", reply);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", reply);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 ```
 
 ### Bidirectional Streaming (N requests, M responses)
 
 ```zig
-fn bidiHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    while (ctx.recvMessage()) |msg| {
-        ctx.sendMessage("application/grpc+proto", msg);
+fn bidiHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    while (req.recvMessage()) |msg| {
+        res.sendMessage("application/grpc+proto", msg);
     }
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 ```
 
@@ -310,7 +311,7 @@ The compress flag is 1 when the message payload is gzip-compressed, otherwise 0.
 
 ### Error path (trailers-only)
 
-When the handler calls `ctx.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `content-type`, `grpc-status`, and `grpc-message` with `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol, the actual gRPC error is in the `grpc-status` trailer. `content-type` is always included per the gRPC spec to ensure client compatibility.
+When the handler calls `res.finish(status, msg)` without sending any data, the server sends a single HEADERS frame with `:status 200`, `content-type`, `grpc-status`, and `grpc-message` with `FLAG_END_STREAM`. HTTP `:status` is always 200 per the gRPC wire protocol, the actual gRPC error is in the `grpc-status` trailer. `content-type` is always included per the gRPC spec to ensure client compatibility.
 
 ## Dispatch Models
 
@@ -360,11 +361,11 @@ flowchart TD
     K -->|END_STREAM| L[dispatchStream]
     L -->|is_server_streaming=false| LI[inline on conn thread]
     L -->|is_server_streaming=true| LS[spawn thread]
-    LI --> M[HandlerFn with GrpcContext]
+    LI --> M[HandlerFn: req/res/ctx trio]
     LS --> M
     MX -->|every complete frame| MI[muxDispatch inline\nreply staged to cork]
     MI --> M
-    M --> N[ctx.finish sends trailers]
+    M --> N[res.finish sends trailers]
 ```
 
 ## Minimal Protobuf Codec

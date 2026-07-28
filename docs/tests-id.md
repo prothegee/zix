@@ -334,7 +334,7 @@ Port: 18200-18206.
 | gRPC client streaming mengumpulkan semua pesan | `collectHandler` menyangga tiga pesan, membalas dengan jumlah `"got 3"` |
 | gRPC bidirectional meng-echo setiap pesan | `echoHandler` meng-echo `"ping"` lalu `"pong"` dari dua pesan client |
 | gRPC method tidak dikenal mengembalikan UNIMPLEMENTED | `dispatchHandler` membalas dengan `GrpcStatus.UNIMPLEMENTED` untuk path tidak dikenal |
-| gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `ctx.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data, client menerima status error |
+| gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `res.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data, client menerima status error |
 | gRPC dua stream pada koneksi yang sama keduanya mengembalikan OK | dua RPC unary berurutan pada satu koneksi, kedua stream menerima respons yang benar |
 
 ### tests/integration/channel/
@@ -732,7 +732,7 @@ Port: 18220-18221.
 | `parseTimeout` karakter tunggal | menghasilkan null |
 | `GrpcClient.connect` port nol | menghasilkan `error.PortNotConfigured` |
 | `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera, tanpa crash atau error |
-| gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `ctx.finish(INVALID_ARGUMENT, ...)`, client menerima status error tanpa frame data apa pun |
+| gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `res.finish(INVALID_ARGUMENT, ...)`, client menerima status error tanpa frame data apa pun |
 
 ### tests/edge/channel/
 

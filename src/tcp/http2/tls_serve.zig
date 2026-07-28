@@ -17,7 +17,6 @@ const linux = std.os.linux;
 const posix = std.posix;
 const win_io = @import("../../utils/windows_io.zig");
 const core = @import("core.zig");
-const Route = core.Route;
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const terminator = @import("../tls/h2_terminator.zig");
@@ -36,8 +35,8 @@ const seal_overhead: usize = 1024;
 /// the plaintext to the mux, and seal the mux's reply frames back into records. No socketpair, no
 /// second thread. Generic over the TLS connection type (1.3 or 1.2), both expose readAppData /
 /// writeAppData / closeNotify.
-fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
-    const mux_conn = mux.MuxConn.init(fd, opts) orelse return;
+fn runInlineMux(handler: core.HandlerFn, opts: core.ServeOpts, fd: posix.fd_t, conn: anytype, record_buf: []u8, io: std.Io) void {
+    const mux_conn = mux.MuxConn.init(fd, opts, io) orelse return;
     defer mux_conn.deinit();
 
     // The mux writes plaintext through frame.writeAllFD. The hook seals that plaintext into TLS records
@@ -116,7 +115,7 @@ fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.
         @memcpy(mux_conn.rbuf[mux_conn.rend..][0..plain.len], plain);
         mux_conn.rend += plain.len;
 
-        const outcome = mux.processRing(routes, mux_conn);
+        const outcome = mux.processRing(handler, mux_conn);
         enc.flush();
         if (enc.failed or outcome == .close) break;
     }
@@ -127,40 +126,39 @@ fn runInlineMux(comptime routes: []const Route, opts: core.ServeOpts, fd: posix.
 }
 
 /// Terminator driver: drives the resumable h2 mux inline over the decrypted stream (no socketpair).
-fn MuxDriver(comptime routes: []const Route) type {
-    return struct {
-        opts: core.ServeOpts,
+const MuxDriver = struct {
+    opts: core.ServeOpts,
+    handler: core.HandlerFn,
+    io: std.Io,
 
-        pub fn drive(self: @This(), fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
-            runInlineMux(routes, self.opts, fd, conn, record_buf);
-        }
-    };
-}
+    pub fn drive(self: @This(), fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
+        runInlineMux(self.handler, self.opts, fd, conn, record_buf, self.io);
+    }
+};
 
 /// Per-connection TLS worker: terminate TLS and serve the inline mux, then close the socket. One
 /// thread per connection so the accept loop never blocks in the terminator.
-fn TlsConn(comptime routes: []const Route) type {
-    return struct {
-        const Ctx = struct {
-            fd: posix.fd_t,
-            opts: core.ServeOpts,
-            ctx: *const @import("../../tls/Tls.zig").Context,
+const TlsConn = struct {
+    const Ctx = struct {
+        fd: posix.fd_t,
+        opts: core.ServeOpts,
+        handler: core.HandlerFn,
+        io: std.Io,
+        ctx: *const @import("../../tls/Tls.zig").Context,
+    };
+
+    fn entry(conn_ctx: Ctx) void {
+        defer if (comptime builtin.os.tag == .windows) win_io.close(conn_ctx.fd) else {
+            _ = linux.close(conn_ctx.fd);
         };
 
-        fn entry(conn_ctx: Ctx) void {
-            defer if (comptime builtin.os.tag == .windows) win_io.close(conn_ctx.fd) else {
-                _ = linux.close(conn_ctx.fd);
-            };
-
-            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(routes){ .opts = conn_ctx.opts }) catch {};
-        }
-    };
-}
+        terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver{ .opts = conn_ctx.opts, .handler = conn_ctx.handler, .io = conn_ctx.io }) catch {};
+    }
+};
 
 /// Listen and serve h2 over TLS. The cert / key / policy are loaded and validated once in the context
-/// (config.tls). Each accepted connection is handed to its own worker thread. Routes are baked in at
-/// compile time, so the driver is generated per route table.
-pub fn runTls(comptime routes: []const Route, config: Http2ServerConfig) !void {
+/// (config.tls). Each accepted connection is handed to its own worker thread.
+pub fn runTls(handler: core.HandlerFn, config: Http2ServerConfig) !void {
     const io = config.io;
     const ctx = config.tls.?;
 
@@ -175,8 +173,8 @@ pub fn runTls(comptime routes: []const Route, config: Http2ServerConfig) !void {
         const stream = srv.accept(io) catch continue;
         const conn_fd = stream.socket.handle;
 
-        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn(routes).entry, .{
-            TlsConn(routes).Ctx{ .fd = conn_fd, .opts = opts, .ctx = ctx },
+        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn.entry, .{
+            TlsConn.Ctx{ .fd = conn_fd, .opts = opts, .handler = handler, .io = io, .ctx = ctx },
         }) catch {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole

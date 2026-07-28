@@ -26,7 +26,7 @@ Implemented. See ADR-024 for design rationale.
 ```
 src/tcp/fix/
     Fix.zig      // namespace aggregator
-    core.zig     // parsing, building, checksum, serveConn, MsgType, FixContext, HandlerFn, FixRoute
+    core.zig     // parsing, building, checksum, serveConn, MsgType, FixRequest, FixResponse, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
     server.zig   // FixServer: thin run() switch over dispatch/ (POOL, ASYNC, MIXED, EPOLL, URING)
     dispatch/    // per-model files: async.zig, pool.zig, mixed.zig, epoll.zig, uring.zig, common.zig
@@ -46,18 +46,20 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Fix.Server` | struct | `init(routes, config)` / `deinit()` / `run()` (routes is `[]const zix.Fix.Route`) |
+| `zix.Fix.Server` | struct | `init(handler, config)` / `deinit()` / `run()` (ADR-063: `handler: ?HandlerFn`, built via `Router(&routes).dispatch`; `null` keeps echo mode) |
 | `zix.Fix.ServerConfig` | struct | See Server Config Fields below |
-| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, routes }`: options for `serveConn` |
+| `zix.Fix.ServeOpts` | struct | `{ logger, heartbeat_timeout_ms, conn_timeout_ms, handler_timeout_ms, handler }`: options for `serveConn` |
 | `zix.Fix.Client` | struct | `connect(config, io)` / `deinit(io)` / `logon(io, heart_bt_int)` / `logout(io)` / `sendMessage(io, msg_type, extra)` / `recvMessage(io)` |
 | `zix.Fix.ClientConfig` | struct | See Client Config Fields below |
 | `zix.Fix.DispatchModel` | enum(u8) | Re-export of `zix.Tcp.DispatchModel` |
 | `zix.Fix.Tag` | enum(u16) | Nonexhaustive enum of standard FIX 4.x tag numbers. Use `@enumFromInt` for custom tags not listed |
 | `zix.Fix.MsgType` | struct | Namespace of compile-time string constants for FIX MsgType (tag 35) values. See MsgType Constants section |
-| `zix.Fix.HandlerFn` | type | `*const fn (fields: []const Field, ctx: *Context) void`: application message handler |
+| `zix.Fix.HandlerFn` | type | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio): application message handler |
 | `zix.Fix.Route` | struct | `{ msg_type: []const u8, handler: HandlerFn, timeout_ms: u32 = 0 }`: one application message route |
-| `zix.Fix.Context` | struct | Per-connection context passed to each handler. Fields: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Methods: `sendMessage`, `isExpired` |
-| `zix.Fix.Router(routes)` | comptime fn | Returns a comptime dispatch type with `dispatch(fields, ctx, server_timeout_ms)` |
+| `zix.Fix.Request` | struct | `{ fields: []const Field }`, `getField(tag) ?[]const u8`: zero-copy view over the received message |
+| `zix.Fix.Response` | struct | `sendMessage(msg_type, fields)`: builder over `buildMessage` plus the SOH-framed write, independent of `Context` |
+| `zix.Fix.Context` | struct | Per-connection context passed to each handler. Fields: `sender_comp_id`, `target_comp_id`, `deadline_ns`. Methods: `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` |
+| `zix.Fix.Router(routes)` | comptime fn | Returns a comptime dispatch type with `dispatch(req, res, ctx) anyerror!void`, matching `HandlerFn` exactly |
 | `zix.Fix.wallClockNs` | fn | `std.os.linux.clock_gettime(.REALTIME)` -> u64 nanoseconds (same as `zix.Grpc.wallClockNs`) |
 | `zix.Fix.Field` | struct | `{ tag: Tag, value: []const u8 }`: zero-copy slice into receive buffer |
 | `zix.Fix.BuildField` | struct | `{ tag: Tag, value: []const u8 }`: input to `buildMessage` |
@@ -262,7 +264,7 @@ Usage in route table and `sendMessage`:
 },
 
 // in handler:
-ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{ ... });
+res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{ ... });
 
 // in client:
 try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
@@ -272,14 +274,16 @@ try client.sendMessage(io, zix.Fix.MsgType.NewOrderSingle, &order_fields);
 
 ## Router and Application Message Dispatch
 
-Routes are passed at `Fix.Server.init()`. Session messages (Logon/Logout/Heartbeat/TestRequest) are always handled internally by `serveConn`. Only application messages (everything else) reach the router.
+Routes are wrapped in `Fix.Router(&routes)` and `.dispatch` is passed to `Fix.Server.init()` (ADR-063, mirrors the rest of the family). Session messages (Logon/Logout/Heartbeat/TestRequest) are always handled internally by `serveConn`. Only application messages (everything else) reach the router.
 
 ```zig
+const router = zix.Fix.Router(&[_]zix.Fix.Route{
+    .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder,   .timeout_ms = 500 },
+    .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel,     .timeout_ms = 500 },
+});
+
 var server = try zix.Fix.Server.init(
-    &[_]zix.Fix.Route{
-        .{ .msg_type = zix.Fix.MsgType.NewOrderSingle,    .handler = handleNewOrder,   .timeout_ms = 500 },
-        .{ .msg_type = zix.Fix.MsgType.OrderCancelRequest, .handler = handleCancel,     .timeout_ms = 500 },
-    },
+    router.dispatch,
     .{
         .io                    = process.io,
         .ip                    = "0.0.0.0",
@@ -292,55 +296,49 @@ var server = try zix.Fix.Server.init(
 );
 ```
 
-Empty routes (`&.{}`) enable echo mode (backward-compatible: all non-session messages are echoed).
+`Server.init` takes `handler: ?HandlerFn`. Passing `null` enables echo mode (backward-compatible: all non-session messages are echoed).
 
 ### HandlerFn
 
 ```zig
-fn handleNewOrder(fields: []const zix.Fix.Field, ctx: *zix.Fix.Context) void {
+fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) !void {
     if (ctx.isExpired()) return;
-    const symbol = zix.Fix.getField(fields, .Symbol) orelse return;
-    ctx.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    const symbol = req.getField(.Symbol) orelse return;
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .Symbol,    .value = symbol },
         .{ .tag = .OrdStatus, .value = "0" },
     });
 }
 ```
 
-### FixContext Fields
+### FixRequest / FixResponse / FixContext (ADR-063 trio)
 
-| Field | Type | Description |
-| :- | :- | :- |
-| `sender_comp_id` | `[]const u8` | Peer's SenderCompID from session Logon |
-| `target_comp_id` | `[]const u8` | Server's comp_id (our identity) |
-| `deadline_ns` | `?u64` | Absolute deadline (CLOCK_REALTIME nanoseconds). Set from tightest of `handler_timeout_ms`, `Route.timeout_ms`. Null = no deadline |
-
-### FixContext Methods
-
-| Method | Description |
+| Type | Members |
 | :- | :- |
-| `sendMessage(msg_type, fields)` | Build and send a FIX response on this connection (swapped CompIDs) |
-| `isExpired()` bool | Returns true when `deadline_ns` is set and has passed |
+| `FixRequest` | `fields: []const Field`, `getField(tag) ?[]const u8` (zero-copy view over the received message's fields) |
+| `FixResponse` | `sendMessage(msg_type, fields)`: build and send a FIX response on this connection (swapped CompIDs), independent of `FixContext` so a handler may send from a captured closure after the context goes out of scope |
+| `FixContext` | `sender_comp_id`, `target_comp_id` (session identity), `deadline_ns: ?u64` (absolute deadline, CLOCK_REALTIME nanoseconds, tightest of `handler_timeout_ms` / `Route.timeout_ms`, null = no deadline), `withTimeout` / `setTimeout` / `withDeadline` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
 
 ### Deadline Override
 
 ```zig
 ctx.deadline_ns = zix.Fix.wallClockNs() + 2 * std.time.ns_per_s; // extend to 2 s
 ctx.deadline_ns = null;                                            // disable
+// or via the helpers: ctx.setTimeout(2_000); ctx.withDeadline(deadline_ns);
 ```
 
 ### FixRouter (comptime)
 
-`FixRouter(routes)` generates a comptime `dispatch` function: `inline for` unrolled at comptime, zero runtime cost.
+`FixRouter(routes)` generates a comptime `dispatch` function matching `HandlerFn` exactly: `inline for` unrolled at comptime, zero runtime cost.
 
 ```zig
 const r = zix.Fix.Router(&[_]zix.Fix.Route{
     .{ .msg_type = zix.Fix.MsgType.NewOrderSingle, .handler = handleNewOrder },
 });
-r.dispatch(fields, ctx, server_handler_timeout_ms);
+try r.dispatch(req, res, ctx);
 ```
 
-The router is wired automatically when routes are passed to `Server.init`. Use it directly only when calling `serveConn` manually.
+`dispatch` reads the message type off `req.getField(.MsgType)` itself, matches it against the route table, tightens `ctx.deadline_ns` with `Route.timeout_ms` when set, then calls `route.handler(req, res, ctx)`. Pass `router.dispatch` to `Server.init` for the normal server path; call it directly only when driving `serveConn` manually.
 
 ---
 
@@ -373,7 +371,7 @@ Same five models as `zix.Http.Server`. The field is required with no default. AS
 ## Server Lifecycle
 
 ```
-Fix.Server.init(config): validates port != 0, io taken from config
+Fix.Server.init(handler, config): validates port != 0, io taken from config
     -> .run(): dispatches via dispatch_model, blocks until error
 Fix.Server.deinit(): no-op (resources released in run() via defer)
 ```

@@ -59,6 +59,26 @@ __*Update:*__
 
 __*Update:*__
 
+- Breaking: `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix` gain the Request/Response/Context trio and the explicit Router idiom (ADR-063), matching `zix.Http1` (ADR-062) and `zix.Http3`:
+    - `HandlerFn` is now `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` on every engine. `zix.Http2` had none of the trio before (raw `method`/`headers`/`body`/`fd`/`sid` args), `zix.Grpc` had raw headers plus `GrpcContext`, `zix.Fix` had raw fields plus `FixContext`. `Request` and `Response` are thin views/builders over each engine's existing wire writers (byte-identical output), `Context` carries `io`, a per-request stack arena allocator (`FixedBufferAllocator`, no heap call), and the timeout helpers `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`.
+    - Router: `Server.init(handler, config)` everywhere, `handler` built via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. `zix.Fix.Server.init` takes `handler: ?HandlerFn`, `null` keeps the existing echo-only mode. `zix.Grpc.Server.init` is the one exception: it takes `Router(&routes)` itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` before dispatch to pick sync-inline vs task-spawn, and a bare handler pointer cannot carry that metadata (measured by a wide per-core RPS margin between the two paths before deciding).
+    - `zix.Http3` gains `Context` and the `anyerror!void` error channel (`Request` / `Response` already existed), `Server.init(handler, config)` was already in place and is unchanged.
+    - Handler-error wire policy: `zix.Http`, `zix.Http2`, `zix.Http3` auto-send one 500 when the handler errors and nothing was sent yet. `zix.Grpc` and `zix.Fix` pass the error through silently, current wire behavior kept.
+    - New per-engine config field: `handler_timeout_ms` on `Http2ServerConfig` and `Http3ServerConfig` (both had no timeout concept before), seeded onto `Context.deadline_ns` at dispatch.
+    - Migration: every example and integration/edge/behaviour test across all five engines was updated to the new call shape. `zig build test-all` and `zig build examples` are green on `zig-0.16` and `zig-0.17`.
+
+<br>
+
+__*Fix:*__
+
+- TBA
+
+<br>
+
+## 0.5.x-rc2 (2026-07-27)
+
+__*Update:*__
+
 - Platform cross-build support, target-suffixed examples, platform-aware tests and runners:
     - The whole tree (module, examples, all four test suites, the test runners, and the postgrez / rediz / prometheuz drivers) builds with Zig 0.16.x and Zig 0.17.x for x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, and x86_64-openbsd. Windows socket I/O rides a small ntdll shim (`src/utils/windows_io.zig`: NtReadFile / NtWriteFile / NtClose plus the AFD partial-disconnect), the BSDs get TCP_NODELAY resolved comptime (`std.posix.TCP` is void there on Zig 0.16), and every Linux-only path (EPOLL / URING loops, CPU affinity, madvise, raw UDP batching) is comptime-gated. On non-Linux targets `.EPOLL` / `.URING` keep falling back to `.POOL`. Windows degrades where the platform lacks the primitive: logger file logging is suspended (console logging stays), poll-based timeouts become blocking reads, no CPU pinning, UDS and raw UDP return runtime errors.
     - Installed example binaries are named `example-<name>-<arch>-<os>` (drivers: `<driver>-example-<name>-<arch>-<os>`), so per-target builds coexist in `zig-out/bin`.
