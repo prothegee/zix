@@ -1,4 +1,6 @@
-//! Minimal blocking socket I/O over ntdll for Windows targets.
+//! Windows platform shims over ntdll for Windows targets: blocking socket I/O
+//! plus the clock and secure-random fallbacks the engines need where std has no
+//! portable path.
 //!
 //! What:
 //! - The engine fast paths talk to sockets through raw POSIX descriptors. On
@@ -10,6 +12,9 @@
 //!   (opened by std, not by Winsock) fail it with connection-abort statuses.
 //!   The ioctls here are the requests std itself issues for every socket
 //!   read and write, so they are the proven path on these handles.
+//! - Beyond sockets the file also carries two Windows-only fallbacks over the
+//!   same ntdll surface: wallClockNs / monotonicUs (RtlGetSystemTimePrecise and
+//!   the performance counter) and secureRandom (the CNG device).
 //!
 //! Note:
 //! - Windows-only: every caller comptime-gates on builtin.os.tag == .windows,

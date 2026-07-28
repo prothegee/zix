@@ -14,6 +14,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 const core = @import("core.zig");
+const mux = @import("mux.zig");
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const frame = @import("../frame.zig");
@@ -40,7 +41,7 @@ const allocator = std.heap.smp_allocator;
 /// connections in the cleartext worker instead of a second fleet.
 pub const TlsConn = struct {
     transport: tls_conn.Transport,
-    grpc: ?*core.GrpcMuxConn = null,
+    grpc: ?*mux.GrpcMuxConn = null,
     opts: core.GrpcServeOpts,
     /// Io backend, carried for the GrpcMuxConn built at handshake. Worker-wide.
     io: std.Io,
@@ -120,7 +121,7 @@ pub fn onCiphertext(comptime RouterType: type, conn: *TlsConn, cipher: []const u
 
     if (r.outcome == .established) {
         if (!conn.transport.tls.alpnIsH2()) return false;
-        conn.grpc = core.GrpcMuxConn.init(conn.transport.fd, conn.opts, conn.io) orelse return false;
+        conn.grpc = mux.GrpcMuxConn.init(conn.transport.fd, conn.opts, conn.io) orelse return false;
     }
 
     if (r.outcome == .close) {
@@ -138,7 +139,7 @@ pub fn onCiphertext(comptime RouterType: type, conn: *TlsConn, cipher: []const u
 
 /// Append decrypted plaintext to the mux read accumulator and drive one processing pass, sealing the
 /// reply through the write hook. Returns false when the mux asks to close.
-fn feedMux(comptime RouterType: type, conn: *TlsConn, grpc_conn: *core.GrpcMuxConn, plaintext: []const u8) bool {
+fn feedMux(comptime RouterType: type, conn: *TlsConn, grpc_conn: *mux.GrpcMuxConn, plaintext: []const u8) bool {
     if (grpc_conn.rstart == grpc_conn.rend) {
         grpc_conn.rstart = 0;
         grpc_conn.rend = 0;
@@ -155,7 +156,7 @@ fn feedMux(comptime RouterType: type, conn: *TlsConn, grpc_conn: *core.GrpcMuxCo
 
     frame.write_hook = hookWrite;
     frame.write_hook_ctx = conn;
-    const outcome = core.grpcMuxProcessRing(RouterType, grpc_conn);
+    const outcome = mux.grpcMuxProcessRing(RouterType, grpc_conn);
     grpc_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> encrypt
     flushPlain(conn);
     frame.write_hook = null;

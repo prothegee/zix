@@ -26,9 +26,6 @@ const slab = @import("../../../multiplexers/slab.zig");
 
 const timer_interval_ms: u32 = 500;
 pub const conn_queue_initial_cap: usize = 16;
-/// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
-/// ready-fd set in one syscall at high connection counts.
-pub const EPOLL_MAX_EVENTS: usize = 1024;
 
 /// Effective cache slot count for a worker, honoring cache_max_total_bytes.
 /// When a memory ceiling is set, the entry count is reduced so the slab
@@ -467,19 +464,12 @@ pub const EpollConnTable = struct {
 };
 
 // --------------------------------------------------------- //
-// URING per-connection state + ring init (ADR-037 Phase 4 step 4)
+// URING per-connection state (ADR-037 Phase 4 step 4)
 
-/// SQ entries per worker ring.
-pub const URING_ENTRIES: u16 = 4096;
-/// CQ entries per worker ring (multishot completion headroom).
-pub const URING_CQ_ENTRIES: u32 = 16 * 1024;
 /// Max CQEs drained per loop pass.
 pub const URING_CQE_BATCH: usize = 512;
 /// Per-connection staged-response buffer: one coalesced send per request.
 pub const URING_SEND_BUF_SIZE: usize = 16 * 1024;
-/// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
-/// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
-pub const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
 
 /// Per-worker EPOLL response staging buffer: the handler's writes coalesce here,
 /// the worker flushes once, and any unwritten tail is staged for EPOLLOUT.
@@ -487,25 +477,6 @@ pub const EPOLL_OUT_BUF_SIZE: usize = 64 * 1024;
 
 /// Outcome of one ring process pass over a connection's read buffer.
 pub const HttpProcOutcome = enum { need_more, keep_alive, close };
-
-/// Initialize a worker ring with the single-issuer fast-path flags, falling back
-/// to a flagless ring when the kernel does not support them. Mirrors the
-/// zix.Http1 ring init.
-pub fn initUringRing() !std.os.linux.IoUring {
-    if (comptime builtin.os.tag != .linux) return error.PlatformNotSupported;
-
-    const linux = std.os.linux;
-    var params = std.mem.zeroInit(linux.io_uring_params, .{
-        .flags = linux.IORING_SETUP_SINGLE_ISSUER |
-            linux.IORING_SETUP_DEFER_TASKRUN |
-            linux.IORING_SETUP_CQSIZE |
-            linux.IORING_SETUP_CLAMP,
-        .cq_entries = URING_CQ_ENTRIES,
-        .sq_thread_idle = URING_SQ_THREAD_IDLE_MS,
-    });
-
-    return std.os.linux.IoUring.init_params(URING_ENTRIES, &params) catch return std.os.linux.IoUring.init(URING_ENTRIES, 0);
-}
 
 /// Per-connection ring state. buf accumulates request bytes until the header end
 /// is found, send_buf holds the coalesced response while a send is in flight, and

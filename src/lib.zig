@@ -198,6 +198,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/http2/grpc/proto.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/timeout.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/core.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/grpc/mux.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/config.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/server.zig"));
     std.testing.refAllDecls(@import("tcp/http2/grpc/dispatch/common.zig"));

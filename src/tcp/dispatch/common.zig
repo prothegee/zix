@@ -24,10 +24,6 @@ pub fn logSystem(cfg: TcpServerConfig, comptime fmt: []const u8, args: anytype) 
         std.debug.print("zix tcp dispatch: " ++ fmt ++ "\n", args);
 }
 
-/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
-/// ready-fd set in one syscall at high connection counts.
-pub const EPOLL_MAX_EVENTS: usize = 512;
-
 // --------------------------------------------------------- //
 
 /// User-provided connection handler. Receives the accepted stream and io.

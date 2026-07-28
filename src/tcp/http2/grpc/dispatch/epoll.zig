@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const core = @import("../core.zig");
+const mux = @import("../mux.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
@@ -24,12 +25,12 @@ const EPOLL_MAX_EVENTS: usize = 512;
 
 /// Private per-worker fd to GrpcMuxConn map. Not shared between workers.
 const GrpcConnTable = struct {
-    slots: []?*core.GrpcMuxConn,
+    slots: []?*mux.GrpcMuxConn,
 
     fn init() !GrpcConnTable {
         // mmap'd pointer slots: kernel-zeroed (zero == null) and demand-paged, so
         // they cost no physical memory until used. See multiplexers/slab.
-        const slots = try slab.mapZeroedSlots(?*core.GrpcMuxConn, MAX_FD);
+        const slots = try slab.mapZeroedSlots(?*mux.GrpcMuxConn, MAX_FD);
 
         return .{ .slots = slots };
     }
@@ -42,18 +43,18 @@ const GrpcConnTable = struct {
         slab.unmapSlots(self.slots);
     }
 
-    fn get(self: *GrpcConnTable, fd: std.posix.fd_t) ?*core.GrpcMuxConn {
+    fn get(self: *GrpcConnTable, fd: std.posix.fd_t) ?*mux.GrpcMuxConn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
         return self.slots[idx];
     }
 
-    fn alloc(self: *GrpcConnTable, fd: std.posix.fd_t, opts: core.GrpcServeOpts, io: std.Io) ?*core.GrpcMuxConn {
+    fn alloc(self: *GrpcConnTable, fd: std.posix.fd_t, opts: core.GrpcServeOpts, io: std.Io) ?*mux.GrpcMuxConn {
         const idx: usize = @intCast(fd);
         if (idx >= self.slots.len) return null;
 
-        const conn = core.GrpcMuxConn.init(fd, opts, io) orelse return null;
+        const conn = mux.GrpcMuxConn.init(fd, opts, io) orelse return null;
         self.slots[idx] = conn;
 
         return conn;
@@ -276,9 +277,9 @@ fn epollMuxWorkerFn(comptime RouterType: type) fn (MuxWorkerCtx) void {
 
                     const conn = table.get(ev.data.fd) orelse continue;
                     const outcome = if ((ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0)
-                        core.GrpcConnOutcome.close
+                        mux.GrpcConnOutcome.close
                     else
-                        core.grpcMuxOnReadable(RouterType, conn);
+                        mux.grpcMuxOnReadable(RouterType, conn);
 
                     if (outcome == .close) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);

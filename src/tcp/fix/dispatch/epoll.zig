@@ -8,8 +8,11 @@ const common = @import("common.zig");
 const logSystem = common.logSystem;
 const ConnTask = common.ConnTask;
 const dispatchConn = common.dispatchConn;
-const EPOLL_MAX_EVENTS = common.EPOLL_MAX_EVENTS;
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+
+/// Max epoll events drained per epoll_wait call. 512 lets a worker clear its
+/// ready-fd set in one syscall at high connection counts.
+const EPOLL_MAX_EVENTS: usize = 512;
 
 // --------------------------------------------------------- //
 

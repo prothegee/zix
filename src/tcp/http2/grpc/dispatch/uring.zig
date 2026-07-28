@@ -2,12 +2,13 @@
 //! listener per worker (ADR-037 Phase 4 step 3). Mirrors the zix.Http1 ring core:
 //! multishot accept, an fd-indexed slot table with a generation-tagged user_data
 //! against fd reuse, a plain recv into the per-connection read accumulator, the
-//! resumable h2 state machine (core.grpcMuxProcessRing) staging every reply into
+//! resumable h2 state machine (mux.grpcMuxProcessRing) staging every reply into
 //! the connection cork, one coalesced send per readable batch, and a batched CQE
 //! drain. Half-duplex per connection (at most one recv or one send in flight).
 
 const std = @import("std");
 const core = @import("../core.zig");
+const mux = @import("../mux.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
 const common = @import("common.zig");
 const epoll_model = @import("epoll.zig");
@@ -57,7 +58,7 @@ fn initUringRing() !IoUring {
 /// inflight is the byte count the kernel owns while a send is outstanding, and
 /// closing defers the free until the last send lands.
 const UringGrpcConn = struct {
-    conn: *core.GrpcMuxConn,
+    conn: *mux.GrpcMuxConn,
     gen: u24,
     inflight: usize,
     closing: bool,
@@ -250,7 +251,7 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
                 setNoDelay(conn_fd);
                 common.setBusyPoll(conn_fd, self.busy_poll_us);
 
-                const c = core.GrpcMuxConn.init(conn_fd, self.opts, self.io) orelse {
+                const c = mux.GrpcMuxConn.init(conn_fd, self.opts, self.io) orelse {
                     _ = linux.close(conn_fd);
                     return;
                 };
@@ -278,7 +279,7 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
 
                 gc.conn.rend += @intCast(cqe.res);
 
-                const outcome = core.grpcMuxProcessRing(RouterType, gc.conn);
+                const outcome = mux.grpcMuxProcessRing(RouterType, gc.conn);
 
                 if (gc.conn.stage.len > 0) {
                     self.submitSend(gc);
