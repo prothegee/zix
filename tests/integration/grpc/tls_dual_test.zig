@@ -193,8 +193,6 @@ fn expectGrpcTlsSettings(io: std.Io, tls_port: u16) !void {
 }
 
 test "zix integration: Grpc dual listener EPOLL serves h2c on port" {
-    std.log.info("DIAG grpc tls_dual: test process started, entering \"EPOLL serves h2c on port\"", .{});
-
     if (builtin.os.tag != .linux) {
         // windows / other-platform region: EPOLL/URING dispatch models are
         // Linux-only, nothing is spawned here, nothing to retry or clean up.
@@ -210,8 +208,6 @@ test "zix integration: Grpc dual listener EPOLL serves h2c on port" {
 }
 
 test "zix integration: Grpc dual listener EPOLL serves gRPC TLS on tls_port" {
-    std.log.info("DIAG grpc tls_dual: test process started, entering \"EPOLL serves gRPC TLS on tls_port\"", .{});
-
     if (builtin.os.tag != .linux) {
         // windows / other-platform region: EPOLL/URING dispatch models are
         // Linux-only, nothing is spawned here, nothing to retry or clean up.
@@ -227,8 +223,6 @@ test "zix integration: Grpc dual listener EPOLL serves gRPC TLS on tls_port" {
 }
 
 test "zix integration: Grpc dual listener URING serves h2c on port" {
-    std.log.info("DIAG grpc tls_dual: test process started, entering \"URING serves h2c on port\"", .{});
-
     if (builtin.os.tag != .linux) {
         // windows / other-platform region: EPOLL/URING dispatch models are
         // Linux-only, nothing is spawned here, nothing to retry or clean up.
@@ -244,8 +238,6 @@ test "zix integration: Grpc dual listener URING serves h2c on port" {
 }
 
 test "zix integration: Grpc dual listener URING serves gRPC TLS on-ring on tls_port" {
-    std.log.info("DIAG grpc tls_dual: test process started, entering \"URING serves gRPC TLS on-ring on tls_port\"", .{});
-
     if (builtin.os.tag != .linux) {
         // windows / other-platform region: EPOLL/URING dispatch models are
         // Linux-only, nothing is spawned here, nothing to retry or clean up.
@@ -261,8 +253,6 @@ test "zix integration: Grpc dual listener URING serves gRPC TLS on-ring on tls_p
 }
 
 test "zix integration: Grpc tls_port equal to port is rejected at run" {
-    std.log.info("DIAG grpc tls_dual: test process started, entering \"tls_port equal to port is rejected at run\"", .{});
-
     if (builtin.os.tag != .linux) {
         // windows / other-platform region: dispatch_model = .EPOLL is
         // Linux-only, nothing is spawned here, nothing to retry or clean up.
