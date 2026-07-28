@@ -5,6 +5,7 @@
 //! the EPOLL path, ADR-037 Phase 4 step 4).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const common = @import("common.zig");
 const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
@@ -14,7 +15,6 @@ const getAvailableCpuCount = common.getAvailableCpuCount;
 const effectiveCacheEntries = common.effectiveCacheEntries;
 const setNoDelay = common.setNoDelay;
 const setNonBlock = common.setNonBlock;
-const initUringRing = common.initUringRing;
 const UringHttpConn = common.UringHttpConn;
 const HttpProcOutcome = common.HttpProcOutcome;
 const MAX_FD = common.MAX_FD;
@@ -34,6 +34,35 @@ const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../tls/Tls.zig");
 const IoUring = std.os.linux.IoUring;
+
+/// SQ entries per worker ring.
+const URING_ENTRIES: u16 = 4096;
+
+/// CQ entries per worker ring (multishot completion headroom).
+const URING_CQ_ENTRIES: u32 = 16 * 1024;
+
+/// io_uring SQPOLL kernel-thread idle before it sleeps, in milliseconds. Inert
+/// unless IORING_SETUP_SQPOLL is set (it is not here), kept for when it is.
+const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
+
+/// Initialize a worker ring with the single-issuer fast-path flags, falling back
+/// to a flagless ring when the kernel does not support them. Mirrors the
+/// zix.Http1 ring init.
+fn initUringRing() !IoUring {
+    if (comptime builtin.os.tag != .linux) return error.PlatformNotSupported;
+
+    const linux = std.os.linux;
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = linux.IORING_SETUP_SINGLE_ISSUER |
+            linux.IORING_SETUP_DEFER_TASKRUN |
+            linux.IORING_SETUP_CQSIZE |
+            linux.IORING_SETUP_CLAMP,
+        .cq_entries = URING_CQ_ENTRIES,
+        .sq_thread_idle = URING_SQ_THREAD_IDLE_MS,
+    });
+
+    return IoUring.init_params(URING_ENTRIES, &params) catch return IoUring.init(URING_ENTRIES, 0);
+}
 
 /// Default minimum warm idle-connection pool floor. Overridden per worker from
 /// config.uring_idle_pool_floor. Mirrors the zix.Http1 URING idle pool.

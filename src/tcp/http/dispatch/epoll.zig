@@ -12,7 +12,6 @@ const getAvailableCpuCount = common.getAvailableCpuCount;
 const effectiveCacheEntries = common.effectiveCacheEntries;
 const EpollConnTable = common.EpollConnTable;
 const epollAcceptAll = common.epollAcceptAll;
-const EPOLL_MAX_EVENTS = common.EPOLL_MAX_EVENTS;
 const EPOLL_OUT_BUF_SIZE = common.EPOLL_OUT_BUF_SIZE;
 const parser = @import("../parser.zig");
 const rcache = @import("../../../utils/response_cache.zig");
@@ -25,6 +24,10 @@ const setCache = resp_mod.setCache;
 const setCompression = resp_mod.setCompression;
 const RespSink = resp_mod.RespSink;
 const writeAllFD = resp_mod.writeAllFD;
+
+/// Max epoll events drained per epoll_wait call. 1024 lets a worker clear its
+/// ready-fd set in one syscall at high connection counts.
+const EPOLL_MAX_EVENTS: usize = 1024;
 
 // --------------------------------------------------------- //
 
