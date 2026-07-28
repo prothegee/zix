@@ -168,7 +168,8 @@ pub fn main(process: std.process.Init) !void {
     ws_rooms = zix.Http.WebSocket.RoomMap.init(std.heap.smp_allocator);
     defer ws_rooms.deinit();
 
-    var server = zix.Http.Server.init(&Routes, .{
+    const router = zix.Http.Router(&Routes);
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

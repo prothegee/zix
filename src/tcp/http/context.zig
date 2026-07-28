@@ -17,6 +17,9 @@ pub const Context = struct {
     /// Use setTimeout() to set in place, withTimeout() to get a modified copy.
     /// Check isExpired() or timedOut() between expensive steps.
     deadline: ?std.Io.Clock.Timestamp = null,
+    /// Static file directory set by the server from config.public_dir. Empty
+    /// disables the router's static-file fallback (Router.dispatch reads this).
+    public_dir: []const u8 = "",
 
     /// Return a copy of ctx with deadline set to now + ms.
     pub fn withTimeout(self: Context, ms: u64) Context {

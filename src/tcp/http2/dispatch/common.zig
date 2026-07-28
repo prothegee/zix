@@ -1,7 +1,7 @@
 //! zix http2 dispatch: shared helpers across the dispatch models (ADR-043).
-//! ConnQueue and the accept-side worker are route-agnostic. The pieces that call
-//! core.serveConn(routes, ...) need the comptime route table, so they live in
-//! Dispatch(routes).
+//! ConnTask / PoolCtx / AsyncWorkerCtx carry a runtime handler: core.HandlerFn (built by the
+//! caller via Router(routes).dispatch), so dispatchConn / poolEntry / asyncWorkerEntry are plain
+//! functions, not a comptime-routes-parameterized type.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,7 +10,6 @@ const win_io = @import("../../../utils/windows_io.zig");
 const core = @import("../core.zig");
 const frame = @import("../frame.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
-const Route = core.Route;
 
 // --------------------------------------------------------- //
 
@@ -40,6 +39,7 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
         .cache_max_value_bytes = cfg.cache_max_value_bytes,
         .cache_ttl_ms = cfg.cache_ttl_ms,
         .cache_max_total_bytes = cfg.cache_max_total_bytes,
+        .handler_timeout_ms = cfg.handler_timeout_ms,
     };
 }
 
@@ -278,61 +278,61 @@ pub fn workerEntry(ctx: WorkerCtx) void {
 
 // --------------------------------------------------------- //
 
-/// Route-table-dependent dispatch helpers. The route set is comptime, so every
-/// function that calls core.serveConn(routes, ...) is baked per route table.
-pub fn Dispatch(comptime routes: []const Route) type {
-    return struct {
-        pub const ConnTask = struct {
-            fd: std.posix.fd_t,
-            opts: core.ServeOpts,
+pub const ConnTask = struct {
+    fd: std.posix.fd_t,
+    opts: core.ServeOpts,
+    handler: core.HandlerFn,
+    io: std.Io,
+};
+
+pub fn dispatchConn(task: ConnTask) void {
+    defer closeFD(task.fd);
+    core.serveConn(task.handler, task.fd, task.opts, task.io);
+}
+
+pub const PoolCtx = struct {
+    queue: *ConnQueue,
+    io: std.Io,
+    opts: core.ServeOpts,
+    handler: core.HandlerFn,
+};
+
+pub fn poolEntry(ctx: PoolCtx) void {
+    while (ctx.queue.pop(ctx.io)) |fd| {
+        defer closeFD(fd);
+        core.serveConn(ctx.handler, fd, ctx.opts, ctx.io);
+    }
+}
+
+pub const AsyncWorkerCtx = struct {
+    io: std.Io,
+    ip: []const u8,
+    port: u16,
+    kernel_backlog: u31,
+    opts: core.ServeOpts,
+    handler: core.HandlerFn,
+};
+
+pub fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
+    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+    var listener = addr.listen(ctx.io, .{
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
+        .kernel_backlog = ctx.kernel_backlog,
+    }) catch return;
+    defer listener.deinit(ctx.io);
+
+    while (true) {
+        const stream = listener.accept(ctx.io) catch |err| {
+            if (err != error.ConnectionAborted) break;
+            continue;
         };
-
-        pub fn dispatchConn(task: ConnTask) void {
-            defer closeFD(task.fd);
-            core.serveConn(routes, task.fd, task.opts);
-        }
-
-        pub const PoolCtx = struct {
-            queue: *ConnQueue,
-            io: std.Io,
-            opts: core.ServeOpts,
-        };
-
-        pub fn poolEntry(ctx: PoolCtx) void {
-            while (ctx.queue.pop(ctx.io)) |fd| {
-                defer closeFD(fd);
-                core.serveConn(routes, fd, ctx.opts);
-            }
-        }
-
-        pub const AsyncWorkerCtx = struct {
-            io: std.Io,
-            ip: []const u8,
-            port: u16,
-            kernel_backlog: u31,
-            opts: core.ServeOpts,
-        };
-
-        pub fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
-            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-            var listener = addr.listen(ctx.io, .{
-                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-                .kernel_backlog = ctx.kernel_backlog,
-            }) catch return;
-            defer listener.deinit(ctx.io);
-
-            while (true) {
-                const stream = listener.accept(ctx.io) catch |err| {
-                    if (err != error.ConnectionAborted) break;
-                    continue;
-                };
-                _ = ctx.io.async(dispatchConn, .{ConnTask{
-                    .fd = stream.socket.handle,
-                    .opts = ctx.opts,
-                }});
-            }
-        }
-    };
+        _ = ctx.io.async(dispatchConn, .{ConnTask{
+            .fd = stream.socket.handle,
+            .opts = ctx.opts,
+            .handler = ctx.handler,
+            .io = ctx.io,
+        }});
+    }
 }
 
 /// Widest allowed-CPU list the pinning path tracks: one slot per affinity-mask bit.

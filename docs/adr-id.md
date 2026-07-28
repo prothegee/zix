@@ -1390,4 +1390,66 @@ Engine yang mampu compression mengekspos enam yang sama: `sendGzipFD`, `sendGzip
 
 ---
 
+## ADR-063: Paritas trio handler engine (Request, Response, Context) dan Router eksplisit lintas engine
+
+**Status:** Accepted
+
+**Context:** Tidak semua engine memberi handler-nya tiga peran yang sama. `zix.Http` dan `zix.Http1` sudah punya trio penuh sejak ADR-062. Yang lain belum:
+
+| Engine | View bertipe Request | Builder bertipe Response | Env bertipe Context |
+| :- | :- | :- | :- |
+| Http / Http1 | ya, `Request` bertipe | ya, `Response` bertipe | ya, `Context` |
+| Http3 | ya, `Request` | ya, `Response` | tidak ada, tanpa parameter ctx, tanpa error return |
+| Http2 | tidak ada, argumen mentah `method` / `path` / `headers` / `body` | tidak ada, menulis via `sendResponseFD` bebas ke `fd` / `sid` mentah | tidak ada |
+| Grpc | tidak ada, slice `headers` mentah | tidak ada, menulis via `sendHeadersFD` / `sendDataFD` bebas ke fd milik `ctx` | ya, `GrpcContext` |
+| Fix | tidak ada, slice `fields` mentah | tidak ada, menulis via `buildMessage` ke fd milik `ctx` | ya, `FixContext` |
+
+Router punya belahan yang sama. `Http`, `Http2`, `Grpc`, `Fix` menerima array route langsung ke `Server.init(routes, config)`, router dibangun secara internal, pemanggil tidak pernah memanggil `Router(...)`. `Http1` dan `Http3` mengharuskan pemanggil memanggil `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...})` sendiri dan menyerahkan `.dispatch` ke `Server.init(handler, config)`. Belahan itulah sebabnya example terbaca berbeda per engine, dan sebabnya aplikasi yang memindahkan satu route dari satu engine ke engine lain harus mempelajari ulang bentuk handler-nya.
+
+**Decision:** Setiap engine mendapat trio, berbentuk sesuai protokolnya, dan idiom router Http1 di mana-mana, dalam satu pass gabungan lintas kelima engine (Fix, Http, Http2, Grpc, Http3, sesuai urutan itu):
+
+- Trio di semua engine: `Request`, `Response`, `Context`, dengan `HandlerFn = *const fn(*Request, *Response, *Context) anyerror!void`. Tidak dipaksa menjadi struct identik, tiap engine mempertahankan bentuknya sendiri sesuai apa yang benar-benar dibawa protokolnya, tapi ketiga peran itu ada di mana-mana dan idiomnya menyamai Http1 (`try res.foo(...)`, guard `Response.sent`, `Context` membawa io, arena per-request, deadline, dan escape hatch fd / sesi).
+- Router: `Server.init(handler, config)` di mana-mana, pemanggil membangun handler via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. Breaking change untuk `Http`, `Http2`, `Grpc`, `Fix`, mencerminkan pendekatan ADR-062 pada Http1. Semua example dan test suite yang terdampak pindah ke idiom call-site yang sama.
+- Nama tetap bare per namespace (`zix.Http2.Request`), tidak diberi prefix nama engine.
+- Kebijakan wire saat handler error: `Http1`, `Http2`, `Http3` otomatis mengirim satu 500 saat handler error dan belum ada yang terkirim (aturan ADR-062, diperluas). `Grpc` dan `Fix` meneruskan error secara diam-diam, perilaku wire saat ini dipertahankan, titik pemanggilan adalah `handler(&req, &res, &ctx) catch {}`.
+- Raw expose: permukaan `send*FD` mentah tetap publik di `Http1`, `Http2`, `Grpc`, `Http3`. `Http` dan `Fix` tidak mendapat raw expose.
+- Fold timeout Fix: `server_timeout_ms` berhenti menjadi argumen ketiga `dispatch` yang bare. Perhitungan effective-timeout pindah ke tempat `Context` dibangun, dan `deadline_ns` membawa hasilnya. Tidak ada raw timeout field yang ditambahkan.
+
+**Rationale:** Satu kosakata handler di semua engine: saat berpindah antar engine, memorinya terbawa, learning curve lebih rendah. Membangun trio di titik pemanggilan membiarkan loop dispatch yang sudah di-tuning tak tersentuh, pola yang sama yang dibuktikan ADR-062 pada Http1 (view murah di stack, writer byte-identical di baliknya).
+
+**Parity matrix:** nama sama, perilaku sama, hanya di tempat protokolnya punya konsepnya. "no" berarti konsepnya tidak ada di protokol itu, jadi method-nya tidak ada, tidak pernah berupa stub yang berbohong.
+
+| Anggota | Http / Http1 | Http2 | Http3 | Grpc | Fix |
+| :- | :- | :- | :- | :- | :- |
+| `Request.method` | ya | ya | ya | tidak (selalu POST) | tidak |
+| `Request.path` | ya | ya | ya | ya | tidak |
+| `Request.query` / `queryParam` / `queryParams` | ya | ya | tidak (handler mem-parse `req.path` sendiri, tanpa API query pada tahap ini) | tidak | tidak |
+| `Request.pathParam` / `pathSegments` | ya | hanya pathSegments, tanpa route kind PARAM pada tahap ini | route kind PARAM ada, tapi `pathParam` adalah free function package (`zix.Http3.pathParam`) atas threadlocal, bukan method `Request` | tidak | tidak |
+| `Request.header` | ya | ya | tidak (tanpa accessor generik, header tertentu sudah di-parse ke field `Request` bernama: `authority`, `accept_encoding`) | ya | tidak |
+| `Request.body` / `bodyReceived` | ya | ya | ya (field polos, tanpa pembedaan `bodyReceived`) | ya (byte proto) | tidak |
+| `Request.getField` (view field bertipe) | tidak | tidak | tidak | tidak | ya |
+| `Request.keepAlive` | ya | tidak (persisten sesuai protokol) | tidak (sama) | tidak | tidak |
+| `Response.setStatus` / `setContentType` / `addHeader` | ya | ya | hanya `setStatus`, `content_type` adalah field polos yang belum terhubung ke wire, tanpa `addHeader` (jalur response HTTP/3 v1 hanya memancarkan `:status` dan `content-encoding`) | tidak | tidak |
+| `Response.send` / `sendJson` / `sendText` / `sendNoContent` | ya | ya | hanya `send`, tanpa `sendJson` / `sendText` / `sendNoContent` pada tahap ini | tidak | tidak |
+| `Response.sendRaw` (byte wire pra-bangun apa adanya) | ya | tidak (h2 tidak punya bentuk wire pra-bangun yang flat, semuanya HPACK plus framed) | tidak (tanpa permukaan byte pra-bangun mentah yang diekspos pada tahap ini) | tidak | tidak |
+| `Response.sendNegotiated` | ya | tidak (negosiasi kompresi tidak ada untuk Http2, jalur ADR-059 sendiri, di luar cakupan tahap ini) | tidak (handler menegosiasi sendiri via `accept_encoding` plus `setContentEncoding`, tanpa helper `sendNegotiated` pada tahap ini) | tidak | tidak |
+| `Response.setKeepAlive` | ya | tidak | tidak | tidak | tidak |
+| `Response.sendStream` (SSE) / `sendFromCache` / `sendCached` | ya | di luar cakupan tahap ini | di luar cakupan tahap ini | hanya `serveCached` / `sendCached`, tanpa SSE (fitur response-cache yang sudah ada sebelumnya, bukan baru di sini) | tidak |
+| `Response.sendMessage` / `finish(status)` | tidak | tidak | tidak | ya | tidak |
+| `Response.sendMessage(msg_type, fields)` | tidak | tidak | tidak | tidak | ya |
+| `Context.withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` | ya | ya | ya | ya | ya |
+| `Context` io plus arena per-request | ya | ya | ya | ya | ya |
+
+**Consequences:**
+- Fix: `Request` adalah view bertipe atas `fields` yang memakai ulang `getField`, `Response` adalah builder atas `buildMessage` plus penulisan ber-frame SOH dengan `sendMessage(msg_type, fields)`. `Context` melipat perhitungan effective-timeout saat dibangun (`deadline_ns` membawanya, tanpa raw field) dan mendapat `io` plus arena per-request (stack `FixedBufferAllocator`, tanpa pemanggilan heap, menjaga FIX core tetap zero-heap-allocation). `Server.init(handler, config)` menerima `handler: ?HandlerFn`, null mempertahankan mode echo-only yang sudah ada. Example dimigrasikan, tes ditambahkan.
+- Http: lebih besar dari yang tersirat satu baris. `zix.Http.Server` adalah tipe generik-comptime-atas-routes (`HttpServerImpl(routes)`), kini menjadi satu struct konkret yang memegang `handler: HandlerFn` runtime. `Router(routes).dispatch` berubah dari method yang menerima `self` dan mengembalikan `!bool` menjadi `fn(req, res, ctx) anyerror!void` polos yang cocok persis dengan `HandlerFn`, menyerap fallback file statis dan 404 yang sebelumnya dimiliki `dispatch/common.zig` secara eksternal (mencerminkan router Http1). `Context` mendapat field `public_dir: []const u8` sehingga router bisa menjangkaunya tanpa threadlocal (Http1 tetap memakai `tl_static_dir` miliknya, tidak berubah). 17 example plus `uds_http` dimigrasikan, 4 file tes router / tls_dual dimigrasikan. Static-file-serving dan fallback 404 diverifikasi end to end secara manual (curl terhadap `example-http_static` yang berjalan), tidak hanya ter-compile.
+- Http2: yang terbesar dari kelimanya. Routing dialirkan comptime lewat sekitar 20 signature fungsi lintas `core.zig`, `mux.zig`, semua 5 berkas `dispatch/*.zig`, dan kedua jalur TLS (`tls_serve.zig`, `tls_mux.zig`), tidak sekadar dibakukan ke tipe server sekali seperti Http. Setiap parameter `comptime routes: []const Route` menjadi `handler: HandlerFn` runtime polos, dan 3 factory fungsi-worker generik-comptime (`epollMuxWorkerFn`, `uringMuxWorkerFn`, `workerFn` di `tls_mux.zig`) diratakan menjadi fungsi polos yang membawa `handler` sebagai field struct. `Request`, `Response`, `Context`, `Router` dibangun dari nol (Http2 sebelumnya tidak punya trio sama sekali), sesuai parity matrix di atas (tanpa route kind PARAM, tanpa `sendNegotiated`, tanpa `sendRaw`, tanpa `keepAlive`). `handler_timeout_ms` ditambahkan ke `Http2ServerConfig` (Http2 sebelumnya sama sekali tidak punya konsep timeout). Byte-identity wire terhadap `sendResponseFD` dipastikan di tes. 5 example `http2_basic_*` plus 4 file tes dimigrasikan. Diverifikasi end to end secara manual: curl terhadap `example-http2_basic_1_async` yang berjalan lewat h2c prior-knowledge.
+- Grpc: `Server.init` adalah satu pengecualian sengaja dari bentuk `Server.init(handler, config)` yang seragam di tempat lain. Ia menerima `Server.init(Router(&routes), config)`, TIPE Router comptime, bukan `.dispatch`, karena `Route.is_server_streaming` adalah metadata yang dibaca engine sebelum memanggil handler, untuk memilih dispatch sync-inline (unary, murah) versus dispatch task-spawn (streaming, dibutuhkan agar stream yang berjalan lama tidak memblokir stream h2 lain pada koneksi yang sama), dan pointer `handler: HandlerFn` yang opak tidak bisa membawa metadata itu. Diputuskan secara empiris: PoC scratchpad berbasis proses terisolasi mengukur dispatch panggilan-langsung di 44.8 juta RPS pada 1 core, task-spawn `io.async` (64 konkuren) di 1.14 juta RPS yang butuh sekitar 4.7 core (kira-kira 185x lebih buruk per core), dan `std.Thread.spawn` mentah di 5,954 RPS total (kira-kira 7,500x lebih buruk). Menyeragamkan ke always-task-spawn bukan penyederhanaan yang bisa diterima. `Router(routes)` mendapat `pub const route_slice: []const Route = routes`, dan setiap model dispatch tetap memakai `comptime RouterType: type` alih-alih turun ke nilai handler runtime. `GrpcRequest` / `GrpcResponse` adalah wrapper delegasi tipis yang memegang pointer `*GrpcContext`, meneruskan ke method `GrpcContext` yang sudah ada dan sudah di-tuning, tanpa logika internal yang dipindah atau diduplikasi. 12 example plus 4 file tes dimigrasikan. Diverifikasi end to end secara manual: client example gRPC terhadap server async yang berjalan (unary dan streaming), dan `grpcurl` (encoding wire protobuf asli) terhadap example dua-layanan-satu-port.
+- Http3: jauh lebih tipis dari Http2 dan Grpc. Hanya ada satu titik pemanggilan handler nyata di seluruh engine (loop request per-paket milik `dispatch/common.zig`), jadi tidak ada threading comptime-routes yang perlu dibongkar, `comptime handler: core.HandlerFn` tetap seperti sebelumnya di setiap fungsi factory `dispatch/*.zig`, hanya bentuk typedef `HandlerFn` yang berubah. `Context` menambahkan `stream_id` sebagai raw escape hatch (QUIC tidak punya fd per-request), set helper timeout, `io`, dan allocator stack-arena. `Response` mendapat flag `sent: bool`. `core.invokeHandler` membangun Context dan meng-auto-500 hanya saat handler error dan belum ada yang terkirim. `Server.init(handler, config)` sudah ada sebelumnya dan tidak perlu berubah. Satu example dimigrasikan (4 handler). Diverifikasi end to end secara manual dengan `curl --http3-only` terhadap server yang berjalan: body polos, query-sum, body multi-paket 256 KiB, dan negosiasi konten brotli semuanya round-trip dengan benar.
+- Menggantikan `Server.init(comptime routes: []const Route, config) HttpServerImpl(routes)` milik ADR-014 untuk `zix.Http`: `Server` kini satu struct konkret, bukan generik comptime, dan `routes` bukan lagi argumen langsung `Server.init`.
+- Guardrail bertahan di kelimanya: tidak ada perubahan pada mekanik wire hot-path (writer `send*FD` tetap byte-identical, loop dispatch `.EPOLL` / `.URING` yang sudah di-tuning tak tersentuh secara internal, hanya pembungkus pemanggilan handler-nya yang berubah), dan `zig-0.16` maupun `zig-0.17` sama-sama terbangun bersih sepanjang proses.
+- Permukaan migrasi: `test-all` 1249 dari 1249 tes, 131 dari 131 step, `examples` 205 dari 205 step, kedua compiler, `zig fmt` bersih.
+
+---
+
 ###### end of adr

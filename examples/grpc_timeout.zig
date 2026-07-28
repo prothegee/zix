@@ -22,60 +22,56 @@ const zix = @import("zix");
 
 // Unary handler. Checks ctx.isExpired() before building the response.
 // In production, check between each expensive step (DB call, codec, etc.).
-fn sayHelloHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     if (ctx.isExpired()) {
-        ctx.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
+        res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
         return;
     }
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    ctx.sendMessage("application/grpc+proto", resp);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", resp);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 // Streaming echo handler. Checks ctx.isExpired() before each response message.
 // Abort early with DEADLINE_EXCEEDED so the client gets a status rather than a closed stream.
-fn echoHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    while (ctx.recvMessage()) |msg| {
+fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    while (req.recvMessage()) |msg| {
         if (ctx.isExpired()) {
-            ctx.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
+            res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
             return;
         }
 
-        ctx.sendMessage("application/grpc+proto", msg);
+        res.sendMessage("application/grpc+proto", msg);
     }
 
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 // Handler that overrides its own deadline at runtime.
 // Use when one route needs a longer or shorter window than the global cap.
 // ctx.deadline_ns = null disables enforcement entirely for this call.
-fn extendedHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-
+fn extendedHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     // Override: extend to 30s from now regardless of the global 5s cap.
     // Always check isExpired() first: the deadline may already have passed.
     if (!ctx.isExpired()) {
         ctx.deadline_ns = zix.Grpc.wallClockNs() + 30 * std.time.ns_per_s;
     }
 
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
-    ctx.sendMessage("application/grpc+proto", msg);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", msg);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
@@ -91,7 +87,7 @@ const Routes = [_]zix.Grpc.Route{
 
 pub fn main(process: std.process.Init) !void {
     var server = zix.Grpc.Server.init(
-        &Routes,
+        zix.Grpc.Router(&Routes),
         .{
             .io = process.io,
             .ip = "127.0.0.1",

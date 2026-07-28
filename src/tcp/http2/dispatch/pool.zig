@@ -3,7 +3,6 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const ConnQueue = common.ConnQueue;
@@ -18,8 +17,7 @@ const ACCEPT_WORKER_STACK_BYTES: usize = 256 * 1024;
 // --------------------------------------------------------- //
 // POOL model
 
-pub fn runPool(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
-    const D = common.Dispatch(routes);
+pub fn runPool(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     const cpu = try std.Thread.getCpuCount();
     const opts = common.serveOpts(cfg);
@@ -36,8 +34,8 @@ pub fn runPool(comptime routes: []const Route, cfg: Http2ServerConfig) !void {
     for (pool_threads) |*t|
         t.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
-            D.poolEntry,
-            .{D.PoolCtx{ .queue = &queue, .io = io, .opts = opts }},
+            common.poolEntry,
+            .{common.PoolCtx{ .queue = &queue, .io = io, .opts = opts, .handler = handler }},
         );
 
     const acc_threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);

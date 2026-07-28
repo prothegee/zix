@@ -9,7 +9,6 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
@@ -97,9 +96,9 @@ const UringMuxCtx = struct {
     steering: ?reuseport.Steering = null,
 };
 
-/// Build a concrete io_uring mux worker entry with the routes baked in at compile
-/// time, mirroring epollMuxWorkerFn.
-fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
+/// Build a concrete io_uring mux worker entry with the Router type baked in at
+/// compile time, mirroring epollMuxWorkerFn.
+fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
     return struct {
         const Worker = struct {
             ring: IoUring,
@@ -107,6 +106,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
             listener_fd: std.posix.fd_t,
             gen_counter: u24,
             opts: core.GrpcServeOpts,
+            io: std.Io,
             busy_poll_us: u32,
             /// Dual-listener TLS side (config.tls + config.tls_port). Inactive by default
             /// (-1 / null), so a cleartext-only worker sees zero layout change.
@@ -250,7 +250,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                 setNoDelay(conn_fd);
                 common.setBusyPoll(conn_fd, self.busy_poll_us);
 
-                const c = core.GrpcMuxConn.init(conn_fd, self.opts) orelse {
+                const c = core.GrpcMuxConn.init(conn_fd, self.opts, self.io) orelse {
                     _ = linux.close(conn_fd);
                     return;
                 };
@@ -278,7 +278,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
 
                 gc.conn.rend += @intCast(cqe.res);
 
-                const outcome = core.grpcMuxProcessRing(routes, gc.conn);
+                const outcome = core.grpcMuxProcessRing(RouterType, gc.conn);
 
                 if (gc.conn.stage.len > 0) {
                     self.submitSend(gc);
@@ -388,6 +388,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                     .conn = .{
                         .transport = tls_conn.Transport.init(conn_fd, self.tls_ctx.?),
                         .opts = self.opts,
+                        .io = self.io,
                     },
                     .gen = self.tls_gen_counter,
                     .cipher_buf = cipher_buf,
@@ -441,7 +442,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                     return;
                 }
 
-                const keep = tls_mux.onCiphertext(routes, &ring_conn.conn, ring_conn.cipher_buf[0..@intCast(cqe.res)]);
+                const keep = tls_mux.onCiphertext(RouterType, &ring_conn.conn, ring_conn.cipher_buf[0..@intCast(cqe.res)]);
                 const transport = &ring_conn.conn.transport;
 
                 if (!keep) {
@@ -580,6 +581,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
                 .listener_fd = listener_fd,
                 .gen_counter = 0,
                 .opts = ctx.opts,
+                .io = ctx.io,
                 .busy_poll_us = ctx.busy_poll_us,
                 .tls_listener_fd = tls_listener_fd,
                 .tls_ctx = if (tls_active) ctx.tls_ctx else null,
@@ -621,7 +623,7 @@ fn uringMuxWorkerFn(comptime routes: []const Route) fn (UringMuxCtx) void {
 /// io_uring ring per worker. Each worker multiplexes many connections through the
 /// resumable h2 state machine on a completion loop and sends one coalesced reply
 /// per readable batch (ADR-037 Phase 4 step 3).
-pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
+pub fn runUring(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     // Runtime probe: io_uring can be unavailable on this host (seccomp/sandbox,
     // RLIMIT_MEMLOCK, or an old kernel). Without this, every worker would fail
     // setup, return, and the server would vanish right after binding (a confusing
@@ -629,7 +631,7 @@ pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     var probe = initUringRing() catch |err| {
         logSystem(cfg, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
 
-        return epoll_model.runEpoll(routes, cfg);
+        return epoll_model.runEpoll(RouterType, cfg);
     };
     probe.deinit();
 
@@ -650,7 +652,7 @@ pub fn runUring(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
-    const worker_fn = uringMuxWorkerFn(routes);
+    const worker_fn = uringMuxWorkerFn(RouterType);
     for (workers, 0..) |*thread, idx|
         thread.* = try std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },

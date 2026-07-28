@@ -17,11 +17,12 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 const h2_preface: []const u8 = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const settings_frame_type: u8 = 0x04;
 
-fn helloHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
+fn helloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = req;
+    _ = ctx;
 
-    ctx.sendMessage("application/grpc+proto", "dual");
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", "dual");
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{
@@ -37,7 +38,7 @@ const ServeArgs = struct {
 /// The server thread runs forever (run() never returns), so everything it touches is intentionally
 /// leaked for the lifetime of the test binary.
 fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: ServeArgs) void {
-    var server = zix.Grpc.Server.init(&Routes, .{
+    var server = zix.Grpc.Server.init(zix.Grpc.Router(&Routes), .{
         .io = io,
         .ip = IP,
         .port = args.port,
@@ -271,7 +272,7 @@ test "zix integration: Grpc tls_port equal to port is rejected at run" {
     });
     defer tls.deinit();
 
-    var server = zix.Grpc.Server.init(&Routes, .{
+    var server = zix.Grpc.Server.init(zix.Grpc.Router(&Routes), .{
         .io = io,
         .ip = IP,
         .port = 9229,

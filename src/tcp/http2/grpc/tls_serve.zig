@@ -17,7 +17,6 @@ const linux = std.os.linux;
 const posix = std.posix;
 const win_io = @import("../../../utils/windows_io.zig");
 const core = @import("core.zig");
-const Route = core.Route;
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const terminator = @import("../../tls/h2_terminator.zig");
@@ -35,8 +34,8 @@ const seal_overhead: usize = 1024;
 /// Drive the resumable gRPC h2 mux inline over a decrypted TLS connection: read a record, decrypt it,
 /// feed the plaintext to the mux, and seal the staged reply back into records. No socketpair, no
 /// second thread. Generic over the TLS connection type (1.3 or 1.2).
-fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
-    const mux_conn = core.GrpcMuxConn.init(fd, opts) orelse return;
+fn runInlineGrpcMux(comptime RouterType: type, opts: core.GrpcServeOpts, fd: posix.fd_t, conn: anytype, record_buf: []u8, io: std.Io) void {
+    const mux_conn = core.GrpcMuxConn.init(fd, opts, io) orelse return;
     defer mux_conn.deinit();
 
     // The mux's reply (staged cork + any direct frame.writeAllFD) routes through this hook, which
@@ -115,7 +114,7 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
         @memcpy(mux_conn.rbuf[mux_conn.rend..][0..plain.len], plain);
         mux_conn.rend += plain.len;
 
-        const outcome = core.grpcMuxProcessRing(routes, mux_conn);
+        const outcome = core.grpcMuxProcessRing(RouterType, mux_conn);
         mux_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> enc
         enc.flush();
         if (enc.failed or outcome == .close) break;
@@ -127,23 +126,25 @@ fn runInlineGrpcMux(comptime routes: []const Route, opts: core.GrpcServeOpts, fd
 }
 
 /// Terminator driver: drives the resumable gRPC mux inline over the decrypted stream (no socketpair).
-fn MuxDriver(comptime routes: []const Route) type {
+fn MuxDriver(comptime RouterType: type) type {
     return struct {
         opts: core.GrpcServeOpts,
+        io: std.Io,
 
         pub fn drive(self: @This(), fd: posix.fd_t, conn: anytype, record_buf: []u8) void {
-            runInlineGrpcMux(routes, self.opts, fd, conn, record_buf);
+            runInlineGrpcMux(RouterType, self.opts, fd, conn, record_buf, self.io);
         }
     };
 }
 
 /// Per-connection TLS worker: terminate TLS and serve the inline mux, then close the socket. One
 /// thread per connection so the accept loop never blocks in the terminator.
-fn TlsConn(comptime routes: []const Route) type {
+fn TlsConn(comptime RouterType: type) type {
     return struct {
         const Ctx = struct {
             fd: posix.fd_t,
             opts: core.GrpcServeOpts,
+            io: std.Io,
             ctx: *const Tls.Context,
         };
 
@@ -152,15 +153,15 @@ fn TlsConn(comptime routes: []const Route) type {
                 _ = linux.close(conn_ctx.fd);
             };
 
-            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(routes){ .opts = conn_ctx.opts }) catch {};
+            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(RouterType){ .opts = conn_ctx.opts, .io = conn_ctx.io }) catch {};
         }
     };
 }
 
 /// Listen and serve gRPC over TLS. The cert / key / policy are loaded and validated once in the
-/// context (config.tls). Each accepted connection is handed to its own worker thread. Routes are
-/// baked in at compile time, so the driver is generated per route table.
-pub fn runTls(comptime routes: []const Route, config: GrpcServerConfig) !void {
+/// context (config.tls). Each accepted connection is handed to its own worker thread. The Router
+/// type is baked in at compile time, so the driver is generated per route table.
+pub fn runTls(comptime RouterType: type, config: GrpcServerConfig) !void {
     const io = config.io;
     const ctx = config.tls.?;
 
@@ -175,8 +176,8 @@ pub fn runTls(comptime routes: []const Route, config: GrpcServerConfig) !void {
         const stream = srv.accept(io) catch continue;
         const conn_fd = stream.socket.handle;
 
-        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn(routes).entry, .{
-            TlsConn(routes).Ctx{ .fd = conn_fd, .opts = opts, .ctx = ctx },
+        const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn(RouterType).entry, .{
+            TlsConn(RouterType).Ctx{ .fd = conn_fd, .opts = opts, .io = io, .ctx = ctx },
         }) catch {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole

@@ -3,7 +3,6 @@
 const std = @import("std");
 const core = @import("../core.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
-const Route = core.Route;
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const ConnQueue = common.ConnQueue;
@@ -18,8 +17,8 @@ const ACCEPT_WORKER_STACK_BYTES: usize = 256 * 1024;
 // --------------------------------------------------------- //
 // POOL model
 
-pub fn runPool(comptime routes: []const Route, cfg: GrpcServerConfig) !void {
-    const D = common.Dispatch(routes);
+pub fn runPool(comptime RouterType: type, cfg: GrpcServerConfig) !void {
+    const D = common.Dispatch(RouterType);
     const io = cfg.io;
     const cpu = try std.Thread.getCpuCount();
     const opts = common.serveOpts(cfg);

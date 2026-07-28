@@ -4,13 +4,15 @@ Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-grpc-id.md`
 
 Model blocking (`.ASYNC`, `.POOL`, `.MIXED`) berbagi satu jalur koneksi (`serveGrpcConn` -> `serveGrpcLoop`). Model `.EPOLL` adalah jalur terpisah, multiplex, non-blocking (`grpcMuxOnReadable`) yang menjadi fokus utama dokumen ini.
 
+Setiap fungsi internal yang bergantung pada tabel route di bawah ini tetap menerima `comptime RouterType: type` (ADR-063), bukan `handler: HandlerFn` runtime yang diratakan seperti padanan Http2. Ini disengaja: engine membaca `Route.is_server_streaming` dari `RouterType.route_slice` sebelum memanggil handler, untuk memilih dispatch sync-inline vs task-spawn, dan pointer `HandlerFn` polos tidak bisa membawa metadata itu. Lihat bagian Pola Handler di `docs/hld-grpc-id.md` untuk biaya terukur kehilangan metadata itu.
+
 ---
 
 ## core.zig
 
 ### GrpcContext
 
-Konteks handler per stream. Field yang relevan untuk keluaran:
+State handler per stream. `GrpcRequest` (`recvMessage`) dan `GrpcResponse` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) adalah wrapper tipis yang memegang pointer `*GrpcContext`, delegasi satu baris ke method di bawah: trio publik (ADR-063) tidak menambah logika baru di sini, hanya mengganti nama panggilan dari `ctx.foo()` menjadi `req.foo()` / `res.foo()`. Field yang relevan untuk keluaran:
 
 ```zig
 fd: std.posix.fd_t,
@@ -84,6 +86,7 @@ State per koneksi milik heap untuk model multiplex. Satu thread worker memiliki 
 pub const GrpcMuxConn = struct {
     fd: std.posix.fd_t,
     opts: GrpcServeOpts,
+    io: std.Io,                 // dibawa untuk Context yang dibangun tiap muxDispatch, berlaku se-worker
 
     rbuf: []u8,                 // akumulator baca, persisten lintas event, menyimpan frame parsial
     rstart: usize,
@@ -99,7 +102,7 @@ pub const GrpcMuxConn = struct {
     stage_buf: [65536]u8,       // backing 64 KB untuk stage
     stage: ReplyStage,          // stage.buf = &stage_buf
 
-    pub fn init(fd, opts) ?*GrpcMuxConn   // satu alokasi per buffer; null saat OOM
+    pub fn init(fd, opts, io) ?*GrpcMuxConn   // satu alokasi per buffer; null saat OOM
     pub fn deinit(self) void
 };
 ```
@@ -108,7 +111,7 @@ pub const GrpcMuxConn = struct {
 
 `init` memanggil `buildSettingsFrame(&settings_frame, opts)` sekali untuk meng-encode blob SETTINGS server 33 byte (header 9 byte + 4 param), dan mengarahkan `stage.buf` ke `stage_buf` 64 KB. Handshake menambahkan `settings_frame` apa adanya (tanpa loop encode per koneksi). Stage 64 KB menggabungkan ~100 reply unary konkuren (~6 KB) menjadi satu write, dan reply server-streaming memadatkan pesan-pesannya menjadi DATA frame yang lebih sedikit dan lebih besar (lihat `muxDispatch`), sehingga reply ~5000 pesan pun tetap jauh di bawah stage dan keluar dalam satu write.
 
-### grpcMuxOnReadable(comptime routes, conn) -> GrpcConnOutcome
+### grpcMuxOnReadable(comptime RouterType, conn) -> GrpcConnOutcome
 
 Satu event readable. Mengembalikan `.close` (peer menutup, error protokol, atau handshake ditolak) atau `.keep_alive`.
 
@@ -121,12 +124,12 @@ Satu event readable. Mengembalikan `.close` (peer menutup, error protokol, atau 
           WouldBlock -> flush, return .keep_alive
           error lain atau 0 -> flush, return .close
      d. rend += got
-     e. jika muxProcess(routes, conn) == .close -> flush, return .close
+     e. jika muxProcess(RouterType, conn) == .close -> flush, return .close
 ```
 
 Membaca satu chunk, memproses frame lengkap, mengulang sampai `EAGAIN`. Epoll level-triggered memicu ulang bila ada lagi.
 
-### muxProcess(comptime routes, conn) -> GrpcConnOutcome
+### muxProcess(comptime RouterType, conn) -> GrpcConnOutcome
 
 Mesin fase handshake, lalu loop frame.
 
@@ -139,7 +142,7 @@ Mesin fase handshake, lalu loop frame.
 
 Akumulasi sampai `\r\n\r\n`. Tanpa header `Upgrade: h2c`, stage `400` dan return `.close` (jalur probe validate). Dengan header itu, stage `101`, konsumsi header request, set `await_preface2`, return `.keep_alive`. Request awal pada stream 1 dari upgrade tidak dilayani (client prior-knowledge tidak memakai jalur ini).
 
-### muxFrameLoop(comptime routes, conn) -> GrpcConnOutcome
+### muxFrameLoop(comptime RouterType, conn) -> GrpcConnOutcome
 
 ```
 loop:
@@ -160,13 +163,13 @@ loop:
 
 Frame kontrol di-stage via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageGoaway` / `muxStageRst` / `muxStageServerSettings`, sehingga keluar dalam write tergabung yang sama dengan reply. `muxStageServerSettings` menambahkan `conn.settings_frame` yang pra-komputasi (dibangun sekali di `init` oleh `buildSettingsFrame`), bukan encode parameter baru.
 
-### muxDispatch(comptime routes, conn, stream)
+### muxDispatch(comptime RouterType, conn, stream)
 
-Membangun `GrpcContext` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), lalu `Router(routes).dispatch`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
+Membangun `GrpcContext` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), membungkusnya dalam pasangan `GrpcRequest` / `GrpcResponse` (view delegasi tipis, tanpa logika tambahan), lalu memanggil `RouterType.dispatch(&req, &res, &ctx)`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
 
 Reply server-streaming dipadatkan pada lapisan gRPC. `muxDispatch` memberi route streaming sebuah buffer coalesce per-call (`ctx._coal`), dan `sendMessage` memadatkan pesan-pesan yang sudah ber-frame gRPC ke dalamnya, mengeluarkan satu DATA frame HTTP/2 per `grpc_stream_coalesce_cap` (16 KiB, max frame size default HTTP/2) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di sisi klien. Unary tetap satu frame per pesan (`_coal` null), jadi byte-nya persis sama.
 
-Untuk route streaming (dideteksi oleh `routeIsStreaming(routes, path)`), dispatch dibungkus dalam `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP. Route unary tidak di-cork (sudah keluar dalam satu write). `setTcpCork` no-op pada target non-Linux.
+Untuk route streaming (dideteksi oleh `routeIsStreaming(RouterType.route_slice, path)`), dispatch dibungkus dalam `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP. Route unary tidak di-cork (sudah keluar dalam satu write). `setTcpCork` no-op pada target non-Linux.
 
 ### Jalur blocking (serveGrpcConn / serveGrpcLoop)
 
@@ -215,13 +218,13 @@ Simbol `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, dan `runEpoll` di bawah
 
 Map fd ke `*GrpcMuxConn` privat per worker, ber-indeks langsung berdasarkan fd (sparse, `MAX_FD = 1 << 16`). `alloc` membangun `GrpcMuxConn`, `free`/`deinit` melepasnya. Tidak dibagi antar worker.
 
-### acceptAll(table, epfd, listener_fd, opts)
+### acceptAll(table, epfd, listener_fd, opts, io)
 
 Menguras `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` sampai `EAGAIN` (level-triggered). Tiap fd yang diterima mendapat `TCP_NODELAY`, sebuah `GrpcMuxConn`, dan registrasi `EPOLL.IN | RDHUP`. Saat alokasi atau registrasi gagal, fd ditutup.
 
-### epollMuxWorkerFn(routes)(ctx)
+### epollMuxWorkerFn(RouterType)(ctx)
 
-`epollMuxWorkerFn(comptime routes)` mengembalikan fungsi entry worker. Satu thread worker:
+`epollMuxWorkerFn(comptime RouterType: type)` mengembalikan fungsi entry worker. Satu thread worker:
 
 ```
 1. listener SO_REUSEPORT privat pada ip:port; setNonBlock
@@ -230,13 +233,13 @@ Menguras `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` sampai `EAGAIN` (level-triggere
 4. loop epoll_wait (hingga EPOLL_MAX_EVENTS = 512 event per pemanggilan):
      untuk tiap event:
        fd listener -> acceptAll
-       fd koneksi  -> outcome = (HUP|ERR) ? .close : grpcMuxOnReadable(routes, conn)
+       fd koneksi  -> outcome = (HUP|ERR) ? .close : grpcMuxOnReadable(RouterType, conn)
                       jika .close -> epoll_ctl DEL, table.free, close
 ```
 
-### runEpoll(comptime routes, cfg)
+### runEpoll(comptime RouterType: type, cfg)
 
-`worker_count = pool_size` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorkerFn(routes)` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
+`worker_count = pool_size` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorkerFn(RouterType)` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
 
 ---
 

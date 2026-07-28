@@ -16,8 +16,8 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
 // --------------------------------------------------------- //
 
-fn handler(_: []const u8, _: []const zix.Http2.Header, _: []const u8, fd: std.posix.fd_t, sid: u31) void {
-    zix.Http2.sendResponseFD(fd, sid, 200, "text/plain", "hello over h2 tls 1.3\n") catch {};
+fn handler(_: *zix.Http2.Request, res: *zix.Http2.Response, _: *zix.Http2.Context) !void {
+    try res.sendText("hello over h2 tls 1.3\n");
 }
 
 const Routes = [_]zix.Http2.Route{
@@ -32,7 +32,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = zix.Http2.Server.init(&Routes, .{
+    var server = zix.Http2.Server.init(zix.Http2.Router(&Routes).dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

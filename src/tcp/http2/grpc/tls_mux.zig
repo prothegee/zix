@@ -14,7 +14,6 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 const core = @import("core.zig");
-const Route = core.Route;
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const frame = @import("../frame.zig");
@@ -43,6 +42,8 @@ pub const TlsConn = struct {
     transport: tls_conn.Transport,
     grpc: ?*core.GrpcMuxConn = null,
     opts: core.GrpcServeOpts,
+    /// Io backend, carried for the GrpcMuxConn built at handshake. Worker-wide.
+    io: std.Io,
 
     // Plaintext the mux emitted this pass, accumulated then sealed in record-sized chunks.
     plain: [record.max_plaintext]u8 = undefined,
@@ -86,7 +87,7 @@ fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
 
 /// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
 /// plaintext to the gRPC h2 mux and seal its reply. Returns false when the connection must close.
-pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
+pub fn onReadable(comptime RouterType: type, conn: *TlsConn) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
 
     while (true) {
@@ -100,7 +101,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
             else => return false,
         }
 
-        if (!onCiphertext(routes, conn, cipher[0..@intCast(rc)])) return false;
+        if (!onCiphertext(RouterType, conn, cipher[0..@intCast(rc)])) return false;
         if (conn.transport.wclose) return conn.transport.want_out; // flush, then close
     }
 }
@@ -109,7 +110,7 @@ pub fn onReadable(comptime routes: []const Route, conn: *TlsConn) bool {
 /// recv-model-agnostic core of onReadable: the .EPOLL paths call it under their own read loop, the
 /// .URING path calls it per recv completion. Returns false when the connection must close now.
 /// transport.wclose set with staged bytes means flush, then close.
-pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []const u8) bool {
+pub fn onCiphertext(comptime RouterType: type, conn: *TlsConn, cipher: []const u8) bool {
     var to_send: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
     var plain_in: [TLS_SEALED_RECORD_SIZE]u8 = undefined;
 
@@ -119,7 +120,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
     if (r.outcome == .established) {
         if (!conn.transport.tls.alpnIsH2()) return false;
-        conn.grpc = core.GrpcMuxConn.init(conn.transport.fd, conn.opts) orelse return false;
+        conn.grpc = core.GrpcMuxConn.init(conn.transport.fd, conn.opts, conn.io) orelse return false;
     }
 
     if (r.outcome == .close) {
@@ -129,7 +130,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
     if (r.plaintext.len > 0) {
         const grpc_conn = conn.grpc orelse return false;
-        if (!feedMux(routes, conn, grpc_conn, r.plaintext)) return false;
+        if (!feedMux(RouterType, conn, grpc_conn, r.plaintext)) return false;
     }
 
     return true;
@@ -137,7 +138,7 @@ pub fn onCiphertext(comptime routes: []const Route, conn: *TlsConn, cipher: []co
 
 /// Append decrypted plaintext to the mux read accumulator and drive one processing pass, sealing the
 /// reply through the write hook. Returns false when the mux asks to close.
-fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.GrpcMuxConn, plaintext: []const u8) bool {
+fn feedMux(comptime RouterType: type, conn: *TlsConn, grpc_conn: *core.GrpcMuxConn, plaintext: []const u8) bool {
     if (grpc_conn.rstart == grpc_conn.rend) {
         grpc_conn.rstart = 0;
         grpc_conn.rend = 0;
@@ -154,7 +155,7 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.Grpc
 
     frame.write_hook = hookWrite;
     frame.write_hook_ctx = conn;
-    const outcome = core.grpcMuxProcessRing(routes, grpc_conn);
+    const outcome = core.grpcMuxProcessRing(RouterType, grpc_conn);
     grpc_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> encrypt
     flushPlain(conn);
     frame.write_hook = null;
@@ -166,7 +167,7 @@ fn feedMux(comptime routes: []const Route, conn: *TlsConn, grpc_conn: *core.Grpc
 /// Accept every pending TLS connection on listener_fd and register each in epfd with
 /// `ev_tag | fd` as the event data. The TLS-only worker passes 0 (plain fd), the dual-listener
 /// .EPOLL loop passes tls_conn.tls_event_tag so its one loop can route TLS events.
-pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.GrpcServeOpts, ev_tag: u64) void {
+pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, ctx: *const Tls.Context, opts: core.GrpcServeOpts, ev_tag: u64, io: std.Io) void {
     while (true) {
         const rc = linux.accept4(listener_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC);
         switch (posix.errno(rc)) {
@@ -189,7 +190,7 @@ pub fn acceptAll(table: *ConnTable, epfd: posix.fd_t, listener_fd: posix.fd_t, c
             _ = linux.close(fd);
             continue;
         };
-        conn.* = .{ .transport = tls_conn.Transport.init(fd, ctx), .opts = opts };
+        conn.* = .{ .transport = tls_conn.Transport.init(fd, ctx), .opts = opts, .io = io };
         conn.transport.wbuf_initial = opts.tls_write_buf_initial;
         conn.transport.ep_data = ev_tag | @as(u64, @intCast(fd));
         table.put(fd, conn);
@@ -212,7 +213,7 @@ const WorkerCtx = struct {
     worker_id: usize,
 };
 
-fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
+fn workerFn(comptime RouterType: type) fn (WorkerCtx) void {
     return struct {
         fn run(worker: WorkerCtx) void {
             // Pin to the worker's CPU slot (cgroup-mask aware) so a pinned cpuset does not
@@ -247,7 +248,7 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
 
                 for (events[0..@intCast(wait_rc)]) |ev| {
                     if (ev.data.fd == listener_fd) {
-                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts, 0);
+                        acceptAll(&table, epfd, listener_fd, worker.ctx, worker.opts, 0, worker.io);
                         continue;
                     }
 
@@ -258,7 +259,7 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
                         keep = false;
                     } else {
                         if ((ev.events & linux.EPOLL.OUT) != 0) keep = conn.transport.onWritable(epfd);
-                        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(routes, conn);
+                        if (keep and (ev.events & linux.EPOLL.IN) != 0) keep = onReadable(RouterType, conn);
                         if (keep and conn.transport.want_out) tls_conn.armOut(epfd, conn.transport.fd, conn.transport.ep_data, true);
                         if (keep and conn.transport.wclose and !conn.transport.want_out) keep = false;
                     }
@@ -275,7 +276,7 @@ fn workerFn(comptime routes: []const Route) fn (WorkerCtx) void {
 }
 
 /// Listen and serve gRPC over TLS, multiplexed across one epoll worker per core.
-pub fn runTlsMux(comptime routes: []const Route, config: GrpcServerConfig) !void {
+pub fn runTlsMux(comptime RouterType: type, config: GrpcServerConfig) !void {
     const ctx = config.tls.?;
     const cpu = common.getAvailableCpuCount();
     const worker_count = if (config.pool_size == 0) cpu else config.pool_size;
@@ -286,7 +287,7 @@ pub fn runTlsMux(comptime routes: []const Route, config: GrpcServerConfig) !void
     const workers = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(workers);
 
-    const wf = workerFn(routes);
+    const wf = workerFn(RouterType);
     for (workers, 0..) |*t, i|
         t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, wf, .{WorkerCtx{
             .io = config.io,

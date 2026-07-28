@@ -34,6 +34,7 @@ pub const Context = context.Context;
 pub const HandlerFn = router.HandlerFn;
 pub const Route = router.Route;
 pub const RouteKind = router.RouteKind;
+pub const Router = router.Router;
 pub const Header = response.HttpHeader;
 pub const HeaderSize = response.HeaderSize;
 pub const RequestHeaderSize = @import("parser.zig").RequestHeaderSize;

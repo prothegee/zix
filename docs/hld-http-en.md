@@ -204,7 +204,7 @@ Access via `const zix = @import("zix");`
 
 | Symbol | Type | Description |
 | :- | :- | :- |
-| `zix.Http.Server` | struct | Lifecycle: `init(comptime routes, config)` / `deinit()` / `run()` |
+| `zix.Http.Server` | struct | Lifecycle: `init(handler, config)` / `deinit()` / `run()` (ADR-063: `handler` built via `Router(&routes).dispatch`, `Server` is one concrete struct) |
 | `zix.Http.ServerConfig` | struct | Server configuration (see HttpServerConfig section) |
 | `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
 | `zix.Http.ClientConfig` | struct | Client configuration (see HttpClientConfig section) |
@@ -409,12 +409,12 @@ Routes are passed at compile time as the second argument to `Server.init`. Each 
 | `.PARAM` | `"/users/:id"` | `:name` segments captured, literals must match exactly |
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
-}, .{ .ip = "127.0.0.1", .port = 9000 });
+}).dispatch, .{ .ip = "127.0.0.1", .port = 9000 });
 ```
 
 Handler accesses the captured segment via `req.pathParam("id")`. Prefix sub-path is read via `req.path()["/api".len..]`.
@@ -610,9 +610,9 @@ For the network-level connection guard (Layer D, `conn_timeout_ms`) see ADR-018.
 ### Handler pattern
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
-}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
+}).dispatch, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
 
 pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
@@ -729,10 +729,10 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Compose left-to-right: the outermost wrapper runs first. Routes are registered at compile time via `Server.init`:
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
-}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
+}).dispatch, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
 
 Each unique `next` value generates a distinct function at comptime. See `examples/http_middleware.zig`.

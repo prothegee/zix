@@ -17,18 +17,18 @@ const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
 // --------------------------------------------------------- //
 
-fn sayHelloHandler(headers: []const zix.Http2.Header, ctx: *zix.Grpc.Context) void {
-    _ = headers;
-    const msg = ctx.recvMessage() orelse {
-        ctx.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
+    _ = ctx;
+    const msg = req.recvMessage() orelse {
+        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    ctx.sendMessage("application/grpc+proto", resp);
-    ctx.finish(zix.Grpc.Status.OK, "");
+    res.sendMessage("application/grpc+proto", resp);
+    res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{
@@ -43,7 +43,7 @@ pub fn main(process: std.process.Init) !void {
     });
     defer tls.deinit();
 
-    var server = zix.Grpc.Server.init(&Routes, .{
+    var server = zix.Grpc.Server.init(zix.Grpc.Router(&Routes), .{
         .io = process.io,
         .ip = IP,
         .port = PORT,

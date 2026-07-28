@@ -15,6 +15,9 @@ pub const HandlerFn = core_mod.HandlerFn;
 pub const Route = core_mod.Route;
 pub const RouteKind = core_mod.RouteKind;
 pub const Router = core_mod.Router;
+pub const Request = @import("request.zig").Request;
+pub const Response = @import("response.zig").Response;
+pub const Context = @import("context.zig").Context;
 pub const ServeOpts = core_mod.ServeOpts;
 pub const serveConn = core_mod.serveConn;
 

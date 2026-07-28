@@ -26,7 +26,7 @@ Both are HTTP/1.1 servers. `zix.Http` is the full-featured layer, `zix.Http1` is
 | Per-request allocator | per-connection arena | per-request arena (`ctx.allocator`, reset per dispatch) |
 | Response writing | buffered `Response` object | `Response` builder delegating to direct fd write helpers |
 | Static files / multipart / SSE writer | built in | `public_dir` static fallback, shared `Multipart`, `SseWriter` |
-| Routing | comptime route table | comptime route table (optional, handler can be bare) |
+| Routing | runtime handler via `Router(routes).dispatch` (ADR-063, not baked into the type) | comptime route table (optional, handler can be bare) |
 | WebSocket | handler-owned frame loop | engine-owned frame pump (.EPOLL / .URING) |
 | Dispatch models | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
 

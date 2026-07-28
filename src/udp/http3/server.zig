@@ -9,7 +9,7 @@
 //!
 //! Usage:
 //! ```zig
-//! fn handler(req: *const zix.Http3.Request, res: *zix.Http3.Response) void {
+//! fn handler(req: *const zix.Http3.Request, res: *zix.Http3.Response, ctx: *zix.Http3.Context) !void {
 //!     res.send("hello over h3");
 //! }
 //! var server = zix.Http3.Server.init(handler, config); // config.tls must be a TLS 1.3 context
@@ -35,6 +35,8 @@ pub const HandlerFn = core.HandlerFn;
 pub const Request = core.Request;
 /// The response the handler fills (re-exported from core).
 pub const Response = core.Response;
+/// The per-request env: deadline, io, allocator (re-exported from core).
+pub const Context = core.Context;
 /// The content coding a handler sets on its response body (re-exported from core).
 pub const ContentEncoding = core.ContentEncoding;
 
@@ -120,7 +122,7 @@ pub const Server = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn noopHandler(_: *const Request, _: *Response) void {}
+fn noopHandler(_: *const Request, _: *Response, _: *Context) !void {}
 
 test "zix http3: run rejects port zero and missing TLS" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});

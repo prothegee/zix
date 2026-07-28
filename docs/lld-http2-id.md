@@ -201,7 +201,7 @@ Pemrosesan request bersama, router, dan jalur koneksi blocking.
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
 
-`HandlerFn` adalah `fn(method, headers, body, fd, sid) void`. `Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`.
+`HandlerFn` adalah `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, dibangun saat dispatch oleh `core.invokeHandler`). `Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
 
 Response cache per-worker (ADR-036) juga berada di sini: `tl_cache`, `serveCached` / `sendCached`, dan `requestKey` (Wyhash atas path + body). Ia dipasang oleh worker `.EPOLL` / `.URING` dan di-key dari `tl_req_path` / `tl_req_body`, yang dicatat `muxDispatch`.
 

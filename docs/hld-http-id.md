@@ -204,7 +204,7 @@ Diakses melalui `const zix = @import("zix");`
 
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
-| `zix.Http.Server` | struct | Siklus hidup: `init(comptime routes, config)` / `deinit()` / `run()` |
+| `zix.Http.Server` | struct | Siklus hidup: `init(handler, config)` / `deinit()` / `run()` (ADR-063: `handler` dibangun via `Router(&routes).dispatch`, `Server` adalah satu struct konkret) |
 | `zix.Http.ServerConfig` | struct | Konfigurasi server (lihat bagian HttpServerConfig) |
 | `zix.Http.Client` | struct | HTTP client: `init` / `deinit` / `get` / `head` / `post` / `put` / `delete` / `patch` / `request` |
 | `zix.Http.ClientConfig` | struct | Konfigurasi client (lihat bagian HttpClientConfig) |
@@ -409,12 +409,12 @@ Route dioper saat kompilasi sebagai argumen kedua ke `Server.init`. Setiap `Rout
 | `.PARAM` | `"/users/:id"` | Segmen `:name` ditangkap, literal harus cocok persis |
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/about",           .handler = aboutHandler },
     .{ .path = "/api",             .handler = apiHandler,    .kind = .PREFIX },
     .{ .path = "/users/:id",       .handler = userHandler,   .kind = .PARAM },
     .{ .path = "/:tenant/:branch", .handler = branchHandler, .kind = .PARAM },
-}, .{ .ip = "127.0.0.1", .port = 9000 });
+}).dispatch, .{ .ip = "127.0.0.1", .port = 9000 });
 ```
 
 Handler mengakses segmen yang ditangkap melalui `req.pathParam("id")`. Sub-path prefix dibaca melalui `req.path()["/api".len..]`.
@@ -610,9 +610,9 @@ Untuk connection guard level jaringan (Layer D, `conn_timeout_ms`) lihat ADR-018
 ### Pola handler
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
-}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
+}).dispatch, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000, .dispatch_model = .ASYNC });
 
 pub fn wsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     const room_id = req.pathParam("room-id") orelse return;
@@ -729,10 +729,10 @@ fn withOriginCheck(comptime next: zix.Http.HandlerFn) zix.Http.HandlerFn {
 Susun dari kiri ke kanan: wrapper paling luar berjalan pertama. Route didaftarkan saat kompilasi melalui `Server.init`:
 
 ```zig
-var server = zix.Http.Server.init(&[_]zix.Http.Route{
+var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
     .{ .path = "/public",  .handler = withOriginCheck(publicHandler) },
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
-}, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
+}).dispatch, .{ .io = process.io, .ip = "127.0.0.1", .port = 9000 });
 ```
 
 Setiap nilai `next` yang unik menghasilkan fungsi tersendiri saat comptime. Lihat `examples/http_middleware.zig`.

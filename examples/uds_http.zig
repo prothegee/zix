@@ -169,7 +169,8 @@ pub fn main(process: std.process.Init) !void {
         std.debug.print("uds_http: fetcher spawn error: {}\n", .{err});
     }
 
-    var server = zix.Http.Server.init(&Routes, .{
+    const router = zix.Http.Router(&Routes);
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = io,
         .ip = IP,
         .port = PORT,

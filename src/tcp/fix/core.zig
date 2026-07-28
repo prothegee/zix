@@ -12,6 +12,9 @@ pub const VERSION: []const u8 = "FIX.4.2";
 pub const MAX_FIELDS: usize = 64;
 pub const MAX_MSG_SIZE: usize = 8192;
 pub const CHECKSUM_MODULUS: u32 = 256;
+/// Backing size of the per-request stack arena on FixContext.allocator. Stack-based
+/// (std.heap.FixedBufferAllocator), no heap call, keeps the FIX core zero-heap-allocation.
+pub const FIX_CTX_ARENA_BYTES: usize = 4096;
 
 // --------------------------------------------------------- //
 
@@ -295,9 +298,13 @@ pub fn wallClockNs() u64 {
 /// Handler function type for routed application messages.
 ///
 /// Param:
-/// fields - []const Field (all parsed fields from the received FIX message)
-/// ctx - *FixContext (per-connection context: sendMessage, isExpired, deadline_ns)
-pub const HandlerFn = *const fn (fields: []const Field, ctx: *FixContext) void;
+/// req - *FixRequest (typed view over the received message's fields)
+/// res - *FixResponse (builder for the reply, sendMessage)
+/// ctx - *FixContext (per-connection env: io, deadline, isExpired)
+///
+/// Return:
+/// - anyerror!void, errors pass through silently (no auto-reply on error)
+pub const HandlerFn = *const fn (req: *FixRequest, res: *FixResponse, ctx: *FixContext) anyerror!void;
 
 /// A route entry mapping a FIX MsgType (tag 35) to a handler function.
 pub const FixRoute = struct {
@@ -307,6 +314,20 @@ pub const FixRoute = struct {
     handler: HandlerFn,
     /// Per-route handler timeout in milliseconds. 0 = use server default (handler_timeout_ms).
     timeout_ms: u32 = 0,
+};
+
+/// Zero-copy view over the parsed fields of one received FIX message.
+pub const FixRequest = struct {
+    fields: []const Field,
+
+    /// Return the value of the first field with the given tag, or null.
+    pub fn getField(self: FixRequest, tag: Tag) ?[]const u8 {
+        for (self.fields) |f| {
+            if (f.tag == tag) return f.value;
+        }
+
+        return null;
+    }
 };
 
 // --------------------------------------------------------- //
@@ -406,16 +427,14 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
 
 // --------------------------------------------------------- //
 
-/// Per-connection context passed to each routed handler.
-pub const FixContext = struct {
-    /// SenderCompID of the peer (from their Logon message, tag 49).
+/// Builder over buildMessage plus the SOH-framed write. Independent of FixContext
+/// (not borrowed from it), so a handler can send after the context it was handed
+/// goes out of scope, e.g. from a captured closure.
+pub const FixResponse = struct {
+    /// SenderCompID of the peer (from their Logon message, tag 49). The outgoing target.
     sender_comp_id: []const u8,
-    /// Our own SenderCompID (the server comp_id from config, tag 56 in their message).
+    /// Our own SenderCompID (the server comp_id from config). The outgoing sender.
     target_comp_id: []const u8,
-    /// Absolute deadline in nanoseconds (wall clock). Null = no deadline.
-    /// Set at dispatch from the tighter of Route.timeout_ms and config handler_timeout_ms.
-    /// Handler may read and overwrite.
-    deadline_ns: ?u64 = null,
     _fd: std.posix.fd_t,
     _seq_out: *u32,
 
@@ -424,7 +443,7 @@ pub const FixContext = struct {
     /// Param:
     /// msg_type - []const u8 (tag-35 value, e.g. "8" for ExecutionReport)
     /// extra - []const BuildField (additional body fields after the standard header)
-    pub fn sendMessage(self: *FixContext, msg_type: []const u8, extra: []const BuildField) void {
+    pub fn sendMessage(self: *FixResponse, msg_type: []const u8, extra: []const BuildField) void {
         var out_buf: [MAX_MSG_SIZE]u8 = undefined;
         const n = buildMessage(&out_buf, self.target_comp_id, self.sender_comp_id, self._seq_out.*, msg_type, extra) catch return;
         self._seq_out.* += 1;
@@ -433,13 +452,76 @@ pub const FixContext = struct {
         // posix write under the blocking serveConn path (sink null).
         writeAllFD(self._fd, out_buf[0..n]) catch {};
     }
+};
 
-    /// Return true if deadline_ns is set and the current wall clock has passed it.
+/// Per-connection context passed to each routed handler.
+pub const FixContext = struct {
+    /// SenderCompID of the peer (from their Logon message, tag 49).
+    sender_comp_id: []const u8,
+    /// Our own SenderCompID (the server comp_id from config, tag 56 in their message).
+    target_comp_id: []const u8,
+    /// Absolute deadline in nanoseconds (wall clock). Null = no deadline.
+    /// Set at dispatch from the server-wide handler_timeout_ms, tightened by a
+    /// matching Route.timeout_ms inside the router. Handler may read and overwrite.
+    deadline_ns: ?u64 = null,
+    /// Io backend for the connection. Carried for symmetry with the other engines'
+    /// Context, and for a handler that needs to make a driver call inline.
+    io: std.Io,
+    /// Per-request scratch allocator, backed by a stack buffer (FixContext parity
+    /// without a heap call, keeps the FIX core zero-heap-allocation).
+    allocator: std.mem.Allocator,
+    _fd: std.posix.fd_t,
+    _seq_out: *u32,
+
+    /// Return a copy with the deadline set to now + ms.
+    pub fn withTimeout(self: FixContext, ms: u64) FixContext {
+        var ctx = self;
+        ctx.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+
+        return ctx;
+    }
+
+    /// Set the deadline to now + ms in place.
+    pub fn setTimeout(self: *FixContext, ms: u64) void {
+        self.deadline_ns = wallClockNs() + ms * std.time.ns_per_ms;
+    }
+
+    /// Return a copy with an explicit absolute deadline (wall-clock nanoseconds).
+    pub fn withDeadline(self: FixContext, deadline_ns: u64) FixContext {
+        var ctx = self;
+        ctx.deadline_ns = deadline_ns;
+
+        return ctx;
+    }
+
+    /// Whether the deadline has passed. False when no deadline is set.
     pub fn isExpired(self: *const FixContext) bool {
+        return self.timedOut();
+    }
+
+    /// Whether the deadline has passed. False when no deadline is set. The
+    /// handler must check this explicitly, it does not interrupt anything.
+    pub fn timedOut(self: *const FixContext) bool {
         const deadline = self.deadline_ns orelse return false;
+
         return wallClockNs() >= deadline;
     }
 };
+
+/// Build the trio and invoke a routed handler, mirroring Http1's core.invokeHandler
+/// (ADR-062). Fix's error policy passes handler errors through silently: the wire
+/// carries whatever the handler already sent (or nothing), current behavior kept.
+pub inline fn invokeHandler(handler_fn: HandlerFn, fields: []const Field, ctx: *FixContext) void {
+    var req = FixRequest{ .fields = fields };
+    var res = FixResponse{
+        .sender_comp_id = ctx.sender_comp_id,
+        .target_comp_id = ctx.target_comp_id,
+        ._fd = ctx._fd,
+        ._seq_out = ctx._seq_out,
+    };
+
+    handler_fn(&req, &res, ctx) catch {};
+}
 
 // --------------------------------------------------------- //
 
@@ -461,8 +543,9 @@ pub const FixServeOpts = struct {
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Applied to each routed message dispatch. Per-route FixRoute.timeout_ms overrides this.
     handler_timeout_ms: u32 = 0,
-    /// Application message routes. Empty slice = echo all non-session messages (backward compat).
-    routes: []const FixRoute = &.{},
+    /// Application message handler, built via Fix.Router(&[_]Fix.Route{...}).dispatch.
+    /// Null = echo all non-session messages (backward compat).
+    handler: ?HandlerFn = null,
 };
 
 /// Serve one FIX connection: Logon handshake, route/echo loop, Logout.
@@ -609,29 +692,24 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             try writer.interface.writeAll(out_buf[0..n]);
             try writer.interface.flush();
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
-        } else if (opts.routes.len > 0 and peer_len > 0) {
-            for (opts.routes) |route| {
-                if (std.mem.eql(u8, msgtype, route.msg_type)) {
-                    const effective_ms = blk: {
-                        const a = route.timeout_ms;
-                        const b = opts.handler_timeout_ms;
-                        break :blk if (a > 0 and b > 0) @min(a, b) else if (a > 0) a else b;
-                    };
-                    var ctx = FixContext{
-                        .sender_comp_id = peer_comp_id[0..peer_len],
-                        .target_comp_id = comp_id,
-                        .deadline_ns = if (effective_ms > 0)
-                            wallClockNs() + @as(u64, effective_ms) * std.time.ns_per_ms
-                        else
-                            null,
-                        ._fd = fd,
-                        ._seq_out = &seq_out,
-                    };
-                    route.handler(fslice, &ctx);
-                    if (opts.logger) |lg| lg.session(msgtype, peer_comp_id[0..peer_len], comp_id, seq_in, "dispatch");
-                    break;
-                }
-            }
+        } else if (opts.handler != null and peer_len > 0) {
+            var arena_buf: [FIX_CTX_ARENA_BYTES]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+            var ctx = FixContext{
+                .sender_comp_id = peer_comp_id[0..peer_len],
+                .target_comp_id = comp_id,
+                .deadline_ns = if (opts.handler_timeout_ms > 0)
+                    wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms
+                else
+                    null,
+                .io = io,
+                .allocator = fba.allocator(),
+                ._fd = fd,
+                ._seq_out = &seq_out,
+            };
+
+            invokeHandler(opts.handler.?, fslice, &ctx);
+            if (opts.logger) |lg| lg.session(msgtype, peer_comp_id[0..peer_len], comp_id, seq_in, "dispatch");
         } else {
             var body_fields: [MAX_FIELDS]BuildField = undefined;
             var body_count: usize = 0;
@@ -705,7 +783,7 @@ pub const FixRingResult = struct {
 /// system logger at worker exit so REUSEPORT skew across workers is measurable.
 pub threadlocal var tl_messages_served: u64 = 0;
 
-pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeOpts, recv: []const u8, fd: std.posix.fd_t) FixRingResult {
+pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeOpts, recv: []const u8, fd: std.posix.fd_t, io: std.Io) FixRingResult {
     var consumed: usize = 0;
 
     while (true) {
@@ -766,27 +844,24 @@ pub fn processFixRing(state: *FixRingState, comp_id: []const u8, opts: FixServeO
             state.seq_out += 1;
             writeAllFD(fd, out_buf[0..n]) catch {};
             if (opts.logger) |lg| lg.session(msgtype, sender, comp_id, seq_in, "TestRequest");
-        } else if (opts.routes.len > 0 and state.peer_len > 0) {
-            for (opts.routes) |route| {
-                if (std.mem.eql(u8, msgtype, route.msg_type)) {
-                    const effective_ms = blk: {
-                        const a = route.timeout_ms;
-                        const b = opts.handler_timeout_ms;
-                        break :blk if (a > 0 and b > 0) @min(a, b) else if (a > 0) a else b;
-                    };
-                    var ctx = FixContext{
-                        .sender_comp_id = state.peer_comp_id[0..state.peer_len],
-                        .target_comp_id = comp_id,
-                        .deadline_ns = if (effective_ms > 0) wallClockNs() + @as(u64, effective_ms) * std.time.ns_per_ms else null,
-                        ._fd = fd,
-                        ._seq_out = &state.seq_out,
-                    };
-                    route.handler(fslice, &ctx);
-                    if (opts.logger) |lg| lg.session(msgtype, state.peer_comp_id[0..state.peer_len], comp_id, seq_in, "dispatch");
+        } else if (opts.handler != null and state.peer_len > 0) {
+            var arena_buf: [FIX_CTX_ARENA_BYTES]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+            var ctx = FixContext{
+                .sender_comp_id = state.peer_comp_id[0..state.peer_len],
+                .target_comp_id = comp_id,
+                .deadline_ns = if (opts.handler_timeout_ms > 0)
+                    wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms
+                else
+                    null,
+                .io = io,
+                .allocator = fba.allocator(),
+                ._fd = fd,
+                ._seq_out = &state.seq_out,
+            };
 
-                    break;
-                }
-            }
+            invokeHandler(opts.handler.?, fslice, &ctx);
+            if (opts.logger) |lg| lg.session(msgtype, state.peer_comp_id[0..state.peer_len], comp_id, seq_in, "dispatch");
         } else {
             var body_fields: [MAX_FIELDS]BuildField = undefined;
             var body_count: usize = 0;
@@ -867,6 +942,9 @@ pub fn fixHeartbeatTick(state: *FixRingState, comp_id: []const u8, fd: std.posix
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+/// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
+const TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 test "zix fix: findMessageEnd returns null for empty buf" {
     try std.testing.expect(findMessageEnd("") == null);
@@ -1093,7 +1171,144 @@ test "zix fix: processFixRing counts each complete message in tl_messages_served
     const msg = "8=FIX.4.2\x019=5\x0135=A\x0110=001\x01";
 
     const before = tl_messages_served;
-    _ = processFixRing(&state, "ZIX", .{}, msg, -1);
+    _ = processFixRing(&state, "ZIX", .{}, msg, -1, undefined);
 
     try std.testing.expectEqual(before + 1, tl_messages_served);
+}
+
+test "zix fix: FixRequest.getField finds a tag and returns null for a missing one" {
+    const fields = [_]Field{
+        .{ .tag = .MsgType, .value = "D" },
+        .{ .tag = .Symbol, .value = "AAPL" },
+    };
+    const req = FixRequest{ .fields = &fields };
+
+    try std.testing.expectEqualStrings("D", req.getField(.MsgType).?);
+    try std.testing.expectEqualStrings("AAPL", req.getField(.Symbol).?);
+    try std.testing.expect(req.getField(.ClOrdID) == null);
+}
+
+test "zix fix: FixResponse.sendMessage is byte-identical to a direct buildMessage write" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var seq: u32 = 1;
+    var res = FixResponse{ .sender_comp_id = "CLIENT", .target_comp_id = "SERVER", ._fd = fds[1], ._seq_out = &seq };
+    res.sendMessage(MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }});
+
+    var buf: [MAX_MSG_SIZE]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+
+    var expected: [MAX_MSG_SIZE]u8 = undefined;
+    const expected_n = try buildMessage(&expected, "SERVER", "CLIENT", 1, MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }});
+
+    try std.testing.expectEqualStrings(expected[0..expected_n], buf[0..n]);
+    try std.testing.expectEqual(@as(u32, 2), seq);
+}
+
+test "zix fix: FixContext.withTimeout, withDeadline, and timedOut" {
+    var seq: u32 = 1;
+    const base = FixContext{
+        .sender_comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        ._fd = TEST_FD,
+        ._seq_out = &seq,
+    };
+
+    try std.testing.expect(!base.isExpired());
+    try std.testing.expect(!base.timedOut());
+
+    const future = base.withTimeout(60_000);
+    try std.testing.expect(future.deadline_ns != null);
+    try std.testing.expect(!future.timedOut());
+
+    const past = base.withDeadline(1);
+    try std.testing.expect(past.timedOut());
+    try std.testing.expect(past.isExpired());
+}
+
+test "zix fix: FixContext.setTimeout mutates the deadline in place" {
+    var seq: u32 = 1;
+    var ctx = FixContext{
+        .sender_comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        ._fd = TEST_FD,
+        ._seq_out = &seq,
+    };
+
+    try std.testing.expect(ctx.deadline_ns == null);
+
+    ctx.setTimeout(60_000);
+
+    try std.testing.expect(ctx.deadline_ns != null);
+    try std.testing.expect(!ctx.timedOut());
+}
+
+test "zix fix: invokeHandler builds the trio and reaches the handler" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    const captured = struct {
+        var msgtype: []const u8 = "";
+        fn handler(req: *FixRequest, res: *FixResponse, ctx: *FixContext) anyerror!void {
+            msgtype = req.getField(.MsgType) orelse "";
+            _ = ctx;
+
+            res.sendMessage(MsgType.Heartbeat, &.{});
+        }
+    };
+    captured.msgtype = "";
+
+    var seq: u32 = 1;
+    var ctx = FixContext{
+        .sender_comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        ._fd = fds[1],
+        ._seq_out = &seq,
+    };
+
+    const fields = [_]Field{.{ .tag = .MsgType, .value = "D" }};
+    invokeHandler(captured.handler, &fields, &ctx);
+
+    try std.testing.expectEqualStrings("D", captured.msgtype);
+
+    var buf: [MAX_MSG_SIZE]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+    try std.testing.expect(n > 0);
+}
+
+test "zix fix: invokeHandler swallows a handler error silently" {
+    const failing = struct {
+        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
+            return error.HandlerBoom;
+        }
+    };
+
+    var seq: u32 = 1;
+    var ctx = FixContext{
+        .sender_comp_id = "CLIENT",
+        .target_comp_id = "SERVER",
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        ._fd = TEST_FD,
+        ._seq_out = &seq,
+    };
+
+    const fields = [_]Field{.{ .tag = .MsgType, .value = "D" }};
+
+    invokeHandler(failing.handler, &fields, &ctx);
 }

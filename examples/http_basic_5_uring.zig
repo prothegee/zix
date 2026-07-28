@@ -57,7 +57,8 @@ pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var server = zix.Http.Server.init(&Routes, .{
+    const router = zix.Http.Router(&Routes);
+    var server = zix.Http.Server.init(router.dispatch, .{
         .io = process.io,
         .ip = IP,
         .port = PORT,
