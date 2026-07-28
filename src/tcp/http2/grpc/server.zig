@@ -12,6 +12,7 @@ const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
+const ignoreSigpipe = @import("../../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 pub const Route = core.Route;
 
@@ -50,6 +51,8 @@ fn GrpcServerImpl(comptime routes: []const Route) type {
         /// - error.PortNotConfigured if config.port is 0
         pub fn run(self: *Self) !void {
             if (self.config.port == 0) return error.PortNotConfigured;
+
+            ignoreSigpipe();
 
             const cfg = self.config;
 

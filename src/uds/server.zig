@@ -6,6 +6,7 @@ const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
 const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
+const ignoreSigpipe = @import("../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 /// Read, write, and payload buffer size for the default echo handler. A frame
 /// whose payload exceeds this closes the connection.
@@ -70,6 +71,8 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
         /// config.io (caller-provided, must outlive the server).
         pub fn run(self: *Self) !void {
             if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
+
+            ignoreSigpipe();
 
             const io = self.config.io;
 

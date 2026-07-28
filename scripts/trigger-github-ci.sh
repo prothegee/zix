@@ -5,7 +5,10 @@
 # - `scripts/trigger-github-ci.sh <branch> <zig-version>` runs every leg on
 #   that branch with that zig version's workflow set, i.e.
 #   `scripts/trigger-github-ci.sh main 0.16`
-# - Both arguments are required: missing args print the help and exit 1
+# - `scripts/trigger-github-ci.sh <branch> <zig-version> <platform>` runs
+#   only that one leg, i.e. `scripts/trigger-github-ci.sh main 0.16 x86_64-linux`
+# - The first two arguments are required: missing args print the help and
+#   exit 1. The platform argument is optional: omit it to run every leg.
 # - Results: https://github.com/prothegee/zix/actions or
 #   `gh run list --repo prothegee/zix`
 #
@@ -18,6 +21,9 @@
 #   repo, so only a machine holding that session can actually trigger a run.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
 REPO="prothegee/zix"
 
 # Extend when a new zig version gets its own zig-*-<version>.yml set.
@@ -25,11 +31,15 @@ implemented_versions=(
     0.16
 )
 
+workflows=("${targets[@]}")
+
 usage() {
     {
-        echo "Usage: scripts/trigger-github-ci.sh <branch> <zig-version>"
+        echo "Usage: scripts/trigger-github-ci.sh <branch> <zig-version> [platform]"
         echo "Example: scripts/trigger-github-ci.sh main 0.16"
+        echo "Example: scripts/trigger-github-ci.sh main 0.16 x86_64-windows"
         echo "Implemented zig versions: ${implemented_versions[*]}"
+        echo "Known platforms: ${workflows[*]}"
     } >&2
 }
 
@@ -42,29 +52,23 @@ fi
 REF="$1"
 ZIG_VERSION="$2"
 
-version_known=false
-for version in "${implemented_versions[@]}"; do
-    if [ "$version" = "$ZIG_VERSION" ]; then
-        version_known=true
-        break
-    fi
-done
-
-if [ "$version_known" = false ]; then
+if ! array_contains "$ZIG_VERSION" "${implemented_versions[@]}"; then
     echo "error: zig ${ZIG_VERSION} CI legs are not implemented yet" >&2
     usage
     exit 1
 fi
 
-workflows=(
-    x86_64-linux
-    aarch64-linux
-    aarch64-macos
-    x86_64-windows
-    x86_64-freebsd
-    x86_64-netbsd
-    x86_64-openbsd
-)
+PLATFORM="${3:-}"
+
+if [ -n "$PLATFORM" ]; then
+    if ! array_contains "$PLATFORM" "${workflows[@]}"; then
+        echo "error: unknown platform ${PLATFORM}" >&2
+        usage
+        exit 1
+    fi
+
+    workflows=("$PLATFORM")
+fi
 
 for workflow in "${workflows[@]}"; do
     echo "dispatching zig-${workflow}-${ZIG_VERSION}.yml on ${REF}"

@@ -7,6 +7,7 @@
 //! ServerKeyExchange path is ECDSA-only.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const StdRsa = std.crypto.Certificate.rsa;
@@ -82,8 +83,16 @@ test "zix integration: Tls.Context loads an RSA cert and signs a valid PSS signa
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cert_path = "/tmp/zix_rsa_integration_cert.pem";
-    const key_path = "/tmp/zix_rsa_integration_key.pem";
+    // cwd-relative on Windows: the CI runner's work drive has no /tmp, so an
+    // absolute unix-style path fails the write with OBJECT_PATH_NOT_FOUND.
+    const cert_path = if (builtin.os.tag == .windows)
+        "zix_rsa_integration_cert.pem"
+    else
+        "/tmp/zix_rsa_integration_cert.pem";
+    const key_path = if (builtin.os.tag == .windows)
+        "zix_rsa_integration_key.pem"
+    else
+        "/tmp/zix_rsa_integration_key.pem";
     try writeFile(io, cert_path, cert_pem);
     try writeFile(io, key_path, key_pem);
     defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};
@@ -161,8 +170,15 @@ test "zix integration: an RSA key below 2048 bits is rejected" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cert_path = "/tmp/zix_rsa_integration_weak_cert.pem";
-    const key_path = "/tmp/zix_rsa_integration_weak_key.pem";
+    // cwd-relative on Windows, same reason as the PSS test above.
+    const cert_path = if (builtin.os.tag == .windows)
+        "zix_rsa_integration_weak_cert.pem"
+    else
+        "/tmp/zix_rsa_integration_weak_cert.pem";
+    const key_path = if (builtin.os.tag == .windows)
+        "zix_rsa_integration_weak_key.pem"
+    else
+        "/tmp/zix_rsa_integration_weak_key.pem";
     try writeFile(io, cert_path, weak_cert_pem);
     try writeFile(io, key_path, weak_key_pem);
     defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};

@@ -617,11 +617,14 @@ test "postgrez: executor runs a submitted job with a null batch when no server" 
 
     try testing.expect(executor.submit(.{ .id = 1 }));
 
-    // wait for the worker to run the batch
-    var spins: usize = 0;
-    while (Probe.ran.load(.monotonic) == 0) : (spins += 1) {
-        if (spins > 5_000_000) return error.WorkerNeverRan;
-        std.atomic.spinLoopHint();
+    // wait for the worker to run the batch: bounded 1ms sleep poll, since a
+    // pure spin cap is a wall-time bound a loaded CI vm can miss (the worker
+    // needs the very core the spin is burning)
+    var attempts: usize = 0;
+    while (Probe.ran.load(.monotonic) == 0) : (attempts += 1) {
+        if (attempts > 2_000) return error.WorkerNeverRan;
+
+        threaded.io().sleep(.fromMilliseconds(1), .awake) catch {};
     }
 
     try testing.expectEqual(@as(u32, 1), Probe.ran.load(.monotonic));
@@ -630,10 +633,11 @@ test "postgrez: executor runs a submitted job with a null batch when no server" 
 
     // the worker records stats after run_batch returns: wait for the
     // counters to land before snapshotting, or the snapshot races them
-    spins = 0;
-    while (executor.stat_batches.load(.monotonic) == 0 or executor.stat_jobs.load(.monotonic) == 0) : (spins += 1) {
-        if (spins > 5_000_000) return error.StatsNeverRecorded;
-        std.atomic.spinLoopHint();
+    attempts = 0;
+    while (executor.stat_batches.load(.monotonic) == 0 or executor.stat_jobs.load(.monotonic) == 0) : (attempts += 1) {
+        if (attempts > 2_000) return error.StatsNeverRecorded;
+
+        threaded.io().sleep(.fromMilliseconds(1), .awake) catch {};
     }
 
     const stats = executor.snapshot();

@@ -4,6 +4,24 @@ const std = @import("std");
 const Config = @import("config.zig");
 const UdpClientConfig = Config.UdpClientConfig;
 const pkt = @import("packet.zig");
+const win_io = @import("../utils/windows_io.zig");
+
+/// poll event bit, mirrored locally: std.posix.POLL is not defined for Windows.
+const POLL_IN: i16 = if (@import("builtin").target.os.tag == .windows) win_io.POLLIN else std.posix.POLL.IN;
+
+/// Readiness gate shared by the recv timeout: AFD poll on Windows, posix poll elsewhere.
+///
+/// Return:
+/// - true when the socket is readable
+/// - false when the timeout elapsed first
+fn pollReady(sock_fd: std.posix.fd_t, events: i16, timeout_ms: u32) !bool {
+    if (comptime @import("builtin").target.os.tag == .windows) return win_io.pollReady(sock_fd, events, timeout_ms);
+
+    var pfd = [1]std.posix.pollfd{.{ .fd = sock_fd, .events = events, .revents = 0 }};
+    const ms: i32 = @intCast(@min(timeout_ms, @as(u32, std.math.maxInt(i32))));
+
+    return try std.posix.poll(&pfd, ms) > 0;
+}
 
 /// UDP client typed to a user-defined extern struct packet.
 ///
@@ -83,18 +101,11 @@ pub fn UdpClient(comptime Packet: type) type {
         /// Note:
         /// - for a concurrent send/receive loop, see examples/udp_client.zig
         pub fn receiveFeedback(self: *Self) !FB {
-            // No poll over the ntdll path: recv_timeout_ms degrades to a blocking receive on Windows.
-            const has_poll = comptime @import("builtin").target.os.tag != .windows;
-            if (has_poll and self.config.recv_timeout_ms > 0) {
-                // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
-                var pfd = [1]std.posix.pollfd{.{
-                    .fd = self.socket.handle,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                }};
-                const ms: i32 = @intCast(@min(self.config.recv_timeout_ms, @as(u32, std.math.maxInt(i32))));
-                const ready = try std.posix.poll(&pfd, ms);
-                if (ready == 0) return error.RecvTimeout;
+            if (self.config.recv_timeout_ms > 0) {
+                // std.Io.Threaded panics on EAGAIN, so gate with poll instead of SO_RCVTIMEO.
+                if (!try pollReady(self.socket.handle, POLL_IN, self.config.recv_timeout_ms)) {
+                    return error.RecvTimeout;
+                }
             }
 
             var buf: [@sizeOf(Packet)]u8 = undefined;
@@ -119,4 +130,20 @@ test "zix udp: UdpClient init rejects a zero port" {
 
     const Client = UdpClient(extern struct { value: u32 });
     try std.testing.expectError(error.PortNotConfigured, Client.init(.{ .ip = "127.0.0.1", .server_port = 0, .bind_port = 0 }, threaded.io(), .{}));
+}
+
+test "zix udp: pollReady, times out on silence and reports ready after a self-send" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9356);
+    var socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(io);
+
+    try std.testing.expectEqual(false, try pollReady(socket.handle, POLL_IN, 50));
+
+    try socket.send(io, &addr, "x");
+
+    try std.testing.expectEqual(true, try pollReady(socket.handle, POLL_IN, 1000));
 }

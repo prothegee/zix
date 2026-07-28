@@ -44,6 +44,17 @@ __*Fix:*__
 
 <br>
 
+## 0.5.x-rc3 (2026-07-27)
+
+__*Update:*__
+
+- `zix.Udp` client `recv_timeout_ms` now enforced on Windows:
+    - `receiveFeedback` previously degraded to a blocking receive on Windows, so a client waiting on a silent peer never timed out (this was the source of the Windows CI hang). The receive is now gated by the same AFD-based readiness poll the TCP-family clients use, so `error.RecvTimeout` fires on every platform.
+- Named test-run build steps for `--summary all` diagnostics:
+    - `zix-build-tests.zig`'s `testRunStep` now tags each integration / behaviour / edge test's `Run` step with its source path (`run.setName(src)`), so `zig build <step> --summary all` shows which file a pending or still-running step belongs to instead of a generic `run test`. No build-command or test-execution change.
+
+<br>
+
 ## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__

@@ -305,6 +305,23 @@ After implementing any new function, field, or behavior, add the tests covering 
 
 > Co-locate tests with the code. Name them `zix <domain>: subject, case`. New behavior ships with its tests, never after.
 
+When a test only makes sense on one platform (e.g. an EPOLL/URING dispatch model that is Linux-only), wrap the skip in an explicit block instead of a bare guard line, so the platform split reads as two distinct regions:
+
+```zig
+test "zix grpc: dual listener, EPOLL serves h2c on port" {
+    if (builtin.os.tag != .linux) {
+        // windows / other-platform region: EPOLL/URING dispatch models are
+        // Linux-only, nothing is spawned here, nothing to retry or clean up.
+        return error.SkipZigTest;
+    }
+
+    // linux region: real server + retry + timeout
+    ...
+}
+```
+
+If the linux region spawns a background server to test against, retry the connect with a fixed attempt count (a hard ceiling, not an unbounded loop). Only add explicit shutdown/deinit for that server if the engine actually exposes a stop path: do not fake cleanup on a thread that can never return.
+
 ---
 
 ## 12. Comments and prose (in code and docs)
@@ -344,3 +361,29 @@ if (comptime ZIG_SEMVER.MINOR == 16) {
 - Documentation comes in an `-en.md` / `-id.md` pair. When translating to Indonesian, keep the English technical term wherever a forced translation would drift from the established meaning (shared-nothing, slab, dispatch, hot path, throughput, comptime, and similar).
 
 > Commit per file with a meaningful message after `zig fmt .`. Keep docs bilingual, and keep technical terms in English inside other languages translation.
+
+---
+
+## 15. File read/write on unix and Windows
+
+Every file operation goes through `std.Io.Dir.cwd()` (`createFile`, `readFileAlloc`, `deleteFile`). When the sub_path is absolute the dir handle is ignored, so this one call shape serves both relative and absolute paths. Do not reach for the `*Absolute` variants (`deleteFileAbsolute`, `openFileAbsolute`): they only accept an absolute path, which forces the call site to split into two shapes the moment a platform needs a relative one.
+
+Never hardcode a unix-style absolute path (`/tmp/...`) in code that Windows will open, write, or bind. Windows resolves `/tmp/...` against the current drive (for example `D:\tmp\...`), and when that directory does not exist the operation fails with NTSTATUS OBJECT_PATH_NOT_FOUND (surfacing as `error.FileNotFound` on file ops, or `error.Unexpected` on a socket bind). The idiom is a comptime branch: a cwd-relative filename on Windows, the usual `/tmp/...` elsewhere:
+
+```zig
+// cwd-relative on Windows: there may be no /tmp on the drive, so an
+// absolute unix-style path fails with OBJECT_PATH_NOT_FOUND.
+const cert_path = if (builtin.os.tag == .windows)
+    "zix_rsa_integration_cert.pem"
+else
+    "/tmp/zix_rsa_integration_cert.pem";
+
+try writeFile(io, cert_path, cert_pem);
+defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};
+```
+
+The same rule covers unix domain socket paths handed to `std.Io.net.UnixAddress`: Windows supports AF_UNIX, but the bind resolves the path exactly like a file open, so a `/tmp/...` socket path fails there too.
+
+Production paths follow the caller: `Tls.Context.init` reads `cert_path` / `key_path` through `cwd().readFileAlloc`, so a config may carry either shape and the right one is the deployment's concern, not zix's.
+
+> Route every file op through `std.Io.Dir.cwd()` and let the path decide relative vs absolute. Never hardcode `/tmp` for anything Windows touches: comptime-branch to a cwd-relative name there, keep the unix path everywhere else.

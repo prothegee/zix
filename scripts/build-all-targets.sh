@@ -5,73 +5,10 @@
 # - Test for runner are execute based on native platform.
 set -euo pipefail
 
-targets=(
-    "x86_64-linux"
-    "x86_64-windows"
-    "aarch64-macos"
-    "aarch64-linux"
-    "x86_64-netbsd"
-    "x86_64-freebsd"
-    "x86_64-openbsd"
-)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-ZIG_BIN="${1:-zig}"
-TARGET_FILTER="${2:-}"
-
-if [[ -n "$TARGET_FILTER" ]]; then
-    matched=false
-    for target in "${targets[@]}"; do
-        if [[ "$target" == "$TARGET_FILTER" ]]; then
-            matched=true
-            break
-        fi
-    done
-
-    if [[ "$matched" == false ]]; then
-        echo "unknown target: $TARGET_FILTER"
-        echo "valid targets: ${targets[*]}"
-        exit 1
-    fi
-
-    targets=("$TARGET_FILTER")
-fi
-
-echo "zig version: $($ZIG_BIN version)"
-
-# --------------------------------------------------------- #
-# One failing leg must not abort the matrix: every invocation is recorded and
-# the script keeps going, then reports every failed leg at the end and exits
-# non-zero if there was any.
-
-failures=()
-
-# try_build LABEL DIR BUILD_ARGS...
-try_build() {
-    local label="$1"
-    local dir="$2"
-    shift 2
-
-    if ! (cd "$dir" && $ZIG_BIN build "$@" --summary all); then
-        echo "FAIL: $label"
-        failures+=("$label")
-    fi
-}
-
-# matrix NAME DIR STEPS...
-# Runs every step for every target ("install" is zig build's default step).
-matrix() {
-    local name="$1"
-    local dir="$2"
-    shift 2
-
-    for step in "$@"; do
-        # echo "$name: $step"
-        for target in "${targets[@]}"; do
-            # echo "target: $target"
-            try_build "$name $step $target" "$dir" $step -Dtarget=$target
-        done
-    done
-}
+parse_target_filter "${1:-zig}" "${2:-}"
 
 # --------------------------------------------------------- #
 
@@ -90,12 +27,4 @@ matrix "prometheuz" src/driver/prometheuz install test-unit examples test-runner
 
 # --------------------------------------------------------- #
 
-if [[ ${#failures[@]} -gt 0 ]]; then
-    echo "${#failures[@]} leg(s) failed:"
-    for failed_leg in "${failures[@]}"; do
-        echo "  FAIL: $failed_leg"
-    done
-    exit 1
-fi
-
-echo "all targets passed"
+report_failures

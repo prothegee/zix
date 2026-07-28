@@ -4,10 +4,18 @@ const std = @import("std");
 /// otherwise return the compile step directly. Deterministic compile-only coverage for a
 /// foreign target regardless of host binfmt_misc / qemu registration making execution
 /// technically possible (e.g. aarch64-linux under a registered qemu-user interpreter).
-fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.Build.Step {
-    if (foreign) return &exe.step;
+///
+/// Note:
+/// - name tags the step with its source path, so `--summary all` shows which
+///   test file a pending or hung step belongs to instead of a generic "run test".
+fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool, name: []const u8) *std.Build.Step {
+    if (foreign) {
+        exe.step.name = name;
+        return &exe.step;
+    }
 
     const run = b.addRunArtifact(exe);
+    run.setName(name);
     return &run.step;
 }
 
@@ -30,7 +38,7 @@ pub fn addSteps(
     }
 
     const zix_tests = b.addTest(.{ .root_module = zix });
-    const zix_tests_step = testRunStep(b, zix_tests, foreign_target);
+    const zix_tests_step = testRunStep(b, zix_tests, foreign_target, "unit-test");
 
     const test_step = b.step("unit-test", "Run unit tests");
     test_step.dependOn(zix_tests_step);
@@ -89,7 +97,7 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_step = testRunStep(b, t_exe, foreign_target);
+        const t_step = testRunStep(b, t_exe, foreign_target, src);
         if (prev_integ) |p| t_step.dependOn(p);
         prev_integ = t_step;
         integration_test_step.dependOn(t_step);
@@ -141,7 +149,7 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_step = testRunStep(b, t_exe, foreign_target);
+        const t_step = testRunStep(b, t_exe, foreign_target, src);
         if (prev_behav) |p| t_step.dependOn(p);
         prev_behav = t_step;
         behaviour_test_step.dependOn(t_step);
@@ -193,7 +201,7 @@ pub fn addSteps(
         t_mod.addImport("zix", zix);
 
         const t_exe = b.addTest(.{ .root_module = t_mod });
-        const t_step = testRunStep(b, t_exe, foreign_target);
+        const t_step = testRunStep(b, t_exe, foreign_target, src);
         if (prev_edge) |p| t_step.dependOn(p);
         prev_edge = t_step;
         edge_test_step.dependOn(t_step);

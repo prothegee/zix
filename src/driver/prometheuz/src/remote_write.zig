@@ -7,6 +7,7 @@
 //! `__name__` label, same as real Prometheus.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const http_client = @import("http_client.zig");
 const protobuf = @import("protobuf.zig");
@@ -263,8 +264,12 @@ test "prometheuz: remoteWrite surfaces a connection failure" {
 
     const samples = [_]Sample{.{ .name = "up", .labels = &.{}, .value = 1, .timestamp_ms = 0 }};
 
+    // windows region: zig std's connect path leaves NTSTATUS
+    // CONNECTION_REFUSED (0xc0000236) unmapped, so the refused
+    // connect surfaces as error.Unexpected there.
+    const expected = if (builtin.os.tag == .windows) error.Unexpected else error.ConnectionRefused;
     try testing.expectError(
-        error.ConnectionRefused,
+        expected,
         remoteWrite(testing.allocator, threaded.io(), .{ .ip = "127.0.0.1", .port = 1 }, &samples),
     );
 }

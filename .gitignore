@@ -45,6 +45,7 @@ orders.jsonl
 *.zip
 *.pem
 *.bin
+*.sock
 
 *perf.*
 *Zone.Identifier

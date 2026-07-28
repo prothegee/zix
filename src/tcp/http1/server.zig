@@ -13,6 +13,7 @@ const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 
 // --------------------------------------------------------- //
 
@@ -40,6 +41,8 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
         }
 
         pub fn run(self: *const Self) !void {
+            ignoreSigpipe();
+
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http.Server.run.
             if (self.config.public_dir.len > 0) {

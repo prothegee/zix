@@ -347,7 +347,14 @@ test "rediz: pool acquire retries then reports the connect error" {
     });
     defer pool.deinit();
 
-    try testing.expectError(error.ConnectionRefused, pool.acquire());
+    // windows region: zig std's connect path leaves NTSTATUS
+    // CONNECTION_REFUSED (0xc0000236) unmapped, so the refused
+    // connect surfaces as error.Unexpected there.
+    if (builtin.os.tag == .windows) {
+        try testing.expectError(error.Unexpected, pool.acquire());
+    } else {
+        try testing.expectError(error.ConnectionRefused, pool.acquire());
+    }
     try testing.expectEqual(@as(usize, 0), pool.idleCount());
 }
 

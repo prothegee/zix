@@ -42,45 +42,51 @@ jobs:
       # so one run reports every failing suite at once. timeout-minutes turns
       # a hung suite (a test blocked in socket io never completes on its own)
       # into a red step with logs instead of a job spinning for hours.
+      # --test-timeout makes zig itself kill a test hung mid-body: without it
+      # zig waits forever on an active test and buffers the child's stderr,
+      # so the workflow kill loses every log line. With it, zig prints the
+      # hung test's name plus its captured stderr and continues to the next
+      # test, so one run enumerates every hang. 15s is ~5x the slowest
+      # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build unit-test
+        run: zig build unit-test --summary all --test-timeout 15s
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build integration-test
+        run: zig build integration-test --summary all --test-timeout 15s
 
       - name: zix behaviour tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build behaviour-test
+        run: zig build behaviour-test --summary all --test-timeout 15s
 
       - name: zix edge tests
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build edge-test
+        run: zig build edge-test --summary all --test-timeout 15s
 
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build postgrez-test-unit
+        run: zig build postgrez-test-unit --summary all
 
       - name: rediz unit tests
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build rediz-test-unit
+        run: zig build rediz-test-unit --summary all
 
       - name: prometheuz unit tests
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
-        run: zig build prometheuz-test-unit
+        run: zig build prometheuz-test-unit --summary all
 
       # no Linux container support on this runner, so postgrez and rediz
       # test-integration (container lifecycle) are skipped here.
