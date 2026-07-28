@@ -496,13 +496,13 @@ For the full per-field reference (every config field with its default, what it a
 
 | Scope | Allocator | Lifetime |
 | :- | :- | :- |
-| Route table | comptime (zero heap cost) | N/A |
+| Route table | zero heap cost | N/A |
 | Read / write I/O buffers | `smp_allocator` | Connection |
 | Per-request allocations (`ctx.allocator`) | Per-connection `ArenaAllocator`, reset each request | Request |
 
 Handlers receive `ctx.allocator`, an arena reset between requests. Any allocation made inside a handler is automatically reclaimed at the end of the request without any `free` call.
 
-Routes are baked into the server type at compile time: no allocator is needed for route storage.
+Routes are comptime-baked into the server type on `zix.Http1`; on `zix.Http` the handler is a runtime `HandlerFn` field (ADR-063), built from a comptime `Router`. Either way, no allocator is needed for route storage.
 
 ### UDP
 

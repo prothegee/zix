@@ -496,13 +496,13 @@ Untuk referensi per-field lengkap (tiap field config dengan default-nya, apa yan
 
 | Cakupan | Allocator | Masa hidup |
 | :- | :- | :- |
-| Tabel rute | comptime (tanpa biaya heap) | N/A |
+| Tabel rute | tanpa biaya heap | N/A |
 | Buffer I/O baca/tulis | `smp_allocator` | Koneksi |
 | Alokasi per-permintaan (`ctx.allocator`) | `ArenaAllocator` per-koneksi, direset setiap permintaan | Permintaan |
 
 Handler menerima `ctx.allocator`, sebuah arena yang direset di antara permintaan. Alokasi apa pun yang dibuat di dalam handler secara otomatis direklamasi di akhir permintaan tanpa panggilan `free`.
 
-Rute dibuat dalam tipe server pada waktu kompilasi: tidak diperlukan allocator untuk penyimpanan rute.
+Rute dibakukan comptime ke dalam tipe server pada `zix.Http1`; pada `zix.Http` handler adalah field `HandlerFn` runtime (ADR-063), dibangun dari `Router` comptime. Keduanya sama-sama tidak memerlukan allocator untuk penyimpanan rute.
 
 ### UDP
 
