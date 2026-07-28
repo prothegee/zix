@@ -4,7 +4,7 @@
 //! - Gated on config.tls (a *Tls.Context). An accept loop hands each connection to its own worker
 //!   thread, which runs the shared h2-over-TLS terminator (../../tls/h2_terminator.zig): the
 //!   handshake negotiates ALPN h2, then the inline-mux driver below drives the resumable gRPC h2
-//!   state machine (core.grpcMuxProcessRing) directly over the decrypted stream. The mux's frames are
+//!   state machine (mux.grpcMuxProcessRing) directly over the decrypted stream. The mux's frames are
 //!   sealed into TLS records through a thread-local hook on frame.writeAllFD plus the staged reply
 //!   cork, so there is NO socketpair and NO second thread per connection. This is what lets the gRPC
 //!   TLS path scale to high connection counts instead of livelocking on a per-connection socketpair.
@@ -17,6 +17,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const win_io = @import("../../../utils/windows_io.zig");
 const core = @import("core.zig");
+const mux = @import("mux.zig");
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const terminator = @import("../../tls/h2_terminator.zig");
@@ -35,7 +36,7 @@ const seal_overhead: usize = 1024;
 /// feed the plaintext to the mux, and seal the staged reply back into records. No socketpair, no
 /// second thread. Generic over the TLS connection type (1.3 or 1.2).
 fn runInlineGrpcMux(comptime RouterType: type, opts: core.GrpcServeOpts, fd: posix.fd_t, conn: anytype, record_buf: []u8, io: std.Io) void {
-    const mux_conn = core.GrpcMuxConn.init(fd, opts, io) orelse return;
+    const mux_conn = mux.GrpcMuxConn.init(fd, opts, io) orelse return;
     defer mux_conn.deinit();
 
     // The mux's reply (staged cork + any direct frame.writeAllFD) routes through this hook, which
@@ -114,7 +115,7 @@ fn runInlineGrpcMux(comptime RouterType: type, opts: core.GrpcServeOpts, fd: pos
         @memcpy(mux_conn.rbuf[mux_conn.rend..][0..plain.len], plain);
         mux_conn.rend += plain.len;
 
-        const outcome = core.grpcMuxProcessRing(RouterType, mux_conn);
+        const outcome = mux.grpcMuxProcessRing(RouterType, mux_conn);
         mux_conn.flushStage(); // staged reply -> frame.writeAllFD -> hook -> enc
         enc.flush();
         if (enc.failed or outcome == .close) break;
