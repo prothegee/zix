@@ -104,9 +104,9 @@ pub fn addSteps(
         .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9028", "/ws/lobby", "", "" },
         // http1 websocket runner on the io_uring (.URING) dispatch model
         .{ "test-runner-http1-websocket-uring", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-uring", "examples/http1_websocket_uring.zig", "9029", "/ws", "", "" },
-        // http1 response-cache runner (unique port; small body so the GET is bounded)
+        // http1 response-cache runner (unique port, small body so the GET is bounded)
         .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9031", "/cache?kb=1", "", "ok" },
-        // http1 over-large request-body drain runners (EPOLL + URING only; the
+        // http1 over-large request-body drain runners (EPOLL + URING only, the
         // other models truncate the body instead of draining it)
         .{ "test-runner-http1-drain-epoll", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-epoll", "examples/http1_basic_4_epoll.zig", "9018", "", "", "" },
         .{ "test-runner-http1-drain-uring", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-uring", "examples/http1_basic_5_uring.zig", "9019", "", "", "" },
