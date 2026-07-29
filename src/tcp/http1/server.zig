@@ -14,6 +14,7 @@ const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const static_cache = @import("../../utils/static_cache.zig");
 
 // --------------------------------------------------------- //
 
@@ -48,6 +49,11 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
             if (self.config.public_dir.len > 0) {
                 const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch return error.PublicDirNotFound;
                 dir.close(self.config.io);
+
+                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
+                if (installed == .MISMATCHED) {
+                    std.log.warn("zix http1: a static cache is already installed in this process with different settings, keeping it", .{});
+                }
             }
 
             if (self.config.tls != null) {
