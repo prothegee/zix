@@ -47,6 +47,9 @@ pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
     pub const response_cache = @import("utils/response_cache.zig");
+    pub const static_cache = @import("utils/static_cache.zig");
+    pub const static_send = @import("utils/static_send.zig");
+    pub const http_range = @import("utils/http_range.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
 };
@@ -212,6 +215,9 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/multipart.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
+    std.testing.refAllDecls(@import("utils/static_cache.zig"));
+    std.testing.refAllDecls(@import("utils/static_send.zig"));
+    std.testing.refAllDecls(@import("utils/http_range.zig"));
     std.testing.refAllDecls(@import("utils/ignore_sigpipe.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
