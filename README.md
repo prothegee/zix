@@ -36,7 +36,24 @@
 
 </div>
 
-<br>
+<hr>
+
+<h4 align="center">
+    <b><i>Platform Development Status:</i></b>
+</h4>
+<div align="center">
+    <img src="https://img.shields.io/badge/x86__64-Linux-green">
+    <img src="https://img.shields.io/badge/aarch64-Linux-yellow">
+    <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
+    <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
+    <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
+    <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
+    <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
+</div>
+
+<hr>
+
+<!-- RESERVED -->
 
 <h4 align="center">
     <b><i>Benchmark by HttpArena:</i></b>
@@ -66,24 +83,6 @@
     <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
     </a>
-</div>
-
-<hr>
-
-<div align="center">
-    <img src="https://img.shields.io/badge/Language-Zig-orange">
-</div>
-<h4 align="center">
-    <b><i>Platform Development Status:</i></b>
-</h4>
-<div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-green">
-    <img src="https://img.shields.io/badge/aarch64-Linux-yellow">
-    <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
-    <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
-    <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
-    <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
-    <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
 
 <br>
