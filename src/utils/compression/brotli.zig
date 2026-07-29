@@ -1470,7 +1470,7 @@ fn writeTreeCode(bw: *BitWriter, allocator: std.mem.Allocator, tree: TreeCode, a
 }
 
 /// Optimal length-limited Huffman code lengths over freq (sec 3.2). A single present symbol
-/// gets length 0 (a zero-bit code); the rest are exact-merge Huffman lengths capped at
+/// gets length 0 (a zero-bit code). The rest are exact-merge Huffman lengths capped at
 /// MAX_BITS via the standard overflow redistribution, assigned shortest to most frequent.
 fn huffmanLengths(allocator: std.mem.Allocator, freq: []const u32, lengths_out: []u8) EncodeError!void {
     @memset(lengths_out, 0);
@@ -2139,7 +2139,7 @@ pub fn compressQualityAlloc(allocator: std.mem.Allocator, data: []const u8, qual
 /// brotli quality. The HTTP `br` content coding path.
 ///
 /// Note:
-/// - FASTEST favours latency (a shallow match search, dictionary on); DEFAULT favours
+/// - FASTEST favours latency (a shallow match search, dictionary on). DEFAULT favours
 ///   ratio (a deeper search). Both stay well under q11 so a response stays cheap to emit.
 ///
 /// Param:
