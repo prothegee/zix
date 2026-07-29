@@ -63,7 +63,7 @@ error.InvalidHeaderValue  (CR atau LF ditemukan di nilai header)
 Cap bukan sekadar batas kegunaan: ini adalah **langkah pertahanan berlapis**. Handler yang salah konfigurasi atau terkompromi yang terus memanggil `addHeader()` dibatasi oleh `max_response_headers`, bukan oleh memori. Dengan `.MINIMAL` (16), overhead per-respons dalam kasus terburuk adalah:
 
 ```
-16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
+16 headers x (name_ptr + value_ptr) = 16 x 32 bytes = 512 bytes (arena)
 ```
 
 Dengan `.EXTRA_LARGE` (128), naik menjadi sekitar 4 KB. Keduanya terbatas dan dialokasikan via arena. Jangan menetapkan `.{ .CUSTOM = N }` ke angka besar secara spekulatif karena hanya memperlebar footprint tanpa manfaat yang sepadan.

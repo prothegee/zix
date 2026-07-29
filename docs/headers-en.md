@@ -63,7 +63,7 @@ error.InvalidHeaderValue  (CR or LF found in header value)
 The cap is not just a usability limit: it is a **defence-in-depth measure**. A misconfigured or compromised handler that loops on `addHeader()` is bounded by `max_response_headers` rather than by memory. With `.MINIMAL` (16), the worst-case per-response overhead is:
 
 ```
-16 headers × (name_ptr + value_ptr) = 16 × 32 bytes = 512 bytes (arena)
+16 headers x (name_ptr + value_ptr) = 16 x 32 bytes = 512 bytes (arena)
 ```
 
 With `.EXTRA_LARGE` (128), that rises to ~4 KB. Both are bounded and arena-allocated. Do not set `.{ .CUSTOM = N }` to a large number speculatively: it widens the footprint without a corresponding benefit.
