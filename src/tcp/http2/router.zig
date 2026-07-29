@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
+const static = @import("static.zig");
 
 // --------------------------------------------------------- //
 
@@ -110,6 +111,17 @@ pub fn Router(comptime routes: []const Route) type {
 
             if (best_handler) |handler| {
                 return handler(req, res, ctx);
+            }
+
+            // Static file fallback: when public_dir is configured, try to serve the request path
+            // as a file before returning 404. Disabled when public_dir is empty.
+            if (ctx.public_dir.len > 0) {
+                const stripped = if (p.len > 0 and p[0] == '/') p[1..] else p;
+                if (stripped.len > 0 and static.serve(req, ctx, stripped, ctx.max_frame_size)) {
+                    res.sent = true;
+
+                    return;
+                }
             }
 
             res.setStatus(404);
