@@ -1,7 +1,6 @@
 //! Integration tests: UDS Server.init, HandlerFn wiring, and client timeout.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const zix = @import("zix");
 
 test "zix integration: UdsServer.init, valid path succeeds and deinit is safe" {
@@ -10,7 +9,7 @@ test "zix integration: UdsServer.init, valid path succeeds and deinit is safe" {
 
     var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{
         .io = threaded.io(),
-        .path = "/tmp/zix_integration_test.sock",
+        .path = "tmp/zix_integration_test.sock",
         .allocator = std.testing.allocator,
     });
     server.deinit();
@@ -27,12 +26,9 @@ test "zix integration: UdsClient, recv_timeout_ms fires when server sends no dat
     defer threaded.deinit();
     const io = threaded.io();
 
-    // cwd-relative on Windows: the CI runner's work drive has no /tmp, so an
-    // absolute unix-style path fails the bind with OBJECT_PATH_NOT_FOUND.
-    const sock_path = if (builtin.os.tag == .windows)
-        "zix_stall_uds_client_test.sock"
-    else
-        "/tmp/zix_stall_uds_client_test.sock";
+    const sock_path = "tmp/zix_stall_uds_client_test.sock";
+    // tmp/ is cwd-relative and not created automatically, unlike the system /tmp.
+    std.Io.Dir.cwd().createDirPath(io, "tmp") catch {};
     std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
 
     const unix_addr = try std.Io.net.UnixAddress.init(sock_path);
