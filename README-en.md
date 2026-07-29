@@ -81,7 +81,7 @@
     - [UDP](./README-en.md#udp)
     - [HTTP/3](./README-en.md#http3)
     - [Logger](./README-en.md#logger)
-- [Benchmark](./README-en.md#benchmark)
+- [Drivers](./README-en.md#drivers)
 
 <br>
 
@@ -124,6 +124,14 @@
 | [`docs/headers-en.md`](docs/headers-en.md) | Response header cap: tiers, security, error handling |
 | [`docs/tests-en.md`](docs/tests-en.md) | Test tiers (unit / integration / behaviour / edge) and how to run |
 <!-- | [`rnd/rfc/README.md`](rnd/rfc/README.md) | RFC-based MUST / MUST NOT conformance checklists for raw HTTP/1.1, HTTP/2, HTTP/3, and TLS 1.3 | -->
+
+Driver documentation (each README fans out to its own hld, lld, and config docs):
+
+| Document | Description |
+| :- | :- |
+| [`docs/driver/postgrez/README-en.md`](docs/driver/postgrez/README-en.md) | PostgreSQL driver: quickstart, URL and config init, prepared statements, pool, executor |
+| [`docs/driver/rediz/README-en.md`](docs/driver/rediz/README-en.md) | Redis driver: quickstart, URL and config init, pipelining, deferred write-behind, pool |
+| [`docs/driver/prometheuz/README-en.md`](docs/driver/prometheuz/README-en.md) | Prometheus driver: scrape, remote write, PromQL query |
 
 <br>
 
@@ -886,7 +894,7 @@ __*In the nutshell:*__
 
 > In many cases for high throughput,
 > zix EPOLL mostly wins for memory efficiency and zix URING got more throughput.
-> However in some cases its performance can vary, see the benchmark section for reference.
+> However in some cases its performance can vary, see the historical benchmarks in the `docs/benchmark` directory for reference.
 > Uring is not allowed in some environment for some reason (e.g. security stand point). But you got the options.
 
 **When to use:** the dispatch model is the one knob that reshapes the whole server. Reach for `.ASYNC` when latency and long-lived connections (SSE, WebSocket) matter, `.POOL` / `.MIXED` for raw throughput on any platform, and `.EPOLL` / `.URING` on Linux for the highest connection counts at the lowest per-request cost. On a loopback dev box the two tie on throughput and `.URING` wins mainly on cache locality. On a many-core box the ring close lets `.URING` keep its cores busy through connection churn, where it reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
@@ -2235,42 +2243,17 @@ Wire a logger into any server by setting `logger: &logger` in its config. See [`
 
 <br>
 
-## Benchmark
+## Drivers
 
-Website: https://www.http-arena.com <br>
-Project repo: https://github.com/MDA2AV/HttpArena <br>
+Database and metrics drivers, written in pure Zig on the standard library like the engines. Each lives under `src/driver/<name>/` with its own build, examples, and container-backed test suites, and initializes from a URL string or a config struct.
 
-<div align="left">
-    <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
-    </a>
-    &nbsp;&nbsp;
-    <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
-    </a>
-</div>
-<br>
-<div align="left">
-    <!-- <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0" target="_blank" rel="noopener noreferrer"> -->
-    <!--     <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44"> -->
-    <!-- </a> -->
-    <!-- &nbsp;&nbsp; -->
-    <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
-    </a>
-</div>
-<br>
-<div align="left">
-    <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
-    </a>
-</div>
-<br>
+| Driver | Description |
+| :- | :- |
+| [`postgrez`](docs/driver/postgrez/README-en.md) | PostgreSQL: prepared statements, pipelining, COPY, LISTEN and NOTIFY, pool, executor, TLS 1.3 |
+| [`rediz`](docs/driver/rediz/README-en.md) | Redis: RESP3 with an in-place RESP2 fallback, pipelining, deferred write-behind, pool, TLS 1.3 |
+| [`prometheuz`](docs/driver/prometheuz/README-en.md) | Prometheus: scrape, remote write, PromQL instant and range query |
 
-> When performance measurement is not narrowed, our workload assumption can't be measure,
-> behaviour of 6-12 cores to 32-64 core cpu is different. Thanks to HttpArena project, zix can be measured in large workload.
-
-> Historical benchmark stored inside `docs/benchmark` directory.
+Each linked README covers install, quickstart, both init styles, and points to its own hld, lld, and config docs.
 
 <br>
 
