@@ -20,6 +20,11 @@ pub const Context = struct {
     io: std.Io,
     /// Per-request scratch allocator, backed by a stack buffer (no heap call).
     allocator: std.mem.Allocator,
+    /// Static file directory set by the server from config.public_dir. Empty disables the router's
+    /// static fallback, so an unmatched route goes straight to 404.
+    public_dir: []const u8 = "",
+    /// Peer's SETTINGS_MAX_FRAME_SIZE, the cap on every DATA frame the static fallback emits.
+    max_frame_size: u32 = 16384,
 
     /// Return a copy with the deadline set to now + ms.
     pub fn withTimeout(self: Context, ms: u64) Context {
