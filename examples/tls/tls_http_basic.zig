@@ -52,7 +52,7 @@ pub fn main(process: std.process.Init) !void {
         .port = PORT,
         .tls = &tls,
         // .EPOLL / .URING terminate TLS in the event-driven epoll-mux worker (keep-alive, many
-        // connections per worker); .ASYNC / .POOL / .MIXED use the thread-per-connection path.
+        // connections per worker). .ASYNC / .POOL / .MIXED use the thread-per-connection path.
         .dispatch_model = .EPOLL,
         .workers = 1,
     });

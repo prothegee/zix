@@ -1,7 +1,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// https/1.1 over TLS. The Http1 server serves cleartext by default; attaching a Tls.Context
+// https/1.1 over TLS. The Http1 server serves cleartext by default. Attaching a Tls.Context
 // (config.tls) opts into the gated TLS path (zix.Tls), on its own perf band, leaving the
 // cleartext EPOLL / URING engine untouched. The context carries the cert / key / alpn / version
 // / curve / cipher / HSTS policy, loaded and validated once at startup.
@@ -47,7 +47,7 @@ pub fn main(process: std.process.Init) !void {
         .port = PORT,
         .tls = &tls,
         // .EPOLL / .URING terminate TLS in the event-driven epoll-mux worker (keep-alive, many
-        // connections per worker); .ASYNC / .POOL / .MIXED use the thread-per-connection path.
+        // connections per worker). .ASYNC / .POOL / .MIXED use the thread-per-connection path.
         .dispatch_model = .EPOLL,
         .workers = 1,
     });

@@ -1,7 +1,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// gRPC over TLS (grpc, RFC 8446 + 7540). The Grpc server serves h2c by default; attaching a
+// gRPC over TLS (grpc, RFC 8446 + 7540). The Grpc server serves h2c by default. Attaching a
 // Tls.Context (config.tls) opts into the gated TLS path (zix.Tls): the handshake negotiates ALPN
 // h2, then the unchanged gRPC h2 mux runs over the decrypted stream. For the event-loop models
 // (EPOLL / URING) one epoll worker per core terminates TLS in place and multiplexes many
