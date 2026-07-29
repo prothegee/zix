@@ -2,7 +2,7 @@
 //!
 //! What:
 //! - Only what the per-model files share: the per-datagram serve (`serveDatagram`), the recvmmsg worker
-//!   loop (`workerLoop`) plus its two run shapes (`runSingle`, one worker for ASYNC; `runMulti`, one
+//!   loop (`workerLoop`) plus its two run shapes (`runSingle` - one worker for ASYNC, `runMulti` - one
 //!   SO_REUSEPORT worker per CPU for POOL / MIXED, which ADR-050 defines as multi-core), the worker
 //!   helpers (`effectiveWorkers` / `pinToCpu` / `setBusyPoll`), and the non-Linux fallback. The per-core
 //!   EPOLL and URING workers own their own loops in `epoll.zig` and `uring.zig` (ADR-050: each model is
