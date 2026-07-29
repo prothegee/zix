@@ -94,6 +94,16 @@ pub const HttpServerConfig = struct {
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Receives multipart uploads.
     public_dir_upload: []const u8 = "u",
+    /// How long a resolved static file stays cached, in milliseconds. Default 0 means never cached:
+    /// every request re-opens and re-reads the file, which is the behaviour shipped before ADR-064.
+    /// Above 0 the file is kept open and its response header prerendered, so a repeat request costs
+    /// a hash lookup, and a file changed on disk is picked up within one window.
+    /// Separate from cache_ttl_ms, which belongs to the handler response cache.
+    public_dir_cache_ttl_ms: u32 = 0,
+    /// Static cache slot count, rounded down to a power of two and clamped against the process
+    /// descriptor budget. One slot holds one file plus its .br and .gz siblings, so 256 covers 85
+    /// distinct files at three variants each. A full table serves the request uncached, never an error.
+    public_dir_cache_max_entries: u32 = 256,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default
     /// false: compression spends CPU and only pays off over a real network, so off keeps the perf
     /// gate untouched. Active under .EPOLL / .URING. A handler opts in via resp.sendNegotiated.
