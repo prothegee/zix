@@ -62,6 +62,7 @@ pub const ExternalFn = core.ExternalFn;
 pub const setExternalHandler = core.setExternalHandler;
 pub const uringWatchFd = core.uringWatchFd;
 pub const setCache = core.setCache;
+pub const setStatic = core.setStatic;
 pub const ResponseCache = @import("../../utils/response_cache.zig").ResponseCache;
 
 pub const writeAllFD = core.writeAllFD;
