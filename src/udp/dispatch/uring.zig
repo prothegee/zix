@@ -90,7 +90,7 @@ fn armUringRecv(ring: *IoUring, msg: *linux.msghdr, slot: usize, fd: std.posix.s
 
 /// Arm (or re-arm) the multishot recvmsg on the provided buffer group: one SQE yields a CQE per datagram
 /// (each carrying a selected buffer id) until the kernel ends the multishot, when the caller re-arms. The
-/// msghdr only reserves the name / control space; the kernel writes the recvmsg_out header, the peer
+/// msghdr only reserves the name / control space. The kernel writes the recvmsg_out header, the peer
 /// address, then the payload into each selected buffer.
 fn armMultishotRecv(ring: *IoUring, msg: *linux.msghdr, fd: std.posix.socket_t) void {
     const sqe = uringGetSqe(ring) orelse return;
@@ -197,7 +197,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     }
     IoUring.buf_ring_advance(br, uring_ring_bufs);
 
-    // The msghdr only reserves name / control space per selected buffer; iov is unused (the kernel picks
+    // The msghdr only reserves name / control space per selected buffer, iov is unused (the kernel picks
     // the buffer). It must outlive the multishot, so it lives here for the worker's life.
     var msg = std.mem.zeroes(linux.msghdr);
     msg.namelen = @intCast(mshot_name_reserve);
