@@ -118,12 +118,12 @@ pub fn main(process: std.process.Init) !void {
 
     // logger.system(.INFO, "ipc", "A: listening on " ++ SOCK_PATH, .{});
 
-    std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
+    std.Io.Dir.cwd().deleteFile(io, SOCK_PATH) catch {};
     const unix_addr = try std.Io.net.UnixAddress.init(SOCK_PATH);
     var net_server = try unix_addr.listen(io, .{ .kernel_backlog = 1 });
     defer {
         net_server.deinit(io);
-        std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
+        std.Io.Dir.cwd().deleteFile(io, SOCK_PATH) catch {};
     }
 
     std.debug.print("A: listening on {s} start Process B\n", .{SOCK_PATH});
