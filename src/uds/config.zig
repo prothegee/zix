@@ -48,10 +48,10 @@ test "zix uds: UdsServerConfig, default field values" {
 
     const cfg = UdsServerConfig{
         .io = threaded.io(),
-        .path = "/tmp/zix.sock",
+        .path = "zix.sock",
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqualStrings("/tmp/zix.sock", cfg.path);
+    try std.testing.expectEqualStrings("zix.sock", cfg.path);
     try std.testing.expectEqual(std.testing.allocator.ptr, cfg.allocator.ptr);
     try std.testing.expectEqual(@as(u31, 128), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
@@ -60,8 +60,8 @@ test "zix uds: UdsServerConfig, default field values" {
 }
 
 test "zix uds: UdsClientConfig, default field values" {
-    const cfg = UdsClientConfig{ .path = "/tmp/zix.sock" };
-    try std.testing.expectEqualStrings("/tmp/zix.sock", cfg.path);
+    const cfg = UdsClientConfig{ .path = "zix.sock" };
+    try std.testing.expectEqualStrings("zix.sock", cfg.path);
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }

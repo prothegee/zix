@@ -368,22 +368,17 @@ if (comptime ZIG_SEMVER.MINOR == 16) {
 
 Every file operation goes through `std.Io.Dir.cwd()` (`createFile`, `readFileAlloc`, `deleteFile`). When the sub_path is absolute the dir handle is ignored, so this one call shape serves both relative and absolute paths. Do not reach for the `*Absolute` variants (`deleteFileAbsolute`, `openFileAbsolute`): they only accept an absolute path, which forces the call site to split into two shapes the moment a platform needs a relative one.
 
-Never hardcode a unix-style absolute path (`/tmp/...`) in code that Windows will open, write, or bind. Windows resolves `/tmp/...` against the current drive (for example `D:\tmp\...`), and when that directory does not exist the operation fails with NTSTATUS OBJECT_PATH_NOT_FOUND (surfacing as `error.FileNotFound` on file ops, or `error.Unexpected` on a socket bind). The idiom is a comptime branch: a cwd-relative filename on Windows, the usual `/tmp/...` elsewhere:
+Never hardcode a unix-style absolute path (`/tmp/...`) in code that Windows will open, write, or bind. Windows resolves `/tmp/...` against the current drive (for example `D:\tmp\...`), and when that directory does not exist the operation fails with NTSTATUS OBJECT_PATH_NOT_FOUND (surfacing as `error.FileNotFound` on file ops, or `error.Unexpected` on a socket bind). The idiom is a cwd-relative path, no platform branch needed since it resolves the same way everywhere:
 
 ```zig
-// cwd-relative on Windows: there may be no /tmp on the drive, so an
-// absolute unix-style path fails with OBJECT_PATH_NOT_FOUND.
-const cert_path = if (builtin.os.tag == .windows)
-    "zix_rsa_integration_cert.pem"
-else
-    "/tmp/zix_rsa_integration_cert.pem";
+const cert_path = "tmp/zix_rsa_integration_cert.pem";
 
 try writeFile(io, cert_path, cert_pem);
 defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};
 ```
 
-The same rule covers unix domain socket paths handed to `std.Io.net.UnixAddress`: Windows supports AF_UNIX, but the bind resolves the path exactly like a file open, so a `/tmp/...` socket path fails there too.
+The same rule covers unix domain socket paths handed to `std.Io.net.UnixAddress`: Windows supports AF_UNIX, but the bind resolves the path exactly like a file open, so a `/tmp/...` socket path fails there too. This also means a UDS server must clean up its socket file through `cwd().deleteFile`, never `deleteFileAbsolute`, since a relative path fails that function's own absolute-path assert.
 
 Production paths follow the caller: `Tls.Context.init` reads `cert_path` / `key_path` through `cwd().readFileAlloc`, so a config may carry either shape and the right one is the deployment's concern, not zix's.
 
-> Route every file op through `std.Io.Dir.cwd()` and let the path decide relative vs absolute. Never hardcode `/tmp` for anything Windows touches: comptime-branch to a cwd-relative name there, keep the unix path everywhere else.
+> Route every file op through `std.Io.Dir.cwd()` and let the path decide relative vs absolute. Never hardcode `/tmp` for anything Windows touches: use a cwd-relative path everywhere instead.

@@ -1,6 +1,6 @@
 // Connect to a zix UDS server, send one request, print the reply, then exit.
 //
-// Default target: /tmp/zix.sock (uds_server).
+// Default target: tmp/zix.sock (uds_server).
 // The server treats any frame content as a "get" request and replies
 // with an incrementing counter value as a decimal string.
 //
@@ -13,7 +13,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const SOCK_PATH: []const u8 = "/tmp/zix.sock";
+const SOCK_PATH: []const u8 = "tmp/zix.sock";
 const MESSAGE: []const u8 = "get";
 
 // --------------------------------------------------------- //

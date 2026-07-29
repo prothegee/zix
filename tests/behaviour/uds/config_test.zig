@@ -12,7 +12,7 @@ test "zix behaviour: UdsServerConfig, kernel_backlog defaults to 128" {
 
     const cfg = zix.Uds.ServerConfig{
         .io = threaded.io(),
-        .path = "/tmp/zix_behaviour_test.sock",
+        .path = "tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
     try std.testing.expectEqual(@as(u31, 128), cfg.kernel_backlog);
@@ -24,24 +24,24 @@ test "zix behaviour: UdsServerConfig, max_recv_buf defaults to 4096" {
 
     const cfg = zix.Uds.ServerConfig{
         .io = threaded.io(),
-        .path = "/tmp/zix_behaviour_test.sock",
+        .path = "tmp/zix_behaviour_test.sock",
         .allocator = std.testing.allocator,
     };
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
 }
 
 test "zix behaviour: UdsClientConfig, stores path as provided" {
-    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix_client_test.sock" };
-    try std.testing.expectEqualStrings("/tmp/zix_client_test.sock", cfg.path);
+    const cfg = zix.Uds.ClientConfig{ .path = "tmp/zix_client_test.sock" };
+    try std.testing.expectEqualStrings("tmp/zix_client_test.sock", cfg.path);
 }
 
 test "zix behaviour: UdsClientConfig, recv_timeout_ms defaults to 0 (disabled)" {
-    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix_client_test.sock" };
+    const cfg = zix.Uds.ClientConfig{ .path = "tmp/zix_client_test.sock" };
     try std.testing.expectEqual(@as(u32, 0), cfg.recv_timeout_ms);
 }
 
 test "zix behaviour: UdsClientConfig, send_timeout_ms defaults to 0 (disabled)" {
-    const cfg = zix.Uds.ClientConfig{ .path = "/tmp/zix_client_test.sock" };
+    const cfg = zix.Uds.ClientConfig{ .path = "tmp/zix_client_test.sock" };
     try std.testing.expectEqual(@as(u32, 0), cfg.send_timeout_ms);
 }
 

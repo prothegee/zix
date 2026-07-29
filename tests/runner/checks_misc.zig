@@ -104,15 +104,15 @@ pub fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
 }
 
 pub fn runUds(io: std.Io, server_path: []const u8) !void {
-    std.Io.Dir.deleteFileAbsolute(io, "/tmp/zix.sock") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "tmp/zix.sock") catch {};
 
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
-    try common.waitForUdsSocket(io, "/tmp/zix.sock", common.START_TIMEOUT_MS);
+    try common.waitForUdsSocket(io, "tmp/zix.sock", common.START_TIMEOUT_MS);
 
     var client = try zix.Uds.Client.connect(.{
-        .path = "/tmp/zix.sock",
+        .path = "tmp/zix.sock",
         .recv_timeout_ms = 3000,
     }, io);
     defer client.deinit(io);
@@ -126,12 +126,12 @@ pub fn runUds(io: std.Io, server_path: []const u8) !void {
 }
 
 pub fn runUdsHttp(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void {
-    std.Io.Dir.deleteFileAbsolute(io, "/tmp/zix.sock") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "tmp/zix.sock") catch {};
 
     var uds_child = try common.spawnServer(io, uds_server_path);
     defer uds_child.kill(io);
 
-    try common.waitForUdsSocket(io, "/tmp/zix.sock", common.START_TIMEOUT_MS);
+    try common.waitForUdsSocket(io, "tmp/zix.sock", common.START_TIMEOUT_MS);
 
     var http_child = try common.spawnServer(io, uds_http_path);
     defer http_child.kill(io);
@@ -169,7 +169,7 @@ pub fn runChannelSelfterm(io: std.Io, binary_path: []const u8) !void {
 }
 
 pub fn runChannelIpc(io: std.Io, ipc_a_path: []const u8, ipc_b_path: []const u8) !void {
-    std.Io.Dir.deleteFileAbsolute(io, "/tmp/zix_ipc.sock") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "/tmp/zix_ipc.sock") catch {};
 
     var child_a = try common.spawnServer(io, ipc_a_path);
     defer child_a.kill(io);

@@ -143,7 +143,7 @@ test "zix uds: UdsClient.sendMsg writes big-endian length header" {
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null" },
+        .config = .{ .path = "dev/null" },
     };
     defer _ = std.os.linux.close(fds[0]);
 
@@ -177,7 +177,7 @@ test "zix uds: UdsClient.recvMsg parses big-endian length header" {
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null" },
+        .config = .{ .path = "dev/null" },
     };
 
     var buf: [32]u8 = undefined;
@@ -205,7 +205,7 @@ test "zix uds: UdsClient.recvMsg does not time out when data arrives immediately
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null", .recv_timeout_ms = 50 },
+        .config = .{ .path = "dev/null", .recv_timeout_ms = 50 },
     };
 
     var buf: [8]u8 = undefined;
@@ -229,7 +229,7 @@ test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives"
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null", .recv_timeout_ms = 50 },
+        .config = .{ .path = "dev/null", .recv_timeout_ms = 50 },
     };
 
     var buf: [8]u8 = undefined;
@@ -255,7 +255,7 @@ test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer d
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null", .send_timeout_ms = 50 },
+        .config = .{ .path = "dev/null", .send_timeout_ms = 50 },
     };
 
     try client.sendMsg(io, "hello");
@@ -294,7 +294,7 @@ test "zix uds: UdsClient.sendMsg returns error.SendTimeout when the peer's buffe
 
     var client = UdsClient{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
-        .config = .{ .path = "/dev/null", .send_timeout_ms = 50 },
+        .config = .{ .path = "dev/null", .send_timeout_ms = 50 },
     };
 
     try std.testing.expectError(error.SendTimeout, client.sendMsg(io, "hello"));

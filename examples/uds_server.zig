@@ -1,6 +1,6 @@
 // uds_server.zig: UDS data provider (Process A)
 //
-// Listens on /tmp/zix.sock. For each received frame the server replies
+// Listens on tmp/zix.sock. For each received frame the server replies
 // with an incrementing counter so the HTTP frontend sees real data changes.
 //
 // Frame format (both directions):
@@ -17,7 +17,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const SOCK_PATH: []const u8 = "/tmp/zix.sock";
+const SOCK_PATH: []const u8 = "tmp/zix.sock";
 
 // Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -100,6 +100,9 @@ pub fn main(process: std.process.Init) !void {
     //     .console        = .ALWAYS,
     // });
     // defer logger.deinit();
+
+    // tmp/ is cwd-relative and not created automatically, unlike the system /tmp.
+    std.Io.Dir.cwd().createDirPath(process.io, "tmp") catch {};
 
     var server = try zix.Uds.Server.init(dataHandler, .{
         .io = process.io,

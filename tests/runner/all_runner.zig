@@ -46,7 +46,7 @@ const Check = struct {
     heavy: bool = false,
 };
 
-const zix_sock = "/tmp/zix.sock";
+const zix_sock = "tmp/zix.sock";
 const zix_ipc_sock = "/tmp/zix_ipc.sock";
 
 const checks = [_]Check{

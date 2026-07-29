@@ -182,7 +182,7 @@ pub fn waitForTcpPort(io: std.Io, child: *std.process.Child, port: u16, timeout_
 ///
 /// Param:
 /// io - std.Io (used to check file existence and sleep between retries)
-/// path - []const u8 (absolute socket file path)
+/// path - []const u8 (socket file path, absolute or cwd-relative)
 /// timeout_ms - u64 (maximum wait time in milliseconds)
 ///
 /// Return:
@@ -192,7 +192,7 @@ pub fn waitForUdsSocket(io: std.Io, path: []const u8, timeout_ms: u64) !void {
     var elapsed: u64 = 0;
 
     while (elapsed < timeout_ms) {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch {
+        std.Io.Dir.cwd().access(io, path, .{}) catch {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
             elapsed += 50;
             continue;
