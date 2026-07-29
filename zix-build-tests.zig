@@ -64,9 +64,13 @@ pub fn addSteps(
         "tests/integration/http1/server_test.zig",
         "tests/integration/http1/router_test.zig",
         "tests/integration/http1/tls_dual_test.zig",
+        "tests/integration/http1/static_cache_test.zig",
         // http2
         "tests/integration/http2/server_test.zig",
+        "tests/integration/http2/static_test.zig",
         "tests/integration/http2/tls_dual_test.zig",
+        // http3
+        "tests/integration/http3/static_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
         // fix
@@ -84,6 +88,7 @@ pub fn addSteps(
         // logger
         "tests/integration/logger/logger_test.zig",
         // tls
+        "tests/integration/tls/large_response_test.zig",
         "tests/integration/tls/rsa_test.zig",
     };
 
@@ -122,6 +127,8 @@ pub fn addSteps(
         "tests/behaviour/http1/core_test.zig",
         // http2
         "tests/behaviour/http2/config_test.zig",
+        // http3
+        "tests/behaviour/http3/config_test.zig",
         // websocket
         "tests/behaviour/websocket/websocket_test.zig",
         // fix
@@ -172,8 +179,12 @@ pub fn addSteps(
         "tests/edge/http/sse_client_test.zig",
         // http1
         "tests/edge/http1/core_test.zig",
+        "tests/edge/http1/static_cache_test.zig",
         // http2
         "tests/edge/http2/server_test.zig",
+        "tests/edge/http2/static_test.zig",
+        // http3
+        "tests/edge/http3/static_test.zig",
         // websocket
         "tests/edge/websocket/websocket_test.zig",
         // fix
