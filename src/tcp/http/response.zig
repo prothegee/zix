@@ -627,6 +627,15 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
     return rawFdWrite(fd, data);
 }
 
+/// Flush response bytes still staged for fd. A caller that writes the socket directly (sendfile)
+/// must call this first, so the wire order matches the order the responses were produced. No-op
+/// when no sink is installed or nothing is staged.
+pub fn flushPending(fd: std.posix.fd_t) void {
+    if (tl_resp_sink) |sink| {
+        if (sink.fd == fd) sink.flush();
+    }
+}
+
 /// Direct socket write, bypassing the .URING coalescing sink. Used by the sink
 /// itself (to avoid recursion) and by every non-ring dispatch model.
 fn rawFdWrite(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
