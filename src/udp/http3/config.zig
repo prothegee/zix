@@ -96,6 +96,20 @@ pub const Http3ServerConfig = struct {
     /// (default) leaves no deadline. A handler may still tighten or clear its own via
     /// Context.setTimeout / withDeadline.
     handler_timeout_ms: u32 = 0,
+    /// Root directory for static file serving. Empty (default) disables it. A request matching no
+    /// route is served as a file before the 404 fallback, ".." is rejected. Responses are always the
+    /// whole file: Range (RFC 7233) is not served over HTTP/3 in this pass.
+    /// Validated at run(): missing dir = error.PublicDirNotFound.
+    public_dir: []const u8 = "",
+    /// How long a resolved static file stays cached, in milliseconds. Unlike the other engines this
+    /// is NOT optional for static serving: an HTTP/3 response body outlives the handler call (the
+    /// pump reads it again for every packet and every retransmission), so it has to come from the
+    /// cache. 0 (the default) therefore disables static serving on this engine entirely.
+    public_dir_cache_ttl_ms: u32 = 0,
+    /// Static cache slot count, rounded down to a power of two and clamped against the process
+    /// descriptor budget. One slot holds one file plus its .br and .gz siblings. A full table serves
+    /// no file rather than an unsafe one, so the request falls through to 404.
+    public_dir_cache_max_entries: u32 = 256,
 };
 
 // --------------------------------------------------------------- //
