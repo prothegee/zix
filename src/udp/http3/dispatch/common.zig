@@ -438,7 +438,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
 
         // Time-driven maintenance (loss recovery + idle eviction), interval-gated. This blocking-recv
         // loop (ASYNC / POOL / MIXED) has no wait timeout, so the sweep advances while traffic keeps
-        // arriving; a fully silent worker parks in recv until the next datagram, acceptable off the
+        // arriving. A fully silent worker parks in recv until the next datagram, acceptable off the
         // benchmark path (the EPOLL / URING workers carry the timeout wake for a total lull).
         const now_us = recovery.nowUs();
         if (now_us -| last_sweep_us >= maintenance_interval_us) {
@@ -1155,7 +1155,7 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
 /// it has no room so the reply is never dropped. `retransmit` is the SendStream byte range this packet
 /// carries, recorded for loss detection (Connection.recordSentRange), or null for a packet that
 /// carries no SendStream data (a coalesced small response or a bare ACK): those have no retransmission
-/// yet, a known gap noted in rnd/http3-uring-throughput-plan.md.
+/// yet, a known gap.
 fn sealAndQueue(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, payload: []const u8, retransmit: ?SentRangeInfo) void {
     const needed = payload.len + protection.short_seal_overhead_max;
 
@@ -1364,7 +1364,7 @@ fn resumeStreams(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socke
 /// its own, RFC 9002 6.2), and evict one whose peer has gone (RFC 9000 10.1) so its table slot is
 /// reclaimed instead of pinned for the worker's life. Without this, a lost tail leaves a connection
 /// wedged (bytes stuck in flight, window collapsed) and the slot never frees, which is what collapsed
-/// EPOLL static-h3 across bench runs. Leaves retransmitted packets queued in `tx`; the caller flushes.
+/// EPOLL static-h3 across bench runs. Leaves retransmitted packets queued in `tx`, the caller flushes.
 pub fn sweepMaintenance(table: *ConnTable, tx: *datagram.SendBatch, fd: std.posix.socket_t, config: Http3ServerConfig, now_us: u64, stats: ?*WorkerStats) void {
     const max_idle_us: u64 = @as(u64, config.max_idle_ms) * 1000; // ms to us
 
