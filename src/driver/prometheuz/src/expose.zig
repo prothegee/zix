@@ -76,7 +76,7 @@ fn writeValue(writer: anytype, value: f64) !void {
     try writer.print("{d}", .{value});
 }
 
-/// Escape `\` and newline always; `"` only for label values (HELP text is
+/// Escape `\` and newline always, `"` only for label values (HELP text is
 /// never quoted, so a literal `"` needs no escape there).
 fn writeEscaped(writer: anytype, text: []const u8, escape_quote: bool) !void {
     for (text) |byte| {
