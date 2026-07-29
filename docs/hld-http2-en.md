@@ -104,6 +104,7 @@ graph TD
     Http2 --> hpack["hpack.zig\nstatic table + Huffman\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["config.zig\nHttp2ServerConfig"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
+    Http2 --> static["static.zig\npublic_dir fallback\nHEADERS + capped DATA frames"]
 
     server --> dispatch["dispatch/\nasync pool mixed epoll uring + common"]
     server --> tls_serve["tls_serve.zig\nthread-per-conn TLS terminator"]
@@ -115,6 +116,9 @@ graph TD
     mux --> hpack
     core --> frame
     core --> hpack
+    static --> frame
+    static --> hpack
+    static --> static_cache["utils/static_cache.zig\nshared open-file cache"]
 ```
 
 ---
@@ -175,6 +179,9 @@ pub const Http2ServerConfig = struct {
     tls_write_buf_initial_bytes: usize = 16 * 1024,
     response_cache: bool  = false, // per-worker response cache (ADR-036), .EPOLL/.URING
     handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline_ns, 0 = no deadline
+    public_dir:     []const u8 = "",        // static file root, "" disables static serving
+    public_dir_cache_ttl_ms:      u32 = 0,  // 0 = never cached, the shipped default
+    public_dir_cache_max_entries: u32 = 256,// static cache slots, one per file plus its siblings
     tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
     logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
 };
@@ -213,7 +220,38 @@ try server.run();
 - `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline_ns` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
 - The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
 - Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `frame.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
-- The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths get 404 `text/plain`), so the handler does not parse or match the path itself.
+- The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths try the static fallback below and then get 404 `text/plain`), so the handler does not parse or match the path itself.
+
+---
+
+## Static File Serving
+
+`public_dir` (ADR-064) serves an unmatched route as a file before the 404. Empty (the default) disables it, and a missing directory fails at `run()` with `error.PublicDirNotFound` rather than 404-ing every file request at runtime.
+
+```mermaid
+flowchart TD
+    A["router: no route matched"] --> B{"ctx.public_dir set?"}
+    B -->|no| Z["404 Not Found"]
+    B -->|yes| C{"path contains '..'?"}
+    C -->|yes| Z
+    C -->|no| D["negotiate encoding, resolve the file"]
+    D -->|absent| Z
+    D -->|found| E{"Range header?"}
+    E -->|none or malformed| F["200, whole file"]
+    E -->|satisfiable| G["206 with Content-Range"]
+    E -->|past the end| H["416, headers only"]
+    F --> I["one HEADERS frame, then DATA frames"]
+    G --> I
+    I --> J["last DATA frame carries END_STREAM"]
+```
+
+- One HEADERS frame carries the status, content type, `content-length`, `accept-ranges`, and `content-range` when the response is a 206. An empty file closes the stream on HEADERS with no DATA at all.
+- DATA frames are capped at the **peer's** `SETTINGS_MAX_FRAME_SIZE`, not at this server's `max_frame_size`. The two are different values: `max_frame_size` is what this server advertises it will accept, and sizing outbound frames by it is what a conforming peer answers with `FRAME_SIZE_ERROR`. The peer value arrives from the mux, from SETTINGS frames mid-connection, or from the base64 `HTTP2-Settings` header on an h2c upgrade.
+- Range (RFC 7233) is served: 206 for a satisfiable range, 416 with `Content-Range: bytes */length` for a well-formed range past the end, and a malformed header is ignored so the whole file is sent, which is what section 3.1 asks for. A multi-range header answers the first range only.
+- Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. Every cached variant header carries `Vary: Accept-Encoding`.
+- Zero copy (`sendfile`) is always refused on this engine, cleartext included, because the mux coalescing hook (`frame.write_hook`) is installed on every batch and a direct socket write would put the body ahead of frames already staged. The body is cut from a resident snapshot instead.
+- Static sends use the same unmetered `frame.sendResponseFD` path `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
+- `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http` and `zix.Http1`.
 
 ---
 
@@ -296,6 +334,7 @@ Per-stream access logging is the handler's responsibility: the handler owns its 
 | HPACK dynamic table | inline in the connection's decoder (`dyn_buf`, 8 KB) | Connection |
 | Per-worker response cache (opt-in) | `smp_allocator`, `cache_max_entries` * `cache_max_value_bytes` per worker | Worker thread |
 | Handler allocations | `ctx.allocator`: a stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, no heap call), reset per request | Request |
+| Static file cache (opt-in) | one demand-paged mapping shared by every worker and every HTTP engine in the process, `public_dir_cache_max_entries` slots holding an open file, its size, and its prerendered header | Process |
 
 The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-local pool (a free-list of `MuxStream`), so resident stream memory tracks the number of concurrent streams on that worker, not connections times `max_streams`. An idle connection holds only its `max_streams`-wide pointer array and its read buffer, not `max_streams` full stream buffers. A closed stream returns its slot (buffers retained) to the pool for the next borrow, so the steady state does no per-stream allocation. The blocking `.ASYNC` / `.POOL` / `.MIXED` path instead reserves a per-connection inline `Stream` array up front.
 
@@ -309,7 +348,8 @@ The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-lo
 | Concurrent streams | Advertised as `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). A stream opened beyond it is answered with `REFUSED_STREAM`, so the advertised value must be at least the peer's concurrent-stream count |
 | h2c upgrade (.EPOLL/.URING) | Served minimally on the mux path: `101` then the connection preface, the request carried on stream 1 is not served. Prior-knowledge clients (the common h2c case) are unaffected. The blocking `.ASYNC` / `.POOL` / `.MIXED` models serve the upgraded stream-1 request |
 | Header block scratch | `max_header_scratch` per connection (4 KB default). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |
-| Frame size | A frame larger than `max_frame_size` plus slack is a `FRAME_SIZE_ERROR` and closes the connection with GOAWAY |
+| Frame size | A frame larger than `max_frame_size` plus slack is a `FRAME_SIZE_ERROR` and closes the connection with GOAWAY. Outbound DATA is sized by the peer's advertised value instead, never by this one |
+| Static files | `public_dir` serves whole files and single ranges. A multi-range header answers the first range only, and there is no `public_dir_upload` companion on this engine |
 | TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` / `.POOL` / `.MIXED` per connection in a worker thread. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
 Endpoints that need a large request body should read it in DATA frames within `max_body`, or move the bulk transfer to a streaming design (the buffered model covers bounded bodies).

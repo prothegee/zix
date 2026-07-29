@@ -81,6 +81,13 @@ pub const Context = struct {
     io: std.Io,
     /// Per-request scratch allocator, backed by a stack buffer (no heap call).
     allocator: std.mem.Allocator,
+    /// Static file directory set by the server from config.public_dir. Empty disables the router's
+    /// static fallback, so an unmatched route goes straight to 404.
+    public_dir: []const u8 = "",
+    /// Cache slot backing the response body, when the router served a static file. The pin is held
+    /// past the handler because the body has to outlive it, so the engine releases it when the send
+    /// stream retires (or immediately, when the whole response fitted one packet).
+    static_slot: ?u32 = null,
 
     /// Return a copy with the deadline set to now + ms.
     pub fn withTimeout(self: Context, ms: u64) Context {
@@ -145,10 +152,15 @@ pub const HandlerFn = *const fn (req: *const Request, res: *Response, ctx: *Cont
 /// stream_id - u64 (QUIC request stream id, carried on Context as the raw escape hatch)
 /// io - std.Io (carried on Context for symmetry with the other engines)
 /// deadline_ns - ?u64 (seeded from config.handler_timeout_ms by the caller)
-pub inline fn invokeHandler(handler: HandlerFn, req: *const Request, res: *Response, stream_id: u64, io: std.Io, deadline_ns: ?u64) void {
+/// public_dir - []const u8 (static root, carried onto Context so the router can reach it)
+///
+/// Return:
+/// - ?u32 (static cache slot still pinned for this response, which the caller MUST release once the
+///   body has been sent. null when the response did not come from a static file)
+pub inline fn invokeHandler(handler: HandlerFn, req: *const Request, res: *Response, stream_id: u64, io: std.Io, deadline_ns: ?u64, public_dir: []const u8) ?u32 {
     var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-    var ctx = Context{ .stream_id = stream_id, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator() };
+    var ctx = Context{ .stream_id = stream_id, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator(), .public_dir = public_dir };
 
     handler(req, res, &ctx) catch {
         if (!res.sent) {
@@ -156,6 +168,8 @@ pub inline fn invokeHandler(handler: HandlerFn, req: *const Request, res: *Respo
             res.body = "";
         }
     };
+
+    return ctx.static_slot;
 }
 
 // --------------------------------------------------------------- //
@@ -226,7 +240,7 @@ test "zix http3: invokeHandler auto-500s when the handler errors and sent nothin
 
     const req = Request{ .method = "GET", .path = "/boom" };
     var res = Response{};
-    invokeHandler(erroringHandler, &req, &res, 0, io, null);
+    _ = invokeHandler(erroringHandler, &req, &res, 0, io, null, "");
 
     try std.testing.expectEqual(@as(u16, 500), res.status);
     try std.testing.expectEqualSlices(u8, "", res.body);
@@ -239,7 +253,7 @@ test "zix http3: invokeHandler keeps a partially sent response on handler error"
 
     const req = Request{ .method = "GET", .path = "/partial" };
     var res = Response{};
-    invokeHandler(erroringAfterSendHandler, &req, &res, 0, io, null);
+    _ = invokeHandler(erroringAfterSendHandler, &req, &res, 0, io, null, "");
 
     try std.testing.expectEqual(@as(u16, 200), res.status);
     try std.testing.expectEqualSlices(u8, "partial", res.body);

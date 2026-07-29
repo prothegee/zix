@@ -344,6 +344,26 @@ updateDateCache():
 
 ## static.zig: Static file serving
 
+Two paths behind one entry point (ADR-064): a cached path that is tried first, and the original
+uncached path kept as the fallback. The cached path is inert unless `public_dir_cache_ttl_ms` is
+set, so the shipped default runs everything below unchanged.
+
+### Cached path
+
+`static_cache.instance()` returns the process-wide table when a server installed one. A hit carries
+an already-open file, its size, the content type, and a prerendered 200 header, so a repeat request
+costs a hash lookup instead of an open plus a stat.
+
+- The 200 header is replayed as bytes. A Range request cannot replay it (it is a 200 with a fixed
+  `Content-Length`), so its 206 header is rendered per request from the same hit.
+- The body goes out through `static_send.sendBody`: `sendfile` on Linux in cleartext, a positional
+  read plus the engine's own write everywhere else. Zero copy is refused when the fd is the TLS
+  capture sentinel or a TLS stream sink is installed, since a direct write would bypass encryption.
+- Precompressed `.br` and `.gz` siblings are resolved once when the entry is built, and
+  `compression.negotiate` picks among the variants that exist. Every variant header carries
+  `Vary: Accept-Encoding`.
+- A miss, an unsafe path, or a full table returns false, and the uncached path below runs.
+
 ### Traversal guard
 
 ```

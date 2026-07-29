@@ -19,6 +19,7 @@ const linux = std.os.linux;
 const win_io = @import("../../utils/windows_io.zig");
 
 const Tls = @import("../../tls/Tls.zig");
+const record = @import("../../tls/record.zig");
 const connection = @import("../../tls/connection.zig");
 const certificate = @import("../../tls/certificate.zig");
 const extensions = @import("../../tls/extensions.zig");
@@ -211,12 +212,52 @@ pub const Session = struct {
     }
 
     /// Encrypt response plaintext into one or more application_data records (RFC 8446 5.2).
+    ///
+    /// Note:
+    /// - A record carries at most record.max_plaintext bytes, so a longer response is split across
+    ///   however many records it takes. Callers size `out` with record.sealedLen for the largest
+    ///   response they stage, which is why that is more than the plaintext itself.
+    /// - All or nothing: a partial response is worse than none, since the peer would read a truncated
+    ///   body as a complete one. An `out` too small to hold every record seals nothing.
+    ///
+    /// Param:
+    /// plaintext - []const u8 (whole response bytes, any length)
+    /// out - []u8 (must hold record.sealedLen(plaintext.len) bytes)
+    ///
+    /// Return:
+    /// - []const u8 (every sealed record, back to back, ready for the wire)
+    /// - empty when out cannot hold them all
     pub fn encrypt(self: *Session, plaintext: []const u8, out: []u8) []const u8 {
-        return self.conn.writeAppData(plaintext, out);
+        if (out.len < record.sealedLen(plaintext.len)) return out[0..0];
+
+        var rest = plaintext;
+        var written: usize = 0;
+
+        while (true) {
+            const take = @min(rest.len, record.max_plaintext);
+            const sealed = self.conn.writeAppData(rest[0..take], out[written..]);
+            if (sealed.len == 0) return out[0..0];
+
+            written += sealed.len;
+            rest = rest[take..];
+
+            if (rest.len == 0) break;
+        }
+
+        return out[0..written];
     }
 
     /// Gather form of encrypt: seal a staged prefix (a) followed by source bytes (b) as one
     /// application_data record, so the send path need not copy b into a contiguous buffer first.
+    ///
+    /// Note:
+    /// - ONE record, so a.len + b.len must be at most record.max_plaintext. The engines that use
+    ///   this stage a record-sized buffer and gather only what completes it, so the sum is bounded
+    ///   by construction. Use encrypt for a payload that has to be split.
+    ///
+    /// Return:
+    /// - []const u8 (the sealed record)
+    /// - empty when the two slices exceed one record or out cannot hold it
     pub fn encrypt2(self: *Session, a: []const u8, b: []const u8, out: []u8) []const u8 {
         return self.conn.writeAppData2(a, b, out);
     }
@@ -315,6 +356,108 @@ test "zix tls: resumable session drives a full 1.3 handshake + app data, sans I/
     const s2c = session.encrypt("pong from server", &s2c_buf);
     var c_in: [256]u8 = undefined;
     try std.testing.expectEqualSlices(u8, "pong from server", try finished.connection.readAppData(s2c, &c_in));
+}
+
+/// Drive a session to .established and hand back both ends, so a test can exchange application
+/// data without repeating the whole handshake.
+fn establishedPair() !struct { session: Session, client_conn: client.ClientConnection } {
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c");
+    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var session = Session.init(cert_der, .{ .ecdsa_p256 = server_key }, &.{.H2});
+
+    var ch_buf: [512]u8 = undefined;
+    const started = try client.start(.{ .client_random = @splat(0x11), .ephemeral_secret = @splat(0x42), .alpn = &.{.H2} }, &ch_buf);
+    var state = started.state;
+
+    var ch_rec: [600]u8 = undefined;
+    const ch_record = wrapRecord(content_type_handshake, started.client_hello, &ch_rec);
+
+    var to_send: [16 * 1024]u8 = undefined;
+    var plain: [4096]u8 = undefined;
+
+    const flight = session.feed(ch_record, &to_send, &plain);
+    var fin_buf: [256]u8 = undefined;
+    const finished = try client.finish(&state, flight.to_send, &fin_buf);
+    _ = session.feed(finished.client_finished, &to_send, &plain);
+
+    return .{ .session = session, .client_conn = finished.connection };
+}
+
+test "zix tls: session encrypt splits a response past one record and the client reads it whole" {
+    var pair = try establishedPair();
+
+    // Three records' worth plus a remainder, so the split has to carry a partial last record.
+    const body_len = record.max_plaintext * 3 + 1234;
+    const body = try std.testing.allocator.alloc(u8, body_len);
+    defer std.testing.allocator.free(body);
+    for (body, 0..) |*byte, index| byte.* = @intCast(index % 251);
+
+    const sealed = try std.testing.allocator.alloc(u8, record.sealedLen(body_len));
+    defer std.testing.allocator.free(sealed);
+
+    const wire = pair.session.encrypt(body, sealed);
+    try std.testing.expectEqual(record.sealedLen(body_len), wire.len);
+
+    // Read it back one record at a time, exactly as a peer would, and reassemble.
+    const reassembled = try std.testing.allocator.alloc(u8, body_len);
+    defer std.testing.allocator.free(reassembled);
+
+    var offset: usize = 0;
+    var filled: usize = 0;
+    var records: usize = 0;
+    var plain_buf: [record.max_plaintext + 1]u8 = undefined;
+    while (offset < wire.len) {
+        const length = (@as(usize, wire[offset + 3]) << 8) | wire[offset + 4];
+        const one = wire[offset .. offset + 5 + length];
+
+        const opened = try pair.client_conn.readAppData(one, &plain_buf);
+        @memcpy(reassembled[filled..][0..opened.len], opened);
+        filled += opened.len;
+        records += 1;
+
+        offset += one.len;
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), records);
+    try std.testing.expectEqual(body_len, filled);
+    try std.testing.expectEqualSlices(u8, body, reassembled);
+}
+
+test "zix tls: session encrypt seals nothing rather than a truncated response" {
+    var pair = try establishedPair();
+
+    const body_len = record.max_plaintext * 2;
+    const body = try std.testing.allocator.alloc(u8, body_len);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'z');
+
+    // One byte short of what the records cost. A partial seal would reach the peer as a complete
+    // but truncated body, which is worse than no response at all.
+    const tight = try std.testing.allocator.alloc(u8, record.sealedLen(body_len) - 1);
+    defer std.testing.allocator.free(tight);
+
+    try std.testing.expectEqual(@as(usize, 0), pair.session.encrypt(body, tight).len);
+
+    const exact = try std.testing.allocator.alloc(u8, record.sealedLen(body_len));
+    defer std.testing.allocator.free(exact);
+
+    try std.testing.expectEqual(exact.len, pair.session.encrypt(body, exact).len);
+}
+
+test "zix tls: session encrypt still emits one record for a small response" {
+    var pair = try establishedPair();
+
+    var sealed: [256]u8 = undefined;
+    const wire = pair.session.encrypt("small", &sealed);
+
+    try std.testing.expectEqual(record.sealedLen("small".len), wire.len);
+
+    var plain_buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("small", try pair.client_conn.readAppData(wire, &plain_buf));
 }
 
 test "zix tls: a fragmented record is held until the whole record arrives" {

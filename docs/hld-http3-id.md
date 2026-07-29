@@ -61,7 +61,10 @@ graph TD
     H3 --> server["server.zig\nServer.init(handler, config)\nrun() switch"]
     H3 --> config["config.zig\nHttp3ServerConfig, DispatchModel"]
     H3 --> router["router.zig\nRouter, Route, pathParam"]
-    H3 --> core["core.zig\nHandlerFn, Request, Response"]
+    H3 --> core["core.zig\nHandlerFn, Request, Response, Context"]
+    H3 --> static["static.zig\nfallback public_dir\nbody snapshot + pin cache"]
+
+    static --> static_cache["utils/static_cache.zig\ncache snapshot bersama"]
 
     server --> dispatch["dispatch/\ncommon + async / pool /\nmixed / epoll / uring"]
     dispatch --> datagram["../datagram.zig\nraw-fd socket\nrecvmmsg / sendmmsg"]
@@ -138,6 +141,10 @@ pub const Http3ServerConfig = struct {
     max_inflight_packets: usize = 128,   // ceiling congestion-window / kedalaman loss-log (RFC 9002)
     initial_window_packets: usize = 32,  // congestion window awal dalam packet (default RFC = 10)
 
+    public_dir:                   []const u8 = "",  // root file static, "" menonaktifkan penyajian static
+    public_dir_cache_ttl_ms:      u32 = 0,          // 0 juga mematikan penyajian static di sini, lihat bawah
+    public_dir_cache_max_entries: u32 = 256,        // slot cache static, satu per file plus sibling-nya
+
     logger: ?*Logger = null, // event lifecycle via logger.system() saat diset
 };
 ```
@@ -168,7 +175,42 @@ var server = zix.Http3.Server.init(Routes.dispatch, config);
 | `PARAM` | Segmen `:name` menangkap, segmen lain harus cocok persis | match pertama terdaftar menang, dibaca dengan `pathParam("name")` |
 | `PREFIX` | Prefix terdaftar terpanjang pada batas `/` | match terpanjang menang |
 
-Query string di-strip sebelum matching (matching melihat path sampai `?`), handler tetap menerima path penuh. Path yang tidak cocok mengembalikan `404 Not Found`. `Routes.dispatch` sendiri adalah `HandlerFn`, jadi langsung terpasang ke `Server.init`. Satu handler tunggal juga bekerja (tanpa router).
+Query string di-strip sebelum matching (matching melihat path sampai `?`), handler tetap menerima path penuh. Path yang tidak cocok mencoba fallback static di bawah, lalu mengembalikan `404 Not Found`. `Routes.dispatch` sendiri adalah `HandlerFn`, jadi langsung terpasang ke `Server.init`. Satu handler tunggal juga bekerja (tanpa router).
+
+---
+
+## Penyajian File Static
+
+`public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404, dengan `..` ditolak. Direktori yang tidak ada gagal saat `run()` dengan `error.PublicDirNotFound`.
+
+**Engine ini berbeda dari ketiga lainnya, dan perbedaannya bukan optimisasi.** Pada `zix.Http`, `zix.Http1`, dan `zix.Http2` response ditulis di dalam pemanggilan handler, jadi body bisa datang dari descriptor yang hanya terbuka selama pemanggilan itu. Di sini tidak bisa: `Response` adalah pemegang nilai, dan body yang terlalu besar untuk satu paket diparkir di slot send-stream, difragmentasi pump ke banyak paket, ditahan sampai setiap range di-ack, lalu di-rewind dan dikirim ulang saat loss atau probe timeout. Body harus berupa memori stabil yang bisa dibaca acak dan hidup lebih lama dari handler.
+
+Jadi body datang dari snapshot yang dipegang cache, dan pin cache ditahan sepanjang response, bukan sepanjang pemanggilan handler. Dua konsekuensi mengikuti:
+
+- **`public_dir_cache_ttl_ms = 0` mematikan penyajian static sepenuhnya di engine ini**, bukan sekadar cache-nya, karena tidak ada sumber body lain yang aman. `Server.run` memberi peringatan saat `public_dir` diisi tanpa itu, dan router jatuh ke 404.
+- File yang lebih besar dari `SNAPSHOT_MAX_BYTES` (8 MiB) tidak disajikan, dan tabel cache yang penuh tidak menyajikan file sama sekali alih-alih menyajikan yang tidak aman.
+
+```mermaid
+flowchart TD
+    A["router: tidak ada route cocok"] --> B{"ctx.public_dir diisi?"}
+    B -->|tidak| Z["404 Not Found"]
+    B -->|ya| C{"cache terpasang?"}
+    C -->|tidak, ttl 0| Z
+    C -->|ya| D["resolve, negosiasi, pin slot"]
+    D -->|miss| Z
+    D -->|hit| E["res.send(snapshot), ctx.static_slot = slot"]
+    E --> F{"response muat satu paket?"}
+    F -->|ya| G["body sudah tersalin, lepas pin sekarang"]
+    F -->|tidak| H["parkir di slot send-stream, tahan pin"]
+    H --> I["pump membaca snapshot per paket dan per retransmisi"]
+    I --> J["dilepas saat ack lengkap, atau saat koneksi idle"]
+```
+
+Pin dilepas tepat di dua titik, yang memang satu-satunya tempat hidup sebuah body berakhir: satu `stream.active = false` di `Connection.onAckFrame`, dan koneksi menjadi idle di `dispatch/common.zig`. Melewatkan salah satunya akan memin entry cache seumur hidup proses.
+
+**Mapping file sempat dibangun lalu ditolak di sini.** Menulis ulang file di tempat, yang persis dilakukan saat menyalin build baru menimpa file yang disajikan, mengubah byte di bawah mapping yang masih dibaca sebuah response, dan file yang menyusut akan fault melewati ujungnya sendiri lalu membawa serta prosesnya. Rename atomik aman, penulisan ulang di tempat tidak, dan server yang bisa dibuat crash hanya dengan menyalin file ke `public_dir`-nya sendiri bukan trade yang bisa diterima. Snapshot tidak bisa diubah di bawah sebuah response. Lihat ADR-064 untuk pengukurannya.
+
+Range (RFC 7233) tidak disajikan di engine ini: response static selalu file utuh dengan 200. Itu gap yang disengaja di pass ini, bukan kelalaian.
 
 ---
 
@@ -260,6 +302,8 @@ Detail ada di [`docs/lld-http3-id.md`](lld-http3-id.md).
 | State per-connection (`Connection`) | di dalam slot CID table | Lifetime connection, ukuran tetap (tanpa heap per-packet) |
 | Batch receive / send | `config.allocator` | Lifetime worker |
 | Scratch dekode (`app_payload_buf`, `path_scratch`) | di dalam `Connection` | Dipakai ulang per packet |
+| Cache file static (opt-in) | satu mapping demand-paged yang dipakai bersama semua worker dan semua engine HTTP dalam proses | Seumur hidup proses server |
+| Snapshot file static | di dalam slot cache, mapping anonim demand-paged dibatasi `SNAPSHOT_MAX_BYTES` (8 MiB) | Seumur hidup entry cache, dipin selama sebuah response membacanya |
 
 Allocator harus general-purpose (mis. `std.heap.smp_allocator`), syarat yang sama seperti keluarga engine lainnya. CID table berkapasitas tetap (256 connection per worker) tanpa alokasi per-packet: table penuh men-drop connection baru alih-alih tumbuh.
 
@@ -287,6 +331,7 @@ Beberapa layer terimplementasi dan diuji-unit terhadap vektor RFC tetapi belum d
 | Stream QUIC / CID pool (`stream.zig`) | State machine send / receive dan NEW_CONNECTION_ID, untuk migration dan CID pooling |
 | ChaCha20-Poly1305, Retry, key update (`crypto.zig`) | Jalur live AES-128-GCM saja |
 | CID steering per-core | ADR-049 fase 3: routing connection-id per-core sehingga model per-core menjadi migration-safe |
+| Range request pada `public_dir` | Response static hanya 200 file utuh. Ketiga engine HTTP lain menyajikan 206 / 416 (ADR-064) |
 
 Lihat ADR-049 / ADR-050 (`docs/adr-id.md`).
 

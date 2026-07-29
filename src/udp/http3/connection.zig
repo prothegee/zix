@@ -24,6 +24,7 @@ const demux = @import("demux.zig");
 const keyschedule = @import("keyschedule.zig");
 const transport_params = @import("transport_params.zig");
 const response = @import("response.zig");
+const static = @import("static.zig");
 const ks = @import("../../tls/key_schedule.zig");
 
 /// The most concurrent large (multi-packet) response streams one connection tracks for resumption.
@@ -73,6 +74,11 @@ pub const SendStream = struct {
     /// and the slot would never free). The slot is retired only once the whole body is sent AND unacked
     /// reaches 0, so a tail packet lost after the last byte went out is still found and retransmitted.
     unacked: usize = 0,
+
+    /// Static cache slot backing `body`, when this response came from public_dir. The pin keeps the
+    /// file mapped while the pump reads it, so it is released only when the slot is retired. null
+    /// for a handler-produced body, which owns its own lifetime.
+    static_slot: ?u32 = null,
 
     /// Whether every byte of the stream content has been sent (the FIN went out).
     pub fn complete(self: *const SendStream) bool {
@@ -316,6 +322,31 @@ pub const Connection = struct {
 
     /// Reserve a send-stream slot for `stream_id`: the existing slot if one is tracked, otherwise a
     /// free slot. Returns null when every slot is busy with another in-flight stream.
+    /// Hand back the static cache pin a retired send stream was holding, so the entry can expire.
+    ///
+    /// Note:
+    /// - Idempotent by clearing the slot, since a stream can be retired down more than one path
+    ///   (acknowledged, or abandoned when the connection goes away).
+    /// - Releasing while the pump could still read `body` would let the mapping be torn down under
+    ///   it, so this is only called where the stream is provably finished with.
+    pub fn releaseStaticPin(self: *Connection, stream: *SendStream) void {
+        _ = self;
+
+        const slot = stream.static_slot orelse return;
+        stream.static_slot = null;
+
+        static.releasePin(slot);
+    }
+
+    /// Retire every send stream this connection still holds, releasing any static cache pins with
+    /// them. Called when the connection is dropped, so a body abandoned mid-flight does not keep its
+    /// cache entry pinned for the life of the process.
+    pub fn releaseAllStaticPins(self: *Connection) void {
+        for (&self.send_streams) |*stream| {
+            if (stream.static_slot != null) self.releaseStaticPin(stream);
+        }
+    }
+
     pub fn reserveSendStream(self: *Connection, stream_id: u64) ?*SendStream {
         if (self.findSendStream(stream_id)) |stream| return stream;
 
@@ -440,6 +471,7 @@ pub const Connection = struct {
         for (&self.send_streams) |*stream| {
             if (stream.active and stream.unacked == 0 and stream.sent >= stream.content_len and stream.content_len > 0) {
                 stream.active = false;
+                self.releaseStaticPin(stream);
             }
         }
     }

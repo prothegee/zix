@@ -116,6 +116,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
 | `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, max_streams=128 dan max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
+| `tcp/http2/static.zig` | `refAllDecls` + perilaku: zero copy ditolak untuk batch coalescing dan fd sentinel, file dibingkai sebagai HEADERS plus DATA dengan END_STREAM, traversal / file hilang / path kepanjangan ditolak, body melebihi max frame size dipotong, file kosong menutup stream di HEADERS, sibling brotli dipilih dari cache |
 
 ### zix.Grpc
 
@@ -146,6 +147,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `udp/http3/connection.zig` | `refAllDecls` + perilaku: `init` menurunkan Initial key dari connection id (RFC 9001 A.1), cap anti-amplification 3x, `sendDatagramSize` meng-clamp ke config / client / ceiling, `replenishBidiStreams` dan `replenishMaxData` menaikkan grant melewati allowance sekali-pakai, batas pool `reserveSendStream`, pelacakan lubang `AckTracker`, sampling RTT `onAckFrame` |
 | `udp/http3/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, query di-strip sebelum matching, tidak ada match mengembalikan 404 |
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat run |
+| `udp/http3/static.zig` | `refAllDecls` + perilaku: content-encoding hanya memetakan yang bisa dikirim jalur respons, serve menolak ketika caching mati (body harus hidup lebih lama dari handler, jadi hanya bisa dari cache), respons diisi dari byte cache dan pin DITAHAN, body tetap terbaca setelah frame handler hilang, sibling `.br` dipilih dan dinamai, traversal dan file hilang ditolak, tepat satu pin ditahan dan `releasePin` mengembalikannya, pin yang dilepas membuat entry bisa di-reclaim, body in-flight kebal terhadap file yang ditulis ulang di tempat |
 
 ### zix.Logger
 
@@ -160,6 +162,8 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `utils/file.zig` | `refAllDecls` + perilaku: extension, save |
 | `utils/multipart.zig` | `refAllDecls` + perilaku: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
+| `utils/static_cache.zig` | `refAllDecls` + perilaku: penggabungan path menolak traversal / absolut / kepanjangan, header membawa `Vary` dan hanya menyebut encoding bila terkompresi, jumlah entry di-clamp dan dibulatkan ke power of two, request kedua memakai file terbuka yang sama, miss tidak menyimpan apa pun, ttl 0 tidak pernah menyentuh tabel, sibling `.br` / `.gz` diambil dan dinegosiasi, file tanpa sibling menyajikan identity, entry kedaluwarsa di-reclaim dan dibuka ulang, slot yang di-pin selamat dari reclaim, tabel penuh turun ke null, sweep membebaskan ruang, `install` process-wide dan `shutdown` membersihkannya |
+| `utils/static_send.zig` | `refAllDecls` + perilaku: jalur copy menulis seluruh body lewat fungsi tulis engine, menghormati offset dan panjang parsial, range nol-panjang tidak pernah menyentuh socket, body lebih besar dari buffer copy melakukan loop, kegagalan tulis engine muncul sebagai BrokenPipe. Khusus Linux: jalur zero-copy mengirim byte persis lewat socket sungguhan, menghormati offset, dan melaporkan BrokenPipe saat peer tertutup |
 
 ### multiplexers (src/multiplexers/, internal)
 
@@ -227,6 +231,50 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | Format wire `SseWriter.writeEvent` | `"data: ping\n\n"` melalui `std.Io.Writer.fixed` buffer |
 | Format wire `SseWriter.writeNamedEvent` | `"event: update\ndata: 99\n\n"` |
 | Format wire `SseWriter.comment` | `": keepalive\n"` |
+
+### tests/integration/http1/
+
+#### `server_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| `Http1Server.init` config valid, deinit aman | init berhasil dan deinit tidak error |
+| `Http1Server.init` dispatch model POOL | model diterima dan disimpan |
+| `Http1Server.init` dispatch model MIXED | model diterima dan disimpan |
+| `Http1Server.init` dispatch model EPOLL | model diterima dan disimpan |
+| `Http1Server.init` dispatch model URING | model diterima dan disimpan |
+
+#### `router_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Dispatch router mengarah ke handler yang cocok | path exact sampai ke handler-nya |
+| Dispatch router memilih route yang benar di antara beberapa | handler yang tepat menang saat beberapa terdaftar |
+| Dispatch router path tak dikenal menulis 404 | tanpa kecocokan jatuh ke 404 |
+
+#### `tls_dual_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Dual listener EPOLL melayani cleartext di port | kaki cleartext menjawab di `port` |
+| Dual listener EPOLL melayani TLS di tls_port dengan route yang sama | kaki TLS melayani tabel route yang sama |
+| Dual listener URING melayani cleartext di port | kaki cleartext menjawab di bawah ring |
+| Dual listener URING melayani TLS on-ring di tls_port | kaki TLS berjalan di ring |
+| Dual listener POOL melayani cleartext di port | kaki cleartext menjawab di model thread |
+| Dual listener POOL melayani TLS via accept thread tambahan | kaki TLS mendapat accept thread sendiri |
+| `tls_port` sama dengan `port` ditolak saat run | mengembalikan `error.TlsPortConflict` |
+
+#### `static_cache_test.zig`
+
+Menjalankan jalur router sungguhan lewat socketpair, jadi yang diuji adalah byte yang diterima klien.
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Router menyajikan path tak cocok dari static cache | 200 dengan content type dan body yang benar |
+| Router tetap 404 untuk path tak cocok tanpa file di baliknya | file yang tidak ada tetap 404 |
+| Router menjaga path ber-route di depan static cache | handler ber-route menang atas file yang akan menutupinya |
+| Router mengulang file yang di-cache byte demi byte antar request | header dan body yang diputar ulang identik dengan respons dingin |
+| Router menyajikan file yang sama tanpa cache ketika tidak ada cache terpasang | default bawaan tetap melayani lewat jalur lama |
 
 ### tests/integration/websocket/
 
@@ -318,6 +366,21 @@ Port: 18082-18085.
 | Http2 POST /echo mengembalikan body request | POST dengan frame DATA body, server meng-echo body kembali |
 | Http2 dua stream berurutan pada koneksi yang sama | stream ID 1 dan 3 masing-masing menerima response yang benar |
 | Http2 h2c upgrade GET / mengembalikan Hello World | HTTP/1.1 `Upgrade: h2c` -> 101 Switching Protocols -> response h2c |
+
+### tests/integration/http3/
+
+#### `static_test.zig`
+
+Membangun trio yang dibangun engine lalu memanggil `Router.dispatch`, jadi yang diuji adalah respons
+yang akan dibingkai engine, termasuk pin cache yang dikembalikannya.
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Router menyajikan path tak cocok dari static cache | 200, body dan content type benar, dan `static_slot` dikembalikan masih ter-pin |
+| Router 404 untuk path tak cocok tanpa file di baliknya | file yang tidak ada adalah 404 dan tidak ada pin diambil |
+| Router menjaga path ber-route di depan fallback static | handler ber-route menang atas file yang akan menutupinya |
+| Router 404 untuk path static ketika caching mati | file-nya ada, tapi engine ini tidak punya sumber body yang aman tanpa cache |
+| Router menyajikan body multi-paket yang hidup lebih lama dari panggilan dispatch | body 64 KiB terbaca utuh setelah Context hilang |
 
 ### tests/integration/grpc/
 
@@ -436,6 +499,32 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | `ContentType.TEXT_EVENT_STREAM.asString()` | mengembalikan `"text/event-stream"` |
 | `Response.streaming` default ke false | invarian `init()` |
 
+### tests/behaviour/http1/
+
+#### `config_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| `dispatch_model` wajib dan disimpan apa adanya | field round-trip |
+| `workers` dan `pool_size` default nol (auto) | nol berarti auto-size |
+| Default `kernel_backlog` 1024 | default bawaan |
+| Default ukuran buffer | `max_recv_buf` 6 KiB, `compression_max_out` 256 KiB |
+| Default kompresi | mati, `min_size` 256, `max_out` 256 KiB |
+| Nilai backing integer `DispatchModel` | `ASYNC` adalah nilai nol |
+| Static cache mati secara default | `public_dir_cache_ttl_ms` 0, `public_dir_cache_max_entries` 256 |
+| Field static cache disimpan apa adanya | keduanya round-trip |
+| Knob static cache independen dari knob response cache | kedua cache tidak berbagi state |
+
+#### `core_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| `parseHead` mengekstrak method, path, dan versi | request line dipisah dengan benar |
+| `parseHead` HTTP/1.1 default keep_alive true | persistensi default RFC |
+| `parseHead` `Connection: close` mematikan keep_alive | header menimpa default |
+| `getHeader` mengembalikan nilai tanpa peduli kapitalisasi | lookup header mengabaikan case |
+| `queryParam` mengembalikan nilai untuk param bernama | parsing query berdasarkan nama |
+
 ### tests/behaviour/websocket/
 
 #### `websocket_test.zig`
@@ -537,6 +626,16 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Panjang `Http2` PREFACE adalah 24 | `zix.Http2.PREFACE.len == 24` |
 | `Http2` ERR_NO_ERROR adalah nol | `zix.Http2.ERR_NO_ERROR == 0` |
 | `Http2` FLAG_END_STREAM dan FLAG_END_HEADERS berbeda | `FLAG_END_STREAM != FLAG_END_HEADERS` |
+
+### tests/behaviour/http3/
+
+#### `config_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Penyajian static mati secara default | `public_dir` kosong, ttl 0, 256 entry |
+| Field static disimpan apa adanya | ketiganya round-trip |
+| Penyajian static butuh caching, berbeda dari engine lain | mengunci asimetri yang disengaja: di Http3 ttl 0 mematikan penyajian static sepenuhnya, karena body respons hidup lebih lama dari handler-nya |
 
 ### tests/behaviour/grpc/
 
@@ -698,6 +797,37 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | Pesan yang datang dalam dua segmen TCP dirakit dengan benar | Logon terpecah di dua flush, server tetap membalas dengan MsgType=A |
 | Checksum yang buruk menyebabkan server menutup tanpa propagasi error di sisi server | byte pesan yang rusak menutup koneksi `ctx.err == null` |
 
+### tests/edge/http1/
+
+#### `core_test.zig`
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| `parseHead` tanpa terminator CRLF | mengembalikan `IncompleteHeader` |
+| `parseHead` request line kosong | mengembalikan `InvalidRequest` |
+| `parseHead` tanpa versi HTTP | mengembalikan `InvalidRequest` |
+| `queryParam` key dengan nilai kosong | mengembalikan string kosong, bukan null |
+| `queryParam` key tidak ada | mengembalikan null |
+| `parseRange` start melebihi total | mengembalikan null |
+| `parseRange` tanpa prefix `bytes=` | mengembalikan null |
+| `percentDecode` spasi ter-encode | didekode di tempat |
+
+#### `static_cache_test.zig`
+
+Setiap kasus di sini berakhir dengan hit null, yang oleh engine diperlakukan sebagai "sajikan tanpa cache".
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Menolak path yang keluar dari public_dir | traversal, absolut, dan kosong ditolak sebelum open apa pun |
+| Menolak path hasil resolve yang lebih panjang dari buffer-nya | path kepanjangan ditolak, bukan dipotong |
+| Dengan ttl 0 tidak pernah menyimpan apa pun | default nonaktif tidak memakai slot |
+| Menolak sebuah direktori | direktori bisa dibuka tapi tidak bisa disajikan, jadi tidak dipublikasikan |
+| Menyajikan file nol byte sebagai hit sungguhan | `Content-Length: 0`, tetap sebuah hit |
+| Kedaluwarsa persis di batas window | segar di `insert + ttl - 1`, kedaluwarsa di `insert + ttl` |
+| Tetap melayani setelah tabel penuh oleh entry yang di-pin | tabel penuh menolak path baru dan membiarkan entry yang ditahan utuh |
+| Negosiasi jatuh ke identity ketika klien menolak semuanya | menyajikan file polos lebih baik daripada menolaknya |
+| Init selamat dari permintaan entry yang absurd | di-clamp terhadap budget descriptor, tetap power of two |
+
 ### tests/edge/http2/
 
 #### `server_test.zig`
@@ -711,6 +841,22 @@ Port: 18100.
 | `Http2Server.init` menolak port nol | menghasilkan `error.PortNotConfigured` |
 | Dekode `HpackDecoder` dari blok kosong menghasilkan nol header | `decode(&.{}, ...)` menghasilkan 0 header tanpa error |
 | `writeFrameHeader` bit tinggi stream_id dihapus saat dibaca | `stream_id = 0x7FFF_FFFF` di-roundtrip dengan benar melalui pipe |
+
+### tests/edge/http3/
+
+#### `static_test.zig`
+
+Batas-batas di mana engine harus menolak alih-alih menyerahkan body yang tidak bisa ia tahan ke jalur kirimnya.
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Menolak file melewati batas snapshot | di atas 8 MiB ditolak untuk byte, sementara jalur descriptor tetap me-resolve-nya untuk engine lain |
+| Menyajikan file persis di batas snapshot | batasnya inklusif |
+| Menyajikan file nol byte sebagai body kosong | slice kosong sudah stabil, tidak ada yang di-snapshot |
+| Byte adalah snapshot, bukan jendela ke file | penulisan ulang di tempat tidak mengubah byte yang sudah diberikan |
+| Byte selamat dari pemotongan ke file lebih pendek | bentuk berbahaya: file menyusut saat respons masih dikirim |
+| Menolak setiap path tidak aman sebelum menyentuh disk | traversal, absolut, dan kosong |
+| Byte di-snapshot sekali dan dipakai ulang antar request | satu salinan menopang respons konkuren, dan masing-masing menahan pin sendiri |
 
 ### tests/edge/grpc/
 

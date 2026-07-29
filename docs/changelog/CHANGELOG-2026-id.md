@@ -44,9 +44,25 @@ __*Fix:*__
 
 <br>
 
-## 0.5.x-rc3 (2026-07-27)
+## MAJOR.MINOR.x (TBA)
 
 __*Update:*__
+
+- Penyajian file statis `public_dir` dirombak, dan diperluas ke keempat engine HTTP (ADR-064):
+    - Modul baru `src/utils/static_cache.zig`, satu tabel yang dipakai bersama semua worker dan semua engine HTTP dalam satu proses, menyimpan descriptor terbuka sebuah file, ukurannya, dan header 200-nya yang sudah dirender. Request berikutnya hanya membayar satu hash lookup alih-alih open plus stat.
+    - Modul baru `src/utils/static_send.zig`, yang memiliki satu tugas: memindahkan rentang byte ke socket. `sendfile` di Linux untuk respons cleartext, positional read plus fungsi tulis engine sendiri untuk yang lain. Zero copy ditolak setiap kali respons dienkripsi atau di-staging, jadi tidak ada jalur yang bisa menaruh plaintext di wire.
+    - Dua field config flat baru di `zix.Http`, `zix.Http1`, `zix.Http2`, dan `zix.Http3`: `public_dir_cache_ttl_ms` (default 0) dan `public_dir_cache_max_entries` (default 256). Default 0 berarti tidak pernah di-cache, jadi deployment yang sudah ada berperilaku persis seperti sebelumnya.
+    - Sibling terkompresi `.br` dan `.gz` diambil dari disk, di-resolve sekali saat entry dibuat alih-alih diprobe per request, dan setiap varian membawa `Vary: Accept-Encoding`. Tidak ada kompresi on the fly.
+    - Range (RFC 7233) disajikan dari file yang di-cache pada `zix.Http`, `zix.Http1`, dan `zix.Http2`, dengan header 206 dirender per request dan 416 untuk range well-formed yang melewati akhir file. Header yang malformed diabaikan dan file utuh yang dikirim, sesuai RFC 7233 bagian 3.1. `zix.Http3` hanya menyajikan file utuh.
+
+    ---
+
+- `public_dir` di `zix.Http2` dan `zix.Http3`, yang sebelumnya tidak punya penyajian file statis sama sekali:
+    - `zix.Http2` membingkai file sebagai satu frame HEADERS plus frame DATA yang dibatasi `SETTINGS_MAX_FRAME_SIZE` peer, yang terakhir membawa END_STREAM. Jalur dengan cache dan tanpa cache keduanya dibangun, jadi `public_dir` berperilaku sama baik caching aktif maupun tidak.
+    - `zix.Http3` berbeda karena keharusan: body respons HTTP/3 hidup lebih lama dari handler-nya, karena body yang terlalu besar untuk satu paket diparkir di slot send-stream dan dibaca ulang untuk setiap paket dan setiap retransmisi. Karena itu body-nya berasal dari snapshot yang ditahan cache, dan pin cache ditahan selama respons berlangsung. Inilah sebabnya `public_dir_cache_ttl_ms = 0` menonaktifkan penyajian static sepenuhnya di engine itu, bukan sekadar menonaktifkan cache-nya.
+    - Pemetaan file (mmap) sudah diukur dan ditolak untuk snapshot itu: menulis ulang file di tempat (yang terjadi saat menyalin build baru ke atas file yang sedang disajikan) mengubah byte di bawah respons yang masih membacanya, dan file yang menyusut akan fault melewati ujungnya sendiri. Snapshot tidak bisa berubah di bawah sebuah respons.
+
+<br>
 
 - `recv_timeout_ms` client `zix.Udp` sekarang berlaku di Windows:
     - `receiveFeedback` sebelumnya jatuh ke blocking receive di Windows, jadi client yang menunggu peer yang diam tidak pernah timeout (ini sumber hang CI Windows). Receive sekarang dijaga readiness poll berbasis AFD yang sama dengan client keluarga TCP, jadi `error.RecvTimeout` berlaku di semua platform.

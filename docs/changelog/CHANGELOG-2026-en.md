@@ -44,9 +44,25 @@ __*Fix:*__
 
 <br>
 
-## 0.5.x-rc3 (2026-07-27)
+## MAJOR.MINOR.x (TBA)
 
 __*Update:*__
+
+- `public_dir` static file serving reworked, and extended to all four HTTP engines (ADR-064):
+    - New `src/utils/static_cache.zig`, a table shared by every worker and every HTTP engine in the process, holding a resolved file's open descriptor, its size, and its prerendered 200 header. A repeat request costs a hash lookup instead of an open plus a stat.
+    - New `src/utils/static_send.zig`, which owns moving a byte range to a socket: `sendfile` on Linux for a cleartext response, a positional read plus the engine's own write otherwise. Zero copy is refused whenever a response is encrypted or staged, so no path can put plaintext on the wire.
+    - Two new flat config fields on `zix.Http`, `zix.Http1`, `zix.Http2`, and `zix.Http3`: `public_dir_cache_ttl_ms` (default 0) and `public_dir_cache_max_entries` (default 256). The default of 0 means never cached, so an existing deployment behaves exactly as before.
+    - Precompressed `.br` and `.gz` siblings are picked up from disk, resolved once when the entry is built rather than probed per request, and every variant carries `Vary: Accept-Encoding`. Nothing is compressed on the fly.
+    - Range (RFC 7233) is served from the cached file on `zix.Http`, `zix.Http1`, and `zix.Http2`, with the 206 header rendered per request and 416 for a well-formed range past the end. A malformed header is ignored and the whole file is sent, which is what RFC 7233 section 3.1 asks for. `zix.Http3` serves whole files only.
+
+    ---
+
+- `public_dir` on `zix.Http2` and `zix.Http3`, which had no static file serving at all:
+    - `zix.Http2` frames a file as one HEADERS frame plus DATA frames capped at the peer's `SETTINGS_MAX_FRAME_SIZE`, the last carrying END_STREAM. Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not caching is enabled.
+    - `zix.Http3` differs by necessity: an HTTP/3 response body outlives its handler, since a body too large for one packet is parked in a send-stream slot and re-read for every packet and every retransmission. Its body therefore comes from a cache-held snapshot, and the cache pin is held for the whole response. This is why `public_dir_cache_ttl_ms = 0` disables static serving entirely on that engine rather than merely disabling the cache.
+    - A file mapping was measured and rejected for that snapshot: rewriting a file in place (what copying a new build over a served file does) changes the bytes under a response still reading them, and a file that shrank would fault past its own end. A snapshot cannot be changed underneath a response.
+
+<br>
 
 - `zix.Udp` client `recv_timeout_ms` now enforced on Windows:
     - `receiveFeedback` previously degraded to a blocking receive on Windows, so a client waiting on a silent peer never timed out (this was the source of the Windows CI hang). The receive is now gated by the same AFD-based readiness poll the TCP-family clients use, so `error.RecvTimeout` fires on every platform.

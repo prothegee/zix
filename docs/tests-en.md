@@ -116,6 +116,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
 | `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers/pool_size default to 0, max_streams=128 and max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+| `tcp/http2/static.zig` | `refAllDecls` + behavioral: zero copy is refused for a coalescing batch and the sentinel fd, a file is framed as HEADERS plus DATA with END_STREAM, traversal / a missing file / an oversize path are rejected, a body past the max frame size is chunked, an empty file closes the stream on HEADERS, the brotli sibling is picked from the cache |
 
 ### zix.Grpc
 
@@ -146,6 +147,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `udp/http3/connection.zig` | `refAllDecls` + behavioral: `init` derives the Initial keys from the connection id (RFC 9001 A.1), the anti-amplification 3x cap, `sendDatagramSize` clamps to config / client / ceiling, `replenishBidiStreams` and `replenishMaxData` raise their grants past the one-time allowances, `reserveSendStream` pool bounds, `AckTracker` hole tracking, `onAckFrame` RTT sampling |
 | `udp/http3/router.zig` | `refAllDecls` + behavioral: dispatch calls the matching handler, the query is stripped before matching, no match returns 404 |
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + behavioral: required config fields and defaults, a null `Tls.Context` is rejected at run |
+| `udp/http3/static.zig` | `refAllDecls` + behavioral: content-encoding maps only what the response path can emit, serve declines when caching is off (the body must outlive the handler, so it can only come from the cache), the response is filled from cached bytes and the pin is KEPT, the body stays readable after the handler frame is gone, a `.br` sibling is picked and named, traversal and a missing file are rejected, exactly one pin is held and `releasePin` returns it, a released pin lets the entry be reclaimed, an in-flight body is immune to the file being rewritten in place |
 
 ### zix.Logger
 
@@ -160,6 +162,8 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `utils/file.zig` | `refAllDecls` + behavioral: extension, save |
 | `utils/multipart.zig` | `refAllDecls` + behavioral: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
+| `utils/static_cache.zig` | `refAllDecls` + behavioral: path join rejects traversal / absolute / oversize, header carries `Vary` and only encodes when compressed, entry count clamped and rounded to a power of two, second request reuses the same open file, a miss caches nothing, ttl 0 never touches the table, `.br` / `.gz` siblings picked up and negotiated, a file with no sibling serves identity, an expired entry is reclaimed and re-opened, a pinned slot survives reclaim, a full table degrades to null, a sweep frees room, `install` is process-wide and `shutdown` clears it |
+| `utils/static_send.zig` | `refAllDecls` + behavioral: the copy path writes the whole body through the engine write, honours an offset and a partial length, a zero-length range never touches the socket, a body larger than the copy buffer loops, a failing engine write surfaces as BrokenPipe. Linux only: the zero-copy path delivers exact bytes over a real socket, honours an offset, and reports BrokenPipe on a closed peer |
 
 ### multiplexers (src/multiplexers/, internal)
 
@@ -227,6 +231,50 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | `SseWriter.writeEvent` wire format | `"data: ping\n\n"` via `std.Io.Writer.fixed` buffer |
 | `SseWriter.writeNamedEvent` wire format | `"event: update\ndata: 99\n\n"` |
 | `SseWriter.comment` wire format | `": keepalive\n"` |
+
+### tests/integration/http1/
+
+#### `server_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `Http1Server.init` valid config, deinit is safe | init succeeds and deinit does not error |
+| `Http1Server.init` POOL dispatch model | the model is accepted and stored |
+| `Http1Server.init` MIXED dispatch model | the model is accepted and stored |
+| `Http1Server.init` EPOLL dispatch model | the model is accepted and stored |
+| `Http1Server.init` URING dispatch model | the model is accepted and stored |
+
+#### `router_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Router dispatch routes to matching handler | an exact path reaches its handler |
+| Router dispatch selects correct route among multiple | the right handler wins with several registered |
+| Router dispatch unknown path writes 404 | no match falls through to the 404 |
+
+#### `tls_dual_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Dual listener EPOLL serves cleartext on port | cleartext leg answers on `port` |
+| Dual listener EPOLL serves TLS on tls_port with the same routes | the TLS leg serves the same route table |
+| Dual listener URING serves cleartext on port | cleartext leg answers under the ring |
+| Dual listener URING serves TLS on-ring on tls_port | the TLS leg runs on the ring |
+| Dual listener POOL serves cleartext on port | cleartext leg answers on the thread model |
+| Dual listener POOL serves TLS via the extra accept thread | the TLS leg gets its own accept thread |
+| `tls_port` equal to `port` is rejected at run | returns `error.TlsPortConflict` |
+
+#### `static_cache_test.zig`
+
+Drives the real router path over a socketpair, so what is asserted is the bytes a client receives.
+
+| Test | What it verifies |
+| :- | :- |
+| Router serves an unmatched path from the static cache | 200 with the right content type and body |
+| Router still 404s an unmatched path with no file behind it | a missing file is still a 404 |
+| Router keeps routed paths ahead of the static cache | a routed handler wins over a file that would shadow it |
+| Router repeats a cached file byte for byte across requests | the replayed header and body are identical to the cold response |
+| Router serves the same file uncached when no cache is installed | the shipped default still serves through the original path |
 
 ### tests/integration/websocket/
 
@@ -318,6 +366,21 @@ Ports: 18082-18085.
 | Http2 POST /echo returns request body | POST with body DATA frame, server echoes body back |
 | Http2 two sequential streams on same connection | stream IDs 1 and 3 each receive correct responses |
 | Http2 h2c upgrade GET / returns Hello World | HTTP/1.1 `Upgrade: h2c` -> 101 Switching Protocols -> h2c response |
+
+### tests/integration/http3/
+
+#### `static_test.zig`
+
+Builds the trio the engine builds and calls `Router.dispatch`, so what is asserted is the response
+the engine would go on to frame, including the cache pin it hands back.
+
+| Test | What it verifies |
+| :- | :- |
+| Router serves an unmatched path from the static cache | 200, correct body and content type, and `static_slot` is handed back still pinned |
+| Router 404s an unmatched path with no file behind it | a missing file is a 404 and no pin is taken |
+| Router keeps routed paths ahead of the static fallback | a routed handler wins over a file that would shadow it |
+| Router 404s static paths when caching is off | the file exists, but this engine has no safe body source without the cache |
+| Router serves a multi-packet body that outlives the dispatch call | a 64 KiB body reads back intact after the Context is gone |
 
 ### tests/integration/grpc/
 
@@ -436,6 +499,32 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `ContentType.TEXT_EVENT_STREAM.asString()` | returns `"text/event-stream"` |
 | `Response.streaming` defaults to false | `init()` invariant |
 
+### tests/behaviour/http1/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `dispatch_model` is required and stored as set | the field round-trips |
+| `workers` and `pool_size` default to zero (auto) | zero means auto-size |
+| `kernel_backlog` default is 1024 | the shipped default |
+| Buffer size defaults | `max_recv_buf` 6 KiB, `compression_max_out` 256 KiB |
+| Compression defaults | off, `min_size` 256, `max_out` 256 KiB |
+| `DispatchModel` integer backing values | `ASYNC` is the zero value |
+| Static cache is off by default | `public_dir_cache_ttl_ms` 0, `public_dir_cache_max_entries` 256 |
+| Static cache fields are stored as set | both round-trip |
+| Static cache knobs are independent of the response cache knobs | the two caches share no state |
+
+#### `core_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `parseHead` extracts method, path, and version | the request line is split correctly |
+| `parseHead` HTTP/1.1 defaults keep_alive to true | RFC default persistence |
+| `parseHead` `Connection: close` disables keep_alive | the header overrides the default |
+| `getHeader` returns value case-insensitively | header lookup ignores case |
+| `queryParam` returns value for named param | query parsing by name |
+
 ### tests/behaviour/websocket/
 
 #### `websocket_test.zig`
@@ -537,6 +626,16 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `Http2` PREFACE length is 24 | `zix.Http2.PREFACE.len == 24` |
 | `Http2` ERR_NO_ERROR is zero | `zix.Http2.ERR_NO_ERROR == 0` |
 | `Http2` FLAG_END_STREAM and FLAG_END_HEADERS are distinct | `FLAG_END_STREAM != FLAG_END_HEADERS` |
+
+### tests/behaviour/http3/
+
+#### `config_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| Static serving is off by default | empty `public_dir`, ttl 0, 256 entries |
+| Static fields are stored as set | all three round-trip |
+| Static serving needs caching, unlike the other engines | pins the deliberate asymmetry: on Http3 a ttl of 0 disables static serving entirely, because the response body outlives its handler |
 
 ### tests/behaviour/grpc/
 
@@ -698,6 +797,37 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Message arriving in two TCP segments is reassembled correctly | split Logon across two flushes, server still replies with MsgType=A |
 | Bad checksum causes server to close without server-side error propagation | corrupted message byte closes connection `ctx.err == null` |
 
+### tests/edge/http1/
+
+#### `core_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| `parseHead` missing CRLF terminator | returns `IncompleteHeader` |
+| `parseHead` empty request line | returns `InvalidRequest` |
+| `parseHead` missing HTTP version | returns `InvalidRequest` |
+| `queryParam` key with empty value | returns an empty string, not null |
+| `queryParam` absent key | returns null |
+| `parseRange` start beyond total | returns null |
+| `parseRange` missing `bytes=` prefix | returns null |
+| `percentDecode` encoded space | decoded in place |
+
+#### `static_cache_test.zig`
+
+Every case here ends in a null hit, which the engines treat as "serve it uncached".
+
+| Test | What it verifies |
+| :- | :- |
+| Declines a path that escapes public_dir | traversal, absolute, and empty are refused before any open |
+| Declines a resolved path longer than its buffer | an oversize path is declined, not truncated |
+| With ttl 0 never stores anything | the disabled default consumes no slot |
+| Declines a directory | a directory opens but is not servable, so it is not published |
+| Serves a zero-byte file as a real hit | `Content-Length: 0`, still a hit |
+| Expiry is exact at the window boundary | fresh at `insert + ttl - 1`, expired at `insert + ttl` |
+| Keeps serving after the table fills with pinned entries | a full table declines the new path and leaves held entries intact |
+| Negotiation falls back to identity when a client rejects everything | serving the plain file beats refusing it |
+| Init survives an absurd entry request | clamped against the descriptor budget, still a power of two |
+
 ### tests/edge/http2/
 
 #### `server_test.zig`
@@ -711,6 +841,22 @@ Port: 18100.
 | `Http2Server.init` rejects port zero | returns `error.PortNotConfigured` |
 | `HpackDecoder` decode of empty block returns zero headers | `decode(&.{}, ...)` returns 0 headers without error |
 | `writeFrameHeader` stream_id high bit is cleared on read | `stream_id = 0x7FFF_FFFF` roundtrips correctly via pipe |
+
+### tests/edge/http3/
+
+#### `static_test.zig`
+
+The boundaries where the engine has to decline rather than hand its send path a body it cannot hold.
+
+| Test | What it verifies |
+| :- | :- |
+| Declines a file past the snapshot ceiling | over 8 MiB is declined for bytes, while the descriptor path still resolves it for the other engines |
+| Serves a file exactly at the snapshot ceiling | the ceiling is inclusive |
+| Serves a zero-byte file as an empty body | an empty slice is already stable, nothing is snapshotted |
+| Bytes are a snapshot, not a window onto the file | an in-place rewrite does not change bytes already handed out |
+| Bytes survive a truncation to a shorter file | the dangerous shape: the file shrinks while a response is still sending |
+| Declines every unsafe path before touching the disk | traversal, absolute, and empty |
+| Bytes are snapshotted once and reused across requests | one copy backs concurrent responses, and each holds its own pin |
 
 ### tests/edge/grpc/
 

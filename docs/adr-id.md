@@ -1452,4 +1452,90 @@ Router punya belahan yang sama. `Http`, `Http2`, `Grpc`, `Fix` menerima array ro
 
 ---
 
+## ADR-064: Cache static public_dir di keempat engine HTTP
+
+**Status:** Accepted
+
+**Konteks:** Penyajian file static baru setengah jadi, dan lambat di tempat yang sudah ada.
+
+| Engine | field `public_dir` | file static | bagaimana body dikirim dulu |
+| :- | :- | :- | :- |
+| zix.Http | ya | `src/tcp/http/static.zig` | `openFile` plus `stat` plus loop copy baca/tulis 8 KiB per request |
+| zix.Http1 | ya | `src/tcp/http1/static.zig` | loop yang sama, menulis lewat `core.writeAllFD` |
+| zix.Http2 | tidak | tidak ada | belum dibangun |
+| zix.Http3 | tidak | tidak ada | belum dibangun |
+
+Setiap request untuk file yang sama membayar 2 syscall untuk menemukannya, lalu `ceil(size / 8 KiB)` pembacaan dan penulisan sebanyak itu juga, plus copy userspace penuh atas setiap byte. Tidak ada yang diingat antar request, dan kedua implementasi hampir menduplikasi satu sama lain.
+
+Pasangan `cache_ttl_ms` dan `cache_max_entries` yang sudah ada tidak bisa dipakai ulang. Keduanya menggerakkan `src/utils/response_cache.zig` (ADR-036), slab response ber-key per-worker dengan key `hashKeyEncoded(method, path, query, encoding)`, yang sengaja terikat pada kompresi dan pada response hasil handler. File static punya owner berbeda, lifetime berbeda, dan sumber body berbeda (sebuah descriptor, bukan slice byte), jadi ia butuh knob sendiri.
+
+**Keputusan:** Satu modul cache bersama plus satu file static tipis per engine, di belakang dua field config flat baru yang hadir di keempat engine.
+
+- `src/utils/static_cache.zig` baru, memiliki index nama, stamp TTL, file yang terbuka, ukurannya, byte header response yang sudah dirender, pin count, dan reclaim. Modul ini tidak tahu apa-apa soal versi HTTP.
+- `src/utils/static_send.zig` baru, memiliki satu tugas: memindahkan rentang byte dari file yang terbuka ke socket, dengan `sendfile` atau dengan copy lewat fungsi write milik engine sendiri.
+- `src/utils/http_range.zig` baru, parser RFC 7233 bersama yang memisahkan pembacaan header dari clamping-nya terhadap panjang yang diketahui, sehingga header malformed bisa diabaikan (200) sementara yang well-formed tapi tak terpenuhi dijawab 416.
+- `static.zig` tiap engine memiliki negosiasi encoding, framing untuk format wire-nya sendiri, dan pengiriman. Hanya framing yang berbeda, jadi hanya framing yang diduplikasi.
+- Dua field flat baru mengikuti penamaan `cache_*` yang sudah ada: `public_dir_cache_ttl_ms: u32 = 0` dan `public_dir_cache_max_entries: u32 = 256`. `zix.Http2` dan `zix.Http3` juga mendapat `public_dir` itu sendiri.
+- `public_dir_cache_ttl_ms = 0` berarti tidak pernah di-cache, dan itu default-nya. Jalur itu menjalankan code path sebelumnya byte demi byte, jadi deployment yang sudah ada tidak bisa regresi hanya karena upgrade.
+- Cache bersifat process-wide, bukan per-worker: satu descriptor per varian yang di-cache alih-alih satu per worker, pembacaan lock-free ber-ordering acquire, dan spinlock hanya pada insert yang jarang. Ini pengecualian yang disengaja terhadap idiom shared-nothing di tempat lain, diambil karena nilai yang di-cache adalah objek kernel, bukan state per-worker.
+- Satu word atomic per slot membawa flag live sekaligus pin count. Pembaca melakukan pin dengan compare-and-swap yang hanya sukses selama slot masih live, dan reclaim membersihkan flag live dengan compare-and-swap yang hanya sukses saat pin nol. Dua word terpisah akan race: sebuah reclaim bisa lolos pemeriksaan pin-nya di antara key match dan pin milik pembaca.
+- Key-nya adalah path identity yang sudah di-resolve, dan satu slot memuat ketiga varian file itu. Client yang menerima brotli untuk file tanpa sibling `.br` ikut memakai entry identity alih-alih memakan slot kedua.
+- Sibling terkompresi hanya diambil dari disk. `foo.js.br` dan `foo.js.gz` dibuka sekali saat insert, lalu `compression.negotiate` memilih per request di antara varian yang benar-benar ada. Tidak ada kompresi on-the-fly. Setiap header varian membawa `Vary: Accept-Encoding`, termasuk yang identity, sehingga intermediary tidak bisa memberi body brotli ke client yang tidak memintanya.
+- Miss tidak pernah di-cache, jadi banjir path tak dikenal hanya berbiaya satu open gagal masing-masing dan meninggalkan tabel apa adanya. Pengisian bersifat lazy, tanpa penelusuran saat startup.
+- Overflow tidak pernah menggagalkan request. Tiga tingkat: reclaim dulu (insert pada tabel penuh menyapu 8 slot terbatas, membebaskan yang kedaluwarsa dan tidak dipin), lalu sajikan tanpa cache lewat jalur lama, dan tidak pernah alokasi di hot path. Tabel penuh berarti response yang lebih lambat, bukan error.
+- Pembersihan tidak punya thread timer. Lookup yang mendarat di entry kedaluwarsa me-reclaim-nya di tempat lalu melaporkan miss, dan insert pada tabel penuh menyapu seperti di atas. Terbatas berarti tidak ada lookup yang membayar scan seluruh tabel, dan itulah yang menjaga tail latency tetap datar.
+- Kedaluwarsa sekaligus menjadi window staleness: hit yang kedaluwarsa menjadi miss, miss itu membuka dan men-stat ulang, jadi file yang berubah di disk terambil dalam satu TTL tanpa mesin inotify.
+- Entry yang byte-nya menopang pengiriman in-flight akan dipin, dan reclaim melewatinya. `sendfile` file besar lewat socket lambat bisa melampaui TTL, dan menutup descriptor di bawahnya akan memotong response yang masih hidup.
+- `public_dir_cache_max_entries` di-clamp saat init terhadap `RLIMIT_NOFILE`, karena satu entry menahan sampai tiga file terbuka. Hasilnya dilaporkan lewat nilai balik `InstallResult`, bukan di-log, agar modul ini tidak pernah menulis ke stderr atas nama pemanggilnya.
+- `zix.Http3` mengambil body-nya dari SNAPSHOT yang dipegang cache, bukan dari descriptor dan bukan dari mapping. Dibatasi `SNAPSHOT_MAX_BYTES` (8 MiB), diambil pada request pertama yang membutuhkannya, dengan pin ditahan sepanjang response. Karena body hanya bisa datang dari cache, `public_dir_cache_ttl_ms = 0` mematikan penyajian static di engine itu sepenuhnya, bukan sekadar mematikan cache-nya.
+
+**Jalur body per engine:** entry selalu menjaga file tetap terbuka, dan jalur yang butuh byte membacanya secara positional (`readPositionalAll`, sebuah `pread`) alih-alih mapping. Pembacaan positional tidak butuh manajemen lifetime, jalan di semua target, dan aman pada descriptor yang dipakai bersama semua worker karena tidak pernah menggeser offset file.
+
+| Engine | header | body | alasan |
+| :- | :- | :- | :- |
+| zix.Http cleartext | byte yang sudah dirender | `sendfile` | thread per koneksi, descriptor blocking, kasus paling sederhana |
+| zix.Http1 cleartext | byte yang sudah dirender | `sendfile` | descriptor ke socket, tanpa copy userspace |
+| zix.Http / Http1 dengan TLS | di-stage ke jalur record | snapshot resident, lalu enkripsi | record dibangun di userspace, `sendfile` tidak bisa dipakai |
+| zix.Http2 | frame HEADERS HPACK | snapshot resident dipotong jadi frame DATA | hook coalescing mux terpasang di setiap batch, termasuk cleartext, jadi write langsung akan menaruh body mendahului frame yang sudah di-stage |
+| zix.Http3 | HEADERS QPACK | snapshot yang dipegang cache, dipin sepanjang response | QUIC mengenkripsi setiap paket, dan body dibaca ulang untuk setiap paket dan setiap retransmisi |
+
+`sendfile` di sini berbentuk Linux. Loop baca/tulis yang lama tetap menjadi fallback portable di bawah pemisahan comptime yang sudah dipakai tree ini untuk fast path lainnya, jadi tidak ada platform yang kehilangan penyajian static.
+
+**Rasional:** Empat properti yang membuat jalur static cepat adalah properti cache, bukan properti protokol, dan itulah sebabnya semuanya berada di satu modul bersama. Nama yang sudah di-resolve ke descriptor terbuka diingat, jadi `open` dan `stat` terjadi sekali per file bukan sekali per request. Header response dirender sekali saat insert lalu diputar ulang sebagai byte. Body dikirim dengan `sendfile` jika bisa, kernel ke kernel, tanpa copy userspace dan tanpa pertumbuhan RSS. Pemilihan sibling di-resolve saat insert, bukan diprobe per request. Steady state per request menjadi satu lookup hash, satu pengiriman header, dan satu pengiriman body.
+
+Ukuran ditentukan saat runtime, bukan comptime, karena library tidak bisa tahu berapa banyak file yang ada di bawah `public_dir` seseorang, sehingga `[N]Entry` yang di-hardcode akan salah untuk hampir semua pengguna. Properti tidak-crash datang dari kebijakan overflow, bukan dari di mana array itu berada. `ResponseCache` sudah membuktikan pola runtime ini di tree yang sama (`slab_mem.mapZeroedSlots`, kernel-zeroed, demand-paged, satu mapping saat init), jadi memakai ulang pola itu menjaga satu idiom saja alih-alih dua.
+
+Satu slot adalah buffer path 256 B plus tiga varian sekitar 290 B masing-masing, mendekati 1,1 KiB, jadi tabel default sekitar 290 KiB address space untuk seluruh proses. Itu virtual, bukan resident: slot yang tidak tersentuh tidak memakan memori fisik. Descriptor terbuka adalah biaya per-entry yang sebenarnya, dan itulah sebabnya clamp saat init ada.
+
+Sibling terkompresi ikut mendarat di pass yang sama karena alasan struktural dan alasan nilai. Secara struktural, key harus membawa encoding bagaimanapun juga, jadi menambahkan pengambilannya belakangan berarti menulis ulang index alih-alih memperluasnya. Secara nilai, begitu caching menghapus syscall, satu-satunya tuas tersisa adalah mengirim lebih sedikit byte.
+
+**Mapping file diukur lalu ditolak untuk snapshot Http3.** Body yang terlalu besar untuk satu paket diparkir di slot send-stream dan dibaca ulang untuk setiap paket dan setiap retransmisi, jadi ia harus berupa memori stabil yang bisa dibaca acak dan hidup lebih lama dari handler. Lima sumber diukur pada konstanta engine itu sendiri (chunk 1040 B, body 256 KiB, ReleaseFast):
+
+| strategi | ns per paket | vs baseline |
+| :- | :- | :- |
+| byte resident, memcpy | 15,7 | 1,00x |
+| mmap file, memcpy | 16,1 | 1,02x |
+| baca blok 64 KiB, memcpy | 120 | 7,2x |
+| pread mentah per paket | 567 | 34x |
+| `readPositionalAll` `std.Io` per paket | 668 | 40x |
+
+Pembacaan per paket gugur: lantai syscall di box pengembangan adalah 324 ns, jadi cara itu menambah satu syscall ke jalur yang sudah membayar satu `sendmsg` per paket. Buffer per stream juga gugur hanya dari aritmetika: 256 koneksi per worker dikali 64 send stream adalah 16.384 body besar bersamaan, jadi bahkan 64 KiB masing-masing sudah 1 GiB per worker.
+
+Tersisa mmap, yang terukur nyaris gratis, dan itu sudah diimplementasikan sebelum sebuah tes menolaknya. File yang ditulis ulang DI TEMPAT, yang persis dilakukan saat menyalin build baru menimpa file yang sedang disajikan, berubah di bawah mapping yang masih dibaca sebuah response: terverifikasi langsung, penulisan ulang di tempat memperlihatkan byte baru lewat mapping yang sudah ada, sementara rename atomik meninggalkan mapping pada inode lama tanpa tersentuh. Jadi response in-flight akan menyajikan byte file baru, dan file yang menyusut akan fault melewati ujungnya sendiri lalu membawa serta prosesnya. Bisa membuat server crash hanya dengan menyalin file ke `public_dir`-nya sendiri bukan trade yang bisa diterima demi 0,4 ns per paket. Snapshot yang mendarat tidak bisa diubah di bawah sebuah response, dan terukur sedikit lebih cepat dari mmap karena tidak ada jalur page fault.
+
+**Konsekuensi:**
+
+- Perilaku default tidak berubah. Dengan `public_dir_cache_ttl_ms = 0` cache tidak pernah dikonsultasi, jadi fast path maupun fallback-nya diam saja bagi siapa pun yang tidak opt in.
+- Kini ada satu struktur mutable process-wide di tree yang selebihnya shared-nothing. Pembacaan lock-free dengan ordering acquire dan spinlock hanya ditahan sepanjang insert, tetapi pengecualiannya nyata dan didokumentasikan di sini agar tidak ikut disalin begitu saja ke pekerjaan lain.
+- File yang disajikan dari cache mencerminkan keadaan disk sampai satu TTL terlambat. Deployment yang menukar aset di tempat sebaiknya memakai TTL pendek atau mematikan caching selama penukaran.
+- Range disajikan pada `zix.Http`, `zix.Http1`, dan `zix.Http2`. Header multi-range dijawab range pertama saja. `zix.Http3` hanya menyajikan file utuh, sebuah gap yang disengaja di pass ini.
+- `public_dir_upload` tidak ditambahkan ke `zix.Http2` maupun `zix.Http3`. Keduanya tidak punya konvensi handler upload, dan menambahkannya berbarengan dengan penyajian static yang serba baru akan mencampur dua concern dalam satu pass.
+- Jalur cache memancarkan `Vary: Accept-Encoding`, jalur non-cache tidak. Hanya jalur cache yang bernegosiasi, jadi hanya ia yang punya sesuatu untuk di-vary.
+- `zix.Http2` mendapat parameter `peer_max_frame_size` eksplisit pada `core.invokeHandler`. `ServeOpts.max_frame_size` adalah batas sisi-terima server ini dan sempat dipakai ulang sebagai batas keluar, yang bisa dijawab peer dengan FRAME_SIZE_ERROR. Kini tiga produsen memasok nilai yang benar: mux (yang memang sudah melacaknya), loop h2c (diperbarui dari SETTINGS di tengah koneksi), dan jalur upgrade h2c (dibaca dari header base64 `HTTP2-Settings`).
+- `Cache-Control`, `ETag`, dan `Last-Modified` tetap di luar cakupan. Ketiganya urusan pengguna, bukan engine, di pass ini.
+
+**Guardrail yang terpenuhi:** tidak ada alokasi di jalur request, setiap array diukur sekali saat init. `zig fmt` bersih, `test-all` hijau di `zig-0.16` dan `zig-0.17`, `examples` hijau, dan ketujuh target matriks cross-build terkompilasi bersih. Jalur `public_dir_cache_ttl_ms = 0` tetap identik byte demi byte dengan jalur sebelumnya, dan itulah yang menjaga `zix.Http1` lepas dari gate perf.
+
+---
+
 ###### end of adr

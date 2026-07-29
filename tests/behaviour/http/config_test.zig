@@ -120,3 +120,30 @@ test "zix behaviour: Response, status defaults to OK" {
     const StatusCode = @TypeOf(res.status);
     try std.testing.expectEqual(StatusCode.OK, res.status);
 }
+
+test "zix behaviour: Http ServerConfig static cache is off by default" {
+    const cfg = zix.Http.ServerConfig{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .ASYNC,
+    };
+
+    try std.testing.expectEqual(@as(u32, 0), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 256), cfg.public_dir_cache_max_entries);
+}
+
+test "zix behaviour: Http ServerConfig static cache fields are stored as set" {
+    const cfg = zix.Http.ServerConfig{
+        .io = undefined,
+        .ip = "127.0.0.1",
+        .port = 9300,
+        .dispatch_model = .ASYNC,
+        .public_dir = "./public",
+        .public_dir_cache_ttl_ms = 2_500,
+        .public_dir_cache_max_entries = 32,
+    };
+
+    try std.testing.expectEqual(@as(u32, 2_500), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 32), cfg.public_dir_cache_max_entries);
+}

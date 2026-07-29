@@ -344,6 +344,26 @@ updateDateCache():
 
 ## static.zig: Penyajian Berkas Statis
 
+Dua jalur di balik satu entry point (ADR-064): jalur cache yang dicoba lebih dulu, dan jalur tanpa
+cache yang lama tetap dipertahankan sebagai fallback. Jalur cache tidak aktif kecuali
+`public_dir_cache_ttl_ms` diatur, jadi default bawaan menjalankan semua yang di bawah ini apa adanya.
+
+### Jalur cache
+
+`static_cache.instance()` mengembalikan tabel process-wide bila ada server yang memasangnya. Satu hit
+membawa file yang sudah terbuka, ukurannya, content type, dan header 200 yang sudah dirender, jadi
+request berikutnya hanya membayar satu hash lookup alih-alih open plus stat.
+
+- Header 200 diputar ulang sebagai byte. Request Range tidak bisa memakainya (itu 200 dengan
+  `Content-Length` tetap), jadi header 206-nya dirender per request dari hit yang sama.
+- Body keluar lewat `static_send.sendBody`: `sendfile` di Linux untuk cleartext, positional read plus
+  fungsi tulis engine sendiri untuk yang lain. Zero copy ditolak ketika fd adalah sentinel capture
+  TLS atau ada TLS stream sink terpasang, karena tulis langsung akan melewati enkripsi.
+- Sibling terkompresi `.br` dan `.gz` di-resolve sekali saat entry dibuat, lalu
+  `compression.negotiate` memilih di antara varian yang benar-benar ada. Setiap header varian membawa
+  `Vary: Accept-Encoding`.
+- Miss, path tidak aman, atau tabel penuh mengembalikan false, dan jalur tanpa cache di bawah berjalan.
+
 ### Penjaga Traversal
 
 ```

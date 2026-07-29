@@ -61,7 +61,10 @@ graph TD
     H3 --> server["server.zig\nServer.init(handler, config)\nrun() switch"]
     H3 --> config["config.zig\nHttp3ServerConfig, DispatchModel"]
     H3 --> router["router.zig\nRouter, Route, pathParam"]
-    H3 --> core["core.zig\nHandlerFn, Request, Response"]
+    H3 --> core["core.zig\nHandlerFn, Request, Response, Context"]
+    H3 --> static["static.zig\npublic_dir fallback\nsnapshot body + cache pin"]
+
+    static --> static_cache["utils/static_cache.zig\nshared snapshot cache"]
 
     server --> dispatch["dispatch/\ncommon + async / pool /\nmixed / epoll / uring"]
     dispatch --> datagram["../datagram.zig\nraw-fd socket\nrecvmmsg / sendmmsg"]
@@ -138,6 +141,10 @@ pub const Http3ServerConfig = struct {
     max_inflight_packets: usize = 128,   // congestion-window ceiling / loss-log depth (RFC 9002)
     initial_window_packets: usize = 32,  // initial congestion window in packets (RFC default is 10)
 
+    public_dir:                   []const u8 = "",  // static file root, "" disables static serving
+    public_dir_cache_ttl_ms:      u32 = 0,          // 0 also disables static serving here, see below
+    public_dir_cache_max_entries: u32 = 256,        // static cache slots, one per file plus its siblings
+
     logger: ?*Logger = null, // lifecycle events via logger.system() when set
 };
 ```
@@ -168,7 +175,42 @@ var server = zix.Http3.Server.init(Routes.dispatch, config);
 | `PARAM` | `:name` segments capture, other segments must match | first registered match wins, read with `pathParam("name")` |
 | `PREFIX` | Longest registered prefix on a `/` boundary | longest match wins |
 
-The query string is stripped before matching (matching sees the path up to `?`), the handler still receives the full path. An unmatched path returns `404 Not Found`. `Routes.dispatch` is itself a `HandlerFn`, so it plugs straight into `Server.init`. A single bare handler works too (no router).
+The query string is stripped before matching (matching sees the path up to `?`), the handler still receives the full path. An unmatched path tries the static fallback below, then returns `404 Not Found`. `Routes.dispatch` is itself a `HandlerFn`, so it plugs straight into `Server.init`. A single bare handler works too (no router).
+
+---
+
+## Static File Serving
+
+`public_dir` (ADR-064) serves an unmatched route as a file before the 404, with `..` rejected. A missing directory fails at `run()` with `error.PublicDirNotFound`.
+
+**This engine differs from the other three, and the difference is not an optimization.** On `zix.Http`, `zix.Http1`, and `zix.Http2` the response is written inside the handler call, so a body can come from a descriptor that is only open for that call. Here it cannot: `Response` is a value holder, and a body too large for one packet is parked in a send-stream slot, fragmented by the pump across many packets, held until every range is acknowledged, and rewound and re-sent on loss or on a probe timeout. The body has to be stable, randomly readable memory that outlives the handler.
+
+So the body comes from a snapshot the cache holds, and the cache pin is held for the whole response rather than for the handler call. Two consequences follow:
+
+- **`public_dir_cache_ttl_ms = 0` disables static serving entirely on this engine**, not merely the cache, because there is no other safe body source. `Server.run` warns when `public_dir` is set without it, and the router falls through to 404.
+- A file larger than `SNAPSHOT_MAX_BYTES` (8 MiB) is not served, and a full cache table serves no file rather than an unsafe one.
+
+```mermaid
+flowchart TD
+    A["router: no route matched"] --> B{"ctx.public_dir set?"}
+    B -->|no| Z["404 Not Found"]
+    B -->|yes| C{"cache installed?"}
+    C -->|no, ttl is 0| Z
+    C -->|yes| D["resolve, negotiate, pin the slot"]
+    D -->|miss| Z
+    D -->|hit| E["res.send(snapshot), ctx.static_slot = slot"]
+    E --> F{"response fits one packet?"}
+    F -->|yes| G["body already copied, release the pin now"]
+    F -->|no| H["park in a send-stream slot, keep the pin"]
+    H --> I["pump reads the snapshot per packet and per retransmit"]
+    I --> J["release on ack-complete, or when the connection goes idle"]
+```
+
+The pin is released at exactly two points, which are the only two places a body's life ends: the single `stream.active = false` in `Connection.onAckFrame`, and the connection going idle in `dispatch/common.zig`. Missing either one would pin a cache entry for the life of the process.
+
+A **file mapping was built and then rejected here.** Rewriting a file in place, which is what copying a new build over a served file does, changes the bytes under a mapping a response is still reading, and a file that shrank faults past its own end and takes the process with it. An atomic rename is safe, an in-place rewrite is not, and a server that can be crashed by copying a file into its own `public_dir` is not an acceptable trade. A snapshot cannot be changed underneath a response. See ADR-064 for the measurements.
+
+Range (RFC 7233) is not served on this engine: a static response is always the whole file with a 200. That is a deliberate gap in this pass, not an oversight.
 
 ---
 
@@ -260,6 +302,8 @@ Detail lives in [`docs/lld-http3-en.md`](lld-http3-en.md).
 | Per-connection state (`Connection`) | inside the CID table slot | Connection lifetime, fixed-size (no per-packet heap) |
 | Receive / send batches | `config.allocator` | Worker lifetime |
 | Decode scratch (`app_payload_buf`, `path_scratch`) | inside `Connection` | Reused per packet |
+| Static file cache (opt-in) | one demand-paged mapping shared by every worker and every HTTP engine in the process | Server process lifetime |
+| Static file snapshot | inside the cache slot, a demand-paged anonymous mapping bounded by `SNAPSHOT_MAX_BYTES` (8 MiB) | Cache entry lifetime, pinned while a response reads it |
 
 The allocator must be general-purpose (e.g. `std.heap.smp_allocator`), the same requirement as the rest of the engine family. The CID table is fixed-capacity (256 connections per worker) with no per-packet allocation: a full table drops a new connection rather than growing.
 
@@ -287,6 +331,7 @@ Several layers are implemented and unit-tested against the RFC vectors but not y
 | QUIC streams / CID pool (`stream.zig`) | Send / receive state machines and NEW_CONNECTION_ID, for migration and CID pooling |
 | ChaCha20-Poly1305, Retry, key update (`crypto.zig`) | Live path is AES-128-GCM only |
 | Per-core CID steering | ADR-049 phase 3: per-core connection-id routing so the per-core models are migration-safe |
+| Range requests on `public_dir` | Static responses are whole-file 200 only. The other three HTTP engines serve 206 / 416 (ADR-064) |
 
 See ADR-049 / ADR-050 (`docs/adr-en.md`).
 

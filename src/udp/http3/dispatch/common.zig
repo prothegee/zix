@@ -37,6 +37,7 @@ const flow = @import("../flow.zig");
 const close = @import("../close.zig");
 const recovery = @import("../recovery.zig");
 const Connection = @import("../connection.zig").Connection;
+const static = @import("../static.zig");
 const SendStream = @import("../connection.zig").SendStream;
 const SentRangeInfo = @import("../connection.zig").SentRangeInfo;
 const max_sent_ranges = @import("../connection.zig").max_sent_ranges;
@@ -1264,7 +1265,11 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
             null
         else
             core.wallClockNs() + @as(u64, config.handler_timeout_ms) * std.time.ns_per_ms;
-        core.invokeHandler(handler, &req, &res, stream_req.stream_id, config.io, deadline_ns);
+        // A static response keeps its cache slot pinned past the handler, because its body has to
+        // stay readable for every packet and every retransmission below. Whoever finishes with the
+        // body releases it: the send stream when it retires, or this loop for a body that was
+        // already copied into a packet.
+        const static_slot = core.invokeHandler(handler, &req, &res, stream_req.stream_id, config.io, deadline_ns, config.public_dir);
         tl_requests_served += 1;
 
         var content: [1024]u8 = undefined;
@@ -1281,13 +1286,21 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
                     .content_len = streamContentLen(res.status, res.content_encoding, res.body),
                     .sent = 0,
                     .stream_limit = conn.client_max_stream_data,
+                    .static_slot = static_slot,
                 };
             } else {
+                // No slot, so the body is never sent and nothing will retire it later.
+                static.releasePin(static_slot);
+
                 const five = response.buildRequestStreamContent(&content, 500, .identity, "") orelse continue;
                 packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, stream_req.stream_id, content[0..five]);
             }
             continue;
         };
+
+        // The whole response fitted one packet, so the body is already copied into `content` and the
+        // pin has done its job.
+        static.releasePin(static_slot);
 
         packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, stream_req.stream_id, content[0..content_len]);
     }
@@ -1360,7 +1373,13 @@ pub fn sweepMaintenance(table: *ConnTable, tx: *datagram.SendBatch, fd: std.posi
 
         const result = conn.onMaintenance(now_us, max_idle_us);
         if (result.resend) resumeStreams(conn, tx, fd, config, stats);
-        if (result.idle) _ = table.remove(&conn.dcid);
+        if (result.idle) {
+            // The connection is going away with whatever it was still sending, so any static cache
+            // pin it holds has to come back now or the entry is pinned for the life of the process.
+            conn.releaseAllStaticPins();
+
+            _ = table.remove(&conn.dcid);
+        }
     }
 
     if (stats) |st| st.conns = table.count;

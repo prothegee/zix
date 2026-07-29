@@ -200,14 +200,45 @@ Pemrosesan request bersama, router, dan jalur koneksi blocking.
 | `conn_read_buf_min` | 32 * 1024 |
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
+| `public_dir` | "" (kosong menonaktifkan fallback static) |
 
 `HandlerFn` adalah `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, dibangun saat dispatch oleh `core.invokeHandler`). `Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
 
 Response cache per-worker (ADR-036) juga berada di sini: `tl_cache`, `serveCached` / `sendCached`, dan `requestKey` (Wyhash atas path + body). Ia dipasang oleh worker `.EPOLL` / `.URING` dan di-key dari `tl_req_path` / `tl_req_body`, yang dicatat `muxDispatch`.
 
+`invokeHandler` menerima `peer_max_frame_size: u32` sebagai parameter eksplisit lalu menyalinnya ke `Context.max_frame_size`, yang dipakai fallback static untuk mengukur frame DATA. Ia sengaja dipisahkan dari `ServeOpts.max_frame_size`: field itu adalah iklan sisi-terima server ini, dan memakainya sebagai batas keluar justru yang dijawab peer patuh dengan `FRAME_SIZE_ERROR`. Tiga call site memasok nilai yang benar:
+
+| call site | sumber nilai peer |
+| :- | :- |
+| `mux.zig` (`.EPOLL` / `.URING`) | `conn.peer_max_frame_size`, yang memang sudah dilacak mux untuk `pumpBody` |
+| `core.serveH2cLoop` (model blocking) | variabel lokal berjalan, diperbarui dari setiap frame SETTINGS dengan validasi 16384..16777215 yang sama seperti mux, karena peer boleh menaikkannya di tengah koneksi |
+| `core.serveH2cUpgrade` | didekode dari header base64 `HTTP2-Settings`, sehingga response stream-1 yang dibawa sudah benar sebelum satu frame pun dipertukarkan |
+
+`Context.public_dir` diisi dari `ServeOpts.public_dir` di titik yang sama, jadi router mencapai root static tanpa threadlocal (berbeda dengan `zix.Http1`, yang tetap memakai `tl_static_dir`).
+
 ### Jalur blocking (serveConn / serveH2cLoop)
 
 `serveConn` mengeset `TCP_NODELAY` dan memanggil `serveConnInner`, yang membaca 3 byte: `"PRI"` menjalankan preface h2c-direct (validasi, `sendSettingsFD`, `serveH2cLoop`), selain itu menjalankan `serveH2cUpgrade` (handshake `Upgrade: h2c` HTTP/1.1, yang melayani request stream-1 awal lalu `serveH2cLoop`). `serveH2cLoop` mengalokasikan buffer payload plus tabel slot `[]Stream` dan menjalankan switch frame yang sama dengan mux memakai `readFrameHeader` + `recvExact` blocking, men-dispatch inline via `dispatchStream`. Perhatikan `Stream` blocking adalah struct inline tetap (`body: [65536]u8`, `header_scratch: [4096]u8`) yang ditahan sedalam `max_streams` per koneksi, berbeda dengan buffer ter-pool milik mux yang berukuran sesuai serve options.
+
+---
+
+## static.zig
+
+Fallback `public_dir` (ADR-064), dipanggil dari `Router.dispatch` setelah semua route meleset dan sebelum 404. `serve(req, ctx, req_path, max_frame_size) bool` mengembalikan false untuk percobaan traversal, file yang tidak ada, atau `ctx.public_dir` kosong, lalu router mengirim 404-nya.
+
+`serve` mencoba `serveCached` lebih dulu dan jatuh ke open langsung bila proses tidak memasang cache static. Keduanya berakhir di kode framing yang sama, jadi `public_dir` berperilaku identik baik `public_dir_cache_ttl_ms` diatur maupun tidak.
+
+| fungsi | peran |
+| :- | :- |
+| `acquireHit` | menegosiasikan encoding dari `accept-encoding`, lalu menanyakan cache. Karena `zeroCopyAllowed` selalu false di sini, ia menanyakan `acquireMapped` dulu (snapshot resident) dan jatuh ke hit descriptor biasa di atas `SNAPSHOT_MAX_BYTES`, sehingga file besar tetap memakai descriptor yang di-cache alih-alih turun ke jalur non-cache |
+| `segmentFor` | mengubah header `Range` menjadi `Segment`. Mengembalikan segment file utuh bila header tidak ada atau malformed (RFC 7233 bagian 3.1 meminta mengabaikannya), dan null bila well-formed tapi tak terpenuhi, yang menjadi isyarat bagi pemanggil untuk menjawab 416 |
+| `sendFramed` | satu frame HEADERS (status, content type, `content-length`, `accept-ranges`, dan `content-range` untuk 206) lalu frame DATA, masing-masing dibatasi `max_frame_size`, yang terakhir berflag END_STREAM |
+| `sendRangeNotSatisfiable` | 416 dengan `Content-Range: bytes */length`, header saja, END_STREAM pada frame HEADERS |
+| `zeroCopyAllowed` | selalu false di engine ini. `dispatch/common.beginCoalesce` memasang `frame.write_hook` di setiap batch, termasuk cleartext, jadi `sendfile` akan menaruh body mendahului frame yang sudah di-stage di sink |
+
+`Segment` membawa `{ offset, length, status, content_range }`, sehingga 200 dan 206 berbagi satu jalur framing dan hanya blok header-nya yang berbeda. `Content-Length` membawa panjang segment, bukan ukuran file, kalau tidak client menunggu byte yang tidak pernah datang. File kosong menutup stream pada HEADERS tanpa frame DATA sama sekali.
+
+Parsing Range sendiri tidak lokal: ia datang dari `src/utils/http_range.zig`, dipakai bersama engine lain. `parseSpec` (membaca header) dan `resolve` (clamp terhadap panjang yang diketahui) sengaja dipisah menjadi dua pemanggilan, karena menggabungkannya menjadi satu hasil nullable membuat perbedaan abaikan-versus-416 mustahil diungkapkan.
 
 ---
 
@@ -225,7 +256,7 @@ Bentuk io_uring dari loop yang sama (ADR-037 Phase 4). `initUringRing` meminta `
 
 ### dispatch/common.zig
 
-`serveOpts(cfg)` memetakan `Http2ServerConfig` ke `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
+`serveOpts(cfg)` memetakan `Http2ServerConfig` ke `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache dan `public_dir`). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
 
 Sink write-coalescing adalah primitif batching untuk mux cleartext: `MuxCoalesceSink` (threadlocal 64 KiB, satu per worker) dipasang sebagai `frame.write_hook` oleh `beginCoalesce(fd)` dan dibongkar oleh `endCoalesce()`. Selama terpasang, setiap frame yang mux tulis dalam satu batch readable (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, sehingga batch banyak-stream menjadi satu segmen alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. Ia flush saat penuh dan menulis frame kelewat besar langsung tembus, jadi kebenaran tidak pernah bergantung pada ukuran buffer. `endCoalesce` mengembalikan apakah sebuah write gagal selama batch.
 

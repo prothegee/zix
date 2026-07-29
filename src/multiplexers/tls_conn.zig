@@ -152,10 +152,19 @@ pub const Transport = struct {
         self.want_out = true;
     }
 
-    /// Encrypt response plaintext into one TLS record and send (staging on backpressure). The
-    /// caller provides the sealed-record staging buffer, sized to its own record policy.
+    /// Encrypt response plaintext into TLS records and send (staging on backpressure). The caller
+    /// provides the sealed staging buffer, sized to its own record policy.
+    ///
+    /// Note:
+    /// - A seal that produced nothing means the staging buffer was too small for the response. That
+    ///   is reported as a dead connection rather than sent as a short read, because a peer cannot
+    ///   tell a truncated body from a complete one.
+    ///
+    /// Return:
+    /// - bool (false when the connection must close)
     pub fn sendPlain(self: *Transport, plaintext: []const u8, sealed: []u8) bool {
         const ct = self.tls.encrypt(plaintext, sealed);
+        if (ct.len == 0) return false;
 
         return self.sendRaw(ct);
     }
@@ -163,8 +172,12 @@ pub const Transport = struct {
     /// Encrypt one full record gathered from two source slices (staged prefix + payload tail) and
     /// send. Avoids copying the tail into an accumulator first. Ordering matches sendPlain:
     /// records leave in sequence order through sendRaw.
+    ///
+    /// Return:
+    /// - bool (false when the connection must close, an empty seal included)
     pub fn sendPlainGather(self: *Transport, prefix: []const u8, tail: []const u8, sealed: []u8) bool {
         const ct = self.tls.encrypt2(prefix, tail, sealed);
+        if (ct.len == 0) return false;
 
         return self.sendRaw(ct);
     }

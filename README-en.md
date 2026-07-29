@@ -436,7 +436,9 @@ Tests run with no external tools: a 69-protocol runner driving hand-rolled nativ
 
 __*21. Static file serving with range support:*__
 
-`public_dir` on `zix.Http` and `zix.Http1` serves unmatched routes as files before the 404 fallback, with HTTP range requests (RFC 7233, 206 / 416), a traversal-safe path check, and a multipart upload companion (`public_dir_upload`).
+`public_dir` on all four HTTP engines serves unmatched routes as files before the 404 fallback, with a traversal-safe path check, and a multipart upload companion (`public_dir_upload`) on `zix.Http` and `zix.Http1`. Range requests (RFC 7233, 206 / 416) are served on `zix.Http`, `zix.Http1`, and `zix.Http2`, whole-file only on `zix.Http3`.
+
+Set `public_dir_cache_ttl_ms` above 0 to keep a resolved file open with its response header prerendered, so a repeat request costs a hash lookup instead of an open plus a stat, and a precompressed `.br` or `.gz` sibling is picked up from disk once instead of probed per request. It is off by default, and on `zix.Http3` it is what enables static serving at all (see [Configuration](./docs/zix-config-en.md)).
 
 > Static assets and uploads are served by the engine on the same port as the API, no separate file server.
 
@@ -1276,8 +1278,10 @@ curl -X POST "http://localhost:9005/upload" \
 
 **Examples:**
 - [examples/http_static.zig](examples/http_static.zig) - full working example including static serving, range requests, and multipart upload
+- [examples/http1_static_cached.zig](examples/http1_static_cached.zig) - the same fallback with `public_dir_cache_ttl_ms` set, showing the cached path and `.br` / `.gz` sibling pickup
+- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - static serving over HTTP/3, where the cache is what makes it possible at all
 
-**When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. For very high static throughput a CDN or a `sendfile`-based path still wins. This is for convenience and co-located assets, not a bulk file CDN.
+**When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. With `public_dir_cache_ttl_ms` set, a cleartext response hands the file to the kernel with `sendfile`, so the bytes never enter user space. A CDN is still the right answer for bulk file distribution across regions: this is for convenience and co-located assets.
 
 <br>
 

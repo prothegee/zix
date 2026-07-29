@@ -21,6 +21,7 @@ const std = @import("std");
 const Config = @import("config.zig");
 const Http3ServerConfig = Config.Http3ServerConfig;
 const core = @import("core.zig");
+const static_cache = @import("../../utils/static_cache.zig");
 
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
@@ -68,6 +69,24 @@ fn Http3ServerImpl(comptime handler: HandlerFn) type {
         pub fn run(self: *const Self) !void {
             if (self.config.port == 0) return error.PortNotConfigured;
             if (self.config.tls == null) return error.TlsRequired;
+
+            // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
+            // rather than 404-ing every file request at runtime. Mirrors zix.Http1.Server.run.
+            if (self.config.public_dir.len > 0) {
+                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch return error.PublicDirNotFound;
+                dir.close(self.config.io);
+
+                // Unlike the other engines this is not just an optimization: an HTTP/3 response body
+                // outlives its handler, so a static file can only be served out of the cache. With
+                // caching off, the router falls through to 404 instead.
+                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
+                if (installed == .DISABLED) {
+                    std.log.warn("zix http3: public_dir is set but public_dir_cache_ttl_ms is 0, so static serving stays off", .{});
+                }
+                if (installed == .MISMATCHED) {
+                    std.log.warn("zix http3: a static cache is already installed in this process with different settings, keeping it", .{});
+                }
+            }
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(handler, self.config),
