@@ -171,7 +171,7 @@ pub fn build(b: *std.Build) void {
 
     // prometheuz is a standalone package (src/driver/prometheuz, own build.zig):
     // this step delegates into it with the same compiler. Only test-unit
-    // exists so far; test-integration/test-runner join once the registry,
+    // exists so far. test-integration/test-runner join once the registry,
     // remote_write, and examples pieces of the build land.
     if (dirExists(b, "src/driver/prometheuz")) {
         const prometheuz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit" });
