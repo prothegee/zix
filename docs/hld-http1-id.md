@@ -25,7 +25,7 @@ Keduanya server HTTP/1.1. `zix.Http` adalah lapisan berfitur lengkap, `zix.Http1
 | Body request | baca socket lazy di `body()` | slice yang diantar engine (di-drain + di-dechunk sebelum invoke) |
 | Allocator per-request | arena per-connection | arena per-request (`ctx.allocator`, di-reset per dispatch) |
 | Penulisan response | objek `Response` ter-buffer | builder `Response` yang mendelegasikan ke write helper fd langsung |
-| Static files / multipart / SSE writer | built in | fallback static `public_dir`, `Multipart` bersama, `SseWriter` |
+| Static files / multipart / SSE writer | built in | fallback static `public_dir` dengan cache file terbuka opsional (ADR-064), `Multipart` bersama, `SseWriter` |
 | Routing | handler runtime lewat `Router(routes).dispatch` (ADR-063, tidak dibakukan ke tipe) | tabel route comptime (opsional, handler boleh polos) |
 | WebSocket | frame loop milik handler | frame pump milik engine (.EPOLL / .URING) |
 | Model dispatch | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
