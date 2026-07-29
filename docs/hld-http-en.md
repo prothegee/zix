@@ -264,6 +264,8 @@ pub const HttpServerConfig = struct {
     max_response_headers: HeaderSize        = .MINIMAL,  // custom response header cap, arena-allocated per request
     public_dir:           []const u8        = "",         // static file root, "" disables static serving
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
+    public_dir_cache_ttl_ms:      u32       = 0,          // 0 = never cached, the shipped default
+    public_dir_cache_max_entries: u32       = 256,        // static cache slots, one per file
     conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
     workers:              usize             = 0,          // 0 = cpu_count; accept threads for .POOL/.MIXED, workers for .EPOLL; ignored by .ASYNC
@@ -472,24 +474,40 @@ zix has no regex engine. Use `kind = .PREFIX` to match a path prefix. Additional
 
 ## Static File Serving
 
+Two paths sit behind one entry point (ADR-064). The cached path is tried first and owns the request
+once the file resolves. It is inert unless `public_dir_cache_ttl_ms` is set, so the default
+configuration runs the original open-stat-copy path unchanged.
+
 ```mermaid
 flowchart TD
-    A["static.serve(req, path, public_dir, io)"] --> B{"path contains '..'?"}
-    B -->|yes| Z["return false, traversal rejected"]
-    B -->|no| C["build full_path = public_dir/path"]
-    C --> D{"file exists?"}
-    D -->|no| Z2["return false"]
+    A["static.serve(req, fd, path, public_dir, io)"] --> B{"static cache installed?"}
+    B -->|no| N["uncached path"]
+    B -->|yes| C["negotiate encoding, ask the cache"]
+    C --> D{"cache hit?"}
+    D -->|no| N
     D -->|yes| E{"Range header present?"}
-    E -->|yes| F["parse Range\n206 Partial Content or 416"]
-    E -->|no| G["200 OK\nstream in 8 KB chunks"]
-    F --> H["return true"]
-    G --> H
+    E -->|yes| F["render 206 header, send the range"]
+    E -->|no| G["replay the prerendered 200 header"]
+    F --> S["send body: sendfile in cleartext, copy under TLS"]
+    G --> S
+    S --> H["return true"]
+    N --> I{"path contains '..'?"}
+    I -->|yes| Z["return false, traversal rejected"]
+    I -->|no| J{"file exists?"}
+    J -->|no| Z
+    J -->|yes| K["200 or 206, stream in 8 KiB chunks"]
+    K --> H
 ```
 
-- If `public_dir` is non-empty, `Http.Server.run()` validates the directory at startup.
-- Directory traversal (`..`) rejected.
+- If `public_dir` is non-empty, `Http.Server.run()` validates the directory at startup, and installs
+  the shared static cache when `public_dir_cache_ttl_ms` is above 0.
+- Directory traversal (`..`) rejected on both paths.
 - MIME type resolved from file extension via `zix.Http.Content.typeFromExtension`.
-- `Range` header supported: `206 Partial Content` (RFC 7233).
+- `Range` header supported on both paths: `206 Partial Content` (RFC 7233), `416` when unsatisfiable.
+- The cached path emits `Vary: Accept-Encoding` because it negotiates. The uncached path does not
+  negotiate, so it does not claim to vary.
+- The cache is shared by every worker and by every HTTP engine in the process, so a file costs one
+  descriptor for the process rather than one per worker. See `docs/zix-config-en.md` for the knobs.
 
 ---
 

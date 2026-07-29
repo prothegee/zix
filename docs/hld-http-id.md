@@ -264,6 +264,8 @@ pub const HttpServerConfig = struct {
     max_response_headers: HeaderSize        = .MINIMAL,  // custom response header cap, arena-allocated per request
     public_dir:           []const u8        = "",         // static file root, "" disables static serving
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
+    public_dir_cache_ttl_ms:      u32       = 0,          // 0 = tidak pernah di-cache, default bawaan
+    public_dir_cache_max_entries: u32       = 256,        // slot static cache, satu per file
     conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
     workers:              usize             = 0,          // 0 = cpu_count; accept threads untuk .POOL/.MIXED, workers untuk .EPOLL; diabaikan oleh .ASYNC
@@ -472,24 +474,40 @@ zix tidak memiliki regex engine. Gunakan `kind = .PREFIX` untuk mencocokkan pref
 
 ## Berkas Statis
 
+Ada dua jalur di balik satu entry point (ADR-064). Jalur cache dicoba lebih dulu dan memiliki
+request begitu file-nya resolve. Jalur ini tidak aktif kecuali `public_dir_cache_ttl_ms` diatur,
+jadi konfigurasi default menjalankan jalur open-stat-copy yang lama tanpa perubahan.
+
 ```mermaid
 flowchart TD
-    A["static.serve(req, path, public_dir, io)"] --> B{"path contains '..'?"}
-    B -->|yes| Z["return false, traversal rejected"]
-    B -->|no| C["build full_path = public_dir/path"]
-    C --> D{"file exists?"}
-    D -->|no| Z2["return false"]
+    A["static.serve(req, fd, path, public_dir, io)"] --> B{"static cache installed?"}
+    B -->|no| N["uncached path"]
+    B -->|yes| C["negotiate encoding, ask the cache"]
+    C --> D{"cache hit?"}
+    D -->|no| N
     D -->|yes| E{"Range header present?"}
-    E -->|yes| F["parse Range\n206 Partial Content or 416"]
-    E -->|no| G["200 OK\nstream in 8 KB chunks"]
-    F --> H["return true"]
-    G --> H
+    E -->|yes| F["render 206 header, send the range"]
+    E -->|no| G["replay the prerendered 200 header"]
+    F --> S["send body: sendfile in cleartext, copy under TLS"]
+    G --> S
+    S --> H["return true"]
+    N --> I{"path contains '..'?"}
+    I -->|yes| Z["return false, traversal rejected"]
+    I -->|no| J{"file exists?"}
+    J -->|no| Z
+    J -->|yes| K["200 or 206, stream in 8 KiB chunks"]
+    K --> H
 ```
 
-- Bila `public_dir` tidak kosong, `Http.Server.run()` memvalidasi direktori saat startup.
-- Directory traversal (`..`) ditolak.
+- Bila `public_dir` tidak kosong, `Http.Server.run()` memvalidasi direktori saat startup, dan
+  memasang static cache bersama ketika `public_dir_cache_ttl_ms` di atas 0.
+- Directory traversal (`..`) ditolak di kedua jalur.
 - Tipe MIME diselesaikan dari ekstensi berkas melalui `zix.Http.Content.typeFromExtension`.
-- Header `Range` didukung: `206 Partial Content` (RFC 7233).
+- Header `Range` didukung di kedua jalur: `206 Partial Content` (RFC 7233), `416` bila tidak terpenuhi.
+- Jalur cache mengirim `Vary: Accept-Encoding` karena ia melakukan negosiasi. Jalur tanpa cache tidak
+  bernegosiasi, jadi ia tidak mengklaim vary.
+- Cache dipakai bersama oleh semua worker dan semua engine HTTP dalam satu proses, jadi satu file
+  memakai satu descriptor untuk proses, bukan satu per worker. Lihat `docs/zix-config-id.md`.
 
 ---
 
