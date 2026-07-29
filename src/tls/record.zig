@@ -67,12 +67,36 @@ pub fn nonce(iv: [iv_length]u8, sequence: u64) [iv_length]u8 {
     return out;
 }
 
+/// Wire bytes one record costs beyond its plaintext: the 5-byte header, the inner content type,
+/// and the AEAD tag.
+pub const record_overhead = 5 + 1 + tag_length;
+
+/// Wire bytes needed to seal plaintext_len bytes, counting every record it takes.
+///
+/// Note:
+/// - An empty plaintext is still one record, since the inner content type has to travel.
+///
+/// Return:
+/// - usize (total sealed length, what an output buffer must hold)
+pub fn sealedLen(plaintext_len: usize) usize {
+    const records = if (plaintext_len == 0) 1 else (plaintext_len + max_plaintext - 1) / max_plaintext;
+
+    return plaintext_len + records * record_overhead;
+}
+
 /// Protect a plaintext into a TLS 1.3 record: AEAD-seal (plaintext || inner content type) under
 /// the key, write the header + ciphertext + tag into `out`, and return the full record slice.
 ///
+/// Note:
+/// - ONE record, so plaintext must be at most max_plaintext. Splitting a longer payload belongs to
+///   the caller, which is what tls_session.Session.encrypt does. A payload that does not fit, or an
+///   `out` too small to hold the record, returns empty rather than writing anything: the AEAD seal
+///   is fed from a fixed record-sized buffer, so an unchecked length here would be a stack overflow
+///   rather than a bad record.
+///
 /// Param:
-/// out - []u8 (must hold 5 + plaintext.len + 1 + tag_length bytes)
-/// plaintext - the application or handshake bytes to protect
+/// out - []u8 (must hold sealedLen(plaintext.len) bytes)
+/// plaintext - the application or handshake bytes to protect, at most max_plaintext
 /// inner_type - the true content type (travels inside the AEAD)
 /// key - the AES-128-GCM key
 /// iv - the static iv
@@ -80,9 +104,13 @@ pub fn nonce(iv: [iv_length]u8, sequence: u64) [iv_length]u8 {
 ///
 /// Return:
 /// - []const u8 (the wire record)
+/// - empty when plaintext exceeds max_plaintext or out cannot hold the record
 pub fn protect(out: []u8, plaintext: []const u8, inner_type: ContentType, key: [key_length]u8, iv: [iv_length]u8, sequence: u64) []const u8 {
+    if (plaintext.len > max_plaintext) return out[0..0];
+
     const inner_length = plaintext.len + 1;
     const record_length = inner_length + tag_length;
+    if (out.len < 5 + record_length) return out[0..0];
 
     out[0] = @intFromEnum(ContentType.APPLICATION_DATA);
     std.mem.writeInt(u16, out[1..3], legacy_record_version, .big);
@@ -104,8 +132,13 @@ pub fn protect(out: []u8, plaintext: []const u8, inner_type: ContentType, key: [
 /// first (the send path stages only a small frame-header prefix in `a` and passes the large payload as
 /// `b` straight from source). Byte-identical to `protect` on the concatenation.
 ///
+/// Note:
+/// - ONE record, exactly like protect, so a.len + b.len must be at most max_plaintext. Callers stage
+///   a record-sized buffer and gather the remainder, so the sum is bounded by construction. It is
+///   still checked here, because the AEAD seal is fed from a fixed record-sized buffer.
+///
 /// Param:
-/// out - []u8 (must hold 5 + a.len + b.len + 1 + tag_length bytes)
+/// out - []u8 (must hold sealedLen(a.len + b.len) bytes)
 /// a - the first plaintext slice (e.g. a staged frame-header prefix)
 /// b - the second plaintext slice (e.g. the source payload)
 /// inner_type - the true content type (travels inside the AEAD)
@@ -115,10 +148,14 @@ pub fn protect(out: []u8, plaintext: []const u8, inner_type: ContentType, key: [
 ///
 /// Return:
 /// - []const u8 (the wire record)
+/// - empty when a.len + b.len exceeds max_plaintext or out cannot hold the record
 pub fn protect2(out: []u8, a: []const u8, b: []const u8, inner_type: ContentType, key: [key_length]u8, iv: [iv_length]u8, sequence: u64) []const u8 {
     const plaintext_len = a.len + b.len;
+    if (plaintext_len > max_plaintext) return out[0..0];
+
     const inner_length = plaintext_len + 1;
     const record_length = inner_length + tag_length;
+    if (out.len < 5 + record_length) return out[0..0];
 
     out[0] = @intFromEnum(ContentType.APPLICATION_DATA);
     std.mem.writeInt(u16, out[1..3], legacy_record_version, .big);
@@ -167,6 +204,77 @@ pub fn deprotect(out: []u8, record: []const u8, key: [key_length]u8, iv: [iv_len
 
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
+
+test "zix tls: record sealedLen counts every record a plaintext takes" {
+    // An empty payload is still one record: the inner content type has to travel.
+    try std.testing.expectEqual(record_overhead, sealedLen(0));
+    try std.testing.expectEqual(1 + record_overhead, sealedLen(1));
+
+    // Exactly one record's worth stays one record, one byte more needs two.
+    try std.testing.expectEqual(max_plaintext + record_overhead, sealedLen(max_plaintext));
+    try std.testing.expectEqual(max_plaintext + 1 + 2 * record_overhead, sealedLen(max_plaintext + 1));
+
+    // A 64 KiB response is four records, which is what the engines size their staging for.
+    try std.testing.expectEqual(65536 + 4 * record_overhead, sealedLen(65536));
+}
+
+test "zix tls: record protect refuses a plaintext larger than one record" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    const oversized = try std.testing.allocator.alloc(u8, max_plaintext + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+
+    const out = try std.testing.allocator.alloc(u8, sealedLen(max_plaintext + 1));
+    defer std.testing.allocator.free(out);
+
+    // The seal is fed from a fixed record-sized buffer, so an unchecked length here would smash the
+    // stack rather than produce a bad record. Refusing is the only safe answer.
+    try std.testing.expectEqual(@as(usize, 0), protect(out, oversized, .APPLICATION_DATA, key, iv, 0).len);
+
+    // One byte under the ceiling is still a real record.
+    const at_ceiling = protect(out, oversized[0..max_plaintext], .APPLICATION_DATA, key, iv, 0);
+    try std.testing.expectEqual(sealedLen(max_plaintext), at_ceiling.len);
+}
+
+test "zix tls: record protect refuses an output buffer too small for the record" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    const message = "needs room for header and tag";
+
+    // One byte short of what the record costs.
+    var tight: [sealedLen("needs room for header and tag".len) - 1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), protect(&tight, message, .APPLICATION_DATA, key, iv, 0).len);
+
+    var exact: [sealedLen("needs room for header and tag".len)]u8 = undefined;
+    try std.testing.expectEqual(exact.len, protect(&exact, message, .APPLICATION_DATA, key, iv, 0).len);
+}
+
+test "zix tls: record protect2 refuses a gather larger than one record" {
+    var key: [key_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "3fce516009c21727d0f2e4e86ee403bc");
+    var iv: [iv_length]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&iv, "5d313eb2671276ee13000b30");
+
+    const tail = try std.testing.allocator.alloc(u8, max_plaintext);
+    defer std.testing.allocator.free(tail);
+    @memset(tail, 'y');
+
+    const out = try std.testing.allocator.alloc(u8, sealedLen(max_plaintext + 8));
+    defer std.testing.allocator.free(out);
+
+    // The prefix pushes the pair one record over, which the gather form must refuse the same way.
+    try std.testing.expectEqual(@as(usize, 0), protect2(out, "prefix", tail, .APPLICATION_DATA, key, iv, 0).len);
+
+    const fits = protect2(out, "prefix", tail[0 .. max_plaintext - "prefix".len], .APPLICATION_DATA, key, iv, 0);
+    try std.testing.expectEqual(sealedLen(max_plaintext), fits.len);
+}
 
 test "zix tls: record protect/deprotect round trip" {
     var key: [key_length]u8 = undefined;
