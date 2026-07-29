@@ -45,7 +45,7 @@ fn ensureSupportedZig() void {
 /// Container start pipeline for node-exporter: build the image, replace any
 /// old container, run detached, bridge-mode with an explicit host port
 /// publish (matches the postgrez/rediz convention). Returned step is the
-/// running container; callers hang their suite on it and a teardown after.
+/// running container. Callers hang their suite on it and a teardown after.
 fn addNodeExporterStart(b: *std.Build) *std.Build.Step.Run {
     const image_build = b.addSystemCommand(&.{
         "docker", "build", "-t", "zix-prometheuz-node-exporter-img", "../../../containers/node-exporter",
