@@ -9,6 +9,7 @@
 const std = @import("std");
 
 const core = @import("core.zig");
+const static = @import("static.zig");
 
 pub const RouteKind = enum(u8) { EXACT, PREFIX, PARAM };
 
@@ -166,6 +167,13 @@ pub fn Router(comptime routes: []const Route) type {
 
             if (best_handler) |h| {
                 return h(req, res, ctx);
+            }
+
+            // Static file fallback: when public_dir is configured, try to serve the request path as
+            // a file before returning 404. Disabled when public_dir is empty.
+            if (ctx.public_dir.len > 0) {
+                const stripped = if (p.len > 0 and p[0] == '/') p[1..] else p;
+                if (stripped.len > 0 and static.serve(req, res, ctx, stripped)) return;
             }
 
             res.setStatus(404);
