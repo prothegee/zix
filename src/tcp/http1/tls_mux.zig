@@ -155,7 +155,7 @@ pub fn onCiphertext(conn: *TlsConn, cipher: []const u8, payload_buf: []u8, out_b
 
 /// Accumulate decrypted plaintext and dispatch every complete request now buffered. Pipelined requests
 /// drain in one pass. Returns false when the connection must close (request too large, bad request, or
-/// a fatal write); sets transport.wclose when the client asked to close after the response.
+/// a fatal write). Sets transport.wclose when the client asked to close after the response.
 fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_buf: []u8) bool {
     // overflow guard: a single request larger than the buffer is rejected (matches tls_serve's cap).
     if (plaintext.len > conn.rbuf.len - conn.rlen) {
