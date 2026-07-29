@@ -30,6 +30,8 @@ zig-out
 zig-pkg
 
 ## proj.
+/dev
+/tmp
 /public
 /*poc*
 orders.jsonl
