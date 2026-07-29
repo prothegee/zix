@@ -40,6 +40,7 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
         .cache_ttl_ms = cfg.cache_ttl_ms,
         .cache_max_total_bytes = cfg.cache_max_total_bytes,
         .handler_timeout_ms = cfg.handler_timeout_ms,
+        .public_dir = cfg.public_dir,
     };
 }
 
