@@ -200,14 +200,45 @@ Shared request processing, the router, and the blocking connection path.
 | `conn_read_buf_min` | 32 * 1024 |
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
+| `public_dir` | "" (empty disables the static fallback) |
 
 `HandlerFn` is `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, built at dispatch by `core.invokeHandler`). `Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
 
 The per-worker response cache (ADR-036) also lives here: `tl_cache`, `serveCached` / `sendCached`, and `requestKey` (Wyhash over path + body). It is installed by the `.EPOLL` / `.URING` workers and keyed off `tl_req_path` / `tl_req_body`, which `muxDispatch` records.
 
+`invokeHandler` takes `peer_max_frame_size: u32` as an explicit parameter and copies it onto `Context.max_frame_size`, which the static fallback uses to size DATA frames. It is separate from `ServeOpts.max_frame_size` on purpose: that field is this server's receive-side advertisement, and using it as the outbound cap is what a conforming peer answers with `FRAME_SIZE_ERROR`. Three call sites supply the correct value:
+
+| call site | source of the peer value |
+| :- | :- |
+| `mux.zig` (`.EPOLL` / `.URING`) | `conn.peer_max_frame_size`, which the mux already tracked for `pumpBody` |
+| `core.serveH2cLoop` (blocking models) | a running local, updated from every SETTINGS frame with the same 16384..16777215 validation the mux applies, since a peer may raise it mid-connection |
+| `core.serveH2cUpgrade` | decoded from the base64 `HTTP2-Settings` header, so the carried stream-1 response is correct before any frame is exchanged |
+
+`Context.public_dir` is filled from `ServeOpts.public_dir` at the same point, so the router reaches the static root without a threadlocal (unlike `zix.Http1`, which keeps `tl_static_dir`).
+
 ### Blocking path (serveConn / serveH2cLoop)
 
 `serveConn` sets `TCP_NODELAY` and calls `serveConnInner`, which reads 3 bytes: `"PRI"` runs the h2c-direct preface (validate, `sendSettingsFD`, `serveH2cLoop`), anything else runs `serveH2cUpgrade` (the HTTP/1.1 `Upgrade: h2c` handshake, which serves the initial stream-1 request then `serveH2cLoop`). `serveH2cLoop` allocates a payload buffer plus a `[]Stream` slot table and runs the same frame switch as the mux with blocking `readFrameHeader` + `recvExact`, dispatching inline via `dispatchStream`. Note the blocking `Stream` is a fixed inline struct (`body: [65536]u8`, `header_scratch: [4096]u8`) held `max_streams` deep per connection, in contrast to the mux's pooled buffers sized to the serve options.
+
+---
+
+## static.zig
+
+The `public_dir` fallback (ADR-064), called from `Router.dispatch` after every route misses and before the 404. `serve(req, ctx, req_path, max_frame_size) bool` returns false for a traversal attempt, an absent file, or an empty `ctx.public_dir`, and the router then sends its 404.
+
+`serve` tries `serveCached` first and falls back to a direct open when the process has no static cache installed. Both end at the same framing code, so `public_dir` behaves identically whether or not `public_dir_cache_ttl_ms` is set.
+
+| function | role |
+| :- | :- |
+| `acquireHit` | negotiates the encoding from `accept-encoding`, then asks the cache. Because `zeroCopyAllowed` is always false here, it asks `acquireMapped` first (a resident snapshot) and falls back to the plain descriptor hit past `SNAPSHOT_MAX_BYTES`, so a large file keeps its cached descriptor instead of dropping to the uncached path |
+| `segmentFor` | turns a `Range` header into a `Segment`. Returns a whole-file segment when the header is absent or malformed (RFC 7233 section 3.1 says ignore it), and null when it is well-formed but unsatisfiable, which is the caller's cue to answer 416 |
+| `sendFramed` | one HEADERS frame (status, content type, `content-length`, `accept-ranges`, and `content-range` for a 206) then DATA frames, each capped at `max_frame_size`, the last flagged END_STREAM |
+| `sendRangeNotSatisfiable` | 416 with `Content-Range: bytes */length`, headers only, END_STREAM on the HEADERS frame |
+| `zeroCopyAllowed` | always false on this engine. `dispatch/common.beginCoalesce` installs `frame.write_hook` on every batch, cleartext included, so a `sendfile` would put the body ahead of frames already staged in the sink |
+
+`Segment` carries `{ offset, length, status, content_range }`, so a 200 and a 206 share one framing path and only the header block differs. `Content-Length` carries the segment length, not the file size, or a client waits for bytes that never arrive. An empty file closes the stream on HEADERS with no DATA frame at all.
+
+Range parsing itself is not local: it comes from `src/utils/http_range.zig`, shared with the other engines. `parseSpec` (read the header) and `resolve` (clamp against a known length) are deliberately separate calls, because collapsing them into one nullable result makes the ignore-versus-416 distinction impossible to express.
 
 ---
 
@@ -225,7 +256,7 @@ The io_uring shape of the same loop (ADR-037 Phase 4). `initUringRing` requests 
 
 ### dispatch/common.zig
 
-`serveOpts(cfg)` maps `Http2ServerConfig` to `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
+`serveOpts(cfg)` maps `Http2ServerConfig` to `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields and `public_dir`). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
 
 The write-coalescing sink is the batching primitive for the cleartext mux: `MuxCoalesceSink` (a 64 KiB threadlocal, one per worker) is installed as `frame.write_hook` by `beginCoalesce(fd)` and torn down by `endCoalesce()`. While installed, every frame the mux writes in one readable batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write, so a many-stream batch is one segment rather than one tiny segment per frame under `TCP_NODELAY`. It flushes when full and writes an oversized frame straight through, so correctness never depends on the buffer size. `endCoalesce` returns whether a write failed during the batch.
 
