@@ -13,6 +13,7 @@ const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 const rcache = @import("../../utils/response_cache.zig");
+const static_cache = @import("../../utils/static_cache.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const setCache = @import("response.zig").setCache;
 const common = @import("dispatch/common.zig");
@@ -115,6 +116,11 @@ pub const Server = struct {
         if (cfg.public_dir.len > 0) {
             const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
             dir.close(thread_io);
+
+            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
+            if (installed == .MISMATCHED) {
+                std.log.warn("zix http: a static cache is already installed in this process with different settings, keeping it", .{});
+            }
         }
 
         // Background timer: updates date cache every 500ms, evicts timed-out connections.
