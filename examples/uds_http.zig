@@ -1,9 +1,9 @@
 // uds_http.zig: HTTP frontend backed by a UDS data provider (Process B)
 //
-// Requires uds_server running on /tmp/zix.sock (Process A).
+// Requires uds_server running on tmp/zix.sock (Process A).
 //
 // Architecture:
-//   [uds_server]->/tmp/zix.sock->[uds fetcher task]->Channel(u64)->[SSE handler]
+//   [uds_server]->tmp/zix.sock->[uds fetcher task]->Channel(u64)->[SSE handler]
 //                                                               \->[/data handler]
 //
 // Endpoints:
@@ -21,7 +21,7 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9055;
-const SOCK_PATH: []const u8 = "/tmp/zix.sock";
+const SOCK_PATH: []const u8 = "tmp/zix.sock";
 
 const KERNEL_BACKLOG: usize = 1024;
 const MAX_RECV_BUF: usize = 1024 * 4;

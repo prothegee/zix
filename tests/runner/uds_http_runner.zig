@@ -11,7 +11,7 @@ const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 
-const UDS_SOCK_PATH: []const u8 = "/tmp/zix.sock";
+const UDS_SOCK_PATH: []const u8 = "tmp/zix.sock";
 const HTTP_PORT: u16 = 9055;
 const WAIT_MS: u64 = 5000;
 
@@ -41,7 +41,7 @@ pub fn main(process: std.process.Init) void {
 }
 
 fn run(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void {
-    std.Io.Dir.deleteFileAbsolute(io, UDS_SOCK_PATH) catch {};
+    std.Io.Dir.cwd().deleteFile(io, UDS_SOCK_PATH) catch {};
 
     var uds_child = try common.spawnServer(io, uds_server_path);
     defer uds_child.kill(io);

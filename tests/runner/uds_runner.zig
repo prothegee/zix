@@ -1,4 +1,4 @@
-// Test runner for zix.Uds.Server (uds_server, /tmp/zix.sock).
+// Test runner for zix.Uds.Server (uds_server, tmp/zix.sock).
 // Spawns the server, sends "get", asserts a counter string is received, kills server.
 //
 // Invoked by `zig build test-runner-uds`.
@@ -8,7 +8,7 @@ const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
 
-const SOCK_PATH: []const u8 = "/tmp/zix.sock";
+const SOCK_PATH: []const u8 = "tmp/zix.sock";
 const WAIT_MS: u64 = 5000;
 
 // --------------------------------------------------------- //
@@ -34,7 +34,7 @@ pub fn main(process: std.process.Init) void {
 
 fn run(io: std.Io, server_path: []const u8) !void {
     // Remove stale socket from a previous run before spawning.
-    std.Io.Dir.deleteFileAbsolute(io, SOCK_PATH) catch {};
+    std.Io.Dir.cwd().deleteFile(io, SOCK_PATH) catch {};
 
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
