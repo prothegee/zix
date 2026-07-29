@@ -29,13 +29,16 @@ const resp = @import("response.zig");
 const tls_serve = @import("tls_serve.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls_conn = @import("../../multiplexers/tls_conn.zig");
+const record = @import("../../tls/record.zig");
 
 const MAX_FD = common.MAX_FD;
 const EPOLL_MAX_EVENTS: usize = 4096;
 const allocator = std.heap.smp_allocator;
 
 const TLS_READ_STAGING_SIZE: usize = tls_conn.read_staging_size;
-const TLS_SEALED_OUT_SIZE: usize = 70 * 1024;
+/// Sealed response staging: room for every record a full-size response takes, since a response past
+/// one record's worth of plaintext is split across several and each pays its own header and tag.
+const TLS_SEALED_OUT_SIZE: usize = record.sealedLen(RESPONSE_BUF_SIZE);
 const TLS_PLAIN_STAGING_SIZE: usize = 32 * 1024;
 const REQUEST_BUF_SIZE: usize = 17 * 1024;
 const RESPONSE_BUF_SIZE: usize = 64 * 1024;
