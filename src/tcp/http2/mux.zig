@@ -304,7 +304,7 @@ fn muxDispatch(handler: core.HandlerFn, conn: *MuxConn, slot: usize) void {
         wallClockNs() + @as(u64, conn.opts.handler_timeout_ms) * std.time.ns_per_ms
     else
         null;
-    core.invokeHandler(handler, &req, conn.fd, s.id, conn.io, deadline_ns);
+    core.invokeHandler(handler, &req, conn.fd, s.id, conn.io, deadline_ns, conn.opts, conn.peer_max_frame_size);
     active_conn = null;
 
     // Free the slot unless the response body is parked on a window, then a WINDOW_UPDATE resumes it.
@@ -1465,4 +1465,74 @@ test "zix http2: outbound DATA frames respect the peer default max frame size, n
     feedFrame(conn, frame.FRAME_TYPE_SETTINGS, 0, 0, &settings_mfs);
     _ = muxFrameLoop(mfs_router.dispatch, conn);
     try std.testing.expectEqual(@as(u32, 24 * 1024), conn.peer_max_frame_size);
+}
+
+// The static public_dir fallback must obey the SAME rule as the streamed handler path above: DATA is
+// capped by what the PEER advertised, never by the server's own receive-side max_frame_size. The
+// static path reads its cap from Context, so this covers the plumbing that fills it.
+const sfs_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = mfsHandler }});
+
+test "zix http2: static DATA frames respect the peer max frame size, not the server's" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Comfortably past 16384, so an unchecked cap would emit an oversized frame.
+    var payload: [40000]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
+    tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big.bin", .data = &payload }) catch @panic("fixture write failed");
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+    defer _ = std.posix.system.close(pair[1]);
+
+    // Server configured with a 24 KiB receive-side limit while the peer never advertised one, so its
+    // ceiling is the RFC default. Reading the server's value here is the bug this guards.
+    const opts = core.ServeOpts{
+        .max_streams = 4,
+        .max_body = 256,
+        .max_header_scratch = 1024,
+        .max_frame_size = 24 * 1024,
+        .public_dir = root,
+    };
+    const conn = MuxConn.init(pair[1], opts, std.testing.io) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    try std.testing.expectEqual(@as(u32, frame.DEFAULT_MAX_FRAME_SIZE), conn.peer_max_frame_size);
+
+    var hblk: [64]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/big.bin");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+    _ = muxFrameLoop(sfs_router.dispatch, conn);
+
+    var wire: [64 * 1024]u8 = undefined;
+    _ = std.os.linux.shutdown(pair[1], std.os.linux.SHUT.WR);
+    var total: usize = 0;
+    while (total < wire.len) {
+        const got = std.posix.read(pair[0], wire[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var data_bytes: usize = 0;
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(wire[off..][0..9]);
+        off += 9;
+        if (fh.frame_type == frame.FRAME_TYPE_DATA) {
+            try std.testing.expect(fh.length <= frame.DEFAULT_MAX_FRAME_SIZE);
+            data_bytes += fh.length;
+        }
+        off += fh.length;
+    }
+
+    try std.testing.expectEqual(@as(usize, payload.len), data_bytes);
 }

@@ -116,11 +116,14 @@ pub const Router = router_mod.Router;
 /// sid - u31 (HTTP/2 stream id)
 /// io - std.Io (carried on Context for symmetry with the other engines)
 /// deadline_ns - ?u64 (seeded from opts.handler_timeout_ms by the caller)
-pub inline fn invokeHandler(handler: HandlerFn, req: *Request, fd: std.posix.fd_t, sid: u31, io: std.Io, deadline_ns: ?u64) void {
+/// opts - ServeOpts (read for public_dir)
+/// peer_max_frame_size - u32 (the peer's advertised SETTINGS_MAX_FRAME_SIZE, NOT opts.max_frame_size,
+///   which is this server's own receive-side limit and says nothing about what the peer accepts)
+pub inline fn invokeHandler(handler: HandlerFn, req: *Request, fd: std.posix.fd_t, sid: u31, io: std.Io, deadline_ns: ?u64, opts: ServeOpts, peer_max_frame_size: u32) void {
     var res = Response{ .fd = fd, .sid = sid };
     var arena_buf: [CTX_ARENA_BYTES]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-    var ctx = Context{ .fd = fd, .sid = sid, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator() };
+    var ctx = Context{ .fd = fd, .sid = sid, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator(), .public_dir = opts.public_dir, .max_frame_size = peer_max_frame_size };
 
     handler(req, &res, &ctx) catch {
         if (!res.sent) frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error") catch {};
@@ -158,6 +161,9 @@ pub const ServeOpts = struct {
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Seeds Context.deadline_ns at dispatch. The handler may extend or override via setTimeout/withTimeout.
     handler_timeout_ms: u32 = 0,
+    /// Root directory for static file serving, carried onto Context so the router can reach it
+    /// without a threadlocal. Empty disables static serving.
+    public_dir: []const u8 = "",
 };
 
 // --------------------------------------------------------- //
@@ -228,7 +234,7 @@ fn serveConnInner(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, io: s
             .{ frame.SETTINGS_ENABLE_PUSH, 0 },
         });
         var hpack_dec = hpack.HpackDecoder.init();
-        try serveH2cLoop(handler, fd, &hpack_dec, opts, 0, io);
+        try serveH2cLoop(handler, fd, &hpack_dec, opts, 0, io, frame.DEFAULT_MAX_FRAME_SIZE);
     } else {
         try serveH2cUpgrade(handler, fd, opts, &peek, io);
     }
@@ -296,6 +302,7 @@ fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, pref
     }
 
     var hpack_dec = hpack.HpackDecoder.init();
+    var peer_max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE;
     if (getHttp1Header(head_buf[0..hdr_end], "http2-settings")) |b64| {
         const trimmed = std.mem.trim(u8, b64, " ");
         var decoded: [SETTINGS_DECODE_SCRATCH]u8 = undefined;
@@ -310,6 +317,11 @@ fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, pref
                 if (id == frame.SETTINGS_HEADER_TABLE_SIZE) {
                     hpack_dec.max_size = val;
                     hpack_dec.evictTo(val);
+                }
+                // The upgrade header carries the client's SETTINGS, so the frame ceiling for the
+                // carried stream-1 response is known before a single frame is exchanged.
+                if (id == frame.SETTINGS_MAX_FRAME_SIZE and val >= frame.DEFAULT_MAX_FRAME_SIZE and val <= 16_777_215) {
+                    peer_max_frame_size = val;
                 }
             }
         }
@@ -330,9 +342,9 @@ fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, pref
     const split = Request.splitPath(path);
     var req = Request{ .method = method, .path = split.path, .query = split.query, .headers = &s1_hdrs, .body = &.{} };
     const deadline_ns: ?u64 = if (opts.handler_timeout_ms > 0) wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms else null;
-    invokeHandler(handler, &req, fd, 1, io, deadline_ns);
+    invokeHandler(handler, &req, fd, 1, io, deadline_ns, opts, peer_max_frame_size);
 
-    try serveH2cLoop(handler, fd, &hpack_dec, opts, 1, io);
+    try serveH2cLoop(handler, fd, &hpack_dec, opts, 1, io, peer_max_frame_size);
 }
 
 fn serveH2cLoop(
@@ -342,7 +354,12 @@ fn serveH2cLoop(
     opts: ServeOpts,
     initial_last_stream: u31,
     io: std.Io,
+    initial_peer_max_frame_size: u32,
 ) !void {
+    // Tracks the peer's SETTINGS_MAX_FRAME_SIZE for the life of the connection. A peer may raise it
+    // mid-connection, so this is a running value rather than a constant read once at the preface.
+    var peer_max_frame_size: u32 = initial_peer_max_frame_size;
+
     const max_payload = opts.max_frame_size + frame.FRAME_PAYLOAD_SLACK;
     const payload_buf = try std.heap.smp_allocator.alloc(u8, max_payload);
     defer std.heap.smp_allocator.free(payload_buf);
@@ -377,6 +394,12 @@ fn serveH2cLoop(
                     if (id == frame.SETTINGS_HEADER_TABLE_SIZE) {
                         hpack_dec.max_size = val;
                         hpack_dec.evictTo(val);
+                    }
+                    // RFC 7540 6.5.2: a valid SETTINGS_MAX_FRAME_SIZE is 16384..16777215. Outbound
+                    // DATA is capped to it so no frame the peer would reject with FRAME_SIZE_ERROR
+                    // is ever emitted. An out-of-range value keeps the last good one.
+                    if (id == frame.SETTINGS_MAX_FRAME_SIZE and val >= frame.DEFAULT_MAX_FRAME_SIZE and val <= 16_777_215) {
+                        peer_max_frame_size = val;
                     }
                 }
                 try frame.sendSettingsAckFD(fd);
@@ -442,7 +465,7 @@ fn serveH2cLoop(
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
 
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io);
+                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -462,7 +485,7 @@ fn serveH2cLoop(
                 s.header_count += count;
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io);
+                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -502,7 +525,7 @@ fn serveH2cLoop(
 
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
                 if (s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io);
+                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -541,7 +564,7 @@ fn findSlot(sid: u31, streams: []Stream, used: []bool) ?usize {
     return null;
 }
 
-fn dispatchStream(handler: HandlerFn, stream: *Stream, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io) void {
+fn dispatchStream(handler: HandlerFn, stream: *Stream, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io, peer_max_frame_size: u32) void {
     var method: []const u8 = "GET";
     var raw_path: []const u8 = "/";
     for (stream.headers[0..stream.header_count]) |h| {
@@ -567,7 +590,7 @@ fn dispatchStream(handler: HandlerFn, stream: *Stream, fd: std.posix.fd_t, opts:
         .body = stream.body[0..stream.body_len],
     };
     const deadline_ns: ?u64 = if (opts.handler_timeout_ms > 0) wallClockNs() + @as(u64, opts.handler_timeout_ms) * std.time.ns_per_ms else null;
-    invokeHandler(handler, &req, fd, stream.id, io, deadline_ns);
+    invokeHandler(handler, &req, fd, stream.id, io, deadline_ns, opts, peer_max_frame_size);
 }
 
 // --------------------------------------------------------- //
