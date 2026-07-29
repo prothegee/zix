@@ -14,6 +14,7 @@ const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const static_cache = @import("../../utils/static_cache.zig");
 
 const is_linux = builtin.target.os.tag == .linux;
 
@@ -69,6 +70,18 @@ pub const Http2Server = struct {
 
         const cfg = self.config;
         const handler = self.handler;
+
+        // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
+        // rather than 404-ing every file request at runtime. Mirrors zix.Http1.Server.run.
+        if (cfg.public_dir.len > 0) {
+            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), cfg.io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+            dir.close(cfg.io);
+
+            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
+            if (installed == .MISMATCHED) {
+                std.log.warn("zix http2: a static cache is already installed in this process with different settings, keeping it", .{});
+            }
+        }
 
         if (cfg.tls != null) {
             // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
