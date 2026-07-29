@@ -436,7 +436,9 @@ Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client 
 
 __*21. Static file serving dengan dukungan range:*__
 
-`public_dir` pada `zix.Http` dan `zix.Http1` menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan HTTP range request (RFC 7233, 206 / 416), pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`).
+`public_dir` pada keempat engine HTTP menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`) pada `zix.Http` dan `zix.Http1`. Range request (RFC 7233, 206 / 416) disajikan pada `zix.Http`, `zix.Http1`, dan `zix.Http2`, hanya file utuh pada `zix.Http3`.
+
+Atur `public_dir_cache_ttl_ms` di atas 0 agar file yang sudah di-resolve tetap terbuka dengan header responsnya sudah dirender, sehingga request berikutnya hanya membayar satu hash lookup alih-alih open plus stat, dan sibling terkompresi `.br` atau `.gz` di-resolve sekali dari disk alih-alih diprobe per request. Default-nya mati, dan pada `zix.Http3` inilah yang mengaktifkan penyajian static sama sekali (lihat [Configuration](./docs/zix-config-id.md)).
 
 > Aset statis dan upload disajikan oleh engine pada port yang sama dengan API, tanpa file server terpisah.
 
@@ -1275,9 +1277,11 @@ curl -X POST "http://localhost:9005/upload" \
 ```
 
 **Contoh:**
+- [examples/http1_static_cached.zig](examples/http1_static_cached.zig) - fallback yang sama dengan `public_dir_cache_ttl_ms` diatur, memperlihatkan jalur cache dan pengambilan sibling `.br` / `.gz`
+- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - penyajian static di atas HTTP/3, di mana cache-lah yang membuatnya mungkin sama sekali
 - [examples/http_static.zig](examples/http_static.zig) - contoh lengkap yang berfungsi termasuk static serving, range request, dan unggah multipart
 
-**Kapan digunakan:** aktifkan `public_dir` untuk menyajikan frontend hasil build, aset, atau unduhan dari server yang sama, dengan range request ditangani otomatis. Pakai jalur multipart untuk unggahan pengguna saat kamu mengontrol target penyimpanan. Untuk throughput statis sangat tinggi, CDN atau jalur berbasis `sendfile` tetap menang. Ini untuk kemudahan dan aset co-located, bukan CDN file massal.
+**Kapan digunakan:** aktifkan `public_dir` untuk menyajikan frontend hasil build, aset, atau unduhan dari server yang sama, dengan range request ditangani otomatis. Pakai jalur multipart untuk unggahan pengguna saat kamu mengontrol target penyimpanan. Dengan `public_dir_cache_ttl_ms` diatur, respons cleartext menyerahkan file ke kernel lewat `sendfile`, jadi byte-nya tidak pernah masuk user space. CDN tetap jawaban yang tepat untuk distribusi file massal lintas region: ini untuk kemudahan dan aset co-located.
 
 <br>
 
