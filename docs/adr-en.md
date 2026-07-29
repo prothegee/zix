@@ -1452,4 +1452,90 @@ Router had a matching split. `Http`, `Http2`, `Grpc`, `Fix` took a route array s
 
 ---
 
+## ADR-064: public_dir static cache across all four HTTP engines
+
+**Status:** Accepted
+
+**Context:** Static file serving was half-built, and slow where it existed.
+
+| Engine | `public_dir` field | static file | how the body went out |
+| :- | :- | :- | :- |
+| zix.Http | yes | `src/tcp/http/static.zig` | per-request `openFile` plus `stat` plus an 8 KiB read/write copy loop |
+| zix.Http1 | yes | `src/tcp/http1/static.zig` | the same loop, writing through `core.writeAllFD` |
+| zix.Http2 | no | none | not built |
+| zix.Http3 | no | none | not built |
+
+Every request for the same file paid 2 syscalls to locate it, then `ceil(size / 8 KiB)` reads and as many writes, plus a full userspace copy of every byte. Nothing was remembered between requests, and the two implementations were near duplicates of each other.
+
+The shipped `cache_ttl_ms` and `cache_max_entries` pair could not be reused. Those drive `src/utils/response_cache.zig` (ADR-036), a per-worker keyed response slab whose key is `hashKeyEncoded(method, path, query, encoding)`, deliberately coupled to compression and to handler-produced responses. A static file has a different owner, a different lifetime, and a different body source (a descriptor, not a byte slice), so it needs its own knobs.
+
+**Decision:** One shared cache module plus one thin per-engine static file, behind two new flat config fields present on all four engines.
+
+- New `src/utils/static_cache.zig`, owning the name index, TTL stamps, the open file, its size, the prerendered response header bytes, pin counts, and reclaim. It knows nothing about HTTP versions.
+- New `src/utils/static_send.zig`, owning one thing: moving a byte range of an open file to a socket, with `sendfile` or by copying through the engine's own write function.
+- New `src/utils/http_range.zig`, a shared RFC 7233 parser that splits reading the header from clamping it against a known length, so a malformed header can be ignored (200) while a well-formed unsatisfiable one is answered 416.
+- Each engine's `static.zig` owns encoding negotiation, framing for its own wire format, and the send. Only the framing differs, so only the framing is duplicated.
+- Two new flat fields mirroring the shipped `cache_*` naming: `public_dir_cache_ttl_ms: u32 = 0` and `public_dir_cache_max_entries: u32 = 256`. `zix.Http2` and `zix.Http3` also gain `public_dir` itself.
+- `public_dir_cache_ttl_ms = 0` means never cached, and it is the default. That leg runs the prior code path byte for byte, so an existing deployment cannot regress by upgrading.
+- The cache is process-wide, not per-worker: one descriptor per cached variant instead of one per worker, lock-free acquire-ordered reads, and a spinlock only on the rare insert. A deliberate exception to the shared-nothing idiom used elsewhere, taken because the cached value is a kernel object rather than per-worker state.
+- One atomic word per slot carries both the live flag and the pin count. A reader pins with a compare-and-swap that only succeeds while the slot is live, and reclaim clears the live flag with a compare-and-swap that only succeeds at zero pins. Two separate words would race: a reclaim could pass its pin check between a reader's key match and its pin.
+- The key is the resolved identity path, and one slot holds all three variants of that file. A client accepting brotli for a file with no `.br` sibling shares the identity entry instead of consuming a second slot.
+- Precompressed siblings are picked up from disk only. `foo.js.br` and `foo.js.gz` are opened once at insert, and `compression.negotiate` picks per request among the variants that exist. No on-the-fly compression. Every variant header carries `Vary: Accept-Encoding`, identity included, so an intermediary cannot hand a brotli body to a client that did not ask for one.
+- A miss is never cached, so a flood of unknown paths costs one failed open each and leaves the table untouched. Fill is lazy, with no startup walk.
+- Overflow never fails a request. Three tiers: reclaim first (a full insert sweeps a bounded 8 slots, freeing any expired and unpinned), then serve uncached through the existing path, and never allocate on the hot path. A full table is a slower response, not an error.
+- Clean-up has no timer thread. A lookup landing on an expired entry reclaims it in place and reports a miss, and a full insert sweeps as above. Bounded means no lookup pays for a full-table scan, which is what keeps the tail latency flat.
+- Expiry doubles as the staleness window: an expired hit becomes a miss, the miss re-opens and re-stats, so a file changed on disk is picked up within one TTL with no inotify machinery.
+- An entry whose bytes back an in-flight send is pinned, and reclaim skips it. A `sendfile` of a large file over a slow socket can outlive the TTL, and closing the descriptor underneath it would truncate a live response.
+- `public_dir_cache_max_entries` is clamped at init against `RLIMIT_NOFILE`, since one entry holds up to three open files. The result is reported through an `InstallResult` return rather than logged, so the module never writes to stderr on a caller's behalf.
+- `zix.Http3` takes its body from a SNAPSHOT the cache holds, not from the descriptor and not from a mapping. Bounded by `SNAPSHOT_MAX_BYTES` (8 MiB), taken on the first request that needs it, with the pin held for the whole response. Because the body can only come from the cache, `public_dir_cache_ttl_ms = 0` disables static serving on that engine entirely rather than merely turning the cache off.
+
+**Body path per engine:** the entry keeps the file open always, and the paths that need bytes read them positionally (`readPositionalAll`, a `pread`) rather than mapping. A positional read needs no lifetime management, works on every target, and is safe on a descriptor shared by every worker, since it never moves the file offset.
+
+| Engine | header | body | why |
+| :- | :- | :- | :- |
+| zix.Http cleartext | prerendered bytes | `sendfile` | thread per connection, blocking descriptor, the simplest case |
+| zix.Http1 cleartext | prerendered bytes | `sendfile` | descriptor to socket, no userspace copy |
+| zix.Http / Http1 with TLS | staged into the record path | resident snapshot, then encrypt | records are built in userspace, `sendfile` cannot apply |
+| zix.Http2 | HPACK HEADERS frame | resident snapshot cut into DATA frames | the mux coalescing hook is installed on every batch, cleartext included, so a direct write would put the body ahead of frames already staged |
+| zix.Http3 | QPACK HEADERS | snapshot held by the cache, pinned for the whole response | QUIC encrypts every packet, and the body is re-read for every packet and every retransmission |
+
+`sendfile` here is the Linux shape. The existing read/write loop stays as the portable fallback under the same comptime split the tree already uses for its other fast paths, so no platform loses static serving.
+
+**Rationale:** The four properties that make a fast static path fast are cache properties, not protocol properties, which is why they belong in one shared module. A resolved name to open descriptor is remembered, so `open` and `stat` happen once per file instead of once per request. The response header is rendered once at insert and replayed as bytes. The body goes out with `sendfile` where it can, kernel to kernel, with no userspace copy and no RSS growth. Sibling selection is resolved at insert rather than probed per request. Steady state per request becomes one hash lookup, one header send, and one body send.
+
+Sizing is runtime rather than comptime because the library cannot know how many files sit under someone's `public_dir`, so a baked-in `[N]Entry` would be wrong for nearly every user. The no-crash property comes from the overflow policy, not from where the array lives. `ResponseCache` already proves the runtime pattern in this tree (`slab_mem.mapZeroedSlots`, kernel-zeroed, demand-paged, one mapping at init), so reusing it keeps one idiom instead of two.
+
+A slot is a 256 B path buffer plus three variants of roughly 290 B each, near 1.1 KiB, so the default table is about 290 KiB of address space for the whole process. That is virtual, not resident: an untouched slot costs no physical memory. Open descriptors are the real per-entry cost, which is why the init clamp exists.
+
+Precompressed siblings landed in the same pass for a structural reason and a value reason. Structurally, the key has to carry the encoding either way, so adding the pickup later would mean rewriting the index instead of extending it. By value, once caching removes the syscalls, the only lever left is sending fewer bytes.
+
+**A file mapping was measured and rejected for the Http3 snapshot.** A body too large for one packet is parked in a send-stream slot and re-read for every packet and every retransmission, so it has to be stable, randomly readable memory that outlives the handler. Five sources were measured at the engine's own constants (1040 B chunk, 256 KiB body, ReleaseFast):
+
+| strategy | ns per packet | vs baseline |
+| :- | :- | :- |
+| resident bytes, memcpy | 15.7 | 1.00x |
+| mmap the file, memcpy | 16.1 | 1.02x |
+| 64 KiB block read, memcpy | 120 | 7.2x |
+| raw pread per packet | 567 | 34x |
+| `std.Io` `readPositionalAll` per packet | 668 | 40x |
+
+Per-packet reads are out: the syscall floor on the development box is 324 ns, so they add a syscall to a path that already pays one `sendmsg` per packet. Per-stream buffers are out on arithmetic alone: 256 connections per worker times 64 send streams is 16,384 concurrent large bodies, so even 64 KiB each is 1 GiB per worker.
+
+That left mmap, which measured essentially free, and it was implemented before a test rejected it. A file rewritten IN PLACE, which is what copying a new build over a served file does, changes under a mapping a response is still reading: verified directly, an in-place rewrite showed the new bytes through an existing mapping while an atomic rename left the mapping on the old inode untouched. So an in-flight response would serve the new file's bytes, and a file that shrank would fault past its own end and take the process with it. Being able to crash a server by copying a file into its own `public_dir` is not an acceptable trade for 0.4 ns per packet. The landed snapshot cannot be changed underneath a response, and measured marginally faster than mmap because there is no page-fault path.
+
+**Consequences:**
+
+- Default behavior is unchanged. With `public_dir_cache_ttl_ms = 0` the cache is never consulted, so both the fast path and its fallback are inert for anyone who does not opt in.
+- One process-wide mutable structure now exists in a tree that is otherwise shared-nothing. Reads are lock-free with acquire ordering and the spinlock is held only across an insert, but the exception is real and is documented here so it is not copied by default into unrelated work.
+- Files served from cache reflect disk state up to one TTL late. A deployment that swaps assets in place should keep the TTL short or leave caching off during the swap.
+- Range is served on `zix.Http`, `zix.Http1`, and `zix.Http2`. A multi-range header answers the first range only. `zix.Http3` serves whole files only, a deliberate gap in this pass.
+- `public_dir_upload` is not added to `zix.Http2` or `zix.Http3`. Neither has an upload handler convention, and adding one alongside net-new static serving would mix two concerns in one pass.
+- The cached path emits `Vary: Accept-Encoding` and the uncached path does not. Only the cached path negotiates, so only it has something to vary on.
+- `zix.Http2` gained an explicit `peer_max_frame_size` parameter on `core.invokeHandler`. `ServeOpts.max_frame_size` is this server's receive-side advertisement and had been reused as the outbound cap, which a peer may answer with FRAME_SIZE_ERROR. Three producers now feed the correct value: the mux (which already tracked it), the h2c loop (updated from SETTINGS mid-connection), and the h2c upgrade path (read from the base64 `HTTP2-Settings` header).
+- `Cache-Control`, `ETag`, and `Last-Modified` stay out of scope. Those are the user's concern, not the engine's, in this pass.
+
+**Guardrails held:** no allocation on the request path, every array sized once at init. `zig fmt` clean, `test-all` green on `zig-0.16` and `zig-0.17`, `examples` green, and all 7 targets of the cross-build matrix compiling clean. The `public_dir_cache_ttl_ms = 0` leg stays byte for byte identical to the prior path, which is what keeps `zix.Http1` off the perf gate.
+
+---
+
 ###### end of adr
