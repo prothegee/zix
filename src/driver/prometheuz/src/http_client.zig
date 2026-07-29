@@ -230,7 +230,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
 
 /// Decode an HTTP/1.1 chunked body (RFC 9112 7.1) into `body_list`. `seed`
 /// is whatever body bytes were already read into the head-scan buffer
-/// before framing was known to be chunked; further bytes come from `fd`.
+/// before framing was known to be chunked. Further bytes come from `fd`.
 /// Chunk extensions (after `;` on a size line) and trailer headers (after
 /// the terminating 0-size chunk) are read but ignored: the socket closes
 /// right after this call regardless, so there is nothing to preserve them

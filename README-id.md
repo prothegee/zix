@@ -130,6 +130,7 @@
 ## Catatan Penting
 
 Zix dispatch model untuk IOCP dan KQUEUE tidak didukung.
+
 Mencari kontributor dan maintainer.
 
 __*Platform Development Status:*__ <br>
@@ -157,8 +158,8 @@ __*Platform Development Status:*__ <br>
 - Persempit pemikiran sistem lalu bersikap eksplisit.
 - "Nice to have" dan "mungkin kita perlu ini" bersifat tersier.
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
-- Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
+- Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
 
 <br>
@@ -817,8 +818,8 @@ pub fn main(process: std.process.Init) !void {
     }).dispatch, .{
         .io = process.io,
         .dispatch_model = .ASYNC, // wajib: .ASYNC, .POOL, .MIXED, .EPOLL, atau .URING
-        // workers        = 0  -> cpu_count (accept thread untuk .POOL/.MIXED; worker untuk .EPOLL)
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (.POOL only; diabaikan oleh .EPOLL)
+        // workers        = 0  -> cpu_count (accept thread untuk .POOL/.MIXED, worker untuk .EPOLL)
+        // pool_size      = 0  -> max(10, cpu_count * 2) pool thread (.POOL only, diabaikan oleh .EPOLL)
     });
 ```
 
@@ -1704,7 +1705,7 @@ fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    // handler dibakukan pada init; io ada di config; run() tidak menerima argumen
+    // handler dibakukan pada init, io ada di config, run() tidak menerima argumen
     var server = try zix.Tcp.Server.init(myHandler, .{
         .io   = process.io,
         .ip   = "127.0.0.1",
@@ -1888,7 +1889,7 @@ IPC dalam host yang sama melalui Unix stream socket. Server menerima koneksi dan
 ```zig
 // Proses A: server UDS (penyedia data)
 pub fn main(process: std.process.Init) !void {
-    // handler dibakukan pada init; io ada di config; run() tidak menerima argumen
+    // handler dibakukan pada init, io ada di config, run() tidak menerima argumen
     var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{
         .io        = process.io,
         .path      = "/tmp/app.sock",

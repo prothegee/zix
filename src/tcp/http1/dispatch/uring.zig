@@ -536,7 +536,7 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
         /// clamped on both ends: the floor keeps a small warm reserve when the
         /// worker is idle, and the ceiling bounds the warm set so it never holds
         /// a full reconnect of a large working set resident. At low concurrency
-        /// the cap is live_count (or the floor when idle); at high concurrency
+        /// the cap is live_count (or the floor when idle). At high concurrency
         /// the ceiling holds the warm set below live_count, which is where an
         /// unclamped cap doubled the resident set and cost throughput.
         fn idleCap(self: *const Self) usize {

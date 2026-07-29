@@ -186,7 +186,7 @@ pub fn runHttpStatic(
 }
 
 // Validate every available coding the compression examples serve. The /gzip, /deflate, /br routes
-// force one specific coding; /data negotiates and, since only one coding is accepted, returns it.
+// force one specific coding. /data negotiates and, since only one coding is accepted, returns it.
 // For each, assert Content-Encoding then decode the body and check it round-trips to the source.
 pub fn runHttpCompression(io: std.Io, server_path: []const u8, port: u16) !void {
     var server_child = try common.spawnServer(io, server_path);

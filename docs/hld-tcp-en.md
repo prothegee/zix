@@ -223,7 +223,7 @@ sequenceDiagram
 Both server and client support `initArgs` / `connectArgs` for runtime `--ip` / `--port` override without rebuilding:
 
 ```zig
-// server (handler baked at init; io in config; run() takes no argument)
+// server (handler baked at init, io in config, run() takes no argument)
 var server = try zix.Tcp.Server.initArgs(myHandler, .{
     .io   = process.io,
     .ip   = "127.0.0.1",

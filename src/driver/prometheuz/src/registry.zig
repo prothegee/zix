@@ -21,7 +21,7 @@ const MetricType = sample_mod.MetricType;
 
 /// A monotonically-increasing counter cell. The value is a bit-cast f64
 /// inside an atomic u64 (std has no atomic float primitive), so add() is a
-/// CAS loop; inc() is the common add(1) case.
+/// CAS loop. inc() is the common add(1) case.
 pub const Counter = struct {
     bits: std.atomic.Value(u64) = .init(0),
 

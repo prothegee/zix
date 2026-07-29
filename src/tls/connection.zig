@@ -675,7 +675,7 @@ test "zix tls: connection, secp256r1 ECDHE shared secret is symmetric" {
     @memset(&a_seed, 0x11);
     @memset(&b_seed, 0x22);
 
-    // b's public, then a derives ECDH(a, b_pub); b derives ECDH(b, a_pub); both must match.
+    // b's public, then a derives ECDH(a, b_pub), b derives ECDH(b, a_pub), and both must match.
     const b_point = try P256.basePoint.mul(reduceP256Scalar(b_seed), .big);
     const b_pub = b_point.toUncompressedSec1();
     const kex_a = try computeKeyExchange(.SECP256R1, a_seed, &b_pub);
@@ -1030,7 +1030,7 @@ test "zix tls: connection, readAppData classifies post-handshake inner types (RF
 }
 
 test "zix tls: connection, writeAppData2 gather round-trips through readAppData" {
-    // Server encrypts a gathered (prefix, payload); a peer with the same app key decrypts prefix||payload.
+    // Server encrypts a gathered (prefix, payload). A peer with the same app key decrypts prefix||payload.
     var server: Connection = undefined;
     server.server_app_key = @splat(0x24);
     server.server_app_iv = @splat(0x68);

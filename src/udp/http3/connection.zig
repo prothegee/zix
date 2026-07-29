@@ -490,7 +490,7 @@ pub const Connection = struct {
     /// max_idle_us - u64 (idle limit before eviction, config.max_idle_ms as microseconds)
     ///
     /// Return:
-    /// - Maintenance (resend: pump the connection to retransmit; idle: remove it from the table)
+    /// - Maintenance (resend - pump the connection to retransmit, idle - remove it from the table)
     pub fn onMaintenance(self: *Connection, now_us: u64, max_idle_us: u64) Maintenance {
         // Reclaim the slot only when the peer is genuinely finished: it sent CONNECTION_CLOSE (RFC 9000
         // 10.2, now draining), or it has gone silent past the idle limit (10.1). The idle check applies

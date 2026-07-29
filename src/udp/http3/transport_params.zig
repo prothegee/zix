@@ -69,7 +69,7 @@ pub fn parse(ext_body: []const u8) TransportParams {
             },
             0x04 => params.initial_max_data = varintValue(value) orelse params.initial_max_data,
             0x05 => params.initial_max_stream_data_bidi_local = varintValue(value) orelse params.initial_max_stream_data_bidi_local,
-            // The valid range is 0-20 (RFC 9000 18.2); a larger value is a transport error, but a
+            // The valid range is 0-20 (RFC 9000 18.2). A larger value is a transport error, but a
             // minimal client is more likely than a hostile one here, so clamp rather than drop the
             // connection.
             0x0a => if (varintValue(value)) |v| {

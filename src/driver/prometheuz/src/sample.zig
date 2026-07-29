@@ -21,7 +21,7 @@ pub const Label = struct {
 };
 
 /// One parsed sample line. `name` carries the histogram/summary suffix
-/// (`_bucket`, `_sum`, `_count`) exactly as the wire format does; `le` and
+/// (`_bucket`, `_sum`, `_count`) exactly as the wire format does. `le` and
 /// `quantile` are ordinary labels, not separate fields.
 pub const Sample = struct {
     name: []const u8,

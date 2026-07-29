@@ -130,6 +130,7 @@
 ## Important Notes
 
 Zix dispatch model for IOCP and KQUEUE not supported.
+
 Looking for contributor & maintaner.
 
 __*Platform Development Status:*__ <br>
@@ -157,8 +158,8 @@ __*Platform Development Status:*__ <br>
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
-- Linux x86_64/aarch64 raw-syscall fast path is guarded, any change there can harm the implementation.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
+- Linux x86_64/aarch64 raw-syscall fast path is guarded, any change there can harm the implementation.
 - You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
 
 <br>
@@ -817,8 +818,8 @@ pub fn main(process: std.process.Init) !void {
     }).dispatch, .{
         .io = process.io,
         .dispatch_model = .ASYNC, // required: .ASYNC, .POOL, .MIXED, .EPOLL, or .URING
-        // workers        = 0  -> cpu_count (accept threads for .POOL/.MIXED; workers for .EPOLL)
-        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (.POOL only; ignored by .EPOLL)
+        // workers        = 0  -> cpu_count (accept threads for .POOL/.MIXED, workers for .EPOLL)
+        // pool_size      = 0  -> max(10, cpu_count * 2) pool threads (.POOL only, ignored by .EPOLL)
     });
 ```
 
@@ -1704,7 +1705,7 @@ fn myHandler(stream: std.Io.net.Stream, io: std.Io) void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    // handler is baked into the server type at init; io lives in config; run() takes no argument
+    // handler is baked into the server type at init, io lives in config, run() takes no argument
     var server = try zix.Tcp.Server.init(myHandler, .{
         .io   = process.io,
         .ip   = "127.0.0.1",
@@ -1888,7 +1889,7 @@ Same-host IPC over a Unix stream socket. The server accepts connections and disp
 ```zig
 // Process A: UDS server (data provider)
 pub fn main(process: std.process.Init) !void {
-    // handler is baked at init; io lives in config; run() takes no argument
+    // handler is baked at init, io lives in config, run() takes no argument
     var server = try zix.Uds.Server.init(zix.Uds.echoHandler, .{
         .io        = process.io,
         .path      = "/tmp/app.sock",

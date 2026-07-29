@@ -192,7 +192,7 @@ fn armUringRecv(ring: *IoUring, msg: *linux.msghdr, slot: usize, fd: std.posix.s
 
 /// Arm (or re-arm) the multishot recvmsg on the provided buffer group: one SQE yields a CQE per datagram
 /// (each carrying a selected buffer id) until the kernel ends the multishot, when the caller re-arms. The
-/// msghdr only reserves the name / control space; the kernel writes the recvmsg_out header, the peer
+/// msghdr only reserves the name / control space. The kernel writes the recvmsg_out header, the peer
 /// address, then the payload into each selected buffer.
 ///
 /// Return:
@@ -308,7 +308,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     }
     IoUring.buf_ring_advance(br, uring_ring_bufs);
 
-    // The msghdr only reserves name / control space per selected buffer; iov is unused (the kernel picks
+    // The msghdr only reserves name / control space per selected buffer, iov is unused (the kernel picks
     // the buffer). It must outlive the multishot, so it lives here for the worker's life.
     var msg = std.mem.zeroes(linux.msghdr);
     msg.namelen = @intCast(mshot_name_reserve);
@@ -333,7 +333,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
 
         // Arm one maintenance timeout while the worker owns connections, so submit_and_wait returns after
         // the interval even with no I/O and the sweep (loss recovery, idle eviction) still runs during a
-        // lull. Only one is ever in flight; it is re-armed after it fires (its CQE below).
+        // lull. Only one is ever in flight, re-armed after it fires (its CQE below).
         if (!timeout_armed and table.count > 0) {
             if (ring.timeout(uring_timeout_tag, &maintenance_ts, 0, 0)) |_| {
                 timeout_armed = true;

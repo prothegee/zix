@@ -36,7 +36,7 @@ pub const Snapshot = struct {
     }
 
     /// Bump the refcount before handing this snapshot to another reader.
-    /// Used by Scraper.latest(); pair with release().
+    /// Used by Scraper.latest(). Pair with release().
     pub fn retain(self: *Snapshot) void {
         _ = self.refcount.fetchAdd(1, .acq_rel);
     }

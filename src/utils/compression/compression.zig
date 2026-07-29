@@ -9,7 +9,7 @@
 //! - gRPC does NOT use this facade. It runs its own grpc-encoding per-message
 //!   negotiation, a different protocol layer, and only reuses the flate codec.
 //! - The producible set is brotli, gzip, deflate, plus identity. Each has its own codec
-//!   (brotli.zig, flate.zig); the negotiation here picks one against the client's
+//!   (brotli.zig, flate.zig). The negotiation here picks one against the client's
 //!   Accept-Encoding and the rest of the policy (size floor, already-compressed types).
 
 const std = @import("std");

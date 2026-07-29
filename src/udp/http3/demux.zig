@@ -43,7 +43,7 @@ pub const ConnId = struct {
 /// `remove` frees an entry's slot for reuse (the idle-connection eviction the maintenance sweep needs, so
 /// a dead connection does not pin its slot for the worker's life). A removed index bucket becomes a
 /// tombstone that find and insert probe past, and insert reuses tombstones, so steady-state churn
-/// recycles them instead of growing the index; when the table empties, the index is cleared outright.
+/// recycles them instead of growing the index. When the table empties, the index is cleared outright.
 pub fn Table(comptime T: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
@@ -123,7 +123,7 @@ pub fn Table(comptime T: type, comptime capacity: usize) type {
         }
 
         /// The live value in `slot`, or null when the slot is free. A worker walks 0..slot_capacity to run
-        /// per-connection upkeep (the maintenance sweep); removing the current entry mid-walk is safe,
+        /// per-connection upkeep (the maintenance sweep). Removing the current entry mid-walk is safe,
         /// since the walk is by slot index over the fixed values array and remove only flips flags.
         pub fn at(self: *Self, slot: usize) ?*T {
             return if (self.occupied[slot]) &self.values[slot] else null;
@@ -313,7 +313,7 @@ test "zix http3: CID table at() walks live slots and skips a freed one" {
     _ = table.put(b, 20).?;
     try std.testing.expect(table.remove(&a));
 
-    // Walking every slot visits only the live entry (b -> 20); the freed slot returns null.
+    // Walking every slot visits only the live entry (b -> 20), the freed slot returns null.
     var seen: u32 = 0;
     var live: usize = 0;
     for (0..Small.slot_capacity) |slot| {

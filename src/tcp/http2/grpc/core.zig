@@ -639,7 +639,7 @@ pub const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;
 const grpc_stream_inline_cap: usize = 4096;
 
 /// Server-streaming DATA-frame coalescing cap (mux cork path). A server-streaming reply is many
-/// tiny gRPC messages; emitting one h2 DATA frame per message spends a 9-byte frame header (and a
+/// tiny gRPC messages. Emitting one h2 DATA frame per message spends a 9-byte frame header (and a
 /// client-side frame parse) on every 2-to-a-few-byte payload. Instead, consecutive messages are
 /// packed into one DATA frame up to this many payload bytes, cutting frame headers and client
 /// parses by the pack factor. Kept at the HTTP/2 default SETTINGS_MAX_FRAME_SIZE (16 KiB) so the

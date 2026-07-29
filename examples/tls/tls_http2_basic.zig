@@ -1,7 +1,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-// HTTP/2 over TLS (h2, RFC 7540 + 8446). The Http2 server serves h2c by default; attaching a
+// HTTP/2 over TLS (h2, RFC 7540 + 8446). The Http2 server serves h2c by default. Attaching a
 // Tls.Context (config.tls) opts into the gated TLS path (zix.Tls): the handshake negotiates ALPN
 // h2, then a terminator runs the unchanged h2c engine over the decrypted stream. The cleartext
 // dispatch models stay untouched, https is on its own perf band.
