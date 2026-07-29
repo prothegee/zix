@@ -40,7 +40,7 @@ pub fn main(process: std.process.Init) void {
 }
 
 fn run(io: std.Io, ipc_a_path: []const u8, ipc_b_path: []const u8) !void {
-    std.Io.Dir.deleteFileAbsolute(io, IPC_SOCK_PATH) catch {};
+    std.Io.Dir.cwd().deleteFile(io, IPC_SOCK_PATH) catch {};
 
     var child_a = try common.spawnServer(io, ipc_a_path);
     defer child_a.kill(io);
