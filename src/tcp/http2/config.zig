@@ -82,6 +82,21 @@ pub const Http2ServerConfig = struct {
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Seeds Context.deadline_ns at dispatch. The handler may extend or override via setTimeout/withTimeout.
     handler_timeout_ms: u32 = 0,
+    /// Root directory for static file serving. Empty (default) disables it. A request matching no
+    /// route is served as a file before the 404 fallback, ".." is rejected. Range (RFC 7233) is
+    /// served: 206 for a satisfiable range, 416 for a well-formed one past the end, and a malformed
+    /// header is ignored so the whole file is sent. A multi-range header answers the first range.
+    /// Validated at run(): missing dir = error.PublicDirNotFound.
+    public_dir: []const u8 = "",
+    /// How long a resolved static file stays cached, in milliseconds. Default 0 means never cached:
+    /// every request re-opens and re-reads the file. Above 0 the file is kept open and its .br / .gz
+    /// siblings resolved once, so a repeat request costs a hash lookup, and a file changed on disk is
+    /// picked up within one window. Separate from cache_ttl_ms, which belongs to the response cache.
+    public_dir_cache_ttl_ms: u32 = 0,
+    /// Static cache slot count, rounded down to a power of two and clamped against the process
+    /// descriptor budget. One slot holds one file plus its .br and .gz siblings, so 256 covers 85
+    /// distinct files at three variants each. A full table serves the request uncached, never an error.
+    public_dir_cache_max_entries: u32 = 256,
 };
 
 // --------------------------------------------------------- //
