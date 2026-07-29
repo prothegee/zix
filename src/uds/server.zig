@@ -77,13 +77,13 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
             const io = self.config.io;
 
             // Remove stale socket from a previous run before binding.
-            std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, self.config.path) catch {};
 
             const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
             var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog });
             defer {
                 net_server.deinit(io);
-                std.Io.Dir.deleteFileAbsolute(io, self.config.path) catch {};
+                std.Io.Dir.cwd().deleteFile(io, self.config.path) catch {};
             }
 
             logSystem(self.config, "listening on {s}", .{self.config.path});
@@ -201,7 +201,7 @@ test "zix uds: UdsServer init, valid path succeeds" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    var server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    var server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "zix_test.sock", .allocator = std.testing.allocator });
     server.deinit();
 }
 
@@ -209,7 +209,7 @@ test "zix uds: UdsServer init, timeout fields default to zero" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
-    const server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "/tmp/zix_test.sock", .allocator = std.testing.allocator });
+    const server = try UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "zix_test.sock", .allocator = std.testing.allocator });
     try std.testing.expectEqual(@as(u32, 0), server.config.recv_timeout_ms);
     try std.testing.expectEqual(@as(u32, 0), server.config.send_timeout_ms);
 }
@@ -258,7 +258,7 @@ test "zix uds: UdsServer init, timeout fields stored from config" {
 
     const server = try UdsServer.init(echoHandler, .{
         .io = threaded.io(),
-        .path = "/tmp/zix_test.sock",
+        .path = "zix_test.sock",
         .allocator = std.testing.allocator,
         .recv_timeout_ms = 5000,
         .send_timeout_ms = 3000,
