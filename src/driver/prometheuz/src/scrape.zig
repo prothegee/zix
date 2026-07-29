@@ -1,5 +1,5 @@
 //! One-shot scrape: GET the target, parse the text 0.0.4 body into an
-//! arena-owned Snapshot. The testable core; Scraper wraps this in a
+//! arena-owned Snapshot. The testable core. Scraper wraps this in a
 //! background poller loop.
 
 const std = @import("std");
