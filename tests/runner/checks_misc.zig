@@ -111,8 +111,13 @@ pub fn runUds(io: std.Io, server_path: []const u8) !void {
 
     try common.waitForUdsSocket(io, "tmp/zix.sock", common.START_TIMEOUT_MS);
 
+    // The same absolute path the server derived. Connecting by relative path is refused on
+    // Windows, so both sides go through the shared resolver.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(io, "tmp", "zix.sock", &path_buf);
+
     var client = try zix.Uds.Client.connect(.{
-        .path = "tmp/zix.sock",
+        .path = sock_path,
         .recv_timeout_ms = 3000,
     }, io);
     defer client.deinit(io);
@@ -169,12 +174,12 @@ pub fn runChannelSelfterm(io: std.Io, binary_path: []const u8) !void {
 }
 
 pub fn runChannelIpc(io: std.Io, ipc_a_path: []const u8, ipc_b_path: []const u8) !void {
-    std.Io.Dir.cwd().deleteFile(io, "/tmp/zix_ipc.sock") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "tmp/zix_ipc.sock") catch {};
 
     var child_a = try common.spawnServer(io, ipc_a_path);
     defer child_a.kill(io);
 
-    try common.waitForUdsSocket(io, "/tmp/zix_ipc.sock", common.START_TIMEOUT_MS);
+    try common.waitForUdsSocket(io, "tmp/zix_ipc.sock", common.START_TIMEOUT_MS);
 
     var child_b = try common.spawnServer(io, ipc_b_path);
     defer child_b.kill(io);
