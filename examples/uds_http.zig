@@ -21,7 +21,8 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9055;
-const SOCK_PATH: []const u8 = "tmp/zix.sock";
+const SOCK_DIR: []const u8 = "tmp";
+const SOCK_FILE: []const u8 = "zix.sock";
 
 const KERNEL_BACKLOG: usize = 1024;
 const MAX_RECV_BUF: usize = 1024 * 4;
@@ -33,6 +34,11 @@ const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 // Capacity 16: absorbs bursts without blocking the fetcher.
 const CountChan = zix.Channel(u64);
 var g_channel: CountChan = undefined;
+
+/// The resolved absolute socket path, filled once in main. Both the fetcher task and the request
+/// handler read it, so it is derived once rather than per connection.
+var g_sock_path_buf: [600]u8 = undefined;
+var g_sock_path: []const u8 = &.{};
 
 // --------------------------------------------------------- //
 
@@ -48,7 +54,7 @@ fn fetcherTask(cap: FetchCap) void {
     const io = cap.io;
 
     while (true) {
-        var client = zix.Uds.Client.connect(.{ .path = SOCK_PATH }, io) catch {
+        var client = zix.Uds.Client.connect(.{ .path = g_sock_path }, io) catch {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1000), .awake) catch {};
             continue;
         };
@@ -77,7 +83,7 @@ fn fetcherTask(cap: FetchCap) void {
 pub fn dataHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
 
-    var client = zix.Uds.Client.connect(.{ .path = SOCK_PATH }, ctx.io) catch {
+    var client = zix.Uds.Client.connect(.{ .path = g_sock_path }, ctx.io) catch {
         res.setStatus(.SERVICE_UNAVAILABLE);
         return res.send("UDS server unavailable");
     };
@@ -160,6 +166,8 @@ pub fn main(process: std.process.Init) !void {
     defer arena.deinit();
 
     // Channel is used for the lifetime of the process, init before server.
+    g_sock_path = try zix.utils.socket_path.resolve(process.io, SOCK_DIR, SOCK_FILE, &g_sock_path_buf);
+
     g_channel = try CountChan.init(arena.allocator(), 16);
     defer g_channel.deinit();
 
@@ -177,7 +185,7 @@ pub fn main(process: std.process.Init) !void {
         .kernel_backlog = KERNEL_BACKLOG,
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
-        .dispatch_model = .ASYNC, // .ASYNC preferred for SSE: long-lived connections do not hold pool threads
+        .dispatch_model = .ASYNC, // .ASYNC preferred for SSE: each connection gets its own async task
     });
     defer server.deinit();
 
