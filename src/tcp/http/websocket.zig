@@ -422,7 +422,7 @@ pub fn upgradeFd(fd: std.posix.fd_t, accept: []const u8) !void {
 }
 
 /// Complete the handshake over TLS, then hand the connection to the https thread (ADR-055). Call
-/// this from a handler served over TLS (`config.tls`, the `.ASYNC` / `.POOL` / `.MIXED` path)
+/// this from a handler served over TLS (`config.tls`, the `.ASYNC` path)
 /// instead of `upgrade` + a stream loop: it detaches the buffered response capture so the `101` and
 /// every frame encrypt one TLS record per write (the ADR-054 stream sink), then registers the
 /// handoff. After the handler returns, the https serve loop drives the inline frame loop over the
