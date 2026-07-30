@@ -17,7 +17,7 @@ Engine server HTTP/2 (h2c) pure-Zig: frame codec, HPACK, dan state machine multi
 
 ## Posisi: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-Ketiganya adalah engine raw-fd dengan lima model dispatch yang sama dan (sejak ADR-063) trio handler `req`/`res`/`ctx` yang sama. `zix.Http1` dan `zix.Grpc` tetap membakukan routing ke dalam tipe `Server` saat comptime, `Server` milik `zix.Http2` menerima handler runtime yang dibangun dari `Router` comptime (lihat bentuk `Server.init` di bawah). Perbedaannya pada protokol dan apa yang diekspos `Response` / `Context` masing-masing.
+Ketiganya adalah engine raw-fd dengan tiga model dispatch yang sama dan (sejak ADR-063) trio handler `req`/`res`/`ctx` yang sama. `zix.Http1` dan `zix.Grpc` tetap membakukan routing ke dalam tipe `Server` saat comptime, `Server` milik `zix.Http2` menerima handler runtime yang dibangun dari `Router` comptime (lihat bentuk `Server.init` di bawah). Perbedaannya pada protokol dan apa yang diekspos `Response` / `Context` masing-masing.
 
 | Aspek | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
@@ -37,21 +37,16 @@ Pakai `zix.Http2` untuk HTTP/2 kelas browser atau prior-knowledge dengan kontrol
 
 ## Model Runtime
 
-Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
 
-### .ASYNC / .POOL / .MIXED: Thread-per-connection di atas core blocking
+### .ASYNC: Thread-per-connection di atas core blocking
 
-Ketiganya berbagi `core.serveConn`: satu thread (atau task `io.async`) memiliki satu koneksi sepanjang masa hidupnya dan menjalankan loop h2c blocking (`serveH2cLoop`), membaca satu frame pada satu waktu dan men-dispatch setiap stream yang selesai secara inline. Perbedaannya hanya pada bagaimana koneksi di-accept dan diserahkan ke serving thread, pemisahan yang sama dengan `zix.Http1`.
+Satu task `io.async` memiliki koneksi sepanjang hidupnya dan menjalankan loop h2c blocking (`serveH2cLoop`), membaca satu frame sekaligus dan men-dispatch setiap stream yang lengkap secara inline. Ini model portabel, bentuk yang sama dengan `zix.Http1`.
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SW{"dispatch_model"}
-    SW -->|ASYNC| A["1 accept thread\nio.async() per connection"]
-    SW -->|POOL| P["N accept threads\nConnQueue + M pool threads"]
-    SW -->|MIXED| M["N accept threads\nio.async() per connection"]
+    MAIN["Server.run()"] --> A["1 accept thread\nio.async() per connection"]
     A --> SERVE["core.serveConn(routes, fd, opts)"]
-    P --> SERVE
-    M --> SERVE
     SERVE --> PRE{"PRI preface?"}
     PRE -->|yes| DIRECT["h2c direct"]
     PRE -->|no| UP["h2c upgrade (Upgrade: h2c)"]
@@ -60,15 +55,14 @@ flowchart TD
     LOOP --> LOOP
 ```
 
-- `.ASYNC`: satu accept thread, setiap koneksi di-dispatch sebagai task `io.async` konkuren. `workers` dan `pool_size` diabaikan.
-- `.POOL`: `workers` accept thread mendorong stream hasil accept ke `ConnQueue` bersama, `pool_size` pool thread mengambil dan melayani setiap koneksi secara sinkron.
-- `.MIXED`: `workers` accept thread (`SO_REUSEPORT`) masing-masing men-dispatch langsung via `io.async`, tanpa `ConnQueue`. `pool_size` diabaikan.
+- Satu accept thread, setiap koneksi di-dispatch sebagai task `io.async` konkuren. `workers` diabaikan.
+- Satu-satunya model yang tersedia di semua platform, jadi ini model yang dipakai setiap target non-Linux.
 
 ### .EPOLL: Event Loop Multiplexed Shared-Nothing (khusus Linux)
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SPAWN["spawn pool_size mux workers"]
+    MAIN["Server.run()"] --> SPAWN["spawn workers mux workers"]
     SPAWN --> W["epollMuxWorker\nprivate SO_REUSEPORT listener\nprivate epoll instance\nprivate ConnTable (fd -> MuxConn)"]
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
@@ -81,14 +75,14 @@ flowchart TD
 - Setiap worker memiliki listener pribadi, instance epoll pribadi, dan `ConnTable` ter-index fd. Kernel menyeimbangkan koneksi baru di antara listener `SO_REUSEPORT` per-worker, sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada handoff fd antar thread.
 - Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux.zig`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
 - Setiap frame yang ditulis oleh readable batch (HEADERS plus DATA per stream, dikali jumlah stream dalam batch) di-coalesce menjadi satu `write()` melalui sink per-worker (`beginCoalesce` / `endCoalesce`), alih-alih satu write per frame.
-- `pool_size` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
-- Pada target non-Linux `.EPOLL` jatuh kembali ke `.POOL` dengan notice yang dicatat di log.
+- `workers` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
+- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
 Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `mux.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
 
-`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Di luar Linux ia melipat ke `.POOL`.
+`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `error.DispatchModelUnsupported`.
 
 ---
 
@@ -131,7 +125,7 @@ Diakses melalui `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http2.Server` | struct | `init(handler, config)`, lalu `run()` / `deinit()` (ADR-063: `handler` adalah `HandlerFn` runtime, bukan tabel route comptime) |
 | `zix.Http2.ServerConfig` | struct | Konfigurasi server (lihat bagian Http2ServerConfig) |
-| `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
+| `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0, portabel) `.EPOLL`(1, hanya Linux) `.URING`(2, hanya Linux) |
 | `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, mencerminkan Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (tanpa `.PARAM` pada tahap ini) |
@@ -168,7 +162,7 @@ pub const Http2ServerConfig = struct {
     dispatch_model: DispatchModel, // wajib, tidak ada default
     kernel_backlog: u31   = 1024,
     workers:        usize = 0,     // 0 = cpu_count accept thread, diabaikan .ASYNC
-    pool_size:      usize = 0,     // .POOL: 0 = max(10, cpu_count*2). .EPOLL/.URING: 0 = cpu_count worker
+    workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux worker. Diabaikan oleh .ASYNC
     worker_stack_size_bytes: usize = 512 * 1024,
     busy_poll_us:   u32   = 0,     // window spin SO_BUSY_POLL (.EPOLL/.URING), 0 = tidak diset
     max_streams:    u32   = 128,   // SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan
@@ -177,7 +171,7 @@ pub const Http2ServerConfig = struct {
     max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (body di atas ini di-shed dengan 413)
     max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
-    response_cache: bool  = false, // response cache per-worker (ADR-036), .EPOLL/.URING
+    response_cache: bool  = false, // response cache per-worker (ADR-036), semua model
     handler_timeout_ms: u32 = 0,   // deadline global yang diseed ke Context.deadline_ns, 0 = tanpa deadline
     public_dir:     []const u8 = "",        // root file static, "" menonaktifkan penyajian static
     public_dir_cache_ttl_ms:      u32 = 0,  // 0 = tidak pernah di-cache, default bawaan
@@ -187,7 +181,7 @@ pub const Http2ServerConfig = struct {
 };
 ```
 
-Catatan: `pool_size` di-overload oleh model. Pada `.POOL` ia adalah jumlah pool-thread blocking. Pada `.EPOLL` / `.URING` ia adalah jumlah mux worker (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
+Catatan: `workers` adalah jumlah mux worker pada `.EPOLL` / `.URING` (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `.ASYNC` mengabaikannya. `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
 
 `handler_timeout_ms` (ADR-063) adalah deadline global: diseed ke `Context.deadline_ns` saat dispatch, 0 berarti tanpa deadline. Handler bisa memperketat atau menghapus deadline-nya sendiri via `ctx.setTimeout` / `withDeadline`, dicek dengan `ctx.isExpired()` di antara langkah-langkah (engine tidak pernah menginterupsi handler yang sedang berjalan, ini opt-in).
 
@@ -309,7 +303,7 @@ Flow control sisi-kirim mengikuti RFC 7540 6.9. Setiap `MuxConn` membawa send wi
 Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 1.3 dengan fallback 1.2, ALPN h2). Switch `run()` di `server.zig` memilih salah satu dari dua terminator berdasarkan `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
-- `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
+- `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
 
 Write hook (`frame.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `frame.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
@@ -328,7 +322,7 @@ Access logging per-stream adalah tanggung jawab handler: handler memiliki frame 
 | Lingkup | Penyimpanan | Masa hidup |
 | :- | :- | :- |
 | Tabel route | comptime (nol biaya heap) | Proses |
-| Frame payload + array stream (.ASYNC/.POOL/.MIXED) | `smp_allocator`: satu payload buffer plus `max_streams` slot `Stream` inline (masing-masing membawa buffer body dan header-scratch-nya sendiri) | Koneksi |
+| Frame payload + array stream (.ASYNC) | `smp_allocator`: satu payload buffer plus `max_streams` slot `Stream` inline (masing-masing membawa buffer body dan header-scratch-nya sendiri) | Koneksi |
 | MuxConn per-connection (.EPOLL/.URING) | `smp_allocator`: read accumulator (floor `max_recv_buf`) plus array pointer `*MuxStream` selebar `max_streams` dan flag slot | Koneksi |
 | State stream terbuka (.EPOLL/.URING) | pool `MuxStream` thread-local per-worker (free-list), buffer `max_body` dan `max_header_scratch` tiap slot dipakai ulang lintas peminjaman | Stream konkuren (dikembalikan ke pool saat close) |
 | Dynamic table HPACK | inline di decoder koneksi (`dyn_buf`, 8 KB) | Koneksi |
@@ -336,7 +330,7 @@ Access logging per-stream adalah tanggung jawab handler: handler memiliki frame 
 | Alokasi handler | `ctx.allocator`: stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, tanpa pemanggilan heap), direset per request | Request |
 | Cache file static (opt-in) | satu mapping demand-paged yang dipakai bersama semua worker dan semua engine HTTP dalam proses, `public_dir_cache_max_entries` slot berisi file terbuka, ukurannya, dan header yang sudah dirender | Proses |
 
-Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-worker (free-list berisi `MuxStream`), sehingga memori stream residen mengikuti jumlah stream konkuren pada worker itu, bukan jumlah koneksi dikali `max_streams`. Koneksi idle hanya menahan array pointer selebar `max_streams` dan read buffer-nya, bukan `max_streams` buffer stream penuh. Stream yang tertutup mengembalikan slot-nya (buffer dipertahankan) ke pool untuk peminjaman berikutnya, sehingga steady state tidak melakukan alokasi per-stream. Jalur blocking `.ASYNC` / `.POOL` / `.MIXED` sebaliknya menyediakan array `Stream` inline per-connection di muka.
+Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-worker (free-list berisi `MuxStream`), sehingga memori stream residen mengikuti jumlah stream konkuren pada worker itu, bukan jumlah koneksi dikali `max_streams`. Koneksi idle hanya menahan array pointer selebar `max_streams` dan read buffer-nya, bukan `max_streams` buffer stream penuh. Stream yang tertutup mengembalikan slot-nya (buffer dipertahankan) ke pool untuk peminjaman berikutnya, sehingga steady state tidak melakukan alokasi per-stream. Jalur blocking `.ASYNC` sebaliknya menyediakan array `Stream` inline per-connection di muka.
 
 ---
 
@@ -346,11 +340,11 @@ Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-wor
 | :- | :- |
 | Body request per stream | Di-buffer hingga `max_body` (default 16 KB). Body yang melewati kapasitas buffer di-shed dengan 413 dan END_STREAM, jadi handler tidak pernah melihat slice terpotong dan body korup tidak pernah di-dispatch. Hanya window koneksi yang dikredit untuk byte yang dibuang, menjaga koneksi tetap dapat dipakai untuk stream lainnya |
 | Stream konkuren | Diiklankan sebagai `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). Stream yang dibuka melebihi itu dijawab dengan `REFUSED_STREAM`, jadi nilai yang diiklankan minimal harus sebesar jumlah concurrent-stream peer |
-| Upgrade h2c (.EPOLL/.URING) | Disajikan minimal pada jalur mux: `101` lalu connection preface, request yang dibawa pada stream 1 tidak dilayani. Klien prior-knowledge (kasus h2c yang umum) tidak terpengaruh. Model blocking `.ASYNC` / `.POOL` / `.MIXED` melayani request stream-1 hasil upgrade |
+| Upgrade h2c (.EPOLL/.URING) | Disajikan minimal pada jalur mux: `101` lalu connection preface, request yang dibawa pada stream 1 tidak dilayani. Klien prior-knowledge (kasus h2c yang umum) tidak terpengaruh. Model blocking `.ASYNC` melayani request stream-1 hasil upgrade |
 | Scratch blok header | `max_header_scratch` per koneksi (default 4 KB). Set header yang meluapkannya dijawab dengan `COMPRESSION_ERROR` dan RST_STREAM |
 | Ukuran frame | Frame yang lebih besar dari `max_frame_size` plus slack adalah `FRAME_SIZE_ERROR` dan menutup koneksi dengan GOAWAY. DATA keluar diukur dengan nilai yang diiklankan peer, tidak pernah dengan nilai ini |
 | File static | `public_dir` menyajikan file utuh dan range tunggal. Header multi-range dijawab range pertama saja, dan tidak ada companion `public_dir_upload` di engine ini |
-| TLS | h2 di atas TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, pada perf band-nya sendiri. `.EPOLL` / `.URING` melakukan terminasi di worker epoll-mux event-driven, `.ASYNC` / `.POOL` / `.MIXED` per koneksi di worker thread. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
+| TLS | h2 di atas TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, pada perf band-nya sendiri. `.EPOLL` / `.URING` melakukan terminasi di worker epoll-mux event-driven, `.ASYNC` per koneksi di worker thread. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
 
 Endpoint yang membutuhkan body request besar sebaiknya membacanya dalam frame DATA di dalam `max_body`, atau memindahkan transfer besar ke desain streaming (model ter-buffer mencakup body yang terbatas).
 
