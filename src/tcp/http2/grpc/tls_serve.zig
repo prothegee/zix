@@ -8,14 +8,13 @@
 //!   sealed into TLS records through a thread-local hook on frame.writeAllFD plus the staged reply
 //!   cork, so there is NO socketpair and NO second thread per connection. This is what lets the gRPC
 //!   TLS path scale to high connection counts instead of livelocking on a per-connection socketpair.
-//! - The cleartext dispatch models (ASYNC / POOL / MIXED / EPOLL / URING) are untouched. https is a
+//! - The cleartext dispatch models (ASYNC / EPOLL / URING) are untouched. https is a
 //!   separate path on its own perf band.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const posix = std.posix;
-const win_io = @import("../../../utils/windows_io.zig");
+const fd_io = @import("../../../utils/fd_io.zig");
 const core = @import("core.zig");
 const mux = @import("mux.zig");
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
@@ -150,11 +149,9 @@ fn TlsConn(comptime RouterType: type) type {
         };
 
         fn entry(conn_ctx: Ctx) void {
-            defer if (comptime builtin.os.tag == .windows) win_io.close(conn_ctx.fd) else {
-                _ = linux.close(conn_ctx.fd);
-            };
+            defer fd_io.close(conn_ctx.fd);
 
-            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver(RouterType){ .opts = conn_ctx.opts, .io = conn_ctx.io }) catch {};
+            terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, conn_ctx.io, MuxDriver(RouterType){ .opts = conn_ctx.opts, .io = conn_ctx.io }) catch {};
         }
     };
 }
@@ -183,11 +180,7 @@ pub fn runTls(comptime RouterType: type, config: GrpcServerConfig) !void {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
             // lifetime, wedging every other pending connection. The client retries the dropped one.
-            if (comptime builtin.os.tag == .windows) {
-                win_io.close(conn_fd);
-            } else {
-                _ = linux.close(conn_fd);
-            }
+            fd_io.close(conn_fd);
 
             continue;
         };
