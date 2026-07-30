@@ -3,21 +3,20 @@
 const std = @import("std");
 const zix = @import("zix");
 
+/// A connected pair for the tests below, portable across every supported platform.
 fn makePair() ![2]std.posix.fd_t {
-    var fds: [2]i32 = undefined;
-    const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
-    if (result != 0) return error.SocketPairFailed;
-    return fds;
+    const pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+
+    return pair.fds;
 }
 
 fn closefd(fd: std.posix.fd_t) void {
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 // --------------------------------------------------------- //
 
 test "zix integration: WsConn.send produces a masked frame (mask bit set)" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -26,7 +25,7 @@ test "zix integration: WsConn.send produces a masked frame (mask bit set)" {
     try conn.send(.text, "hello");
 
     var raw: [64]u8 = undefined;
-    const n = try std.posix.read(fds[1], &raw);
+    const n = try zix.utils.fd_io.readOnce(fds[1], &raw);
 
     try std.testing.expect(n >= 2);
     // RFC 6455 5.1: mask bit is bit 7 of the second byte.
@@ -34,7 +33,6 @@ test "zix integration: WsConn.send produces a masked frame (mask bit set)" {
 }
 
 test "zix integration: WsConn.send + recv text frame round-trip" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -45,7 +43,7 @@ test "zix integration: WsConn.send + recv text frame round-trip" {
     // Read the raw masked frame from fds[1] and feed it back as an "unmasked server frame"
     // by decoding it manually into a new unmasked frame, then writing to a second pair.
     var raw: [64]u8 = undefined;
-    const raw_len = try std.posix.read(fds[1], &raw);
+    const raw_len = try zix.utils.fd_io.readOnce(fds[1], &raw);
     try std.testing.expect(raw_len >= 2);
 
     // Decode the masked client frame to get the payload.
@@ -56,7 +54,6 @@ test "zix integration: WsConn.send + recv text frame round-trip" {
 }
 
 test "zix integration: WsConn.recv reads an unmasked server frame" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
@@ -65,7 +62,7 @@ test "zix integration: WsConn.recv reads an unmasked server frame" {
     var frame_buf: [32]u8 = undefined;
     const frame_len = zix.Http.WebSocket.buildFrame(&frame_buf, .text, "ping");
 
-    _ = std.posix.system.write(fds[1], frame_buf[0..frame_len].ptr, frame_len);
+    zix.utils.fd_io.writeAll(fds[1], frame_buf[0..frame_len]) catch {};
 
     const conn = zix.Http.WsConn{ .fd = fds[0] };
     var payload_buf: [64]u8 = undefined;
@@ -77,8 +74,6 @@ test "zix integration: WsConn.recv reads an unmasked server frame" {
 }
 
 test "zix integration: WsConn.recv returns null on clean EOF before frame" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const fds = try makePair();
     defer closefd(fds[0]);
 
