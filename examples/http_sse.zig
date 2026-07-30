@@ -5,7 +5,7 @@
 //! GET /events  - SSE stream: sends a counter every second for 10 ticks then closes
 //!
 //! Uses .ASYNC dispatch: single accept thread, each SSE connection dispatched via io.async().
-//! .ASYNC is preferred for SSE: long-lived connections do not hold pool threads.
+//! .ASYNC is preferred for SSE: each long-lived connection gets its own async task.
 //!
 //! curl usage:
 //! curl -N http://localhost:9012/events
@@ -23,7 +23,6 @@ const KERNEL_BACKLOG: usize = 1024;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .ASYNC
-const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
@@ -88,7 +87,6 @@ pub fn main(process: std.process.Init) !void {
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .dispatch_model = DISPATCH_MODEL,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
