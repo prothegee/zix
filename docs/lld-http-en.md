@@ -12,32 +12,6 @@ Internal implementation details for the HTTP layer. For design rationale see [`d
 
 `init(handler, config)` stores the handler and config, nothing else: no socket is opened. The socket is opened in `run()`. `Router(routes).dispatch` itself absorbs the static-file-fallback and 404 (mirrors Http1's router), so `dispatch/common.zig` no longer owns that logic externally.
 
-### ConnQueue
-
-Shared work queue between accept threads (producers) and pool threads (consumers). Backed by `std.Io.Mutex` + `std.Io.Condition` + `std.ArrayListUnmanaged(std.Io.net.Stream)`.
-
-```
-push(stream): lock -> append -> unlock -> signal
-pop():        lock -> while empty: wait -> orderedRemove(0) -> unlock -> return stream
-close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiting pop())
-```
-
-### run(): .POOL (dispatch_model = .POOL)
-
-```
-1. worker_count = if (workers == 0) cpu_count else workers
-2. pool_size    = if (pool_size == 0) max(10, cpu_count * 2) else pool_size
-3. std.Io.Threaded.init(smp_allocator, .{ .stack_size = 512 KB }) -> thread_io
-4. ConnQueue{}
-5. spawn timer thread  -> timerLoop(thread_io, &self.registry)
-      every 500ms: updateDateCache + registry.evict (Layer D connection guard)
-6. spawn pool_size pool threads  -> poolEntry(self, &queue, thread_io)
-7. spawn worker_count accept threads -> workerEntry(self, &queue, thread_io)
-8. join accept threads
-9. queue.close(thread_io)
-10. join pool threads
-```
-
 ### run(): .ASYNC (dispatch_model = .ASYNC)
 
 ```
@@ -47,19 +21,6 @@ close():      lock -> closed = true -> unlock -> broadcast   (unblocks all waiti
       stream = net_server.accept(io)
       if (io.async(handleConnection, .{ stream, io, self })) |_| {}
       else |_| { handleConnection(stream, io, self); }  // fallback if pool exhausted
-```
-
-### run(): .MIXED (dispatch_model = .MIXED)
-
-```
-1. worker_count = if (workers == 0) cpu_count else workers
-2. spawn worker_count asyncWorkerEntry threads
-3. each asyncWorkerEntry:
-      resolve + listen with SO_REUSEPORT
-      accept loop:
-        stream = net_server.accept(io)
-        if (io.async(handleConnection, .{ stream, io, self })) |_| {}
-        else |_| { handleConnection(stream, io, self); }
 ```
 
 ### run(): .EPOLL (dispatch_model = .EPOLL, Linux-only)
@@ -92,23 +53,6 @@ epollWorker():
 
 No shared state between workers. `handleOneRequest` is called directly on the worker thread;
 it does a synchronous blocking recv/parse/dispatch/send. The arena is reset between requests.
-
-### workerEntry() (.POOL accept thread)
-
-```
-1. resolve + listen with SO_REUSEPORT (reuse_address = true)
-2. loop:
-      stream = net_server.accept(io)
-      queue.push(stream, io)        // never blocks on I/O
-```
-
-### poolEntry() (.POOL pool thread)
-
-```
-loop:
-    stream = queue.pop(io)          // blocks until connection arrives
-    handleConnection(stream, io, self)
-```
 
 ### handleConnection()
 
@@ -326,8 +270,8 @@ g_date_lens:   [2]usize       // valid length of each buffer
 g_date_active: atomic(usize)  // index (0 or 1) of the current live buffer
 g_date_secs:   atomic(u64)    // last wall-clock second written
 
-.POOL: timer thread calls updateDateCache every 500 ms (std.Io.sleep)
-.ASYNC: accept loop calls updateDateCache before each accept()
+.ASYNC: a background timer thread calls updateDateCache every 500 ms (std.Io.sleep), and the
+        accept loop also calls it before each accept()
 
 updateDateCache():
   cur_secs = std.Io.Clock.real.now(io).toSeconds()
