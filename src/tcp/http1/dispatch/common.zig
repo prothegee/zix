@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../../utils/windows_io.zig");
+const async_cache = @import("../../../utils/async_cache.zig");
 const Config = @import("../config.zig").Http1ServerConfig;
 const core = @import("../core.zig");
 const HandlerFn = core.HandlerFn;
@@ -23,7 +24,7 @@ pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
 }
 
 // --------------------------------------------------------- //
-// Shared connection entry (ASYNC and MIXED)
+// Shared connection entry (.ASYNC)
 
 /// Arguments for connEntry, one set per accepted connection.
 pub const ConnArgs = struct {
@@ -37,17 +38,39 @@ pub const ConnArgs = struct {
     large_body_rcvbuf: usize = 0,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
+    compress: bool = false,
+    compression_min_size: usize = 256,
+    compression_max_out: usize = 256 * 1024,
+    response_cache: bool = false,
+    cache_max_entries: u32 = 256,
+    cache_max_value_bytes: u32 = 16 * 1024,
+    cache_ttl_ms: u32 = 0,
+    cache_max_total_bytes: usize = 0,
 };
 
-/// Thread entry for one accepted connection (.ASYNC / .MIXED): installs the
+/// Thread entry for one accepted connection (.ASYNC): installs the
 /// per-worker switches, arms the guard when a registry is given, and runs the
 /// keep-alive serve loop until the connection ends.
+///
+/// Note:
+/// - The multiplexed models install their switches once per worker, because a worker owns its
+///   connections for its whole life. .ASYNC has no such worker: io.async hands each connection
+///   to whichever pool thread is free, so the switches are installed here instead. Compression
+///   is stateless, the cache is built once per pool thread and reused (see threadCache).
 pub fn connEntry(args: ConnArgs) void {
     core.setDateHeader(args.send_date_header);
     core.setStatic(args.public_dir, args.io);
     core.setMaxResponseHeaders(args.max_response_headers);
+    core.setCompression(args.compress, args.compression_min_size, args.compression_max_out);
+
+    if (args.response_cache) {
+        if (threadCache(args)) |cache| core.setCache(cache, args.cache_ttl_ms) else core.setCache(null, 0);
+    } else {
+        core.setCache(null, 0);
+    }
 
     defer args.stream.close(args.io);
+
     const fd = args.stream.socket.handle;
 
     var guard: ?ConnEntry = null;
@@ -60,9 +83,17 @@ pub fn connEntry(args: ConnArgs) void {
     core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf }, args.io);
 }
 
+/// This pool thread's response cache, sized from the connection's config.
+fn threadCache(args: ConnArgs) ?*async_cache.ResponseCache {
+    return async_cache.forThisThread(.{
+        .max_entries = async_cache.effectiveEntries(args.cache_max_entries, args.cache_max_value_bytes, args.cache_max_total_bytes),
+        .max_value_bytes = args.cache_max_value_bytes,
+    });
+}
+
 // --------------------------------------------------------- //
 // Connection guard (config.conn_timeout_ms): registry plus timer eviction on
-// the blocking models (.ASYNC, .POOL, .MIXED). The multiplexed models (.EPOLL,
+// the blocking model (.ASYNC). The multiplexed models (.EPOLL,
 // .URING) do not use it, their event loops own connection lifetime.
 
 /// Sweep interval for the connection-guard timer thread.
