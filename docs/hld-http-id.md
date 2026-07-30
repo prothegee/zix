@@ -23,39 +23,7 @@ HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
 
 ## Model Runtime
 
-Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
-
-### .POOL: Work-Queue Thread Pool
-
-```mermaid
-flowchart TD
-    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
-    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) -> queue.push(stream)"]
-    SPAWN --> POOL["Pool thread\nqueue.pop()\nhandleConnection(stream)"]
-    ACC --> ACC
-    POOL --> HC["handleConnection()"]
-    HC --> G["stack/heap read_buf + write_buf"]
-    G --> H["std.http.Server.init()"]
-    H --> I["ArenaAllocator per-connection"]
-    I --> J["keep-alive loop"]
-    J --> K["receiveHead()"]
-    K -->|close or reset| Z["stream.close()"]
-    K --> L["build Request + Response + Context"]
-    L --> M["Router.dispatch()"]
-    M -->|matched| N["HandlerFn"]
-    M -->|no match| O{"public_dir set?"}
-    O -->|yes| P["static.serve()"]
-    O -->|no| Q["404 Not Found"]
-    P -->|file not found| Q
-    N --> J
-    P --> J
-    Q --> J
-```
-
-- Accept thread hanya memanggil `accept()` dan mendorong koneksi ke `ConnQueue` yang dipakai bersama. Accept thread tidak pernah menangani I/O.
-- Pool thread mengambil dan menangani setiap koneksi dengan I/O blocking sinkron (tanpa overhead `io.async()`).
-- Default: cpu_count accept thread, `max(10, cpu_count * 2)` pool thread.
-- `workers` dan `pool_size` mengatur jumlah thread. Lihat `HttpServerConfig`.
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, jadi pemanggil portabel memilih model per target saat comptime dan `run()` menolak model khusus Linux di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -84,14 +52,9 @@ flowchart TD
 ```
 
 - Satu accept thread. Setiap koneksi di-dispatch sebagai task konkuren melalui `io.async()`.
-- `workers` dan `pool_size` diabaikan.
-- Direkomendasikan untuk SSE dan WebSocket: koneksi berumur panjang tidak menahan pool thread.
-
-### .MIXED: N Accept Thread, Dispatch io.async()
-
-- N accept thread (default cpu_count, `SO_REUSEPORT`). Setiap thread men-dispatch koneksi langsung melalui `io.async()` tanpa `ConnQueue`.
-- `pool_size` diabaikan. `workers` mengontrol jumlah accept thread.
-- Throughput dan latency seimbang. Jitter lebih tinggi dibanding `.POOL` saat saturasi.
+- `workers` diabaikan (selalu tepat satu accept thread).
+- Direkomendasikan untuk SSE dan WebSocket: satu stream terbuka hanya memakai satu task, bukan slot worker event loop.
+- Satu-satunya model yang tersedia di semua platform, jadi ini model yang dipakai setiap target non-Linux.
 
 ### .EPOLL: Shared-Nothing epoll Worker (Linux-only)
 
@@ -113,18 +76,18 @@ flowchart TD
 - Setiap worker memiliki satu `SO_REUSEPORT` listener dan satu `epoll` instance. Kernel mendistribusikan koneksi baru ke worker tanpa antrian bersama.
 - Level-triggered `EPOLLIN`: koneksi tetap terdaftar setelah setiap request dan re-fires saat data baru tiba. Tidak perlu re-arm eksplisit.
 - Fd blocking: `handleOneRequest` melakukan recv/parse/send secara sinkron, lalu mengembalikan worker ke `epoll_wait`.
-- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
+- `workers` mengontrol jumlah worker (0 = cpu_count).
 - Terbaik untuk request berumur pendek throughput tinggi di Linux. Tidak cocok untuk SSE atau WebSocket (blocking read akan menahan worker).
-- Build non-Linux otomatis fallback ke `.POOL`.
+- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 ### .URING: Worker io_uring Shared-Nothing (Linux-only)
 
 Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama), tetapi completion-based alih-alih readiness-based: accept, read, dan write disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring (`self.runUring(io)`, ADR-037 Fase 4).
 
-- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan.
+- `workers` mengontrol jumlah worker (0 = cpu_count).
 - Terbaik untuk beban sustained dan pipelined di mana ring yang di-batch mengamortisasi syscall. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality. Di mesin many-core, ring close (`prep_close`, ADR-041, native ke `zix.Http1` untuk saat ini) membuat worker terus memanen completion lewat connection churn, di mana `.URING` mencapai paritas atau lebih baik dengan memori jauh lebih sedikit.
 - Seperti `.EPOLL`, serve per-connection bersifat blocking begitu request siap, jadi tidak cocok untuk SSE atau WebSocket.
-- Build non-Linux otomatis fallback ke `.POOL`.
+- Saat io_uring sendiri tidak tersedia di host (kernel lama, `RLIMIT_MEMLOCK` rendah, sandbox) engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 `zix.Http.Server` menerima nilai `std.Io` yang opak dan tidak memiliki atau memanggil deinit pada backend tersebut. Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk detail jumlah thread dan perbandingan model.
 
@@ -220,7 +183,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native Linux saja. Non-Linux dan protokol selain HTTP/Grpc menggunakan `.POOL` secara otomatis) `.URING`(4, io_uring Linux saja, fallback `.POOL` otomatis yang sama di luar Linux) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0, portabel) `.EPOLL`(1, Linux saja) `.URING`(2, io_uring Linux saja). Di luar Linux `run()` mengembalikan `error.DispatchModelUnsupported` untuk dua yang terakhir |
 | `zix.Http.RequestHeaderSize` | union(enum) | Batas header request: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | String user agent client dari `build.zig.zon` (contoh: `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Batas header response: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -252,11 +215,11 @@ pub const HttpServerConfig = struct {
     io:                   std.Io,                         // backend io dari pemanggil, wajib, harus outlive server
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel,    // required: ASYNC, POOL, MIXED, EPOLL, or URING (EPOLL/URING Linux-only)
+    dispatch_model:       DispatchModel,    // required: ASYNC, EPOLL, or URING (EPOLL/URING Linux-only)
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
     large_body_rcvbuf:    usize             = 0,          // SO_RCVBUF pada jalur large-body/upload, 0 = default kernel
-    compress:             bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (.EPOLL/.URING)
+    compress:             bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (semua model)
     compression_min_size: usize             = 256,        // lewati body di bawah floor ini
     compression_max_out:  usize             = 256 * 1024, // cap output terkompresi codec-agnostic
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
@@ -266,10 +229,9 @@ pub const HttpServerConfig = struct {
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
     public_dir_cache_ttl_ms:      u32       = 0,          // 0 = tidak pernah di-cache, default bawaan
     public_dir_cache_max_entries: u32       = 256,        // slot static cache, satu per file
-    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
+    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled, .ASYNC only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
-    workers:              usize             = 0,          // 0 = cpu_count; accept threads untuk .POOL/.MIXED, workers untuk .EPOLL; diabaikan oleh .ASYNC
-    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (diabaikan oleh .EPOLL, .MIXED, .ASYNC)
+    workers:              usize             = 0,          // 0 = cpu_count worker untuk .EPOLL / .URING, diabaikan oleh .ASYNC
     tls:                  ?*zix.Tls.Context = null,       // non-null melayani engine ini lewat TLS (https native), jika tidak cleartext
     tls_port:             u16               = 0,          // port pendamping dual-listener, 0 = single-listener; lihat docs/hld-tls-id.md
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
@@ -286,7 +248,7 @@ Untuk panduan pemilihan batas header dan keamanan, lihat [`docs/headers.md`](hea
 
 ## Siklus Hidup Koneksi
 
-`.POOL` (pool thread menangani koneksi secara sinkron):
+`.ASYNC` (task io.async() menangani koneksi):
 
 ```mermaid
 sequenceDiagram
@@ -392,7 +354,7 @@ Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membat
 
 **Logika `Date`** (lintas platform, sadar proxy):
 1. `server.zig` memindai header request satu kali sebelum dispatch untuk nilai `Date` yang diteruskan proxy. Bila ditemukan, disimpan di `res.date_cache`.
-2. Bila tidak ada, `res.date_cache` diisi dari cache date atomik global (diperbarui oleh timer thread setiap 500 ms pada `.POOL`, atau oleh accept loop pada `.ASYNC`). Satu atomic load per request, tanpa syscall clock.
+2. Bila tidak ada, `res.date_cache` diisi dari cache date atomik global (diperbarui oleh background timer thread setiap 500 ms). Satu atomic load per request, tanpa syscall clock.
 3. `send()` membaca `res.date_cache` langsung tanpa pemindaian header saat pengiriman.
 4. Format IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
@@ -702,7 +664,7 @@ sequenceDiagram
 
 ### Persyaratan konkurensi
 
-Koneksi SSE berumur panjang. Thread pool blocking milik `.POOL` akan habis (satu thread per stream terbuka, diblokir selama durasi penuh stream). `.ASYNC` lebih disarankan: setiap koneksi berjalan sebagai task konkuren melalui `io.async()` tanpa menempati pool thread.
+Koneksi SSE berumur panjang. Event loop `.EPOLL` dan `.URING` akan menahan satu worker selama durasi penuh stream. `.ASYNC` lebih disarankan: setiap koneksi berjalan sebagai task konkuren melalui `io.async()`, jadi satu stream terbuka hanya memakai satu task, bukan slot worker.
 
 ### Pola handler
 
