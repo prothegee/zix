@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-grpc-en.md`](hld-grpc-en.md) and ADR-031.
 
-The blocking models (`.ASYNC`, `.POOL`, `.MIXED`) share one connection path (`serveGrpcConn` -> `serveGrpcLoop`). The `.EPOLL` model is a separate, multiplexed, non-blocking path (`grpcMuxOnReadable`) that owns the bulk of this document.
+The blocking model (`.ASYNC`) uses one connection path (`serveGrpcConn` -> `serveGrpcLoop`). The `.EPOLL` model is a separate, multiplexed, non-blocking path (`grpcMuxOnReadable`) that owns the bulk of this document.
 
 Every route-table-dependent internal function below still takes `comptime RouterType: type` (ADR-063), not a flattened runtime `handler: HandlerFn` like Http2's equivalents. This is deliberate: the engine reads `Route.is_server_streaming` off `RouterType.route_slice` before invoking the handler, to pick sync-inline vs task-spawn dispatch, and a bare `HandlerFn` pointer cannot carry that metadata. See `docs/hld-grpc-en.md`'s Handler Pattern section for the measured cost of losing it.
 
@@ -173,7 +173,7 @@ For a streaming route (detected by `routeIsStreaming(RouterType.route_slice, pat
 
 ### Blocking path (serveGrpcConn / serveGrpcLoop)
 
-Unchanged for `.ASYNC`, `.POOL`, `.MIXED`. `serveGrpcConn` sets `TCP_NODELAY` and calls `serveGrpcConnInner`, which handles the h2c-direct preface or the h2c upgrade, then `serveGrpcLoop`. The loop uses a blocking `ConnReader` and the same frame switch, dispatching via `dispatchStream`: unary inline (`dispatchGrpcInline`, staged via a stack `ReplyStage`), server-streaming via `spawnGrpcStream` (one detached thread, deep-copies headers and body, writes under a shared `ConnMutex`).
+Unchanged for `.ASYNC`. `serveGrpcConn` sets `TCP_NODELAY` and calls `serveGrpcConnInner`, which handles the h2c-direct preface or the h2c upgrade, then `serveGrpcLoop`. The loop uses a blocking `ConnReader` and the same frame switch, dispatching via `dispatchStream`: unary inline (`dispatchGrpcInline`, staged via a stack `ReplyStage`), server-streaming via `spawnGrpcStream` (one detached thread, deep-copies headers and body, writes under a shared `ConnMutex`).
 
 ---
 
@@ -210,7 +210,7 @@ The blocks are produced by running the real `HpackEncoder` at comptime, so they 
 
 ### Dispatch (run)
 
-`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` / `.POOL` / `.MIXED` keep the accept-thread + `io.async` / `ConnQueue` pool structure and call `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection).
+`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` keeps the accept-thread + `io.async` structure and calls `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection). Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.DispatchModelUnsupported` (ADR-065).
 
 The `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, and `runEpoll` symbols below all live in `dispatch/epoll.zig`.
 
@@ -239,7 +239,7 @@ Drains `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` to `EAGAIN` (level-triggered). Ea
 
 ### runEpoll(comptime RouterType: type, cfg)
 
-`worker_count = pool_size` (0 = cpu count). Spawns `worker_count` `epollMuxWorkerFn(RouterType)` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
+`worker_count = workers` (0 = cpu count). Spawns `worker_count` `epollMuxWorkerFn(RouterType)` threads (512 KB stacks) and joins them. The kernel balances connections across the per-worker `SO_REUSEPORT` listeners.
 
 ---
 
