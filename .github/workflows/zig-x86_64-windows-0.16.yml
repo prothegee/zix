@@ -16,16 +16,21 @@ jobs:
     name: x86_64-windows
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: windows-latest
+    # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
+    # hung test to burn a day of runner minutes before anyone notices.
+    timeout-minutes: 60
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
       - name: Checkout
+        timeout-minutes: 5
         uses: actions/checkout@v7
 
       # toolchain comes from the official zip: the runner image does not ship
       # the pinned 0.16.0
       - name: Install zig 0.16.0
         shell: pwsh
+        timeout-minutes: 10
         run: |
           Invoke-WebRequest -Uri "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip" -OutFile zig.zip
           Expand-Archive -Path zig.zip -DestinationPath .
@@ -35,6 +40,7 @@ jobs:
       # sanity print so the log records the exact toolchain in use
       - name: zig version
         shell: pwsh
+        timeout-minutes: 2
         run: zig version
 
       # zix suites run one step each so a red step names the failing suite.
@@ -74,17 +80,18 @@ jobs:
       # examples is compile-plus-install only (no execution). test-runner-all then drives
       # every zix protocol end to end over real sockets, so unlike the cross-build matrix
       # (which only COMPILES runners for a foreign target) this leg actually executes them.
-      # Both get a longer timeout-minutes than a test suite: examples links ~95 binaries and
-      # the runner spawns a server child process per protocol.
+      # Both carry the same 3 minute cap as a test suite. examples links ~95 binaries and
+      # the runner spawns a server child process per protocol, so these are the two steps
+      # most likely to need the cap raised on a slow runner.
       - name: zix examples
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
         run: zig build examples --summary all
 
       - name: zix protocol runners
         if: always()
-        timeout-minutes: 15
+        timeout-minutes: 3
         shell: pwsh
         run: zig build test-runner-all --summary all
 
