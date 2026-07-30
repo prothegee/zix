@@ -3,12 +3,11 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9009;
-const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
+const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 64; // 64 KB streaming read buffer (supports file uploads)
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 64;
-const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
-const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
+const WORKERS: usize = 0; // ignored by .ASYNC
 
 const PUBLIC_DIR = "./public";
 const UPLOAD_SUBDIR = "u";
@@ -244,7 +243,6 @@ pub fn main(process: std.process.Init) !void {
         .public_dir = PUBLIC_DIR,
         .public_dir_upload = UPLOAD_SUBDIR,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
