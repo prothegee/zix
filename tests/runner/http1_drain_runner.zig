@@ -10,8 +10,8 @@
 // argv[1]: server binary path. argv[2]: label. argv[3]: port.
 //
 // Note:
-// - The drain only exists on the EPOLL and URING dispatch models. ASYNC, POOL,
-//   and MIXED truncate an over-large body instead, so they are not wired here.
+// - The drain only exists on the EPOLL and URING dispatch models. ASYNC truncates
+//   an over-large body instead, so it is not wired here.
 // - Pipelining the GET behind the body is the point: it is the bytes the drain
 //   must leave on the socket, so it directly checks the conn.drain cap.
 
