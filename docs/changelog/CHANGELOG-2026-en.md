@@ -48,6 +48,35 @@ __*Fix:*__
 
 __*Update:*__
 
+- Breaking: the `.POOL` and `.MIXED` dispatch models are removed (ADR-065):
+    - `DispatchModel` is now `ASYNC = 0`, `EPOLL = 1`, `URING = 2` on all eight engines. Off Linux, `run()` returns `error.DispatchModelUnsupported` for `.EPOLL` and `.URING` instead of silently downgrading to `.POOL`, and logs which model was rejected. The old fallback changed a caller's throughput, memory, and latency profile with nothing but a log line to say so, and a server with no logger configured said nothing at all.
+    - `pool_size` is removed from all eight configs, and `pool_stack_size_bytes` from `zix.Fix`. On `zix.Http2` and `zix.Grpc` `pool_size` was the `.EPOLL` / `.URING` worker count while `workers` was POOL and MIXED only, so both are repointed onto `workers`. Both defaulted to 0, so default behaviour is unchanged.
+    - The 16 `dispatch/pool.zig` and `dispatch/mixed.zig` files are deleted, along with `ConnQueue`, `WorkerCtx`, `PoolCtx`, and `AsyncWorkerCtx`.
+    - The 34 numbered per-model examples collapse to 7 unified ones, each picking its model per target at comptime. Two test-runner legs are lost with them: `http1-drain` keeps only its URING leg, and `grpc-stream` now shares port 9032 with `grpc`.
+    - New shared predicate `src/utils/dispatch_support.zig`, consulted at the top of every `run()` before it opens a listener or spawns a thread, so a rejected config leaves nothing behind.
+
+    ---
+
+- Every feature now works under `.ASYNC` on every supported platform (ADR-066):
+    - Response compression and the response cache reached `.ASYNC`. Both are per-worker threadlocal switches that only `dispatch/epoll.zig` and `dispatch/uring.zig` installed, so a server with `compress = true` on `.ASYNC` was returning uncompressed bodies with no error at all. The engine-owned WebSocket promotion was worse: `core.zig` took the handoff and dropped it, ending the connection.
+    - Fixed: TLS over `.ASYNC` was broken on macOS, FreeBSD, NetBSD and OpenBSD. Six files split `if (windows) ... else <Linux syscall>`, so those four platforms fell into the Linux branch and issued Linux syscall numbers. It compiled, which is why no cross-build sweep caught it. Every such site is now a three-way `windows` / `linux` / `posix` split.
+    - HTTP/3 gained a portable datagram fallback. Its `runSingle` previously logged a line and returned void off Linux, so `run()` reported success and never bound a socket.
+    - Unix-domain socket and channel IPC paths are now resolved to an absolute path both ends derive identically, instead of a relative path (rejected outright by the Windows AF_UNIX bind) or `/tmp/...` (a location Windows does not have).
+    - New shared substrate: `src/utils/fd_io.zig` (blocking read / write / close / readiness on a raw descriptor), `src/utils/socket_pair.zig` (a connected pair, socketpair on POSIX and loopback on Windows), `src/utils/socket_path.zig`, and `src/utils/async_cache.zig` (the `.ASYNC` response cache, one per io pool thread, with a registry and reclaim because a threadlocal has no destructor).
+    - `examples/http1_websocket_uring.zig` is deleted: `http1_websocket.zig` already runs `.URING` on Linux and so already exercises `websocket.pumpRing`. Its `/ws` echo route moved across and its runner became `test-runner-http1-websocket-echo`. Port 9029 is retired, not reused.
+    - `tests/runner/common.zig:linux_only_labels` is now empty: all 52 runner scenarios are expected to pass on every platform. 85 unit, integration and edge tests dropped their `!= .linux` skip guard, because what made them Linux-only was the test harness (`socketpair`, `pipe2`, `memfd_create`) and not the behaviour under test.
+    - Nothing here touches the `.EPOLL` / `.URING` install path: their per-worker cache and compression setup is byte for byte what it was.
+
+    ---
+
+- Docker-free test suites for all three drivers:
+    - New `test-behaviour` and `test-edge` steps on `postgrez`, `rediz`, and `prometheuz`, each driving an in-process server under `tests/inproc/` that speaks the real protocol. They need no container and no daemon, so all seven CI legs run them, where previously only the Linux leg could run the container-backed `test-integration`.
+    - `postgrez` covers the PG v3 wire protocol including SCRAM-SHA-256 and its channel-bound PLUS variant, cleartext auth, the extended query cycle, COPY, LISTEN / NOTIFY, and a TLS 1.3 handshake. `rediz` covers RESP2 and RESP3 with a real keyspace, ACL auth, CLIENT KILL, and TLS. `prometheuz` gets its first end-to-end coverage at all, with one HTTP endpoint standing in for the exporter, the remote-write receiver, and the query API.
+    - Each framing layer is verified against the driver's own codec rather than against itself: messages built by the driver's own `src/protocol/frontend.zig` are read back by the test parser, the test builder is read back by `src/protocol/backend.zig`, and the SCRAM server runs against the real `src/auth/scram.zig` client, all three under `src/driver/postgrez/`.
+    - `test-integration` and `test-runner` are unchanged and stay container-only. The in-process server runs no SQL and no PromQL, so it proves the wire path and the driver's handling of it, never that a query means what its author intended.
+
+    ---
+
 - `public_dir` static file serving reworked, and extended to all four HTTP engines (ADR-064):
     - New `src/utils/static_cache.zig`, a table shared by every worker and every HTTP engine in the process, holding a resolved file's open descriptor, its size, and its prerendered 200 header. A repeat request costs a hash lookup instead of an open plus a stat.
     - New `src/utils/static_send.zig`, which owns moving a byte range to a socket: `sendfile` on Linux for a cleartext response, a positional read plus the engine's own write otherwise. Zero copy is refused whenever a response is encrypted or staged, so no path can put plaintext on the wire.
@@ -83,17 +112,7 @@ __*Update:*__
     - New per-engine config field: `handler_timeout_ms` on `Http2ServerConfig` and `Http3ServerConfig` (both had no timeout concept before), seeded onto `Context.deadline_ns` at dispatch.
     - Migration: every example and integration/edge/behaviour test across all five engines was updated to the new call shape. `zig build test-all` and `zig build examples` are green on `zig-0.16` and `zig-0.17`.
 
-<br>
-
-__*Fix:*__
-
-- TBA
-
-<br>
-
-## 0.5.x-rc2 (2026-07-27)
-
-__*Update:*__
+    ---
 
 - Platform cross-build support, target-suffixed examples, platform-aware tests and runners:
     - The whole tree (module, examples, all four test suites, the test runners, and the postgrez / rediz / prometheuz drivers) builds with Zig 0.16.x and Zig 0.17.x for x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, and x86_64-openbsd. Windows socket I/O rides a small ntdll shim (`src/utils/windows_io.zig`: NtReadFile / NtWriteFile / NtClose plus the AFD partial-disconnect), the BSDs get TCP_NODELAY resolved comptime (`std.posix.TCP` is void there on Zig 0.16), and every Linux-only path (EPOLL / URING loops, CPU affinity, madvise, raw UDP batching) is comptime-gated. On non-Linux targets `.EPOLL` / `.URING` keep falling back to `.POOL`. Windows degrades where the platform lacks the primitive: logger file logging is suspended (console logging stays), poll-based timeouts become blocking reads, no CPU pinning, UDS and raw UDP return runtime errors.
