@@ -18,18 +18,16 @@ pub const HttpServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
-    /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
+    /// Connection dispatch model. Selects between .ASYNC, .EPOLL, and .URING (.EPOLL and .URING are
+    /// Linux-only, run() rejects them elsewhere with error.DispatchModelUnsupported).
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().
     kernel_backlog: u31 = 1024,
-    /// Number of accept threads (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
+    /// Shared-nothing worker count for .EPOLL / .URING (0 = cpu_count). Ignored by .ASYNC,
+    /// which always runs exactly one accept thread.
     workers: usize = 0,
-    /// Number of pool threads (0 = max(10, cpu_count * 2)). Only used by .POOL,
-    /// ignored by .ASYNC and .MIXED.
-    pool_size: usize = 0,
-    /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
+    /// Worker thread stack size in bytes for the .EPOLL and .URING handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// Worker thread stack size in bytes when compression is enabled, a floor under .EPOLL / .URING:
@@ -106,7 +104,7 @@ pub const HttpServerConfig = struct {
     public_dir_cache_max_entries: u32 = 256,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default
     /// false: compression spends CPU and only pays off over a real network, so off keeps the perf
-    /// gate untouched. Active under .EPOLL / .URING. A handler opts in via resp.sendNegotiated.
+    /// gate untouched. Active under every dispatch model. A handler opts in via resp.sendNegotiated.
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body under this floor
     /// is sent uncompressed, since the header and CPU cost outweighs the saving.
@@ -116,7 +114,7 @@ pub const HttpServerConfig = struct {
     /// brotli). A response whose compressed form would exceed this is sent uncompressed instead.
     compression_max_out: usize = 256 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache
-    /// API (res.sendFromCache / res.sendCached) degrades to a plain send. Active under .EPOLL / .URING.
+    /// API (res.sendFromCache / res.sendCached) degrades to a plain send. Active under every model.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -132,7 +130,7 @@ pub const HttpServerConfig = struct {
     cache_max_total_bytes: usize = 0,
     /// https - opt-in. When non-null the server serves HTTP/1.1 over TLS (zix.Tls) on a gated path,
     /// cleartext engine untouched: .EPOLL / .URING terminate in tls_mux (SSE via the stream sink),
-    /// the thread models in tls_serve (WS over TLS rides those, ADR-055). Caller owns, must outlive.
+    /// the thread model (.ASYNC) in tls_serve (WS over TLS rides that, ADR-055). Caller owns, must outlive.
     tls: ?*Tls.Context = null,
     /// Companion https bind port for the dual-listener mode. 0 (default) keeps single-listener
     /// behavior (with tls set the server is TLS-only on port). Non-zero (requires tls) serves
