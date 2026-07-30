@@ -245,7 +245,6 @@ The request slices point into the engine's per-connection decode buffer and are 
 | Model | Shape |
 | :- | :- |
 | `.ASYNC` | One single-worker recv loop on the calling thread. One CID table owns every connection, so a client 4-tuple change (connection migration) is just a new peer address on the same connection id. Migration-safe. |
-| `.POOL`, `.MIXED` | Multi-core: one SO_REUSEPORT `recvmmsg` blocking worker per CPU, each pinned to its core and owning its own CID table (shared-nothing). The kernel load-balances by 4-tuple. |
 | `.EPOLL` | The per-core shape plus epoll readiness (drain-to-EAGAIN). |
 | `.URING` | The per-core shape plus a real io_uring completion loop. Folds to the epoll worker loop per-worker when io_uring is unavailable (a capability fold, not model-mixing). |
 
