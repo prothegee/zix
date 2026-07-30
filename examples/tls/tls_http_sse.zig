@@ -4,7 +4,7 @@
 //! GET /        - HTML page that opens an EventSource (open in browser over https)
 //! GET /events  - SSE stream over TLS: a counter every second for 10 ticks then closes
 //!
-//! Streaming over TLS rides the thread-per-connection path (.ASYNC / .POOL / .MIXED), so this
+//! Streaming over TLS rides the thread-per-connection path (.ASYNC), so this
 //! example uses .ASYNC: each long-lived SSE connection owns its worker thread (ADR-054). The
 //! .EPOLL / .URING multiplexed TLS path stays request / response only. res.sendStream() is unchanged:
 //! it detaches the buffered capture and each event encrypts one TLS record straight to the socket.
@@ -95,7 +95,7 @@ pub fn main(process: std.process.Init) !void {
         .port = PORT,
         .tls = &tls,
         // .ASYNC (thread per connection) is the streaming-over-TLS path: each SSE stream parks its
-        // own thread instead of a fixed pool slot. .EPOLL / .URING would buffer (no streaming).
+        // own thread. .EPOLL / .URING would buffer (no streaming).
         .dispatch_model = .ASYNC,
     });
     defer server.deinit();
