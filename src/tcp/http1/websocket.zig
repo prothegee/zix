@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const core = @import("core.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 
 // --------------------------------------------------------- //
 
@@ -371,7 +372,7 @@ pub fn broadcast(conns: []const std.posix.fd_t, opcode: Opcode, payload: []const
 /// worker is never parked on a single connection.
 ///
 /// Note:
-/// - Honored under dispatch_model .EPOLL only. Under .ASYNC/.POOL the handoff
+/// - Honored under dispatch_model .EPOLL only. Under .ASYNC the handoff
 ///   is cleared and the connection ends after the handler returns.
 ///
 /// Param:
@@ -390,7 +391,7 @@ pub fn serve(fd: std.posix.fd_t, key: []const u8, on_frame: WsFrameFn) !void {
 }
 
 /// Complete the handshake over TLS, then hand the connection to the https thread (ADR-055). Call
-/// this from an http1 handler served over TLS (`config.tls`, the `.ASYNC` / `.POOL` / `.MIXED`
+/// this from an http1 handler served over TLS (`config.tls`, the `.ASYNC`
 /// path) instead of `serve`: it detaches the buffered response capture so the `101` and every
 /// frame encrypt one TLS record per write (ADR-054 stream sink), then registers the handoff. After
 /// the handler returns, the https serve loop drives the inline frame loop over the TLS session,
@@ -538,6 +539,55 @@ pub fn pumpRing(fd: std.posix.fd_t, data: []const u8, payload_buf: []u8, out_buf
 }
 
 // --------------------------------------------------------- //
+// Blocking frame loop (.ASYNC)
+
+/// Drive an engine-owned WebSocket to completion on the calling thread.
+///
+/// What:
+///   The multiplexed models return to their event loop between frames. The .ASYNC model owns one
+///   connection per task, so it stays here until the peer goes away. Framing, ping / pong and
+///   close handling all come from pump, the same code the event loops use.
+///
+/// Note:
+/// - Blocking reads, so the task parks between frames rather than spinning.
+/// - A frame wider than recv_buf can never complete, so the connection is closed instead of
+///   looping on bytes that can make no progress.
+/// - broadcast works here as it does on the event loops, since every send goes through the fd.
+///
+/// Param:
+/// fd - std.posix.fd_t (the promoted connection)
+/// on_frame - WsFrameFn (invoked per text / binary frame)
+/// recv_buf - []u8 (accumulates raw frame bytes, sizes the largest accepted frame)
+/// payload_buf - []u8 (scratch for unmasking, must hold the largest payload)
+/// out_buf - []u8 (staging for the coalesced write)
+///
+/// Return:
+/// - void once the peer hung up, sent a close frame, or a write failed
+pub fn serveBlocking(fd: std.posix.fd_t, on_frame: WsFrameFn, recv_buf: []u8, payload_buf: []u8, out_buf: []u8) void {
+    var filled: usize = 0;
+
+    while (true) {
+        if (filled >= recv_buf.len) return;
+
+        const got = fd_io.readOnce(fd, recv_buf[filled..]) catch return;
+        if (got == 0) return;
+
+        filled += got;
+
+        const result = pump(fd, recv_buf[0..filled], payload_buf, out_buf, on_frame);
+
+        if (result.consumed >= filled) {
+            filled = 0;
+        } else if (result.consumed > 0) {
+            std.mem.copyForwards(u8, recv_buf[0 .. filled - result.consumed], recv_buf[result.consumed..filled]);
+            filled -= result.consumed;
+        }
+
+        if (result.close) return;
+    }
+}
+
+// --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
 test "zix http1 ws: acceptKey RFC 6455 vector" {
@@ -645,7 +695,7 @@ test "zix http1 ws: pump echoes masked client frames over a socketpair" {
 
     // Both echoes arrive coalesced. Read and parse them back as server frames.
     var recv: [128]u8 = undefined;
-    const n = try std.posix.read(fds[0], &recv);
+    const n = try fd_io.readOnce(fds[0], &recv);
 
     var scratch: [128]u8 = undefined;
     const first = parseFrame(recv[0..n], &scratch).?;
@@ -741,7 +791,7 @@ test "zix http1 ws: broadcast fans one built frame out to every member" {
     // Every member receives the identical, well-formed text frame.
     for (pairs) |p| {
         var recv: [128]u8 = undefined;
-        const n = try std.posix.read(p[0], &recv);
+        const n = try fd_io.readOnce(p[0], &recv);
 
         var scratch: [128]u8 = undefined;
         const parsed = parseFrame(recv[0..n], &scratch).?;
@@ -762,7 +812,7 @@ test "zix http1 ws: broadcast skips a dead fd and still reaches live members" {
     broadcast(&conns, .binary, "payload");
 
     var recv: [128]u8 = undefined;
-    const n = try std.posix.read(live[0], &recv);
+    const n = try fd_io.readOnce(live[0], &recv);
 
     var scratch: [128]u8 = undefined;
     const parsed = parseFrame(recv[0..n], &scratch).?;
