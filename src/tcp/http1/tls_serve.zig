@@ -58,8 +58,10 @@ const client_key_exchange_size: usize = 256;
 /// Outgoing server Finished output (TLS 1.2 path).
 const server_finished_out_size: usize = 256;
 
-/// Application-data encrypt output: one response record plus AEAD and framing overhead.
-const app_data_encrypt_out_size: usize = 70 * 1024;
+/// Application-data encrypt output: one full record plus AEAD and framing overhead. A response
+/// longer than that leaves as several records staged through here one at a time (sendAppData), so
+/// this never has to hold a whole response.
+const app_data_encrypt_out_size: usize = record.sealedLen(record.max_plaintext);
 
 /// One encrypted alert record (close_notify or a fatal alert after keys exist).
 const encrypted_alert_size: usize = 64;
@@ -252,6 +254,41 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, io:
 ///   readAppData / writeAppData / closeNotify, only the 1.3 connection adds encryptedAlert.
 /// - Ends cleanly on a peer hangup (ConnectionClosed), a client close_notify (an inner alert ->
 ///   PeerClosed on 1.3, an alert record on 1.2), or a request carrying Connection: close.
+/// Encrypt `plaintext` and send it as however many application-data records it takes.
+///
+/// Note:
+/// - conn.writeAppData seals ONE record, and a record carries at most record.max_plaintext bytes
+///   (RFC 8446 5.1, RFC 5246 6.2.1). Handing it a longer payload returns an empty slice, which puts
+///   nothing on the wire while the caller believes the response was sent, so the peer waits for a
+///   response that never comes. Everything the handler produces goes through here, and its size is
+///   the handler's to decide, so the split belongs on this path rather than at each call site.
+/// - Generic over the connection so the TLS 1.3 and TLS 1.2 paths share it, like serveRequests.
+///
+/// Param:
+/// conn - the established connection (TLS 1.3 or TLS 1.2)
+/// fd - posix.fd_t (the connection socket)
+/// plaintext - []const u8 (whole response bytes, any length)
+/// enc - []u8 (staging for one sealed record, at least app_data_encrypt_out_size)
+///
+/// Return:
+/// - void
+/// - error.RecordSealFailed when enc cannot hold one sealed record
+/// - the write error when the socket rejects a record
+fn sendAppData(conn: anytype, fd: posix.fd_t, plaintext: []const u8, enc: []u8) !void {
+    var rest = plaintext;
+
+    while (true) {
+        const take = @min(rest.len, record.max_plaintext);
+        const sealed = conn.writeAppData(rest[0..take], enc);
+        if (sealed.len == 0) return error.RecordSealFailed;
+
+        try writeAllFD(fd, sealed);
+        rest = rest[take..];
+
+        if (rest.len == 0) return;
+    }
+}
+
 fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, conn: anytype, record_buf: []u8) !void {
     var request_plain: [request_plain_size]u8 = undefined;
     var response_buf: [response_buf_size]u8 = undefined;
@@ -329,7 +366,7 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             return;
         }
 
-        try writeAllFD(fd, conn.writeAppData(result.bytes, &encrypt_buf));
+        try sendAppData(conn, fd, result.bytes, &encrypt_buf);
 
         // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
         if (!head.keep_alive) {
@@ -500,8 +537,13 @@ pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body
 }
 
 /// Per-connection streaming state behind the type-erased core.TlsStreamSink (ADR-054). Generic over
-/// the connection so the TLS 1.3 and 1.2 paths share one implementation: write encrypts one record
-/// from `plaintext` and sends it straight to the socket, the streaming counterpart of writeAppData.
+/// the connection so the TLS 1.3 and 1.2 paths share one implementation: write encrypts `plaintext`
+/// and sends it straight to the socket, the streaming counterpart of the buffered response path.
+///
+/// Note:
+/// - A single write can be larger than one record: a coalesced WebSocket pump pass stages up to
+///   ws_out_size, and an SSE event has no size ceiling of its own. It goes through sendAppData for
+///   the same reason the buffered path does.
 fn StreamSinkFor(comptime Conn: type) type {
     return struct {
         conn: Conn,
@@ -511,8 +553,7 @@ fn StreamSinkFor(comptime Conn: type) type {
         fn write(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
 
-            const encrypted = self.conn.writeAppData(plaintext, self.enc);
-            writeAllFD(self.fd, encrypted) catch return false;
+            sendAppData(self.conn, self.fd, plaintext, self.enc) catch return false;
 
             return true;
         }
@@ -663,6 +704,128 @@ test "zix http1: tls_serve, keep-alive serves many requests then honors Connecti
 
     var eof_rec: [64]u8 = undefined;
     try std.testing.expectError(error.ConnectionClosed, readRecord(client_fd, &eof_rec));
+}
+
+/// Body length the multi-record test asks for: past two records' worth of plaintext, so the
+/// response cannot leave as one record however the headers are sized.
+const multi_record_body_len: usize = 40000;
+
+/// Test handler: a body past the one-record ceiling, filled with a non-repeating pattern so a
+/// truncated or misordered record cannot pass as correct.
+fn multiRecordTestHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    var body: [multi_record_body_len]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast('!' + index % 90);
+
+    try res.send(&body);
+}
+
+test "zix http1: tls_serve, a response past one record leaves as several and arrives whole" {
+    const client = @import("../../tls/client.zig");
+    const context = @import("../../tls/context.zig");
+    const socket_pair = @import("../../utils/socket_pair.zig");
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, fixture_key_hex);
+    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    var cert_buf: [512]u8 = undefined;
+    const cert_der = try std.fmt.hexToBytes(&cert_buf, fixture_cert_hex);
+
+    var ctx = Tls.Context{
+        .allocator = std.testing.allocator,
+        .cert_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = server_key },
+        .alpn = &.{},
+        .curves = context.default_curves,
+        .ciphers = context.default_ciphers,
+        .min_version = .TLS_1_2,
+        .max_version = .TLS_1_3,
+        .prefer_server_ciphers = true,
+        .hsts_max_age_s = 0,
+    };
+
+    var pair: [2]posix.fd_t = undefined;
+    try socket_pair.open(io, &pair);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer fd_io.close(client_fd);
+
+    // The server serves on its own thread while this one reads. The response is far past any
+    // socket buffer, so a send nobody is draining would block both ends against each other.
+    const Srv = struct {
+        fn run(fd: posix.fd_t, server_ctx: *const Tls.Context, srv_io: std.Io) void {
+            serveConnTls(fd, multiRecordTestHandler, server_ctx, srv_io) catch {};
+
+            fd_io.close(fd);
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Srv.run, .{ server_fd, &ctx, io });
+    defer t.join();
+
+    var ch_buf: [512]u8 = undefined;
+    const started = try client.start(.{ .client_random = @splat(0x13), .ephemeral_secret = @splat(0x24) }, &ch_buf);
+    var state = started.state;
+
+    var ch_rec: [600]u8 = undefined;
+    ch_rec[0] = content_type_handshake;
+    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
+    try writeAllFD(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+
+    var flight_buf: [4096]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| {
+        const rec = try readRecord(client_fd, flight_buf[flen..]);
+        flen += rec.full.len;
+    }
+
+    var fin_buf: [256]u8 = undefined;
+    var finished = try client.finish(&state, flight_buf[0..flen], &fin_buf);
+    try writeAllFD(client_fd, finished.client_finished);
+
+    var enc: [512]u8 = undefined;
+    const request = "GET /big HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    try writeAllFD(client_fd, finished.connection.writeAppData(request, &enc));
+
+    const response = try std.testing.allocator.alloc(u8, multi_record_body_len + 4096);
+    defer std.testing.allocator.free(response);
+
+    // Reassemble across however many records carry it. Before the split this read blocked forever:
+    // the whole response went to writeAppData at once, which seals nothing past one record's worth
+    // and returned an empty slice, so the server sent no bytes at all and reported success.
+    var rec_buf: [record.max_record_wire]u8 = undefined;
+    var plain: [record.max_plaintext + 1]u8 = undefined;
+    var filled: usize = 0;
+    var records: usize = 0;
+    var body_start: ?usize = null;
+    while (true) {
+        const rec = try readRecord(client_fd, &rec_buf);
+        const opened = try finished.connection.readAppData(rec.full, &plain);
+        records += 1;
+
+        @memcpy(response[filled..][0..opened.len], opened);
+        filled += opened.len;
+
+        if (body_start == null) {
+            if (std.mem.indexOf(u8, response[0..filled], "\r\n\r\n")) |mark| body_start = mark + 4;
+        }
+
+        if (body_start) |start| {
+            if (filled - start >= multi_record_body_len) break;
+        }
+    }
+
+    const body = response[body_start.?..filled];
+    try std.testing.expect(std.mem.indexOf(u8, response[0..filled], "200 OK") != null);
+    try std.testing.expectEqual(multi_record_body_len, body.len);
+
+    // The point of the split: the body genuinely arrived as several records, not one oversized one.
+    try std.testing.expect(records >= 3);
+    for (body, 0..) |byte, index| try std.testing.expectEqual(@as(u8, @intCast('!' + index % 90)), byte);
 }
 
 /// Test handler: an SSE stream that opts in via beginStream(), then writes one event and returns.
