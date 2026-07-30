@@ -321,8 +321,6 @@ test "zix http1: static acquireHit takes resident bytes only when zero copy is r
 }
 
 test "zix http1: static serveCached writes a whole body from resident bytes over TLS" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -348,8 +346,6 @@ test "zix http1: static serveCached writes a whole body from resident bytes over
 }
 
 test "zix http1: static serveCached answers a Range from resident bytes over TLS" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -378,8 +374,6 @@ test "zix http1: static serveCached answers a Range from resident bytes over TLS
 }
 
 test "zix http1: static serveCached serves a sibling from resident bytes over TLS" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
