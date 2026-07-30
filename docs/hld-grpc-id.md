@@ -4,7 +4,7 @@
 
 - Server dan client gRPC h2c (HTTP/2 cleartext) diimplementasikan tanpa C FFI.
 - Semua 4 tipe RPC: unary, server streaming, client streaming, bidirectional streaming.
-- Semua 5 model dispatch: ASYNC, POOL, MIXED, EPOLL (hanya Linux), URING (hanya Linux). Wajib, tidak ada default.
+- Semua 3 model dispatch: ASYNC (portabel), EPOLL (hanya Linux), URING (hanya Linux). Wajib, tidak ada default.
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
 - TLS native (TLS 1.3 / 1.2, ALPN h2) via `Tls.Context`, aditif di atas default h2c. Reverse proxy (nginx, haproxy) tetap opsi untuk offloading.
@@ -53,7 +53,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | tipe comptime: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok). `Server.init` menerima TIPE Router itu sendiri, bukan `.dispatch`, karena engine membaca `Route.is_server_streaming` dari `route_slice` sebelum dispatch |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 (hanya Linux), URING=4 (hanya Linux), wajib tanpa default |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (portabel), EPOLL=1 (hanya Linux), URING=2 (hanya Linux), wajib tanpa default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |
@@ -79,10 +79,9 @@ graph LR
 | `io` | wajib | backend `std.Io` yang disediakan pemanggil |
 | `ip` | wajib | alamat bind |
 | `port` | wajib | port listen, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native) |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native, ditolak di luar Linux dengan error.DispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
-| `workers` | 0 | 0 -> cpu_count accept thread (POOL dan MIXED) |
-| `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool thread. EPOLL: 0 -> cpu_count worker multiplex |
+| `workers` | 0 | 0 -> cpu_count worker multiplex untuk EPOLL dan URING. Diabaikan oleh ASYNC |
 | `max_streams` | 128 | maksimum stream HTTP/2 konkuren per koneksi (SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan) |
 | `max_frame_size` | 16384 | ukuran frame HTTP/2 maksimum yang diiklankan |
 | `max_header_scratch` | 4096 | buffer scratch decode HPACK per stream (di-pool per worker) |
@@ -318,23 +317,19 @@ Saat handler memanggil `res.finish(status, msg)` tanpa mengirim data apa pun, se
 | Model | Accept thread | Dispatch koneksi | Catatan |
 | :- | :- | :- | :- |
 | `.ASYNC` | 1 | `io.async()` per koneksi | direkomendasikan untuk stream tak terbatas atau berumur panjang |
-| `.POOL` | cpu_count | `ConnQueue` bersama + pool blocking | workers dan pool_size berlaku |
-| `.MIXED` | cpu_count | `io.async()` per accept thread | tanpa ConnQueue, pool_size diabaikan |
 | `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
 | `.URING` | per worker | loop io_uring multiplex (hanya Linux) | bentuk sama dengan `.EPOLL`, berbasis completion |
 
-Accept thread MIXED menggunakan ukuran stack default `.{}` (default sistem ~8MB) untuk mencegah stack overflow saat `io.async()` jatuh kembali ke eksekusi inline.
-
-`.EPOLL` spesifik Linux. Pada platform non-Linux, `.EPOLL` otomatis jatuh kembali ke `.POOL`. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `pool_size` (0 = cpu_count), hanya Linux, dan juga jatuh kembali ke `.POOL` pada non-Linux.
+`.EPOLL` spesifik Linux. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak, jadi pakai `.ASYNC` di sana. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `workers` (0 = cpu_count), hanya Linux, dan ditolak di luar Linux dengan cara yang sama. Saat io_uring sendiri tidak tersedia di host Linux, `.URING` melipat ke loop `.EPOLL` dengan notice yang dicatat.
 
 ### `.EPOLL` bersifat multiplex dan shared-nothing
 
-`.EPOLL` tidak memarkir satu thread per koneksi. Ia menjalankan `pool_size` thread worker (0 = jumlah cpu), masing-masing memiliki listener `SO_REUSEPORT` privat, instance epoll sendiri, dan tabel koneksi privat ber-indeks fd. Kernel menyeimbangkan koneksi baru ke listener tiap worker, jadi tidak ada accept thread, tidak ada antrian bersama, dan tidak ada handoff fd lintas-thread. Satu worker menjalankan banyak koneksi non-blocking melalui state machine HTTP/2 yang resumable (`GrpcMuxConn`), sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread. `epoll_wait` tiap worker menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan (ADR-032). Desain tingkat rendahnya ada di `lld-grpc-id.md`.
+`.EPOLL` tidak memarkir satu thread per koneksi. Ia menjalankan `workers` thread worker (0 = jumlah cpu), masing-masing memiliki listener `SO_REUSEPORT` privat, instance epoll sendiri, dan tabel koneksi privat ber-indeks fd. Kernel menyeimbangkan koneksi baru ke listener tiap worker, jadi tidak ada accept thread, tidak ada antrian bersama, dan tidak ada handoff fd lintas-thread. Satu worker menjalankan banyak koneksi non-blocking melalui state machine HTTP/2 yang resumable (`GrpcMuxConn`), sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread. `epoll_wait` tiap worker menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan (ADR-032). Desain tingkat rendahnya ada di `lld-grpc-id.md`.
 
 Dua konsekuensi berbeda dari model lain:
 
-- `pool_size` adalah jumlah worker multiplex untuk `.EPOLL` (nilai optimal sekitar jumlah cpu), bukan ukuran pool blocking. Memberi nilai terlalu besar hanya menambah churn scheduler.
-- Setiap route, termasuk server-streaming, di-dispatch inline pada worker (tanpa thread per stream). Handler streaming berjalan di event loop, jadi harus terbatas - stream yang berjalan lama atau tak terbatas memblokir koneksi lain pada worker itu. Gunakan `.ASYNC` untuk streaming tak terbatas. Spawn thread per stream tetap berlaku untuk route server-streaming pada `.ASYNC`, `.POOL`, dan `.MIXED`.
+- `workers` adalah jumlah worker multiplex untuk `.EPOLL` (nilai optimal sekitar jumlah cpu). Memberi nilai terlalu besar hanya menambah churn scheduler.
+- Setiap route, termasuk server-streaming, di-dispatch inline pada worker (tanpa thread per stream). Handler streaming berjalan di event loop, jadi harus terbatas - stream yang berjalan lama atau tak terbatas memblokir koneksi lain pada worker itu. Gunakan `.ASYNC` untuk streaming tak terbatas, tempat spawn thread per stream tetap berlaku untuk route server-streaming.
 - Reply server-streaming memadatkan banyak pesan gRPC ke tiap DATA frame HTTP/2 (hingga max frame size default 16 KiB) alih-alih satu frame per pesan, jadi stream yang banyak-pesan memakai jauh lebih sedikit frame di wire dan jauh lebih sedikit parsing per-frame di klien. Lihat LLD untuk mekanismenya.
 
 `max_streams` yang diiklankan harus minimal sebanyak jumlah stream konkuren client. Sebuah client (misalnya benchmark dengan 100 stream paralel per koneksi) membuka stream secara optimistis sebelum melihat SETTINGS server, dan yang melebihi `max_streams` dijawab dengan `REFUSED_STREAM`.
@@ -345,8 +340,6 @@ Dua konsekuensi berbeda dari model lain:
 flowchart TD
     A[GrpcServer.run] --> B{dispatch_model}
     B -->|ASYNC| C[single accept thread\nio.async per conn]
-    B -->|POOL| D[N accept threads\nConnQueue\nM pool threads]
-    B -->|MIXED| E[N accept threads\nio.async per conn]
     B -->|EPOLL| EP[N workers\nlistener SO_REUSEPORT\n+ epoll masing-masing]
     C --> F[serveGrpcConn blocking]
     D --> F
@@ -393,7 +386,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC` / `.POOL` / `.MIXED`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. Dengan `tls_port` diisi bersama `tls`, SATU server melayani h2c di `port` dan gRPC over TLS di `tls_port` dari worker fleet yang sama (ADR-060).
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. Dengan `tls_port` diisi bersama `tls`, SATU server melayani h2c di `port` dan gRPC over TLS di `tls_port` dari worker fleet yang sama (ADR-060).
 
 ```mermaid
 graph LR
@@ -406,15 +399,10 @@ Reverse proxy tetap alternatif ketika TLS offload, routing, atau berbagi port de
 
 | Berkas | Pola |
 | :- | :- |
-| `examples/grpc_server_1_async.zig` | dispatch ASYNC: handler SayHello dan Echo, port 8083 |
-| `examples/grpc_server_2_pool.zig` | dispatch POOL: handler SayHello dan Echo, port 8083 |
-| `examples/grpc_server_3_mixed.zig` | dispatch MIXED: handler SayHello dan Echo, port 8083 |
-| `examples/grpc_server_4_epoll.zig` | dispatch EPOLL (hanya Linux): handler SayHello dan Echo, port 8083 |
+| `examples/grpc_server.zig` | model dispatch dipilih per target (URING di Linux, ASYNC di platform lain): handler SayHello, Echo, dan StreamSum, port 9032 |
 | `examples/grpc_client.zig` | demo unary call dan manual streaming, port 8083 |
 | `examples/grpc_timeout.zig` | demo context timeout: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), penimpaan ctx.deadline_ns, port 8084 |
-| `examples/grpc_location_server_1_async.zig` | ASYNC, location.Location/SendLocationAndSave, port 10101, logger terhubung |
-| `examples/grpc_location_server_2_pool.zig` | POOL, port 10101 |
-| `examples/grpc_location_server_3_mixed.zig` | MIXED, port 10101 |
+| `examples/grpc_location_server.zig` | location.Location/SendLocationAndSave, model dispatch dipilih per target, port 9038 |
 | `examples/grpc_location_client.zig` | client layanan lokasi: encode field double, decode respons bool |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location pada satu port (10102), logger terhubung |
 | `examples/grpc_multi_client.zig` | memanggil kedua layanan pada satu koneksi, port 10102 |
