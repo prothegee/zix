@@ -27,7 +27,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
     };
     const fd = stream.socket.handle;
     zix.Http2.serveConn(nop_router.dispatch, fd, .{}, io);
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
@@ -60,12 +60,12 @@ test "zix edge: bad PRI preface causes server to close connection" {
     const t = try spawnServer(&ctx, io, TEST_PORT);
 
     const fd = try clientConnect(io, TEST_PORT);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try zix.Http2.writeAllFD(fd, "PRI * HTTP/2.0\r\nBAD PREFACE GARBAGE");
 
     var buf: [256]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch 0;
+    const n = zix.utils.fd_io.readOnce(fd, &buf) catch 0;
     _ = n;
 
     t.join();
@@ -83,7 +83,7 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
     const t = try spawnServer(&ctx, io, TEST_PORT + 1);
 
     const fd = try clientConnect(io, TEST_PORT + 1);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
     try zix.Http2.sendSettingsFD(fd, &.{});
@@ -128,10 +128,9 @@ test "zix edge: HpackDecoder decode of empty block returns zero headers" {
 }
 
 test "zix edge: writeFrameHeader stream_id high bit is cleared on read" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     const orig = zix.Http2.FrameHeader{
         .length = 0,
@@ -140,7 +139,7 @@ test "zix edge: writeFrameHeader stream_id high bit is cleared on read" {
         .stream_id = 0x7FFF_FFFF,
     };
     try zix.Http2.writeFrameHeaderFD(fds[1], orig);
-    _ = std.posix.system.close(fds[1]);
+    zix.utils.fd_io.close(fds[1]);
     const got = try zix.Http2.readFrameHeader(fds[0]);
     try std.testing.expectEqual(orig.stream_id, got.stream_id);
 }
