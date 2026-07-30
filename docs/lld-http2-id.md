@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-http2-id.md`](hld-http2-id.md), ADR-043 (split `dispatch/` per-engine), dan ADR-052 (TLS multiplex).
 
-Model blocking (`.ASYNC`, `.POOL`, `.MIXED`) berbagi satu jalur koneksi (`core.serveConn` -> `serveH2cLoop`). Model `.EPOLL` dan `.URING` menggerakkan state machine terpisah, resumable, non-blocking (`mux.zig`) yang menjadi fokus utama dokumen ini. Keduanya bermuara ke satu `Router` comptime. Jalur TLS (`config.tls != null`) terminasi di tempat, baik secara multiplex (`tls_mux.zig`, untuk `.EPOLL` / `.URING`) atau thread-per-connection (`tls_serve.zig`, yang juga melayani TLS 1.2).
+Model blocking (`.ASYNC`) memakai satu jalur koneksi (`core.serveConn` -> `serveH2cLoop`). Model `.EPOLL` dan `.URING` menggerakkan state machine terpisah, resumable, non-blocking (`mux.zig`) yang menjadi fokus utama dokumen ini. Keduanya bermuara ke satu `Router` comptime. Jalur TLS (`config.tls != null`) terminasi di tempat, baik secara multiplex (`tls_mux.zig`, untuk `.EPOLL` / `.URING`) atau thread-per-connection (`tls_serve.zig`, yang juga melayani TLS 1.2).
 
 ---
 
@@ -244,11 +244,11 @@ Parsing Range sendiri tidak lokal: ia datang dari `src/utils/http_range.zig`, di
 
 ## dispatch/ dan tls_mux.zig
 
-`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` / `.POOL` / `.MIXED` mempertahankan struktur accept-thread (`common.Dispatch(routes)`, `ConnQueue`) dan memanggil `core.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`.
+`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `core.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 
-`ConnTable` adalah map fd -> `*MuxConn` privat per-worker, ber-indeks berdasarkan fd atas `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), tidak dibagi antar worker. `acceptAll` menguras `accept4(NONBLOCK | CLOEXEC)` sampai EAGAIN, mengeset `TCP_NODELAY` dan busy-poll opsional, membangun `MuxConn`, dan meregistrasi `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` mem-pin ke sebuah CPU, membuka listener `SO_REUSEPORT` privat plus instance epoll-nya sendiri dan response cache opsional, dan menjalankan `epoll_wait` (hingga 512 event): listener menggerakkan `acceptAll`, fd koneksi menjalankan `beginCoalesce` -> `mux.onReadable` -> `endCoalesce` (tutup saat kegagalan write batch). `runEpoll` men-spawn `worker_count = pool_size` (0 = jumlah CPU tersedia) thread dan men-join mereka.
+`ConnTable` adalah map fd -> `*MuxConn` privat per-worker, ber-indeks berdasarkan fd atas `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), tidak dibagi antar worker. `acceptAll` menguras `accept4(NONBLOCK | CLOEXEC)` sampai EAGAIN, mengeset `TCP_NODELAY` dan busy-poll opsional, membangun `MuxConn`, dan meregistrasi `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` mem-pin ke sebuah CPU, membuka listener `SO_REUSEPORT` privat plus instance epoll-nya sendiri dan response cache opsional, dan menjalankan `epoll_wait` (hingga 512 event): listener menggerakkan `acceptAll`, fd koneksi menjalankan `beginCoalesce` -> `mux.onReadable` -> `endCoalesce` (tutup saat kegagalan write batch). `runEpoll` men-spawn `worker_count = workers` (0 = jumlah CPU tersedia) thread dan men-join mereka.
 
 ### dispatch/uring.zig
 
