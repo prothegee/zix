@@ -71,6 +71,23 @@ jobs:
         shell: pwsh
         run: zig build edge-test --summary all --test-timeout 15s
 
+      # examples is compile-plus-install only (no execution). test-runner-all then drives
+      # every zix protocol end to end over real sockets, so unlike the cross-build matrix
+      # (which only COMPILES runners for a foreign target) this leg actually executes them.
+      # Both get a longer timeout-minutes than a test suite: examples links ~95 binaries and
+      # the runner spawns a server child process per protocol.
+      - name: zix examples
+        if: always()
+        timeout-minutes: 15
+        shell: pwsh
+        run: zig build examples --summary all
+
+      - name: zix protocol runners
+        if: always()
+        timeout-minutes: 15
+        shell: pwsh
+        run: zig build test-runner-all --summary all
+
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
@@ -87,6 +104,38 @@ jobs:
         timeout-minutes: 3
         shell: pwsh
         run: zig build prometheuz-test-unit --summary all
+
+      # driver behaviour and edge suites drive an in-process server, so they need
+      # no container and run here even though test-integration cannot.
+      - name: postgrez behaviour tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build postgrez-test-behaviour --summary all
+
+      - name: postgrez edge tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build postgrez-test-edge --summary all
+
+      - name: rediz behaviour tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build rediz-test-behaviour --summary all
+
+      - name: rediz edge tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build rediz-test-edge --summary all
+
+      - name: prometheuz behaviour tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build prometheuz-test-behaviour --summary all
+
+      - name: prometheuz edge tests
+        timeout-minutes: 5
+        shell: pwsh
+        run: zig build prometheuz-test-edge --summary all
 
       # no Linux container support on this runner, so postgrez and rediz
       # test-integration (container lifecycle) are skipped here.
