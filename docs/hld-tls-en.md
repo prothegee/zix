@@ -32,7 +32,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` is sans-I/O: it has no listener and no socket loop. The engine owns the socket. The h2 engines (Http2, Grpc) select between two TLS serve paths by `dispatch_model`: `.EPOLL` / `.URING` use a per-core multiplexed loop (`tls_mux.zig`) over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig` (ADR-052). The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
+`zix.Tls` is sans-I/O: it has no listener and no socket loop. The engine owns the socket. The h2 engines (Http2, Grpc) select between two TLS serve paths by `dispatch_model`: `.EPOLL` / `.URING` use a per-core multiplexed loop (`tls_mux.zig`) over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` uses `tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig` (ADR-052). The handshake is driven through `connection.zig`, which composes the wire, key-schedule, record, certificate, extension, and alert layers, all on `std.crypto`.
 
 ## Source Layout
 
@@ -125,7 +125,7 @@ TLS is a gated blocking serve path per engine, selected by `config.tls`, leaving
 - Http1: `serveConnTls` runs the handshake, then per request decrypts the record, reuses `core.parseHead`, runs the handler with an in-memory response sink capturing its plaintext (`runHandlerToBuffer`), and encrypts that.
 - Http2 and Grpc (ADR-052): two serve paths, selected by `dispatch_model`. ALPN selects h2 on both.
   - `.EPOLL` / `.URING`: one `SO_REUSEPORT` epoll worker per core (`tls_mux.zig`, `grpc/tls_mux.zig`) terminates TLS in place via a resumable TLS 1.3 session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker. No socketpair, no thread per connection. This is the high-concurrency path.
-  - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` runs a thread-per-connection accept loop over the shared terminator `tcp/tls/h2_terminator.zig`, which runs an inline-mux driver directly over the decrypted records (frames sealed back into TLS records through a thread-local write hook). No socketpair, no second thread. This path also serves the TLS 1.2 fallback.
+  - `.ASYNC`: `tls_serve.zig` runs a thread-per-connection accept loop over the shared terminator `tcp/tls/h2_terminator.zig`, which runs an inline-mux driver directly over the decrypted records (frames sealed back into TLS records through a thread-local write hook). No socketpair, no second thread. This path also serves the TLS 1.2 fallback.
 
 - Dual listener (ADR-060): with `tls_port` set next to `tls` (Http1, Http, Http2, Grpc), ONE server serves cleartext on `port` and TLS on `tls_port` from the same worker fleet. The per-connection transport machinery the mux paths share lives in `src/multiplexers/tls_conn.zig`, and under `.URING` the TLS side runs on the ring (no separate epoll fleet).
 
