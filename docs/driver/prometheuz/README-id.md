@@ -131,8 +131,17 @@ for (result.vector) |entry| std.debug.print("{d}\n", .{entry.value});
 
 ```
 zig build test-unit          # in-process, tanpa server
+zig build test-behaviour     # in-process endpoint in-process, tanpa container
+zig build test-edge          # in-process endpoint in-process, tanpa container
 zig build examples           # build setiap example sekali jalan ke zig-out/bin
 zig build test-runner        # jalankan setiap example sekali jalan terhadap container asli (memegang siklus hidupnya)
 ```
+
+`test-behaviour` dan `test-edge` menjalankan satu endpoint HTTP in-process yang
+mewakili ketiga server yang diajak bicara driver: exporter yang di-scrape,
+receiver tujuan remote write, dan query API yang dibaca. Keduanya tidak butuh
+docker dan jalan di setiap platform yang didukung, sehingga CI bisa
+menjalankannya di mana saja. `test-runner` tetap menjadi cakupan terhadap
+container node-exporter dan Prometheus sungguhan.
 
 `test-runner` membangun dan menjalankan `containers/node-exporter` dan `containers/prometheus` (root repo), menunggu keduanya siap, menjalankan setiap example sekali jalan, lalu teardown container. `examples/registry_live_demo.zig` bukan bagian dari langkah di atas: ia demo yang berjalan terus-menerus dan memegang siklus hidup container-nya sendiri, lihat `hld-id.md`.
