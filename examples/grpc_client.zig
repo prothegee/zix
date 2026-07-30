@@ -1,5 +1,5 @@
 //! gRPC h2c client example.
-//! Demonstrates unary and streaming calls against the grpc_server_1_async example.
+//! Demonstrates unary and streaming calls against the grpc_server example.
 //!
 //! Run (server must be running on port 9032):
 //! zig build example-grpc_client
