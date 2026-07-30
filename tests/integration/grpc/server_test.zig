@@ -65,7 +65,7 @@ fn makeRunner(comptime RouterType: type) type {
             };
             const fd = stream.socket.handle;
             zix.Grpc.serveConn(RouterType, fd, .{}, io);
-            _ = std.posix.system.close(fd);
+            zix.utils.fd_io.close(fd);
         }
     };
 }
@@ -530,7 +530,7 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
             zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{
                 .{ .path = "/svc.Svc/Greet", .handler = greetHandler },
             }), fd, .{}, run_io);
-            _ = std.posix.system.close(fd);
+            zix.utils.fd_io.close(fd);
         }
     };
     _ = Runner;
@@ -541,7 +541,7 @@ test "zix integration: gRPC second request HPACK indexed path returns correct re
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 7);
     const raw_stream = try addr.connect(io, .{ .mode = .stream });
     const fd = raw_stream.socket.handle;
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
 
