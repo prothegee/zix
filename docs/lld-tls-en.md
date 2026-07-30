@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-tls-en.md`](hld-tls-en.md) and ADR-045 / 046 / 047.
 
-`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop. Http1 is thread-per-connection in `tcp/http1/tls_serve.zig`. Http2 and Grpc select between two paths by `dispatch_model` (ADR-052): `.EPOLL` / `.URING` use the per-core multiplexed `tcp/http2/tls_mux.zig` and `tcp/http2/grpc/tls_mux.zig` over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` / `.POOL` / `.MIXED` use `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig`.
+`zix.Tls` is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the client by `client.zig` / `tls12_client.zig`. The engines own the socket loop. Http1 is thread-per-connection in `tcp/http1/tls_serve.zig`. Http2 and Grpc select between two paths by `dispatch_model` (ADR-052): `.EPOLL` / `.URING` use the per-core multiplexed `tcp/http2/tls_mux.zig` and `tcp/http2/grpc/tls_mux.zig` over a resumable session in `tcp/tls/tls_session.zig`, and `.ASYNC` uses `tcp/http2/tls_serve.zig` and `tcp/http2/grpc/tls_serve.zig` over the shared terminator `tcp/tls/h2_terminator.zig`.
 
 ---
 
@@ -131,11 +131,11 @@ WebSocket builds on the same stream sink for the write half and adds the read ha
 
 ## tcp/tls/h2_terminator.zig (shared h2-over-TLS terminator)
 
-`serveConnTls(fd, ctx, driver)` is the engine-agnostic terminator used by the `.ASYNC` / `.POOL` / `.MIXED` path of both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`, which takes the same `driver`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), verifies the client Finished, then calls `driver.drive(fd, &conn, &record_buf)`. The driver owns the connection until close: it runs the resumable h2 mux inline over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook. No socketpair, no second thread.
+`serveConnTls(fd, ctx, driver)` is the engine-agnostic terminator used by the `.ASYNC` path of both Http2 and Grpc. It runs the handshake (version policy + 1.2 fallback to `serveConnTls12`, which takes the same `driver`), asserts ALPN selected h2 (`AlpnNotH2` otherwise), verifies the client Finished, then calls `driver.drive(fd, &conn, &record_buf)`. The driver owns the connection until close: it runs the resumable h2 mux inline over the decrypted records and seals the engine's frames back into TLS records through a thread-local write hook. No socketpair, no second thread.
 
 ## tcp/http2/tls_serve.zig and tcp/http2/grpc/tls_serve.zig
 
-These are the `.ASYNC` / `.POOL` / `.MIXED` path. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread, which calls `serveConnTls` with a `MuxDriver(routes)`. The driver's `drive` is what differs: Http2 runs `mux.processRing` over a `mux.MuxConn`, Grpc runs `core.grpcMuxProcessRing` over a `GrpcMuxConn` then `flushStage` to cork the staged reply. Both seal frames into TLS records through `frame.write_hook`, the same resumable state machine as the cleartext `.EPOLL` / `.URING` models, so there are no per-stream write races. The `.EPOLL` / `.URING` dispatch models instead use the multiplexed `tls_mux.zig` below.
+This is the `.ASYNC` path. `runTls` reads `config.tls.?`, runs the accept loop, and hands each connection to its own worker thread, which calls `serveConnTls` with a `MuxDriver(routes)`. The driver's `drive` is what differs: Http2 runs `mux.processRing` over a `mux.MuxConn`, Grpc runs `core.grpcMuxProcessRing` over a `GrpcMuxConn` then `flushStage` to cork the staged reply. Both seal frames into TLS records through `frame.write_hook`, the same resumable state machine as the cleartext `.EPOLL` / `.URING` models, so there are no per-stream write races. The `.EPOLL` / `.URING` dispatch models instead use the multiplexed `tls_mux.zig` below.
 
 ## tcp/tls/tls_session.zig (resumable TLS 1.3 server session)
 
