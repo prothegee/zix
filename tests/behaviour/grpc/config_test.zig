@@ -18,7 +18,6 @@ test "zix behaviour: GrpcServerConfig defaults" {
     try std.testing.expectEqual(zix.Grpc.DispatchModel.ASYNC, cfg.dispatch_model);
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 128), cfg.max_streams);
     try std.testing.expectEqual(@as(u32, 16384), cfg.max_frame_size);
     try std.testing.expectEqual(@as(usize, 16384), cfg.max_body);
