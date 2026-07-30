@@ -89,10 +89,10 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig
     }
 }
 
-/// Run the raw server with one SO_REUSEPORT epoll worker per CPU. Non-Linux falls back to the portable
-/// single-socket loop.
+/// Run the raw server with one SO_REUSEPORT epoll worker per CPU. Linux-only: off Linux this returns
+/// error.DispatchModelUnsupported instead of downgrading (ADR-065), the caller picks .ASYNC there.
 pub fn runEpoll(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
-    if (!datagram.is_linux) return common.runFallback(handler, config);
+    if (!datagram.is_linux) return error.DispatchModelUnsupported;
 
     const want = common.effectiveWorkers(config);
     common.logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + epoll)", .{ config.ip, config.port, want });
