@@ -113,6 +113,8 @@ pub fn addSteps(
     const behaviour_test_step = b.step("behaviour-test", "Run behaviour tests");
 
     const behaviour_tests = .{
+        // dispatch
+        "tests/behaviour/dispatch/platform_gate_test.zig",
         // tcp
         "tests/behaviour/tcp/config_test.zig",
         // http
