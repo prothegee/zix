@@ -1966,7 +1966,7 @@ test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
 
     // Skip where io_uring is unavailable (older kernel, or blocked by a seccomp
-    // sandbox): the engine itself falls back to POOL in that case.
+    // sandbox): the engine itself falls back to EPOLL in that case.
     var ring = initUringRing() catch return error.SkipZigTest;
     defer ring.deinit();
 
