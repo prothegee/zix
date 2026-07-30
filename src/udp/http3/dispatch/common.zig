@@ -395,9 +395,9 @@ pub fn setBusyPoll(fd: std.posix.socket_t, us: u32) void {
     ) catch {};
 }
 
-/// The single-worker HTTP/3 recv loop (ASYNC / POOL / MIXED): bind one UDP socket, own a CID table, and
+/// The single-worker HTTP/3 recv loop (.ASYNC): bind one UDP socket, own a CID table, and
 /// run the blocking recvmmsg / demux / respond loop on the calling thread. `reuse` sets SO_REUSEPORT so
-/// several per-core workers can bind the same port (runMulti), and a per-core worker pins to its CPU.
+/// several per-core workers can bind the same port, and a per-core worker pins to its CPU.
 /// The single-worker mode (reuse == false) stays unpinned. Shared-nothing, no lock.
 pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, reuse: bool, worker_id: usize) void {
     if (reuse) pinToCpu(worker_id);
@@ -437,7 +437,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
         tx.flush(fd) catch {};
 
         // Time-driven maintenance (loss recovery + idle eviction), interval-gated. This blocking-recv
-        // loop (ASYNC / POOL / MIXED) has no wait timeout, so the sweep advances while traffic keeps
+        // loop (.ASYNC) has no wait timeout, so the sweep advances while traffic keeps
         // arriving. A fully silent worker parks in recv until the next datagram, acceptable off the
         // benchmark path (the EPOLL / URING workers carry the timeout wake for a total lull).
         const now_us = recovery.nowUs();
@@ -449,40 +449,64 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
     }
 }
 
-/// The single-worker recv loop on the calling thread (ASYNC / POOL / MIXED).
+/// The single-worker recv loop on the calling thread (.ASYNC).
 pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
-    if (!datagram.is_linux) {
-        logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
-        return;
-    }
+    if (!datagram.is_linux) return runFallback(handler, config);
 
     logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
     workerLoop(handler, config, false, 0);
 }
 
-/// One SO_REUSEPORT blocking-recvmmsg worker per core (POOL / MIXED, which ADR-050 defines as multi-core
-/// everywhere). Each worker binds the same port with SO_REUSEPORT, pins to its CPU, and owns its own CID
-/// table (shared-nothing), so the kernel load-balances connections by 4-tuple. The .EPOLL / .URING
-/// siblings add readiness / completion on top of the same per-core shape (epoll.zig / uring.zig).
-pub fn runMulti(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
-    if (!datagram.is_linux) {
-        logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
-        return;
+/// Portable single-socket recv loop for targets with no recvmmsg / sendmmsg.
+///
+/// What:
+///   Same QUIC state machine as workerLoop, driven one datagram at a time over std.Io instead
+///   of a Linux batch. Demux, handshake, response and maintenance all reuse the shared helpers,
+///   so this differs from the Linux worker only in how bytes reach and leave the socket.
+///
+/// Note:
+/// - One recv and one send per datagram, so throughput is below the batched Linux path. This is
+///   the correctness path for other platforms, not the benchmark path.
+/// - Receive blocks with no timeout, so the maintenance sweep advances on traffic. A fully idle
+///   server parks in receive until the next datagram, matching the Linux single-worker loop.
+pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
+    const io = config.io;
+
+    const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
+    const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(io);
+
+    logSystem(config, "listening on {s}:{d} (fallback)", .{ config.ip, config.port });
+
+    const table = config.allocator.create(ConnTable) catch return error.OutOfMemory;
+    defer config.allocator.destroy(table);
+    table.* = .{};
+
+    const buf = try config.allocator.alloc(u8, config.max_recv_buf);
+    defer config.allocator.free(buf);
+
+    var tx = try datagram.SendBatch.init(config.allocator, config.send_batch, sendBufBytes(config));
+    defer tx.deinit();
+
+    var last_sweep_us: u64 = recovery.nowUs();
+
+    while (true) {
+        const msg = socket.receive(io, buf) catch continue;
+
+        // The send helpers only queue into tx, so the descriptor they take is never used on this
+        // path. flushPortable owns the actual sending.
+        const dg = datagram.Datagram{ .data = msg.data, .from = datagram.ipToSockaddr6(msg.from) };
+        serveDatagram(handler, table, dg, &tx, undefined, config, null);
+
+        tx.flushPortable(socket, io);
+
+        const now_us = recovery.nowUs();
+        if (now_us -| last_sweep_us >= maintenance_interval_us) {
+            sweepMaintenance(table, &tx, undefined, config, now_us, null);
+            tx.flushPortable(socket, io);
+            last_sweep_us = now_us;
+        }
     }
-
-    const want = effectiveWorkers(config);
-    logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + recvmmsg)", .{ config.ip, config.port, want });
-
-    const threads = try config.allocator.alloc(std.Thread, want);
-    defer config.allocator.free(threads);
-
-    var spawned: usize = 0;
-    for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoop, .{ handler, config, true, i }) catch break;
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |t| t.join();
 }
 
 /// Process one received datagram: demux + decrypt, then drive the matching handshake or response step.
