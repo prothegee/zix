@@ -302,13 +302,13 @@ fn epollMuxWorkerFn(comptime RouterType: type) fn (MuxWorkerCtx) void {
 /// state machine, dispatches inline, and flushes one coalesced write per readable event.
 ///
 /// Note:
-/// - worker_count = pool_size (0 = cpu count). A streaming handler runs on the event
+/// - worker_count = workers (0 = cpu count). A streaming handler runs on the event
 ///   loop, so it must stay bounded (it blocks the worker's other connections while running).
 pub fn runEpoll(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     const io = cfg.io;
     // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
     const cpu = common.getAvailableCpuCount();
-    const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
+    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
     const opts = common.serveOptsWithCache(cfg);
 
     logSystem(cfg, "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
