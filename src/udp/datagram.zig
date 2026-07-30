@@ -236,6 +236,20 @@ pub const RecvBatch = struct {
     }
 };
 
+/// The socket a portable run sends through, with the std.Io it belongs to.
+///
+/// Note:
+/// - Off Linux there is no descriptor to send batched raw datagrams on: the caller binds through
+///   std.Io and holds a socket, not an fd. The helpers that queue a reply flush mid-flight when the
+///   batch fills, and they only receive that unusable descriptor, so without this they would take
+///   the sendmmsg path against a descriptor that was never opened, then reset the batch. Every
+///   queued reply would be dropped with nothing reported. Setting this makes flush ignore its
+///   descriptor and send through std.Io instead, so those mid-flight flushes reach the wire.
+pub const PortableSink = struct {
+    socket: std.Io.net.Socket,
+    io: std.Io,
+};
+
 /// A reusable send batch: queued replies copied into a backing buffer and flushed via sendmmsg, or a coalesced sendmsg per peer-run when GSO is on. The
 /// copy keeps replies valid even when the handler hands back bytes that live in the receive buffer.
 pub const SendBatch = struct {
@@ -262,6 +276,9 @@ pub const SendBatch = struct {
     gso_iovs: []posix.iovec_const,
     gso_msgs: []linux.msghdr_const,
     gso_controls: []GsoControl,
+    /// Where flush sends when there is no batched raw path (every target but Linux). Null on Linux,
+    /// where flush owns the descriptor it is handed. See PortableSink for why this exists.
+    portable: ?PortableSink = null,
 
     /// Allocate a batch holding up to `count` replies totalling `buf_bytes` payload bytes.
     pub fn init(allocator: std.mem.Allocator, count: usize, buf_bytes: usize) !SendBatch {
@@ -363,8 +380,20 @@ pub const SendBatch = struct {
     /// already put on the ring (ring_sent), so a caller that mixes the two never re-sends a reply
     /// twice.
     pub fn flush(self: *SendBatch, fd: posix.socket_t) !void {
-        // Batched raw sends are POSIX-only (open is gated on Windows).
-        if (comptime builtin.os.tag == .windows) return error.SendFailed;
+        // A portable run has no descriptor to send on, and `fd` is whatever placeholder the caller
+        // had. Send through the bound socket instead, so a helper that flushes mid-flight still
+        // reaches the wire there.
+        if (self.portable) |sink| {
+            self.flushPortable(sink.socket, sink.io);
+
+            return;
+        }
+
+        // sendmmsg below is a Linux syscall issued directly, so this path must never run anywhere
+        // else: that syscall number belongs to something different there, and its result would be
+        // read back through the wrong errno convention (a failure reading as success). A caller off
+        // Linux is expected to set `portable` above, and gets a reported failure when it did not.
+        if (comptime builtin.os.tag != .linux) return error.SendFailed;
 
         if (self.gso) {
             try self.flushGso(fd);
@@ -695,6 +724,45 @@ test "zix udp: SendBatch flushPortable delivers every queued reply and clears th
     batch.flushPortable(sender, io);
 
     // the batch is cleared whether or not a send failed, so the next round starts empty
+    try std.testing.expectEqual(@as(usize, 0), batch.count);
+    try std.testing.expectEqual(@as(usize, 0), batch.used);
+
+    var buf: [64]u8 = undefined;
+    const first = try receiver.receive(io, &buf);
+    try std.testing.expectEqualStrings("first", first.data);
+
+    var buf2: [64]u8 = undefined;
+    const second = try receiver.receive(io, &buf2);
+    try std.testing.expectEqualStrings("second", second.data);
+}
+
+test "zix udp: SendBatch flush sends through the portable sink and never touches its descriptor" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const recv_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9753);
+    const receiver = try recv_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer receiver.close(io);
+
+    const sender_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 0);
+    const sender = try sender_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(io);
+
+    var batch = try SendBatch.init(std.testing.allocator, 4, 64);
+    defer batch.deinit();
+    batch.portable = .{ .socket = sender, .io = io };
+
+    const dest = try parseBind("127.0.0.1", 9753);
+    try std.testing.expect(batch.queue(dest, "first"));
+    try std.testing.expect(batch.queue(dest, "second"));
+
+    // The descriptor is one that was never opened, standing in for what a portable caller has to
+    // pass. With the sink set, flush must ignore it rather than send on it: sending would drop
+    // both replies and clear the batch, leaving the peer waiting on a reply that was never sent.
+    const never_opened: posix.socket_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+    try batch.flush(never_opened);
+
     try std.testing.expectEqual(@as(usize, 0), batch.count);
     try std.testing.expectEqual(@as(usize, 0), batch.used);
 
