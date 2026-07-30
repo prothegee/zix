@@ -6,8 +6,6 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix edge: WsClient.connect, wss:// returns TlsNotSupported" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -16,8 +14,6 @@ test "zix edge: WsClient.connect, wss:// returns TlsNotSupported" {
 }
 
 test "zix edge: WsClient.connect, non-ws scheme returns InvalidUrl" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -30,8 +26,8 @@ test "zix edge: WsConn.send mask bit present in every frame header" {
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    defer zix.utils.fd_io.close(fds[0]);
+    defer zix.utils.fd_io.close(fds[1]);
 
     const conn = zix.Http.WsConn{ .fd = fds[0] };
     try conn.send(.binary, &[_]u8{ 0xDE, 0xAD });
@@ -39,7 +35,7 @@ test "zix edge: WsConn.send mask bit present in every frame header" {
 
     // Read both frames.
     var raw: [128]u8 = undefined;
-    const n = try std.posix.read(fds[1], &raw);
+    const n = try zix.utils.fd_io.readOnce(fds[1], &raw);
     try std.testing.expect(n >= 4);
 
     // First frame: mask bit must be set.
@@ -51,14 +47,14 @@ test "zix edge: WsConn.send empty payload, mask bit still set" {
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    defer zix.utils.fd_io.close(fds[0]);
+    defer zix.utils.fd_io.close(fds[1]);
 
     const conn = zix.Http.WsConn{ .fd = fds[0] };
     try conn.send(.text, "");
 
     var raw: [16]u8 = undefined;
-    const n = try std.posix.read(fds[1], &raw);
+    const n = try zix.utils.fd_io.readOnce(fds[1], &raw);
 
     // Empty payload: 2-byte header + 4-byte mask = 6 bytes.
     try std.testing.expectEqual(@as(usize, 6), n);
@@ -66,8 +62,6 @@ test "zix edge: WsConn.send empty payload, mask bit still set" {
 }
 
 test "zix edge: WsClientConfig defaults" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
