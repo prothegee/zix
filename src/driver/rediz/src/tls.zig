@@ -12,8 +12,15 @@
 //!   (CertificateVerify).
 
 const std = @import("std");
-const client = @import("tls/client.zig");
-const record = @import("tls/record.zig");
+
+/// The TLS layers this file is built from, named so they can be reached as
+/// rediz.tls.record and friends. Direction-neutral: wire, key_schedule and
+/// record describe the protocol rather than the client role, which is what
+/// lets the in-process test server drive the other side of the same handshake.
+pub const client = @import("tls/client.zig");
+pub const record = @import("tls/record.zig");
+pub const wire = @import("tls/wire.zig");
+pub const key_schedule = @import("tls/key_schedule.zig");
 
 pub const TlsSession = struct {
     connection: client.ClientConnection,
