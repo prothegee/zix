@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const Method = @import("method.zig");
 const parser = @import("parser.zig");
 
@@ -52,21 +53,7 @@ fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
 /// - true when the fd became readable
 /// - false on timeout or a poll error
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
-    // The Windows read path blocks in the ntdll shim, so there is no EAGAIN
-    // wait to perform: report readable and let the read block.
-    if (comptime builtin.os.tag == .windows) return true;
-
-    const linux = std.os.linux;
-    var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
-
-    while (true) {
-        const rc = linux.poll(&pfd, 1, timeout_ms);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return rc > 0 and (pfd[0].revents & linux.POLL.IN) != 0,
-            .INTR => continue,
-            else => return false,
-        }
-    }
+    return fd_io.waitReadable(fd, timeout_ms);
 }
 
 pub const PathParam = struct {
