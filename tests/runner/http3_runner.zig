@@ -55,6 +55,10 @@ pub fn main(process: std.process.Init) void {
         std.process.exit(1);
     };
 
+    // HTTP/3 has no portable datagram path: off Linux the recv loop logs and returns at once, so
+    // the server never binds and the client would time out. Report a visible skip instead.
+    if (common.skipDispatchOffPlatform(label)) return;
+
     run(process.io, server_path) catch |err| {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);
