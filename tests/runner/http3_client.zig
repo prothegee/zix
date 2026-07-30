@@ -472,7 +472,7 @@ fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, body_out: 
 /// - an error if any handshake or framing step fails
 pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const u8, body_out: []u8) ![]const u8 {
     var rnd: [16 + 16 + 32 + 32]u8 = undefined;
-    _ = std.os.linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     const dcid = rnd[0..CID_LEN];
     const scid = rnd[16 .. 16 + CID_LEN];
     const client_random: [32]u8 = rnd[32..64].*;
@@ -501,7 +501,7 @@ pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const 
 /// - an error if the handshake fails or either response is missing
 pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []const u8, path1: []const u8, body0_out: []u8, body1_out: []u8) !struct { []const u8, []const u8 } {
     var rnd: [16 + 16 + 32 + 32]u8 = undefined;
-    _ = std.os.linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     const dcid = rnd[0..CID_LEN];
     const scid = rnd[16 .. 16 + CID_LEN];
     const client_random: [32]u8 = rnd[32..64].*;
