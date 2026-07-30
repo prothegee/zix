@@ -1,6 +1,6 @@
 # HLD: zix.Tcp (raw stream)
 
-Server dan client raw TCP stream. Byte-stream generik melalui IP dengan framing yang didefinisikan oleh pengguna. Handler per-connection berjalan di bawah ASYNC, POOL, MIXED, dan EPOLL (semua native di Linux, EPOLL melipat ke POOL di non-Linux). Jalur callback per-frame terpisah (`initFramed`) menambah ring io_uring `.URING` native (ADR-037). Untuk handler per-connection, `.URING` melipat ke `.EPOLL` (ADR-038).
+Server dan client raw TCP stream. Byte-stream generik melalui IP dengan framing yang didefinisikan oleh pengguna. Handler per-connection berjalan di bawah ASYNC (portabel) dan EPOLL (khusus Linux). Jalur callback per-frame terpisah (`initFramed`) menambah ring io_uring `.URING` native (ADR-037). Untuk handler per-connection, `.URING` melipat ke `.EPOLL` (ADR-038).
 
 ---
 
@@ -15,7 +15,7 @@ Sudah diimplementasi. Lihat ADR-022 untuk dasar keputusan desain.
 - Eksplisit daripada implisit: pola config dan dispatch model yang sama seperti `zix.Http`.
 - Pengguna memiliki handler: `HandlerFn = *const fn(stream, io) void`, dibakukan ke dalam tipe server pada `init` (ADR-038), identik bentuknya dengan `zix.Uds.HandlerFn`.
 - Framing dengan length-prefix sudah terintegrasi di echo handler default dan API client (big-endian, network byte order).
-- Dispatch model ASYNC, POOL, MIXED, EPOLL untuk handler per-connection: semantik sama seperti HTTP, semua native di Linux (EPOLL melipat ke POOL di non-Linux). Callback per-frame `FrameFn` (`initFramed`) menambah jalur ring `.URING` native (ADR-037, ADR-038).
+- Dispatch model ASYNC dan EPOLL untuk handler per-connection: semantik sama seperti HTTP. EPOLL khusus Linux dan `run()` menolaknya di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065). Callback per-frame `FrameFn` (`initFramed`) menambah jalur ring `.URING` native (ADR-037, ADR-038).
 - `initArgs()` pada server maupun client agar `--ip` dan `--port` dapat diganti saat runtime tanpa perlu build ulang.
 - Tidak ada dependensi lintas protokol: `src/tcp/server.zig`, `src/tcp/client.zig`, `src/tcp/config.zig` tidak mengimpor dari `src/tcp/http/`.
 
@@ -45,9 +45,9 @@ pub const Tcp = @import("tcp/Tcp.zig");
 | :- | :- | :- |
 | `zix.Tcp.Server` | namespace | `init(handler, config)` / `initArgs(handler, config, args)` (per-connection), `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (per-frame ring), masing-masing mengembalikan server dengan `run()` / `deinit()` |
 | `zix.Tcp.Client` | struct | `connect(config, io)` / `connectArgs(config, io, args)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
+| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
 | `zix.Tcp.ClientConfig` | struct | `ip`, `port`, `max_recv_buf` (4096) |
-| `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `POOL=1`, `MIXED=2`, `EPOLL=3`, `URING=4`. Handler per-connection: ASYNC/POOL/MIXED/EPOLL native, URING melipat ke EPOLL. Jalur framed: URING native. |
+| `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `EPOLL=1`, `URING=2`. Handler per-connection: ASYNC dan EPOLL native, URING melipat ke EPOLL. Jalur framed: URING native. |
 | `zix.Tcp.HandlerFn` | tipe | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` (per-connection, memiliki stream) |
 | `zix.Tcp.FrameFn` | tipe | `*const fn(payload: []const u8, fd: std.posix.fd_t) void` (per-frame, engine memiliki koneksi, tidak pernah blocking, berjalan di ring `.URING`) |
 | `zix.Tcp.echoHandler` | fn | Echo handler default: membaca frame length-prefixed dan memantulkan setiap frame kembali. Dilewatkan secara eksplisit ke `init` |
@@ -89,28 +89,6 @@ Frame dengan `payload_len == 0` atau `payload_len > max_recv_buf` (default 4096)
 
 ## Model Dispatch
 
-### POOL
-
-N accept thread mendorong koneksi yang diterima ke `ConnQueue` bersama. M pool thread mengambil dan menangani setiap koneksi secara sinkron dengan blocking I/O.
-
-```mermaid
-flowchart TD
-    A["server.run()"] --> B["spawn pool_count pool threads"]
-    B --> C["spawn worker_count accept threads"]
-    C --> D["workerEntry loop"]
-    D --> E["stream = accept(io)"]
-    E --> F["queue.push(stream)"]
-    F --> D
-    B --> G["poolEntry loop"]
-    G --> H["stream = queue.pop()"]
-    H --> I["handler(stream, io)"]
-    I --> G
-```
-
-- `workers = 0` menghasilkan `cpu_count` accept thread.
-- `pool_size = 0` menghasilkan `max(10, cpu_count * 2)` pool thread.
-- Semua accept thread mengikat port yang sama melalui `SO_REUSEPORT` (`.reuse_address = true`).
-
 ### ASYNC
 
 Satu accept thread mendispatch setiap koneksi melalui `io.async()`. Tidak ada pool thread atau antrian bersama.
@@ -126,29 +104,12 @@ flowchart TD
     F --> G["stream.close(io)"]
 ```
 
-- `workers` dan `pool_size` diabaikan.
-- Lebih cocok ketika koneksi bersifat long-lived (tidak menggunakan pool thread secara terus-menerus).
-
-### MIXED
-
-N accept thread, masing-masing mendispatch koneksi melalui `io.async()` secara langsung, tanpa `ConnQueue`.
-
-```mermaid
-flowchart TD
-    A["server.run()"] --> B["spawn worker_count accept threads"]
-    B --> C["asyncWorkerEntry loop"]
-    C --> D["stream = accept(io)"]
-    D --> E["io.async(dispatchConn, task)"]
-    E --> C
-    E --> F["handler(stream, io) in async task"]
-```
-
-- `pool_size` diabaikan. `workers = 0` menghasilkan `cpu_count` accept thread.
-- Throughput dan latensi yang seimbang.
+- `workers` diabaikan (selalu tepat satu accept thread).
+- Lebih cocok ketika koneksi bersifat long-lived, dan satu-satunya model yang tersedia di semua platform.
 
 ### EPOLL
 
-Shared-nothing: setiap worker memiliki satu `SO_REUSEPORT` listener dan satu epoll instance. Kernel menyeimbangkan koneksi yang diterima ke worker tanpa antrian bersama. Setiap koneksi tetap menjalankan `HandlerFn` per-connection yang blocking. Khusus Linux, native (bukan lagi fallback POOL). `workers = 0` menghasilkan `cpu_count` worker, `pool_size` diabaikan. Di non-Linux melipat ke POOL.
+Shared-nothing: setiap worker memiliki satu `SO_REUSEPORT` listener dan satu epoll instance. Kernel menyeimbangkan koneksi yang diterima ke worker tanpa antrian bersama. Setiap koneksi tetap menjalankan `HandlerFn` per-connection yang blocking. Khusus Linux dan native: `workers = 0` menghasilkan `cpu_count` worker. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`, jadi pakai `.ASYNC` di sana.
 
 ### URING (hanya jalur framed)
 
@@ -161,13 +122,13 @@ Shared-nothing: setiap worker memiliki satu `SO_REUSEPORT` listener dan satu epo
 ```
 Tcp.Server.init(handler, config): memvalidasi port != 0, membakukan handler ke tipe
     -> .run(): mendispatch berdasarkan dispatch_model (io dari config.io)
-        -> memblokir hingga error (ASYNC) atau accept/worker thread selesai (POOL/MIXED/EPOLL)
+        -> memblokir hingga error (ASYNC) atau worker shared-nothing selesai (EPOLL/URING)
 
 server.deinit(): no-op (resource dibebaskan di dalam run melalui defer)
 ```
 
 - `init()` / `initFramed()` hanya memvalidasi konfigurasi: tidak membuka socket.
-- `run()` membuka socket, menspawn thread (POOL/MIXED) atau worker epoll/uring shared-nothing, kemudian memblokir.
+- `run()` membuka socket, menspawn accept thread (ASYNC) atau worker epoll/uring shared-nothing, kemudian memblokir.
 - `deinit()` adalah no-op. Semua resource jaringan dibebaskan saat `run()` kembali.
 
 ---
@@ -246,12 +207,8 @@ Argumen diproses dari kiri ke kanan. Argumen yang tidak dikenal dilewati tanpa p
 
 | Berkas | Dispatch model | Port | Sasaran |
 | :- | :- | :- | :- |
-| `examples/tcp_server_1_async.zig` | `.ASYNC` | 9300 | Pemula: server paling sederhana, satu accept, custom handler |
-| `examples/tcp_server_2_pool.zig` | `.POOL` | 9301 | Berpengalaman: tuning workers/pool_size secara eksplisit |
-| `examples/tcp_server_3_mixed.zig` | `.MIXED` | 9302 | Berpengalaman: N accept + io.async, tanpa antrian |
-| `examples/tcp_server_4_epoll.zig` | `.EPOLL` | 9303 | Linux: worker epoll shared-nothing |
-| `examples/tcp_server_5_uring.zig` | `.URING` | 9304 | Linux: `FrameFn` per-frame di ring io_uring (`initFramed`) |
-| `examples/tcp_client.zig` | n/a | 9300 | Koneksi, kirim satu pesan, cetak respons, keluar |
+| `examples/tcp_server.zig` | dipilih per target (`.URING` di Linux, `.ASYNC` di platform lain) | 9043 | `FrameFn` per-frame lewat `initFramed`, satu server untuk semua platform |
+| `examples/tcp_client.zig` | n/a | 9043 | Koneksi, kirim satu pesan, cetak respons, keluar |
 
 ---
 
