@@ -17,8 +17,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: windows-latest
     # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
-    # hung test to burn a day of runner minutes before anyone notices.
-    timeout-minutes: 60
+    # hung test to burn a day of runner minutes before anyone notices. A healthy leg
+    # lands well inside this: the slowest measured so far is the openbsd VM at 16
+    # minutes, so anything past 30 is a hang, not a slow run.
+    timeout-minutes: 30
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
