@@ -17,18 +17,16 @@ pub const GrpcServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. Selects between .ASYNC, .POOL, .MIXED, .EPOLL,
-    /// and .URING (.EPOLL and .URING are Linux-only and fall back to .POOL elsewhere).
+    /// Connection dispatch model. Selects between .ASYNC, .EPOLL, and .URING (.EPOLL and .URING are
+    /// Linux-only, run() rejects them elsewhere with error.DispatchModelUnsupported).
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Accept thread count (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
+    /// Multiplexed worker count for .EPOLL / .URING (0 = cpu_count). Ignored by .ASYNC
+    /// (always 1 accept thread).
     workers: usize = 0,
-    /// Pool thread count (0 = max(10, cpu_count * 2)). Only used by .POOL,
-    /// ignored by .ASYNC and .MIXED.
-    pool_size: usize = 0,
-    /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, and TLS handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING): the
@@ -61,8 +59,8 @@ pub const GrpcServerConfig = struct {
     /// for clients that advertise grpc-accept-encoding: gzip. Default: false.
     compress: bool = false,
     /// Enable the per-worker unary response cache (ADR-036). Default false. When off, the handler
-    /// cache API (ctx.serveCached / ctx.sendCached) degrades to a plain send. Active under .EPOLL
-    /// and .URING.
+    /// cache API (ctx.serveCached / ctx.sendCached) degrades to a plain send. Active under every
+    /// dispatch model.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker memory
     /// is cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -124,14 +122,13 @@ test "zix grpc: GrpcServerConfig dispatch_model is required and stored as set" {
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix grpc: GrpcServerConfig worker and pool defaults to zero" {
+test "zix grpc: GrpcServerConfig workers defaults to zero" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
     const cfg = GrpcServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8083, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
     try std.testing.expectEqual(@as(u32, 0), cfg.busy_poll_us);
     try std.testing.expect(!cfg.reuseport_cbpf);
     try std.testing.expectEqual(@as(usize, 512 * 1024), cfg.worker_stack_size_bytes);
