@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-http2-en.md`](hld-http2-en.md), ADR-043 (the per-engine `dispatch/` split), and ADR-052 (multiplexed TLS).
 
-The blocking models (`.ASYNC`, `.POOL`, `.MIXED`) share one connection path (`core.serveConn` -> `serveH2cLoop`). The `.EPOLL` and `.URING` models drive a separate, resumable, non-blocking state machine (`mux.zig`) that owns the bulk of this document. Both feed one comptime `Router`. The TLS path (`config.tls != null`) terminates in place, either multiplexed (`tls_mux.zig`, for `.EPOLL` / `.URING`) or thread-per-connection (`tls_serve.zig`, which also serves TLS 1.2).
+The blocking model (`.ASYNC`) uses one connection path (`core.serveConn` -> `serveH2cLoop`). The `.EPOLL` and `.URING` models drive a separate, resumable, non-blocking state machine (`mux.zig`) that owns the bulk of this document. Both feed one comptime `Router`. The TLS path (`config.tls != null`) terminates in place, either multiplexed (`tls_mux.zig`, for `.EPOLL` / `.URING`) or thread-per-connection (`tls_serve.zig`, which also serves TLS 1.2).
 
 ---
 
@@ -244,11 +244,11 @@ Range parsing itself is not local: it comes from `src/utils/http_range.zig`, sha
 
 ## dispatch/ and tls_mux.zig
 
-`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` / `.POOL` / `.MIXED` keep the accept-thread structure (`common.Dispatch(routes)`, `ConnQueue`) and call `core.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`.
+`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `core.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.DispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 
-`ConnTable` is a private per-worker fd -> `*MuxConn` map, indexed by fd over `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), not shared between workers. `acceptAll` drains `accept4(NONBLOCK | CLOEXEC)` to EAGAIN, sets `TCP_NODELAY` and the optional busy-poll, builds a `MuxConn`, and registers `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` pins to a CPU, opens a private `SO_REUSEPORT` listener plus its own epoll instance and optional response cache, and runs `epoll_wait` (up to 512 events): the listener drives `acceptAll`, a connection fd runs `beginCoalesce` -> `mux.onReadable` -> `endCoalesce` (close on a batch write failure). `runEpoll` spawns `worker_count = pool_size` (0 = available CPU count) threads and joins them.
+`ConnTable` is a private per-worker fd -> `*MuxConn` map, indexed by fd over `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), not shared between workers. `acceptAll` drains `accept4(NONBLOCK | CLOEXEC)` to EAGAIN, sets `TCP_NODELAY` and the optional busy-poll, builds a `MuxConn`, and registers `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` pins to a CPU, opens a private `SO_REUSEPORT` listener plus its own epoll instance and optional response cache, and runs `epoll_wait` (up to 512 events): the listener drives `acceptAll`, a connection fd runs `beginCoalesce` -> `mux.onReadable` -> `endCoalesce` (close on a batch write failure). `runEpoll` spawns `worker_count = workers` (0 = available CPU count) threads and joins them.
 
 ### dispatch/uring.zig
 
