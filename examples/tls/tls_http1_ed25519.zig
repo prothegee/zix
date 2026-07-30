@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 // https/1.1 over TLS with an Ed25519 server certificate (RFC 8410 / 8446 4.4.3, scheme
@@ -46,7 +47,9 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .tls = &tls,
-        .dispatch_model = .EPOLL,
+        // Picked per target at comptime (ADR-065): .EPOLL / .URING terminate TLS in the
+        // epoll-mux worker on Linux, .ASYNC in the thread-per-connection path elsewhere.
+        .dispatch_model = if (builtin.os.tag == .linux) .URING else .ASYNC,
     });
     defer server.deinit();
 
