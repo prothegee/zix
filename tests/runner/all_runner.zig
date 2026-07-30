@@ -442,6 +442,103 @@ fn maxHeavy(cpu: usize) usize {
     return std.math.clamp(cpu / 12, 1, 3);
 }
 
+// --------------------------------------------------------- //
+// Stall watchdog
+
+/// How long the runner may go without reporting a single check before it calls the run stuck.
+/// A healthy full run reports every check within a few seconds. The slowest honest gap is one check
+/// exhausting MAX_ATTEMPTS, each attempt bounded by common.START_TIMEOUT_MS plus the check body,
+/// which lands near 47 seconds, so this is roughly double the worst legitimate case.
+const STALL_TIMEOUT_MS: u64 = 90_000;
+
+/// Watchdog poll period. It only bounds how quickly an already-exceeded stall is noticed, so a
+/// coarse tick costs nothing and keeps the watchdog off the cores the checks are using.
+const STALL_POLL_MS: u64 = 1_000;
+
+/// What the main thread is currently awaiting, published for the watchdog thread to read.
+///
+/// Note:
+/// - Progress is any reported check or the start of a new wave, so the watchdog measures the GAP
+///   between results rather than the total run time. A slow but moving run is never killed.
+/// - `labels` is plain memory written before the `generation` bump that publishes it, and is read
+///   only once a stall is confirmed, at which point the main thread is parked in an await and is
+///   writing nothing.
+const WaveWatch = struct {
+    /// Bumped on every progress event. The watchdog only compares it against its own previous read.
+    generation: std.atomic.Value(u64) = .init(0),
+    /// Set once every wave is done, so the watchdog stops looking.
+    finished: std.atomic.Value(bool) = .init(false),
+    /// Labels of the wave being awaited.
+    labels: [WAVE_MAX][]const u8 = undefined,
+    /// How many entries of `labels` are live.
+    count: std.atomic.Value(usize) = .init(0),
+    /// Slot the main thread is parked on. Every slot below it has already reported.
+    pending: std.atomic.Value(usize) = .init(0),
+
+    fn progress(watch: *WaveWatch) void {
+        _ = watch.generation.fetchAdd(1, .release);
+    }
+};
+
+/// Name the check that never returned, plus the wave it was running in.
+fn reportStall(watch: *WaveWatch) void {
+    const count = watch.count.load(.acquire);
+    const pending = watch.pending.load(.acquire);
+    const seconds = STALL_TIMEOUT_MS / 1000;
+
+    // The wave is folded into one line so the whole verdict is a single log record.
+    var wave_buf: [512]u8 = undefined;
+    var wave_len: usize = 0;
+    for (watch.labels[0..count]) |label| {
+        const separator: []const u8 = if (wave_len == 0) "" else ", ";
+        const written = std.fmt.bufPrint(wave_buf[wave_len..], "{s}{s}", .{ separator, label }) catch break;
+        wave_len += written.len;
+    }
+
+    if (pending >= count) {
+        std.log.info("STALL: no result in {d}s, no check in flight (wave: {s})", .{ seconds, wave_buf[0..wave_len] });
+        return;
+    }
+
+    std.log.info("STALL {s}: no result in {d}s (wave: {s})", .{ watch.labels[pending], seconds, wave_buf[0..wave_len] });
+}
+
+/// Poll for a stalled run and end it with the offending check named.
+///
+/// Note:
+/// - Runs on a raw thread, never io.async: on a single-core host std.Io.Threaded's async limit is
+///   zero, so an io.async watchdog would run inline on its caller and watch nothing.
+/// - std.Io.sleep is a plain blocking sleep on the calling thread, so borrowing the runner's io
+///   here costs no pool slot.
+/// - Ends the process rather than cancelling the check: Future.cancel is documented not threadsafe,
+///   so the watchdog cannot unstick a wave. Naming the check is the point, and a stalled run had
+///   already lost every check behind it.
+fn watchForStall(io: std.Io, watch: *WaveWatch) void {
+    const ticks_allowed = STALL_TIMEOUT_MS / STALL_POLL_MS;
+
+    var last = watch.generation.load(.acquire);
+    var idle: u64 = 0;
+
+    while (!watch.finished.load(.acquire)) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(STALL_POLL_MS), .awake) catch return;
+
+        const seen = watch.generation.load(.acquire);
+        if (seen != last) {
+            last = seen;
+            idle = 0;
+            continue;
+        }
+
+        idle += 1;
+        if (idle < ticks_allowed) continue;
+
+        reportStall(watch);
+        std.process.exit(1);
+    }
+}
+
+// --------------------------------------------------------- //
+
 /// Run every check concurrently in waves whose width is scaled to the host, reporting each result as
 /// its wave completes. Two limits shape a wave: a check whose `resource` tag is already in flight is
 /// deferred so two checks that share a filesystem path never overlap, and at most `max_heavy` of the
@@ -450,7 +547,7 @@ fn maxHeavy(cpu: usize) usize {
 /// Output streams in stable table order: a wave is a contiguous block of checks, waves run in index
 /// order, and within a wave the slots are awaited and reported in index order. report() runs only
 /// here on the main thread (never on the concurrent check threads), so the prints never interleave.
-fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize) void {
+fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize, watch: *WaveWatch) void {
     const wave_width = waveWidth(cpu);
     const max_heavy = maxHeavy(cpu);
     const Fut = std.Io.Future(anyerror!void);
@@ -488,9 +585,18 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
             check_idx += 1;
         }
 
+        // publish the wave before awaiting any of it, so a stall can name what never came back
+        for (0..count) |s| watch.labels[s] = checks[slot_check[s]].label;
+        watch.count.store(count, .release);
+        watch.pending.store(0, .release);
+        watch.progress();
+
         for (0..count) |s| {
+            watch.pending.store(s, .release);
+
             const result = futs[s].await(io);
             report(checks[slot_check[s]].label, result, tally);
+            watch.progress();
         }
     }
 }
@@ -517,7 +623,19 @@ pub fn main(process: std.process.Init) void {
     const cpu = std.Thread.getCpuCount() catch 4;
 
     var tally: Tally = .{};
-    runWaves(io, &all_paths, &tally, cpu);
+    var watch: WaveWatch = .{};
+
+    // Without the watchdog a hung check costs the whole step to an outer timeout, which reports
+    // nothing at all: the only way to identify the check is to count PASS lines against the table.
+    // A run that cannot spawn the thread still works, it just goes back to being silent when stuck.
+    if (std.Thread.spawn(.{}, watchForStall, .{ io, &watch })) |thread| {
+        thread.detach();
+    } else |err| {
+        std.log.info("stall watchdog unavailable ({}), a hang will not be named", .{err});
+    }
+
+    runWaves(io, &all_paths, &tally, cpu, &watch);
+    watch.finished.store(true, .release);
 
     if (tally.failed > 0) {
         std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });
