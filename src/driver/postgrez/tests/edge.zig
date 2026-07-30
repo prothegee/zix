@@ -12,6 +12,7 @@
 //!   is covered here rather than only where a container can run.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const postgrez = @import("postgrez");
 
 const inproc = @import("inproc/server.zig");
@@ -119,13 +120,21 @@ test "postgrez edge: connecting to a closed port is refused" {
     const dead_port = harness.server.port;
     harness.server.stop();
 
+    // stop() frees the backend, so the harness needs a live one back on every exit path, not only
+    // the passing one: an expectation that fails below returns before a trailing restart would run,
+    // and harness.stop() then frees the same pointer a second time, which crashes the runner.
+    defer harness.server = inproc.Server.start(std.heap.smp_allocator, harness.io(), .{}) catch
+        @panic("inproc backend restart failed");
+
     var config = harness.config();
     config.port = dead_port;
 
-    try testing.expectError(error.ConnectionRefused, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
+    // windows region: zig std's connect path leaves NTSTATUS
+    // CONNECTION_REFUSED (0xc0000236) unmapped, so the refused
+    // connect surfaces as error.Unexpected there.
+    const refused = if (builtin.os.tag == .windows) error.Unexpected else error.ConnectionRefused;
 
-    // the harness must not stop a backend that is already gone
-    harness.server = try inproc.Server.start(std.heap.smp_allocator, harness.io(), .{});
+    try testing.expectError(refused, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "postgrez edge: a unique violation maps to its sqlstate" {
