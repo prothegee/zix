@@ -2,7 +2,7 @@
 //!
 //! Note:
 //! - Gated on config.tls (a *Tls.Context). The accept loop hands each connection to its own worker
-//!   thread (.ASYNC / .POOL / .MIXED), so a slow handshake or a keep-alive client never serializes
+//!   thread (.ASYNC), so a slow handshake or a keep-alive client never serializes
 //!   the others. The worker reads the ClientHello, then branches on the version policy: a 1.3-capable
 //!   client takes the TLS 1.3 path (zix.Tls), a 1.2-only client takes the TLS 1.2 path (zix.Tls
 //!   tls12_connection), each subject to the context's min_version / max_version. Either way it then
@@ -23,9 +23,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const posix = std.posix;
-const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const Config = @import("config.zig").Http1ServerConfig;
 const core = @import("core.zig");
 const common = @import("dispatch/common.zig");
@@ -36,6 +35,11 @@ const record = @import("../../tls/record.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const HandlerFn = core.HandlerFn;
+
+/// Record traffic runs over the bare accepted descriptor, so it goes through the shared
+/// fd helpers rather than a per-platform branch in this file.
+const readAll = fd_io.readAll;
+const writeAllFD = fd_io.writeAll;
 
 const content_type_change_cipher_spec: u8 = 20;
 const content_type_alert: u8 = 21;
@@ -81,7 +85,7 @@ fn peerAlert(body: []const u8) anyerror {
     return error.PeerAlert;
 }
 
-/// Listen and serve https/1.1, one worker thread per connection (the .ASYNC / .POOL / .MIXED path,
+/// Listen and serve https/1.1, one worker thread per connection (the .ASYNC path,
 /// .EPOLL / .URING use the event-driven tls_mux). The cert / key / policy are already loaded and
 /// validated in the context (config.tls), so this only accepts and drives per-connection handshakes.
 ///
@@ -108,11 +112,7 @@ pub fn runTls(handler: HandlerFn, config: Config) !void {
             // Spawn failed (thread / pid limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
             // lifetime, wedging every other pending connection. The client retries the dropped one.
-            if (comptime builtin.os.tag == .windows) {
-                win_io.close(conn_fd);
-            } else {
-                _ = linux.close(conn_fd);
-            }
+            fd_io.close(conn_fd);
 
             continue;
         };
@@ -136,16 +136,12 @@ fn connWorker(conn_ctx: ConnCtx) void {
     core.setStatic(conn_ctx.public_dir, conn_ctx.io);
     core.setMaxResponseHeaders(conn_ctx.max_response_headers);
 
-    serveConnTls(conn_ctx.fd, conn_ctx.handler, conn_ctx.ctx) catch {};
+    serveConnTls(conn_ctx.fd, conn_ctx.handler, conn_ctx.ctx, conn_ctx.io) catch {};
 
-    if (comptime builtin.os.tag == .windows) {
-        win_io.close(conn_ctx.fd);
-    } else {
-        _ = linux.close(conn_ctx.fd);
-    }
+    fd_io.close(conn_ctx.fd);
 }
 
-fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !void {
+fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, io: std.Io) !void {
     var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientHello (a plaintext handshake record carries the message in its body).
@@ -155,9 +151,10 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context) !vo
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
     var pss_salt: [32]u8 = undefined;
-    _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
-    _ = linux.getrandom(&server_random, server_random.len, 0);
-    _ = linux.getrandom(&pss_salt, pss_salt.len, 0);
+    // std.Io carries the platform's CSPRNG, so the handshake secrets need no syscall branch.
+    try io.randomSecure(&ephemeral_secret);
+    try io.randomSecure(&server_random);
+    try io.randomSecure(&pss_salt);
 
     const opts = ctx.handshakeOptions(ephemeral_secret, server_random, pss_salt);
 
@@ -541,48 +538,6 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     return .{ .content_type = buf[0], .full = buf[0 .. 5 + length], .body = buf[5 .. 5 + length] };
 }
 
-fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    if (comptime builtin.os.tag == .windows) {
-        var read: usize = 0;
-        while (read < buf.len) {
-            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-            if (n == 0) return error.ConnectionClosed;
-
-            read += n;
-        }
-        return;
-    }
-
-    var read: usize = 0;
-    while (read < buf.len) {
-        const chunk = buf[read..];
-        const rc = linux.read(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
-}
-
-fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
-
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const chunk = bytes[written..];
-        const rc = linux.write(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        written += rc;
-    }
-}
-
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
@@ -615,9 +570,13 @@ pub const fixture_cert_hex = "308201d43082017ba00302010202147a26ee491f091ac7c914
 pub const fixture_key_hex = "0b76f7f1c7bf6e20029ddb566795e58da5ba63ffbdb914bf699bfbed3147d32c";
 
 test "zix http1: tls_serve, keep-alive serves many requests then honors Connection: close" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const client = @import("../../tls/client.zig");
     const context = @import("../../tls/context.zig");
+    const socket_pair = @import("../../utils/socket_pair.zig");
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     // server identity from the fixture cert + its secret key.
     var skey: [32]u8 = undefined;
@@ -640,19 +599,19 @@ test "zix http1: tls_serve, keep-alive serves many requests then honors Connecti
     };
 
     var pair: [2]posix.fd_t = undefined;
-    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    try socket_pair.open(io, &pair);
     const client_fd = pair[0];
     const server_fd = pair[1];
-    defer _ = linux.close(client_fd);
+    defer fd_io.close(client_fd);
 
     const Srv = struct {
-        fn run(fd: posix.fd_t, server_ctx: *const Tls.Context) void {
-            serveConnTls(fd, keepAliveTestHandler, server_ctx) catch {};
+        fn run(fd: posix.fd_t, server_ctx: *const Tls.Context, srv_io: std.Io) void {
+            serveConnTls(fd, keepAliveTestHandler, server_ctx, srv_io) catch {};
 
-            _ = linux.close(fd);
+            fd_io.close(fd);
         }
     };
-    const t = try std.Thread.spawn(.{}, Srv.run, .{ server_fd, &ctx });
+    const t = try std.Thread.spawn(.{}, Srv.run, .{ server_fd, &ctx, io });
     defer t.join();
 
     // client handshake: ClientHello wrapped in a plaintext handshake record, then the server flight.
