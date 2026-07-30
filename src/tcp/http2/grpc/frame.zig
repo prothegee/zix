@@ -1,6 +1,8 @@
 //! gRPC 5-byte message prefix codec, gRPC frame send functions, and gzip codec.
 
 const std = @import("std");
+const socket_pair = @import("../../../utils/socket_pair.zig");
+const fd_io = @import("../../../utils/fd_io.zig");
 const h2 = @import("../Http2.zig");
 
 // --------------------------------------------------------- //
@@ -459,15 +461,14 @@ test "zix grpc: readGrpcPrefix exactly 5 bytes is valid" {
 }
 
 test "zix grpc: sendGrpcErrorFD includes content-type header" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const pipe_fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(pipe_fds[0]);
-    defer _ = std.posix.system.close(pipe_fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const pipe_fds = pair.fds;
 
     try sendGrpcErrorFD(pipe_fds[1], 1, 3, "");
 
     var buf: [256]u8 = undefined;
-    const n = try std.posix.read(pipe_fds[0], &buf);
+    const n = try fd_io.readOnce(pipe_fds[0], &buf);
     const hpack_block = buf[9..n];
 
     var decoder = h2.HpackDecoder.init();
