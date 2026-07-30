@@ -20,23 +20,40 @@ pub fn argsIterator(args: std.process.Args) std.process.Args.Iterator {
     return std.process.Args.Iterator.init(args);
 }
 
-/// Whether an EPOLL / URING scenario must be skipped on this host: those
-/// dispatch models are Linux-only, elsewhere the server would silently run the
-/// POOL fallback instead of the model under test. Prints a PASS line with a
-/// warn so the suite stays green and the skip stays visible.
+/// Scenario labels whose observable behaviour exists on Linux only, so the runner reports them as
+/// a visible skip off Linux instead of a failure.
+///
+/// Note:
+/// - Empty on purpose. Compression, the engine-owned WebSocket pump, the response cache, the
+///   over-large body drain and HTTP/3 all run under `.ASYNC` now, so every scenario is expected
+///   to pass on every platform.
+/// - Add a label here only with a reason that is about the PLATFORM, not about the model. A
+///   scenario that merely picks `.URING` on Linux does not belong.
+const linux_only_labels = [_][]const u8{};
+
+/// Whether a scenario must be skipped on this host because its behaviour is Linux-only. Prints a
+/// PASS line with a warn so the suite stays green and the skip stays visible.
+///
+/// Note:
+/// - Matches the label EXACTLY against `linux_only_labels`, which is currently empty. It used to
+///   substring-match "epoll" / "uring", which silently stopped matching anything once the
+///   per-model runner rows collapsed and their labels lost those words. An exact list cannot rot
+///   that way unnoticed.
+///
+/// Param:
+/// label - []const u8 (the scenario label, argv[2] for a standalone runner or Check.label in all_runner)
 ///
 /// Return:
 /// - true when the scenario was reported and the caller must return
 pub fn skipDispatchOffPlatform(label: []const u8) bool {
     if (comptime builtin.os.tag == .linux) return false;
 
-    const is_uring = std.mem.indexOf(u8, label, "uring") != null;
-    const is_epoll = std.mem.indexOf(u8, label, "epoll") != null;
-    if (!is_epoll and !is_uring) return false;
+    for (linux_only_labels) |name| {
+        if (std.mem.eql(u8, label, name)) break;
+    } else return false;
 
-    std.debug.print("PASS {s} (WARN: {s} is Linux-only, scenario skipped on {s})\n", .{
+    std.debug.print("PASS {s} (WARN: Linux-only scenario, skipped on {s})\n", .{
         label,
-        if (is_uring) "URING" else "EPOLL",
         @tagName(builtin.os.tag),
     });
 
