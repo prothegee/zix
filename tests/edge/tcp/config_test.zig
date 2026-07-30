@@ -16,9 +16,13 @@ test "zix edge: TcpServer.init, port zero returns PortNotConfigured" {
 
 test "zix edge: DispatchModel, backing values are stable" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.POOL));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.URING));
+}
+
+test "zix edge: DispatchModel, the removed POOL and MIXED names no longer exist" {
+    try std.testing.expect(std.meta.stringToEnum(zix.Tcp.DispatchModel, "POOL") == null);
+    try std.testing.expect(std.meta.stringToEnum(zix.Tcp.DispatchModel, "MIXED") == null);
 }
 
 test "zix edge: TCP frame, max u32 length encodes and decodes correctly" {
