@@ -129,13 +129,9 @@ jobs:
         timeout-minutes: 5
         run: zig build prometheuz-test-edge --summary all
 
-      # docker ships preinstalled on this arm64 ubuntu runner, so postgrez and
-      # rediz can own their own container lifecycle here. The DRIVER test-runner
-      # steps stay out of scope, the zix protocol runners above are wired.
-      - name: postgrez integration tests
-        timeout-minutes: 10
-        run: zig build postgrez-test-integration --summary all
-
-      - name: rediz integration tests
-        timeout-minutes: 10
-        run: zig build rediz-test-integration --summary all
+      # postgrez and rediz test-integration (container lifecycle) are not CI steps on
+      # any leg. Driver coverage here comes from the in-process behaviour and edge
+      # suites above, which need no container and so report the same result on all
+      # seven legs. test-integration pulls its image from a public registry, so a
+      # registry outage reddens the leg over something that is not a zix defect.
+      # Run it locally, where a real PostgreSQL 18 and Redis 8 are the point.
