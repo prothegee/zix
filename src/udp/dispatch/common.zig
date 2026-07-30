@@ -2,8 +2,8 @@
 //!
 //! What:
 //! - Only what the per-model files share: the per-datagram serve (`serveDatagram`), the recvmmsg worker
-//!   loop (`workerLoop`) plus its two run shapes (`runSingle` - one worker for ASYNC, `runMulti` - one
-//!   SO_REUSEPORT worker per CPU for POOL / MIXED, which ADR-050 defines as multi-core), the worker
+//!   loop (`workerLoop`) plus its run shape (`runSingle` - one worker for .ASYNC, the portable
+//!   SO_REUSEPORT worker per CPU for .EPOLL / .URING, which ADR-050 defines as multi-core), the worker
 //!   helpers (`effectiveWorkers` / `pinToCpu` / `setBusyPoll`), and the non-Linux fallback. The per-core
 //!   EPOLL and URING workers own their own loops in `epoll.zig` and `uring.zig` (ADR-050: each model is
 //!   independently tunable, .URING is a real io_uring ring, not an alias of .EPOLL).
@@ -242,35 +242,12 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
     }
 }
 
-/// Single worker on the calling thread. Used by the ASYNC model (POOL / MIXED run multi-core).
+/// Single worker on the calling thread. Used by the .ASYNC model, the only portable one.
 pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
     logSystem(config, "raw listening on {s}:{d} (single worker)", .{ config.ip, config.port });
     workerLoop(handler, config, config.reuse_address, 0);
-}
-
-/// One SO_REUSEPORT blocking-recvmmsg worker per CPU (POOL / MIXED, which ADR-050 defines as multi-core
-/// everywhere). Per-core workers each bind the same port, so SO_REUSEPORT is forced on regardless of the
-/// reuse_address flag, and each pins to its CPU and owns its own send / recv batches (shared-nothing), so
-/// the kernel load-balances datagrams by 4-tuple. The .EPOLL / .URING siblings add readiness / completion
-/// on top of the same per-core shape (epoll.zig / uring.zig).
-pub fn runMulti(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
-    if (!datagram.is_linux) return runFallback(handler, config);
-
-    const want = effectiveWorkers(config);
-    logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + recvmmsg)", .{ config.ip, config.port, want });
-
-    const threads = try config.allocator.alloc(std.Thread, want);
-    defer config.allocator.free(threads);
-
-    var spawned: usize = 0;
-    for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoop, .{ handler, config, true, i }) catch break;
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |t| t.join();
 }
 
 /// Portable single-socket fallback for non-Linux targets: one datagram per receive, replies sent
