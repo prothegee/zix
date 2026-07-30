@@ -34,11 +34,22 @@ const NO_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.os.
 /// Whether fd still refers to an open descriptor. Probes with fcntl(F_GETFD),
 /// a closed fd returns EBADF. Windows has no cheap probe here, so members are
 /// assumed live and pruned when a send to them fails.
+///
+/// Note:
+/// - fcntl has no portable wrapper in std here: the Linux form returns the raw syscall convention
+///   (a negative errno packed into a usize) and the libc form returns c_int with -1 on failure,
+///   so each branch checks its own return. Issuing the Linux form everywhere aims a Linux syscall
+///   number at a kernel that assigns it to something else entirely.
 fn fdAlive(fd: std.posix.fd_t) bool {
-    if (comptime @import("builtin").os.tag == .windows) return true;
+    if (comptime builtin.os.tag == .windows) return true;
 
-    const rc = std.os.linux.fcntl(fd, std.posix.F.GETFD, 0);
-    return std.posix.errno(rc) == .SUCCESS;
+    if (comptime builtin.os.tag == .linux) {
+        const rc = std.os.linux.fcntl(fd, std.posix.F.GETFD, 0);
+
+        return std.posix.errno(rc) == .SUCCESS;
+    }
+
+    return std.c.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0)) != -1;
 }
 
 /// One connection tracked in a room: its fd, the room it joined, and the
