@@ -3,12 +3,11 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9020;
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
+const DISPATCH_MODEL: zix.Http1.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const WORKERS: usize = 0; // 0 = cpu_count accept threads
-const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
+const WORKERS: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 
@@ -137,7 +136,6 @@ pub fn main(process: std.process.Init) !void {
         .max_recv_buf = MAX_RECV_BUF,
         .compression_max_out = COMPRESSION_MAX_OUT,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
