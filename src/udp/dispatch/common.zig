@@ -250,6 +250,10 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !voi
     workerLoop(handler, config, config.reuse_address, 0);
 }
 
+/// The descriptor the portable loop hands the sink. Never opened and never sent on: the batch
+/// carries a PortableSink, so the flush the sink can reach goes through std.Io.
+const NO_SOCKET: posix.socket_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 /// Portable single-socket fallback for non-Linux targets: one datagram per receive, replies sent
 /// individually through std.Io.net (no recvmmsg / sendmmsg batching).
 pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
@@ -267,12 +271,17 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
     var tx = try datagram.SendBatch.init(config.allocator, config.send_batch, config.send_batch * config.max_recv_buf);
     defer tx.deinit();
 
+    // A handler that replies more than the batch holds makes the sink flush mid-handler, and the
+    // descriptor it has here was never opened. The batch carries the bound socket so that flush
+    // sends through std.Io: without it the queued replies would be dropped and never reported.
+    tx.portable = .{ .socket = socket, .io = io };
+
     while (true) {
         const msg = socket.receive(io, buf) catch continue;
 
         const sender = datagram.ipToSockaddr6(msg.from);
         const peer = msg.from;
-        var sink = core.Sink{ .batch = &tx, .fd = undefined, .sender = sender };
+        var sink = core.Sink{ .batch = &tx, .fd = NO_SOCKET, .sender = sender };
         handler(msg.data, &peer, &sink);
 
         for (0..tx.count) |i| {
