@@ -1,5 +1,5 @@
 // Runner for channel_ipc_a and channel_ipc_b examples.
-// Spawns Process A (listens on /tmp/zix_ipc.sock), waits for the socket to appear,
+// Spawns Process A (listens on tmp/zix_ipc.sock), waits for the socket to appear,
 // spawns Process B (connects to A), lets them exchange for 1.5 seconds, then kills both.
 //
 // Invoked by `zig build test-runner-channel-ipc`.
@@ -10,7 +10,7 @@
 const std = @import("std");
 const common = @import("common.zig");
 
-const IPC_SOCK_PATH: []const u8 = "/tmp/zix_ipc.sock";
+const IPC_SOCK_PATH: []const u8 = "tmp/zix_ipc.sock";
 const WAIT_MS: u64 = 5000;
 const EXCHANGE_MS: u64 = 1500;
 
