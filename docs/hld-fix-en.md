@@ -16,7 +16,7 @@ Implemented. See ADR-024 for design rationale.
 - SOH-delimited framing: no length prefix, delimiter-based message boundary detection.
 - Session layer built in: Logon / Logout / Heartbeat / TestRequest handled automatically, all other messages are echoed.
 - No heap allocation in `serveConn`: stack buffers throughout.
-- POOL, ASYNC, MIXED, EPOLL, and URING dispatch. Required with no default: ASYNC suits long-lived FIX sessions. EPOLL runs natively on Linux (gRPC pattern: single epoll accept loop, pool workers hold each connection for its full lifetime). URING runs shared-nothing io_uring workers on Linux. Both fall back to POOL on non-Linux.
+- ASYNC, EPOLL, and URING dispatch. Required with no default: ASYNC suits long-lived FIX sessions and is the only portable model. EPOLL and URING run shared-nothing per-core workers on Linux, and `run()` rejects both off Linux with `error.DispatchModelUnsupported` (ADR-065).
 - `io: std.Io` in config (not passed to `run()`).
 
 ---
@@ -28,7 +28,7 @@ src/tcp/fix/
     Fix.zig      // namespace aggregator
     core.zig     // parsing, building, checksum, serveConn, MsgType, FixRequest, FixResponse, FixContext, HandlerFn, FixRoute
     config.zig   // FixServerConfig, FixClientConfig
-    server.zig   // FixServer: thin run() switch over dispatch/ (POOL, ASYNC, MIXED, EPOLL, URING)
+    server.zig   // FixServer: thin run() switch over dispatch/ (ASYNC, EPOLL, URING)
     dispatch/    // per-model files: async.zig, pool.zig, mixed.zig, epoll.zig, uring.zig, common.zig
     router.zig   // comptime FixRouter
     client.zig   // FixClient
@@ -85,12 +85,10 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `ip` | required | Bind address |
 | `port` | required | Bind port. Must be non-zero |
 | `comp_id` | required | Server SenderCompID (tag 49) |
-| `dispatch_model` | `.ASYNC` | POOL, ASYNC, MIXED, EPOLL, or URING (EPOLL and URING are Linux-only: native epoll / io_uring. Non-Linux falls back to POOL) |
+| `dispatch_model` | `.ASYNC` | ASYNC, EPOLL, or URING (EPOLL and URING are Linux-only: native epoll / io_uring, rejected off Linux with error.DispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Accept thread count. Ignored by ASYNC |
-| `pool_size` | 0 (auto) | Pool threads (`max(10, cpu_count * 2)`). Used by POOL only |
 | `worker_stack_size_bytes` | 512 KiB | Worker thread stack for EPOLL / URING handler threads. Demand-paged, costs little until the depth is used |
-| `pool_stack_size_bytes` | 256 KiB | Pool worker thread stack for POOL. Smaller than EPOLL / URING since FIX handlers process small fixed-format messages |
 | `reuseport_cbpf` | false | SO_ATTACH_REUSEPORT_CBPF steering (EPOLL / URING): a new connection goes to the worker on the receiving CPU instead of the 4-tuple hash. Silent no-op on a kernel pre-4.5 |
 | `uring_send_buf_size` | 64 KiB | Per-connection send buffer for URING. No effect under the other dispatch models |
 | `uring_max_conns_per_worker` | 65536 | Max concurrent connections one URING worker tracks (fd-indexed slab). Connections past the cap are refused |
@@ -356,15 +354,13 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Dispatch Models
 
-Same five models as `zix.Http.Server`. The field is required with no default. ASYNC suits long-lived FIX sessions (POOL can exhaust threads under sustained load):
+Same three models as `zix.Http.Server`. The field is required with no default. ASYNC suits long-lived FIX sessions and is the only portable model:
 
-| Model | Accept threads | Notes |
+| Model | Workers | Notes |
 | :- | :- | :- |
-| `.ASYNC` | 1 | Long-lived sessions, standard FIX deployments |
-| `.POOL` | cpu_count | High connection volume with short sessions |
-| `.MIXED` | cpu_count | Balanced throughput and latency |
-| `.EPOLL` | 1 (Linux-only) | Single epoll accept loop. Pool workers hold each connection for its full lifetime. Non-Linux falls back to POOL. |
-| `.URING` | cpu_count (Linux-only) | Shared-nothing io_uring workers running a resumable session processor (`core.processFixRing`) per readable batch (ADR-037). Non-Linux falls back to POOL. |
+| `.ASYNC` | 1 accept thread | Long-lived sessions, standard FIX deployments, every platform |
+| `.EPOLL` | cpu_count (Linux-only) | Shared-nothing: one SO_REUSEPORT listener and one epoll instance per worker. Rejected off Linux. |
+| `.URING` | cpu_count (Linux-only) | Shared-nothing io_uring workers running a resumable session processor (`core.processFixRing`) per readable batch (ADR-037). Rejected off Linux. |
 
 ---
 
@@ -392,11 +388,7 @@ See `docs/hld-logger-en.md` for log line format details.
 
 | File | Role | Port |
 | :- | :- | :- |
-| `examples/fix_server_1_async.zig` | `.ASYNC` server (echo mode) | 9500 |
-| `examples/fix_server_2_pool.zig` | `.POOL` server (echo mode) | 9500 |
-| `examples/fix_server_3_mixed.zig` | `.MIXED` server (echo mode) | 9500 |
-| `examples/fix_server_4_epoll.zig` | `.EPOLL` server (Linux-only: native epoll. Non-Linux falls back to POOL) | 9500 |
-| `examples/fix_server_5_uring.zig` | `.URING` server (Linux-only: shared-nothing io_uring workers. Non-Linux falls back to POOL) | 9052 |
+| `examples/fix_server.zig` | echo-mode server, dispatch model picked per target (`.URING` on Linux, `.ASYNC` elsewhere) | 9048 |
 | `examples/fix_server_trading.zig` | `.ASYNC` server with router: NewOrderSingle + OrderCancelRequest, JSON append, logger, timeouts | 9500 |
 | `examples/fix_client.zig` | `FixClient` high-level client | 9500 |
 | `examples/fix_client_raw.zig` | raw core primitives client | 9500 |
