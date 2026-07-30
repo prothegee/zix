@@ -136,10 +136,18 @@ const replies = try pipe.sync();
 
 ## Pengujian
 
-Setiap suite memegang siklus hidup container Redis sendiri:
+Tiga suite tidak butuh apa pun terpasang, dua memegang container Redis 8:
 
 ```
 zig build test-unit          # in-process, tanpa server
+zig build test-behaviour     # in-process server in-process, tanpa container
+zig build test-edge          # in-process server in-process, tanpa container
 zig build test-integration   # start, uji, teardown container
 zig build test-runner        # jalankan setiap example terhadap container
 ```
+
+`test-behaviour` dan `test-edge` menjalankan in-process server yang berbicara RESP2
+dan RESP3 secara in-process, lengkap dengan keyspace nyata, autentikasi ACL,
+client kill, dan TLS. Keduanya tidak butuh docker dan jalan di setiap platform
+yang didukung, sehingga CI bisa menjalankannya di mana saja. `test-integration`
+dan `test-runner` tetap menjadi cakupan terhadap Redis 8 sungguhan.
