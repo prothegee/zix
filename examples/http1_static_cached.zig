@@ -1,9 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9077;
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
+// Pick the model per target at comptime (ADR-065): .URING is the Linux shared-nothing
+// completion loop, .ASYNC the portable model. .EPOLL and .URING are Linux-only, and run()
+// returns error.DispatchModelUnsupported rather than silently serving a different model.
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const WORKERS: usize = 0; // 0 = one worker per cpu
