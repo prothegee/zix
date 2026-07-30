@@ -337,6 +337,26 @@ pub fn sendResponseEncodedFD(
 
 // --------------------------------------------------------- //
 
+/// Read one end of a pair until the peer closes it, and report how many bytes arrived.
+///
+/// Note:
+/// - Meant to run as its own task while the other end is still sending. A send larger than the
+///   socket buffer only completes while someone is draining: with no concurrent reader the
+///   writer blocks the moment that buffer fills and neither side moves again.
+fn drainUntilEof(fd: std.posix.fd_t, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = fd_io.readOnce(fd, buf[total..]) catch break;
+        if (got == 0) break;
+
+        total += got;
+    }
+
+    return total;
+}
+
+// --------------------------------------------------------- //
+
 test "zix http2: writeAllFD delivers data on a blocking fd" {
     var pair = try socket_pair.Pair.open(std.testing.allocator);
     defer pair.deinit();
@@ -351,22 +371,26 @@ test "zix http2: writeAllFD delivers data on a blocking fd" {
 }
 
 test "zix http2: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var pair = try socket_pair.Pair.open(std.testing.allocator);
     defer pair.deinit();
     const fds = pair.fds;
+
+    // 40000 bytes is past the socket buffer on macOS, NetBSD and OpenBSD (Linux holds it), so
+    // the drain has to be in flight before the send starts. Reading afterwards deadlocks there:
+    // sendResponseFD fills the buffer and waits on a reader that has not been reached yet.
+    var buf: [64 * 1024]u8 = undefined;
+    var drain: std.Io.Future(usize) = io.async(drainUntilEof, .{ fds[0], &buf });
 
     var body: [40000]u8 = undefined;
     @memset(&body, 'a');
     try sendResponseFD(fds[1], 1, 200, "text/plain", &body);
     fd_io.close(fds[1]);
 
-    var buf: [64 * 1024]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const got = fd_io.readOnce(fds[0], buf[total..]) catch break;
-        if (got == 0) break;
-        total += got;
-    }
+    const total = drain.await(io);
 
     var off: usize = 0;
     var data_bytes: usize = 0;
