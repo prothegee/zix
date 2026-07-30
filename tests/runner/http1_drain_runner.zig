@@ -17,7 +17,6 @@
 
 const std = @import("std");
 const common = @import("common.zig");
-const linux = std.os.linux;
 
 const WAIT_MS: u64 = 5000;
 const RECV_TIMEOUT_S: isize = 4;
@@ -90,8 +89,10 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 /// Bound a blocking read so a desynchronized connection fails the runner
 /// instead of hanging it. Best-effort: a kernel without SO_RCVTIMEO is a no-op.
 fn setRecvTimeout(fd: std.posix.fd_t) void {
-    var tv = linux.timeval{ .sec = RECV_TIMEOUT_S, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, linux.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    // std.posix carries the per-target layout and option number. The Linux ones fed a foreign
+    // kernel a struct of the wrong shape under an option number that means something else there.
+    var tv = std.posix.timeval{ .sec = RECV_TIMEOUT_S, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
 fn sendLargePost(fd: std.posix.fd_t) !void {
