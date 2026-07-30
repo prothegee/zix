@@ -141,10 +141,20 @@ The consumer writes only the `Job` type and `run_batch`, the driver owns the con
 
 ## Testing
 
-The suites own their PostgreSQL 18 container lifecycle:
+Three suites need nothing installed, two own a PostgreSQL 18 container:
 
 ```
 zig build test-unit          # in-process, no server
+zig build test-behaviour     # in-process backend, no container
+zig build test-edge          # in-process backend, no container
 zig build test-integration   # starts, tests, tears down the container
 zig build test-runner        # runs every example against the container
 ```
+
+`test-behaviour` and `test-edge` drive an in-process backend that speaks the v3 wire
+protocol in process: startup, SCRAM and cleartext authentication, the extended
+query cycle, COPY, notifications, and TLS with channel binding. They need no
+docker and run on every supported platform, so CI can run them everywhere.
+What they cannot check is whether a statement means what its author intended,
+because the server runs no SQL: that is what `test-integration` and
+`test-runner` are still for.
