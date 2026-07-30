@@ -10,6 +10,7 @@
 //! - Ids start at 1 to match a real server, where 0 is never a client id.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// One accepted connection, as the registry tracks it.
 pub const Client = struct {
@@ -232,7 +233,7 @@ test "rediz inproc: clients kill reports whether the id was connected" {
     try testing.expect(client.killed.load(.acquire));
 }
 
-test "rediz inproc: clients kill makes the victim read return end of stream" {
+test "rediz inproc: clients kill ends the victim read" {
     var pair: Pair = undefined;
     try pair.open();
     defer pair.close();
@@ -245,5 +246,18 @@ test "rediz inproc: clients kill makes the victim read return end of stream" {
 
     var read_buf: [16]u8 = undefined;
     var reader = pair.server_side.reader(pair.threaded.io(), &read_buf);
-    try testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+    // What kill promises is that a parked read comes back, and how it comes back is the platform's
+    // call. POSIX reports a clean end of stream on a socket shut down under the reader. Windows
+    // fails the read instead: its socket layer answers STATUS_PIPE_DISCONNECTED there, a status std
+    // has no end-of-stream mapping for, so std prints its own unexpected-status diagnostic and
+    // returns error.ReadFailed. That diagnostic in a passing Windows run is expected output, not a
+    // failure. The transport in this suite already folds the two errors into one closed connection.
+    const outcome = reader.interface.takeByte();
+
+    if (comptime builtin.os.tag == .windows) {
+        try testing.expectError(error.ReadFailed, outcome);
+    } else {
+        try testing.expectError(error.EndOfStream, outcome);
+    }
 }
