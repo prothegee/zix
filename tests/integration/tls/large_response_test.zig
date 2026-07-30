@@ -252,8 +252,6 @@ fn expectBody(session: *Session, allocator: std.mem.Allocator, want: usize) !usi
 // --------------------------------------------------------- //
 
 test "zix integration: TLS serves a body spanning one two three and four records" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     try startServersOnce();
 
     const gpa = std.testing.allocator;
@@ -282,8 +280,6 @@ test "zix integration: TLS serves a body spanning one two three and four records
 }
 
 test "zix integration: TLS keeps answering after a multi-record response" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     try startServersOnce();
 
     const gpa = std.testing.allocator;
@@ -308,8 +304,6 @@ test "zix integration: TLS keeps answering after a multi-record response" {
 }
 
 test "zix integration: TLS on the URING model splits a large response the same way" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     try startServersOnce();
 
     const gpa = std.testing.allocator;
