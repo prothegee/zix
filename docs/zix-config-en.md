@@ -28,10 +28,8 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | value | meaning |
 | :- | :- |
 | `.ASYNC` | one accept thread, one `io.async()` per connection. Best for low latency at moderate connection counts. |
-| `.POOL` | N accept threads push connections to a shared queue, M pool threads handle them. Best for throughput under high connection counts. |
-| `.MIXED` | N accept threads each dispatch via `io.async()`, no shared queue. Balanced throughput and latency. |
-| `.EPOLL` | shared-nothing: each worker owns one SO_REUSEPORT listener plus one epoll instance. Best for very high connection counts. Linux-only, folds to `.POOL` elsewhere. |
-| `.URING` | shared-nothing io_uring: same per-core topology as `.EPOLL`, completion-based so most syscalls are batched away. Linux-only, probes the ring at startup and falls back to `.EPOLL` then `.POOL`. |
+| `.EPOLL` | shared-nothing: each worker owns one SO_REUSEPORT listener plus one epoll instance. Best for very high connection counts. Linux-only, `run()` returns `error.DispatchModelUnsupported` elsewhere. |
+| `.URING` | shared-nothing io_uring: same per-core topology as `.EPOLL`, completion-based so most syscalls are batched away. Linux-only, probes the ring at startup and folds to `.EPOLL` when io_uring is unavailable. |
 
 ## HTTP/1 (`Http1ServerConfig`)
 
@@ -40,11 +38,10 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, must be non-zero | | | | | zero is not validated: binds a kernel-chosen ephemeral port |
-| dispatch_model | required | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model (see table above) | picks the whole strategy | `.EPOLL`/`.URING` for high connection counts on Linux | | | wrong model caps throughput, off Linux only `.ASYNC` runs |
 | kernel_backlog | 1024 | TCP listen backlog before accept() | kernel accept queue depth | raise under bursty connection storms | new connections dropped during a burst | more kernel memory for the queue | too low drops connections during spikes |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism across cores | leave 0 (auto), or pin a count | fewer cores used | oversubscription and context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | concurrency under `.POOL` | raise for many blocking handlers | queueing under load | more threads and memory | only used by `.POOL` |
-| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL handler threads | per-thread RSS (demand-paged) | raise for deep handlers or large stack locals, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING handler threads | per-thread RSS (demand-paged) | raise for deep handlers or large stack locals, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | worker_stack_compress_bytes | 2097152 | worker stack when compression is on, applied as a floor: effective stack is max(worker_stack_size_bytes, this) | per-thread RSS under .EPOLL/.URING with compression | raise if a compressing handler needs more | flate (about 230 KB on the handler frame) can overflow a small stack | wasted RSS per worker | no effect when compression is off |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
@@ -56,7 +53,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | uring_idle_pool_ceiling | 256 | absolute warm idle slot ceiling per worker under .URING, holds the warm set below live_count at high concurrency | resident memory at high connection counts | raise to keep more warm for reconnect, lower to shrink the resident set under churn | more page faults on reconnect at high concurrency | more closed slots kept resident (cache and TLB pressure) | the fix for the high-connection regression where the warm set tracked live_count, no effect under other models |
 | process_queue_len | 0 (off) | per-worker FIFO ring (.URING) that parks a recv or send re-arm when the submission queue is full and retries it next loop pass instead of closing the connection, 0 disables the feature | per-worker slab, references only (fd + generation), engages only when the SQ fills under a burst | size to about peak concurrent connections per worker so an SQ-full burst parks instead of dropping connections | ring fills sooner under a burst, the newest entry is rejected and that connection falls back to close | more reserved slab per worker (entry count times a few bytes) | no effect under other dispatch models, a value far above peak connections per worker reserves slab that faults resident over time for no gain |
 | max_response_headers | `.MINIMAL` (16) | max custom response headers (addHeader capacity, ADR-062) | per-response memory, lazily allocated on first addHeader | raise the tier for many custom headers | extra headers cannot be set | more per-response memory | requests that add none pay nothing |
-| conn_timeout_ms | 0 | connection lifetime guard in ms, 0 = disabled (ADR-062) | background timer eviction on `.ASYNC`/`.POOL`/`.MIXED` | set to evict long-lived connections on the blocking models | connections cut sooner | longer-lived connections | documented no-op on `.EPOLL`/`.URING` (their event loops own connection lifetime) |
+| conn_timeout_ms | 0 | connection lifetime guard in ms, 0 = disabled (ADR-062) | background timer eviction on `.ASYNC` | set to evict long-lived connections on the blocking model | connections cut sooner | longer-lived connections | documented no-op on `.EPOLL`/`.URING` (their event loops own connection lifetime) |
 | handler_timeout_ms | 0 | per-handler execution budget in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut off sooner | slow handlers run longer | handlers must check isExpired() for it to take effect |
 | send_date_header | true | include the Date header in every response (RFC 7231) | 37 bytes per response | leave on for compliance, off to shrink responses | | | off drops a standard header |
 | public_dir | "" | root directory for static file serving, empty disables it | disk I/O on static hits | set to serve static files for routes that match no handler | | | non-empty is validated at run(), a missing dir yields error.PublicDirNotFound |
@@ -84,11 +81,10 @@ h2c cleartext by default, h2-over-TLS when `tls` is set.
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | `.URING` falls back to `.EPOLL`, off Linux both fold to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | `.URING` folds to `.EPOLL` when io_uring is unavailable, off Linux only `.ASYNC` runs |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under connection storms | connections dropped during a burst | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores used | context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
-| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING) | hot, kernel busy-spins before sleeping the worker | set to e.g. 50 to cut tail latency under load | shorter spin, more idle-sleep wakeups | cores spin at 100% when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
 | max_recv_buf | 32768 | per-connection read buffer floor (.EPOLL / .URING mux) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
@@ -118,11 +114,10 @@ gRPC over HTTP/2. h2c cleartext by default, h2-over-TLS when `tls` is set.
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | off Linux only `.ASYNC` runs |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
-| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING and TLS handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING) | hot, kernel busy-spins before sleeping the worker | set to e.g. 50 to cut tail latency under load | shorter spin, more idle-sleep wakeups | cores spin at 100% when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
 | max_recv_buf | 65536 | per-connection read buffer floor (.EPOLL / .URING) | per-conn read buffer, hot | raise to cut read() and compaction for large frames | more reads and compactions for big frames | more memory per connection | reader is max(this, one max frame) |
@@ -151,11 +146,10 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is not validated: binds a kernel-chosen ephemeral port |
-| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | off Linux only `.ASYNC` runs |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
-| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL handler threads | per-thread RSS (demand-paged) | raise for deep handlers or large stack locals, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING handler threads | per-thread RSS (demand-paged) | raise for deep handlers or large stack locals, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | worker_stack_compress_bytes | 2097152 | worker stack when compression is on, applied as a floor: effective stack is max(worker_stack_size_bytes, this) | per-thread RSS under .EPOLL/.URING with compression | raise if a compressing handler needs more | flate (about 230 KB on the handler frame) can overflow a small stack | wasted RSS per worker | no effect when compression is off |
 | busy_poll_us | 50 | SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL) | hot, kernel busy-spins before sleeping the worker | raise to cut tail latency under load, 0 to save idle CPU | shorter spin, more idle-sleep wakeups, higher tail latency | cores spin at 100% when idle | no-op without kernel SO_BUSY_POLL support |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
@@ -195,11 +189,10 @@ The standard library path. Same compression and cache field set as HTTP/1, plus 
 | io | required | std.Io backend | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | off Linux only `.ASYNC` runs |
 | kernel_backlog | 4096 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | workers | 0 | accept thread count, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
-| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING/.POOL handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
+| worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL/.URING handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
 | max_recv_buf | 4096 | max payload bytes per frame, over-size closes the connection | per-conn memory and max frame | raise for larger frames | large frames close the connection | more memory per connection | too low closes valid large frames |
 | uring_send_buf_size | 65536 | per-connection send buffer for the .URING framed model (max_recv_buf covers recv) | per-conn memory under .URING | raise for larger frames, lower to shrink per-conn memory | more buffer growth on big frames | more memory per connection | no effect under other dispatch models |
@@ -248,7 +241,7 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | allocator | required | backing allocator, general-purpose | | | | | |
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
-| dispatch_model | required | concurrency: .EPOLL is an epoll readiness loop, .URING an io_uring completion loop, each one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC runs a single worker with CID demux, POOL/MIXED/EPOLL/URING run one per core. .URING falls back to .EPOLL when io_uring is unavailable |
+| dispatch_model | required | concurrency: .EPOLL is an epoll readiness loop, .URING an io_uring completion loop, each one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` for multicore scale | | | ASYNC runs a single worker with CID demux, EPOLL/URING run one per core. .URING folds to .EPOLL when io_uring is unavailable |
 | workers | 0 | worker count for per-core models, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | only for EPOLL/URING |
 | worker_stack_size_bytes | 524288 | worker thread stack for the per-core workers (.EPOLL / .URING) | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
 | busy_poll_us | 0 | SO_BUSY_POLL spin window in microseconds for the per-core worker socket (.EPOLL / .URING) | recvmmsg wake-up latency | set to e.g. 50 to cut wake-up latency under load | shorter spin, more idle-sleep wakeups | cores spin when idle | 0 leaves it unset, no-op without kernel SO_BUSY_POLL support |
@@ -280,12 +273,10 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | ip | required | bind address | | | | | |
 | port | required | bind port, non-zero | | | | | zero is rejected |
 | comp_id | required | server SenderCompID (tag 49) | | | | | required for the FIX session |
-| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | non-Linux folds to `.POOL` |
+| dispatch_model | required | concurrency model | picks the strategy | `.EPOLL`/`.URING` on Linux for scale | | | off Linux only `.ASYNC` runs |
 | kernel_backlog | 1024 | TCP listen backlog | kernel accept queue | raise under storms | dropped connections | more kernel memory | too low drops connections |
 | workers | 0 | accept/event-loop workers, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores | context-switching | ignored by `.ASYNC` |
-| pool_size | 0 | pool thread count, 0 = max(10, cpu*2) | `.POOL` concurrency | raise for blocking handlers | queueing | more threads | only used by `.POOL` |
 | worker_stack_size_bytes | 524288 | worker thread stack for the .EPOLL and .URING handler threads | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | cost is low until the depth is used |
-| pool_stack_size_bytes | 262144 | pool worker thread stack for the .POOL model, smaller because FIX handlers process small fixed-format messages | per-thread RSS under .POOL | raise if a pool handler needs more, lower to trim RSS | stack overflow in a deep pool handler | wasted RSS per pool thread | only used by .POOL |
 | reuseport_cbpf | false | SO_ATTACH_REUSEPORT_CBPF steering (.EPOLL / .URING): a new connection goes to listener index = receiving CPU mod workers instead of the 4-tuple hash | connection placement (per SYN, zero hot-path cost) | enable on multi-core hosts so a connection is served on the core that received it | | | no-op when the kernel lacks the option (pre-4.5) |
 | uring_send_buf_size | 65536 | per-connection send buffer for the .URING dispatch model | per-conn memory under .URING | raise for larger replies, lower to shrink per-conn memory | more buffer growth on big replies | more memory per connection | no effect under other dispatch models |
 | uring_max_conns_per_worker | 65536 | max concurrent connections one .URING worker tracks (fd-indexed slab) | per-worker slab, demand-paged | raise for very high concurrency, lower to shrink the slab | connections rejected past the cap | larger upfront slab (demand-paged) | only the .URING model |
@@ -342,5 +333,5 @@ Build one Logger with this config and attach it by pointer to any engine's `logg
 
 - Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) have no default and must be set. A zero `port` is rejected at init by `zix.Tcp` / `zix.Udp` / `zix.Fix` (and their clients), and at `run()` by `zix.Http2` / `zix.Grpc` / `zix.Http3`. `zix.Http1` and `zix.Http` do not validate it (port 0 binds a kernel-chosen ephemeral port).
 - `io`, `logger`, and `tls` are caller-owned: they are passed by handle or pointer and must outlive the server.
-- `.EPOLL` and `.URING` are Linux-only. Off Linux they fold to `.POOL`. The TLS paths follow the model: `.EPOLL` / `.URING` terminate in the multiplexed tls_mux workers, the thread models in tls_serve.
+- `.EPOLL` and `.URING` are Linux-only. Off Linux `run()` returns `error.DispatchModelUnsupported`, so pick `.ASYNC` there. The TLS paths follow the model: `.EPOLL` / `.URING` terminate in the multiplexed tls_mux workers, `.ASYNC` in tls_serve.
 - The compression and response-cache features are active only under `.EPOLL` and `.URING` (shared-nothing, one owner per worker).
