@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
+const socket_poll = @import("../utils/socket_poll.zig");
 const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 
 // --------------------------------------------------------- //
@@ -119,10 +120,12 @@ pub fn UdpServer(comptime Packet: type) type {
             var clients = std.array_list.Managed(ClientRecord).init(self.config.allocator);
             defer clients.deinit();
 
-            const poll_timeout: std.Io.Timeout = .{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(self.config.poll_timeout_ms),
-                .clock = .awake,
-            } };
+            // poll_timeout_ms is signed in the config: a value at or below zero is a plain
+            // non-blocking check, which is what the previous timed receive did with it too.
+            const poll_ms: u32 = if (self.config.poll_timeout_ms <= 0)
+                0
+            else
+                @intCast(@min(self.config.poll_timeout_ms, std.math.maxInt(u32)));
 
             var last_check = std.Io.Clock.Timestamp.now(io, .awake);
             var next_index: usize = 1; // 1-based for readable log output
@@ -130,14 +133,27 @@ pub fn UdpServer(comptime Packet: type) type {
             while (true) {
                 var buf: [@sizeOf(Packet)]u8 = undefined;
 
-                const msg = socket.receiveTimeout(io, &buf, poll_timeout) catch |err| {
-                    if (err == error.Timeout) {
-                        const now = std.Io.Clock.Timestamp.now(io, .awake);
-                        checkDisconnections(&clients, now, self.config.conn_timeout_ms, self.config.logger);
-                        last_check = now;
-                        continue;
-                    }
+                // Wait for readiness, then receive plainly. A timed std.Io receive would race the
+                // receive against a timer, which the Windows backend cannot do for a socket (it
+                // answers error.ConcurrencyUnavailable). That error is not error.Timeout, so this
+                // loop used to log it and spin without ever taking a datagram: the server bound its
+                // port and then answered nobody. The wait carries the idle tick either way.
+                const ready = socket_poll.waitReady(socket.handle, socket_poll.READABLE, poll_ms) catch |err| {
+                    if (self.config.logger) |lg| lg.system(.WARN, "udp", "poll error: {}", .{err});
+
+                    continue;
+                };
+                if (!ready) {
+                    const now = std.Io.Clock.Timestamp.now(io, .awake);
+                    checkDisconnections(&clients, now, self.config.conn_timeout_ms, self.config.logger);
+                    last_check = now;
+
+                    continue;
+                }
+
+                const msg = socket.receive(io, &buf) catch |err| {
                     if (self.config.logger) |lg| lg.system(.WARN, "udp", "receive error: {}", .{err});
+
                     continue;
                 };
 
