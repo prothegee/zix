@@ -22,7 +22,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> er
 fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type   // .init(config); .deinit(); .run() -> ring on .URING, else frameAdapter fallback
 
 // Free dispatch workers (handler kept as a runtime value, same shape as zix.Http1):
-fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // ASYNC/POOL/MIXED/EPOLL switch
+fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // ASYNC/EPOLL switch, rejects a Linux-only model off Linux
 fn runEpoll(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn, cpu: usize) !void
 ```
 
@@ -41,31 +41,6 @@ The handler (or per-frame callback) is comptime-known at the type boundary, but 
 ```
 
 Single accept thread. Each connection is dispatched as an `io.async()` task. The accept loop never blocks on connection handling.
-
-### serveDispatch POOL path
-
-```
-1. worker_count = cfg.workers  (0 -> cpu_count)
-   pool_count   = cfg.pool_size (0 -> max(10, cpu_count * 2))
-2. var queue = ConnQueue{}
-3. spawn pool_count pool threads: poolEntry(&queue, io, handler)
-4. spawn worker_count accept threads: workerEntry(cfg, &queue, io)
-5. join accept threads
-6. queue.close(io)   <- signals pool threads to drain and exit
-7. join pool threads
-```
-
-Accept threads and pool threads share the same `io` handle (passed by value, `std.Io.Threaded` is thread-safe).
-
-### serveDispatch MIXED path
-
-```
-1. worker_count = cfg.workers (0 -> cpu_count)
-2. spawn worker_count accept threads: asyncWorkerEntry(cfg, io, handler)
-3. join accept threads
-```
-
-Each accept thread listens on the same port (SO_REUSEPORT via `.reuse_address = true`) and dispatches via `io.async()`. No shared queue.
 
 ### runEpoll (EPOLL path, dispatch/epoll.zig)
 
@@ -166,37 +141,6 @@ fn dispatchConn(task: ConnTask) void {
 
 `dispatchConn` is the comptime-known function passed to `io.async()`. The runtime function pointer (`handler`) is stored inside `ConnTask` and called through at runtime.
 
-### workerEntry (POOL accept thread)
-
-```
-resolve ip:port
-listen with .reuse_address = true
-loop:
-    stream = accept(io)
-    if err != ConnectionAborted: break
-    queue.push(stream, io)
-```
-
-### poolEntry (POOL pool thread)
-
-```
-loop:
-    stream = queue.pop(io)   <- blocks until connection or close
-    if null: break
-    handler(stream, io)      <- synchronous blocking I/O
-```
-
-### asyncWorkerEntry (MIXED accept thread)
-
-```
-resolve ip:port
-listen with .reuse_address = true
-loop:
-    stream = accept(io)
-    if err != ConnectionAborted: break
-    io.async(dispatchConn, ConnTask{ stream, io, handler })
-```
-
 ### echoHandler()
 
 ```
@@ -290,11 +234,9 @@ Pattern shared by `TcpServer.initArgs` and `TcpClient.connectArgs`. Unknown args
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    ASYNC = 0,
-    POOL  = 1,
-    MIXED = 2,
-    EPOLL = 3,   // Linux-only, native
-    URING = 4,   // Linux-only, native for the framed path only (initFramed)
+    ASYNC = 0,   // the only portable model
+    EPOLL = 1,   // Linux-only, native
+    URING = 2,   // Linux-only, native for the framed path only (initFramed)
 };
 
 pub const TcpServerConfig = struct {
@@ -304,7 +246,6 @@ pub const TcpServerConfig = struct {
     dispatch_model:             DispatchModel,
     kernel_backlog:             u31   = 4096,
     workers:                    usize = 0,
-    pool_size:                  usize = 0,
     worker_stack_size_bytes:    usize = 512 * 1024,
     reuseport_cbpf:             bool  = false,
     max_recv_buf:               usize = 4096,
