@@ -32,7 +32,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
     };
     const fd = stream.socket.handle;
     zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = nopHandler }}), fd, .{}, io);
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 fn runErrorServer(ctx: *ServerCtx, io: std.Io) void {
@@ -42,7 +42,7 @@ fn runErrorServer(ctx: *ServerCtx, io: std.Io) void {
     };
     const fd = stream.socket.handle;
     zix.Grpc.serveConn(zix.Grpc.Router(&[_]zix.Grpc.Route{.{ .path = "/nop/Nop", .handler = errorOnlyHandler }}), fd, .{}, io);
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
@@ -143,7 +143,7 @@ test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
 
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
     const stream = try addr.connect(io, .{ .mode = .stream });
-    _ = std.posix.system.close(stream.socket.handle);
+    zix.utils.fd_io.close(stream.socket.handle);
 
     t.join();
     ctx.listener.deinit(io);
