@@ -7,6 +7,7 @@
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
+const socket_poll = zix.utils.socket_poll;
 
 // --------------------------------------------------------- //
 
@@ -93,13 +94,12 @@ pub fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
     const server = try std.Io.net.IpAddress.parse("127.0.0.1", 9064);
     try sock.send(io, &server, "raw-echo-ping");
 
-    const timeout: std.Io.Timeout = .{ .duration = .{
-        .raw = std.Io.Duration.fromMilliseconds(3000),
-        .clock = .awake,
-    } };
+    // Readiness first, then a plain receive: a timed std.Io receive needs the Io to run the receive
+    // and a timer concurrently, which the Windows backend cannot do for a socket.
+    if (!try socket_poll.waitReady(sock.handle, socket_poll.READABLE, 3000)) return error.EchoTimeout;
 
     var buf: [64]u8 = undefined;
-    const msg = try sock.receiveTimeout(io, &buf, timeout);
+    const msg = try sock.receive(io, &buf);
     if (!std.mem.eql(u8, msg.data, "raw-echo-ping")) return error.EchoMismatch;
 }
 
