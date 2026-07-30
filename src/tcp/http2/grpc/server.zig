@@ -6,13 +6,12 @@ const core = @import("core.zig");
 const GrpcServerConfig = @import("config.zig").GrpcServerConfig;
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
 const ignoreSigpipe = @import("../../../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const dispatch_support = @import("../../../utils/dispatch_support.zig");
 
 pub const Route = core.Route;
 
@@ -42,7 +41,7 @@ fn GrpcServerImpl(comptime RouterType: type) type {
             _ = self;
         }
 
-        /// Dual-listener TLS accept thread for the thread models: serves gRPC-over-TLS on
+        /// Dual-listener TLS accept thread for the thread model (.ASYNC): serves gRPC-over-TLS on
         /// config.port (already overridden to tls_port by the caller) while the cleartext model
         /// runs on the original port.
         fn serveTlsThread(config: GrpcServerConfig) void {
@@ -61,6 +60,14 @@ fn GrpcServerImpl(comptime RouterType: type) type {
 
             const cfg = self.config;
 
+            // Reject an unrunnable model before any listener or TLS thread starts, so a rejected
+            // config leaves nothing behind (ADR-065).
+            if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+                common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+
+                return error.DispatchModelUnsupported;
+            }
+
             if (cfg.tls != null) {
                 const is_linux = @import("builtin").target.os.tag == .linux;
 
@@ -74,9 +81,8 @@ fn GrpcServerImpl(comptime RouterType: type) type {
                     if (is_linux and cfg.dispatch_model == .URING)
                         return uring_model.runUring(RouterType, cfg);
 
-                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
-                    // TLS on tls_port (thread-per-connection), the cleartext model runs below
-                    // unchanged.
+                    // Thread model (.ASYNC): one extra accept thread terminates TLS on tls_port
+                    // (thread-per-connection), the cleartext model runs below unchanged.
                     var tls_cfg = cfg;
                     tls_cfg.port = cfg.tls_port;
                     tls_cfg.tls_port = 0;
@@ -85,8 +91,8 @@ fn GrpcServerImpl(comptime RouterType: type) type {
                     tls_thread.detach();
                 } else {
                     // Multiplexed TLS for the event-loop models (no thread-per-conn): one epoll worker per
-                    // core terminates TLS in place and serves the resumable grpc mux. ASYNC / POOL / MIXED
-                    // keep the thread-per-conn terminator (which also serves TLS 1.2).
+                    // core terminates TLS in place and serves the resumable grpc mux. ASYNC keeps the
+                    // thread-per-conn terminator (which also serves TLS 1.2).
                     if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING))
                         return tls_mux.runTlsMux(RouterType, cfg);
 
@@ -94,25 +100,19 @@ fn GrpcServerImpl(comptime RouterType: type) type {
                 }
             }
 
+            // The guard above already rejected .EPOLL / .URING off Linux, the comptime gate here
+            // only keeps the Linux-only loops out of analysis there.
             return switch (cfg.dispatch_model) {
                 .ASYNC => async_model.runAsync(RouterType, cfg),
-                .POOL => pool_model.runPool(RouterType, cfg),
-                .MIXED => mixed_model.runMixed(RouterType, cfg),
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                     epoll_model.runEpoll(RouterType, cfg)
-                else blk: {
-                    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
-
-                    break :blk pool_model.runPool(RouterType, cfg);
-                },
+                else
+                    error.DispatchModelUnsupported,
                 // Native io_uring ring path (ADR-037 Phase 4 step 3).
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
                     uring_model.runUring(RouterType, cfg)
-                else blk: {
-                    common.logSystem(cfg, "URING is Linux-only. Falling back to POOL.", .{});
-
-                    break :blk pool_model.runPool(RouterType, cfg);
-                },
+                else
+                    error.DispatchModelUnsupported,
             };
         }
     };
