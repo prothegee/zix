@@ -29,7 +29,7 @@ test "zix integration: TcpServer.init with EPOLL dispatch model succeeds and dei
     server.deinit();
 }
 
-test "zix integration: TcpServer EPOLL, workers governs worker count and pool_size is ignored" {
+test "zix integration: TcpServer EPOLL, workers governs worker count" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
@@ -39,10 +39,8 @@ test "zix integration: TcpServer EPOLL, workers governs worker count and pool_si
         .port = 9300,
         .dispatch_model = .EPOLL,
         .workers = 4,
-        .pool_size = 99,
     });
     try std.testing.expectEqual(@as(usize, 4), server.config.workers);
-    try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
 }
 
 test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
