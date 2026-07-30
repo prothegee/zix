@@ -41,14 +41,23 @@ pub fn open(io: std.Io, fds: *[2]posix.fd_t) Error!void {
 }
 
 /// The socketpair syscall, direct on Linux and through libc on the other POSIX targets.
+///
+/// Note:
+/// - The two branches check their own return convention separately. Linux packs a negative errno
+///   into the returned usize, libc returns -1 and sets errno. A libc -1 widened to usize is
+///   maxInt(usize), which never compares equal to -1, so one shared check would report every
+///   libc failure as success and leave the caller holding two undefined descriptors.
 fn openPosix(fds: *[2]posix.fd_t) Error!void {
     if (comptime is_windows) return error.SocketPairFailed;
 
-    const rc = if (comptime is_linux)
-        std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds)
-    else
-        @as(usize, @bitCast(@as(isize, posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds))));
+    if (comptime is_linux) {
+        const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
 
+        return;
+    }
+
+    const rc = posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
     if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
 }
 
