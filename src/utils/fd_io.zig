@@ -25,6 +25,77 @@ const is_linux = builtin.os.tag == .linux;
 pub const ReadError = error{ ReadFailed, ConnectionClosed };
 pub const WriteError = error{WriteFailed};
 
+/// Outcome of one raw syscall, before a caller turns it into its own error.
+const SyscallError = error{ SyscallFailed, Interrupted };
+
+// --------------------------------------------------------- //
+
+/// One read syscall, normalized to a byte count.
+///
+/// Note:
+/// - The two branches must each check their own return convention. Linux packs a negative errno
+///   into the returned usize, libc returns -1 and sets errno. A libc -1 widened to usize is
+///   maxInt(usize), which can never compare equal to -1, so a shared check would read every libc
+///   failure as success and hand back a bogus count.
+///
+/// Param:
+/// fd - posix.fd_t (an accepted, blocking descriptor)
+/// buf - []u8 (destination, filled up to its length)
+///
+/// Return:
+/// - the byte count, where 0 means the peer hung up
+/// - error.Interrupted when the syscall was interrupted and should be retried
+/// - error.SyscallFailed on any other read error
+fn readSyscall(fd: posix.fd_t, buf: []u8) SyscallError!usize {
+    if (comptime is_linux) {
+        const rc = std.os.linux.read(fd, buf.ptr, buf.len);
+
+        return switch (posix.errno(rc)) {
+            .SUCCESS => rc,
+            .INTR => error.Interrupted,
+            else => error.SyscallFailed,
+        };
+    }
+
+    const rc = posix.system.read(fd, buf.ptr, buf.len);
+
+    return switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => error.Interrupted,
+        else => error.SyscallFailed,
+    };
+}
+
+/// One write syscall, normalized to a byte count. Same two-convention split as readSyscall.
+///
+/// Param:
+/// fd - posix.fd_t (an accepted, blocking descriptor)
+/// bytes - []const u8 (source, written up to its length)
+///
+/// Return:
+/// - the byte count accepted by the kernel
+/// - error.Interrupted when the syscall was interrupted and should be retried
+/// - error.SyscallFailed on any other write error
+fn writeSyscall(fd: posix.fd_t, bytes: []const u8) SyscallError!usize {
+    if (comptime is_linux) {
+        const rc = std.os.linux.write(fd, bytes.ptr, bytes.len);
+
+        return switch (posix.errno(rc)) {
+            .SUCCESS => rc,
+            .INTR => error.Interrupted,
+            else => error.SyscallFailed,
+        };
+    }
+
+    const rc = posix.system.write(fd, bytes.ptr, bytes.len);
+
+    return switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => error.Interrupted,
+        else => error.SyscallFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 
 /// Read exactly buf.len bytes, retrying a short read until the buffer is full.
@@ -42,33 +113,26 @@ pub const WriteError = error{WriteFailed};
 /// - error.ConnectionClosed when the peer hung up mid-read
 /// - error.ReadFailed on any other read error
 pub fn readAll(fd: posix.fd_t, buf: []u8) ReadError!void {
-    var read: usize = 0;
+    var filled: usize = 0;
 
-    while (read < buf.len) {
-        const chunk = buf[read..];
+    while (filled < buf.len) {
+        const chunk = buf[filled..];
 
         if (comptime is_windows) {
             const got = win_io.readOnce(fd, chunk) catch return error.ReadFailed;
             if (got == 0) return error.ConnectionClosed;
 
-            read += got;
+            filled += got;
             continue;
         }
 
-        const rc = if (comptime is_linux)
-            std.os.linux.read(fd, chunk.ptr, chunk.len)
-        else
-            @as(usize, @bitCast(@as(isize, posix.system.read(fd, chunk.ptr, chunk.len))));
+        const got = readSyscall(fd, chunk) catch |err| switch (err) {
+            error.Interrupted => continue,
+            error.SyscallFailed => return error.ReadFailed,
+        };
+        if (got == 0) return error.ConnectionClosed;
 
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-
-        if (rc == 0) return error.ConnectionClosed;
-
-        read += rc;
+        filled += got;
     }
 }
 
@@ -86,19 +150,13 @@ pub fn readAll(fd: posix.fd_t, buf: []u8) ReadError!void {
 /// - the byte count, where 0 means the peer hung up
 /// - error.ReadFailed on a read error
 pub fn readOnce(fd: posix.fd_t, buf: []u8) error{ReadFailed}!usize {
+    if (comptime is_windows) return win_io.readOnce(fd, buf) catch error.ReadFailed;
+
     while (true) {
-        if (comptime is_windows) return win_io.readOnce(fd, buf) catch error.ReadFailed;
-
-        const rc = if (comptime is_linux)
-            std.os.linux.read(fd, buf.ptr, buf.len)
-        else
-            @as(usize, @bitCast(@as(isize, posix.system.read(fd, buf.ptr, buf.len))));
-
-        switch (posix.errno(rc)) {
-            .SUCCESS => return rc,
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
+        return readSyscall(fd, buf) catch |err| switch (err) {
+            error.Interrupted => continue,
+            error.SyscallFailed => error.ReadFailed,
+        };
     }
 }
 
@@ -119,18 +177,15 @@ pub fn writeAll(fd: posix.fd_t, bytes: []const u8) WriteError!void {
     while (written < bytes.len) {
         const chunk = bytes[written..];
 
-        const rc = if (comptime is_linux)
-            std.os.linux.write(fd, chunk.ptr, chunk.len)
-        else
-            @as(usize, @bitCast(@as(isize, posix.system.write(fd, chunk.ptr, chunk.len))));
+        const accepted = writeSyscall(fd, chunk) catch |err| switch (err) {
+            error.Interrupted => continue,
+            error.SyscallFailed => return error.WriteFailed,
+        };
 
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
+        // a kernel that accepts nothing would spin this loop forever, so treat it as a dead peer
+        if (accepted == 0) return error.WriteFailed;
 
-        written += rc;
+        written += accepted;
     }
 }
 
@@ -230,14 +285,58 @@ test "zix utils: fd_io waitReadable sees pending bytes and times out on a quiet 
     try std.testing.expect(waitReadable(pair[1], 1000));
 }
 
+test "zix utils: fd_io readAll on a closed descriptor errors instead of reporting a filled buffer" {
+    if (comptime is_windows) return error.SkipZigTest;
+
+    var pair: [2]posix.fd_t = undefined;
+    try testSocketPair(&pair);
+    close(pair[0]);
+    close(pair[1]);
+
+    // a failed read must never look like a completed one: reporting success here would hand the
+    // caller a buffer it believes is filled, which is what a shared errno check used to do
+    var received: [8]u8 = undefined;
+    try std.testing.expectError(error.ReadFailed, readAll(pair[1], &received));
+}
+
+test "zix utils: fd_io readOnce on a closed descriptor errors instead of reporting a byte count" {
+    if (comptime is_windows) return error.SkipZigTest;
+
+    var pair: [2]posix.fd_t = undefined;
+    try testSocketPair(&pair);
+    close(pair[0]);
+    close(pair[1]);
+
+    var received: [8]u8 = undefined;
+    try std.testing.expectError(error.ReadFailed, readOnce(pair[1], &received));
+}
+
+test "zix utils: fd_io writeAll on a closed descriptor errors instead of reporting a drained slice" {
+    if (comptime is_windows) return error.SkipZigTest;
+
+    var pair: [2]posix.fd_t = undefined;
+    try testSocketPair(&pair);
+    close(pair[0]);
+    close(pair[1]);
+
+    try std.testing.expectError(error.WriteFailed, writeAll(pair[1], "never leaves"));
+}
+
 /// A connected descriptor pair for the tests above, on every POSIX target.
+///
+/// Note:
+/// - Each branch checks its own return convention, for the reason readSyscall spells out. A pair
+///   that failed to open must surface as an error here, never as two undefined descriptors.
 fn testSocketPair(fds: *[2]posix.fd_t) !void {
     if (comptime is_windows) return error.SkipZigTest;
 
-    const rc = if (comptime is_linux)
-        std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds)
-    else
-        @as(usize, @bitCast(@as(isize, posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds))));
+    if (comptime is_linux) {
+        const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
 
+        return;
+    }
+
+    const rc = posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
     if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
 }
