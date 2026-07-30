@@ -16,15 +16,20 @@ jobs:
     name: aarch64-linux
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04-arm
+    # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
+    # hung test to burn a day of runner minutes before anyone notices.
+    timeout-minutes: 60
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
       - name: Checkout
+        timeout-minutes: 5
         uses: actions/checkout@v7
 
       # toolchain comes from the official tarball: the runner image does not
       # ship the pinned 0.16.0
       - name: Install zig 0.16.0
+        timeout-minutes: 10
         run: |
           curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
           tar -xf zig.tar.xz
@@ -33,75 +38,104 @@ jobs:
 
       # sanity print so the log records the exact toolchain in use
       - name: zig version
+        timeout-minutes: 2
         run: zig version
 
       # zix suites run one step each so a red step names the failing suite.
       # if: always() keeps the later suites running after an earlier failure,
-      # so one run reports every failing suite at once.
+      # so one run reports every failing suite at once. timeout-minutes turns
+      # a hung suite (a test blocked in socket io never completes on its own)
+      # into a red step with logs instead of a job spinning for hours.
+      # --test-timeout makes zig itself kill a test hung mid-body: without it
+      # zig waits forever on an active test and buffers the child's stderr,
+      # so the workflow kill loses every log line. With it, zig prints the
+      # hung test's name plus its captured stderr and continues to the next
+      # test, so one run enumerates every hang. 15s is ~5x the slowest
+      # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
-        run: zig build unit-test --summary all
+        timeout-minutes: 3
+        run: zig build unit-test --summary all --test-timeout 15s
 
       - name: zix integration tests
         if: always()
-        run: zig build integration-test --summary all
+        timeout-minutes: 3
+        run: zig build integration-test --summary all --test-timeout 15s
 
       - name: zix behaviour tests
         if: always()
-        run: zig build behaviour-test --summary all
+        timeout-minutes: 3
+        run: zig build behaviour-test --summary all --test-timeout 15s
 
       - name: zix edge tests
         if: always()
-        run: zig build edge-test --summary all
+        timeout-minutes: 3
+        run: zig build edge-test --summary all --test-timeout 15s
 
       # examples is compile-plus-install only (no execution), so it gates the whole
       # example set against this target's toolchain. test-runner-all then drives every
       # zix protocol end to end: it spawns each example server as a child process and
       # talks to it over real sockets, so unlike the cross-build matrix (which only
       # COMPILES runners for a foreign target) this leg actually executes them.
+      # Both carry the same 3 minute cap as a test suite. examples links ~95 binaries and
+      # the runner spawns a server child process per protocol, so these are the two steps
+      # most likely to need the cap raised on a slow runner.
       - name: zix examples
         if: always()
+        timeout-minutes: 3
         run: zig build examples --summary all
 
       - name: zix protocol runners
         if: always()
+        timeout-minutes: 3
         run: zig build test-runner-all --summary all
 
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
+        timeout-minutes: 3
         run: zig build postgrez-test-unit --summary all
 
       - name: rediz unit tests
+        timeout-minutes: 3
         run: zig build rediz-test-unit --summary all
 
       - name: prometheuz unit tests
+        timeout-minutes: 3
         run: zig build prometheuz-test-unit --summary all
 
       # driver behaviour and edge suites drive an in-process server, so unlike
       # the container steps below they need no docker and run on every leg.
       - name: postgrez behaviour tests
+        timeout-minutes: 5
         run: zig build postgrez-test-behaviour --summary all
 
       - name: postgrez edge tests
+        timeout-minutes: 5
         run: zig build postgrez-test-edge --summary all
 
       - name: rediz behaviour tests
+        timeout-minutes: 5
         run: zig build rediz-test-behaviour --summary all
 
       - name: rediz edge tests
+        timeout-minutes: 5
         run: zig build rediz-test-edge --summary all
 
       - name: prometheuz behaviour tests
+        timeout-minutes: 5
         run: zig build prometheuz-test-behaviour --summary all
 
       - name: prometheuz edge tests
+        timeout-minutes: 5
         run: zig build prometheuz-test-edge --summary all
 
       # docker ships preinstalled on this arm64 ubuntu runner, so postgrez and
       # rediz can own their own container lifecycle here. The DRIVER test-runner
       # steps stay out of scope, the zix protocol runners above are wired.
       - name: postgrez integration tests
+        timeout-minutes: 10
         run: zig build postgrez-test-integration --summary all
 
       - name: rediz integration tests
+        timeout-minutes: 10
         run: zig build rediz-test-integration --summary all
