@@ -89,6 +89,42 @@ fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.
     return &run.step;
 }
 
+/// Wire one docker-free suite: a test root that drives the in-process server
+/// server under tests/inproc, so it needs no container and no daemon and runs
+/// on every supported target.
+///
+/// Note:
+/// - The server binds port 0 and each test starts its own, so several of these
+///   suites can run at once without a port agreement between them.
+///
+/// Param:
+/// rediz - *std.Build.Module (the driver under test, imported as "rediz")
+/// foreign - bool (compile only, do not execute)
+/// step_name - []const u8 (the `zig build <name>` step to create)
+/// root_path - []const u8 (test root, relative to this package)
+fn addInprocSuite(
+    b: *std.Build,
+    rediz: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    foreign: bool,
+    step_name: []const u8,
+    root_path: []const u8,
+    description: []const u8,
+) void {
+    const suite_module = b.createModule(.{
+        .root_source_file = b.path(root_path),
+        .target = target,
+        .optimize = optimize,
+    });
+    suite_module.addImport("rediz", rediz);
+
+    const suite_tests = b.addTest(.{ .root_module = suite_module });
+
+    const step = b.step(step_name, description);
+    step.dependOn(testRunStep(b, suite_tests, foreign));
+}
+
 // --------------------------------------------------------- //
 
 pub fn build(b: *std.Build) void {
@@ -134,6 +170,33 @@ pub fn build(b: *std.Build) void {
     const unit_step = b.step("test-unit", "Run rediz unit tests (no server needed)");
     unit_step.dependOn(module_run_step);
     unit_step.dependOn(unit_run_step);
+
+    // --------------------------------------------------------- //
+
+    // Docker-free suites: the driver against the in-process server, so
+    // they run everywhere test-integration cannot. They cover what the
+    // container suite covers, split by nature: behaviour takes the happy
+    // paths, edge takes the refusals, bounds and broken connections.
+    addInprocSuite(
+        b,
+        rediz,
+        target,
+        optimize,
+        foreign_target,
+        "test-behaviour",
+        "tests/behaviour.zig",
+        "Run rediz behaviour tests against the in-process server (no container)",
+    );
+    addInprocSuite(
+        b,
+        rediz,
+        target,
+        optimize,
+        foreign_target,
+        "test-edge",
+        "tests/edge.zig",
+        "Run rediz edge tests against the in-process server (no container)",
+    );
 
     // --------------------------------------------------------- //
 
