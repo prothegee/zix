@@ -297,10 +297,10 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
     }
 }
 
-/// Run the raw server with one SO_REUSEPORT io_uring worker per CPU. Non-Linux falls back to the portable
-/// single-socket loop.
+/// Run the raw server with one SO_REUSEPORT io_uring worker per CPU. Linux-only: off Linux this returns
+/// error.DispatchModelUnsupported instead of downgrading (ADR-065), the caller picks .ASYNC there.
 pub fn runUring(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
-    if (!datagram.is_linux) return common.runFallback(handler, config);
+    if (!datagram.is_linux) return error.DispatchModelUnsupported;
 
     const want = common.effectiveWorkers(config);
     common.logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
@@ -336,7 +336,6 @@ test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without 
         runUring(noop, undefined) catch {};
         epoll.runEpoll(noop, undefined) catch {};
         common.runSingle(noop, undefined) catch {};
-        common.runMulti(noop, undefined) catch {};
     }
 }
 
