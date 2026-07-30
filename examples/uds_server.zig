@@ -17,7 +17,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const SOCK_PATH: []const u8 = "tmp/zix.sock";
+const SOCK_DIR: []const u8 = "tmp";
+const SOCK_FILE: []const u8 = "zix.sock";
 
 // Logger config: uncomment this section to add logger
 // const LOG_DIR: []const u8  = "./logs";
@@ -101,12 +102,14 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    // tmp/ is cwd-relative and not created automatically, unlike the system /tmp.
-    std.Io.Dir.cwd().createDirPath(process.io, "tmp") catch {};
+    // An absolute path: Windows rejects a relative one at bind time, and resolving it here
+    // means the client derives the identical string from the same working directory.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(process.io, SOCK_DIR, SOCK_FILE, &path_buf);
 
     var server = try zix.Uds.Server.init(dataHandler, .{
         .io = process.io,
-        .path = SOCK_PATH,
+        .path = sock_path,
         .allocator = std.heap.smp_allocator,
         // .logger = &logger, // uncomment to wire logger (UDS lifecycle logging)
     });
