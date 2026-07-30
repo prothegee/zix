@@ -7,12 +7,20 @@ const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 
-// 0 means unlimited concurrent tasks (auto from CPU count).
-// Any other value pins the max concurrent task limit.
+// 0 means leave std's own default in place (one less than the CPU count).
+// Any other value pins how many connections may run at once.
 const CONCURRENT_LIMIT: usize = 4;
 
-// .ASYNC uses the caller's io directly (the Io.Threaded created below).
-// concurrent_limit on that io controls how many connections run concurrently.
+// .ASYNC uses the caller's io directly (the Io.Threaded created below) and hands each accepted
+// connection to io.async, so async_limit is the field that decides how many run at once.
+// concurrent_limit is set to match only because io.concurrent is the other way a caller can reach
+// this pool. Setting concurrent_limit alone would do nothing here.
+//
+// Two things are worth knowing before changing the limit:
+// std.Io.Threaded defaults async_limit to one less than the CPU count, so a single-core host
+// defaults to 0, and when the limit is reached io.async does not queue or block: it runs the task
+// inline on the caller. For an accept loop that means the connection is served on the accept thread
+// and nothing new is accepted until it finishes, so too low a limit turns the server serial.
 const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const WORKERS: usize = 0; // ignored by .ASYNC
 
@@ -65,13 +73,16 @@ const Routes = [_]zix.Http.Route{
 };
 
 pub fn main() !void {
-    const limit: std.Io.Limit = if (CONCURRENT_LIMIT == 0)
-        .unlimited
+    // null leaves each field at std's own default rather than forcing .unlimited, which for
+    // async_limit would mean an unbounded thread pool.
+    const limit: ?std.Io.Limit = if (CONCURRENT_LIMIT == 0)
+        null
     else
         std.Io.Limit.limited(CONCURRENT_LIMIT);
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-        .concurrent_limit = limit,
+        .async_limit = limit,
+        .concurrent_limit = limit orelse .unlimited,
     });
     defer threaded.deinit();
 
