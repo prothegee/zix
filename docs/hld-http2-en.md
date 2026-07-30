@@ -17,7 +17,7 @@ Pure-Zig HTTP/2 (h2c) server engine: frame codec, HPACK, and a resumable multipl
 
 ## Positioning: zix.Http2 vs zix.Http1 vs zix.Grpc
 
-All three are raw-fd engines with the same five dispatch models and (since ADR-063) the same `req`/`res`/`ctx` handler trio. `zix.Http1` and `zix.Grpc` still bake routing into the `Server` type at comptime, `zix.Http2`'s `Server` takes a runtime handler built from a comptime `Router` (see `Server.init` shape below). They differ in protocol and what each `Response` / `Context` exposes for it.
+All three are raw-fd engines with the same three dispatch models and (since ADR-063) the same `req`/`res`/`ctx` handler trio. `zix.Http1` and `zix.Grpc` still bake routing into the `Server` type at comptime, `zix.Http2`'s `Server` takes a runtime handler built from a comptime `Router` (see `Server.init` shape below). They differ in protocol and what each `Response` / `Context` exposes for it.
 
 | Aspect | `zix.Http1` | `zix.Http2` | `zix.Grpc` |
 | :- | :- | :- | :- |
@@ -37,21 +37,16 @@ Use `zix.Http2` for browser-grade or prior-knowledge HTTP/2 with raw frame contr
 
 ## Runtime Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.DispatchModelUnsupported` (ADR-065).
 
-### .ASYNC / .POOL / .MIXED: Thread-per-connection over the blocking core
+### .ASYNC: Thread-per-connection over the blocking core
 
-These three share `core.serveConn`: one thread (or `io.async` task) owns a connection for its whole lifetime and runs the blocking h2c loop (`serveH2cLoop`), reading one frame at a time and dispatching each completed stream inline. They differ only in how connections are accepted and handed to a serving thread, the same split as `zix.Http1`.
+One `io.async` task owns a connection for its whole lifetime and runs the blocking h2c loop (`serveH2cLoop`), reading one frame at a time and dispatching each completed stream inline. This is the portable model, the same shape as `zix.Http1`.
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SW{"dispatch_model"}
-    SW -->|ASYNC| A["1 accept thread\nio.async() per connection"]
-    SW -->|POOL| P["N accept threads\nConnQueue + M pool threads"]
-    SW -->|MIXED| M["N accept threads\nio.async() per connection"]
+    MAIN["Server.run()"] --> A["1 accept thread\nio.async() per connection"]
     A --> SERVE["core.serveConn(routes, fd, opts)"]
-    P --> SERVE
-    M --> SERVE
     SERVE --> PRE{"PRI preface?"}
     PRE -->|yes| DIRECT["h2c direct"]
     PRE -->|no| UP["h2c upgrade (Upgrade: h2c)"]
@@ -60,15 +55,14 @@ flowchart TD
     LOOP --> LOOP
 ```
 
-- `.ASYNC`: one accept thread, each connection dispatched as a concurrent `io.async` task. `workers` and `pool_size` are ignored.
-- `.POOL`: `workers` accept threads push accepted streams into a shared `ConnQueue`, `pool_size` pool threads pop and serve each connection synchronously.
-- `.MIXED`: `workers` accept threads (`SO_REUSEPORT`) each dispatch via `io.async` directly, no `ConnQueue`. `pool_size` is ignored.
+- One accept thread, each connection dispatched as a concurrent `io.async` task. `workers` is ignored.
+- The only model available on every platform, so it is the model every non-Linux target uses.
 
 ### .EPOLL: Shared-Nothing Multiplexed Event Loop (Linux only)
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SPAWN["spawn pool_size mux workers"]
+    MAIN["Server.run()"] --> SPAWN["spawn workers mux workers"]
     SPAWN --> W["epollMuxWorker\nprivate SO_REUSEPORT listener\nprivate epoll instance\nprivate ConnTable (fd -> MuxConn)"]
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
@@ -81,14 +75,14 @@ flowchart TD
 - Each worker owns a private listener, epoll instance, and fd-indexed `ConnTable`. The kernel load-balances new connections across the per-worker `SO_REUSEPORT` listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff.
 - One worker drives many non-blocking connections through the resumable h2 state machine in `mux.zig`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
 - Every frame a readable batch writes (HEADERS plus DATA per stream, times the streams in the batch) coalesces into a single `write()` through a per-worker sink (`beginCoalesce` / `endCoalesce`), instead of one write per frame.
-- `pool_size` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
-- On non-Linux targets `.EPOLL` falls back to `.POOL` with a logged notice.
+- `workers` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
+- Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
 Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `mux.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
 
-`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. Off Linux it folds to `.POOL`.
+`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `error.DispatchModelUnsupported`.
 
 ---
 
@@ -131,7 +125,7 @@ Access via `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http2.Server` | struct | `init(handler, config)`, then `run()` / `deinit()` (ADR-063: `handler` is a runtime `HandlerFn`, not a comptime route table) |
 | `zix.Http2.ServerConfig` | struct | Server configuration (see Http2ServerConfig section) |
-| `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
+| `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only) |
 | `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, mirrors Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (no `.PARAM` this pass) |
@@ -168,7 +162,7 @@ pub const Http2ServerConfig = struct {
     dispatch_model: DispatchModel, // required, no default
     kernel_backlog: u31   = 1024,
     workers:        usize = 0,     // 0 = cpu_count accept threads, ignored by .ASYNC
-    pool_size:      usize = 0,     // .POOL: 0 = max(10, cpu_count*2). .EPOLL/.URING: 0 = cpu_count workers
+    workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux workers. Ignored by .ASYNC
     worker_stack_size_bytes: usize = 512 * 1024,
     busy_poll_us:   u32   = 0,     // SO_BUSY_POLL spin window (.EPOLL/.URING), 0 = unset
     max_streams:    u32   = 128,   // advertised SETTINGS_MAX_CONCURRENT_STREAMS
@@ -177,7 +171,7 @@ pub const Http2ServerConfig = struct {
     max_body:       usize = 16384, // max request body buffered per stream (a body past this sheds the stream with 413)
     max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
     tls_write_buf_initial_bytes: usize = 16 * 1024,
-    response_cache: bool  = false, // per-worker response cache (ADR-036), .EPOLL/.URING
+    response_cache: bool  = false, // per-worker response cache (ADR-036), every model
     handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline_ns, 0 = no deadline
     public_dir:     []const u8 = "",        // static file root, "" disables static serving
     public_dir_cache_ttl_ms:      u32 = 0,  // 0 = never cached, the shipped default
@@ -187,7 +181,7 @@ pub const Http2ServerConfig = struct {
 };
 ```
 
-Note: `pool_size` is overloaded by model. Under `.POOL` it is the blocking pool-thread count. Under `.EPOLL` / `.URING` it is the mux worker count (0 = cpu count), and oversubscribing it only adds scheduler churn. `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
+Note: `workers` is the mux worker count under `.EPOLL` / `.URING` (0 = cpu count), and oversubscribing it only adds scheduler churn. `.ASYNC` ignores it. `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
 
 `handler_timeout_ms` (ADR-063) is the global deadline: seeded onto `Context.deadline_ns` at dispatch, 0 leaves no deadline. A handler may tighten or clear its own via `ctx.setTimeout` / `withDeadline`, checked with `ctx.isExpired()` between steps (the engine never interrupts a running handler, this is opt-in).
 
@@ -309,7 +303,7 @@ Send-side flow control follows RFC 7540 6.9. Each `MuxConn` carries a connection
 Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with a 1.2 fallback, ALPN h2). The `server.zig` `run()` switch picks one of two terminators by `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
-- `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
+- `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
 
 The write hook (`frame.write_hook`) is the shared mechanism: the mux writes plaintext through `frame.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
 
@@ -328,7 +322,7 @@ Per-stream access logging is the handler's responsibility: the handler owns its 
 | Scope | Storage | Lifetime |
 | :- | :- | :- |
 | Route table | comptime (zero heap cost) | Process |
-| Frame payload + stream array (.ASYNC/.POOL/.MIXED) | `smp_allocator`: one payload buffer plus `max_streams` inline `Stream` slots (each carries its own body and header-scratch buffers) | Connection |
+| Frame payload + stream array (.ASYNC) | `smp_allocator`: one payload buffer plus `max_streams` inline `Stream` slots (each carries its own body and header-scratch buffers) | Connection |
 | Per-connection MuxConn (.EPOLL/.URING) | `smp_allocator`: read accumulator (`max_recv_buf` floor) plus a `max_streams`-wide `*MuxStream` pointer array and slot flags | Connection |
 | Open stream state (.EPOLL/.URING) | per-worker thread-local `MuxStream` pool (free-list), each slot's `max_body` and `max_header_scratch` buffers reused across borrows | Concurrent stream (returned to the pool on close) |
 | HPACK dynamic table | inline in the connection's decoder (`dyn_buf`, 8 KB) | Connection |
@@ -336,7 +330,7 @@ Per-stream access logging is the handler's responsibility: the handler owns its 
 | Handler allocations | `ctx.allocator`: a stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, no heap call), reset per request | Request |
 | Static file cache (opt-in) | one demand-paged mapping shared by every worker and every HTTP engine in the process, `public_dir_cache_max_entries` slots holding an open file, its size, and its prerendered header | Process |
 
-The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-local pool (a free-list of `MuxStream`), so resident stream memory tracks the number of concurrent streams on that worker, not connections times `max_streams`. An idle connection holds only its `max_streams`-wide pointer array and its read buffer, not `max_streams` full stream buffers. A closed stream returns its slot (buffers retained) to the pool for the next borrow, so the steady state does no per-stream allocation. The blocking `.ASYNC` / `.POOL` / `.MIXED` path instead reserves a per-connection inline `Stream` array up front.
+The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-local pool (a free-list of `MuxStream`), so resident stream memory tracks the number of concurrent streams on that worker, not connections times `max_streams`. An idle connection holds only its `max_streams`-wide pointer array and its read buffer, not `max_streams` full stream buffers. A closed stream returns its slot (buffers retained) to the pool for the next borrow, so the steady state does no per-stream allocation. The blocking `.ASYNC` path instead reserves a per-connection inline `Stream` array up front.
 
 ---
 
@@ -346,11 +340,11 @@ The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-lo
 | :- | :- |
 | Request body per stream | Buffered up to `max_body` (16 KB default). A body past the buffer cap sheds the stream with a 413 and END_STREAM, so the handler never sees a truncated slice and a corrupt body never dispatches. Only the connection window is credited for the discarded bytes, keeping the connection usable for its other streams |
 | Concurrent streams | Advertised as `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). A stream opened beyond it is answered with `REFUSED_STREAM`, so the advertised value must be at least the peer's concurrent-stream count |
-| h2c upgrade (.EPOLL/.URING) | Served minimally on the mux path: `101` then the connection preface, the request carried on stream 1 is not served. Prior-knowledge clients (the common h2c case) are unaffected. The blocking `.ASYNC` / `.POOL` / `.MIXED` models serve the upgraded stream-1 request |
+| h2c upgrade (.EPOLL/.URING) | Served minimally on the mux path: `101` then the connection preface, the request carried on stream 1 is not served. Prior-knowledge clients (the common h2c case) are unaffected. The blocking `.ASYNC` model serves the upgraded stream-1 request |
 | Header block scratch | `max_header_scratch` per connection (4 KB default). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |
 | Frame size | A frame larger than `max_frame_size` plus slack is a `FRAME_SIZE_ERROR` and closes the connection with GOAWAY. Outbound DATA is sized by the peer's advertised value instead, never by this one |
 | Static files | `public_dir` serves whole files and single ranges. A multi-range header answers the first range only, and there is no `public_dir_upload` companion on this engine |
-| TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` / `.POOL` / `.MIXED` per connection in a worker thread. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
+| TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` per connection in a worker thread. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
 Endpoints that need a large request body should read it in DATA frames within `max_body`, or move the bulk transfer to a streaming design (the buffered model covers bounded bodies).
 
