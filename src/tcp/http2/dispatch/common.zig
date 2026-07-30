@@ -6,7 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
-const win_io = @import("../../../utils/windows_io.zig");
+const fd_io = @import("../../../utils/fd_io.zig");
 const core = @import("../core.zig");
 const async_cache = @import("../../../utils/async_cache.zig");
 const frame = @import("../frame.zig");
@@ -77,14 +77,15 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
     }
 }
 
-/// Close a connection fd: the ntdll shim on Windows, the raw close syscall elsewhere.
+/// Close a connection fd.
+///
+/// Note:
+/// - Delegates to the shared helper rather than branching here. It used to call the raw Linux close
+///   on every platform but Windows, which off Linux aims a Linux syscall number at a kernel that
+///   assigns it to something else, so the connection was never closed and something unrelated ran
+///   in its place. fd_io owns the three-way branch (ntdll, raw syscall, libc) for every engine.
 pub fn closeFD(fd: std.posix.fd_t) void {
-    if (comptime builtin.os.tag == .windows) {
-        win_io.close(fd);
-        return;
-    }
-
-    _ = std.os.linux.close(fd);
+    fd_io.close(fd);
 }
 
 /// Put a socket in non-blocking mode (listener and accepted fds in the event-driven paths).
