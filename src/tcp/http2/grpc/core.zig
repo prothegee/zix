@@ -2,6 +2,8 @@
 //! The multiplexed .EPOLL / .URING connection state machine lives in mux.zig.
 
 const std = @import("std");
+const socket_pair = @import("../../../utils/socket_pair.zig");
+const fd_io = @import("../../../utils/fd_io.zig");
 const win_io = @import("../../../utils/windows_io.zig");
 const h2 = @import("../Http2.zig");
 const frame = @import("frame.zig");
@@ -602,7 +604,7 @@ pub const GrpcServeOpts = struct {
     /// that advertise grpc-accept-encoding: gzip. Passed from GrpcServerConfig.compress.
     compress: bool = false,
     /// Enable the per-worker unary response cache (ADR-036). Passed from
-    /// GrpcServerConfig.response_cache. Active under .EPOLL and .URING.
+    /// GrpcServerConfig.response_cache. Active under every dispatch model.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two.
     cache_max_entries: u32 = 256,
@@ -1731,10 +1733,9 @@ test "zix grpc: RouterType dispatches to matching handler" {
 // --------------------------------------------------------- //
 
 test "zix grpc: ReplyStage append and flush via pipe" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     var backing: [64]u8 = undefined;
     var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
@@ -1743,7 +1744,7 @@ test "zix grpc: ReplyStage append and flush via pipe" {
     stage.flush();
 
     var out: [16]u8 = undefined;
-    const n = try std.posix.read(fds[0], &out);
+    const n = try fd_io.readOnce(fds[0], &out);
     try std.testing.expectEqualStrings("hello world", out[0..n]);
 }
 
@@ -1752,9 +1753,9 @@ test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
         std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
         return error.SkipZigTest;
     }
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     var backing: [4]u8 = undefined;
     var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
@@ -1764,15 +1765,14 @@ test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
     stage.flush();
 
     var out: [16]u8 = undefined;
-    const n = try std.posix.read(fds[0], &out);
+    const n = try fd_io.readOnce(fds[0], &out);
     try std.testing.expectEqualStrings("abcdef", out[0..n]);
 }
 
 test "zix grpc: ReplyStage payload larger than buf writes directly" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     var backing: [4]u8 = undefined;
     var stage = ReplyStage{ .fd = fds[1], .buf = &backing };
@@ -1781,7 +1781,7 @@ test "zix grpc: ReplyStage payload larger than buf writes directly" {
     stage.flush();
 
     var out: [16]u8 = undefined;
-    const n = try std.posix.read(fds[0], &out);
+    const n = try fd_io.readOnce(fds[0], &out);
     try std.testing.expectEqualStrings("hello world", out[0..n]);
 }
 
@@ -1936,7 +1936,7 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
     ctx.finish(.OK, "");
 
     var first: [512]u8 = undefined;
-    const n1 = try std.posix.read(fds[0], &first);
+    const n1 = try fd_io.readOnce(fds[0], &first);
     try std.testing.expect(std.mem.indexOf(u8, first[0..n1], reply) != null);
 
     // the message is now stored under the call key
@@ -1958,7 +1958,7 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
     try std.testing.expect(ctx2.serveCached("application/grpc"));
 
     var second: [512]u8 = undefined;
-    const n2 = try std.posix.read(fds[0], &second);
+    const n2 = try fd_io.readOnce(fds[0], &second);
     try std.testing.expect(std.mem.indexOf(u8, second[0..n2], reply) != null);
 }
 
