@@ -3,6 +3,8 @@
 //! to a handler that calls those directly.
 
 const std = @import("std");
+const fd_io = @import("../../utils/fd_io.zig");
+const socket_pair = @import("../../utils/socket_pair.zig");
 const builtin = @import("builtin");
 const frame = @import("frame.zig");
 
@@ -68,9 +70,10 @@ pub const Response = struct {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-fn socketPair(fds: *[2]i32) !void {
-    const linux = std.os.linux;
-    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, fds));
+/// A connected pair for the tests below, portable across every supported platform.
+fn socketPair(fds: *[2]std.posix.fd_t) !void {
+    const pair = try socket_pair.Pair.open(std.testing.allocator);
+    fds.* = pair.fds;
 }
 
 /// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
@@ -88,36 +91,34 @@ test "zix http2: Response setters mutate status and content type" {
 }
 
 test "zix http2: Response.send is byte-identical to frame.sendResponseFD" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    var pair_res: [2]i32 = undefined;
-    var pair_frame: [2]i32 = undefined;
+    var pair_res: [2]std.posix.fd_t = undefined;
+    var pair_frame: [2]std.posix.fd_t = undefined;
     try socketPair(&pair_res);
     try socketPair(&pair_frame);
-    defer for ([_]i32{ pair_res[0], pair_res[1], pair_frame[0], pair_frame[1] }) |fd| {
-        _ = std.os.linux.close(fd);
+    defer for ([_]std.posix.fd_t{ pair_res[0], pair_res[1], pair_frame[0], pair_frame[1] }) |fd| {
+        fd_io.close(fd);
     };
 
     var res = Response{ .fd = pair_res[1], .sid = 1, .status = 201, .content_type = "text/plain" };
     try res.send("hello");
 
     var via_res: [256]u8 = undefined;
-    const n_res = try std.posix.read(pair_res[0], &via_res);
+    const n_res = try fd_io.readOnce(pair_res[0], &via_res);
 
     try frame.sendResponseFD(pair_frame[1], 1, 201, "text/plain", "hello");
 
     var via_frame: [256]u8 = undefined;
-    const n_frame = try std.posix.read(pair_frame[0], &via_frame);
+    const n_frame = try fd_io.readOnce(pair_frame[0], &via_frame);
 
     try std.testing.expectEqualStrings(via_frame[0..n_frame], via_res[0..n_res]);
     try std.testing.expect(res.sent);
 }
 
 test "zix http2: Response.sendJson sets application/json" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    var fds: [2]i32 = undefined;
+    var fds: [2]std.posix.fd_t = undefined;
     try socketPair(&fds);
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response{ .fd = fds[1], .sid = 1 };
     try res.sendJson("{\"ok\":true}");
@@ -125,15 +126,14 @@ test "zix http2: Response.sendJson sets application/json" {
     try std.testing.expectEqualStrings("application/json", res.content_type);
 
     var buf: [256]u8 = undefined;
-    _ = try std.posix.read(fds[0], &buf);
+    _ = try fd_io.readOnce(fds[0], &buf);
 }
 
 test "zix http2: Response.sendNoContent sets 204" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    var fds: [2]i32 = undefined;
+    var fds: [2]std.posix.fd_t = undefined;
     try socketPair(&fds);
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response{ .fd = fds[1], .sid = 1 };
     try res.sendNoContent();
@@ -141,5 +141,5 @@ test "zix http2: Response.sendNoContent sets 204" {
     try std.testing.expectEqual(@as(u16, 204), res.status);
 
     var buf: [256]u8 = undefined;
-    _ = try std.posix.read(fds[0], &buf);
+    _ = try fd_io.readOnce(fds[0], &buf);
 }
