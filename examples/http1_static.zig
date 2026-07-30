@@ -3,12 +3,11 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9024;
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .POOL;
+const DISPATCH_MODEL: zix.Http1.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
-const WORKERS: usize = 0; // 0 = cpu_count accept threads
-const POOL_SIZE: usize = 0; // 0 = max(10, cpu_count * 2) pool threads
+const WORKERS: usize = 0; // ignored by .ASYNC
 
 const PUBLIC_DIR = "./public";
 const UPLOAD_SUBDIR = "u";
@@ -69,7 +68,7 @@ fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Co
 //
 // Body-size limit: the body handed to a handler is capped by the dispatch model, NOT by
 // max_recv_buf.
-// - .POOL / .ASYNC / .MIXED (blocking core.serveConn): body is capped at the fixed 8192-byte
+// - .ASYNC (blocking core.serveConn): body is capped at the fixed 8192-byte
 //   body_buf. A larger upload is silently truncated to 8192 bytes.
 // - .EPOLL (serveEpollConn): body must fit in max_recv_buf. A larger body arrives EMPTY (the
 //   rest is drained off the socket), so the handler sees an empty req.body().
@@ -350,7 +349,6 @@ pub fn main(process: std.process.Init) !void {
         .public_dir = PUBLIC_DIR,
         .public_dir_upload = UPLOAD_SUBDIR,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 
