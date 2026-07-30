@@ -62,6 +62,12 @@ test "prometheuz edge: a scrape of a closed port reports down, not an error" {
     const dead_port = harness.server.port;
     harness.server.stop();
 
+    // stop() frees the server, so the harness needs a live one back on every exit path, not only
+    // the passing one: an expectation that fails below returns before a trailing restart would run,
+    // and harness.stop() then frees the same pointer a second time, which crashes the runner.
+    defer harness.server = inproc.Server.start(std.heap.smp_allocator, harness.io(), .{}) catch
+        @panic("inproc server restart failed");
+
     var config = harness.scrapeConfig();
     config.port = dead_port;
     config.conn_timeout_ms = 500;
@@ -72,9 +78,6 @@ test "prometheuz edge: a scrape of a closed port reports down, not an error" {
     try testing.expect(!snapshot.up);
     try testing.expect(snapshot.last_error != null);
     try testing.expectEqual(@as(usize, 0), snapshot.families.len);
-
-    // the harness must not stop a server that is already gone
-    harness.server = try inproc.Server.start(std.heap.smp_allocator, harness.io(), .{});
 }
 
 test "prometheuz edge: a non-200 scrape reports down with a reason" {
@@ -273,6 +276,12 @@ test "prometheuz edge: a remote write to a closed port is refused" {
     const dead_port = harness.server.port;
     harness.server.stop();
 
+    // stop() frees the server, so the harness needs a live one back on every exit path, not only
+    // the passing one: an expectation that fails below returns before a trailing restart would run,
+    // and harness.stop() then frees the same pointer a second time, which crashes the runner.
+    defer harness.server = inproc.Server.start(std.heap.smp_allocator, harness.io(), .{}) catch
+        @panic("inproc server restart failed");
+
     var config = harness.writeConfig();
     config.port = dead_port;
     config.conn_timeout_ms = 500;
@@ -281,12 +290,15 @@ test "prometheuz edge: a remote write to a closed port is refused" {
         .{ .name = "zix_requests_total", .labels = &.{}, .value = 1, .timestamp_ms = null },
     };
 
+    // windows region: zig std's connect path leaves NTSTATUS
+    // CONNECTION_REFUSED (0xc0000236) unmapped, so the refused
+    // connect surfaces as error.Unexpected there.
+    const refused = if (builtin.os.tag == .windows) error.Unexpected else error.ConnectionRefused;
+
     try testing.expectError(
-        error.ConnectionRefused,
+        refused,
         prometheuz.remoteWrite(testing.allocator, harness.io(), config, &samples),
     );
-
-    harness.server = try inproc.Server.start(std.heap.smp_allocator, harness.io(), .{});
 }
 
 test "prometheuz edge: a scraper keeps polling after a failed scrape" {
