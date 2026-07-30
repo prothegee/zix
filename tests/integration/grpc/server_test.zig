@@ -588,7 +588,7 @@ test "zix integration: GrpcClient, recv_timeout_ms fires when server sends no da
     defer threaded.deinit();
     const io = threaded.io();
 
-    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 18100);
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 8);
     var stall_listener = try addr.listen(io, .{
         .mode = .stream,
         .reuse_address = true,
@@ -598,7 +598,7 @@ test "zix integration: GrpcClient, recv_timeout_ms fires when server sends no da
 
     var client = try zix.Grpc.Client.connect(.{
         .ip = "127.0.0.1",
-        .port = 18100,
+        .port = TEST_PORT + 8,
         .recv_timeout_ms = 200,
     }, io);
     defer client.deinit();
