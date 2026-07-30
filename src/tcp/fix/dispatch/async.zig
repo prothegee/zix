@@ -19,7 +19,7 @@ pub fn runAsync(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
 
     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
     var listener = try addr.listen(io, .{
-        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
         .kernel_backlog = cfg.kernel_backlog,
     });
     defer listener.deinit(io);
