@@ -11,8 +11,8 @@ const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
 
 /// The dispatch model, shared with the TCP engines and the UDP raw path (ADR-050). `.ASYNC` runs a
-/// single-worker recv with internal CID demux. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one
-/// SO_REUSEPORT worker per core, the kernel load-balancing connections by 4-tuple.
+/// single-worker recv with internal CID demux. `.EPOLL` / `.URING` run one SO_REUSEPORT worker per
+/// core, the kernel load-balancing connections by 4-tuple.
 pub const DispatchModel = @import("../../tcp/config.zig").DispatchModel;
 
 pub const Http3ServerConfig = struct {
@@ -27,8 +27,9 @@ pub const Http3ServerConfig = struct {
 
     // UDP substrate knobs (ADR-049), restated flat. Used by the recv path.
 
-    /// Concurrency model. ASYNC runs a single worker. POOL / MIXED / EPOLL / URING run one
-    /// SO_REUSEPORT worker per core (multicore), the kernel load-balancing by 4-tuple.
+    /// Concurrency model. ASYNC runs a single worker. EPOLL / URING run one SO_REUSEPORT worker per
+    /// core (multicore), the kernel load-balancing by 4-tuple. EPOLL / URING are Linux-only, run()
+    /// rejects them elsewhere with error.DispatchModelUnsupported.
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models (EPOLL / URING). 0 means one per available CPU.
