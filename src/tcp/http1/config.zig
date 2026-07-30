@@ -18,11 +18,10 @@ pub const Http1ServerConfig = struct {
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Accept thread count (0 = cpu_count). Ignored by .ASYNC.
+    /// Shared-nothing worker count for .EPOLL / .URING (0 = cpu_count). Ignored by .ASYNC,
+    /// which always runs exactly one accept thread.
     workers: usize = 0,
-    /// Pool thread count (0 = max(10, cpu_count * 2)). Used by .POOL only.
-    pool_size: usize = 0,
-    /// Worker thread stack size in bytes for the .EPOLL, .URING, and .POOL handler threads.
+    /// Worker thread stack size in bytes for the .EPOLL and .URING handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// Worker thread stack size in bytes when compression is enabled, a floor under .EPOLL / .URING:
@@ -70,8 +69,8 @@ pub const Http1ServerConfig = struct {
     /// The backing buffer is arena-allocated lazily on the first addHeader call, so requests
     /// that add none pay nothing.
     max_response_headers: HeaderSize = .MINIMAL,
-    /// Whole-connection wall-clock budget in milliseconds on the blocking models (.ASYNC,
-    /// .POOL, .MIXED): a timer sweep shuts down any connection older than this.
+    /// Whole-connection wall-clock budget in milliseconds on the blocking model (.ASYNC):
+    /// a timer sweep shuts down any connection older than this.
     /// Should be >= handler_timeout_ms to avoid cutting off an in-flight response.
     /// 0 = disabled. No-op under .EPOLL and .URING (those event loops own connection lifetime).
     conn_timeout_ms: u32 = 0,
@@ -103,7 +102,7 @@ pub const Http1ServerConfig = struct {
     public_dir_cache_max_entries: u32 = 256,
     /// Enable response compression with Accept-Encoding negotiation (gzip, deflate, brotli). Default
     /// false: compression spends CPU and only pays off over a real network, so off keeps the perf
-    /// gate untouched. Active under .EPOLL / .URING. A handler opts in via res.sendNegotiated or
+    /// gate untouched. Active under every dispatch model. A handler opts in via res.sendNegotiated or
     /// the raw sendNegotiateCachedFD.
     compress: bool = false,
     /// Minimum response body size in bytes before compression is attempted. A body under this floor
@@ -115,8 +114,8 @@ pub const Http1ServerConfig = struct {
     compression_max_out: usize = 256 * 1024,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache
     /// API (res.sendFromCache / res.sendCached and the raw cacheLookup / cacheStore /
-    /// sendWithCacheFD) degrades to a no-op. Active under .EPOLL and .URING (both shared-nothing,
-    /// one owner thread per cache).
+    /// sendWithCacheFD) degrades to a no-op. Active under every dispatch model, shared-nothing
+    /// either way: one cache per multiplexed worker, one per io pool thread under .ASYNC.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker
     /// memory is cache_max_entries * cache_max_value_bytes, times the worker count.
