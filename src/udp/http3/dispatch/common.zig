@@ -449,6 +449,10 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
     }
 }
 
+/// The descriptor the portable loop hands to helpers that expect one. Never opened and never sent
+/// on: the batch carries a PortableSink, so every flush those helpers reach goes through std.Io.
+const NO_SOCKET: std.posix.socket_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 /// The single-worker recv loop on the calling thread (.ASYNC).
 pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
@@ -488,21 +492,25 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) 
     var tx = try datagram.SendBatch.init(config.allocator, config.send_batch, sendBufBytes(config));
     defer tx.deinit();
 
+    // The send helpers below take a descriptor and flush on it whenever the batch fills mid-flight.
+    // There is no such descriptor here, so the batch carries the bound socket and flush routes to
+    // it. Without this the server flight is queued, dropped by a flush against a descriptor that
+    // was never opened, and the peer keeps retransmitting into silence.
+    tx.portable = .{ .socket = socket, .io = io };
+
     var last_sweep_us: u64 = recovery.nowUs();
 
     while (true) {
         const msg = socket.receive(io, buf) catch continue;
 
-        // The send helpers only queue into tx, so the descriptor they take is never used on this
-        // path. flushPortable owns the actual sending.
         const dg = datagram.Datagram{ .data = msg.data, .from = datagram.ipToSockaddr6(msg.from) };
-        serveDatagram(handler, table, dg, &tx, undefined, config, null);
+        serveDatagram(handler, table, dg, &tx, NO_SOCKET, config, null);
 
         tx.flushPortable(socket, io);
 
         const now_us = recovery.nowUs();
         if (now_us -| last_sweep_us >= maintenance_interval_us) {
-            sweepMaintenance(table, &tx, undefined, config, now_us, null);
+            sweepMaintenance(table, &tx, NO_SOCKET, config, now_us, null);
             tx.flushPortable(socket, io);
             last_sweep_us = now_us;
         }
