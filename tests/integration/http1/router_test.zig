@@ -34,10 +34,9 @@ fn dispatchReq(head: *const zix.Http1.ParsedHead, fd: std.posix.fd_t) !void {
 }
 
 test "zix integration: Http1 Router dispatch routes to matching handler" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const pipe_fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(pipe_fds[0]);
-    defer _ = std.posix.system.close(pipe_fds[1]);
+    var pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const pipe_fds = pair.fds;
 
     const head = parsedHead("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     last_route = "";
@@ -47,10 +46,9 @@ test "zix integration: Http1 Router dispatch routes to matching handler" {
 }
 
 test "zix integration: Http1 Router dispatch selects correct route among multiple" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const pipe_fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(pipe_fds[0]);
-    defer _ = std.posix.system.close(pipe_fds[1]);
+    var pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const pipe_fds = pair.fds;
 
     const head = parsedHead("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
     last_route = "";
@@ -60,16 +58,15 @@ test "zix integration: Http1 Router dispatch selects correct route among multipl
 }
 
 test "zix integration: Http1 Router dispatch unknown path writes 404" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const pipe_fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(pipe_fds[0]);
-    defer _ = std.posix.system.close(pipe_fds[1]);
+    var pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const pipe_fds = pair.fds;
 
     const head = parsedHead("GET /not-found HTTP/1.1\r\nHost: localhost\r\n\r\n");
     try dispatchReq(&head, pipe_fds[1]);
 
     var resp_buf: [256]u8 = undefined;
-    const n = try std.posix.read(pipe_fds[0], &resp_buf);
+    const n = try zix.utils.fd_io.readOnce(pipe_fds[0], &resp_buf);
     try std.testing.expect(n > 0);
     try std.testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "404") != null);
 }
