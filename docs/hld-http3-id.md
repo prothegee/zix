@@ -245,7 +245,6 @@ Slice request menunjuk ke buffer dekode per-connection engine dan hanya valid se
 | Model | Bentuk |
 | :- | :- |
 | `.ASYNC` | Satu loop recv single-worker di thread pemanggil. Satu CID table memiliki setiap connection, jadi perubahan 4-tuple client (connection migration) hanyalah peer address baru pada connection yang sama. Migration-safe. |
-| `.POOL`, `.MIXED` | Multi-core: satu worker blocking `recvmmsg` SO_REUSEPORT per CPU, masing-masing dipin ke core-nya dan memiliki CID table sendiri (shared-nothing). Kernel load-balance berdasarkan 4-tuple. |
 | `.EPOLL` | Bentuk per-core plus readiness epoll (drain-to-EAGAIN). |
 | `.URING` | Bentuk per-core plus loop completion io_uring nyata. Fold ke loop worker epoll per-worker saat io_uring tidak tersedia (capability fold, bukan pencampuran model). |
 
