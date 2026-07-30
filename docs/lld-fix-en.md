@@ -157,10 +157,8 @@ The SOH prefix guards against false positives where `10=` appears inside a field
 | Model | Entry function | Connection dispatch |
 | :- | :- | :- |
 | `.ASYNC` | `asyncWorkerEntry` | Single accept, `io.async(dispatchConn)` |
-| `.POOL` | `poolEntry` (pool threads) + `workerEntry` (accept) | `ConnQueue` + blocking pool handler |
-| `.MIXED` | `asyncWorkerEntry` per accept thread | N accept threads, each calling `io.async(dispatchConn)` |
-| `.EPOLL` | `epollWorkerEntry` (`dispatch/epoll.zig`, `runEpoll`) | Single epoll accept loop, readable connections dispatched via `io.async` (Linux-only, falls back to `.POOL`) |
-| `.URING` | `uringFixWorker` (`dispatch/uring.zig`, `runUring`) | Shared-nothing io_uring workers running the resumable `core.processFixRing` per readable batch (Linux-only, falls back to `.POOL`) |
+| `.EPOLL` | `epollWorkerEntry` (`dispatch/epoll.zig`, `runEpoll`) | Shared-nothing: one SO_REUSEPORT listener plus one epoll instance per worker (Linux-only, rejected off Linux with `error.DispatchModelUnsupported`) |
+| `.URING` | `uringFixWorker` (`dispatch/uring.zig`, `runUring`) | Shared-nothing io_uring workers running the resumable `core.processFixRing` per readable batch (Linux-only, rejected off Linux the same way) |
 
 `dispatchConn` calls `core.serveConn(task.stream, task.io, task.comp_id, task.opts)`.
 
