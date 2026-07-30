@@ -487,6 +487,33 @@ pub const SendBatch = struct {
         self.count = 0;
         self.ring_sent = 0;
     }
+
+    /// Send every queued reply one at a time through std.Io, then clear the batch.
+    ///
+    /// What:
+    ///   flush() batches with sendmmsg, which is Linux only. This is the portable equivalent:
+    ///   the same queued replies, one send syscall each. Used by the .ASYNC model on targets
+    ///   with no sendmmsg, so a datagram server still runs there.
+    ///
+    /// Note:
+    /// - A failed send is dropped rather than retried, matching flush(): UDP gives no delivery
+    ///   guarantee, and one unreachable peer must not stall the replies queued behind it.
+    ///
+    /// Param:
+    /// socket - std.Io.net.Socket (the bound datagram socket)
+    /// io - std.Io
+    ///
+    /// Return:
+    /// - void, with the batch cleared either way
+    pub fn flushPortable(self: *SendBatch, socket: std.Io.net.Socket, io: std.Io) void {
+        defer self.reset();
+
+        for (0..self.count) |i| {
+            const dest = sockaddr6ToIp(self.names[i]);
+
+            socket.send(io, &dest, self.iovs[i].base[0..self.iovs[i].len]) catch continue;
+        }
+    }
 };
 
 /// Length in bytes of one UDP_SEGMENT control message: the cmsghdr plus the u16 segment size. The
@@ -642,6 +669,59 @@ test "zix udp: SendBatch queues replies and reports full" {
     batch.reset();
     try std.testing.expectEqual(@as(usize, 0), batch.count);
     try std.testing.expectEqual(@as(usize, 0), batch.used);
+}
+
+test "zix udp: SendBatch flushPortable delivers every queued reply and clears the batch" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // a real bound receiver, so what is asserted is delivery and not just bookkeeping
+    const recv_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9752);
+    const receiver = try recv_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer receiver.close(io);
+
+    const sender_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 0);
+    const sender = try sender_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(io);
+
+    var batch = try SendBatch.init(std.testing.allocator, 4, 64);
+    defer batch.deinit();
+
+    const dest = try parseBind("127.0.0.1", 9752);
+    try std.testing.expect(batch.queue(dest, "first"));
+    try std.testing.expect(batch.queue(dest, "second"));
+
+    batch.flushPortable(sender, io);
+
+    // the batch is cleared whether or not a send failed, so the next round starts empty
+    try std.testing.expectEqual(@as(usize, 0), batch.count);
+    try std.testing.expectEqual(@as(usize, 0), batch.used);
+
+    var buf: [64]u8 = undefined;
+    const first = try receiver.receive(io, &buf);
+    try std.testing.expectEqualStrings("first", first.data);
+
+    var buf2: [64]u8 = undefined;
+    const second = try receiver.receive(io, &buf2);
+    try std.testing.expectEqualStrings("second", second.data);
+}
+
+test "zix udp: SendBatch flushPortable on an empty batch sends nothing and stays empty" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 0);
+    const sender = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(io);
+
+    var batch = try SendBatch.init(std.testing.allocator, 4, 64);
+    defer batch.deinit();
+
+    batch.flushPortable(sender, io);
+
+    try std.testing.expectEqual(@as(usize, 0), batch.count);
 }
 
 test "zix udp: SendBatch rejects an oversized payload" {
