@@ -7,10 +7,25 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
+// The date must come from the same clock the logger names its directory after. std.os.linux
+// compiles everywhere but issues a Linux syscall number, so off Linux it fills nothing and the
+// test then looks for a directory that was never written. Mirror the logger's own three-way split.
+fn currentDateSeconds() u64 {
+    if (comptime @import("builtin").target.os.tag == .linux) {
+        var spec: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &spec);
+
+        return if (spec.sec >= 0) @intCast(spec.sec) else 0;
+    }
+
+    var spec: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &spec);
+
+    return if (spec.sec >= 0) @intCast(spec.sec) else 0;
+}
+
 fn currentDateBuf() [10]u8 {
-    var spec: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &spec);
-    const secs: u64 = if (spec.sec >= 0) @intCast(spec.sec) else 0;
+    const secs = currentDateSeconds();
 
     const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs };
     const year_day = epoch_secs.getEpochDay().calculateYearDay();
