@@ -16,18 +16,17 @@ pub const Http2ServerConfig = struct {
     ip: []const u8,
     /// Bind port. Must be non-zero.
     port: u16,
-    /// Connection dispatch model. .ASYNC / .POOL / .MIXED are the cleartext blocking models, .EPOLL /
-    /// .URING the Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener plus epoll or
-    /// io_uring per worker, .URING falls back to .EPOLL, off Linux both fold to .POOL). Required.
+    /// Connection dispatch model. .ASYNC is the cleartext blocking model, .EPOLL / .URING the
+    /// Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener plus epoll or io_uring
+    /// per worker, .URING falls back to .EPOLL when io_uring is unavailable). Off Linux, run() rejects
+    /// .EPOLL and .URING with error.DispatchModelUnsupported. Required.
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
-    /// Accept thread count (0 = cpu_count). Ignored by .ASYNC (always 1 accept thread).
+    /// Multiplexed worker count for .EPOLL / .URING (0 = cpu_count). Ignored by .ASYNC
+    /// (always 1 accept thread).
     workers: usize = 0,
-    /// Pool thread count (0 = max(10, cpu_count * 2)). Only used by .POOL,
-    /// ignored by .ASYNC and .MIXED.
-    pool_size: usize = 0,
-    /// Worker thread stack size in bytes for the .EPOLL, .URING, .POOL, and TLS handler threads.
+    /// Worker thread stack size in bytes for the .EPOLL, .URING, and TLS handler threads.
     /// Thread stacks are demand-paged, so this costs little RSS until the depth is used.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// SO_BUSY_POLL spin window in microseconds for accepted connections (.EPOLL / .URING): the
@@ -56,7 +55,7 @@ pub const Http2ServerConfig = struct {
     /// Maximum request body buffered per stream (bytes). A larger request body is truncated to this.
     max_body: usize = 16384,
     /// Enable the per-worker response cache (ADR-036). Default false. When off, the handler cache API
-    /// (serveCached / sendCachedFD) degrades to a plain send. Active under .EPOLL and .URING.
+    /// (serveCached / sendCachedFD) degrades to a plain send. Active under every dispatch model.
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two. Per-worker memory is
     /// cache_max_entries * cache_max_value_bytes, times the worker count.
@@ -121,14 +120,13 @@ test "zix http2: Http2ServerConfig dispatch_model is required and stored as set"
     try std.testing.expectEqual(DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix http2: Http2ServerConfig worker and pool defaults to zero" {
+test "zix http2: Http2ServerConfig workers defaults to zero" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
     const cfg = Http2ServerConfig{ .io = io, .ip = "127.0.0.1", .port = 8082, .dispatch_model = .ASYNC };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
 test "zix http2: Http2ServerConfig stream and frame defaults" {
