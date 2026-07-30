@@ -76,17 +76,17 @@ jobs:
       # zix protocol end to end: it spawns each example server as a child process and
       # talks to it over real sockets, so unlike the cross-build matrix (which only
       # COMPILES runners for a foreign target) this leg actually executes them.
-      # Both carry the same 3 minute cap as a test suite. examples links ~95 binaries and
-      # the runner spawns a server child process per protocol, so these are the two steps
-      # most likely to need the cap raised on a slow runner.
+      # examples links ~95 binaries and the runner spawns a server child process per
+      # protocol, so both are slower than a test suite: on the slower runners they landed
+      # within seconds of the old 3 minute cap. Both carry 6. Past that it is a stall.
       - name: zix examples
         if: always()
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: zig build examples --summary all
 
       - name: zix protocol runners
         if: always()
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: zig build test-runner-all --summary all
 
       # driver unit steps carry no if: always(), so they are skipped when a
