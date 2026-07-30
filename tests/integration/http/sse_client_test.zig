@@ -3,26 +3,25 @@
 const std = @import("std");
 const zix = @import("zix");
 
+/// A connected pair for the tests below, portable across every supported platform.
 fn makePair() ![2]std.posix.fd_t {
-    var fds: [2]i32 = undefined;
-    const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
-    if (result != 0) return error.SocketPairFailed;
-    return fds;
+    const pair = try zix.utils.socket_pair.Pair.open(std.testing.allocator);
+
+    return pair.fds;
 }
 
 fn closefd(fd: std.posix.fd_t) void {
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 // --------------------------------------------------------- //
 
 test "zix integration: SseStream.next parses a data-only event" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
 
-    _ = std.posix.system.write(fds[1], "data: hello\n\n", "data: hello\n\n".len);
+    zix.utils.fd_io.writeAll(fds[1], "data: hello\n\n") catch {};
 
     var stream = zix.Http.SseStream{
         .fd = fds[0],
@@ -42,12 +41,11 @@ test "zix integration: SseStream.next parses a data-only event" {
 }
 
 test "zix integration: SseStream.next parses a named event with data" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
 
-    _ = std.posix.system.write(fds[1], "event: update\ndata: 42\n\n", "event: update\ndata: 42\n\n".len);
+    zix.utils.fd_io.writeAll(fds[1], "event: update\ndata: 42\n\n") catch {};
 
     var stream = zix.Http.SseStream{
         .fd = fds[0],
@@ -65,12 +63,11 @@ test "zix integration: SseStream.next parses a named event with data" {
 }
 
 test "zix integration: SseStream.next joins multiple data lines with newline" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
 
-    _ = std.posix.system.write(fds[1], "data: line1\ndata: line2\n\n", "data: line1\ndata: line2\n\n".len);
+    zix.utils.fd_io.writeAll(fds[1], "data: line1\ndata: line2\n\n") catch {};
 
     var stream = zix.Http.SseStream{
         .fd = fds[0],
@@ -87,8 +84,6 @@ test "zix integration: SseStream.next joins multiple data lines with newline" {
 }
 
 test "zix integration: SseStream.next returns null on clean EOF with no data" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-
     const fds = try makePair();
     defer closefd(fds[0]);
 
@@ -108,12 +103,11 @@ test "zix integration: SseStream.next returns null on clean EOF with no data" {
 }
 
 test "zix integration: SseStream.next parses id and retry fields" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const fds = try makePair();
     defer closefd(fds[0]);
     defer closefd(fds[1]);
 
-    _ = std.posix.system.write(fds[1], "id: abc\nretry: 5000\ndata: payload\n\n", "id: abc\nretry: 5000\ndata: payload\n\n".len);
+    zix.utils.fd_io.writeAll(fds[1], "id: abc\nretry: 5000\ndata: payload\n\n") catch {};
 
     var stream = zix.Http.SseStream{
         .fd = fds[0],
