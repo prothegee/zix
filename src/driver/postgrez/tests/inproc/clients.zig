@@ -10,6 +10,7 @@
 //! - Process ids start at 1, the way a real backend never reports 0.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// One accepted backend, as the registry tracks it.
 pub const Client = struct {
@@ -233,7 +234,7 @@ test "postgrez inproc: clients terminate reports whether the pid was connected" 
     try testing.expect(client.killed.load(.acquire));
 }
 
-test "postgrez inproc: clients terminate makes the victim read return end of stream" {
+test "postgrez inproc: clients terminate ends the victim read" {
     var pair: Pair = undefined;
     try pair.open();
     defer pair.close();
@@ -246,5 +247,19 @@ test "postgrez inproc: clients terminate makes the victim read return end of str
 
     var read_buf: [16]u8 = undefined;
     var reader = pair.server_side.reader(pair.threaded.io(), &read_buf);
-    try testing.expectError(error.EndOfStream, reader.interface.takeByte());
+
+    // What terminate promises is that a parked read comes back, and how it comes back is the
+    // platform's call. POSIX reports a clean end of stream on a socket shut down under the reader.
+    // Windows fails the read instead: its socket layer answers STATUS_PIPE_DISCONNECTED there, a
+    // status std has no end-of-stream mapping for, so std prints its own unexpected-status
+    // diagnostic and returns error.ReadFailed. That diagnostic in a passing Windows run is
+    // expected output, not a failure. The transports in this suite already fold the two errors
+    // into one closed connection.
+    const outcome = reader.interface.takeByte();
+
+    if (comptime builtin.os.tag == .windows) {
+        try testing.expectError(error.ReadFailed, outcome);
+    } else {
+        try testing.expectError(error.EndOfStream, outcome);
+    }
 }
