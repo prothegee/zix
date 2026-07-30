@@ -94,10 +94,10 @@ const t = try std.Thread.spawn(.{}, workerFn, .{ &ch, io });
 
 ## Hubungan dengan Model Konkurensi Server
 
-Channel bersifat ortogonal terhadap model dispatch HTTP (`.POOL`, `.ASYNC`, `.MIXED`). Channel tidak menggantikan atau memperluas model manapun. Channel adalah primitif koordinasi dalam satu proses yang dapat digunakan berdampingan dengan model apapun.
+Channel bersifat ortogonal terhadap model dispatch HTTP (`.ASYNC`, `.EPOLL`, `.URING`). Channel tidak menggantikan atau memperluas model manapun. Channel adalah primitif koordinasi dalam satu proses yang dapat digunakan berdampingan dengan model apapun.
 
 ```
-.POOL / .ASYNC / .MIXED server
+.ASYNC / .EPOLL / .URING server
   handler task A  -->  Channel(Event)  -->  background task B
 ```
 
