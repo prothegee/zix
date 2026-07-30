@@ -2,10 +2,10 @@ const std = @import("std");
 const zix = @import("zix");
 
 // Runs against any of the http1 basic servers on port 9015
-// (e.g. example-http1_basic_2_pool with routes / /echo /about).
+// (e.g. example-http1_basic with routes / /echo /about).
 //
 // Usage:
-// 1. start a server:  ./zig-out/bin/example-http1_basic_2_pool
+// 1. start a server:  ./zig-out/bin/example-http1_basic
 // 2. run this client:  ./zig-out/bin/example-http1_client
 //
 // zix.Http.Client speaks HTTP/1.1 over std.http.Client, so it works against the
