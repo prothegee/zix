@@ -63,8 +63,12 @@ jobs:
 
             # examples is compile-plus-install only. test-runner-all drives every zix
             # protocol end to end over real sockets inside this VM.
-            zig build examples --summary all || failures="$failures examples"
-            zig build test-runner-all --summary all || failures="$failures test-runner-all"
+            # Both are slower than a test suite and neither has a --test-timeout to bound it,
+            # so they carry the same 6 minute cap the native legs give them as steps. timeout
+            # exits 124, which the || below records like any other failure, so one stall costs
+            # its own command rather than the rest of the leg.
+            timeout 6m zig build examples --summary all || failures="$failures examples"
+            timeout 6m zig build test-runner-all --summary all || failures="$failures test-runner-all"
             zig build postgrez-test-unit --summary all || failures="$failures postgrez-test-unit"
             zig build rediz-test-unit --summary all || failures="$failures rediz-test-unit"
             zig build prometheuz-test-unit --summary all || failures="$failures prometheuz-test-unit"
