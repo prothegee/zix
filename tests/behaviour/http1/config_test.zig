@@ -15,7 +15,7 @@ test "zix behaviour: Http1 ServerConfig dispatch_model is required and stored as
     try std.testing.expectEqual(zix.Http1.DispatchModel.ASYNC, cfg.dispatch_model);
 }
 
-test "zix behaviour: Http1 ServerConfig workers and pool_size default to zero (auto)" {
+test "zix behaviour: Http1 ServerConfig workers defaults to zero (auto)" {
     const cfg = zix.Http1.ServerConfig{
         .io = undefined,
         .ip = "127.0.0.1",
@@ -23,7 +23,6 @@ test "zix behaviour: Http1 ServerConfig workers and pool_size default to zero (a
         .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
 test "zix behaviour: Http1 ServerConfig kernel_backlog default is 1024" {
@@ -61,9 +60,8 @@ test "zix behaviour: Http1 ServerConfig compression defaults" {
 
 test "zix behaviour: Http1 DispatchModel integer backing values (ASYNC=0 is zero-value)" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Http1.DispatchModel.ASYNC));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Http1.DispatchModel.POOL));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Http1.DispatchModel.MIXED));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Http1.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Http1.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Http1.DispatchModel.URING));
 }
 
 test "zix behaviour: Http1 ServerConfig static cache is off by default" {
