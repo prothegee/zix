@@ -13,7 +13,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const SOCK_PATH: []const u8 = "tmp/zix.sock";
+const SOCK_DIR: []const u8 = "tmp";
+const SOCK_FILE: []const u8 = "zix.sock";
 const MESSAGE: []const u8 = "get";
 
 // --------------------------------------------------------- //
@@ -21,10 +22,14 @@ const MESSAGE: []const u8 = "get";
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
+    // Derived the same way the server derives it, so both ends agree on one absolute path.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(io, SOCK_DIR, SOCK_FILE, &path_buf);
+
     var client = zix.Uds.Client.connect(.{
-        .path = SOCK_PATH,
+        .path = sock_path,
     }, io) catch |err| {
-        std.debug.print("error: cannot connect to {s}: {}\n", .{ SOCK_PATH, err });
+        std.debug.print("error: cannot connect to {s}: {}\n", .{ sock_path, err });
         return;
     };
     defer client.deinit(io);
