@@ -51,9 +51,20 @@ jobs:
             zig build integration-test --summary all || failures="$failures integration-test"
             zig build behaviour-test --summary all || failures="$failures behaviour-test"
             zig build edge-test --summary all || failures="$failures edge-test"
+
+            # examples is compile-plus-install only. test-runner-all drives every zix
+            # protocol end to end over real sockets inside this VM.
+            zig build examples --summary all || failures="$failures examples"
+            zig build test-runner-all --summary all || failures="$failures test-runner-all"
             zig build postgrez-test-unit --summary all || failures="$failures postgrez-test-unit"
             zig build rediz-test-unit --summary all || failures="$failures rediz-test-unit"
             zig build prometheuz-test-unit --summary all || failures="$failures prometheuz-test-unit"
+            zig build postgrez-test-behaviour --summary all || failures="$failures postgrez-test-behaviour"
+            zig build postgrez-test-edge --summary all || failures="$failures postgrez-test-edge"
+            zig build rediz-test-behaviour --summary all || failures="$failures rediz-test-behaviour"
+            zig build rediz-test-edge --summary all || failures="$failures rediz-test-edge"
+            zig build prometheuz-test-behaviour --summary all || failures="$failures prometheuz-test-behaviour"
+            zig build prometheuz-test-edge --summary all || failures="$failures prometheuz-test-edge"
 
             if [ -n "$failures" ]; then
               echo "failed:$failures"
