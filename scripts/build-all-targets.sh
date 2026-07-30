@@ -19,11 +19,13 @@ matrix "zix" . install test-all examples test-runner-all
 # target the tests and runner compile and skip execution, on the native
 # target the container-based steps (test-integration, test-runner) own their
 # container lifecycle and need docker running.
-# prometheuz has no test-integration step yet (unit + examples + runner).
+# test-behaviour and test-edge drive an in-process server instead, so they need
+# no container and run on every target.
+# prometheuz has no test-integration step (its container coverage is test-runner).
 
-matrix "postgrez" src/driver/postgrez install test-unit test-integration examples test-runner
-matrix "rediz" src/driver/rediz install test-unit test-integration examples test-runner
-matrix "prometheuz" src/driver/prometheuz install test-unit examples test-runner
+matrix "postgrez" src/driver/postgrez install test-unit test-behaviour test-edge test-integration examples test-runner
+matrix "rediz" src/driver/rediz install test-unit test-behaviour test-edge test-integration examples test-runner
+matrix "prometheuz" src/driver/prometheuz install test-unit test-behaviour test-edge examples test-runner
 
 # --------------------------------------------------------- #
 
