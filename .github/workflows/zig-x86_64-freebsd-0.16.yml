@@ -16,10 +16,14 @@ jobs:
     name: x86_64-freebsd
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
+    # hung test to burn a day of runner minutes before anyone notices.
+    timeout-minutes: 60
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
       - name: Checkout
+        timeout-minutes: 5
         uses: actions/checkout@v7
 
       # No GitHub-hosted FreeBSD runner exists, so the job boots a real
@@ -28,7 +32,11 @@ jobs:
       # (container lifecycle) are skipped here.
       # A leg that goes silent for many minutes can be a stuck VM rather than
       # a hung test: re-run the job once before diagnosing.
+      # The whole leg is one step, so a step-level cap is the only per-leg bound there is.
+      # It sits under the job cap on purpose: killing the step still runs Post Checkout, so
+      # the log is uploaded. A job-level kill loses the step body entirely.
       - name: Test in FreeBSD
+        timeout-minutes: 50
         uses: vmactions/freebsd-vm@v1
         with:
           release: "15.1"
@@ -47,10 +55,10 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            zig build unit-test --summary all || failures="$failures unit-test"
-            zig build integration-test --summary all || failures="$failures integration-test"
-            zig build behaviour-test --summary all || failures="$failures behaviour-test"
-            zig build edge-test --summary all || failures="$failures edge-test"
+            zig build unit-test --summary all --test-timeout 15s || failures="$failures unit-test"
+            zig build integration-test --summary all --test-timeout 15s || failures="$failures integration-test"
+            zig build behaviour-test --summary all --test-timeout 15s || failures="$failures behaviour-test"
+            zig build edge-test --summary all --test-timeout 15s || failures="$failures edge-test"
 
             # examples is compile-plus-install only. test-runner-all drives every zix
             # protocol end to end over real sockets inside this VM.
