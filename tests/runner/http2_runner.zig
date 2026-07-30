@@ -8,6 +8,7 @@
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
+const fd_io = zix.utils.fd_io;
 
 // --------------------------------------------------------- //
 
@@ -118,25 +119,9 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 }
 
 fn fdWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const rc = std.os.linux.write(fd, bytes[written..].ptr, bytes.len - written);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        written += rc;
-    }
+    return fd_io.writeAll(fd, bytes);
 }
 
 fn fdReadOnce(fd: std.posix.fd_t, buf: []u8) !usize {
-    while (true) {
-        const rc = std.os.linux.read(fd, buf.ptr, buf.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return rc,
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-    }
+    return fd_io.readOnce(fd, buf);
 }
