@@ -12,32 +12,6 @@ Detail implementasi internal untuk lapisan HTTP. Untuk dasar pertimbangan desain
 
 `init(handler, config)` menyimpan handler dan config, tidak ada yang lain: tidak ada socket yang dibuka. Socket dibuka di `run()`. `Router(routes).dispatch` sendiri menyerap fallback file statis dan 404 (mencerminkan router Http1), jadi `dispatch/common.zig` tidak lagi memiliki logika itu secara eksternal.
 
-### ConnQueue
-
-Antrian kerja bersama antara accept thread (producer) dan pool thread (consumer). Didukung oleh `std.Io.Mutex` + `std.Io.Condition` + `std.ArrayListUnmanaged(std.Io.net.Stream)`.
-
-```
-push(stream): lock -> append -> unlock -> signal
-pop():        lock -> while empty: wait -> orderedRemove(0) -> unlock -> return stream
-close():      lock -> closed = true -> unlock -> broadcast   (membuka blokir semua pop() yang menunggu)
-```
-
-### run(): .POOL (dispatch_model = .POOL)
-
-```
-1. worker_count = if (workers == 0) cpu_count else workers
-2. pool_size    = if (pool_size == 0) max(10, cpu_count * 2) else pool_size
-3. std.Io.Threaded.init(smp_allocator, .{ .stack_size = 512 KB }) -> thread_io
-4. ConnQueue{}
-5. spawn timer thread  -> timerLoop(thread_io, &self.registry)
-      setiap 500ms: updateDateCache + registry.evict (penjaga koneksi Layer D)
-6. spawn pool_size pool threads  -> poolEntry(self, &queue, thread_io)
-7. spawn worker_count accept threads -> workerEntry(self, &queue, thread_io)
-8. join accept threads
-9. queue.close(thread_io)
-10. join pool threads
-```
-
 ### run(): .ASYNC (dispatch_model = .ASYNC)
 
 ```
@@ -47,19 +21,6 @@ close():      lock -> closed = true -> unlock -> broadcast   (membuka blokir sem
       stream = net_server.accept(io)
       if (io.async(handleConnection, .{ stream, io, self })) |_| {}
       else |_| { handleConnection(stream, io, self); }  // fallback jika pool habis
-```
-
-### run(): .MIXED (dispatch_model = .MIXED)
-
-```
-1. worker_count = if (workers == 0) cpu_count else workers
-2. spawn worker_count asyncWorkerEntry threads
-3. setiap asyncWorkerEntry:
-      resolve + listen dengan SO_REUSEPORT
-      accept loop:
-        stream = net_server.accept(io)
-        if (io.async(handleConnection, .{ stream, io, self })) |_| {}
-        else |_| { handleConnection(stream, io, self); }
 ```
 
 ### run(): .EPOLL (dispatch_model = .EPOLL, Linux-only)
@@ -92,23 +53,6 @@ epollWorker():
 
 Tidak ada state bersama antar worker. `handleOneRequest` dipanggil langsung di thread worker
 yang melakukan recv/parse/dispatch/send secara blocking sinkron. Arena di-reset antar request.
-
-### workerEntry() (accept thread .POOL)
-
-```
-1. resolve + listen dengan SO_REUSEPORT (reuse_address = true)
-2. loop:
-      stream = net_server.accept(io)
-      queue.push(stream, io)        // tidak pernah memblokir I/O
-```
-
-### poolEntry() (pool thread .POOL)
-
-```
-loop:
-    stream = queue.pop(io)          // blokir sampai koneksi masuk
-    handleConnection(stream, io, self)
-```
 
 ### handleConnection()
 
@@ -326,8 +270,8 @@ g_date_lens:   [2]usize       // panjang valid setiap buffer
 g_date_active: atomic(usize)  // indeks (0 atau 1) buffer aktif saat ini
 g_date_secs:   atomic(u64)    // detik wall-clock terakhir yang ditulis
 
-.POOL: timer thread memanggil updateDateCache setiap 500 ms (std.Io.sleep)
-.ASYNC: accept loop memanggil updateDateCache sebelum setiap accept()
+.ASYNC: background timer thread memanggil updateDateCache setiap 500 ms (std.Io.sleep), dan
+        accept loop juga memanggilnya sebelum setiap accept()
 
 updateDateCache():
   cur_secs = std.Io.Clock.real.now(io).toSeconds()
