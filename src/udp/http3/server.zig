@@ -4,8 +4,8 @@
 //! What:
 //! - Server.init(handler, config) binds a UDP socket and serves QUIC / HTTP-3 on the zix.Udp
 //!   datagram substrate. The dispatch model selects the worker shape per the ADR-050 contract:
-//!   `.ASYNC` runs a single-worker recv with internal CID demux. `.POOL` / `.MIXED` / `.EPOLL` /
-//!   `.URING` run one SO_REUSEPORT worker per core, the kernel load-balancing connections by 4-tuple.
+//!   `.ASYNC` runs a single-worker recv with internal CID demux. `.EPOLL` / `.URING` run one
+//!   SO_REUSEPORT worker per core, the kernel load-balancing connections by 4-tuple.
 //!
 //! Usage:
 //! ```zig
@@ -22,11 +22,10 @@ const Config = @import("config.zig");
 const Http3ServerConfig = Config.Http3ServerConfig;
 const core = @import("core.zig");
 const static_cache = @import("../../utils/static_cache.zig");
+const dispatch_support = @import("../../utils/dispatch_support.zig");
 
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 
@@ -66,9 +65,18 @@ fn Http3ServerImpl(comptime handler: HandlerFn) type {
         /// - !void
         /// - error.PortNotConfigured if config.port is 0
         /// - error.TlsRequired if config.tls is null (QUIC has no cleartext mode)
+        /// - error.DispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
             if (self.config.port == 0) return error.PortNotConfigured;
             if (self.config.tls == null) return error.TlsRequired;
+
+            // Reject an unrunnable model before binding, so a rejected config leaves nothing
+            // behind (ADR-065).
+            if (!dispatch_support.isSupported(self.config.dispatch_model)) {
+                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+
+                return error.DispatchModelUnsupported;
+            }
 
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http1.Server.run.
@@ -90,8 +98,6 @@ fn Http3ServerImpl(comptime handler: HandlerFn) type {
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(handler, self.config),
-                .POOL => pool_model.runPool(handler, self.config),
-                .MIXED => mixed_model.runMixed(handler, self.config),
                 .EPOLL => epoll_model.runEpoll(handler, self.config),
                 .URING => uring_model.runUring(handler, self.config),
             };
