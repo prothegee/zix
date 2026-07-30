@@ -1,6 +1,6 @@
 // channel_ipc_b.zig: bidirectional IPC via UDS (Process B, client side)
 //
-// Process B connects to /tmp/zix_ipc.sock opened by Process A.
+// Process B connects to tmp/zix_ipc.sock opened by Process A.
 // After connecting, both sides send and receive independently at different rates.
 //
 // Two threads per process:
@@ -16,7 +16,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const SOCK_PATH: []const u8 = "/tmp/zix_ipc.sock";
+const SOCK_DIR: []const u8 = "tmp";
+const SOCK_FILE: []const u8 = "zix_ipc.sock";
 const SEND_INTERVAL_MS: i64 = 400;
 
 // Logger config: uncomment this section to add logger
@@ -112,10 +113,14 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    // logger.system(.INFO, "ipc", "B: connecting to " ++ SOCK_PATH, .{});
+    // logger.system(.INFO, "ipc", "B: connecting to {s}", .{sock_path});
 
-    std.debug.print("B: connecting to {s}\n", .{SOCK_PATH});
-    const unix_addr = try std.Io.net.UnixAddress.init(SOCK_PATH);
+    // Derived the same way Process A derives it, so both ends agree on one absolute path.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(io, SOCK_DIR, SOCK_FILE, &path_buf);
+
+    std.debug.print("B: connecting to {s}\n", .{sock_path});
+    const unix_addr = try std.Io.net.UnixAddress.init(sock_path);
     const stream = try unix_addr.connect(io);
 
     std.debug.print("B: connected, starting bidirectional exchange\n", .{});
