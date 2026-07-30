@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const common = @import("common.zig");
+const async_cache = @import("../../../utils/async_cache.zig");
 const logSystem = common.logSystem;
 const handleConnection = common.handleConnection;
 
@@ -20,6 +21,10 @@ pub fn runAsync(server: anytype, io: std.Io) !void {
         }
     };
 
+    // Each pool thread builds its own cache on first use, so they are reclaimed together when
+    // the accept loop ends rather than living until process exit.
+    defer _ = async_cache.reclaim();
+
     logSystem(cfg, "listening on {s}:{d} (io.async)", .{ cfg.ip, cfg.port });
 
     const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
@@ -29,7 +34,7 @@ pub fn runAsync(server: anytype, io: std.Io) !void {
     var net_server = addr.listen(io, .{
         .mode = .stream,
         .kernel_backlog = @intCast(cfg.kernel_backlog),
-        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
     }) catch |err| {
         logSystem(cfg, "listen error: {}", .{err});
         return;
