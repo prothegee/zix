@@ -1,4 +1,4 @@
-// Test runner for all protocols and all dispatch models.
+// Test runner for all protocols.
 //
 // Invoked by `zig build test-runner-all`. The build pushes one server binary
 // path per check as argv, in the exact order of the `checks` table below: that
@@ -47,138 +47,38 @@ const Check = struct {
 };
 
 const zix_sock = "tmp/zix.sock";
-const zix_ipc_sock = "/tmp/zix_ipc.sock";
+const zix_ipc_sock = "tmp/zix_ipc.sock";
 
 const checks = [_]Check{
-    // Basic dispatch-model checks.
-    .{ .label = "http-async", .run = &struct {
+    // Basic per-engine checks: one unified example each, on the dispatch model its target picks.
+    .{ .label = "http", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp(io, paths[0], 9000);
         }
     }.f },
-    .{ .label = "http-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9001);
-        }
-    }.f },
-    .{ .label = "http-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9002);
-        }
-    }.f },
-    .{ .label = "http-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9003);
-        }
-    }.f },
-    .{ .label = "http1-async", .run = &struct {
+    .{ .label = "http1", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp1(io, paths[0], 9015);
         }
     }.f },
-    .{ .label = "http1-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9016);
-        }
-    }.f },
-    .{ .label = "http1-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9017);
-        }
-    }.f },
-    .{ .label = "http1-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9018);
-        }
-    }.f },
-    .{ .label = "http1-uring", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9019);
-        }
-    }.f },
-    .{ .label = "grpc-async", .run = &struct {
+    .{ .label = "grpc", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpc(io, paths[0], 9032);
         }
     }.f },
-    .{ .label = "grpc-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9033);
-        }
-    }.f },
-    .{ .label = "grpc-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9034);
-        }
-    }.f },
-    .{ .label = "grpc-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9035);
-        }
-    }.f },
-    .{ .label = "tcp-async", .run = &struct {
+    .{ .label = "tcp", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runTcp(io, paths[0], 9043);
         }
     }.f },
-    .{ .label = "tcp-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9044);
-        }
-    }.f },
-    .{ .label = "tcp-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9045);
-        }
-    }.f },
-    .{ .label = "tcp-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9046);
-        }
-    }.f },
-    .{ .label = "fix-async", .run = &struct {
+    .{ .label = "fix", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runFix(io, paths[0], 9048);
         }
     }.f },
-    .{ .label = "fix-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9049);
-        }
-    }.f },
-    .{ .label = "fix-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9050);
-        }
-    }.f },
-    .{ .label = "fix-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9051);
-        }
-    }.f },
-    .{ .label = "http2-async", .run = &struct {
+    .{ .label = "http2", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp2(io, paths[0], 9065);
-        }
-    }.f },
-    .{ .label = "http2-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9066);
-        }
-    }.f },
-    .{ .label = "http2-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9067);
-        }
-    }.f },
-    .{ .label = "http2-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9068);
-        }
-    }.f },
-    .{ .label = "http2-uring", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9069);
         }
     }.f },
     .{ .label = "udp", .run = &struct {
@@ -317,24 +217,9 @@ const checks = [_]Check{
     }.f },
 
     // gRPC feature checks.
-    .{ .label = "grpc-location-async", .run = &struct {
+    .{ .label = "grpc-location", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpcLocation(io, paths[0], 9038);
-        }
-    }.f },
-    .{ .label = "grpc-location-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9039);
-        }
-    }.f },
-    .{ .label = "grpc-location-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9040);
-        }
-    }.f },
-    .{ .label = "grpc-location-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9041);
         }
     }.f },
     .{ .label = "grpc-multi", .run = &struct {
@@ -542,7 +427,7 @@ fn resourceBusy(active: []const ?[]const u8, res: []const u8) bool {
 const WAVE_MAX = 16;
 
 /// Live wave width scaled to the host. Each engine server spawns a worker pool sized to the CPU
-/// count (a POOL server is ~3x CPU threads), so starting too many servers at once oversubscribes the
+/// count (a multiplexed server is one worker per CPU), so starting too many servers at once oversubscribes the
 /// cores, starves a fresh server's accept threads, and the runner's connect probe then gets refused
 /// (a flaky "ServerStartTimeout"). Conservative on purpose: a small box can only bring up a few of
 /// these heavyweight servers at a time, a large box scales out. The per-check retry (see runCheck) is
