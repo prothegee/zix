@@ -585,7 +585,7 @@ test "zix http3: parseMultishotBuf recovers the peer and payload at the recvmsg_
 test "zix http3: http3 run shapes compile (monomorphize without running)" {
     // The run shapes never return, so they cannot be run in a test. if (false) still type-checks the
     // whole call chain at comptime, so a compile error in any generic body (including the parameterized
-    // workerLoop that runSingle / runMulti drive) surfaces here rather than only when an example runs it.
+    // workerLoop that runSingle drives) surfaces here rather than only when an example runs it.
     const noop = struct {
         fn h(_: *const core.Request, _: *core.Response) void {}
     }.h;
@@ -594,7 +594,6 @@ test "zix http3: http3 run shapes compile (monomorphize without running)" {
         runUring(noop, undefined) catch {};
         epoll.runEpoll(noop, undefined) catch {};
         common.runSingle(noop, undefined) catch {};
-        common.runMulti(noop, undefined) catch {};
     }
 }
 
