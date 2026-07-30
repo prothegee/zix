@@ -11,7 +11,6 @@ const wire = @import("wire.zig");
 
 const Tls = zix.Tls;
 const Http2 = zix.Http2;
-const linux = std.os.linux;
 
 // --------------------------------------------------------- //
 
@@ -98,7 +97,7 @@ pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     const fd = stream.socket.handle;
 
     var rnd: [64]u8 = undefined;
-    _ = linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     var ch_buf: [600]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
@@ -169,7 +168,7 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
     const fd = stream.socket.handle;
 
     var rnd: [64]u8 = undefined;
-    _ = linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     var ch_buf: [600]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
@@ -253,7 +252,7 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     const fd = stream.socket.handle;
 
     var rnd: [64]u8 = undefined;
-    _ = linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     var ch_buf: [600]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].* }, &ch_buf);
     var state = started.state;
@@ -272,9 +271,7 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/tls/certs/ed25519_cert.pem", fba.allocator(), .limited(8192));
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &ts);
-    try finished.verifyServerCert(anchor_der, "localhost", ts.sec);
+    try finished.verifyServerCert(anchor_der, "localhost", common.realtimeSeconds(io));
 
     try wire.tlsWriteAll(fd, finished.client_finished);
 
@@ -313,7 +310,7 @@ pub fn runTlsSse(io: std.Io, server_path: []const u8, port: u16) !void {
 
     try common.waitForTcpPort(io, &server_child, port, common.START_TIMEOUT_MS);
 
-    try common.tlsSseFirstEvent(port);
+    try common.tlsSseFirstEvent(io, port);
 }
 
 /// WebSocket over TLS 1.3 (ADR-055): spawn the wss echo server, then confirm a frame echoes over TLS
@@ -324,5 +321,5 @@ pub fn runTlsWs(io: std.Io, server_path: []const u8, port: u16) !void {
 
     try common.waitForTcpPort(io, &server_child, port, common.START_TIMEOUT_MS);
 
-    try common.tlsWsEcho(port);
+    try common.tlsWsEcho(io, port);
 }
