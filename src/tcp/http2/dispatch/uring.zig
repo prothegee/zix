@@ -562,7 +562,7 @@ fn uringMuxWorker(ctx: UringMuxCtx) void {
 /// completion loop (ADR-037 Phase 4).
 ///
 /// Note:
-/// - worker_count = pool_size (0 = cpu count). A handler runs on the completion loop, so it must
+/// - worker_count = workers (0 = cpu count). A handler runs on the completion loop, so it must
 ///   stay bounded (it blocks the worker's other connections while running).
 pub fn runUring(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     // Runtime probe: io_uring can be unavailable on this host (seccomp/sandbox, RLIMIT_MEMLOCK, or
@@ -579,7 +579,7 @@ pub fn runUring(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
     const cpu = common.getAvailableCpuCount();
-    const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
+    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
     const opts = common.serveOpts(cfg);
 
     logSystem(cfg, "listening on {s}:{d} (io_uring-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
