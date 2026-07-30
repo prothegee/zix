@@ -53,6 +53,19 @@ jobs:
         if: always()
         run: zig build edge-test --summary all
 
+      # examples is compile-plus-install only (no execution), so it gates the whole
+      # example set against this target's toolchain. test-runner-all then drives every
+      # zix protocol end to end: it spawns each example server as a child process and
+      # talks to it over real sockets, so unlike the cross-build matrix (which only
+      # COMPILES runners for a foreign target) this leg actually executes them.
+      - name: zix examples
+        if: always()
+        run: zig build examples --summary all
+
+      - name: zix protocol runners
+        if: always()
+        run: zig build test-runner-all --summary all
+
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
@@ -64,8 +77,29 @@ jobs:
       - name: prometheuz unit tests
         run: zig build prometheuz-test-unit --summary all
 
+      # driver behaviour and edge suites drive an in-process server, so unlike
+      # the container steps below they need no docker and run on every leg.
+      - name: postgrez behaviour tests
+        run: zig build postgrez-test-behaviour --summary all
+
+      - name: postgrez edge tests
+        run: zig build postgrez-test-edge --summary all
+
+      - name: rediz behaviour tests
+        run: zig build rediz-test-behaviour --summary all
+
+      - name: rediz edge tests
+        run: zig build rediz-test-edge --summary all
+
+      - name: prometheuz behaviour tests
+        run: zig build prometheuz-test-behaviour --summary all
+
+      - name: prometheuz edge tests
+        run: zig build prometheuz-test-edge --summary all
+
       # docker ships preinstalled on ubuntu-latest, so postgrez and rediz can
-      # own their own container lifecycle here. test-runner is out of scope.
+      # own their own container lifecycle here. The DRIVER test-runner steps stay
+      # out of scope, the zix protocol runners above are wired.
       - name: postgrez integration tests
         run: zig build postgrez-test-integration --summary all
 
