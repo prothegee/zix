@@ -48,6 +48,35 @@ __*Fix:*__
 
 __*Update:*__
 
+- Breaking: dispatch model `.POOL` dan `.MIXED` dihapus (ADR-065):
+    - `DispatchModel` kini `ASYNC = 0`, `EPOLL = 1`, `URING = 2` di kedelapan engine. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` untuk `.EPOLL` dan `.URING` alih-alih diam-diam turun ke `.POOL`, dan mencatat model mana yang ditolak. Fallback lama mengubah profil throughput, memori, dan latency pemanggil hanya dengan satu baris log sebagai penanda, dan server tanpa logger terkonfigurasi tidak berkata apa-apa.
+    - `pool_size` dihapus dari kedelapan config, dan `pool_stack_size_bytes` dari `zix.Fix`. Di `zix.Http2` dan `zix.Grpc`, `pool_size` adalah jumlah worker `.EPOLL` / `.URING` sementara `workers` hanya milik POOL dan MIXED, jadi keduanya dialihkan ke `workers`. Keduanya default 0, jadi perilaku default tidak berubah.
+    - 16 berkas `dispatch/pool.zig` dan `dispatch/mixed.zig` dihapus, berikut `ConnQueue`, `WorkerCtx`, `PoolCtx`, dan `AsyncWorkerCtx`.
+    - 34 example bernomor per model diringkas menjadi 7 example terpadu, masing-masing memilih model per target secara comptime. Dua leg test-runner ikut hilang: `http1-drain` hanya menyisakan leg URING, dan `grpc-stream` kini berbagi port 9032 dengan `grpc`.
+    - Predikat bersama baru `src/utils/dispatch_support.zig`, dibaca di awal setiap `run()` sebelum ia membuka listener atau men-spawn thread, sehingga config yang ditolak tidak meninggalkan apa pun.
+
+    ---
+
+- Setiap fitur kini bekerja di bawah `.ASYNC` di setiap platform yang didukung (ADR-066):
+    - Response compression dan response cache menjangkau `.ASYNC`. Keduanya switch threadlocal per worker yang hanya dipasang `dispatch/epoll.zig` dan `dispatch/uring.zig`, sehingga server dengan `compress = true` di `.ASYNC` mengembalikan body tanpa kompresi dan tanpa error sama sekali. Promosi WebSocket milik engine lebih buruk: `core.zig` menerima handoff-nya lalu membuangnya, sehingga koneksi berakhir.
+    - Perbaikan: TLS di atas `.ASYNC` rusak di macOS, FreeBSD, NetBSD dan OpenBSD. Enam berkas terpisah `if (windows) ... else <syscall Linux>`, sehingga keempat platform itu jatuh ke cabang Linux dan mengeluarkan nomor syscall Linux. Ia tetap terkompilasi, itulah sebabnya tidak ada sweep cross-build yang menangkapnya. Setiap titik semacam itu kini memakai pemisahan tiga arah `windows` / `linux` / `posix`.
+    - HTTP/3 mendapat fallback datagram portable. `runSingle` miliknya sebelumnya hanya mencatat satu baris lalu mengembalikan void di luar Linux, sehingga `run()` melaporkan sukses dan tidak pernah mem-bind socket.
+    - Path Unix-domain socket dan channel IPC kini di-resolve menjadi path absolut yang diturunkan sama persis oleh kedua ujung, bukan path relatif (langsung ditolak bind AF_UNIX Windows) atau `/tmp/...` (lokasi yang tidak dimiliki Windows).
+    - Substrate bersama baru: `src/utils/fd_io.zig` (read / write / close / readiness blocking di descriptor mentah), `src/utils/socket_pair.zig` (pasangan terhubung, socketpair di POSIX dan loopback di Windows), `src/utils/socket_path.zig`, dan `src/utils/async_cache.zig` (response cache `.ASYNC`, satu per io pool thread, dengan registry dan reclaim karena threadlocal tidak punya destructor).
+    - `examples/http1_websocket_uring.zig` dihapus: `http1_websocket.zig` sudah berjalan `.URING` di Linux dan karena itu sudah menjalankan `websocket.pumpRing`. Route echo `/ws` miliknya dipindahkan dan runner-nya menjadi `test-runner-http1-websocket-echo`. Port 9029 dipensiunkan, tidak dipakai ulang.
+    - `tests/runner/common.zig:linux_only_labels` kini kosong: kelima puluh dua skenario runner diharapkan lulus di setiap platform. 85 test unit, integration dan edge melepas guard skip `!= .linux`, karena yang membuatnya Linux-only adalah harness test-nya (`socketpair`, `pipe2`, `memfd_create`), bukan perilaku yang diuji.
+    - Tidak ada yang menyentuh jalur pemasangan `.EPOLL` / `.URING` di sini: setup cache dan compression per worker mereka tetap sama byte demi byte.
+
+    ---
+
+- Test suite tanpa docker untuk ketiga driver:
+    - Step baru `test-behaviour` dan `test-edge` di `postgrez`, `rediz`, dan `prometheuz`, masing-masing menjalankan server in-process di bawah `tests/inproc/` yang berbicara protokol sungguhan. Keduanya tidak butuh container maupun daemon, sehingga ketujuh leg CI menjalankannya, padahal sebelumnya hanya leg Linux yang bisa menjalankan `test-integration` berbasis container.
+    - `postgrez` mencakup protokol wire PG v3 termasuk SCRAM-SHA-256 dan varian PLUS ber-channel-binding, auth cleartext, siklus extended query, COPY, LISTEN / NOTIFY, dan handshake TLS 1.3. `rediz` mencakup RESP2 dan RESP3 dengan keyspace nyata, auth ACL, CLIENT KILL, dan TLS. `prometheuz` mendapat cakupan end-to-end pertamanya, dengan satu endpoint HTTP mewakili exporter, receiver remote-write, dan query API sekaligus.
+    - Setiap lapisan framing diverifikasi terhadap codec milik driver sendiri, bukan terhadap dirinya sendiri: pesan yang dibangun `src/protocol/frontend.zig` milik driver dibaca ulang oleh parser test, builder test dibaca ulang oleh `src/protocol/backend.zig`, dan server SCRAM berjalan melawan klien `src/auth/scram.zig` yang sungguhan, ketiganya di bawah `src/driver/postgrez/`.
+    - `test-integration` dan `test-runner` tidak berubah dan tetap khusus container. Server in-process tidak menjalankan SQL maupun PromQL, jadi ia membuktikan jalur wire dan cara driver menanganinya, bukan bahwa sebuah query bermakna seperti maksud penulisnya.
+
+    ---
+
 - Penyajian file statis `public_dir` dirombak, dan diperluas ke keempat engine HTTP (ADR-064):
     - Modul baru `src/utils/static_cache.zig`, satu tabel yang dipakai bersama semua worker dan semua engine HTTP dalam satu proses, menyimpan descriptor terbuka sebuah file, ukurannya, dan header 200-nya yang sudah dirender. Request berikutnya hanya membayar satu hash lookup alih-alih open plus stat.
     - Modul baru `src/utils/static_send.zig`, yang memiliki satu tugas: memindahkan rentang byte ke socket. `sendfile` di Linux untuk respons cleartext, positional read plus fungsi tulis engine sendiri untuk yang lain. Zero copy ditolak setiap kali respons dienkripsi atau di-staging, jadi tidak ada jalur yang bisa menaruh plaintext di wire.
@@ -83,17 +112,7 @@ __*Update:*__
     - Field config baru per engine: `handler_timeout_ms` pada `Http2ServerConfig` dan `Http3ServerConfig` (keduanya sebelumnya tidak punya konsep timeout), diseed ke `Context.deadline_ns` saat dispatch.
     - Migrasi: setiap example dan tes integration/edge/behaviour di kelima engine diperbarui ke bentuk pemanggilan baru. `zig build test-all` dan `zig build examples` hijau pada `zig-0.16` dan `zig-0.17`.
 
-<br>
-
-__*Fix:*__
-
-- TBA
-
-<br>
-
-## 0.5.x-rc2 (2026-07-27)
-
-__*Update:*__
+    ---
 
 - Dukungan cross-build platform, example dengan suffix target, tes dan runner yang sadar platform:
     - Seluruh tree (module, examples, keempat test suite, test runner, dan driver postgrez / rediz / prometheuz) ter-build dengan Zig 0.16.x dan Zig 0.17.x untuk x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, dan x86_64-openbsd. Socket I/O Windows menumpang shim ntdll kecil (`src/utils/windows_io.zig`: NtReadFile / NtWriteFile / NtClose plus AFD partial-disconnect), BSD mendapat TCP_NODELAY yang diresolusi comptime (`std.posix.TCP` bernilai void di sana pada Zig 0.16), dan setiap jalur Linux-only (loop EPOLL / URING, CPU affinity, madvise, batching raw UDP) dijaga comptime. Di target non-Linux `.EPOLL` / `.URING` tetap fallback ke `.POOL`. Windows menurun di tempat platformnya tidak punya primitif: file logging pada logger ditangguhkan (console logging tetap jalan), timeout berbasis poll menjadi blocking read, tanpa CPU pinning, UDS dan raw UDP mengembalikan error runtime.
