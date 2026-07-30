@@ -12,8 +12,8 @@ const zix = @import("zix");
 const common = @import("common.zig");
 
 const Tls = zix.Tls;
-const linux = std.os.linux;
 const posix = std.posix;
+const fd_io = zix.utils.fd_io;
 
 const WAIT_MS: u64 = 5000;
 const CA_PATH = "examples/tls/certs/ed25519_cert.pem";
@@ -61,7 +61,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
     // TLS 1.3 handshake via the native zix.Tls client (offers ecdsa + ed25519 sig schemes).
     var rnd: [64]u8 = undefined;
-    _ = linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     var ch_buf: [600]u8 = undefined;
     const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].* }, &ch_buf);
     var state = started.state;
@@ -119,14 +119,7 @@ fn verifyServerTrust(io: std.Io, finished: *const Tls.Client.FinishResult) !void
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
 
-    try finished.verifyServerCert(anchor_der, "localhost", nowSec());
-}
-
-fn nowSec() i64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &ts);
-
-    return ts.sec;
+    try finished.verifyServerCert(anchor_der, "localhost", common.realtimeSeconds(io));
 }
 
 fn writeRecord(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
@@ -148,29 +141,9 @@ fn readRecordInto(fd: posix.fd_t, buf: []u8) !usize {
 }
 
 fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    var read: usize = 0;
-    while (read < buf.len) {
-        const rc = linux.read(fd, buf[read..].ptr, buf.len - read);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
+    return fd_io.readAll(fd, buf);
 }
 
 fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const rc = linux.write(fd, bytes[written..].ptr, bytes.len - written);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        written += rc;
-    }
+    return fd_io.writeAll(fd, bytes);
 }
