@@ -13,7 +13,7 @@
 //!   on the worker, so like the gRPC mux model it must stay bounded.
 //! - The h2c upgrade path (HTTP/1.1 `Upgrade: h2c`) is served minimally on the mux path: 101 then the
 //!   connection preface, the request carried on stream 1 is not served (prior-knowledge clients, the
-//!   common h2c case, are unaffected). The blocking POOL / ASYNC / MIXED models serve it.
+//!   common h2c case, are unaffected). The blocking ASYNC model serves it.
 
 const std = @import("std");
 const frame = @import("frame.zig");
