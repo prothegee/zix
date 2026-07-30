@@ -3,11 +3,17 @@
 //! These are the raw byte movers the checks reach for when zix's own clients
 //! cannot exercise a path: TLS record framing, response-header lookup, and the
 //! HTTP/2 frame scan that hunts for a :status 200 reply.
+//!
+//! Note:
+//! - Descriptor reads and writes go through zix.utils.fd_io, which carries a backend for
+//!   Windows, Linux and the other POSIX targets. These helpers used raw Linux syscalls, which
+//!   forced a Windows skip and issued Linux syscall numbers at the BSD and macOS kernels.
 
 const std = @import("std");
 const zix = @import("zix");
 
 const Http2 = zix.Http2;
+const fd_io = zix.utils.fd_io;
 
 // --------------------------------------------------------- //
 
@@ -34,39 +40,12 @@ pub fn tlsReadRecord(fd: std.posix.fd_t, buf: []u8) !usize {
 
 /// Read exactly buf.len bytes from fd, looping over short reads and retrying on EINTR.
 pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
-    // Raw fd TLS record I/O is POSIX-only here: not ported to Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
-
-    var read: usize = 0;
-    while (read < buf.len) {
-        const rc = std.os.linux.read(fd, buf[read..].ptr, buf.len - read);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-
-        read += rc;
-    }
+    return fd_io.readAll(fd, buf);
 }
 
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
 pub fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
-    // Raw fd TLS record I/O is POSIX-only here: not ported to Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
-
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const rc = std.os.linux.write(fd, bytes[written..].ptr, bytes.len - written);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-
-        written += rc;
-    }
+    return fd_io.writeAll(fd, bytes);
 }
 
 // --------------------------------------------------------- //
