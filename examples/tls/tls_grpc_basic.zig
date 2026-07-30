@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 // gRPC over TLS (grpc, RFC 8446 + 7540). The Grpc server serves h2c by default. Attaching a
@@ -47,7 +48,9 @@ pub fn main(process: std.process.Init) !void {
         .io = process.io,
         .ip = IP,
         .port = PORT,
-        .dispatch_model = .EPOLL,
+        // Picked per target at comptime (ADR-065): .EPOLL / .URING terminate TLS in the
+        // epoll-mux worker on Linux, .ASYNC in the thread-per-connection path elsewhere.
+        .dispatch_model = if (builtin.os.tag == .linux) .URING else .ASYNC,
         .tls = &tls,
     });
     defer server.deinit();
