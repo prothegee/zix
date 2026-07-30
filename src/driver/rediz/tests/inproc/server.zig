@@ -410,8 +410,10 @@ test "rediz inproc: server kill drops the victim connection" {
     var killer_buf: [128]u8 = undefined;
     try testing.expectEqualStrings(":1", try killer.roundTrip(&.{ "CLIENT", "KILL", "ID", id_text }, &killer_buf));
 
-    // the victim's next command finds a dead connection
-    try testing.expectError(error.EndOfStream, victim.roundTrip(&.{"PING"}, &buf));
+    // The victim's next command has to find a dead connection. Which error names that is the
+    // platform's call: Linux hands back a clean EOF, NetBSD resets the socket and std reports the
+    // reset as ReadFailed. A completed round trip is the only wrong outcome here.
+    if (victim.roundTrip(&.{"PING"}, &buf)) |_| return error.VictimSurvivedKill else |_| {}
 }
 
 test "rediz inproc: server demands credentials when configured with them" {
