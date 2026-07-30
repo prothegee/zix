@@ -1,6 +1,8 @@
 //! HTTP/2 frame codec: constants, FrameHeader, read/write, control frame senders.
 
 const std = @import("std");
+const socket_pair = @import("../../utils/socket_pair.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
 
@@ -164,7 +166,7 @@ pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!voi
 fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
     if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
 
-    return std.posix.read(fd, buf);
+    return fd_io.readOnce(fd, buf);
 }
 
 pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
@@ -336,34 +338,32 @@ pub fn sendResponseEncodedFD(
 // --------------------------------------------------------- //
 
 test "zix http2: writeAllFD delivers data on a blocking fd" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     try writeAllFD(fds[1], "frame");
-    _ = std.posix.system.close(fds[1]);
+    fd_io.close(fds[1]);
 
     var buf: [8]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try fd_io.readOnce(fds[0], &buf);
     try std.testing.expectEqualStrings("frame", buf[0..n]);
 }
 
 test "zix http2: sendResponseFD chunks a body past the max frame size, END_STREAM on the last" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     var body: [40000]u8 = undefined;
     @memset(&body, 'a');
     try sendResponseFD(fds[1], 1, 200, "text/plain", &body);
-    _ = std.posix.system.close(fds[1]);
+    fd_io.close(fds[1]);
 
     var buf: [64 * 1024]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const got = std.posix.read(fds[0], buf[total..]) catch break;
+        const got = fd_io.readOnce(fds[0], buf[total..]) catch break;
         if (got == 0) break;
         total += got;
     }
@@ -401,10 +401,9 @@ test "zix http2: frame constants, ERR_NO_ERROR is 0" {
 }
 
 test "zix http2: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     const fh = FrameHeader{
         .length = 42,
@@ -413,7 +412,7 @@ test "zix http2: writeFrameHeaderFD and readFrameHeader roundtrip via pipe" {
         .stream_id = 3,
     };
     try writeFrameHeaderFD(fds[1], fh);
-    _ = std.posix.system.close(fds[1]);
+    fd_io.close(fds[1]);
 
     const got = try readFrameHeader(fds[0]);
     try std.testing.expectEqual(fh.length, got.length);
@@ -428,13 +427,12 @@ test "zix http2: PREFACE starts with PRI" {
 }
 
 test "zix http2: sendSettingsFD empty params writes 9-byte SETTINGS frame via pipe" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     try sendSettingsFD(fds[1], &.{});
-    _ = std.posix.system.close(fds[1]);
+    fd_io.close(fds[1]);
 
     const fh = try readFrameHeader(fds[0]);
     try std.testing.expectEqual(@as(u8, FRAME_TYPE_SETTINGS), fh.frame_type);
