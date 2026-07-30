@@ -7,8 +7,13 @@
 //!   works on Linux fails there.
 //!
 //! Note:
-//! - Resolve the directory once, then build an absolute path from it. Both ends of a pair run
-//!   from the same working directory, so both derive the same string with no shared state.
+//! - The absolute path is the working directory plus the caller's relative directory. Both ends
+//!   of a pair run from the same working directory, so both derive the same string with no
+//!   shared state.
+//! - The working directory comes from std.process.currentPath, not from resolving the opened
+//!   directory handle. std.Io.Dir.realPath is unimplemented on NetBSD and OpenBSD (it returns
+//!   error.OperationUnsupported there), which left both platforms unable to host a local socket
+//!   at all. currentPath is backed by getcwd on every POSIX target and by ntdll on Windows.
 //! - Windows has supported AF_UNIX since build 17063. On an older build std reports
 //!   error.AddressFamilyUnsupported at bind time, which is the honest answer rather than a
 //!   silent downgrade.
@@ -19,9 +24,9 @@ const builtin = @import("builtin");
 /// Path separator for the target, so the joined path is one the platform's own APIs accept.
 const separator: []const u8 = if (builtin.os.tag == .windows) "\\" else "/";
 
-/// Longest absolute directory path resolve() will handle. POSIX caps a unix socket path at 108
+/// Longest working directory path resolve() will handle. POSIX caps a unix socket path at 108
 /// bytes anyway, so a directory beyond this could not host one.
-const DIR_PATH_MAX: usize = 512;
+const CWD_PATH_MAX: usize = 512;
 
 pub const Error = error{ PathTooLong, DirectoryUnavailable };
 
@@ -41,18 +46,16 @@ pub const Error = error{ PathTooLong, DirectoryUnavailable };
 ///
 /// Return:
 /// - the absolute path, a slice of buf
-/// - error.DirectoryUnavailable when the directory could not be created or opened
+/// - error.DirectoryUnavailable when the directory could not be created or the working
+///   directory could not be read
 /// - error.PathTooLong when the result does not fit in buf
 pub fn resolve(io: std.Io, dir_name: []const u8, file_name: []const u8, buf: []u8) Error![]const u8 {
     std.Io.Dir.cwd().createDirPath(io, dir_name) catch return error.DirectoryUnavailable;
 
-    var dir = std.Io.Dir.cwd().openDir(io, dir_name, .{}) catch return error.DirectoryUnavailable;
-    defer dir.close(io);
+    var cwd_path: [CWD_PATH_MAX]u8 = undefined;
+    const cwd_len = std.process.currentPath(io, &cwd_path) catch return error.DirectoryUnavailable;
 
-    var dir_path: [DIR_PATH_MAX]u8 = undefined;
-    const dir_len = dir.realPath(io, &dir_path) catch return error.DirectoryUnavailable;
-
-    return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ dir_path[0..dir_len], separator, file_name }) catch return error.PathTooLong;
+    return std.fmt.bufPrint(buf, "{s}{s}{s}{s}{s}", .{ cwd_path[0..cwd_len], separator, dir_name, separator, file_name }) catch return error.PathTooLong;
 }
 
 /// Remove a socket file left behind by an earlier run, so a rebind is not refused.
@@ -102,6 +105,22 @@ test "zix utils: socket_path resolve is absolute, ends with the file name, and i
     var buf2: [600]u8 = undefined;
     const again = try resolve(io, "tmp", "socket_path_test.sock", &buf2);
     try std.testing.expectEqualStrings(path, again);
+}
+
+test "zix utils: socket_path resolve places the socket inside the requested directory" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // the directory name has to survive into the joined path: resolving the working directory
+    // only gets the prefix, and dropping the middle segment would put the socket one level up
+    var buf: [600]u8 = undefined;
+    const path = try resolve(io, "tmp", "socket_path_dir_test.sock", &buf);
+
+    var tail_buf: [64]u8 = undefined;
+    const tail = try std.fmt.bufPrint(&tail_buf, "{s}tmp{s}socket_path_dir_test.sock", .{ separator, separator });
+
+    try std.testing.expect(std.mem.endsWith(u8, path, tail));
 }
 
 test "zix utils: socket_path resolve reports PathTooLong instead of truncating" {
