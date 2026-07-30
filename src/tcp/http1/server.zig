@@ -7,14 +7,13 @@ const core = @import("core.zig");
 const HandlerFn = core.HandlerFn;
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
 const tls_mux = @import("tls_mux.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const static_cache = @import("../../utils/static_cache.zig");
+const dispatch_support = @import("../../utils/dispatch_support.zig");
 
 // --------------------------------------------------------- //
 
@@ -34,7 +33,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
 
         pub fn deinit(_: *Self) void {}
 
-        /// Dual-listener TLS accept thread for the thread models: serves https on config.port
+        /// Dual-listener TLS accept thread for the thread model (.ASYNC): serves https on config.port
         /// (already overridden to tls_port by the caller) while the cleartext model runs on the
         /// original port.
         fn serveTlsThread(config: Config) void {
@@ -43,6 +42,14 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
 
         pub fn run(self: *const Self) !void {
             ignoreSigpipe();
+
+            // Reject an unrunnable model before any listener or TLS thread starts, so a rejected
+            // config leaves nothing behind (ADR-065).
+            if (!dispatch_support.isSupported(self.config.dispatch_model)) {
+                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+
+                return error.DispatchModelUnsupported;
+            }
 
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http.Server.run.
@@ -69,9 +76,9 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                     if (is_linux and self.config.dispatch_model == .URING)
                         return uring_model.runUring(self.config, handler);
 
-                    // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
-                    // TLS on tls_port (thread-per-connection, WebSocket + SSE included), the
-                    // cleartext model runs below unchanged.
+                    // Thread model (.ASYNC): one extra accept thread terminates TLS on tls_port
+                    // (thread-per-connection, WebSocket + SSE included), the cleartext model runs
+                    // below unchanged.
                     var tls_cfg = self.config;
                     tls_cfg.port = self.config.tls_port;
                     tls_cfg.tls_port = 0;
@@ -81,7 +88,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                 } else {
                     // .EPOLL / .URING terminate TLS in an event-driven epoll-mux worker (keep-alive,
                     // thousands of connections per worker). The thread-per-connection blocking path
-                    // (tls_serve) serves the remaining models.
+                    // (tls_serve) serves .ASYNC.
                     if (is_linux and (self.config.dispatch_model == .EPOLL or self.config.dispatch_model == .URING))
                         return tls_mux.runTlsMux(handler, self.config);
 
@@ -89,22 +96,18 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                 }
             }
 
+            // The .EPOLL / .URING arms are comptime-guarded because their loops only compile on
+            // Linux. The guard above already rejected them off Linux, so the else arm never runs.
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(self.config, handler),
-                .POOL => pool_model.runPool(self.config, handler),
-                .MIXED => mixed_model.runMixed(self.config, handler),
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                     epoll_model.runEpoll(self.config, handler)
-                else blk: {
-                    common.logSystem(self.config, "EPOLL is Linux-only. Falling back to POOL.", .{});
-                    break :blk pool_model.runPool(self.config, handler);
-                },
+                else
+                    error.DispatchModelUnsupported,
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
                     uring_model.runUring(self.config, handler)
-                else blk: {
-                    common.logSystem(self.config, "URING is Linux-only. Falling back to POOL.", .{});
-                    break :blk pool_model.runPool(self.config, handler);
-                },
+                else
+                    error.DispatchModelUnsupported,
             };
         }
     };
@@ -152,16 +155,6 @@ test "zix http1: Server.init valid config, deinit is safe" {
         .ip = "127.0.0.1",
         .port = 9200,
         .dispatch_model = .ASYNC,
-    });
-    server.deinit();
-}
-
-test "zix http1: Server.init with POOL dispatch model" {
-    var server = Server.init(testNoopHandler, .{
-        .io = undefined,
-        .ip = "127.0.0.1",
-        .port = 9200,
-        .dispatch_model = .POOL,
     });
     server.deinit();
 }
