@@ -14,6 +14,12 @@ const zix = @import("zix");
 
 const Http2 = zix.Http2;
 const fd_io = zix.utils.fd_io;
+const socket_poll = zix.utils.socket_poll;
+
+/// Ceiling for one raw TLS record read. A check's server answers in well under a second, so this
+/// only fires when it accepted the connection and then went silent. Without it the read has no end,
+/// and an infinite park is not an error the runner's retry layer can see.
+const TLS_READ_TIMEOUT_MS: u32 = 5000;
 
 // --------------------------------------------------------- //
 
@@ -38,9 +44,25 @@ pub fn tlsReadRecord(fd: std.posix.fd_t, buf: []u8) !usize {
     return 5 + len;
 }
 
-/// Read exactly buf.len bytes from fd, looping over short reads and retrying on EINTR.
+/// Read exactly buf.len bytes from fd, looping over short reads and bounding each one.
+///
+/// Note:
+/// - fd_io.readAll is the same loop without a bound, which is why it is not used here: a server
+///   that accepts and then stops answering parks the check forever, and the runner reports that as
+///   a killed child rather than a named failure.
+/// - Raw descriptor, no reader buffer above it, so the readiness gate is safe to place directly in
+///   front of the read.
 pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
-    return fd_io.readAll(fd, buf);
+    var filled: usize = 0;
+
+    while (filled < buf.len) {
+        if (!socket_poll.readableWithin(fd, TLS_READ_TIMEOUT_MS)) return error.ReadTimeout;
+
+        const got = try fd_io.readOnce(fd, buf[filled..]);
+        if (got == 0) return error.ConnectionClosed;
+
+        filled += got;
+    }
 }
 
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
