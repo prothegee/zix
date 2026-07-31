@@ -46,7 +46,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` untuk setiap varian enum |
-| `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak valid, flag chunked aktif/nonaktif, dechunk tunggal/ganda/terminal/extension/hex-tidak-valid/hex-kapital |
+| `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak valid, flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
 | `tcp/http/request.zig` | `refAllDecls` + perilaku: method, path, query string, queryParam (ada / tidak ada / flag), pathSegments, queryParams, pencarian header (case-insensitive) |
 | `tcp/http/response.zig` | `refAllDecls` + perilaku: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, penjaga injeksi (CR/LF), TooManyHeaders, format wire `SseWriter`, default `Response.streaming` |
 | `tcp/http/router.zig` | `refAllDecls` + perilaku: matchParam, registrasi route (kind + path tersimpan) |
@@ -709,7 +709,7 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | `queryParam` key ada dengan nilai kosong | `"?k="` -> `""` (bukan null) |
 | `queryParam` key tidak ada menghasilkan null | key tidak ada dalam query string |
 | `queryParam` tidak ada query string sama sekali menghasilkan null | target tidak memiliki `?` |
-| `body()` chunked hex tidak valid menghasilkan string kosong | ukuran chunk `"zz"` -> `""` (error dechunk -> 0 byte) |
+| `body()` chunked hex tidak valid adalah error, bukan body kosong | ukuran chunk `"zz"` -> `error.InvalidChunkedBody`, `bodyComplete()` false (engine menjawab 400) |
 | `body()` chunked chunk terminal yang hilang mengembalikan data parsial | tidak ada `0\r\n\r\n` -> data parsial dikembalikan |
 | `body()` chunked chunk satu-byte | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
