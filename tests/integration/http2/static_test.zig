@@ -36,39 +36,15 @@ const Routes = zix.Http2.Router(&[_]zix.Http2.Route{
     .{ .path = "/", .handler = homeHandler },
 });
 
-/// Progress marker, for locating a stall this suite cannot reproduce on demand.
-///
-/// Note:
-/// - A test that outlives --test-timeout is killed by the runner, which then prints the test name
-///   and the stderr it captured. The last line logged here is therefore the step that never
-///   finished, which is the one thing a bare timeout does not say.
-/// - Temporary. Once the stall on the OpenBSD leg is located these come out again.
-fn trace(comptime message: []const u8, args: anytype) void {
-    // The runner pins std.testing.log_level to .warn before the first test, so an info line would
-    // be dropped before it reaches stderr. Raising it here keeps the markers at info, where a
-    // progress note belongs, rather than dressing them up as warnings.
-    std.testing.log_level = .info;
-
-    std.log.info("h2c static: " ++ message, args);
-}
-
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
-    trace("server waiting to accept", .{});
-
     const stream = ctx.listener.accept(io) catch |err| {
         ctx.err = err;
-
-        trace("server accept failed: {t}", .{err});
 
         return;
     };
     const fd = stream.socket.handle;
 
-    trace("server accepted, entering serveConn", .{});
-
     zix.Http2.serveConn(Routes.dispatch, fd, .{ .public_dir = g_public_dir }, io);
-
-    trace("server left serveConn", .{});
 
     zix.utils.fd_io.close(fd);
 }
@@ -91,16 +67,12 @@ fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", port);
     const stream = try addr.connect(io, .{ .mode = .stream });
 
-    trace("client connected on port {d}", .{port});
-
     return stream.socket.handle;
 }
 
 fn sendPreface(fd: std.posix.fd_t) !void {
     try zix.Http2.writeAllFD(fd, zix.Http2.PREFACE);
     try zix.Http2.sendSettingsFD(fd, &.{});
-
-    trace("client sent preface and settings", .{});
 }
 
 fn sendGet(fd: std.posix.fd_t, sid: u31, path: []const u8, accept_encoding: ?[]const u8) !void {
@@ -125,8 +97,6 @@ fn sendGetRange(fd: std.posix.fd_t, sid: u31, path: []const u8, accept_encoding:
         .stream_id = sid,
     });
     try zix.Http2.writeAllFD(fd, hblock);
-
-    trace("client sent GET {s} on stream {d}", .{ path, sid });
 }
 
 /// Read one stream to END_STREAM, returning its body and the decoded status.
@@ -149,13 +119,9 @@ fn recvReply(fd: std.posix.fd_t, sid: u31, buf: []u8, encoding_buf: []u8) !Reply
     var scratch: [2048]u8 = undefined;
 
     while (true) {
-        trace("client waiting for a frame on stream {d}", .{sid});
-
         const fh = try zix.Http2.readFrameHeader(fd);
         const payload = payload_buf[0..fh.length];
         if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
-
-        trace("client read frame type {d} flags {d} len {d} stream {d}", .{ fh.frame_type, fh.flags, fh.length, fh.stream_id });
 
         switch (fh.frame_type) {
             zix.Http2.FRAME_TYPE_SETTINGS => {
@@ -256,15 +222,7 @@ test "zix integration: Http2 serves an unmatched path from public_dir over h2c" 
     try std.testing.expectEqualStrings("body{margin:0;padding:0}", reply.body);
 
     try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
-
-    // This is the test that stalls on the OpenBSD leg, so its teardown is traced too: a stall here
-    // rather than in recvReply above means the server never left serveConn on the GOAWAY.
-    trace("client sent GOAWAY, joining the server thread", .{});
-
     thread.join();
-
-    trace("server thread joined", .{});
-
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
