@@ -2844,6 +2844,10 @@ fn testTcpSocket() !std.posix.fd_t {
 ///   drain asks for far more than any scratch buffer holds, so every drain test
 ///   needs a real TCP pair.
 pub fn testTcpPair() ![2]std.posix.fd_t {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+
     const linux = std.os.linux;
 
     const listener = try testTcpSocket();
