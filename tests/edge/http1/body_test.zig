@@ -7,6 +7,9 @@
 const std = @import("std");
 const zix = @import("zix");
 
+/// The request views under test never touch the socket, so any invalid fd works.
+const TEST_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
 // --------------------------------------------------------- //
 
 test "zix edge: Http1 absent Content-Length frames the request as bodyless" {
@@ -62,7 +65,7 @@ test "zix edge: Http1 Expect 100-continue is flagged for a body-carrying request
 
 test "zix edge: Http1 Request bodyReceived is zero for a bodyless request" {
     const result = try zix.Http1.parseHead("GET /ping HTTP/1.1\r\nHost: t\r\n\r\n");
-    var req = zix.Http1.Request.init(&result.head, &.{}, -1);
+    var req = zix.Http1.Request.init(&result.head, &.{}, TEST_FD);
 
     try std.testing.expectEqual(@as(u64, 0), req.bodyReceived());
     try std.testing.expectEqual(@as(usize, 0), (try req.body()).len);
@@ -70,7 +73,7 @@ test "zix edge: Http1 Request bodyReceived is zero for a bodyless request" {
 
 test "zix edge: Http1 Request bodyReceived tracks the delivered slice by default" {
     const result = try zix.Http1.parseHead("POST /upload HTTP/1.1\r\nContent-Length: 4\r\n\r\n");
-    var req = zix.Http1.Request.init(&result.head, "abcd", -1);
+    var req = zix.Http1.Request.init(&result.head, "abcd", TEST_FD);
 
     try std.testing.expectEqual(@as(u64, 4), req.bodyReceived());
     try std.testing.expectEqualStrings("abcd", try req.body());
@@ -80,7 +83,7 @@ test "zix edge: Http1 Request bodyComplete is true for a bodyless request" {
     const parsed = try zix.Http1.parseHead("GET /ping HTTP/1.1\r\nHost: x\r\n\r\n");
 
     // Nothing was declared, so nothing could fall short.
-    const req = zix.Http1.Request.init(&parsed.head, "", -1);
+    const req = zix.Http1.Request.init(&parsed.head, "", TEST_FD);
     try std.testing.expect(req.bodyComplete());
 }
 
@@ -89,7 +92,7 @@ test "zix edge: Http1 Request bodyComplete is independent of the delivered lengt
 
     // A body past the receive buffer arrives whole and is delivered short. Only
     // a peer that stopped sending makes it incomplete.
-    var req = zix.Http1.Request.init(&parsed.head, "", -1);
+    var req = zix.Http1.Request.init(&parsed.head, "", TEST_FD);
     req.body_received = 65536;
     try std.testing.expect(req.bodyComplete());
 
