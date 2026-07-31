@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
+const socket_poll = @import("../../utils/socket_poll.zig");
 
 /// SSE stream read buffer.
 const SSE_READ_BUF: usize = 4096;
@@ -41,6 +42,17 @@ pub const SseClientConfig = struct {
     io: std.Io,
     /// TCP connect timeout in milliseconds. 0 = no timeout.
     connect_timeout_ms: u32 = 0,
+    /// Time allowed to receive the response head after the request is sent, in milliseconds.
+    /// 0 = no timeout. Yields error.ResponseTimeout when a server accepts and then never answers.
+    response_timeout_ms: u32 = 0,
+    /// Idle bound between events, in milliseconds. The budget restarts on every event.
+    /// 0 = no timeout. Yields error.ReadTimeout when the stream goes quiet.
+    ///
+    /// Note:
+    /// - Defaults to no bound on purpose. A live SSE stream is expected to sit idle between
+    ///   events, so only a caller that knows its stream is chatty (a test, a health probe) should
+    ///   set this.
+    read_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -54,6 +66,9 @@ pub const SseStream = struct {
     read_buf: [SSE_READ_BUF]u8,
     read_len: usize,
     read_pos: usize,
+    /// Idle bound carried over from SseClientConfig, applied per socket read in readLine.
+    /// Defaults to no bound so a hand-built stream reads exactly as it did before the field existed.
+    read_timeout_ms: u32 = 0,
 
     // --------------------------------------------------------- //
 
@@ -176,6 +191,10 @@ pub const SseStream = struct {
                 }
             }
 
+            // A quiet stream is an error, never a clean close: null here would surface as "no
+            // event" and hide a server that accepted and then stopped answering.
+            if (!socket_poll.readableWithin(self.fd, self.read_timeout_ms)) return error.ReadTimeout;
+
             const n = readOnceFD(self.fd, &self.read_buf) catch return null;
             if (n == 0) return if (line_len > 0) out[0..line_len] else null;
             self.read_pos = 0;
@@ -253,6 +272,8 @@ pub const SseClient = struct {
         var header_end: usize = 0;
 
         while (head_len < head_buf.len) {
+            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+
             const n = readOnceFD(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
             if (n == 0) return error.ConnectionFailed;
             head_len += n;
@@ -273,6 +294,7 @@ pub const SseClient = struct {
             .read_buf = undefined,
             .read_len = 0,
             .read_pos = 0,
+            .read_timeout_ms = self.config.read_timeout_ms,
         };
 
         const already_read = head_len - header_end;
@@ -421,4 +443,82 @@ test "zix http sse client: parseHttpUrl default port 80" {
 
 test "zix http sse client: parseHttpUrl https returns TlsNotSupported" {
     try std.testing.expectError(error.TlsNotSupported, parseHttpUrl("https://example.com/events"));
+}
+
+test "zix http sse client: a server that never answers yields ResponseTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Never accepted on purpose. The kernel completes the handshake into the backlog, so the client
+    // connects and sends fine and then waits on a head that never comes.
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9079);
+    var silent = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer silent.deinit(io);
+
+    const client = SseClient.init(.{
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 150,
+    });
+
+    try std.testing.expectError(error.ResponseTimeout, client.open("http://127.0.0.1:9079/events"));
+}
+
+test "zix http sse client: a stream that goes quiet yields ReadTimeout, not a clean close" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9080);
+    var listener = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer listener.deinit(io);
+
+    // Sends a valid event-stream head and then no events at all. Held open until released, because
+    // closing would be the clean end of stream this test is trying NOT to produce.
+    const Quiet = struct {
+        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io, release: *std.atomic.Value(bool)) void {
+            const stream = listen_srv.accept(srv_io) catch return;
+            defer stream.close(srv_io);
+
+            var scratch: [1024]u8 = undefined;
+            var reader = stream.reader(srv_io, &scratch);
+            while (reader.interface.takeDelimiterInclusive('\n') catch null) |line| {
+                if (line.len <= 2) break;
+            }
+
+            var sink: [256]u8 = undefined;
+            var writer = stream.writer(srv_io, &sink);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+            writer.interface.flush() catch return;
+
+            var rounds: usize = 0;
+            while (!release.load(.acquire) and rounds < 5000) : (rounds += 1) {
+                std.Io.sleep(srv_io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+    };
+
+    var release: std.atomic.Value(bool) = .init(false);
+    const serve_thread = try std.Thread.spawn(.{}, Quiet.serve, .{ &listener, io, &release });
+    defer serve_thread.join();
+
+    const client = SseClient.init(.{
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 3000,
+        .read_timeout_ms = 150,
+    });
+
+    var stream = client.open("http://127.0.0.1:9080/events") catch |err| {
+        release.store(true, .release);
+        return err;
+    };
+    defer stream.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const outcome = stream.next(&buf);
+    release.store(true, .release);
+
+    try std.testing.expectError(error.ReadTimeout, outcome);
 }
