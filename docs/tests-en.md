@@ -86,10 +86,11 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
-| `tcp/http/client.zig` | `refAllDecls` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`) |
+| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
+| `tcp/http/client.zig` | `refAllDecls` + behavioral: `.HTTP_2` over a non-https URL is rejected before connecting, `.HTTP_3` yields `UnsupportedVersion`, a server that never answers yields `ResponseTimeout`, a complete reply is not cut short by an idle bound, a body that goes quiet mid-transfer yields `ReadTimeout` |
+| `tcp/http/h2_client.zig` | `refAllDecls` + behavioral: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trips through the frame parser, `putWindowUpdate` encodes the increment big-endian, `headerBlock` strips PADDED and PRIORITY prefixes, `dataPayload` strips DATA padding, a peer that accepts and never speaks yields `ResponseTimeout` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`), a server that never answers yields `ResponseTimeout`, a stream that goes quiet yields `ReadTimeout` (not a clean close) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`), a server that never answers yields `ResponseTimeout`, a peer that sends no frame yields `ReadTimeout` |
 
 ### zix.Channel
 
@@ -165,6 +166,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `utils/static_cache.zig` | `refAllDecls` + behavioral: path join rejects traversal / absolute / oversize, header carries `Vary` and only encodes when compressed, entry count clamped and rounded to a power of two, second request reuses the same open file, a miss caches nothing, ttl 0 never touches the table, `.br` / `.gz` siblings picked up and negotiated, a file with no sibling serves identity, an expired entry is reclaimed and re-opened, a pinned slot survives reclaim, a full table degrades to null, a sweep frees room, `install` is process-wide and `shutdown` clears it |
 | `utils/dispatch_support.zig` | `refAllDecls` + behavioral: `.ASYNC` is supported on every platform, `.EPOLL` / `.URING` support follows the target os tag, `rejectedName` reports the model tag, `Error` carries the single canonical reject error |
 | `utils/static_send.zig` | `refAllDecls` + behavioral: the copy path writes the whole body through the engine write, honours an offset and a partial length, a zero-length range never touches the socket, a body larger than the copy buffer loops, a failing engine write surfaces as BrokenPipe. Linux only: the zero-copy path delivers exact bytes over a real socket, honours an offset, and reports BrokenPipe on a closed peer |
+| `utils/socket_poll.zig` | `refAllDecls` + behavioral: `readableWithin` skips the wait when the budget is zero, `waitReady` reports a datagram already queued on the socket, `waitReady` reports not ready when nothing arrives in the budget |
 
 ### multiplexers (src/multiplexers/, internal)
 
