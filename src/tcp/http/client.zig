@@ -523,28 +523,9 @@ fn udsMethodStr(method: Method.Code) []const u8 {
     };
 }
 
-/// Whether the socket has something to read inside the budget.
-///
-/// Note:
-/// - A budget of 0 is the caller asking for no bound at all, so this reports ready without waiting
-///   and the read below blocks exactly as it did before any bound existed.
-/// - Under https readiness means bytes arrived on the wire, not that a whole TLS record is there.
-///   It bounds liveness, not record framing.
-/// - A failed readiness check counts as not ready: the caller turns that into its timeout error
-///   rather than parking on a socket it could not ask about.
-///
-/// Param:
-/// handle - std.posix.socket_t (the connection socket)
-/// budget_ms - u32 (0 skips the wait entirely)
-///
-/// Return:
-/// - true when the socket is readable, or when no bound was configured
-/// - false when the budget elapsed first
-fn readableWithin(handle: std.posix.socket_t, budget_ms: u32) bool {
-    if (budget_ms == 0) return true;
-
-    return socket_poll.waitReady(handle, socket_poll.READABLE, budget_ms) catch false;
-}
+/// Readiness gate shared with the SSE and WebSocket clients. Under https it means bytes arrived on
+/// the wire, not that a whole TLS record is there, so it bounds liveness rather than record framing.
+const readableWithin = socket_poll.readableWithin;
 
 /// Whether any byte of the response is already in userspace, anywhere along the reader chain.
 ///
@@ -711,21 +692,6 @@ test "zix http: http client, a server that never answers yields ResponseTimeout"
     try std.testing.expectError(error.ResponseTimeout, client.get("http://127.0.0.1:9066/", .{}));
 }
 
-test "zix http: http client, readableWithin skips the wait when the budget is zero" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9067);
-    const idle = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
-    defer idle.close(io);
-
-    // Nothing is ever sent here, so a real check reports not ready. A zero budget has to report
-    // ready regardless: that is what keeps an unconfigured client on its original blocking read.
-    try std.testing.expect(!readableWithin(idle.handle, 50));
-    try std.testing.expect(readableWithin(idle.handle, 0));
-}
-
 test "zix http: http client, a complete reply is not cut short by an idle bound" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -739,18 +705,35 @@ test "zix http: http client, a complete reply is not cut short by an idle bound"
     // quiet. A gate that only asks the socket times out here on a response already in hand, which
     // is exactly what this guards.
     const Whole = struct {
-        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io) void {
+        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io, release: *std.atomic.Value(bool)) void {
             const stream = listen_srv.accept(srv_io) catch return;
             defer stream.close(srv_io);
+
+            // Drain the request first. Closing a socket that still holds unread bytes is an
+            // abortive close, and Windows then discards the reply this test just wrote and fails
+            // the client's read with LOCAL_DISCONNECT instead of delivering it.
+            var scratch: [1024]u8 = undefined;
+            var reader = stream.reader(srv_io, &scratch);
+            while (reader.interface.takeDelimiterInclusive('\n') catch null) |line| {
+                if (line.len <= 2) break;
+            }
 
             var sink: [256]u8 = undefined;
             var writer = stream.writer(srv_io, &sink);
             writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nwhole") catch return;
             writer.interface.flush() catch return;
+
+            // Held open until the client is done, for the same reason: the close must not race the
+            // read it is answering. The round cap is only a backstop against an unjoinable thread.
+            var rounds: usize = 0;
+            while (!release.load(.acquire) and rounds < 5000) : (rounds += 1) {
+                std.Io.sleep(srv_io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            }
         }
     };
 
-    const serve_thread = try std.Thread.spawn(.{}, Whole.serve, .{ &listener, io });
+    var release: std.atomic.Value(bool) = .init(false);
+    const serve_thread = try std.Thread.spawn(.{}, Whole.serve, .{ &listener, io, &release });
     defer serve_thread.join();
 
     var client = HttpClient.init(.{
@@ -762,7 +745,10 @@ test "zix http: http client, a complete reply is not cut short by an idle bound"
     });
     defer client.deinit();
 
-    var resp = try client.get("http://127.0.0.1:9069/", .{});
+    const outcome = client.get("http://127.0.0.1:9069/", .{});
+    release.store(true, .release);
+
+    var resp = try outcome;
     defer resp.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), resp.status());
