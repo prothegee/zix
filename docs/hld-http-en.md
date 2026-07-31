@@ -751,8 +751,8 @@ pub const HttpClientConfig = struct {
     allocator:           std.mem.Allocator, // owns response body + head copies
     io:                  std.Io,            // event-loop backend, not owned by client
     connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
-    response_timeout_ms: u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
-    read_timeout_ms:     u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ResponseTimeout when the head never arrives
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ReadTimeout when the body stalls (Content-Length only)
     max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
@@ -795,6 +795,8 @@ sequenceDiagram
 | `error.InvalidUrl` | `Uri.parse` fails, unsupported scheme, or missing host |
 | `error.BodyTooLarge` | response body exceeds `max_response_body` bytes |
 | `error.Timeout` | TCP connect exceeded `connect_timeout_ms` (from `std.Io`) |
+| `error.ResponseTimeout` | server accepted the connection but sent no response head within `response_timeout_ms` |
+| `error.ReadTimeout` | body stalled past `read_timeout_ms` mid-transfer (Content-Length bodies only) |
 
 Other errors from `std.http.Client` propagate unchanged (OutOfMemory, ConnectionRefused, etc.).
 
@@ -819,8 +821,6 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 
 | Feature | Status |
 | :- | :- |
-| `response_timeout_ms` enforcement | v1: field stored, not yet applied |
-| `read_timeout_ms` enforcement | v1: field stored, not yet applied |
 | TLS / HTTPS (client) | https via `version = .HTTP_2` (h2 over TLS 1.3, `h2_client.zig`), trusting the server cert through `tls_ca_path` / `tls_verify`. The HTTP/1 client path is cleartext |
 | Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
 
@@ -831,7 +831,6 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | Feature | Location | Note |
 | :- | :- | :- |
 | Middleware chain runner | deleted (ADR-062) | Comptime wrapper composition is the middleware idiom, see `examples/http_middleware.zig` |
-| response/read timeout enforcement (client) | `client.zig` | Config fields stored. IO-level wiring deferred |
 
 TLS for this server (native https, opt-in via `config.tls`, dual listener via `config.tls_port`) is implemented, see [`docs/hld-tls-en.md`](hld-tls-en.md).
 
