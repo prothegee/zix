@@ -29,6 +29,8 @@ pub fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
         .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
     });
@@ -61,6 +63,8 @@ pub fn runTlsHttp1Dual(io: std.Io, server_path: []const u8, port: u16, tls_port:
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
         .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
     });
