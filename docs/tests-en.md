@@ -46,7 +46,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` for every enum variant |
-| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, dechunk single/multiple/terminal/extension/invalid-hex/uppercase hex |
+| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
 | `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive) |
 | `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
@@ -709,7 +709,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
 | `queryParam` key absent returns null | key not in query string |
 | `queryParam` no query string at all returns null | target has no `?` |
-| `body()` chunked invalid hex returns empty string | `"zz"` chunk size -> `""` (dechunk error -> 0 bytes) |
+| `body()` chunked invalid hex is an error, not an empty body | `"zz"` chunk size -> `error.InvalidChunkedBody`, `bodyComplete()` false (the engine answers 400) |
 | `body()` chunked missing terminal chunk returns partial data | no `0\r\n\r\n` -> partial data returned |
 | `body()` chunked single-byte chunks | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
