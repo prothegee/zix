@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../utils/windows_io.zig");
+const socket_poll = @import("../../utils/socket_poll.zig");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
@@ -159,6 +160,8 @@ pub const HttpClient = struct {
     /// Errors (named):
     /// error.InvalidUrl          - malformed URL, unsupported scheme, or missing host
     /// error.BodyTooLarge        - response body exceeded config.max_response_body bytes
+    /// error.ResponseTimeout     - no first response byte within config.response_timeout_ms
+    /// error.ReadTimeout         - response body went quiet for config.read_timeout_ms
     /// error.UnsupportedVersion  - config.version is HTTP_3
     /// error.UnsupportedScheme   - HTTP_2 was requested for a non-https URL
     /// error.TlsNoTrustAnchor    - HTTP_2 with tls_verify set but no tls_ca_path
@@ -246,6 +249,12 @@ pub const HttpClient = struct {
             try req.sendBodiless();
         }
 
+        const conn_handle = conn.stream_reader.stream.socket.handle;
+
+        // The request is out, so everything below waits on the peer. A server that accepts and then
+        // never answers parks receiveHead forever without this gate.
+        if (!readableWithin(conn_handle, self.config.response_timeout_ms)) return error.ResponseTimeout;
+
         var redirect_buf: [REDIRECT_HEAD_BUF]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
@@ -257,7 +266,21 @@ pub const HttpClient = struct {
 
         var transfer_buf: [BODY_TRANSFER_BUF]u8 = undefined;
         const body_reader = response.reader(&transfer_buf);
-        const body_bytes = body_reader.allocRemaining(gpa, .limited(self.config.max_response_body)) catch |err| switch (err) {
+
+        // Bounded only when the reply declares its length, since the bounded loop stops on the byte
+        // count. A chunked or close-delimited body keeps std's own read, which ends on the stream.
+        const declared: ?usize = if (self.config.read_timeout_ms == 0)
+            null
+        else if (response.head.content_length) |len|
+            std.math.cast(usize, len) orelse return error.BodyTooLarge
+        else
+            null;
+
+        const body_bytes = if (declared) |expected| blk: {
+            if (expected > self.config.max_response_body) return error.BodyTooLarge;
+
+            break :blk try readBodyBounded(gpa, body_reader, conn, self.config.read_timeout_ms, expected);
+        } else body_reader.allocRemaining(gpa, .limited(self.config.max_response_body)) catch |err| switch (err) {
             error.StreamTooLong => return error.BodyTooLarge,
             else => |e| return e,
         };
@@ -394,6 +417,8 @@ pub const HttpClient = struct {
         var header_end: usize = 0;
 
         while (head_scan_len < head_scan_buf.len) {
+            if (!readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+
             const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
             if (n == 0) return error.ConnectionClosed;
             head_scan_len += n;
@@ -436,6 +461,8 @@ pub const HttpClient = struct {
             @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
             var body_received = initial;
             while (body_received < cl) {
+                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ReadTimeout;
+
                 const n = readOnceFD(fd, body_list.items[body_received..]) catch break;
                 if (n == 0) break;
                 body_received += n;
@@ -444,6 +471,8 @@ pub const HttpClient = struct {
             if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
             var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
             while (true) {
+                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ReadTimeout;
+
                 const n = readOnceFD(fd, &read_chunk) catch break;
                 if (n == 0) break;
                 if (body_list.items.len + n > self.config.max_response_body) return error.BodyTooLarge;
@@ -492,6 +521,107 @@ fn udsMethodStr(method: Method.Code) []const u8 {
         .TRACE => "TRACE",
         .CONNECT => "CONNECT",
     };
+}
+
+/// Whether the socket has something to read inside the budget.
+///
+/// Note:
+/// - A budget of 0 is the caller asking for no bound at all, so this reports ready without waiting
+///   and the read below blocks exactly as it did before any bound existed.
+/// - Under https readiness means bytes arrived on the wire, not that a whole TLS record is there.
+///   It bounds liveness, not record framing.
+/// - A failed readiness check counts as not ready: the caller turns that into its timeout error
+///   rather than parking on a socket it could not ask about.
+///
+/// Param:
+/// handle - std.posix.socket_t (the connection socket)
+/// budget_ms - u32 (0 skips the wait entirely)
+///
+/// Return:
+/// - true when the socket is readable, or when no bound was configured
+/// - false when the budget elapsed first
+fn readableWithin(handle: std.posix.socket_t, budget_ms: u32) bool {
+    if (budget_ms == 0) return true;
+
+    return socket_poll.waitReady(handle, socket_poll.READABLE, budget_ms) catch false;
+}
+
+/// Whether any byte of the response is already in userspace, anywhere along the reader chain.
+///
+/// Note:
+/// - This is what makes a socket-readiness gate safe to compose with a buffered reader. receiveHead
+///   reads the head and whatever body bytes rode the same packet into the connection buffer, so the
+///   socket can be silent while the body is already in hand. Polling then would wait out the whole
+///   budget and report a timeout on a response that already arrived.
+/// - Three levels because the chain differs by scheme: the body reader decodes, and under https the
+///   connection reader holds decrypted bytes while stream_reader holds the raw ones. On plain http
+///   the middle and last are the same reader, which costs one redundant load.
+///
+/// Param:
+/// body_reader - *std.Io.Reader (the decoded body reader)
+/// conn - *std.http.Client.Connection (the live connection)
+///
+/// Return:
+/// - true when a read can be served without touching the socket
+fn anyBuffered(body_reader: *std.Io.Reader, conn: *std.http.Client.Connection) bool {
+    return body_reader.bufferedLen() > 0 or
+        conn.reader().bufferedLen() > 0 or
+        conn.stream_reader.interface.bufferedLen() > 0;
+}
+
+/// Read a declared-length response body with an idle bound between socket reads.
+///
+/// Note:
+/// - The loop ends on the byte count, never on end of stream. A finished body leaves the socket
+///   quiet, so a gate placed after the last byte would wait out its full budget on a complete
+///   response.
+/// - The budget covers one quiet stretch, not the whole transfer, so a large body is never cut off
+///   for being large.
+/// - Needs the length up front, so it serves content-length replies only. A chunked or
+///   close-delimited body has no count to stop on and stays on the caller's unbounded path.
+///
+/// Param:
+/// gpa - std.mem.Allocator (owns the returned slice)
+/// reader - *std.Io.Reader (the decoded body reader)
+/// conn - *std.http.Client.Connection (polled between reads, and asked what it already holds)
+/// idle_ms - u32 (budget for one read, restarted on every chunk that arrives)
+/// expected - usize (declared body length, from the Content-Length header)
+///
+/// Return:
+/// - the body bytes, owned by gpa
+/// - error.ReadTimeout when no byte arrives inside idle_ms
+fn readBodyBounded(
+    gpa: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    conn: *std.http.Client.Connection,
+    idle_ms: u32,
+    expected: usize,
+) ![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(gpa);
+
+    try body.ensureTotalCapacity(gpa, expected);
+
+    while (body.items.len < expected) {
+        if (!anyBuffered(reader, conn)) {
+            if (!readableWithin(conn.stream_reader.stream.socket.handle, idle_ms)) return error.ReadTimeout;
+        }
+
+        // A peer that closes early ends the body short rather than hanging the caller. The status
+        // and head are already parsed, so the caller still sees a usable response.
+        reader.fill(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+
+        const chunk = reader.buffered();
+        const wanted = @min(chunk.len, expected - body.items.len);
+
+        try body.appendSlice(gpa, chunk[0..wanted]);
+        reader.toss(wanted);
+    }
+
+    return body.toOwnedSlice(gpa);
 }
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
@@ -556,4 +686,134 @@ test "zix http: http client, HTTP_3 still yields UnsupportedVersion" {
     defer client.deinit();
 
     try std.testing.expectError(error.UnsupportedVersion, client.get("https://localhost:9061/", .{}));
+}
+
+test "zix http: http client, a server that never answers yields ResponseTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Never accepted on purpose. The kernel completes the handshake into the backlog either way, so
+    // the client connects and sends fine and then waits on a reply that never comes. That is what a
+    // parked server looks like from the client side, and with no bound the wait has no end.
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9066);
+    var silent = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer silent.deinit(io);
+
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 150,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(error.ResponseTimeout, client.get("http://127.0.0.1:9066/", .{}));
+}
+
+test "zix http: http client, readableWithin skips the wait when the budget is zero" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9067);
+    const idle = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer idle.close(io);
+
+    // Nothing is ever sent here, so a real check reports not ready. A zero budget has to report
+    // ready regardless: that is what keeps an unconfigured client on its original blocking read.
+    try std.testing.expect(!readableWithin(idle.handle, 50));
+    try std.testing.expect(readableWithin(idle.handle, 0));
+}
+
+test "zix http: http client, a complete reply is not cut short by an idle bound" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9069);
+    var listener = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer listener.deinit(io);
+
+    // Head and body land in one write, so both sit in the connection buffer while the socket goes
+    // quiet. A gate that only asks the socket times out here on a response already in hand, which
+    // is exactly what this guards.
+    const Whole = struct {
+        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io) void {
+            const stream = listen_srv.accept(srv_io) catch return;
+            defer stream.close(srv_io);
+
+            var sink: [256]u8 = undefined;
+            var writer = stream.writer(srv_io, &sink);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nwhole") catch return;
+            writer.interface.flush() catch return;
+        }
+    };
+
+    const serve_thread = try std.Thread.spawn(.{}, Whole.serve, .{ &listener, io });
+    defer serve_thread.join();
+
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 3000,
+        .read_timeout_ms = 150,
+    });
+    defer client.deinit();
+
+    var resp = try client.get("http://127.0.0.1:9069/", .{});
+    defer resp.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status());
+    try std.testing.expectEqualStrings("whole", resp.body());
+}
+
+test "zix http: http client, a body that goes quiet mid-transfer yields ReadTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9068);
+    var listener = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer listener.deinit(io);
+
+    // Promises 100 body bytes, sends 5, then holds the connection open. Closing instead would hand
+    // the client a clean end of stream, which is a different outcome than the stall under test.
+    const Stall = struct {
+        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io, release: *std.atomic.Value(bool)) void {
+            const stream = listen_srv.accept(srv_io) catch return;
+            defer stream.close(srv_io);
+
+            var sink: [256]u8 = undefined;
+            var writer = stream.writer(srv_io, &sink);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nfive!") catch return;
+            writer.interface.flush() catch return;
+
+            // Released the moment the client call returns. The round cap is only a backstop so a
+            // broken expectation cannot leave this thread unjoinable.
+            var rounds: usize = 0;
+            while (!release.load(.acquire) and rounds < 5000) : (rounds += 1) {
+                std.Io.sleep(srv_io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+    };
+
+    var release: std.atomic.Value(bool) = .init(false);
+    const stall_thread = try std.Thread.spawn(.{}, Stall.serve, .{ &listener, io, &release });
+    defer stall_thread.join();
+
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 3000,
+        .read_timeout_ms = 150,
+    });
+    defer client.deinit();
+
+    const outcome = client.get("http://127.0.0.1:9068/", .{});
+    release.store(true, .release);
+
+    try std.testing.expectError(error.ReadTimeout, outcome);
 }
