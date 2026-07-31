@@ -412,6 +412,33 @@ test "zix http: parser length-switch rejects same-length non-framing headers" {
     try std.testing.expect(!h.chunked);
 }
 
+test "zix http: parser chunked flag set when chunked is the last transfer coding" {
+    // RFC 9112 lets Transfer-Encoding carry a coding list as long as chunked is
+    // last. Missing it frames the request as bodyless, so the chunked body that
+    // follows is read as the next request on the connection.
+    const raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expect(h.chunked);
+}
+
+test "zix http: parser non-numeric Content-Length falls back to zero" {
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: abc\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(@as(u64, 0), h.content_length);
+}
+
+test "zix http: parser Content-Length past u64 falls back to zero" {
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(@as(u64, 0), h.content_length);
+}
+
+test "zix http: parser reads Content-Length case-insensitively on the full parse" {
+    const raw = "POST /upload HTTP/1.1\r\ncOnTeNt-LeNgTh: 20971520\r\n\r\n";
+    const h = (try parse(raw, 64)).?;
+    try std.testing.expectEqual(@as(u64, 20971520), h.content_length);
+}
+
 test "zix http: parser chunked flag false when Transfer-Encoding absent" {
     const raw = "POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
     const h = (try parse(raw, 64)).?;
