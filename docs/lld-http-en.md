@@ -400,8 +400,8 @@ Default values:
 | Field | Default | Enforced in v1? |
 | :- | :- | :- |
 | `connect_timeout_ms` | 0 | Yes, via `connectTcpOptions` |
-| `response_timeout_ms` | 0 | No, stored only |
-| `read_timeout_ms` | 0 | No, stored only |
+| `response_timeout_ms` | 0 | Yes, a readiness poll before `receiveHead` yields `error.ResponseTimeout` |
+| `read_timeout_ms` | 0 | Yes, a readiness poll inside the body read loop yields `error.ReadTimeout` (Content-Length bodies only) |
 | `max_response_body` | 4 MB | Yes, via `allocRemaining` |
 | `follow_redirects` | true | Yes |
 | `max_redirects` | 3 | Yes |
