@@ -75,3 +75,24 @@ test "zix edge: Http1 Request bodyReceived tracks the delivered slice by default
     try std.testing.expectEqual(@as(u64, 4), req.bodyReceived());
     try std.testing.expectEqualStrings("abcd", try req.body());
 }
+
+test "zix edge: Http1 Request bodyComplete is true for a bodyless request" {
+    const parsed = try zix.Http1.parseHead("GET /ping HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    // Nothing was declared, so nothing could fall short.
+    const req = zix.Http1.Request.init(&parsed.head, "", -1);
+    try std.testing.expect(req.bodyComplete());
+}
+
+test "zix edge: Http1 Request bodyComplete is independent of the delivered length" {
+    const parsed = try zix.Http1.parseHead("POST /u HTTP/1.1\r\nContent-Length: 65536\r\n\r\n");
+
+    // A body past the receive buffer arrives whole and is delivered short. Only
+    // a peer that stopped sending makes it incomplete.
+    var req = zix.Http1.Request.init(&parsed.head, "", -1);
+    req.body_received = 65536;
+    try std.testing.expect(req.bodyComplete());
+
+    req.body_complete = false;
+    try std.testing.expect(!req.bodyComplete());
+}
