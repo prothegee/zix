@@ -319,10 +319,8 @@ test "zix integration: TLS keeps answering after a multi-record response" {
 }
 
 test "zix integration: TLS on the URING model splits a large response the same way" {
-    if (comptime !is_linux) {
-        std.log.warn("URING dispatch is Linux-only, test skipped", .{});
-        return error.SkipZigTest;
-    }
+    // URING dispatch is Linux-only.
+    if (comptime !is_linux) return error.SkipZigTest;
 
     try startServersOnce();
 
