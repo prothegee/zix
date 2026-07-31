@@ -19,7 +19,7 @@ const setNonBlock = common.setNonBlock;
 const setBusyPoll = common.setBusyPoll;
 const pinToCpu = common.pinToCpu;
 const getAvailableCpuCount = common.getAvailableCpuCount;
-const decodeChunkedInBuf = common.decodeChunkedInBuf;
+const decodeChunkedInBuf = core.decodeChunkedInBuf;
 const parseGetFastPath = common.parseGetFastPath;
 const effectiveCacheEntries = common.effectiveCacheEntries;
 const MAX_FD = common.MAX_FD;
@@ -134,8 +134,10 @@ threadlocal var tl_requests_served: u64 = 0;
 /// once the connection upgrades to WebSocket: from then on buf holds raw frame
 /// bytes and the engine echoes via the stored callback instead of parsing HTTP.
 /// drain is the count of request-body bytes still to read and discard for a
-/// body too large to buffer (the response was already sent), drain_close marks
-/// that the connection must close once the drain finishes.
+/// body too large to buffer. The handler for that request has not run yet: it
+/// waits for the drain so it can be told how many body bytes arrived. drain_received
+/// accumulates that count and pending_head_len is how many head bytes are parked
+/// at the front of buf for the deferred parse.
 /// write_pending is a heap-owned slice of response bytes staged when a write
 /// hits EAGAIN (send buffer full). The EPOLL loop arms EPOLLOUT and drains it
 /// on the next writable event rather than blocking the worker. write_pending_off
@@ -153,8 +155,17 @@ const Conn = struct {
     /// event resumes the scan instead of rescanning from zero.
     scan_from: usize = 0,
     ws: ?core.WsFrameFn = null,
+    /// Whether 100 Continue was already sent for the request currently being
+    /// parsed. The parse pass re-runs on every readable event while a body is
+    /// still arriving, and the client only needs to be told once.
+    continue_sent: bool = false,
     drain: usize = 0,
-    drain_close: bool = false,
+    /// Body bytes of the deferred request already taken off the socket, the ones
+    /// that arrived with the head plus every byte the drain has discarded since.
+    drain_received: usize = 0,
+    /// Head bytes of the deferred request parked at the front of buf. Non-zero
+    /// means a handler is waiting for the drain to finish.
+    pending_head_len: usize = 0,
     write_pending: []u8 = &.{},
     write_pending_len: usize = 0,
     write_pending_off: usize = 0,
@@ -329,12 +340,12 @@ fn acceptAll(table: *ConnTable, epfd: std.posix.fd_t, listener_fd: std.posix.fd_
 /// remaining bytes are staged in conn.write_pending and EPOLLOUT is armed so
 /// the worker is never parked waiting for a slow client. An upgraded connection
 /// is handed to the WebSocket pump only after the flush.
-fn serveEpollConn(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
+fn serveEpollConn(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t, io: std.Io, arena: *std.heap.ArenaAllocator, do_read: bool) core.ConnOutcome {
     const linux = std.os.linux;
 
     var sink = core.RespSink{ .fd = conn.fd, .buf = out_buf };
     core.tl_resp_sink = &sink;
-    const outcome = serveEpollConnInner(handler_fn, conn, body_buf, handler_timeout_ms, io, arena);
+    const outcome = serveEpollConnInner(handler_fn, conn, body_buf, handler_timeout_ms, io, arena, do_read);
     core.tl_resp_sink = null;
 
     if (sink.failed) return .close;
@@ -402,11 +413,17 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     return if (should_close) .close else .keep_alive;
 }
 
-fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, handler_timeout_ms: u32, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
+/// Parse and serve every complete request in conn.buf.
+///
+/// Note:
+/// - do_read false skips the socket read and works only on what is already in
+///   conn.buf. That is how a request whose body was drained is served: the bytes
+///   it needs are its parked head, and reading again would take the next request.
+fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, handler_timeout_ms: u32, io: std.Io, arena: *std.heap.ArenaAllocator, do_read: bool) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
 
-    {
+    if (do_read) {
         const rc = linux.read(fd, conn.buf[conn.filled..].ptr, conn.buf.len - conn.filled);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
@@ -448,40 +465,84 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []
         };
         const head = parsed.head;
 
+        // The client is holding its body back until the server agrees to take it.
+        // Answering here rather than after the body means the wait is one round
+        // trip instead of the client's own timeout. .ASYNC has always done this.
+        if (head.expect_continue and !conn.continue_sent and (head.content_length > 0 or head.chunked_request)) {
+            core.writeAllFD(fd, "HTTP/1.1 100 Continue\r\n\r\n") catch return .close;
+            conn.continue_sent = true;
+        }
+
         var body: []const u8 = &.{};
         var request_len = parsed.body_offset;
         if (head.chunked_request) {
-            const decoded = decodeChunkedInBuf(rem[parsed.body_offset..], body_buf) orelse break;
+            const decoded = decodeChunkedInBuf(rem[parsed.body_offset..], body_buf);
+            switch (decoded.stop) {
+                .COMPLETE => {},
+                // Still arriving: keep the bytes and resume on the next event.
+                .NEED_MORE => break,
+                // Neither of these can ever complete, so waiting for more bytes
+                // would hold the connection until the buffer filled and the peer
+                // looked like it hung up. Answer the client instead.
+                .MALFORMED => {
+                    core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                    return .close;
+                },
+                .TOO_LARGE => {
+                    core.writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                    return .close;
+                },
+            }
+
             body = body_buf[0..decoded.len];
             request_len = parsed.body_offset + decoded.consumed;
         } else if (head.content_length > 0) {
+            // Refused before a byte of it is read or discarded, so a declared
+            // length cannot make this worker consume an arbitrary body.
+            if (core.tl_max_request_body != 0 and head.content_length > core.tl_max_request_body) {
+                core.writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                return .close;
+            }
+
             const content_length: usize = @intCast(head.content_length);
             const need = parsed.body_offset + content_length;
 
             if (need <= rem.len) {
                 body = rem[parsed.body_offset..need];
                 request_len = need;
+            } else if (conn.pending_head_len > 0) {
+                // Deferred request re-entering after its drain finished: the body
+                // was consumed off the socket and counted, so serve it now with
+                // that total and the empty body slice.
+                // The drain ran to zero before this branch was reached, so the body
+                // is whole even though none of it can be handed over.
+                core.tl_body_info = .{ .received = conn.drain_received, .complete = true };
+                conn.pending_head_len = 0;
+                conn.drain_received = 0;
+                request_len = parsed.body_offset;
             } else if (need > conn.buf.len) {
-                // Body is larger than the read buffer and can never fit. Respond
-                // now with an empty body (large-body endpoints use content_length,
-                // not the bytes), then drain the rest off the socket over later
-                // events so the connection stays usable for keep-alive.
-                if (handler_timeout_ms != 0) core.setTimeout(handler_timeout_ms);
-                _ = arena.reset(.retain_capacity);
-                core.invokeHandler(handler_fn, &head, &.{}, fd, io, arena.allocator());
-                tl_requests_served += 1;
-
-                // Widen the receive window for the upcoming large-body drain (uploads). Only this
-                // branch (body larger than the read buffer) touches it, so small-request cells keep
-                // the kernel default.
+                // Body is larger than the read buffer and can never fit. Hold the
+                // handler until the remainder has drained off the socket, so the
+                // count it is given comes from the reads that consumed the body
+                // rather than from the header. The head bytes stay at the front
+                // of buf for that deferred parse, which the MSG.TRUNC drain never
+                // writes over. Same ordering the .URING model uses.
                 core.setRecvBuf(fd, core.tl_large_body_rcvbuf);
+
+                if (consumed > 0) {
+                    std.mem.copyForwards(u8, conn.buf[0..parsed.body_offset], rem[0..parsed.body_offset]);
+                }
 
                 const present_body = rem.len - parsed.body_offset;
                 conn.drain = content_length - present_body;
-                conn.drain_close = !head.keep_alive;
-                conn.filled = 0;
+                conn.drain_received = present_body;
+                conn.pending_head_len = parsed.body_offset;
+                consumed = conn.filled;
 
-                return .keep_alive;
+                break;
             } else {
                 break;
             }
@@ -493,6 +554,7 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []
 
         consumed += request_len;
         tl_requests_served += 1;
+        conn.continue_sent = false;
 
         // The handler may have promoted this connection to WebSocket via
         // WebSocket.serve. From here buf bytes are frames, not requests, so
@@ -567,15 +629,15 @@ fn serveEpollWs(conn: *Conn, on_frame: core.WsFrameFn, payload_buf: []u8, out_bu
 }
 
 /// Read and discard the remaining body bytes of an over-large request whose
-/// response was already sent. Discards with MSG_TRUNC, so the kernel drops
-/// the bytes in place: no copy into conn.buf and the per-call chunk is not
-/// capped by the buffer length. Reads to EAGAIN, never past conn.drain, so
-/// the next request's bytes are left untouched. When the drain finishes, the
-/// connection resumes normal HTTP parsing, or closes if the request asked to.
+/// handler has not run yet. Discards with MSG_TRUNC, so the kernel drops the
+/// bytes in place: no copy into conn.buf, and the per-call chunk is not capped
+/// by the buffer length. Reads to EAGAIN, never past conn.drain, so the next
+/// request's bytes are left untouched. Every discarded byte is counted, because
+/// that count is what the waiting handler will be told it received.
 ///
 /// Return:
-/// - .keep_alive while bytes remain or once a keep-alive body is fully drained
-/// - .close on peer hangup or once a Connection: close body is fully drained
+/// - .keep_alive while bytes remain, or once the body is fully drained
+/// - .close on peer hangup
 fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
     const linux = std.os.linux;
     const fd = conn.fd;
@@ -589,6 +651,7 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
                 if (n == 0) return .close;
 
                 conn.drain -= n;
+                conn.drain_received += n;
             },
             .AGAIN => return .keep_alive,
             .INTR => {},
@@ -596,7 +659,32 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
         }
     }
 
-    return if (conn.drain_close) .close else .keep_alive;
+    return .keep_alive;
+}
+
+/// Drain what is left of an over-large body, then serve the request that was
+/// waiting on it. The head bytes were parked at the front of conn.buf, so the
+/// normal parse pass re-reads them and hands the handler the counted total.
+///
+/// Return:
+/// - .keep_alive while the drain is still running, or after the deferred request
+///   was served on a keep-alive connection
+/// - .close on peer hangup, or when the deferred request asked to close
+fn serveEpollDrainThenServe(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
+    const outcome = serveEpollDrain(conn);
+
+    if (outcome == .close) {
+        conn.pending_head_len = 0;
+        conn.drain_received = 0;
+
+        return .close;
+    }
+
+    if (conn.drain > 0 or conn.pending_head_len == 0) return outcome;
+
+    conn.filled = conn.pending_head_len;
+
+    return serveEpollConn(handler_fn, conn, body_buf, out_buf, handler_timeout_ms, epfd, io, arena, false);
 }
 
 /// One event on a dual-listener TLS connection: mirrors the tls_mux worker loop body (flush staged
@@ -651,6 +739,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn) fn (EpollWorkerCtx) void {
 
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
+            core.setMaxRequestBody(config.max_request_body);
             core.setStatic(config.public_dir, io);
             core.setMaxResponseHeaders(config.max_response_headers.value());
 
@@ -725,7 +814,11 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn) fn (EpollWorkerCtx) void {
             // disjoint sets, so the order of these defers does not matter.
             defer tl_write_pool.deinit();
 
-            const body_buf = std.heap.smp_allocator.alloc(u8, core.BUF_SIZE) catch return;
+            // Sized from the same knob as the recv slot, not a fixed constant:
+            // it holds a decoded chunked body and doubles as the WebSocket
+            // payload buffer, so both callers are bounded by what a connection
+            // may receive. .URING sizes its equivalent the same way.
+            const body_buf = std.heap.smp_allocator.alloc(u8, ws_buf_size) catch return;
             defer std.heap.smp_allocator.free(body_buf);
 
             const out_buf = std.heap.smp_allocator.alloc(u8, EPOLL_OUT_BUF_SIZE) catch return;
@@ -796,11 +889,11 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn) fn (EpollWorkerCtx) void {
                     else if (conn.write_pending.len > conn.write_pending_off)
                         serveEpollWrite(conn, epfd)
                     else if (conn.drain > 0)
-                        serveEpollDrain(conn)
+                        serveEpollDrainThenServe(handler_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd, io, &req_arena)
                     else if (conn.ws) |on_frame|
                         serveEpollWs(conn, on_frame, body_buf, out_buf)
                     else
-                        serveEpollConn(handler_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd, io, &req_arena);
+                        serveEpollConn(handler_fn, conn, body_buf, out_buf, config.handler_timeout_ms, epfd, io, &req_arena, true);
 
                     if (outcome == .close) {
                         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, ev.data.fd, null);
@@ -887,7 +980,7 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
 
     // epfd = -1: EPOLLOUT staging won't trigger for this burst (socketpair
     // buffer fits all 16 responses), so no epoll_ctl calls are made.
-    const outcome = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    const outcome = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
 
@@ -921,7 +1014,7 @@ test "zix http1: EPOLL split head resumes the terminator scan from the watermark
     // terminator split across events is still found).
     const part1 = "GET /pipeline HTTP/1.1\r\nHost: t";
     try std.testing.expectEqual(part1.len, std.os.linux.write(fds[0], part1, part1.len));
-    const first = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    const first = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
     try std.testing.expectEqual(part1.len, conn.filled);
     try std.testing.expectEqual(part1.len - 3, conn.scan_from);
@@ -929,7 +1022,7 @@ test "zix http1: EPOLL split head resumes the terminator scan from the watermark
     // The terminator arrives: the request completes and the watermark resets.
     const part2 = "\r\n\r\n";
     try std.testing.expectEqual(part2.len, std.os.linux.write(fds[0], part2, part2.len));
-    const second = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    const second = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
     try std.testing.expectEqual(@as(usize, 0), conn.scan_from);
@@ -940,6 +1033,180 @@ test "zix http1: EPOLL split head resumes the terminator scan from the watermark
     try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\nok"));
 }
 
+/// Echo the engine-counted received body size, so a test reads the value the
+/// upload contract is built on rather than the Content-Length header.
+fn testEchoReceivedHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    var buf: [48]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "{d}:{s}", .{ req.bodyReceived(), if (req.bodyComplete()) "whole" else "cut" }) catch return;
+
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(out);
+}
+
+test "zix http1: EPOLL reports the counted body total for an over-large body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // Both event loops defer the handler until the drain finishes and hand it
+    // the counted total, so the same request reports the same size on either.
+    const fds = try core.testTcpPair();
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const body_len: usize = 4096;
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 4096\r\n\r\n";
+    var body: [body_len]u8 = @splat('A');
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+    try std.testing.expectEqual(body_len, std.os.linux.write(fds[0], &body, body_len));
+
+    var conn_buf: [256]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Drive the event loop the way runEpoll does: the readable event parks the
+    // head and arms the drain, then drain events run until the body is consumed
+    // and the parked request is served with the counted total.
+    const outcome = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(head.len, conn.pending_head_len);
+
+    while (conn.drain > 0) {
+        _ = serveEpollDrainThenServe(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+
+    var recv: [1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\n4096:whole"));
+}
+
+test "zix http1: EPOLL never serves a request whose peer quit mid-drain" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The counterpart to .ASYNC reporting an incomplete body: this model does not
+    // report one, it never invokes the handler at all. Nothing pinned that, and
+    // a future edit could start serving the parked request on a hangup.
+    const fds = try core.testTcpPair();
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 4096\r\n\r\n";
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+    try std.testing.expectEqual(@as(usize, 10), std.os.linux.write(fds[0], "0123456789", 10));
+
+    var conn_buf: [256]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const served_before = tl_requests_served;
+
+    // Event 1 parks the head and arms the drain.
+    const first = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(head.len, conn.pending_head_len);
+    try std.testing.expect(conn.drain > 0);
+
+    // The peer goes away with the body unfinished.
+    _ = std.os.linux.shutdown(fds[0], std.os.linux.SHUT.WR);
+
+    const second = serveEpollDrainThenServe(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, second);
+    try std.testing.expectEqual(served_before, tl_requests_served);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain_received);
+}
+
+test "zix http1: EPOLL drain consumes exactly the declared body so the pipelined request survives" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const fds = try core.testTcpPair();
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const body_len: usize = 4096;
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 4096\r\n\r\n";
+    const follow = "GET /ping HTTP/1.1\r\nHost: t\r\n\r\n";
+    var body: [body_len]u8 = @splat('A');
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+    try std.testing.expectEqual(body_len, std.os.linux.write(fds[0], &body, body_len));
+    try std.testing.expectEqual(follow.len, std.os.linux.write(fds[0], follow, follow.len));
+
+    var conn_buf: [256]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Event 1 parks the POST head and arms the drain. Event 2 is the drain, which
+    // must stop at the body end, answer the POST, and leave the GET on the socket.
+    // Event 3 is the GET, which only parses when the drain neither over- nor
+    // under-read.
+    _ = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    const drained = serveEpollDrainThenServe(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, drained);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+
+    const second = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+
+    var recv: [1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, recv[0..n], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\n0:whole"));
+}
+
+test "zix http1: EPOLL waits for a body that fits the buffer and then reports the full count" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const body_len: usize = 100;
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n";
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // The head arrives without its body: nothing is answered yet and the bytes
+    // stay buffered for the next readable event.
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+    const first = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(head.len, conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+
+    var body: [body_len]u8 = @splat('A');
+    try std.testing.expectEqual(body_len, std.os.linux.write(fds[0], &body, body_len));
+    const second = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    var recv: [1024]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\n100:whole"));
+}
+
 fn testCacheHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
     if (core.cacheLookup(req.head)) |bytes| {
         try res.sendRaw(bytes);
@@ -947,6 +1214,144 @@ fn testCacheHandler(req: *core.Request, res: *core.Response, _: *core.Context) a
     }
 
     return core.sendWithCacheFD(req.fd, req.head, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", core.cacheTtl());
+}
+
+test "zix http1: EPOLL refuses a declared body past the limit with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    core.setMaxRequestBody(1024);
+    defer core.setMaxRequestBody(0);
+
+    // The declared length alone is enough to refuse, so the worker never arms a
+    // drain for a body it was never going to accept.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 65536\r\n\r\n";
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const outcome = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectStringStartsWith(recv[0..n], "HTTP/1.1 413 ");
+}
+
+test "zix http1: EPOLL sends 100 Continue once while the body is still arriving" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // Head only: the client is waiting for the interim response before it sends
+    // the body. The parse pass re-runs on every readable event until the body
+    // lands, so the answer has to go out once, not once per event.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n";
+    try std.testing.expectEqual(head.len, std.os.linux.write(fds[0], head, head.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const first = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expect(conn.continue_sent);
+
+    // A second event with the body: the request completes and the interim
+    // response is not repeated.
+    try std.testing.expectEqual(@as(usize, 4), std.os.linux.write(fds[0], "abcd", 4));
+    const second = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expect(!conn.continue_sent);
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, recv[0..n], "HTTP/1.1 100 Continue\r\n\r\n"));
+    try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 100 Continue\r\n\r\n"));
+}
+
+test "zix http1: EPOLL answers 400 on a malformed chunked body instead of waiting" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // A chunk size that is not hex can never become valid by waiting. Treating it
+    // as "not arrived yet" held the connection until the buffer filled and the
+    // peer read as a hangup, with no answer sent.
+    const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nab\r\n0\r\n\r\n";
+    try std.testing.expectEqual(req.len, std.os.linux.write(fds[0], req, req.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const outcome = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 400 "));
+}
+
+test "zix http1: EPOLL answers 413 for a chunked body past the body buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const oversized: [64]u8 = @splat('A');
+    const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n40\r\n".* ++ oversized ++ "\r\n0\r\n\r\n".*;
+    try std.testing.expectEqual(req.len, std.os.linux.write(fds[0], &req, req.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+
+    // Decoded body larger than the worker's body buffer: it can never be served,
+    // so the client is told rather than left waiting.
+    var body_buf: [16]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const outcome = serveEpollConn(testOkHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+
+    var recv: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &recv);
+    try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 413 "));
 }
 
 test "zix http1: EPOLL path serves a miss then a hit from the cache" {
@@ -981,7 +1386,7 @@ test "zix http1: EPOLL path serves a miss then a hit from the cache" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const outcome = serveEpollConn(testCacheHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena);
+    const outcome = serveEpollConn(testCacheHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
 
     var recv: [4 * 1024]u8 = undefined;

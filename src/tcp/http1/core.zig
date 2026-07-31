@@ -26,9 +26,6 @@ pub const HEADER_BUF_SIZE: usize = 256;
 /// path. The body threshold is this minus HEADER_BUF_SIZE.
 const SMALL_BODY_INLINE_BUF: usize = 4096;
 
-/// Body read chunk for the ASYNC serve loop: bytes drained per recv after the head.
-const ASYNC_BODY_CHUNK: usize = 8 * 1024;
-
 /// Staging buffer for one blocking WebSocket pump pass, matching what the .EPOLL worker gives
 /// its own pump so a pipelined burst costs one write on either model.
 const WS_OUT_SIZE: usize = 4 * 1024;
@@ -86,9 +83,10 @@ pub inline fn invokeHandler(
     var res = Response.init(fd, io, allocator);
     var ctx = Context.init(io, allocator, fd);
 
-    if (tl_body_received != 0) {
-        req.body_received = tl_body_received;
-        tl_body_received = 0;
+    if (tl_body_info) |info| {
+        req.body_received = info.received;
+        req.body_complete = info.complete;
+        tl_body_info = null;
     }
 
     handler_fn(&req, &res, &ctx) catch {
@@ -96,12 +94,28 @@ pub inline fn invokeHandler(
     };
 }
 
-/// Received-body count for the request about to be invoked, set by a dispatch
-/// path that drained a body larger than the receive buffer (counted from the
-/// socket reads). 0 means the delivered body slice is the whole count.
-/// Consumed and reset by invokeHandler, so it never leaks into a later
-/// request.
-pub threadlocal var tl_body_received: u64 = 0;
+/// What a dispatch model measured about the body it just read, for the request
+/// it is about to invoke.
+///
+/// Note:
+/// - Only set when the delivered slice does not tell the whole story: a body the
+///   engine consumed past what it could hand over, or one the peer cut short.
+///   A body that arrived whole and fits the buffer needs no entry, Request.init
+///   already derives both answers from the slice.
+pub const BodyInfo = struct {
+    /// Body bytes taken off the socket, counted from the reads that took them
+    /// and never from the Content-Length header.
+    received: u64,
+    /// Whether those reads reached the end of the body: the declared length, or
+    /// the chunked terminator.
+    complete: bool,
+};
+
+/// Body measurements for the request about to be invoked. Null is the common
+/// case and the one the bodyless hot path takes, so the check costs one load and
+/// one branch. Consumed and cleared by invokeHandler, so it never leaks into a
+/// later request on the same thread.
+pub threadlocal var tl_body_info: ?BodyInfo = null;
 
 /// Options for serveConn.
 pub const ServeOpts = struct {
@@ -111,7 +125,54 @@ pub const ServeOpts = struct {
     /// SO_RCVBUF applied on the large-body path only (a body larger than the read buffer). 0 leaves
     /// the kernel default. Widens the receive window so a large upload drains in fewer cycles.
     large_body_rcvbuf: usize = 0,
+    /// Per-connection receive size in bytes, from config.max_recv_buf. Bounds the
+    /// request head and the body slice a handler is given, the same knob the
+    /// .EPOLL and .URING slots are cut from. Defaults to BUF_SIZE so a direct
+    /// serveConn caller that does not care keeps the historical size.
+    max_recv_buf: usize = BUF_SIZE,
+    /// Largest request body in bytes, from config.max_request_body. A declared
+    /// Content-Length past this is refused with 413 before the body is read or
+    /// discarded. 0 removes the check.
+    max_request_body: usize = 0,
 };
+
+/// This pool thread's receive and body buffers for the thread model (.ASYNC).
+///
+/// io.async hands each connection to whichever pool thread is free, so a thread
+/// keeps one pair and every connection it serves reuses them. That is the same
+/// shape a .EPOLL or .URING worker already has, one body scratch shared by every
+/// connection the worker owns, rather than a fresh reservation per connection.
+threadlocal var tl_recv_buf: []u8 = &.{};
+threadlocal var tl_body_buf: []u8 = &.{};
+
+/// The pair of buffers this pool thread serves connections with, allocated on
+/// first use and grown only when a later connection asks for more.
+///
+/// Note:
+/// - They live for the thread's lifetime rather than the connection's. That is
+///   the trade the event-loop models already make, and it is what keeps a
+///   request allocation-free.
+/// - Resident is bounded by pool threads, not by connection count.
+///
+/// Param:
+/// size - usize (bytes each buffer must hold, from config.max_recv_buf)
+///
+/// Return:
+/// - the two buffers, each exactly size bytes
+/// - null when the allocation failed, the caller drops the connection
+fn threadConnBufs(size: usize) ?struct { recv: []u8, body: []u8 } {
+    if (tl_recv_buf.len < size) {
+        const grown = std.heap.smp_allocator.realloc(tl_recv_buf, size) catch return null;
+        tl_recv_buf = grown;
+    }
+
+    if (tl_body_buf.len < size) {
+        const grown = std.heap.smp_allocator.realloc(tl_body_buf, size) catch return null;
+        tl_body_buf = grown;
+    }
+
+    return .{ .recv = tl_recv_buf[0..size], .body = tl_body_buf[0..size] };
+}
 
 /// SO_RCVBUF for the large-body path under the event-loop models (.EPOLL / .URING), set once per
 /// worker from config.large_body_rcvbuf. The blocking model (.ASYNC) carries it on ServeOpts instead. The
@@ -122,6 +183,16 @@ pub threadlocal var tl_large_body_rcvbuf: usize = 0;
 /// Install the large-body SO_RCVBUF for this worker (event-loop models).
 pub fn setLargeBodyRcvbuf(bytes: usize) void {
     tl_large_body_rcvbuf = bytes;
+}
+
+/// Largest request body accepted under the event-loop models (.EPOLL / .URING), set once per worker
+/// from config.max_request_body. The blocking model (.ASYNC) carries it on ServeOpts instead. 0
+/// removes the check.
+pub threadlocal var tl_max_request_body: usize = 0;
+
+/// Install the request body limit for this worker.
+pub fn setMaxRequestBody(bytes: usize) void {
+    tl_max_request_body = bytes;
 }
 
 /// External fd watch (.URING): a caller-registered callback for foreign fds
@@ -1489,113 +1560,241 @@ fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
     }
 }
 
-/// Decode a chunked request body (RFC 9112 7.1).
-/// peeked contains bytes already read past the header.
-/// Ignores chunk extensions. Skips trailer section.
+/// Why a chunked body read or decode stopped.
+pub const ChunkedStop = enum {
+    /// The terminal chunk arrived, the body is whole.
+    COMPLETE,
+    /// The bytes in hand end mid-body. Read more and try again.
+    NEED_MORE,
+    /// The body does not fit the buffer the engine can hand a handler.
+    TOO_LARGE,
+    /// A chunk size line is not valid hex.
+    MALFORMED,
+};
+
+/// What a walk of the chunk framing found.
+pub const ChunkedFrame = struct {
+    /// Decoded body size, valid once stop is COMPLETE.
+    len: usize = 0,
+    /// Wire bytes the body occupies, chunk framing and trailers included. Bytes
+    /// past this belong to whatever follows the request.
+    consumed: usize = 0,
+    stop: ChunkedStop,
+};
+
+/// Walk the chunk framing in src without moving a byte.
+///
+/// Note:
+/// - Steps over chunk data by its declared size, so the cost is one step per
+///   chunk rather than one per byte, and data that happens to spell the terminal
+///   chunk cannot be mistaken for it.
+/// - The stop reason separates "not arrived yet" from "broken" from "too big".
+///   One null for all three left every caller unable to answer, which is how a
+///   malformed body used to stall a connection instead of drawing a 400.
+///
+/// Param:
+/// src - []const u8 (chunked bytes received so far, framing included)
+/// out_cap - usize (bytes the caller can hold, decides TOO_LARGE)
 ///
 /// Return:
-/// - !usize (decoded bytes written into out)
-pub fn readChunkedBody(fd: std.posix.fd_t, peeked: []const u8, out: []u8) !usize {
-    const Rd = struct {
-        fd: std.posix.fd_t,
-        buf: [BUF_SIZE]u8 = undefined,
-        pos: usize = 0,
-        len: usize = 0,
-
-        fn refill(reader: *@This()) !void {
-            const rem = reader.len - reader.pos;
-            if (rem > 0) std.mem.copyForwards(u8, &reader.buf, reader.buf[reader.pos..reader.len]);
-            reader.pos = 0;
-            reader.len = rem;
-            const n = readOnceFD(reader.fd, reader.buf[reader.len..]) catch return error.Closed;
-            if (n == 0) return error.Closed;
-            reader.len += n;
-        }
-
-        fn next(reader: *@This()) !u8 {
-            if (reader.pos >= reader.len) try reader.refill();
-            const b = reader.buf[reader.pos];
-            reader.pos += 1;
-            return b;
-        }
-    };
-
-    var rd: Rd = .{ .fd = fd };
-    const seed = @min(peeked.len, rd.buf.len);
-    @memcpy(rd.buf[0..seed], peeked[0..seed]);
-    rd.len = seed;
-
-    var out_pos: usize = 0;
+/// - ChunkedFrame
+pub fn chunkedFrame(src: []const u8, out_cap: usize) ChunkedFrame {
+    var pos: usize = 0;
+    var decoded: usize = 0;
 
     while (true) {
-        var line: [64]u8 = undefined;
-        var line_len: usize = 0;
-        while (true) {
-            const b = try rd.next();
-            if (b == '\r') {
-                _ = try rd.next();
-                break;
-            }
-            if (b == '\n') break;
-            if (line_len < line.len) {
-                line[line_len] = b;
-                line_len += 1;
-            }
-        }
+        const line_end = std.mem.indexOfPos(u8, src, pos, "\r\n") orelse return .{ .stop = .NEED_MORE };
+        const size_field = src[pos..line_end];
+        const hex = if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field[0..semi] else size_field;
 
-        var hex_end: usize = line_len;
-        for (line[0..line_len], 0..) |c, i| {
-            if (c == ';') {
-                hex_end = i;
-                break;
-            }
-        }
-        const chunk_size = std.fmt.parseInt(
-            usize,
-            std.mem.trimEnd(u8, line[0..hex_end], " "),
-            16,
-        ) catch return error.InvalidChunkSize;
+        const chunk_size = std.fmt.parseInt(usize, std.mem.trim(u8, hex, " "), 16) catch
+            return .{ .stop = .MALFORMED };
+        pos = line_end + 2;
 
         if (chunk_size == 0) {
-            while (true) {
-                var blank = true;
-                while (true) {
-                    const b = try rd.next();
-                    if (b == '\r') {
-                        _ = try rd.next();
-                        break;
-                    }
-                    if (b == '\n') break;
-                    blank = false;
-                }
-                if (blank) break;
-            }
-            break;
+            const trailer_end = std.mem.indexOfPos(u8, src, pos, "\r\n") orelse return .{ .stop = .NEED_MORE };
+
+            return .{ .len = decoded, .consumed = trailer_end + 2, .stop = .COMPLETE };
         }
 
-        var left = chunk_size;
-        while (left > 0) {
-            if (rd.pos >= rd.len) try rd.refill();
-            const avail = rd.len - rd.pos;
-            const take = @min(avail, left);
-            const copy = @min(take, out.len - out_pos);
-            if (copy > 0) {
-                @memcpy(out[out_pos..][0..copy], rd.buf[rd.pos..][0..copy]);
-                out_pos += copy;
-            }
-            rd.pos += take;
-            left -= take;
-        }
+        if (decoded + chunk_size > out_cap) return .{ .stop = .TOO_LARGE };
+        if (pos + chunk_size + 2 > src.len) return .{ .stop = .NEED_MORE };
 
-        _ = try rd.next();
-        _ = try rd.next();
+        decoded += chunk_size;
+        pos += chunk_size + 2;
+    }
+}
+
+/// Decode a chunked request body that is fully present in src (RFC 9112 7.1).
+///
+/// Note:
+/// - Every dispatch model decodes here, so a chunked body means the same thing
+///   on all three.
+/// - out may be src itself. Decoding only removes framing, so every byte moves
+///   left and a forward copy is correct even where the ranges overlap. @memcpy
+///   is not usable for that, it requires disjoint ranges.
+/// - Nothing is copied until the framing walk says the body is whole, so a
+///   partial body leaves src untouched and the caller can read more into it.
+///
+/// Param:
+/// src - []const u8 (chunked bytes received so far, framing included)
+/// out - []u8 (decode destination, may alias src)
+///
+/// Return:
+/// - ChunkedFrame (len and consumed are set only when stop is COMPLETE)
+pub fn decodeChunkedInBuf(src: []const u8, out: []u8) ChunkedFrame {
+    const frame = chunkedFrame(src, out.len);
+    if (frame.stop != .COMPLETE) return frame;
+
+    var pos: usize = 0;
+    var out_pos: usize = 0;
+
+    while (out_pos < frame.len) {
+        const line_end = std.mem.indexOfPos(u8, src, pos, "\r\n").?;
+        const size_field = src[pos..line_end];
+        const hex = if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field[0..semi] else size_field;
+        const chunk_size = std.fmt.parseInt(usize, std.mem.trim(u8, hex, " "), 16) catch unreachable;
+        pos = line_end + 2;
+
+        std.mem.copyForwards(u8, out[out_pos..][0..chunk_size], src[pos..][0..chunk_size]);
+        out_pos += chunk_size;
+        pos += chunk_size + 2;
     }
 
-    return out_pos;
+    return frame;
+}
+
+/// Result of pulling a chunked body off a blocking socket.
+pub const ChunkedRead = struct {
+    /// Decoded body bytes, living at buf[0..len].
+    len: usize = 0,
+    /// Wire bytes of the body taken off the socket, framing included.
+    received: u64 = 0,
+    /// Bytes read past the end of the body, sitting at buf[leftover_off..][0..leftover].
+    /// A pipelined request lands here, and dropping it would leave that client
+    /// waiting on a response to a request the server already read.
+    leftover_off: usize = 0,
+    leftover: usize = 0,
+    stop: ChunkedStop,
+};
+
+/// Read a chunked request body off a blocking socket and decode it in place.
+///
+/// Note:
+/// - buf is both the read buffer and the decode destination. The caller seeds it
+///   with the body bytes that arrived alongside the head, and the body is decoded
+///   over those same bytes, so there is no second buffer and no full-body copy.
+/// - A body that outgrows buf stops with TOO_LARGE rather than being cut to what
+///   fits, because a handler cannot tell a cut body from a whole one.
+/// - Whatever follows the body is reported, not discarded. The reader this
+///   replaced kept a private buffer and dropped its tail, losing a pipelined
+///   request the server had already taken off the socket.
+///
+/// Param:
+/// fd - std.posix.fd_t
+/// buf - []u8 (read buffer and decode destination, seeded bytes already at the front)
+/// seeded - usize (how many body bytes the caller placed at the front of buf)
+///
+/// Return:
+/// - ChunkedRead
+pub fn readChunkedBody(fd: std.posix.fd_t, buf: []u8, seeded: usize) ChunkedRead {
+    var filled = seeded;
+
+    while (true) {
+        const frame = chunkedFrame(buf[0..filled], buf.len);
+        switch (frame.stop) {
+            .COMPLETE => {
+                _ = decodeChunkedInBuf(buf[0..filled], buf);
+
+                return .{
+                    .len = frame.len,
+                    .received = frame.consumed,
+                    .leftover_off = frame.consumed,
+                    .leftover = filled - frame.consumed,
+                    .stop = .COMPLETE,
+                };
+            },
+            .MALFORMED, .TOO_LARGE => return .{ .received = filled, .stop = frame.stop },
+            .NEED_MORE => {},
+        }
+
+        if (filled == buf.len) return .{ .received = filled, .stop = .TOO_LARGE };
+
+        const n = readOnceFD(fd, buf[filled..]) catch return .{ .received = filled, .stop = .NEED_MORE };
+        if (n == 0) return .{ .received = filled, .stop = .NEED_MORE };
+
+        filled += n;
+    }
 }
 
 /// Per-request verdict from a dispatch: keep the connection open or close it.
 pub const ConnOutcome = enum { keep_alive, close };
+
+/// Bytes requested per drain read on the portable arm of drainBody. The Linux arm
+/// asks for the whole remainder in one call, because MSG.TRUNC never writes a buffer.
+const DRAIN_SCRATCH: usize = 4096;
+
+/// Upper clamp on bytes requested in a single MSG.TRUNC drain recv. The kernel
+/// never writes the buffer there, so a length past it is safe. Mirrors the clamp
+/// the multiplexed models use.
+const MAX_DRAIN_RECV: usize = 1 << 30;
+
+/// Discard request-body bytes still sitting on the socket.
+///
+/// Note:
+/// - Never writes into the buffer the handler is about to read. The drained
+///   bytes are not part of the delivered body, so sharing one buffer hands the
+///   handler the tail of the drain in place of the start of its request.
+/// - Stops early on a peer that hangs up, which the caller sees as a returned
+///   count short of what it asked for.
+///
+/// Param:
+/// fd - std.posix.fd_t (the connection)
+/// owed - usize (body bytes still to consume)
+///
+/// Return:
+/// - usize (bytes actually consumed off the socket)
+fn drainBody(fd: std.posix.fd_t, owed: usize) usize {
+    var remaining = owed;
+    var consumed: usize = 0;
+    var scratch: [DRAIN_SCRATCH]u8 = undefined;
+
+    if (comptime @import("builtin").target.os.tag == .linux) {
+        // MSG.TRUNC drops the bytes inside the kernel: nothing is copied to
+        // userspace and one call may ask for far more than scratch holds.
+        const linux = std.os.linux;
+
+        while (remaining > 0) {
+            const want = @min(remaining, MAX_DRAIN_RECV);
+            const rc = linux.recvfrom(fd, &scratch, want, linux.MSG.TRUNC, null, null);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) return consumed;
+
+                    consumed += n;
+                    remaining -= n;
+                },
+                .INTR => continue,
+                else => return consumed,
+            }
+        }
+
+        return consumed;
+    }
+
+    // Portable arm: a dedicated scratch buffer, never the handler's body buffer.
+    while (remaining > 0) {
+        const want = @min(remaining, scratch.len);
+        const n = readOnceFD(fd, scratch[0..want]) catch return consumed;
+        if (n == 0) return consumed;
+
+        consumed += n;
+        remaining -= n;
+    }
+
+    return consumed;
+}
 
 /// Keep-alive connection loop. The caller owns closing the fd. Pass raw fd extracted
 /// from the accepted stream.
@@ -1619,12 +1818,19 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var recv_buf: [BUF_SIZE]u8 = undefined;
-    var body_buf: [ASYNC_BODY_CHUNK]u8 = undefined;
+    // Both buffers are cut from config.max_recv_buf, the same knob the .EPOLL
+    // and .URING connection slots use, so the body a handler is given has one
+    // size across every dispatch model.
+    const recv_size = if (opts.max_recv_buf == 0) BUF_SIZE else opts.max_recv_buf;
+
+    const bufs = threadConnBufs(recv_size) orelse return;
+    const recv_buf = bufs.recv;
+    const body_buf = bufs.body;
+
     var leftover: usize = 0;
 
     while (true) {
-        const hdr = recvHead(fd, &recv_buf, leftover) catch |err| {
+        const hdr = recvHead(fd, recv_buf, leftover) catch |err| {
             if (err == error.HeaderTooLarge) {
                 writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
             }
@@ -1642,11 +1848,56 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
         }
 
         var body_len: usize = 0;
+        var received: u64 = 0;
         var drained_large = false;
+        // Whether this request declared a body at all, and whether reading it
+        // reached the end. A request with no body skips the handoff below
+        // entirely, so the bodyless path pays one compare and no store.
+        var has_body = false;
+        var body_complete = true;
+        var chunked_leftover: usize = 0;
+        var chunked_leftover_off: usize = 0;
         if (head.chunked_request) {
-            const peeked = recv_buf[hdr.body_offset..hdr.filled];
-            body_len = readChunkedBody(fd, peeked, &body_buf) catch 0;
+            // The body reads into body_buf and is decoded over itself there. recv_buf
+            // cannot be used as that scratch: head still points into it, and the
+            // handler is about to be given those slices.
+            const peeked = hdr.filled - hdr.body_offset;
+            if (peeked > 0) @memcpy(body_buf[0..peeked], recv_buf[hdr.body_offset..hdr.filled]);
+
+            const chunked = readChunkedBody(fd, body_buf, peeked);
+            switch (chunked.stop) {
+                .COMPLETE => {},
+                .MALFORMED => {
+                    // The rest of the body cannot be framed, so there is no way to
+                    // find where the next request would start. Answer and close.
+                    writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                    return;
+                },
+                .TOO_LARGE => {
+                    writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                    return;
+                },
+                .NEED_MORE => return,
+            }
+
+            has_body = true;
+            body_len = chunked.len;
+            received = chunked.received;
+            chunked_leftover_off = chunked.leftover_off;
+            chunked_leftover = chunked.leftover;
         } else if (head.content_length > 0) {
+            // Refused before a byte of it is read or discarded, so a declared
+            // length cannot make this thread consume an arbitrary body.
+            if (opts.max_request_body != 0 and head.content_length > opts.max_request_body) {
+                writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+
+                return;
+            }
+
+            has_body = true;
+
             const content_length: usize = @intCast(head.content_length);
             const to_read: usize = @min(content_length, body_buf.len);
             const peeked = hdr.filled - hdr.body_offset;
@@ -1661,26 +1912,36 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
                 body_len += n;
             }
 
-            // Body larger than the handler buffer: drain the remainder off the socket so the
+            // Body bytes already off the socket: the ones that arrived with the head, plus the
+            // ones the fill loop pulled. Counting only the head-side bytes here would make the
+            // drain below ask for the fill loop's bytes a second time, taking them from the next
+            // request on the connection.
+            received = @min(peeked, content_length) + (body_len - from_peek);
+
+            // Body larger than the handler buffer: consume the rest off the socket so the
             // connection stays usable for keep-alive (the leftover would otherwise be misparsed as
-            // the next request). Large-body endpoints use content_length, not the bytes, so the
-            // discard is safe. A wider SO_RCVBUF (opts.large_body_rcvbuf) speeds this on uploads.
-            if (content_length > peeked) {
+            // the next request). drainBody never touches body_buf, so the slice handed to the
+            // handler stays the start of the request instead of the tail of the drain. A wider
+            // SO_RCVBUF (opts.large_body_rcvbuf) speeds this on uploads.
+            if (received < content_length) {
                 setRecvBuf(fd, opts.large_body_rcvbuf);
 
-                var remaining = content_length - peeked;
-                while (remaining > 0) {
-                    const want = @min(remaining, body_buf.len);
-                    const n = readOnceFD(fd, body_buf[0..want]) catch break;
-                    if (n == 0) break;
-                    remaining -= n;
-                }
+                received += drainBody(fd, content_length - received);
                 drained_large = true;
             }
+
+            // A peer that stopped early leaves the drain short of the declared
+            // length. The handler still runs, so it needs a way to tell that
+            // upload apart from one that finished.
+            body_complete = received >= content_length;
         }
 
         setTimeout(opts.handler_timeout_ms);
         _ = arena.reset(.retain_capacity);
+
+        // The delivered slice is capped by body_buf, the count is everything the socket gave up,
+        // so a handler comparing the two can tell a truncated body from a complete one.
+        if (has_body) tl_body_info = .{ .received = received, .complete = body_complete };
         invokeHandler(handler, &head, body_buf[0..body_len], fd, io, arena.allocator());
 
         // Engine-owned WebSocket promotion: the event loops hand the connection to their own
@@ -1689,15 +1950,23 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
         if (takeWebSocket()) |pending| {
             var ws_out_buf: [WS_OUT_SIZE]u8 = undefined;
 
-            websocket.serveBlocking(pending.fd, pending.on_frame, &recv_buf, &body_buf, &ws_out_buf);
+            websocket.serveBlocking(pending.fd, pending.on_frame, recv_buf, body_buf, &ws_out_buf);
 
             return;
         }
 
         if (!head.keep_alive) return;
 
-        if (head.chunked_request or drained_large) {
-            // drained_large: the whole body was consumed off the socket, and a large body has no
+        if (head.chunked_request) {
+            // Bytes the chunked read pulled past the end of the body: a pipelined
+            // request, carried to the front of recv_buf for the next pass. The
+            // handler has returned, so overwriting the head bytes is safe now.
+            leftover = chunked_leftover;
+            if (leftover > 0) {
+                @memcpy(recv_buf[0..leftover], body_buf[chunked_leftover_off..][0..leftover]);
+            }
+        } else if (drained_large) {
+            // The whole body was consumed off the socket, and a large body has no
             // pipelined request after it, so nothing is left to carry.
             leftover = 0;
         } else {
@@ -2445,13 +2714,11 @@ test "zix http1: sendNegotiateFD sends uncompressed when no coding is accepted" 
 
 test "zix http1: serveConn drains an over-large body so the keep-alive connection survives" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
         return error.SkipZigTest;
     }
     const linux = std.os.linux;
 
-    var pair: [2]std.posix.fd_t = undefined;
-    try std.testing.expect(std.posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const pair = try testTcpPair();
     const client_fd = pair[0];
     const server_fd = pair[1];
     defer _ = linux.close(client_fd);
@@ -2463,7 +2730,7 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     };
     const Srv = struct {
         fn run(fd: std.posix.fd_t) void {
-            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20 }, undefined);
+            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = 8 * 1024 }, undefined);
 
             _ = linux.close(fd);
         }
@@ -2471,7 +2738,7 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     const t = try std.Thread.spawn(.{}, Srv.run, .{server_fd});
     defer t.join();
 
-    // request 1: a 64 KiB body, well past ASYNC_BODY_CHUNK (8 KiB), so the engine must drain the rest.
+    // request 1: a 64 KiB body, well past the 8 KiB receive buffer, so the engine must drain the rest.
     const big: usize = 64 * 1024;
     var head_buf: [128]u8 = undefined;
     const h1 = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
@@ -2496,6 +2763,695 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     var resp2: [256]u8 = undefined;
     const n2 = try std.posix.read(client_fd, &resp2);
     try std.testing.expect(std.mem.indexOf(u8, resp2[0..n2], "200 OK") != null);
+}
+
+/// Echo the engine-counted received body size, so a test reads the value the
+/// upload contract is built on rather than the Content-Length header.
+fn testEchoReceivedHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    var buf: [24]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "{d}", .{req.bodyReceived()}) catch return;
+
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(out);
+}
+
+/// Echo "<received>:<delivered>", the counted body size beside the slice the
+/// handler actually got. A handler can only tell a body was cut short when
+/// these two disagree.
+fn testEchoBodyStatsHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    const delivered = try req.body();
+
+    var buf: [48]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "{d}:{d}", .{ req.bodyReceived(), delivered.len }) catch return;
+
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(out);
+}
+
+/// Echo "<received>:<complete>", so a test can tell an upload that finished from
+/// one the peer cut short at the same byte count.
+fn testEchoBodyCompleteHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    var buf: [48]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "{d}:{s}", .{ req.bodyReceived(), if (req.bodyComplete()) "whole" else "cut" }) catch return;
+
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(out);
+}
+
+/// Echo the first and last byte of the delivered body, so a test can tell which
+/// part of the request the handler was actually handed.
+fn testEchoBodyEndsHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    const delivered = try req.body();
+    if (delivered.len == 0) return res.send("empty");
+
+    var buf: [2]u8 = .{ delivered[0], delivered[delivered.len - 1] };
+
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.send(&buf);
+}
+
+/// Run serveConn on one end of a socketpair until it returns, then close that
+/// end so the client side sees EOF and its read loop terminates.
+const TestServeArgs = struct {
+    fd: std.posix.fd_t,
+    handler: HandlerFn,
+    max_recv_buf: usize = 8 * 1024,
+    max_request_body: usize = 0,
+};
+
+fn testServeConnThread(args: TestServeArgs) void {
+    serveConn(args.fd, args.handler, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = args.max_recv_buf, .max_request_body = args.max_request_body }, undefined);
+
+    _ = std.os.linux.close(args.fd);
+}
+
+fn testTcpSocket() !std.posix.fd_t {
+    const rc = std.os.linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (std.posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+
+    return @intCast(rc);
+}
+
+/// Connected loopback TCP pair, returned as {client, server}.
+///
+/// Note:
+/// - The drain discards with MSG.TRUNC, which the kernel honours on a TCP
+///   socket only. An AF.UNIX socketpair ignores it and copies instead, and the
+///   drain asks for far more than any scratch buffer holds, so every drain test
+///   needs a real TCP pair.
+pub fn testTcpPair() ![2]std.posix.fd_t {
+    const linux = std.os.linux;
+
+    const listener = try testTcpSocket();
+    defer _ = linux.close(listener);
+
+    var addr = std.posix.sockaddr.in{
+        .port = 0,
+        .addr = std.mem.nativeToBig(u32, 0x7F000001),
+    };
+    var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+    if (std.posix.errno(linux.bind(listener, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.BindFailed;
+    if (std.posix.errno(linux.listen(listener, 1)) != .SUCCESS) return error.ListenFailed;
+    if (std.posix.errno(linux.getsockname(listener, @ptrCast(&addr), &addr_len)) != .SUCCESS) return error.SockNameFailed;
+
+    const client = try testTcpSocket();
+    errdefer _ = linux.close(client);
+    if (std.posix.errno(linux.connect(client, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.ConnectFailed;
+
+    const accepted = linux.accept4(listener, null, null, 0);
+    if (std.posix.errno(accepted) != .SUCCESS) return error.AcceptFailed;
+
+    return .{ client, @intCast(accepted) };
+}
+
+/// Drain one socketpair end to EOF. The peer half-closed before the server
+/// thread started, so the server always reaches the end of its serve loop and
+/// closes, which bounds this read without a timeout.
+fn testReadToEof(fd: std.posix.fd_t, buf: []u8) usize {
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = std.posix.read(fd, buf[len..]) catch break;
+        if (n == 0) break;
+        len += n;
+    }
+
+    return len;
+}
+
+test "zix http1: ASYNC serveConn reports a fitting body through bodyReceived" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const body_len: usize = 64;
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{body_len});
+    try writeAllFD(client_fd, head);
+    var body: [body_len]u8 = @splat('x');
+    try writeAllFD(client_fd, &body);
+
+    // Half-close before the server starts: every request byte is already
+    // buffered, so the serve loop runs to completion and then sees EOF.
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n64"));
+}
+
+test "zix http1: ASYNC serveConn reports the full received size when the body outgrows the async chunk" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // A 64 KiB body against an 8 KiB receive buffer. The delivered slice is
+    // capped by design, but the count must stay the bytes the engine consumed,
+    // the way .URING reports it. When both read 8192 the handler has no way to
+    // tell a 64 KiB upload from an 8 KiB one.
+    const big: usize = 64 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
+    try writeAllFD(client_fd, head);
+
+    var chunk: [4096]u8 = @splat('A');
+    var sent: usize = 0;
+    while (sent < big) {
+        const n = @min(chunk.len, big - sent);
+        try writeAllFD(client_fd, chunk[0..n]);
+        sent += n;
+    }
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyStatsHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n65536:8192"));
+}
+
+test "zix http1: ASYNC serveConn delivers the start of an over-large body, not drain leftovers" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // First 8 KiB of the body is 'A', the rest is 'B'. The delivered slice is
+    // capped at the receive buffer, so it must be the 'A' region. The drain loop
+    // reuses the same body_buf, so anything else means the handler is reading
+    // bytes the drain wrote over the body after it was collected.
+    const head_bytes: usize = 8 * 1024;
+    const tail_bytes: usize = 56 * 1024;
+    const big = head_bytes + tail_bytes;
+
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
+    try writeAllFD(client_fd, head);
+
+    var a_chunk: [4096]u8 = @splat('A');
+    var sent: usize = 0;
+    while (sent < head_bytes) {
+        const n = @min(a_chunk.len, head_bytes - sent);
+        try writeAllFD(client_fd, a_chunk[0..n]);
+        sent += n;
+    }
+
+    var b_chunk: [4096]u8 = @splat('B');
+    sent = 0;
+    while (sent < tail_bytes) {
+        const n = @min(b_chunk.len, tail_bytes - sent);
+        try writeAllFD(client_fd, b_chunk[0..n]);
+        sent += n;
+    }
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyEndsHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\nAA"));
+}
+
+test "zix http1: ASYNC serveConn drains an over-large body so the pipelined request survives" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // A 64 KiB body against an 8 KiB receive buffer: the handler sees the
+    // capped count, and the remainder has to leave the socket so the pipelined
+    // GET behind it still parses as a request.
+    const big: usize = 64 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
+    try writeAllFD(client_fd, head);
+
+    var chunk: [4096]u8 = @splat('A');
+    var sent: usize = 0;
+    while (sent < big) {
+        const n = @min(chunk.len, big - sent);
+        try writeAllFD(client_fd, chunk[0..n]);
+        sent += n;
+    }
+    try writeAllFD(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler }});
+    defer thread.join();
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n0"));
+}
+
+test "zix http1: ASYNC serveConn drain stops at the body end when the head fills the receive buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // A padded head leaves under a full buffer of body in the receive
+    // buffer, so the body-fill loop must read the shortfall off the socket.
+    // Those bytes are already consumed, so the drain that follows owes only
+    // what is left. Reading the full content_length minus the peek instead
+    // over-consumes and eats the pipelined GET.
+    const pad_len: usize = 12 * 1024;
+    var pad: [pad_len]u8 = @splat('P');
+
+    const big: usize = 64 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const head_start = try std.fmt.bufPrint(&head_buf, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\nX-Pad: ", .{big});
+    try writeAllFD(client_fd, head_start);
+    try writeAllFD(client_fd, &pad);
+    try writeAllFD(client_fd, "\r\n\r\n");
+
+    var chunk: [4096]u8 = @splat('A');
+    var sent: usize = 0;
+    while (sent < big) {
+        const n = @min(chunk.len, big - sent);
+        try writeAllFD(client_fd, chunk[0..n]);
+        sent += n;
+    }
+    try writeAllFD(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler, .max_recv_buf = BUF_SIZE }});
+    defer thread.join();
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n0"));
+}
+
+test "zix http1: chunkedFrame reports the body length once the terminator arrived" {
+    const raw = "5\r\nhello\r\n0\r\n\r\n";
+    const frame = chunkedFrame(raw, 64);
+    try std.testing.expectEqual(ChunkedStop.COMPLETE, frame.stop);
+    try std.testing.expectEqual(@as(usize, 5), frame.len);
+    try std.testing.expectEqual(raw.len, frame.consumed);
+}
+
+test "zix http1: chunkedFrame asks for more while the body is still arriving" {
+    try std.testing.expectEqual(ChunkedStop.NEED_MORE, chunkedFrame("5\r\nhel", 64).stop);
+    try std.testing.expectEqual(ChunkedStop.NEED_MORE, chunkedFrame("5\r\nhello\r\n", 64).stop);
+    try std.testing.expectEqual(ChunkedStop.NEED_MORE, chunkedFrame("5\r\nhello\r\n0\r\n", 64).stop);
+}
+
+test "zix http1: chunkedFrame separates malformed and too-large from unfinished" {
+    // All three used to answer null, so a caller could only wait. Only the first
+    // of these can ever be resolved by waiting.
+    try std.testing.expectEqual(ChunkedStop.NEED_MORE, chunkedFrame("5\r\nhel", 64).stop);
+    try std.testing.expectEqual(ChunkedStop.MALFORMED, chunkedFrame("zz\r\nabc\r\n0\r\n\r\n", 64).stop);
+    const oversized: [64]u8 = @splat('A');
+    const raw = "40\r\n".* ++ oversized ++ "\r\n0\r\n\r\n".*;
+    try std.testing.expectEqual(ChunkedStop.TOO_LARGE, chunkedFrame(raw[0..], 8).stop);
+}
+
+test "zix http1: chunkedFrame steps over data that spells the terminator" {
+    const raw = "5\r\n0\r\n\r\n\r\n0\r\n\r\n";
+    const frame = chunkedFrame(raw, 64);
+    try std.testing.expectEqual(ChunkedStop.COMPLETE, frame.stop);
+    try std.testing.expectEqual(raw.len, frame.consumed);
+}
+
+test "zix http1: chunkedFrame stops at the request pipelined behind the terminator" {
+    const body = "3\r\nabc\r\n0\r\n\r\n";
+    const frame = chunkedFrame(body ++ "GET /next HTTP/1.1\r\n\r\n", 64);
+    try std.testing.expectEqual(ChunkedStop.COMPLETE, frame.stop);
+    try std.testing.expectEqual(body.len, frame.consumed);
+}
+
+test "zix http1: decodeChunkedInBuf decodes over its own source buffer" {
+    // Source and destination overlap here, which is what @memcpy may not do.
+    const filler: [32]u8 = @splat('A');
+    var raw = "20\r\n".* ++ filler ++ "\r\n0\r\n\r\n".*;
+
+    const decoded = decodeChunkedInBuf(&raw, &raw);
+    try std.testing.expectEqual(ChunkedStop.COMPLETE, decoded.stop);
+    try std.testing.expectEqualStrings(&filler, raw[0..decoded.len]);
+}
+
+test "zix http1: decodeChunkedInBuf leaves the source untouched when the body is unfinished" {
+    const source = "5\r\nhello\r\n3\r\nab";
+    var raw = source.*;
+    var out: [64]u8 = undefined;
+    const decoded = decodeChunkedInBuf(&raw, &out);
+    try std.testing.expectEqual(ChunkedStop.NEED_MORE, decoded.stop);
+    try std.testing.expectEqualStrings(source, &raw);
+}
+
+test "zix http1: ASYNC serveConn answers 413 for a chunked body past the receive buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // The decoded body is far past what the engine can hand a handler. Cutting it
+    // down would give the handler a fragment it cannot tell from a whole body, so
+    // the request is refused instead.
+    const chunk: usize = 16 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n{x}\r\n", .{chunk});
+    try writeAllFD(client_fd, head);
+    var payload: [chunk]u8 = @splat('A');
+    try writeAllFD(client_fd, &payload);
+    try writeAllFD(client_fd, "\r\n0\r\n\r\n");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyStatsHandler, .max_recv_buf = 4096 }});
+    defer thread.join();
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.startsWith(u8, resp[0..len], "HTTP/1.1 413 "));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+}
+
+test "zix http1: ASYNC serveConn answers the request pipelined behind a chunked body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // The GET arrives in the same segment as the chunked body. The chunked read
+    // takes it off the socket, so it has to be carried forward. Dropping it left
+    // the client waiting on a response to a request the server had already read.
+    const request = "POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n" ++
+        "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
+    try writeAllFD(client_fd, request);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyStatsHandler, .max_recv_buf = 4096 }});
+    defer thread.join();
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, resp[0..len], "\r\n\r\n15:5") != null);
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n0:0"));
+}
+
+test "zix http1: ASYNC serveConn answers 400 and closes on a malformed chunked body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // A chunk size that is not hex. The body can no longer be framed, so where
+    // the next request starts is unknowable. Serving the connection on would
+    // parse the undecodable remainder as a request.
+    const request = "POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n" ++
+        "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
+    try writeAllFD(client_fd, request);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyStatsHandler, .max_recv_buf = 4096 }});
+    defer thread.join();
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.startsWith(u8, resp[0..len], "HTTP/1.1 400 "));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+}
+
+test "zix http1: ASYNC serveConn delivers a chunked body that arrives after the head" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const head = "POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try writeAllFD(client_fd, head);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyStatsHandler, .max_recv_buf = 4096 }});
+    defer thread.join();
+
+    // The body follows in its own segments, the shape a streaming client sends.
+    try writeAllFD(client_fd, "5\r\nhello\r\n");
+    try writeAllFD(client_fd, "6\r\n world\r\n");
+    try writeAllFD(client_fd, "0\r\n\r\n");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    var resp: [1024]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n26:11"));
+}
+
+test "zix http1: ASYNC serveConn refuses a declared body past the limit with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // The declared length alone is enough to refuse. Without a limit the engine
+    // reads or discards every byte a client cares to claim, which costs a worker
+    // for as long as the client keeps sending.
+    const head = "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 65536\r\n\r\n";
+    try writeAllFD(client_fd, head);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler, .max_request_body = 1024 }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectStringStartsWith(resp[0..len], "HTTP/1.1 413 ");
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+}
+
+test "zix http1: ASYNC serveConn serves a declared body inside the limit" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const request = "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nabcd";
+    try writeAllFD(client_fd, request);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler, .max_request_body = 1024 }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n4"));
+}
+
+test "zix http1: ASYNC serveConn sends 100 Continue before a body that expects it" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const request = "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\nabcd";
+    try writeAllFD(client_fd, request);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoReceivedHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    // The interim response comes first, then the real one on the same connection.
+    try std.testing.expect(std.mem.startsWith(u8, resp[0..len], "HTTP/1.1 100 Continue\r\n\r\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, resp[0..len], "HTTP/1.1 200 OK\r\n"));
+}
+
+test "zix http1: ASYNC serveConn marks a body the peer cut short as incomplete" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // 64 declared, 10 sent, then the peer goes away. The handler still runs, and
+    // without this flag a 10-byte upload and a 64-byte upload that died at byte
+    // 10 look identical to it.
+    const head = "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n";
+    try writeAllFD(client_fd, head);
+    try writeAllFD(client_fd, "0123456789");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyCompleteHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n10:cut"));
+}
+
+test "zix http1: ASYNC serveConn marks a body that arrived in full as complete" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    const request = "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n0123456789";
+    try writeAllFD(client_fd, request);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyCompleteHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n10:whole"));
+}
+
+test "zix http1: ASYNC serveConn marks a drained over-large body as complete" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    const pair = try testTcpPair();
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    // Past the receive buffer, so the handler is given a short slice. That is a
+    // delivery cap, not a truncated upload, and the two must not read the same.
+    const big: usize = 64 * 1024;
+    var head_buf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&head_buf, "POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{big});
+    try writeAllFD(client_fd, head);
+    var body: [big]u8 = @splat('A');
+    try writeAllFD(client_fd, &body);
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyCompleteHandler }});
+    defer thread.join();
+
+    var resp: [4096]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n65536:whole"));
+}
+
+test "zix http1: ASYNC serveConn marks a bodyless request as complete" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const linux = std.os.linux;
+
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    const client_fd = pair[0];
+    const server_fd = pair[1];
+    defer _ = linux.close(client_fd);
+
+    try writeAllFD(client_fd, "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = linux.shutdown(client_fd, linux.SHUT.WR);
+
+    const thread = try std.Thread.spawn(.{}, testServeConnThread, .{TestServeArgs{ .fd = server_fd, .handler = testEchoBodyCompleteHandler }});
+    defer thread.join();
+
+    var resp: [512]u8 = undefined;
+    const len = testReadToEof(client_fd, &resp);
+
+    // Nothing to fall short of, so there is no measurement to hand over and the
+    // request keeps the defaults.
+    try std.testing.expect(std.mem.endsWith(u8, resp[0..len], "\r\n\r\n0:whole"));
 }
 
 test "zix http1: uringWatchFd routes through the installed trampoline" {

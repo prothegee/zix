@@ -36,6 +36,12 @@ pub const ConnArgs = struct {
     registry: ?*ConnRegistry = null,
     send_date_header: bool = true,
     large_body_rcvbuf: usize = 0,
+    /// Per-connection receive size, from config.max_recv_buf. Carried here so
+    /// the blocking model sizes its buffers from the same knob the .EPOLL and
+    /// .URING slots use.
+    max_recv_buf: usize = core.BUF_SIZE,
+    /// Largest request body, from config.max_request_body. 0 removes the check.
+    max_request_body: usize = 0,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
     compress: bool = false,
@@ -80,7 +86,7 @@ pub fn connEntry(args: ConnArgs) void {
     }
     defer if (args.registry) |registry| registry.deregister(&guard.?, args.io);
 
-    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf }, args.io);
+    core.serveConn(fd, args.handler, .{ .handler_timeout_ms = args.handler_timeout_ms, .large_body_rcvbuf = args.large_body_rcvbuf, .max_recv_buf = args.max_recv_buf, .max_request_body = args.max_request_body }, args.io);
 }
 
 /// This pool thread's response cache, sized from the connection's config.
@@ -184,41 +190,6 @@ pub const MAX_DRAIN_RECV: usize = 1 << 30;
 /// Accept-thread stack. Accept threads only block in accept and hand off, so a
 /// smaller stack than the workers is enough.
 pub const ACCEPT_STACK: usize = 256 * 1024;
-
-const ChunkDecode = struct { len: usize, consumed: usize };
-
-/// Decode a chunked request body that is fully present in src.
-///
-/// Note:
-/// - Chunk extensions are ignored. Trailers are skipped to the final blank line.
-///
-/// Return:
-/// - ChunkDecode (decoded length in out, bytes consumed from src)
-/// - null when the terminating zero chunk has not arrived yet, or out is too small
-pub fn decodeChunkedInBuf(src: []const u8, out: []u8) ?ChunkDecode {
-    var pos: usize = 0;
-    var out_pos: usize = 0;
-
-    while (true) {
-        const line_end = std.mem.indexOfPos(u8, src, pos, "\r\n") orelse return null;
-        const size_field = src[pos..line_end];
-        const hex = if (std.mem.indexOfScalar(u8, size_field, ';')) |s| size_field[0..s] else size_field;
-        const chunk_size = std.fmt.parseInt(usize, std.mem.trim(u8, hex, " "), 16) catch return null;
-        pos = line_end + 2;
-
-        if (chunk_size == 0) {
-            const trailer_end = std.mem.indexOfPos(u8, src, pos, "\r\n") orelse return null;
-            return .{ .len = out_pos, .consumed = trailer_end + 2 };
-        }
-
-        if (pos + chunk_size + 2 > src.len) return null;
-        if (out_pos + chunk_size > out.len) return null;
-
-        @memcpy(out[out_pos..][0..chunk_size], src[pos..][0..chunk_size]);
-        out_pos += chunk_size;
-        pos += chunk_size + 2;
-    }
-}
 
 pub fn setNoDelay(fd: std.posix.fd_t) void {
     if (comptime @import("builtin").target.os.tag != .windows) {
