@@ -45,6 +45,40 @@ pub const Verdict = enum {
     TIMED_OUT,
 };
 
+/// Whether an error is a transient symptom worth respawning the whole check for, versus a real
+/// failure. Most are connection-establishment errors: under a startup burst a fresh server's accept
+/// path is starved, so the probe or first client connect is refused, reset, or times out. A real
+/// check failure is an assertion (UnexpectedStatus, UnexpectedBody, ...), never on this list.
+///
+/// Note:
+/// - ResponseTimeout and ReadTimeout are the same transient shape one step later: the server
+///   accepted and then went quiet, and a respawn clears it. They only reach here because the check
+///   clients carry common.RESPONSE_TIMEOUT_MS. Without that bound the identical condition is an
+///   infinite park, which no retry can see, and the run dies where it stands.
+/// - Retrying these is safe in a way retrying a TIMED_OUT check is not. The check returned an
+///   error, so its defers ran and its server is gone. A killed child leaves its server listening,
+///   which is why Verdict.TIMED_OUT is never retried.
+///
+/// Param:
+/// err - anyerror (what the check body returned)
+///
+/// Return:
+/// - true when another attempt is worth spawning
+pub fn isRetriable(err: anyerror) bool {
+    return switch (err) {
+        error.ServerStartTimeout,
+        error.ConnectFailed,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionTimedOut,
+        error.BrokenPipe,
+        error.ResponseTimeout,
+        error.ReadTimeout,
+        => true,
+        else => false,
+    };
+}
+
 pub const Result = struct {
     verdict: Verdict,
     /// The line the child printed, copied into the caller's buffer. Written by the parent instead
@@ -203,6 +237,23 @@ test "zix runner: verdictOf treats an unknown exit code as failed" {
 
 test "zix runner: verdictOf treats a child with no exit status as failed" {
     try std.testing.expectEqual(Verdict.FAILED, verdictOf(.{ .unknown = 0 }));
+}
+
+test "zix runner: isRetriable accepts a connection-establishment error" {
+    try std.testing.expect(isRetriable(error.ServerStartTimeout));
+    try std.testing.expect(isRetriable(error.ConnectionRefused));
+    try std.testing.expect(isRetriable(error.BrokenPipe));
+}
+
+test "zix runner: isRetriable accepts a server that accepted then went quiet" {
+    try std.testing.expect(isRetriable(error.ResponseTimeout));
+    try std.testing.expect(isRetriable(error.ReadTimeout));
+}
+
+test "zix runner: isRetriable refuses an assertion failure" {
+    try std.testing.expect(!isRetriable(error.UnexpectedStatus));
+    try std.testing.expect(!isRetriable(error.UnexpectedBody));
+    try std.testing.expect(!isRetriable(error.MissingExpectedSubstring));
 }
 
 test "zix runner: verdictOf treats a signalled child as failed" {
